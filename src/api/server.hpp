@@ -10,6 +10,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 namespace httplib {
 class Request;
@@ -104,6 +105,18 @@ public:
     // Returns true if the server is currently listening.
     bool listening() const;
 
+#ifdef KEEN_PBR3_TESTING
+    // Models grant expiry between pre-routing admission and serialized
+    // publication without changing the production grant TTL.
+    void revoke_step_up_grant_for_testing(const std::string& token);
+
+    // Deterministically models a provider publication after pre-routing has
+    // admitted a credential request.
+    void publish_auth_provider_for_testing(
+        const std::string& provider,
+        const std::string& keenetic_endpoint = {});
+#endif
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
@@ -140,6 +153,26 @@ using AuthLoginVerifiedHook = std::function<void()>;
 void set_auth_login_verified_hook_for_testing(
     AuthLoginVerifiedHook hook);
 void reset_auth_login_verified_hook_for_testing();
+
+// Runs at credential-handler entry, after pre-routing attached its admission
+// and before the handler snapshots auth or parses the body.
+using CredentialHandlerAdmissionHook =
+    std::function<void(std::string_view path)>;
+void set_credential_handler_admission_hook_for_testing(
+    CredentialHandlerAdmissionHook hook);
+void reset_credential_handler_admission_hook_for_testing();
+
+// Replaces only the socket/NDMS/route verdict in API integration tests. Pure
+// tests cover the production evaluator; handlers use this seam to prove that
+// a denial happens before credential body parsing/forwarding. Forwarding
+// headers remain a hard production denial before this hook is consulted.
+using TrustedLocalConnectionEvaluatorForTesting =
+    std::function<bool(std::string_view remote_address,
+                       std::string_view local_address,
+                       bool require_credential_freshness)>;
+void set_trusted_local_connection_evaluator_for_testing(
+    TrustedLocalConnectionEvaluatorForTesting evaluator);
+void reset_trusted_local_connection_evaluator_for_testing();
 #endif
 
 } // namespace keen_pbr3

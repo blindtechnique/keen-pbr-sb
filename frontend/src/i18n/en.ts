@@ -18,7 +18,12 @@ export const enTranslation = {
     upgrade: "Upgrade package",
     upgradeUnavailableTitle: "In-panel upgrade is temporarily unavailable",
     upgradeUnavailableDescription:
-      "The panel will not run opkg until it can preserve the exact previous IPK, verify and pin the target IPK, preserve opkg state and finish rollback after a reboot. The current configuration is unchanged.",
+      "The backend did not authorize this package upgrade. Refresh the page; if the block remains, inspect the package transaction state before retrying.",
+    upgradeMetadataUnverifiedDescription:
+      "A retained nfqws2 transaction means the restored files and opkg metadata may describe different versions. Update checks and upgrades in this panel remain blocked until you repair the package manually with opkg over SSH.",
+    upgradeGuardedTitle: "Recovery limitation",
+    upgradeGuardedDescription:
+      "The upgrade runs the regular opkg path under the shared lock and saves the current nfqws2 files first. This is not an exact package rollback: the previous IPK and opkg state are not preserved, the target IPK is not pinned, and an operation interrupted by reboot is not recovered automatically.",
     captureRestorePoint: "Save restore point",
     restoreComponent: "Restore previous files",
     restorePointMissing:
@@ -26,12 +31,13 @@ export const enTranslation = {
     interruptedTransactionTitle: "A package operation did not finish",
     interruptedTransactionDescription:
       "An upgrade or restore of nfqws2 started and never reported an end — most likely the router restarted while it was running. Check that nfqws2 works before upgrading again; the next upgrade will refuse until this is resolved.",
-    restoreComponentConfirmTitle: "Restore the nfqws2 files saved before the upgrade?",
+    restoreComponentConfirmTitle:
+      "Restore the nfqws2 files saved before the upgrade?",
     restoreComponentConfirmDescription:
-      "The saved binary, configuration and lists are written back. If the service was running, the panel starts it on the restored binary and verifies NFQUEUE; if it was stopped, it remains stopped.",
+      "The saved binary, configuration and lists are written back. If the service was running, the panel starts it on the restored binary and verifies NFQUEUE; if it was stopped, it remains stopped. Even after a successful file restore, package metadata remains unverified: update checks and upgrades in this panel stay blocked until you repair the package manually with opkg over SSH.",
     restoreComponentLimitTitle: "What this does not do",
     restoreComponentLimitDescription:
-      "Files the newer package added are left in place. This returns nfqws2 to the saved files, not the router to its exact earlier state.",
+      "Files the newer package added are left in place. This returns nfqws2 to the saved files, not the router to its exact earlier state. The retained degraded state blocks future update checks and upgrades in this panel until manual opkg repair over SSH.",
     maintenance: "Maintenance",
     maintenanceHint: "Rare actions: package, restore points, backups",
     serviceHelp: {
@@ -45,7 +51,7 @@ export const enTranslation = {
       reload:
         "The service re-reads its configuration files without stopping, so connections survive. Enough when only lists and parameters changed.",
       upgrade:
-        "Installs a newer version of nfqws2 itself from the repository. The button is available only when an exact, reboot-safe rollback is available.",
+        "Asks the currently configured Entware opkg sources to select and install nfqws2-keenetic under the shared lock. The panel neither pins nor independently cryptographically verifies the target package or source. It saves the current files first, but cannot provide exact package rollback or recovery after a power loss.",
       captureRestorePoint:
         "Saves the current nfqws2 files — the binary, the configuration and the lists — so you can return to them later. An upgrade does this by itself; use this to take one before changing anything else.",
       restoreComponent:
@@ -57,12 +63,14 @@ export const enTranslation = {
     },
     updateAvailable: "Update {{version}} is available",
     upToDate: "The latest available nfqws2 version is installed.",
+    updateStateUnverified:
+      "The package state needs attention. The panel cannot verify the installed nfqws2 version or check for updates until the retained transaction is repaired.",
     upgradeConfirmTitle: "Update nfqws2",
     upgradeConfirmDescription:
-      "Version {{version}} will be installed from the official nfqws2-keenetic repository.",
+      "The panel reports {{version}} as the latest release, but opkg will install the version selected by the currently configured Entware sources. The panel does not pin or independently cryptographically verify that package or source.",
     automaticBackupTitle: "Automatic backup",
     automaticBackupDescription:
-      "Before updating, the panel always stores a local copy of the configuration, lists, Lua scripts and strategies. It can be restored from the operation log.",
+      "Before updating, the panel stores a local copy of the configuration, lists, Lua scripts and strategies and captures the currently installed files for recovery during this request. There is no attributable one-click rollback after the operation ends.",
     downloadBackupBeforeUpgrade:
       "Also download a copy of the original nfqws2 files to this computer",
     operationResult: "nfqws2 operation result",
@@ -82,8 +90,6 @@ export const enTranslation = {
     defaultStrategyCreated:
       "The package's new configuration was saved as strategy “{{name}}”.",
     closeResult: "Close message",
-    rollback: "Roll back configuration",
-    rollbackCompleted: "The configuration was restored from backup.",
     customConfigTitle: "A custom configuration is running",
     customConfigDescription:
       "The active nfqws2.conf matches none of the strategies in the list - that happens after editing it on the Settings tab or over ssh. Save it as a strategy, or the first Apply will overwrite it for good.",
@@ -429,6 +435,12 @@ export const enTranslation = {
     invalidCredentials: "Invalid username or password.",
     unavailable: "The authentication service is unavailable.",
     unavailableTitle: "Unable to verify access",
+    protectedTransportTitle: "Use a direct local connection",
+    protectedTransportRequired:
+      "Router-account credentials are available only over a direct local connection verified by the router. This external or proxy connection cannot ask for them.",
+    loopbackOnlyTitle: "Sign-in is disabled",
+    loopbackOnlyDescription:
+      "The API is now loopback-only and this LAN browser cannot change its settings. Run recovery on the router itself or restore auth.json over SSH to enable sign-in again.",
     retry: "Try again",
     credentialsHint:
       "Use the sign-in method selected in keen-pbr-sb settings. When Keenetic verification is enabled, enter the router web interface credentials.",
@@ -725,7 +737,7 @@ export const enTranslation = {
     },
     title: "VPN and proxies",
     description:
-      "Managed VPN and proxies that provide interfaces for keen-pbr routing.",
+      "Managed proxies and VPN interfaces already configured in KeeneticOS that can be used for keen-pbr routing.",
     tabs: {
       all: "All",
       other: "Other",
@@ -742,13 +754,13 @@ export const enTranslation = {
       managed: "keen-pbr-sb tunnels and proxies",
       native: "KeeneticOS interfaces",
       nativeDescription:
-        "Created by the router firmware. keen-pbr-sb only shows them: starting, restarting or deleting such an interface happens in the Keenetic web configurator. Here you can point a route at it.",
+        "These are existing router-firmware interfaces. keen-pbr-sb currently only shows them and lets you point a route at them; create, edit, start, restart or delete the interface itself in the Keenetic web configurator.",
       orphan: "Routes without a tunnel",
       orphanDescription:
         "Normally there are none: a route is created together with its tunnel. These point at interfaces keen-pbr does not manage - for example, another Entware package's tunnel.",
     },
     refresh: "Refresh",
-    add: "Add VPN or proxy",
+    add: "Add proxy or connect VPN",
     unavailable: "VPN and proxy manager unavailable",
     empty: "No VPN or proxies configured.",
     emptyTitle: "No VPN or proxies yet",
@@ -811,10 +823,11 @@ export const enTranslation = {
     stopped: "VPN or proxy stop requested",
     restarted: "VPN or proxy restart requested",
     nativeManagedExternally:
-      "This native interface is managed by KeeneticOS or another service.",
+      "This is an existing KeeneticOS interface. keen-pbr-sb only tracks it and links it to a route; the interface itself is not created or edited here.",
     nativeInterface: {
       keeneticOwner: "KeeneticOS",
-      managedByFirmware: "This interface is managed by KeeneticOS",
+      managedByFirmware:
+        "Existing KeeneticOS interface: create, edit, start, restart and delete are not available here yet",
       logicalName: "Keenetic interface",
       kernelName: "System interface",
       protocol: "Protocol",
@@ -842,7 +855,11 @@ export const enTranslation = {
       management: "Management",
       managementReadOnly: "Read only",
       managementUnsupported: "Not supported",
-      managementReady: "The interface is ready for safe management.",
+      managementReadOnlyDescription:
+        "keen-pbr-sb currently only shows this existing KeeneticOS interface and can create a route to it. Creating, editing and deleting the interface itself are disabled in the panel.",
+      managementBlockersTitle: "Why management is disabled",
+      managementReady:
+        "Candidate checks passed, but operations remain disabled in this version",
       managementReadinessUnavailable:
         "The installed backend does not report management readiness yet.",
       managementBlockers: {
@@ -872,15 +889,84 @@ export const enTranslation = {
       showHidden: "Show hidden ({{count}})",
       hideHidden: "Stop showing hidden interfaces",
     },
+    nativeImport: {
+      title: "Import WireGuard / AmneziaWG from a file",
+      description:
+        "Through an authenticated direct local connection verified by the router, select or drop a client .conf file. A preliminary structural check runs only in this browser: the application does not send the source text or keys over the network or store them. Key values stay hidden in the preview, but the endpoint may be shown. Creating the Keenetic interface is still disabled.",
+      transportBlockedTitle: "A protected sign-in is required for import",
+      transportBlockedDescription:
+        "Open the panel through the router's local management address. Import and drag-and-drop are available only after the router verifies an authenticated direct local connection. External or proxied HTTP is blocked; the local network must still be trusted against interception.",
+      dropzoneLabel: "Select or drop a WireGuard configuration file",
+      dropzone: "Drop a .conf here or click to choose",
+      fileHint: "One text .conf file, up to {{size}} KiB",
+      clear: "Remove the selected file",
+      errorTitle: "File was not accepted",
+      redactedNotice:
+        "This is a local preliminary structural preview, not confirmation that the configuration is ready. Key values stay hidden, but the endpoint may be shown. Apply remains disabled.",
+      apply: "Create interface in Keenetic",
+      applyBlockedTitle: "Interface creation is disabled for now",
+      applyBlockedDescription:
+        "The router-verified local preview channel is active, but no key-transfer/apply API, typed KeeneticOS commands, automatic backup, ownership checks, concurrent-change protection or rollback exist yet. The file cannot be applied to the router.",
+      requiredGuards: "Required safeguards not ready",
+      guards: {
+        typed_rci: "typed RCI commands",
+        automatic_backup: "automatic backup and rollback",
+        ownership_check: "interface ownership check",
+        optimistic_revision: "concurrent-change protection",
+      },
+      preview: {
+        protocol: "Type",
+        addresses: "Interface addresses",
+        dns: "DNS servers",
+        peers: "Peers",
+        allowedIps: "Allowed networks",
+        privateKey: "Private key",
+        presharedKeys: "Peers with PSK",
+        presentRedacted: "Present, value hidden",
+        absent: "Absent",
+        endpoint: "Endpoint",
+        hiddenOrMultiple: "Not set or multiple peers",
+        keepalive: "Keepalive",
+        seconds: "{{count}} s",
+        amneziaParameters: "Amnezia parameters",
+      },
+      errors: {
+        "single-file-only": "Select exactly one file.",
+        "conf-extension-required":
+          "A file with the .conf extension is required.",
+        "empty-file": "The file is empty.",
+        "file-too-large": "The file exceeds the size limit.",
+        "not-text": "The file is not a valid text .conf.",
+        "read-failed": "The browser could not read the file.",
+        input_too_large: "The configuration exceeds the size limit.",
+        invalid_encoding: "The configuration contains invalid text.",
+        unsupported_uri:
+          "This field accepts a plain .conf. URI import will arrive with safe backend apply support.",
+        invalid_base64: "A WireGuard key has an invalid format.",
+        malformed_line: "Invalid syntax near line {{line}}.",
+        unknown_section: "Unknown section near line {{line}}.",
+        duplicate_section:
+          "The [Interface] section repeats near line {{line}}.",
+        duplicate_field: "A field repeats near line {{line}}.",
+        unknown_field: "Unknown field near line {{line}}.",
+        dangerous_directive:
+          "Up/Down command directives are forbidden for security (line {{line}}).",
+        missing_required_field:
+          "A required WireGuard section or field is missing.",
+        invalid_field: "A field contains an invalid value.",
+        limit_exceeded:
+          "The configuration contains too many lines, peers or values.",
+      },
+    },
     setupWizard: "Setup wizard",
     routeOffer: {
-      title: "New KeeneticOS tunnel",
+      title: "KeeneticOS interface detected",
       question:
-        "“{{name}}” is not used as a VPN in keen-pbr-sb yet. Create a route for it?",
-      create: "Create a route",
+        "The existing KeeneticOS interface “{{name}}” is not used by keen-pbr-sb routing yet. Create only a route for it without changing the interface itself?",
+      create: "Create route only",
       dismiss: "Don't ask again",
       created:
-        "The route “{{name}}” was created in the draft — apply the configuration for it to start working.",
+        "The “{{name}}” route was created in the draft; the existing KeeneticOS interface was not changed. Apply the configuration to activate the route.",
     },
     deleteTitle: "Delete VPN or proxy?",
     deleteDescription:
@@ -897,14 +983,21 @@ export const enTranslation = {
       create: "VPN or proxy created",
       update: "VPN or proxy updated",
       delete: "VPN or proxy deleted",
+      nativeLinked:
+        "The existing Keenetic interface was linked to routing; the interface itself was not changed",
+      nativeTrackerUpdated:
+        "The existing Keenetic interface link was updated; the interface itself was not changed",
     },
     form: {
       createOutbound: "Create a route now",
       createOutboundHint:
         "The route appears in the shared list with the same name and can be picked in routing rules straight away.",
       outboundExists: "A route tagged {{tag}} already exists",
-      createTitle: "Add VPN or proxy",
+      createTitle: "Add proxy or connect VPN",
       editTitle: "Edit VPN or proxy",
+      editNativeTrackerTitle: "Edit Keenetic interface link",
+      editNativeTrackerDescription:
+        "This changes only the keen-pbr-sb record for an existing KeeneticOS interface. The WireGuard/AmneziaWG interface itself is left unchanged.",
       missingTitle: "VPN or proxy not found",
       missingDescription:
         "Return to the VPN and proxies list and choose an existing entry.",
@@ -913,7 +1006,7 @@ export const enTranslation = {
       loadErrorDescription:
         "Check that the service is available and try again. Saving is disabled to avoid overwriting the current configuration.",
       description:
-        "Expose a native interface or a scoped proxy TUN to keen-pbr.",
+        "Add an isolated proxy TUN or connect an interface already configured in KeeneticOS to routing. This form does not create or edit Keenetic interfaces.",
       tag: "Tag",
       tagHint:
         "1–24 characters: start with a lowercase Latin letter, then use only a–z, 0–9 and underscore. Example: my_tunnel.",
@@ -932,15 +1025,15 @@ export const enTranslation = {
       backendUpdateRequired:
         "The installed backend does not support tunnel aliases. Install this version's IPK, then save again.",
       type: "Type",
-      native: "Native interface",
-      nativeInterface: "Keenetic interface",
-      nativeInterfacePlaceholder: "Select a Keenetic interface",
+      native: "Connect existing Keenetic interface",
+      nativeInterface: "Existing Keenetic interface",
+      nativeInterfacePlaceholder: "Select a configured Keenetic interface",
       nativeInterfaceHidden: "hidden",
       nativeInterfaceUnavailable: "unavailable",
       nativeInterfaceUnavailableServer: "unavailable: VPN server",
       nativeInterfaceUnavailableDisabled: "unavailable: disabled in KeeneticOS",
       nativeInterfaceHint:
-        "A tunnel marked “unavailable” is usually disabled in KeeneticOS: enable it in the Keenetic web configurator and it becomes selectable here. VPN servers are always unavailable: outgoing traffic cannot be routed into them. Hidden interfaces remain in this list and are clearly marked.",
+        "keen-pbr-sb does not create or edit the selected interface: it must already be configured in KeeneticOS. An “unavailable” interface is usually disabled there; VPN servers cannot be selected because outgoing traffic cannot be routed into them. Hidden interfaces remain in this list and are clearly marked.",
       singBox: "sing-box connection",
       singBoxLegacy: "sing-box (legacy VLESS configuration)",
       interface: "Interface name",
@@ -1337,8 +1430,7 @@ export const enTranslation = {
         protocolPorts:
           "{{protocol}} {{state}}; wanted: {{desired}}; applied: {{applied}}",
         noPorts: "none",
-        rawCounter:
-          "{{chain}} raw: {{packets}} packets / {{bytes}} bytes",
+        rawCounter: "{{chain}} raw: {{packets}} packets / {{bytes}} bytes",
         lastReconcile: "last reconcile {{value}}",
         observedAt: "observed {{value}}",
         counterCaveat:
@@ -1803,6 +1895,14 @@ export const enTranslation = {
           "Turn off Internet access and wait until its firewall state is verified closed before switching to the router account.",
         systemAuthUnavailable:
           "Router-account login cannot be enabled safely yet: keen-pbr-sb could not verify both the system login and its administrator-lockout protection. The separate password was preserved.",
+        protectedTransportRequired:
+          "Router credentials can be entered only over a fresh direct local connection verified by the router. Reopen this page through the router's local management address.",
+        disableConfirm:
+          "Stage sign-in to be disabled after the daemon restarts? The current daemon will keep requiring sign-in until then. After restart, the API becomes loopback-only and this page cannot turn sign-in back on; recovery requires a process on the router or SSH restoring auth.json.",
+        disabledRecoveryWarning:
+          "Saving stages sign-in to be disabled. The current daemon keeps requiring sign-in until its next restart. After restart, the API is loopback-only; recovery requires a process on the router or restoring auth.json over SSH.",
+        disableRestartRequired:
+          "The disabled setting is saved, but the current daemon still requires sign-in. Restart the keen-pbr-sb daemon to activate loopback-only recovery mode; after that, re-enable sign-in only from the router itself or through SSH.",
         save: "Save login method",
         saved: "Login settings saved, sign in again",
       },

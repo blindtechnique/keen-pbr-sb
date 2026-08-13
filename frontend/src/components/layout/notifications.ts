@@ -34,10 +34,22 @@ const LEGACY_TRANSIENT_FIREWALL_MARKERS = [
   "failed to synchronize live iptables",
 ] as const
 
+const LEGACY_KEENETIC_REMOTE_ACCESS_INCOMPATIBILITY =
+  "Cannot reconcile remote-access firewall state: remote access is unavailable with the Keenetic authentication provider because router credentials would traverse plaintext WAN HTTP"
+
 const SAFE_SRS_CONVERSION =
   /^List '[^'\r\n]+': SRS import is lossy: (?:mapped [1-9]\d* exact domain\(s\) to keen-pbr root-and-subdomain semantics|skipped [1-9]\d* unsupported condition\(s\))(?:; (?:mapped [1-9]\d* exact domain\(s\) to keen-pbr root-and-subdomain semantics|skipped [1-9]\d* unsupported condition\(s\)))*$/
 
 function isDiagnosticOnlyMessage(text: string): boolean {
+  // Current builds normalize this old incompatible desired state to durable
+  // `enabled: false` and then verify that both owned WAN chains are absent.
+  // Keep the historical line in the downloadable log, but do not keep showing
+  // a resolved compatibility condition in the bell. A real cleanup failure
+  // has different text and remains actionable below.
+  if (text === LEGACY_KEENETIC_REMOTE_ACCESS_INCOMPATIBILITY) {
+    return true
+  }
+
   // Exact-domain widening and unsupported destination alternatives are
   // successful, bounded SRS conversions. New builds log them at info level;
   // filter historical warning lines as well. Complete skipped rules and
@@ -47,18 +59,14 @@ function isDiagnosticOnlyMessage(text: string): boolean {
   }
 
   if (
-    LEGACY_INTERNAL_RECOVERY_PREFIXES.some((prefix) =>
-      text.startsWith(prefix)
-    )
+    LEGACY_INTERNAL_RECOVERY_PREFIXES.some((prefix) => text.startsWith(prefix))
   ) {
     return true
   }
 
   if (
     text.startsWith("Runtime iproute and firewall refresh failed:") ||
-    text.startsWith(
-      "Error rebuilding routing/firewall after urltest change:"
-    )
+    text.startsWith("Error rebuilding routing/firewall after urltest change:")
   ) {
     return LEGACY_TRANSIENT_FIREWALL_MARKERS.some((marker) =>
       text.includes(marker)

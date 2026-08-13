@@ -5,6 +5,12 @@
 #include <fstream>
 #include <iterator>
 
+#ifndef KEEN_PBR_NFQWS_STRATEGY_ROOT
+#define KEEN_PBR_NFQWS_STRATEGY_ROOT                                      \
+    "packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/"            \
+    "nfqws-strategies"
+#endif
+
 namespace {
 
 std::string read_generated_strategy(const std::string& name) {
@@ -50,6 +56,47 @@ TEST_CASE("nfqws built-in strategy receives all WAN interfaces") {
 TEST_CASE("nfqws custom strategy is unchanged without detected WAN") {
     const std::string content = "ISP_INTERFACE=\"manual0\"\n";
     CHECK(keen_pbr3::nfqws_config_with_isp_interfaces(content, {}) == content);
+}
+
+TEST_CASE("nfqws pristine built-in matches its raw packaged strategy") {
+    const std::string packaged =
+        "ISP_INTERFACE=\"eth3\"\nNFQUEUE_NUM=300\n";
+    const auto rendered = keen_pbr3::nfqws_config_with_isp_interfaces(
+        packaged, {"eth4", "eth5"});
+
+    CHECK(keen_pbr3::nfqws_config_matches_packaged_strategy(
+        packaged, packaged, rendered));
+}
+
+TEST_CASE("nfqws built-in override accepts only owned rendering deltas") {
+    const std::string packaged =
+        "NFQWS_BASE_ARGS=\"--writable=/var/run/keen-pbr-nfqws --lua-init=@/opt/etc/nfqws2/lua/zapret-lib.lua\n"
+        "                 --lua-init=@/opt/var/lib/keen-pbr/nfqws-rotator-telemetry-v1.lua\"\n"
+        "ISP_INTERFACE=\"eth3\"\n"
+        "NFQUEUE_NUM=300\n";
+    const auto rendered = keen_pbr3::nfqws_config_with_isp_interfaces(
+        packaged, {"eth4", "eth5"});
+    auto rendered_without_owned_telemetry = rendered;
+    replace_once(
+        rendered_without_owned_telemetry,
+        "NFQWS_BASE_ARGS=\"--writable=/var/run/keen-pbr-nfqws ",
+        "NFQWS_BASE_ARGS=\"");
+    replace_once(
+        rendered_without_owned_telemetry,
+        "\n                 --lua-init=@/opt/var/lib/keen-pbr/"
+        "nfqws-rotator-telemetry-v1.lua");
+
+    CHECK(keen_pbr3::nfqws_config_matches_packaged_strategy(
+        packaged, packaged, rendered));
+    CHECK(keen_pbr3::nfqws_config_matches_packaged_strategy(
+        rendered, packaged, rendered));
+    CHECK(keen_pbr3::nfqws_config_matches_packaged_strategy(
+        rendered_without_owned_telemetry, packaged, rendered));
+
+    auto edited = rendered;
+    replace_once(edited, "NFQUEUE_NUM=300", "NFQUEUE_NUM=301");
+    CHECK_FALSE(keen_pbr3::nfqws_config_matches_packaged_strategy(
+        edited, packaged, rendered));
 }
 
 TEST_CASE("nfqws pre-telemetry active profile keeps its built-in identity") {

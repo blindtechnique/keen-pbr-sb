@@ -11,6 +11,8 @@
 #include "../src/log/logger.hpp"
 
 #include <atomic>
+#include <array>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
@@ -21,6 +23,9 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/stat.h>
 #include <thread>
 #include <unordered_set>
@@ -117,6 +122,31 @@ public:
 
 private:
     EnvironmentVariableGuard wait_mode_;
+};
+
+class TrustedLocalConnectionEvaluatorGuard {
+public:
+    explicit TrustedLocalConnectionEvaluatorGuard(
+        TrustedLocalConnectionEvaluatorForTesting evaluator) {
+        set_trusted_local_connection_evaluator_for_testing(
+            std::move(evaluator));
+    }
+
+    ~TrustedLocalConnectionEvaluatorGuard() {
+        reset_trusted_local_connection_evaluator_for_testing();
+    }
+};
+
+class CredentialHandlerAdmissionHookGuard {
+public:
+    explicit CredentialHandlerAdmissionHookGuard(
+        CredentialHandlerAdmissionHook hook) {
+        set_credential_handler_admission_hook_for_testing(std::move(hook));
+    }
+
+    ~CredentialHandlerAdmissionHookGuard() {
+        reset_credential_handler_admission_hook_for_testing();
+    }
 };
 
 class ThrowingPostCommitAuthLogger {
@@ -224,6 +254,81 @@ void grant_local_step_up(httplib::Client& client,
     CHECK(nlohmann::json::parse(response->body).at("granted").get<bool>());
 }
 
+struct RawHttpResult {
+    std::string response;
+    bool peer_closed{false};
+    std::chrono::milliseconds elapsed{};
+};
+
+RawHttpResult post_headers_without_body(
+    const int port,
+    const std::string_view path,
+    const std::string_view cookie = {},
+    const std::string_view extra_headers = {}) {
+    const int socket_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    REQUIRE(socket_fd >= 0);
+    struct SocketCloser {
+        int fd;
+        ~SocketCloser() {
+            if (fd >= 0) {
+                (void)::shutdown(fd, SHUT_RDWR);
+                (void)::close(fd);
+            }
+        }
+    } closer{socket_fd};
+
+    const timeval timeout{2, 0};
+    REQUIRE(::setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO,
+                         &timeout, sizeof(timeout)) == 0);
+    REQUIRE(::setsockopt(socket_fd, SOL_SOCKET, SO_SNDTIMEO,
+                         &timeout, sizeof(timeout)) == 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(static_cast<std::uint16_t>(port));
+    REQUIRE(::inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) == 1);
+    REQUIRE(::connect(socket_fd,
+                      reinterpret_cast<const sockaddr*>(&address),
+                      sizeof(address)) == 0);
+
+    std::string request =
+        "POST " + std::string{path} + " HTTP/1.1\r\n" +
+        "Host: 127.0.0.1\r\n" +
+        "Content-Type: application/json\r\n" +
+        "Content-Length: 1048576\r\n" +
+        "Connection: keep-alive\r\n";
+    if (!cookie.empty()) {
+        request += "Cookie: " + std::string{cookie} + "\r\n";
+    }
+    request += std::string{extra_headers};
+    request += "\r\n";
+
+    std::size_t sent = 0U;
+    while (sent < request.size()) {
+        const auto count = ::send(
+            socket_fd, request.data() + sent, request.size() - sent, 0);
+        REQUIRE(count > 0);
+        sent += static_cast<std::size_t>(count);
+    }
+
+    const auto started = std::chrono::steady_clock::now();
+    RawHttpResult result;
+    std::array<char, 4096> buffer{};
+    while (true) {
+        const auto count = ::recv(
+            socket_fd, buffer.data(), buffer.size(), 0);
+        if (count > 0) {
+            result.response.append(
+                buffer.data(), static_cast<std::size_t>(count));
+            continue;
+        }
+        result.peer_closed = count == 0;
+        break;
+    }
+    result.elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started);
+    return result;
+}
+
 } // namespace
 
 TEST_CASE("missing auth file keeps the bootstrap API open") {
@@ -244,6 +349,7 @@ TEST_CASE("missing auth file keeps the bootstrap API open") {
 
     CHECK_FALSE(status.at("enabled").get<bool>());
     CHECK(status.at("authenticated").get<bool>());
+    CHECK_FALSE(status.at("trusted_local_connection").get<bool>());
     CHECK_FALSE(status.contains("error"));
     CHECK_FALSE(status.contains("keenetic_endpoint"));
     REQUIRE(protected_response != nullptr);
@@ -273,6 +379,7 @@ TEST_CASE("present invalid auth file fails closed as auth_misconfigured") {
 
     CHECK(status.at("enabled").get<bool>());
     CHECK_FALSE(status.at("authenticated").get<bool>());
+    CHECK_FALSE(status.at("trusted_local_connection").get<bool>());
     CHECK(status.at("error") == "auth_misconfigured");
     CHECK_FALSE(status.contains("keenetic_endpoint"));
     REQUIRE(protected_response != nullptr);
@@ -310,6 +417,8 @@ TEST_CASE("auth settings are replaced atomically with private permissions") {
     REQUIRE(::chmod(auth_path.c_str(), 0644) == 0);
     EnvironmentVariableGuard auth_file(
         "KEEN_PBR_AUTH_FILE", auth_path.string());
+    TrustedLocalConnectionEvaluatorGuard trusted_local_transport(
+        [](std::string_view, std::string_view, bool) { return true; });
 
     const auto config = auth_api_config();
     ApiServer server(config);
@@ -327,6 +436,16 @@ TEST_CASE("auth settings are replaced atomically with private permissions") {
         {"Cookie", session_cookie(*login_response)},
     };
     grant_local_step_up(client, headers, "old", "old-secret");
+    const auto malformed = client.Post(
+        "/api/auth/settings",
+        headers,
+        R"({"enabled":true,"provider":"local","password":"DO_NOT_ECHO",)",
+        "application/json");
+    REQUIRE(malformed != nullptr);
+    CHECK(malformed->status == 400);
+    CHECK(malformed->body.find("DO_NOT_ECHO") == std::string::npos);
+    CHECK(nlohmann::json::parse(malformed->body).at("error") ==
+          "invalid authentication settings request");
     const auto settings_response = client.Post(
         "/api/auth/settings",
         headers,
@@ -368,6 +487,9 @@ TEST_CASE("authentication cannot be disabled while remote access is desired") {
         "KEEN_PBR_AUTH_FILE", auth_path.string());
     EnvironmentVariableGuard remote_file(
         "KEEN_PBR_TEST_REMOTE_SETTINGS_FILE", remote_path.string());
+
+    TrustedLocalConnectionEvaluatorGuard trusted_local_transport(
+        [](std::string_view, std::string_view, bool) { return true; });
 
     const auto config = auth_api_config();
     ApiServer server(config);
@@ -419,6 +541,8 @@ TEST_CASE(
     EnvironmentVariableGuard remote_file(
         "KEEN_PBR_TEST_REMOTE_SETTINGS_FILE", remote_path.string());
     VerifiedClosedRemoteAccessGuard remote_access_closed;
+    TrustedLocalConnectionEvaluatorGuard trusted_local_transport(
+        [](std::string_view, std::string_view, bool) { return true; });
 
     std::atomic<unsigned int> forwarded_credentials{0};
     httplib::Server router;
@@ -486,6 +610,8 @@ TEST_CASE(
         R"({"enabled":true,"provider":"local","username":"old","password":"old-secret"})");
     EnvironmentVariableGuard auth_file(
         "KEEN_PBR_AUTH_FILE", auth_path.string());
+    TrustedLocalConnectionEvaluatorGuard trusted_local_transport(
+        [](std::string_view, std::string_view, bool) { return true; });
 
     const auto config = auth_api_config();
     ApiServer server(config);
@@ -552,6 +678,8 @@ TEST_CASE(
         "KEEN_PBR_AUTH_FILE", auth_path.string());
     EnvironmentVariableGuard write_fault(
         "KEEN_PBR_TEST_AUTH_WRITE_FAULT", "directory_fsync");
+    TrustedLocalConnectionEvaluatorGuard trusted_local_transport(
+        [](std::string_view, std::string_view, bool) { return true; });
 
     const auto config = auth_api_config();
     ApiServer server(config);
@@ -622,6 +750,8 @@ TEST_CASE("pre-commit auth write failure preserves disk and memory") {
     const auto status = get_auth_status(client);
     CHECK_FALSE(status.at("enabled").get<bool>());
     CHECK(status.at("authenticated").get<bool>());
+    CHECK(status.at("no_auth_scope") == "loopback_only");
+    CHECK_FALSE(status.at("network_api_blocked").get<bool>());
 }
 
 TEST_CASE("concurrent auth settings writes leave disk and memory consistent") {
@@ -1020,6 +1150,601 @@ TEST_CASE("rate limiter normalizes IPv4-mapped peer addresses") {
         "::ffff:127.0.0.1", start + std::chrono::seconds{1});
     CHECK_FALSE(limiter.allow(
         "127.0.0.1", start + std::chrono::seconds{2}));
+}
+
+TEST_CASE("queued auth settings cannot publish after an earlier request revokes its session") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    const auto remote_path = directory.path / "remote-access.json";
+    write_text(
+        auth_path,
+        R"({"enabled":true,"provider":"local","username":"admin","password":"secret"})");
+    write_text(remote_path, R"({"enabled":false,"port":12121})");
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+    EnvironmentVariableGuard remote_file(
+        "KEEN_PBR_TEST_REMOTE_SETTINGS_FILE", remote_path.string());
+    VerifiedClosedRemoteAccessGuard remote_access_closed;
+    TrustedLocalConnectionEvaluatorGuard trusted_local_transport(
+        [](std::string_view, std::string_view, bool) { return true; });
+
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+    const int port = configured_port(config);
+    httplib::Client client("127.0.0.1", port);
+    const auto login = client.Post(
+        "/api/auth/login",
+        R"({"username":"admin","password":"secret"})",
+        "application/json");
+    REQUIRE(login != nullptr);
+    REQUIRE(login->status == 200);
+    const std::string cookie = session_cookie(*login);
+    const httplib::Headers session{{"Cookie", cookie}};
+    grant_local_step_up(client, session, "admin", "secret");
+
+    std::mutex admission_mutex;
+    std::condition_variable admission_cv;
+    int admitted = 0;
+    bool release_first = false;
+    set_auth_settings_admission_hook_for_testing([&]() {
+        std::unique_lock lock(admission_mutex);
+        ++admitted;
+        admission_cv.notify_all();
+        if (admitted == 1) {
+            admission_cv.wait(lock, [&]() { return release_first; });
+        }
+    });
+    struct AdmissionHookReset {
+        ~AdmissionHookReset() {
+            reset_auth_settings_admission_hook_for_testing();
+        }
+    } admission_hook_reset;
+
+    std::atomic<int> queued_status{0};
+    std::thread queued([&]() {
+        httplib::Client queued_client("127.0.0.1", port);
+        const httplib::Headers queued_session{{"Cookie", cookie}};
+        const auto response = queued_client.Post(
+            "/api/auth/settings", queued_session,
+            R"({"enabled":true,"provider":"local","username":"attacker","password":"replacement"})",
+            "application/json");
+        queued_status.store(
+            response ? response->status : -1,
+            std::memory_order_release);
+    });
+
+    bool first_admitted = false;
+    {
+        std::unique_lock lock(admission_mutex);
+        first_admitted = admission_cv.wait_for(
+            lock, std::chrono::seconds{5}, [&]() { return admitted == 1; });
+    }
+    int disabling_status = -1;
+    if (first_admitted) {
+        const auto disabling = client.Post(
+            "/api/auth/settings", session,
+            R"({"enabled":false,"provider":"local"})",
+            "application/json");
+        disabling_status = disabling ? disabling->status : -1;
+    }
+    {
+        std::lock_guard lock(admission_mutex);
+        release_first = true;
+    }
+    admission_cv.notify_all();
+    queued.join();
+
+    REQUIRE(first_admitted);
+    REQUIRE(disabling_status == 200);
+    CHECK(queued_status.load(std::memory_order_acquire) == 401);
+    const auto stored = nlohmann::json::parse(std::ifstream(auth_path));
+    CHECK_FALSE(stored.at("enabled").get<bool>());
+    CHECK(stored.at("provider") == "local");
+    const bool attacker_published =
+        stored.contains("username") && stored.at("username") == "attacker";
+    CHECK_FALSE(attacker_published);
+}
+
+TEST_CASE("queued auth settings cannot publish after its step-up grant expires") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    write_text(
+        auth_path,
+        R"({"enabled":true,"provider":"local","username":"admin","password":"secret"})");
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+    VerifiedClosedRemoteAccessGuard remote_access_closed;
+    TrustedLocalConnectionEvaluatorGuard trusted_local_transport(
+        [](std::string_view, std::string_view, bool) { return true; });
+
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+    const int port = configured_port(config);
+    httplib::Client client("127.0.0.1", port);
+    const auto login = client.Post(
+        "/api/auth/login",
+        R"({"username":"admin","password":"secret"})",
+        "application/json");
+    REQUIRE(login != nullptr);
+    REQUIRE(login->status == 200);
+    const std::string cookie = session_cookie(*login);
+    const httplib::Headers session{{"Cookie", cookie}};
+    grant_local_step_up(client, session, "admin", "secret");
+
+    std::mutex admission_mutex;
+    std::condition_variable admission_cv;
+    bool admitted = false;
+    bool release = false;
+    set_auth_settings_admission_hook_for_testing([&]() {
+        std::unique_lock lock(admission_mutex);
+        admitted = true;
+        admission_cv.notify_all();
+        admission_cv.wait(lock, [&]() { return release; });
+    });
+    struct AdmissionHookReset {
+        ~AdmissionHookReset() {
+            reset_auth_settings_admission_hook_for_testing();
+        }
+    } admission_hook_reset;
+
+    std::atomic<int> queued_status{0};
+    std::thread queued([&]() {
+        httplib::Client queued_client("127.0.0.1", port);
+        const auto response = queued_client.Post(
+            "/api/auth/settings", session,
+            R"({"enabled":true,"provider":"local","username":"attacker","password":"replacement"})",
+            "application/json");
+        queued_status.store(
+            response ? response->status : -1,
+            std::memory_order_release);
+    });
+
+    bool request_admitted = false;
+    {
+        std::unique_lock lock(admission_mutex);
+        request_admitted = admission_cv.wait_for(
+            lock, std::chrono::seconds{5}, [&]() { return admitted; });
+    }
+    const auto separator = cookie.find('=');
+    if (request_admitted && separator != std::string::npos) {
+        server.revoke_step_up_grant_for_testing(cookie.substr(separator + 1));
+    }
+    {
+        std::lock_guard lock(admission_mutex);
+        release = true;
+    }
+    admission_cv.notify_all();
+    queued.join();
+
+    REQUIRE(request_admitted);
+    REQUIRE(separator != std::string::npos);
+    CHECK(queued_status.load(std::memory_order_acquire) == 403);
+    const auto stored = nlohmann::json::parse(std::ifstream(auth_path));
+    CHECK(stored.at("username") == "admin");
+    CHECK_FALSE(stored.at("password") == "replacement");
+}
+
+TEST_CASE("login admission cannot cross a local to Keenetic publication") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    write_text(
+        auth_path,
+        R"({"enabled":true,"provider":"local","username":"admin","password":"local-secret"})");
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+
+    std::atomic<unsigned int> forwarded_credentials{0U};
+    httplib::Server router;
+    router.Get("/auth", [](const httplib::Request&,
+                            httplib::Response& response) {
+        response.status = 401;
+        response.set_header("X-NDM-Realm", "Keenetic");
+        response.set_header("X-NDM-Challenge", "challenge");
+    });
+    router.Post("/auth", [&forwarded_credentials](
+                             const httplib::Request&,
+                             httplib::Response& response) {
+        forwarded_credentials.fetch_add(1U, std::memory_order_relaxed);
+        response.status = 200;
+    });
+    BoundHttpServer running_router(router);
+
+    std::mutex hook_mutex;
+    std::condition_variable hook_cv;
+    bool admitted = false;
+    bool release = false;
+    CredentialHandlerAdmissionHookGuard admission_hook(
+        [&](const std::string_view path) {
+            if (path != "/api/auth/login") return;
+            std::unique_lock lock(hook_mutex);
+            admitted = true;
+            hook_cv.notify_all();
+            hook_cv.wait(lock, [&]() { return release; });
+        });
+
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+    std::atomic<int> login_status{-1};
+    std::thread login_thread([&]() {
+        httplib::Client client("127.0.0.1", configured_port(config));
+        const auto response = client.Post(
+            "/api/auth/login",
+            R"({"username":"admin","password":"DO_NOT_FORWARD"})",
+            "application/json");
+        login_status.store(
+            response ? response->status : -1,
+            std::memory_order_release);
+    });
+
+    bool request_admitted = false;
+    {
+        std::unique_lock lock(hook_mutex);
+        request_admitted = hook_cv.wait_for(
+            lock, std::chrono::seconds{5}, [&]() { return admitted; });
+    }
+    if (request_admitted) {
+        server.publish_auth_provider_for_testing(
+            "keenetic",
+            "127.0.0.1:" + std::to_string(running_router.port()));
+    }
+    {
+        std::lock_guard lock(hook_mutex);
+        release = true;
+    }
+    hook_cv.notify_all();
+    login_thread.join();
+
+    REQUIRE(request_admitted);
+    CHECK(login_status.load(std::memory_order_acquire) == 403);
+    CHECK(forwarded_credentials.load(std::memory_order_relaxed) == 0U);
+}
+
+TEST_CASE("step-up admission cannot cross a local to Keenetic publication") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    write_text(
+        auth_path,
+        R"({"enabled":true,"provider":"local","username":"admin","password":"local-secret"})");
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+
+    std::atomic<unsigned int> forwarded_credentials{0U};
+    httplib::Server router;
+    router.Get("/auth", [](const httplib::Request&,
+                            httplib::Response& response) {
+        response.status = 401;
+        response.set_header("X-NDM-Realm", "Keenetic");
+        response.set_header("X-NDM-Challenge", "challenge");
+    });
+    router.Post("/auth", [&forwarded_credentials](
+                             const httplib::Request&,
+                             httplib::Response& response) {
+        forwarded_credentials.fetch_add(1U, std::memory_order_relaxed);
+        response.status = 200;
+    });
+    BoundHttpServer running_router(router);
+
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+    httplib::Client client("127.0.0.1", configured_port(config));
+    const auto login = client.Post(
+        "/api/auth/login",
+        R"({"username":"admin","password":"local-secret"})",
+        "application/json");
+    REQUIRE(login != nullptr);
+    REQUIRE(login->status == 200);
+    const std::string cookie = session_cookie(*login);
+
+    std::mutex hook_mutex;
+    std::condition_variable hook_cv;
+    bool admitted = false;
+    bool release = false;
+    CredentialHandlerAdmissionHookGuard admission_hook(
+        [&](const std::string_view path) {
+            if (path != "/api/auth/step-up") return;
+            std::unique_lock lock(hook_mutex);
+            admitted = true;
+            hook_cv.notify_all();
+            hook_cv.wait(lock, [&]() { return release; });
+        });
+    std::atomic<int> step_up_status{-1};
+    std::thread step_up_thread([&]() {
+        httplib::Client step_up_client(
+            "127.0.0.1", configured_port(config));
+        const httplib::Headers session{{"Cookie", cookie}};
+        const auto response = step_up_client.Post(
+            "/api/auth/step-up", session,
+            R"({"username":"admin","password":"DO_NOT_FORWARD"})",
+            "application/json");
+        step_up_status.store(
+            response ? response->status : -1,
+            std::memory_order_release);
+    });
+
+    bool request_admitted = false;
+    {
+        std::unique_lock lock(hook_mutex);
+        request_admitted = hook_cv.wait_for(
+            lock, std::chrono::seconds{5}, [&]() { return admitted; });
+    }
+    if (request_admitted) {
+        server.publish_auth_provider_for_testing(
+            "keenetic",
+            "127.0.0.1:" + std::to_string(running_router.port()));
+    }
+    {
+        std::lock_guard lock(hook_mutex);
+        release = true;
+    }
+    hook_cv.notify_all();
+    step_up_thread.join();
+
+    REQUIRE(request_admitted);
+    CHECK(step_up_status.load(std::memory_order_acquire) == 403);
+    CHECK(forwarded_credentials.load(std::memory_order_relaxed) == 0U);
+}
+
+TEST_CASE("Keenetic login rejects untrusted and forwarded transport before body parsing") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    write_text(
+        auth_path,
+        R"({"enabled":true,"provider":"keenetic","keenetic_endpoint_mode":"manual","keenetic_endpoint":"127.0.0.1:8080"})");
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+    std::atomic<unsigned int> evaluations{0U};
+    TrustedLocalConnectionEvaluatorGuard local_transport(
+        [&](std::string_view, std::string_view, const bool credential_fresh) {
+            evaluations.fetch_add(1U, std::memory_order_relaxed);
+            CHECK(credential_fresh);
+            return false;
+        });
+
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+    httplib::Client client("127.0.0.1", configured_port(config));
+
+    const auto untrusted = client.Post(
+        "/api/auth/login", "this is deliberately not JSON", "application/json");
+    REQUIRE(untrusted != nullptr);
+    CHECK(untrusted->status == 403);
+    CHECK(untrusted->get_header_value("Cache-Control") == "no-store");
+    CHECK(nlohmann::json::parse(untrusted->body).at("error") ==
+          "protected_secret_transport_unavailable");
+    CHECK(evaluations.load(std::memory_order_relaxed) == 1U);
+
+    const httplib::Headers forwarded{{"X-Forwarded-For", "192.168.1.5"}};
+    const auto spoofed = client.Post(
+        "/api/auth/login", forwarded, "still not JSON", "application/json");
+    REQUIRE(spoofed != nullptr);
+    CHECK(spoofed->status == 403);
+    // Forwarding headers are denied before the injectable socket evaluator.
+    CHECK(evaluations.load(std::memory_order_relaxed) == 1U);
+}
+
+TEST_CASE("Keenetic credential gates answer and close before a withheld body") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    write_text(
+        auth_path,
+        R"({"enabled":true,"provider":"keenetic","keenetic_endpoint_mode":"manual","keenetic_endpoint":"127.0.0.1:8080"})");
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+    TrustedLocalConnectionEvaluatorGuard local_transport(
+        [](std::string_view, std::string_view, bool) { return false; });
+
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+    const auto denied = post_headers_without_body(
+        configured_port(config), "/api/auth/login");
+
+    CHECK(denied.response.rfind("HTTP/1.1 403", 0U) == 0U);
+    CHECK(denied.response.find("protected_secret_transport_unavailable") !=
+          std::string::npos);
+    CHECK(denied.response.find("Cache-Control: no-store") !=
+          std::string::npos);
+    CHECK(denied.response.find("Connection: close") != std::string::npos);
+    CHECK(denied.peer_closed);
+    CHECK(denied.elapsed < std::chrono::milliseconds{1000});
+}
+
+TEST_CASE("Keenetic login and step-up use trusted local HTTP transport") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    std::atomic<unsigned int> forwarded_credentials{0U};
+    httplib::Server router;
+    router.Get("/auth", [](const httplib::Request&,
+                            httplib::Response& response) {
+        response.status = 401;
+        response.set_header("X-NDM-Realm", "Keenetic");
+        response.set_header("X-NDM-Challenge", "challenge");
+    });
+    router.Post("/auth", [&forwarded_credentials](
+                             const httplib::Request&,
+                             httplib::Response& response) {
+        forwarded_credentials.fetch_add(1U, std::memory_order_relaxed);
+        response.status = 200;
+    });
+    BoundHttpServer running_router(router);
+    write_text(
+        auth_path,
+        nlohmann::json{
+            {"enabled", true},
+            {"provider", "keenetic"},
+            {"keenetic_endpoint_mode", "manual"},
+            {"keenetic_endpoint",
+             "127.0.0.1:" + std::to_string(running_router.port())},
+        }.dump());
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+    std::atomic<unsigned int> evaluations{0U};
+    TrustedLocalConnectionEvaluatorGuard local_transport(
+        [&](std::string_view remote, std::string_view local,
+            const bool credential_fresh) {
+            CHECK_FALSE(remote.empty());
+            CHECK_FALSE(local.empty());
+            CHECK(credential_fresh);
+            evaluations.fetch_add(1U, std::memory_order_relaxed);
+            return true;
+        });
+
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+    httplib::Client client("127.0.0.1", configured_port(config));
+    const auto login = client.Post(
+        "/api/auth/login",
+        R"({"username":"admin","password":"router-secret"})",
+        "application/json");
+    REQUIRE(login != nullptr);
+    REQUIRE(login->status == 200);
+    const httplib::Headers session{{"Cookie", session_cookie(*login)}};
+    const auto step_up = client.Post(
+        "/api/auth/step-up",
+        session,
+        R"({"username":"admin","password":"router-secret"})",
+        "application/json");
+    REQUIRE(step_up != nullptr);
+    CHECK(step_up->status == 200);
+    CHECK(nlohmann::json::parse(step_up->body).at("granted").get<bool>());
+    CHECK(evaluations.load(std::memory_order_relaxed) == 2U);
+    CHECK(forwarded_credentials.load(std::memory_order_relaxed) == 2U);
+}
+
+TEST_CASE("Keenetic step-up rejects stale local proof before forwarding credentials") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    std::atomic<unsigned int> forwarded_credentials{0U};
+    httplib::Server router;
+    router.Get("/auth", [](const httplib::Request&,
+                            httplib::Response& response) {
+        response.status = 401;
+        response.set_header("X-NDM-Realm", "Keenetic");
+        response.set_header("X-NDM-Challenge", "challenge");
+    });
+    router.Post("/auth", [&forwarded_credentials](
+                             const httplib::Request&,
+                             httplib::Response& response) {
+        forwarded_credentials.fetch_add(1U, std::memory_order_relaxed);
+        response.status = 200;
+    });
+    BoundHttpServer running_router(router);
+    write_text(
+        auth_path,
+        nlohmann::json{
+            {"enabled", true},
+            {"provider", "keenetic"},
+            {"keenetic_endpoint_mode", "manual"},
+            {"keenetic_endpoint",
+             "127.0.0.1:" + std::to_string(running_router.port())},
+        }.dump());
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+    std::atomic<bool> transport_trusted{true};
+    std::atomic<unsigned int> evaluations{0U};
+    TrustedLocalConnectionEvaluatorGuard local_transport(
+        [&](std::string_view, std::string_view,
+            const bool credential_fresh) {
+            CHECK(credential_fresh);
+            evaluations.fetch_add(1U, std::memory_order_relaxed);
+            return transport_trusted.load(std::memory_order_relaxed);
+        });
+
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+    httplib::Client client("127.0.0.1", configured_port(config));
+    const auto login = client.Post(
+        "/api/auth/login",
+        R"({"username":"admin","password":"router-secret"})",
+        "application/json");
+    REQUIRE(login != nullptr);
+    REQUIRE(login->status == 200);
+    REQUIRE(forwarded_credentials.load(std::memory_order_relaxed) == 1U);
+    const httplib::Headers session{{"Cookie", session_cookie(*login)}};
+
+    transport_trusted.store(false, std::memory_order_relaxed);
+    const auto denied = client.Post(
+        "/api/auth/step-up",
+        session,
+        "not JSON and must not be parsed",
+        "application/json");
+    REQUIRE(denied != nullptr);
+    CHECK(denied->status == 403);
+    CHECK(nlohmann::json::parse(denied->body).at("error") ==
+          "protected_secret_transport_unavailable");
+    CHECK(evaluations.load(std::memory_order_relaxed) == 2U);
+    CHECK(forwarded_credentials.load(std::memory_order_relaxed) == 1U);
+}
+
+TEST_CASE("nfqws action step-up runs after body read and before its handler") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    write_text(
+        auth_path,
+        R"({"enabled":true,"provider":"local","username":"admin","password":"secret"})");
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+
+    TrustedLocalConnectionEvaluatorGuard trusted_local_transport(
+        [](std::string_view, std::string_view, bool) { return true; });
+
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    std::atomic<unsigned int> handled{0U};
+    server.post(
+        "/api/nfqws",
+        [&](const std::string& body) {
+            handled.fetch_add(1U, std::memory_order_relaxed);
+            return nlohmann::json{{"body", body}}.dump();
+        });
+    server.start();
+    httplib::Client client("127.0.0.1", configured_port(config));
+    const auto login = client.Post(
+        "/api/auth/login",
+        R"({"username":"admin","password":"secret"})",
+        "application/json");
+    REQUIRE(login != nullptr);
+    REQUIRE(login->status == 200);
+    const httplib::Headers session{{"Cookie", session_cookie(*login)}};
+
+    const auto upgrade = client.Post(
+        "/api/nfqws", session, R"({"action":"upgrade"})",
+        "application/json");
+    REQUIRE(upgrade != nullptr);
+    CHECK(upgrade->status == 403);
+    CHECK(nlohmann::json::parse(upgrade->body).at("error") ==
+          "step_up_required");
+    CHECK(handled.load(std::memory_order_relaxed) == 0U);
+
+    const std::vector<nlohmann::json> ordinary_payloads{
+        {{"action", "service"}, {"command", "start"}},
+        {{"action", "service"}, {"command", "stop"}},
+        {{"action", "service"}, {"command", "restart"}},
+        {{"action", "check_update"}},
+    };
+    for (const auto& payload : ordinary_payloads) {
+        const auto ordinary = client.Post(
+            "/api/nfqws", session, payload.dump(),
+            "application/json");
+        REQUIRE(ordinary != nullptr);
+        CHECK(ordinary->status == 200);
+    }
+    CHECK(handled.load(std::memory_order_relaxed) == 4U);
+
+    grant_local_step_up(client, session, "admin", "secret");
+    const auto granted = client.Post(
+        "/api/nfqws", session, R"({"action":"upgrade"})",
+        "application/json");
+    REQUIRE(granted != nullptr);
+    CHECK(granted->status == 200);
+    CHECK(handled.load(std::memory_order_relaxed) == 5U);
 }
 
 TEST_CASE("rate limiter atomically caps parallel attempts from one source") {

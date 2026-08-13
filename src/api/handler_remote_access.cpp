@@ -786,11 +786,57 @@ ReconcileAttemptOutcome reconcile_remote_access_rules_once(
     };
 }
 
-DesiredRemoteAccessState load_desired_state(
+DesiredRemoteAccessState load_and_normalize_desired_state(
     const std::string& listen_address) {
-    const auto settings = load_settings();
+    auto settings = load_settings();
+    bool enabled = settings.value("enabled", false);
+
+    // A durable enabled=true left by an older build or an external restore is
+    // not a firewall failure when the selected authentication provider can
+    // never be published safely over plaintext WAN HTTP. Normalize that
+    // incompatible request to the same durable disabled state produced by the
+    // settings API, then let the ordinary disabled reconciler remove and
+    // verify every owned rule. A cleanup failure remains a real recoverable
+    // incident; provider incompatibility by itself does not.
+    //
+    // Every caller holds settings_mutex(), so the atomic replacement and the
+    // desired generation admitted from it cannot be interleaved with a remote
+    // access POST.
+    if (enabled) {
+        const auto auth = load_remote_auth_state();
+        if (auth.readable && auth.enabled && auth.provider == "keenetic") {
+            settings["enabled"] = false;
+            try {
+                const bool durable = save_settings(settings);
+                if (durable) {
+                    Logger::instance().info(
+                        "Remote access was disabled because the Keenetic "
+                        "authentication provider cannot be published over "
+                        "plaintext WAN HTTP; owned firewall rules will be "
+                        "removed and verified.");
+                } else {
+                    Logger::instance().warn(
+                        "Remote access was disabled and published because "
+                        "the Keenetic authentication provider cannot be "
+                        "published over plaintext WAN HTTP, but directory "
+                        "durability could not be confirmed; owned firewall "
+                        "rules will still be removed and verified.");
+                }
+            } catch (const std::exception& error) {
+                // Disk failure is not authority to reopen the unsafe desired
+                // state. Keep this process fail-closed and retry persistence
+                // on the next refresh; cleanup verification below still owns
+                // its normal recovery/incident policy.
+                Logger::instance().error(
+                    "Cannot persist fail-closed remote-access normalization: "
+                    "{}; runtime cleanup will continue",
+                    error.what());
+            }
+            enabled = false;
+        }
+    }
     return {
-        settings.value("enabled", false),
+        enabled,
         settings.value("port", kDefaultPort),
         listen_address,
     };
@@ -1447,7 +1493,7 @@ defer_remote_access_reconcile_after_auth_enable(
     RemoteAccessReconcileResult result;
     {
         const std::lock_guard<std::mutex> lock(settings_mutex());
-        const auto desired = load_desired_state({});
+        const auto desired = load_and_normalize_desired_state({});
         const auto current = remote_access_runtime_status();
         const bool already_converged =
             desired.enabled
@@ -1548,7 +1594,7 @@ RemoteAccessReconcileResult refresh_remote_access_reconcile(
     {
         const std::lock_guard<std::mutex> lock(settings_mutex());
         claim = begin_refresh_generation(
-            load_desired_state(listen_address), immediate);
+            load_and_normalize_desired_state(listen_address), immediate);
     }
     if (!claim) {
         publish_reconcile_result_hint(immediate);
@@ -1575,7 +1621,7 @@ RemoteAccessReconcileResult retry_remote_access_reconcile(
         const std::lock_guard<std::mutex> lock(settings_mutex());
         claim = begin_retry_generation(
             expected_generation,
-            load_desired_state(listen_address),
+            load_and_normalize_desired_state(listen_address),
             immediate);
     }
     if (!claim) {

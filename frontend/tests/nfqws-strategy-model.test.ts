@@ -333,14 +333,17 @@ describe("nfqws profile marker", () => {
         content: "# keen-pbr-sb · профиль «ОБЫЧНЫЙ»\n",
       })
     ).toBe(true)
-    // Демон постарше бита не присылает — расхождение не выдумывается.
+  })
+
+  test("marks an override modified when an older backend omits proof", () => {
+    // Демон постарше бита не присылает — совпадение доказать нельзя.
     expect(
       nfqwsProfileMatchesPackage({
         builtin: true,
         overridden: true,
         content: "# keen-pbr-sb · профиль «ОБЫЧНЫЙ»\n",
       })
-    ).toBe(true)
+    ).toBe(false)
   })
 
   /**

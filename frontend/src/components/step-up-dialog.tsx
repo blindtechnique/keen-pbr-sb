@@ -14,6 +14,15 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import {
+  useRevokeTrustedLocalConnection,
+  useTrustedAuthStatus,
+} from "@/lib/auth-status-context"
+import {
+  authCredentialsMayBeCollected,
+  refreshCredentialTransportStatus,
+} from "@/lib/auth-status"
+import {
+  setProtectedTransportUnavailableHandler,
   setStepUpPrompt,
   type StepUpCredentials,
 } from "@/lib/step-up"
@@ -33,6 +42,8 @@ type PendingPrompt = {
  */
 export function StepUpDialog() {
   const { t } = useTranslation()
+  const authStatus = useTrustedAuthStatus()
+  const revokeTrustedLocalConnection = useRevokeTrustedLocalConnection()
   const [pending, setPending] = useState<PendingPrompt | null>(null)
   const [username, setUsername] = useState("")
   const [password, setPassword] = useState("")
@@ -41,11 +52,28 @@ export function StepUpDialog() {
   // open. Leaving it unsettled would hang the request that is awaiting it.
   const pendingRef = useRef<PendingPrompt | null>(null)
 
+  // Synchronising the external prompt registry also has to settle a prompt
+  // whose authority was revoked. Those state clears are intentionally part of
+  // the subscription teardown, not derived render state.
+  /* eslint-disable react-hooks/set-state-in-effect -- revoking the external prompt authority must synchronously settle and wipe any pending secret */
   useEffect(() => {
     pendingRef.current = pending
   }, [pending])
 
   useEffect(() => {
+    const canPrompt = authCredentialsMayBeCollected(authStatus)
+    if (!canPrompt) {
+      setStepUpPrompt(null)
+      setProtectedTransportUnavailableHandler(null)
+      const current = pendingRef.current
+      pendingRef.current = null
+      setPending(null)
+      setUsername("")
+      setPassword("")
+      setSubmitting(false)
+      current?.resolve(null)
+      return
+    }
     setStepUpPrompt(
       () =>
         new Promise<StepUpCredentials | null>((resolve) => {
@@ -55,36 +83,60 @@ export function StepUpDialog() {
           setPending({ resolve })
         })
     )
+    setProtectedTransportUnavailableHandler(() => {
+      revokeTrustedLocalConnection()
+      const current = pendingRef.current
+      pendingRef.current = null
+      setPending(null)
+      setUsername("")
+      setPassword("")
+      setSubmitting(false)
+      current?.resolve(null)
+    })
 
     return () => {
       setStepUpPrompt(null)
+      setProtectedTransportUnavailableHandler(null)
       pendingRef.current?.resolve(null)
     }
+  }, [authStatus, revokeTrustedLocalConnection])
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  const settle = useCallback((credentials: StepUpCredentials | null) => {
+    const current = pendingRef.current
+    setPending(null)
+    // The password is not kept after the prompt closes. It is forwarded once
+    // and never held for a possible retry.
+    setPassword("")
+    setSubmitting(false)
+    current?.resolve(credentials)
   }, [])
 
-  const settle = useCallback(
-    (credentials: StepUpCredentials | null) => {
-      const current = pendingRef.current
-      setPending(null)
-      // The password is not kept after the prompt closes. It is forwarded once
-      // and never held for a possible retry.
-      setPassword("")
-      setSubmitting(false)
-      current?.resolve(credentials)
-    },
-    []
-  )
-
   const handleSubmit = useCallback(
-    (event: FormEvent) => {
+    async (event: FormEvent) => {
       event.preventDefault()
       if (submitting) {
         return
       }
       setSubmitting(true)
+      if (
+        authStatus?.provider === "keenetic" &&
+        !(await refreshCredentialTransportStatus())
+      ) {
+        revokeTrustedLocalConnection()
+        settle(null)
+        return
+      }
       settle({ username, password })
     },
-    [password, settle, submitting, username]
+    [
+      authStatus?.provider,
+      password,
+      revokeTrustedLocalConnection,
+      settle,
+      submitting,
+      username,
+    ]
   )
 
   return (

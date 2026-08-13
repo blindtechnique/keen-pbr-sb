@@ -39,6 +39,8 @@ add_executable(keen-pbr-tests
   test_ndms_vpn_server_service.cpp
   test_internal_vpn_service_resolver.cpp
   test_ndms_interface_management.cpp
+  test_ndms_native_management_preflight.cpp
+  test_ndms_native_tunnel_import.cpp
   test_ndms_rci_observation.cpp
   test_ndms_rci_restorable_snapshot.cpp
   test_dns_probe_server.cpp
@@ -207,6 +209,8 @@ add_executable(keen-pbr-tests
   ../src/keenetic/internal_vpn_service_resolver.cpp
   ../src/keenetic/internal_vpn_ingress_resolver.cpp
   ../src/keenetic/ndms_interface_management.cpp
+  ../src/keenetic/ndms_native_management_preflight.cpp
+  ../src/keenetic/ndms_native_tunnel_import.cpp
   ../src/keenetic/ndms_rci_observation.cpp
   ../src/keenetic/ndms_rci_restorable_snapshot.cpp
   ../src/health/url_tester.cpp
@@ -284,6 +288,32 @@ endif()
 add_test(
   NAME keen-pbr-cache-generation-tests
   COMMAND keen-pbr-cache-generation-tests
+)
+
+# Keep the secret-bearing native WG/AWG import parser independently buildable.
+# It has no daemon, API, RCI, or router dependency.
+add_executable(keen-pbr-native-tunnel-import-tests
+  test_main.cpp
+  test_ndms_native_tunnel_import.cpp
+  ../src/keenetic/ndms_native_tunnel_import.cpp
+)
+set_target_properties(keen-pbr-native-tunnel-import-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_include_directories(keen-pbr-native-tunnel-import-tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+)
+target_link_libraries(keen-pbr-native-tunnel-import-tests PRIVATE
+  nlohmann_json::nlohmann_json
+)
+keen_pbr_apply_project_options(keen-pbr-native-tunnel-import-tests)
+add_test(
+  NAME keen-pbr-native-tunnel-import-tests
+  COMMAND keen-pbr-native-tunnel-import-tests
 )
 
 # Keep runtime mutation admission independently buildable. The contract is
@@ -680,7 +710,9 @@ if(WITH_API)
     test_api_nfqws.cpp
     test_runtime_outbound_state.cpp
     test_ndms_web_endpoint.cpp
+    test_trusted_local_connection.cpp
     ../src/api/server.cpp
+    ../src/api/trusted_local_connection.cpp
     ../src/api/connection_query.cpp
     ../src/api/auth_runtime.cpp
     ../src/api/keenetic_auth.cpp

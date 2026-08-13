@@ -6,6 +6,25 @@ const t = (key: string, options?: Record<string, unknown>) =>
   `${key}:${String(options?.version ?? "")}`
 
 describe("notification collector", () => {
+  test("hides the resolved Keenetic remote-access compatibility incident only", () => {
+    const notices = collectNotices(
+      [
+        "2026-08-12 22:15:19.756 [E] Cannot reconcile remote-access firewall state: remote access is unavailable with the Keenetic authentication provider because router credentials would traverse plaintext WAN HTTP",
+        "2026-08-12 22:15:20.000 [E] Cannot reconcile remote-access firewall state: remote access is disabled, but owned firewall rules could not be removed and verified",
+      ],
+      undefined,
+      undefined,
+      0,
+      new Set(),
+      t
+    )
+
+    expect(notices).toHaveLength(1)
+    expect(notices[0]?.text).toContain(
+      "owned firewall rules could not be removed and verified"
+    )
+  })
+
   test("does not turn a successful managed-route repair into a warning", () => {
     const notices = collectNotices(
       [

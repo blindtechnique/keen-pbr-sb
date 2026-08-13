@@ -28,6 +28,11 @@ struct ExecCaptureResult {
     int exit_code{-1};
     bool truncated{false};
     bool timed_out{false};
+    // A timeout is safe to recover from only after every process in the
+    // command's process group is gone and the capture pipe reaches EOF. When
+    // either cannot be established within the kill deadline, callers that
+    // would mutate the same files must retain their journal and abstain.
+    bool termination_uncertain{false};
 };
 
 inline void reset_child_signal_mask() {
@@ -138,6 +143,106 @@ inline void signal_child_process_group(pid_t pid, int signal_number) {
     if (kill(-pid, signal_number) != 0 && errno == ESRCH) {
         (void)kill(pid, signal_number);
     }
+}
+
+inline void signal_retained_process_group(pid_t group_id,
+                                          int signal_number,
+                                          bool direct_child_owned) noexcept {
+    // The direct child may already have been reaped, so its pid can be reused.
+    // Fall back to its positive pid only while it is still our unreaped child;
+    // in that state pid reuse is impossible. This covers a failed setpgid()
+    // without ever signalling an unrelated process after the leader is reaped.
+    if (kill(-group_id, signal_number) != 0 && errno == ESRCH &&
+        direct_child_owned) {
+        (void)kill(group_id, signal_number);
+    }
+}
+
+inline bool process_group_still_exists(pid_t group_id) noexcept {
+    if (kill(-group_id, 0) == 0) return true;
+    return errno != ESRCH;
+}
+
+struct ProcessGroupTerminationResult {
+    bool group_gone{false};
+    bool child_reaped{false};
+    bool child_status_valid{false};
+    int child_status{0};
+    int wait_errno{0};
+};
+
+// Terminate and observe the whole execution group, including the case where
+// its leader exited normally while a maintainer-script descendant retained the
+// capture pipe. Both TERM and KILL phases are bounded. Returning group_gone=false
+// is an explicit unsafe/unknown outcome; it is never permission to begin a
+// rollback that could race the descendant.
+inline ProcessGroupTerminationResult terminate_process_group_bounded(
+    pid_t group_id,
+    bool child_reaped,
+    bool child_status_valid,
+    int child_status,
+    std::chrono::milliseconds kill_grace) noexcept {
+    using clock = std::chrono::steady_clock;
+    ProcessGroupTerminationResult result{
+        false, child_reaped, child_status_valid, child_status, 0};
+
+    auto observe_child = [&]() {
+        if (result.child_reaped) return;
+        while (true) {
+            const pid_t waited =
+                waitpid(group_id, &result.child_status, WNOHANG);
+            if (waited == group_id) {
+                result.child_reaped = true;
+                result.child_status_valid = true;
+                return;
+            }
+            if (waited == 0) return;
+            if (waited < 0 && errno == EINTR) continue;
+            if (waited < 0 && errno == ECHILD) {
+                result.child_reaped = true;
+                return;
+            }
+            if (waited < 0) {
+                result.wait_errno = errno;
+                return;
+            }
+        }
+    };
+
+    auto wait_until_gone = [&](clock::time_point deadline) {
+        while (true) {
+            observe_child();
+            const bool group_exists =
+                process_group_still_exists(group_id);
+            bool direct_child_exists = false;
+            if (!result.child_reaped) {
+                direct_child_exists =
+                    kill(group_id, 0) == 0 || errno == EPERM;
+            }
+            if (!group_exists && !direct_child_exists) return true;
+            const auto now = clock::now();
+            if (now >= deadline) return false;
+            const auto remaining =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    deadline - now);
+            const int delay = static_cast<int>(std::max<std::int64_t>(
+                1, std::min<std::int64_t>(20, remaining.count())));
+            (void)poll(nullptr, 0, delay);
+        }
+    };
+
+    signal_retained_process_group(
+        group_id, SIGTERM, !result.child_reaped);
+    if (!wait_until_gone(clock::now() + kill_grace)) {
+        signal_retained_process_group(
+            group_id, SIGKILL, !result.child_reaped);
+        result.group_gone =
+            wait_until_gone(clock::now() + kill_grace);
+    } else {
+        result.group_gone = true;
+    }
+    observe_child();
+    return result;
 }
 
 inline ChildWaitResult wait_for_child_until(
@@ -981,47 +1086,93 @@ inline ExecCaptureResult safe_exec_capture(const std::vector<std::string>& args,
     bool timed_out = false;
     int status = 0;
     const auto deadline = started_at + timeouts.timeout;
-    while (pipe_open || !child_reaped) {
-        if (pipe_open) {
-            while (true) {
-                const ssize_t n = read(pipefd[0], buf, sizeof(buf));
-                if (n > 0) {
-                    const size_t received = static_cast<size_t>(n);
-                    const size_t remaining = max_bytes == 0 || result.stdout_output.size() >= max_bytes
+
+    auto read_available_output = [&]() {
+        if (!pipe_open) return;
+        while (true) {
+            const ssize_t n = read(pipefd[0], buf, sizeof(buf));
+            if (n > 0) {
+                const size_t received = static_cast<size_t>(n);
+                const size_t remaining =
+                    max_bytes == 0 ||
+                            result.stdout_output.size() >= max_bytes
                         ? (max_bytes == 0 ? received : 0)
                         : max_bytes - result.stdout_output.size();
-                    result.stdout_output.append(buf, std::min(received, remaining));
-                    if (max_bytes > 0 && received > remaining) {
-                        result.truncated = true;
-                    }
-                    continue;
+                result.stdout_output.append(
+                    buf, std::min(received, remaining));
+                if (max_bytes > 0 && received > remaining) {
+                    result.truncated = true;
                 }
-                if (n == 0) {
-                    close(pipefd[0]);
-                    pipe_open = false;
-                }
-                if (n < 0 && errno == EINTR) continue;
-                break;
+                continue;
+            }
+            if (n == 0) {
+                close(pipefd[0]);
+                pipe_open = false;
+            }
+            if (n < 0 && errno == EINTR) continue;
+            break;
+        }
+    };
+
+    auto observe_child = [&]() {
+        if (child_reaped) return;
+        while (true) {
+            const pid_t waited = waitpid(pid, &status, WNOHANG);
+            if (waited == pid) {
+                child_status_valid = true;
+                child_reaped = true;
+                return;
+            }
+            if (waited == 0) return;
+            if (waited < 0 && errno == EINTR) continue;
+            if (waited < 0) {
+                child_reaped = true;
+                child_status_valid = false;
+                return;
             }
         }
+    };
 
-        if (!child_reaped) {
-            const pid_t waited = waitpid(pid, &status, WNOHANG);
-            child_status_valid = waited == pid;
-            child_reaped = child_status_valid || waited == -1;
-        }
+    while (pipe_open || !child_reaped) {
+        read_available_output();
+        observe_child();
         const bool output_limit_reached =
             result.truncated && !drain_after_limit;
         if (output_limit_reached ||
             std::chrono::steady_clock::now() >= deadline) {
             timed_out = !output_limit_reached;
-            if (!child_reaped) {
-                const auto wait_result = wait_for_child_until(
-                    pid, std::chrono::steady_clock::now(), timeouts.kill_grace);
-                status = wait_result.status;
-                child_reaped = true;
-                child_status_valid = status != -1;
+
+            // Always terminate the retained group. The leader can already be
+            // reaped while an opkg maintainer-script descendant keeps stdout
+            // open and continues mutating files. Returning before that group
+            // is gone would let a rollback race the mutation we timed out.
+            const auto terminated = terminate_process_group_bounded(
+                pid,
+                child_reaped,
+                child_status_valid,
+                status,
+                timeouts.kill_grace);
+            child_reaped = terminated.child_reaped;
+            child_status_valid = terminated.child_status_valid;
+            status = terminated.child_status;
+
+            // A gone group must also yield EOF. If the descriptor remains
+            // open, a process escaped the group (for example via setsid) and
+            // recovery safety cannot be established. Drain only for the same
+            // bounded grace; never turn cleanup into another indefinite wait.
+            const auto drain_deadline =
+                std::chrono::steady_clock::now() + timeouts.kill_grace;
+            while (pipe_open &&
+                   std::chrono::steady_clock::now() < drain_deadline) {
+                read_available_output();
+                if (!pipe_open) break;
+                pollfd descriptor{
+                    pipefd[0], static_cast<short>(POLLIN | POLLHUP), 0};
+                (void)poll(&descriptor, 1, 20);
             }
+            read_available_output();
+            result.termination_uncertain =
+                !terminated.group_gone || !child_reaped || pipe_open;
             if (pipe_open) close(pipefd[0]);
             pipe_open = false;
             break;
@@ -1039,20 +1190,23 @@ inline ExecCaptureResult safe_exec_capture(const std::vector<std::string>& args,
     if (timed_out) {
         if (should_log_safe_exec_failure(failure_log)) {
             Logger::instance().error(
-                "Command '{}' exceeded {} ms and was killed",
+                "Command '{}' exceeded {} ms and was killed; termination_uncertain={}",
                 command,
-                timeouts.timeout.count());
+                timeouts.timeout.count(),
+                result.termination_uncertain ? "true" : "false");
         }
         result.timed_out = true;
     }
     Logger::instance().trace("safe_exec_capture_end",
-                             "cmd={} exit_code={} duration_ms={} bytes={} truncated={}",
+                             "cmd={} exit_code={} duration_ms={} bytes={} truncated={} timed_out={} termination_uncertain={}",
                              command,
                              result.exit_code,
                              std::chrono::duration_cast<std::chrono::milliseconds>(
                                  std::chrono::steady_clock::now() - started_at).count(),
                              result.stdout_output.size(),
-                             result.truncated ? "true" : "false");
+                             result.truncated ? "true" : "false",
+                             result.timed_out ? "true" : "false",
+                             result.termination_uncertain ? "true" : "false");
     return result;
 }
 

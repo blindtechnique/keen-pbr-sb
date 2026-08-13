@@ -84,6 +84,7 @@ public:
         reset_stream_admission_hook_for_testing();
         reset_auth_settings_admission_hook_for_testing();
         reset_auth_login_verified_hook_for_testing();
+        reset_trusted_local_connection_evaluator_for_testing();
         reset_remote_access_reconciler_for_testing();
         reset_remote_access_command_runner_for_testing();
     }
@@ -93,6 +94,7 @@ public:
         reset_stream_admission_hook_for_testing();
         reset_auth_settings_admission_hook_for_testing();
         reset_auth_login_verified_hook_for_testing();
+        reset_trusted_local_connection_evaluator_for_testing();
         reset_remote_access_reconciler_for_testing();
         reset_remote_access_command_runner_for_testing();
     }
@@ -382,7 +384,7 @@ TEST_CASE("remote access refuses a custom port instead of exposing direct 12121"
     CHECK_FALSE(std::filesystem::exists(settings_path));
 }
 
-TEST_CASE("Keenetic auth provider keeps remote access fail-closed") {
+TEST_CASE("Keenetic auth normalizes stale remote access and verifies cleanup without an incident") {
     RemoteAccessTempDir directory;
     RemoteAccessRunnerGuard runner_guard;
     const auto settings_path = directory.path / "remote-access.json";
@@ -400,7 +402,7 @@ TEST_CASE("Keenetic auth provider keeps remote access fail-closed") {
     }
     {
         std::ofstream auth(auth_path);
-        auth << R"({"enabled":true,"provider":"keenetic"})";
+        auth << R"({"enabled":true,"provider":"local"})";
     }
 
     FakeIptables firewall;
@@ -408,6 +410,62 @@ TEST_CASE("Keenetic auth provider keeps remote access fail-closed") {
         [&firewall](const std::vector<std::string>& command) {
             return firewall.run(command);
         });
+
+    const auto opened =
+        refresh_remote_access_reconcile("0.0.0.0:12121");
+    REQUIRE(opened.apply.applied);
+    REQUIRE(opened.status.state == RemoteAccessRuntimeState::applied);
+    // The supported fixed-port path keeps NAT absent. Seed a legacy owned NAT
+    // chain as well so normalization proves cleanup in both tables.
+    REQUIRE(firewall.run({"iptables", "-w", "1", "-t", "nat", "-N",
+                          "KeenPbrRemote"}) == 0);
+    REQUIRE(firewall.run({"iptables", "-w", "1", "-t", "nat", "-I",
+                          "PREROUTING", "1", "-j", "KeenPbrRemote"}) == 0);
+    CHECK(firewall.run(
+              {"iptables", "-w", "1", "-S", "KeenPbrRemote"}) == 0);
+    CHECK(firewall.run({"iptables", "-w", "1", "-t", "nat", "-S",
+                        "KeenPbrRemote"}) == 0);
+
+    // Model a stale/restored pair of durable files from an older build: WAN
+    // access is still requested and its owned rules still exist, but router
+    // credentials are now the authentication authority.
+    {
+        std::ofstream auth(auth_path);
+        auth << R"({"enabled":true,"provider":"keenetic"})";
+    }
+
+    RemoteAccessLogCapture logs;
+    auto result = refresh_remote_access_reconcile("0.0.0.0:12121");
+    CHECK(result.apply.applied);
+    CHECK(result.status.state == RemoteAccessRuntimeState::closed);
+    CHECK_FALSE(result.status.desired_enabled);
+    CHECK(result.status.applied_generation ==
+          result.status.desired_generation);
+    CHECK_FALSE(result.status.incident_active);
+    CHECK_FALSE(result.status.recovery_owned);
+    CHECK_FALSE(result.incident_raised);
+    CHECK(remote_access_runtime_is_verified_closed());
+    CHECK(firewall.run(
+              {"iptables", "-w", "1", "-S", "KeenPbrRemote"}) == 1);
+    CHECK(firewall.run({"iptables", "-w", "1", "-t", "nat", "-S",
+                        "KeenPbrRemote"}) == 1);
+
+    const auto stored = nlohmann::json::parse(std::ifstream(settings_path));
+    CHECK_FALSE(stored.at("enabled").get<bool>());
+    CHECK(stored.at("port") == 12121);
+
+    result = refresh_remote_access_reconcile("0.0.0.0:12121");
+    CHECK(result.apply.applied);
+    CHECK(result.status.state == RemoteAccessRuntimeState::closed);
+    CHECK_FALSE(result.incident_raised);
+    CHECK_FALSE(result.incident_cleared);
+    CHECK(std::none_of(
+        logs.lines().begin(), logs.lines().end(),
+        [](const std::string& line) {
+            return line.find(
+                       "Cannot reconcile remote-access firewall state") !=
+                   std::string::npos;
+        }));
 
     SseBroadcaster broadcaster;
     auto context = make_remote_access_context(broadcaster);
@@ -422,11 +480,11 @@ TEST_CASE("Keenetic auth provider keeps remote access fail-closed") {
     const auto status = client.Get("/api/system/remote-access");
     REQUIRE(status != nullptr);
     const auto status_body = nlohmann::json::parse(status->body);
+    CHECK_FALSE(status_body.at("enabled").get<bool>());
     CHECK(status_body.at("auth_provider") == "keenetic");
     CHECK(status_body.at("blocked_reason") ==
           "keenetic_auth_plaintext_wan");
-    CHECK_FALSE(
-        status_body.at("keenetic_auth_switch_allowed").get<bool>());
+    CHECK(status_body.at("keenetic_auth_switch_allowed").get<bool>());
     CHECK_FALSE(status_body.at("custom_port_supported").get<bool>());
     CHECK(status_body.at("supported_port") == 12121);
     const auto enable = client.Post(
@@ -437,15 +495,111 @@ TEST_CASE("Keenetic auth provider keeps remote access fail-closed") {
     REQUIRE(enable != nullptr);
     CHECK(nlohmann::json::parse(enable->body).at("error") ==
           "keenetic_auth_plaintext_wan");
+}
 
-    const auto result =
+TEST_CASE("Keenetic auth normalization keeps cleanup failures in bounded recovery") {
+    RemoteAccessTempDir directory;
+    RemoteAccessRunnerGuard runner_guard;
+    const auto settings_path = directory.path / "remote-access.json";
+    const auto auth_path = directory.path / "auth.json";
+    EnvironmentVariableGuard settings_file(
+        "KEEN_PBR_TEST_REMOTE_SETTINGS_FILE", settings_path.string());
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_TEST_REMOTE_AUTH_FILE", auth_path.string());
+    EnvironmentVariableGuard wan("KEEN_PBR_TEST_REMOTE_WAN", "wan-test");
+    EnvironmentVariableGuard wait_mode(
+        "KEEN_PBR_TEST_REMOTE_XTABLES_WAIT", "timeout");
+    {
+        std::ofstream settings(settings_path);
+        settings << R"({"enabled":true,"port":12121})";
+    }
+    {
+        std::ofstream auth(auth_path);
+        auth << R"({"enabled":true,"provider":"local"})";
+    }
+
+    FakeIptables firewall;
+    bool cleanup_blocked = false;
+    set_remote_access_command_runner_for_testing(
+        [&firewall, &cleanup_blocked](
+            const std::vector<std::string>& command) {
+            return cleanup_blocked ? 4 : firewall.run(command);
+        });
+
+    const auto opened =
         refresh_remote_access_reconcile("0.0.0.0:12121");
+    REQUIRE(opened.apply.applied);
+    REQUIRE(opened.status.state == RemoteAccessRuntimeState::applied);
+    REQUIRE(firewall.run({"iptables", "-w", "1", "-t", "nat", "-N",
+                          "KeenPbrRemote"}) == 0);
+    REQUIRE(firewall.run({"iptables", "-w", "1", "-t", "nat", "-I",
+                          "PREROUTING", "1", "-j", "KeenPbrRemote"}) == 0);
+    {
+        std::ofstream auth(auth_path);
+        auth << R"({"enabled":true,"provider":"keenetic"})";
+    }
+
+    cleanup_blocked = true;
+    RemoteAccessLogCapture logs;
+    auto result = refresh_remote_access_reconcile("0.0.0.0:12121");
+    REQUIRE_FALSE(result.apply.applied);
+    CHECK(result.status.state == RemoteAccessRuntimeState::pending);
+    CHECK_FALSE(result.status.desired_enabled);
+    CHECK(result.status.recovery_owned);
+    CHECK(result.status.attempt == 1U);
+    CHECK_FALSE(result.incident_raised);
+    const auto generation = result.status.desired_generation;
+
+    const auto stored = nlohmann::json::parse(std::ifstream(settings_path));
+    CHECK_FALSE(stored.at("enabled").get<bool>());
+    CHECK(stored.at("port") == 12121);
+
+    for (unsigned int attempt = 2U; attempt <= 7U; ++attempt) {
+        result = retry_remote_access_reconcile(
+            generation, "0.0.0.0:12121");
+    }
     CHECK_FALSE(result.apply.applied);
     CHECK(result.status.state == RemoteAccessRuntimeState::degraded);
-    CHECK_FALSE(result.status.recovery_owned);
-    CHECK(result.status.error.find("plaintext WAN HTTP") !=
+    CHECK(result.status.incident_active);
+    CHECK(result.status.recovery_owned);
+    CHECK(result.status.maintenance);
+    CHECK(result.status.attempt == 7U);
+    CHECK(result.incident_raised);
+    CHECK(result.status.error.find(
+              "owned firewall rules could not be removed and verified") !=
           std::string::npos);
-    CHECK(remove_remote_access_rules());
+    CHECK(result.status.error.find("plaintext WAN HTTP") ==
+          std::string::npos);
+    CHECK(std::count_if(
+              logs.lines().begin(), logs.lines().end(),
+              [](const std::string& line) {
+                  return line.find(
+                             "Cannot reconcile remote-access firewall state") !=
+                         std::string::npos;
+              }) == 1);
+
+    result = retry_remote_access_reconcile(
+        generation, "0.0.0.0:12121");
+    CHECK_FALSE(result.incident_raised);
+    CHECK(std::count_if(
+              logs.lines().begin(), logs.lines().end(),
+              [](const std::string& line) {
+                  return line.find(
+                             "Cannot reconcile remote-access firewall state") !=
+                         std::string::npos;
+              }) == 1);
+
+    cleanup_blocked = false;
+    result = retry_remote_access_reconcile(
+        generation, "0.0.0.0:12121");
+    CHECK(result.apply.applied);
+    CHECK(result.status.state == RemoteAccessRuntimeState::closed);
+    CHECK(result.incident_cleared);
+    CHECK(remote_access_runtime_is_verified_closed());
+    CHECK(firewall.run(
+              {"iptables", "-w", "1", "-S", "KeenPbrRemote"}) == 1);
+    CHECK(firewall.run({"iptables", "-w", "1", "-t", "nat", "-S",
+                        "KeenPbrRemote"}) == 1);
 }
 
 TEST_CASE("remote access reports pending and schedules an unapplied firewall state") {
@@ -711,7 +865,10 @@ TEST_CASE("enabling authentication revives a closed remote desired state") {
     }
     {
         std::ofstream auth(auth_path);
-        auth << R"({"enabled":false,"provider":"local"})";
+        // Merely selecting the provider while authentication is disabled is
+        // not an incompatible published credential path. Preserve the remote
+        // desired state so enabling a safe provider can revive it below.
+        auth << R"({"enabled":false,"provider":"keenetic"})";
     }
 
     FakeIptables firewall;
@@ -849,6 +1006,8 @@ TEST_CASE("auth settings need step-up and cannot switch to Keenetic while WAN is
         "KEEN_PBR_TEST_REMOTE_AUTH_FILE", auth_path.string());
     EnvironmentVariableGuard server_auth_file(
         "KEEN_PBR_AUTH_FILE", auth_path.string());
+    set_trusted_local_connection_evaluator_for_testing(
+        [](std::string_view, std::string_view, bool) { return true; });
     {
         std::ofstream settings(settings_path);
         settings << R"({"enabled":true,"port":12121})";
@@ -1300,6 +1459,8 @@ TEST_CASE("remote access teardown cleanup failure is quiet") {
 TEST_CASE("auth disable waits for verified startup remote cleanup") {
     RemoteAccessTempDir directory;
     RemoteAccessRunnerGuard runner_guard;
+    set_trusted_local_connection_evaluator_for_testing(
+        [](std::string_view, std::string_view, bool) { return true; });
     const auto settings_path = directory.path / "remote-access.json";
     const auto auth_path = directory.path / "auth.json";
     EnvironmentVariableGuard settings_file(
@@ -1357,6 +1518,8 @@ TEST_CASE("auth disable waits for verified startup remote cleanup") {
 TEST_CASE("auth disable is staged so existing connections stay protected") {
     RemoteAccessTempDir directory;
     RemoteAccessRunnerGuard runner_guard;
+    set_trusted_local_connection_evaluator_for_testing(
+        [](std::string_view, std::string_view, bool) { return true; });
     const auto settings_path = directory.path / "remote-access.json";
     const auto auth_path = directory.path / "auth.json";
     EnvironmentVariableGuard settings_file(
@@ -1442,6 +1605,8 @@ TEST_CASE("auth disable is staged so existing connections stay protected") {
 TEST_CASE("credential rotation revokes admitted SSE cohorts") {
     RemoteAccessTempDir directory;
     RemoteAccessRunnerGuard runner_guard;
+    set_trusted_local_connection_evaluator_for_testing(
+        [](std::string_view, std::string_view, bool) { return true; });
     const auto settings_path = directory.path / "remote-access.json";
     const auto auth_path = directory.path / "auth.json";
     EnvironmentVariableGuard settings_file(
@@ -1531,6 +1696,8 @@ TEST_CASE(
     "credential rotation rejects a stream paused after middleware admission") {
     RemoteAccessTempDir directory;
     RemoteAccessRunnerGuard runner_guard;
+    set_trusted_local_connection_evaluator_for_testing(
+        [](std::string_view, std::string_view, bool) { return true; });
     const auto settings_path = directory.path / "remote-access.json";
     const auto auth_path = directory.path / "auth.json";
     EnvironmentVariableGuard settings_file(
@@ -1616,6 +1783,8 @@ TEST_CASE(
 TEST_CASE("queued credential rotation loses revoked session authority") {
     RemoteAccessTempDir directory;
     RemoteAccessRunnerGuard runner_guard;
+    set_trusted_local_connection_evaluator_for_testing(
+        [](std::string_view, std::string_view, bool) { return true; });
     const auto settings_path = directory.path / "remote-access.json";
     const auto auth_path = directory.path / "auth.json";
     EnvironmentVariableGuard settings_file(
@@ -1756,6 +1925,8 @@ TEST_CASE("queued credential rotation loses revoked session authority") {
 TEST_CASE("verified login cannot publish a session after auth rotation") {
     RemoteAccessTempDir directory;
     RemoteAccessRunnerGuard runner_guard;
+    set_trusted_local_connection_evaluator_for_testing(
+        [](std::string_view, std::string_view, bool) { return true; });
     const auto settings_path = directory.path / "remote-access.json";
     const auto auth_path = directory.path / "auth.json";
     EnvironmentVariableGuard settings_file(
@@ -2160,6 +2331,8 @@ TEST_CASE("remote enable is rejected after authentication was disabled") {
 TEST_CASE("concurrent remote enable wins before auth disable can publish") {
     RemoteAccessTempDir directory;
     RemoteAccessRunnerGuard runner_guard;
+    set_trusted_local_connection_evaluator_for_testing(
+        [](std::string_view, std::string_view, bool) { return true; });
     const auto settings_path = directory.path / "remote-access.json";
     const auto auth_path = directory.path / "auth.json";
     EnvironmentVariableGuard settings_file(

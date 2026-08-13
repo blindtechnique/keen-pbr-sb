@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
   forwardRef,
+  useEffect,
   useImperativeHandle,
   useState,
   type ForwardedRef,
@@ -28,21 +29,31 @@ import {
 import { Switch } from "@/components/ui/switch"
 import {
   authEndpointModeLabelKey,
+  authSettingsRestartRequired,
+  confirmAuthEnabledChange,
+  refreshTrustedLocalCredentialTransport,
   type KeeneticEndpointMode,
 } from "@/lib/auth-status"
+import {
+  useRevokeTrustedLocalConnection,
+  useTrustedAuthStatus,
+} from "@/lib/auth-status-context"
 import { fetchWithStepUp } from "@/lib/step-up"
 import type {
   SettingsSectionController,
   SettingsSectionState,
 } from "@/components/settings/settings-section-control"
 
-type AuthStatus = {
+type SettingsAuthStatus = {
   enabled: boolean
   provider?: "local" | "keenetic"
   keenetic_endpoint?: string
   keenetic_endpoint_mode?: KeeneticEndpointMode
   keenetic_endpoint_source?: "ndms" | "fallback"
   authenticated: boolean
+  trusted_local_connection?: boolean
+  trusted_local_connection_generation?: string
+  trusted_local_connection_valid_for_seconds?: number
 }
 
 type RemoteAccessAuthSafety = {
@@ -71,9 +82,11 @@ function AuthSettingsCardInner(
   ref: ForwardedRef<SettingsSectionController>
 ) {
   const { t } = useTranslation()
+  const gateAuthStatus = useTrustedAuthStatus()
+  const revokeTrustedLocalConnection = useRevokeTrustedLocalConnection()
   const queryClient = useQueryClient()
 
-  const statusQuery = useQuery<AuthStatus>({
+  const statusQuery = useQuery<SettingsAuthStatus>({
     queryKey: ["auth-status"],
     queryFn: async () => {
       const response = await fetch("/api/auth/status", { cache: "no-store" })
@@ -95,6 +108,7 @@ function AuthSettingsCardInner(
   const [draft, setDraft] = useState<Partial<AuthDraft>>({})
   const [username, setUsername] = useState("")
   const [password, setPassword] = useState("")
+  const [disableRestartRequired, setDisableRestartRequired] = useState(false)
 
   const enabled = draft.enabled ?? statusQuery.data?.enabled ?? true
   const provider =
@@ -105,13 +119,59 @@ function AuthSettingsCardInner(
     draft.endpointMode ?? statusQuery.data?.keenetic_endpoint_mode ?? "auto"
   const keeneticAuthSwitchAllowed =
     remoteAccessQuery.data?.keenetic_auth_switch_allowed === true
+  const trustedLocalTransport =
+    gateAuthStatus !== null &&
+    gateAuthStatus.error === undefined &&
+    gateAuthStatus.trustedLocalConnection &&
+    gateAuthStatus.trustedLocalConnectionGeneration !== null
+
+  /* eslint-disable react-hooks/set-state-in-effect -- locality revocation must wipe secret state synchronously with the external auth-status change */
+  useEffect(() => {
+    if (!trustedLocalTransport) {
+      setUsername("")
+      setPassword("")
+    }
+  }, [trustedLocalTransport])
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const saveMutation = useMutation({
     mutationFn: async () => {
       if (enabled && provider === "keenetic" && !keeneticAuthSwitchAllowed) {
         throw new Error(t("pages.settings.auth.remoteAccessConflict"))
       }
-      const response = await fetchWithStepUp("/api/auth/settings", {
+      if (!trustedLocalTransport) {
+        throw new Error(t("pages.settings.auth.protectedTransportRequired"))
+      }
+      if (!(await refreshTrustedLocalCredentialTransport())) {
+        revokeTrustedLocalConnection()
+        setUsername("")
+        setPassword("")
+        throw new Error(t("pages.settings.auth.protectedTransportRequired"))
+      }
+      // Acquire step-up through a bodyless, route-bound contract. The prompt
+      // can stay open while the network changes, so re-prove locality only
+      // after it completes and before constructing the replacement body.
+      const grant = await fetchWithStepUp(
+        "/api/auth/settings/step-up-preflight",
+        { method: "POST" }
+      )
+      if (!grant.ok) {
+        const grantData = await grant.json().catch(() => ({}))
+        if (grantData.error === "protected_secret_transport_unavailable") {
+          revokeTrustedLocalConnection()
+          setUsername("")
+          setPassword("")
+          throw new Error(t("pages.settings.auth.protectedTransportRequired"))
+        }
+        throw new Error(grantData.error || `HTTP ${grant.status}`)
+      }
+      if (!(await refreshTrustedLocalCredentialTransport())) {
+        revokeTrustedLocalConnection()
+        setUsername("")
+        setPassword("")
+        throw new Error(t("pages.settings.auth.protectedTransportRequired"))
+      }
+      const response = await fetch("/api/auth/settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -134,18 +194,42 @@ function AuthSettingsCardInner(
         ) {
           throw new Error(t("pages.settings.auth.systemAuthUnavailable"))
         }
+        if (data.error === "protected_secret_transport_unavailable") {
+          revokeTrustedLocalConnection()
+          throw new Error(t("pages.settings.auth.protectedTransportRequired"))
+        }
         throw new Error(data.error || `HTTP ${response.status}`)
       }
       return data
     },
-    onSuccess: async () => {
+    onSuccess: async (data: unknown) => {
+      const restartRequired = authSettingsRestartRequired(data)
+      setUsername("")
       setPassword("")
+      if (restartRequired) {
+        // The file is disabled, but the current daemon deliberately keeps its
+        // existing authenticated runtime until restart. Keep that staged
+        // state visible instead of refetching the still-enabled runtime and
+        // falsely presenting the change as already applied.
+        setDisableRestartRequired(true)
+        setDraft({ enabled: false })
+        onStateChange({ dirty: false, valid: true })
+        toast.warning(t("pages.settings.auth.disableRestartRequired"), {
+          duration: 12_000,
+        })
+        return
+      }
+      setDisableRestartRequired(false)
       await queryClient.invalidateQueries({ queryKey: ["auth-status"] })
       setDraft({})
       onStateChange({ dirty: false, valid: true })
       toast.success(t("pages.settings.auth.saved"))
     },
-    onError: (error: Error) => toast.error(error.message, { richColors: true }),
+    onError: (error: Error) => {
+      setUsername("")
+      setPassword("")
+      toast.error(error.message, { richColors: true })
+    },
   })
 
   const getSectionState = (
@@ -178,6 +262,7 @@ function AuthSettingsCardInner(
       (nextDraft.endpoint ?? endpoint).trim().length === 0
     const remoteAccessConflict =
       nextEnabled && nextProvider === "keenetic" && !keeneticAuthSwitchAllowed
+    const protectedTransportMissing = !trustedLocalTransport
     return {
       dirty,
       valid:
@@ -185,14 +270,25 @@ function AuthSettingsCardInner(
         ((!credentialsRequired ||
           (nextUsername.length > 0 && nextPassword.length > 0)) &&
           !manualEndpointMissing &&
-          !remoteAccessConflict),
+          !remoteAccessConflict &&
+          !protectedTransportMissing),
     }
   }
 
   const updateDraft = (patch: Partial<AuthDraft>) => {
     const nextDraft = { ...draft, ...patch }
+    if (patch.enabled === false) {
+      setUsername("")
+      setPassword("")
+    }
     setDraft(nextDraft)
-    onStateChange(getSectionState(nextDraft))
+    onStateChange(
+      getSectionState(
+        nextDraft,
+        patch.enabled === false ? "" : username,
+        patch.enabled === false ? "" : password
+      )
+    )
   }
 
   const updateUsername = (nextUsername: string) => {
@@ -207,7 +303,7 @@ function AuthSettingsCardInner(
 
   useImperativeHandle(ref, () => ({
     reset: () => {
-      setDraft({})
+      setDraft(disableRestartRequired ? { enabled: false } : {})
       setUsername("")
       setPassword("")
       onStateChange({ dirty: false, valid: true })
@@ -220,6 +316,9 @@ function AuthSettingsCardInner(
       if (!state.valid) {
         if (enabled && provider === "keenetic" && !keeneticAuthSwitchAllowed) {
           throw new Error(t("pages.settings.auth.remoteAccessConflict"))
+        }
+        if (!trustedLocalTransport) {
+          throw new Error(t("pages.settings.auth.protectedTransportRequired"))
         }
         throw new Error(t("pages.settings.auth.verifyHint"))
       }
@@ -240,14 +339,34 @@ function AuthSettingsCardInner(
           <Switch
             checked={enabled}
             id="auth-enabled"
-            onCheckedChange={(nextEnabled) =>
+            onCheckedChange={(nextEnabled) => {
+              if (
+                !confirmAuthEnabledChange(enabled, nextEnabled, () =>
+                  window.confirm(t("pages.settings.auth.disableConfirm"))
+                )
+              ) {
+                return
+              }
               updateDraft({ enabled: nextEnabled })
-            }
+            }}
           />
           <Label className="cursor-pointer" htmlFor="auth-enabled">
             {t("pages.settings.auth.enabled")}
           </Label>
         </div>
+
+        {disableRestartRequired ? (
+          <p
+            aria-live="polite"
+            className="max-w-[640px] text-sm text-destructive"
+          >
+            {t("pages.settings.auth.disableRestartRequired")}
+          </p>
+        ) : !enabled ? (
+          <p className="max-w-[640px] text-sm text-destructive">
+            {t("pages.settings.auth.disabledRecoveryWarning")}
+          </p>
+        ) : null}
 
         {enabled ? (
           <>
@@ -295,7 +414,7 @@ function AuthSettingsCardInner(
               </p>
             </div>
 
-            {provider === "keenetic" ? (
+            {provider === "keenetic" && trustedLocalTransport ? (
               <div className="grid max-w-[480px] gap-3">
                 <div className="grid gap-1.5">
                   <Label>{t("pages.settings.auth.endpointMode")}</Label>
@@ -380,31 +499,37 @@ function AuthSettingsCardInner(
               </div>
             ) : null}
 
-            <div className="grid max-w-[480px] gap-1.5 sm:grid-cols-2 sm:gap-3">
-              <div className="grid gap-1.5">
-                <Label htmlFor="auth-username">
-                  {t("pages.settings.auth.username")}
-                </Label>
-                <Input
-                  autoComplete="username"
-                  id="auth-username"
-                  onChange={(event) => updateUsername(event.target.value)}
-                  value={username}
-                />
+            {!trustedLocalTransport ? (
+              <p className="max-w-[480px] text-sm text-destructive">
+                {t("pages.settings.auth.protectedTransportRequired")}
+              </p>
+            ) : (
+              <div className="grid max-w-[480px] gap-1.5 sm:grid-cols-2 sm:gap-3">
+                <div className="grid gap-1.5">
+                  <Label htmlFor="auth-username">
+                    {t("pages.settings.auth.username")}
+                  </Label>
+                  <Input
+                    autoComplete="username"
+                    id="auth-username"
+                    onChange={(event) => updateUsername(event.target.value)}
+                    value={username}
+                  />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="auth-password">
+                    {t("pages.settings.auth.password")}
+                  </Label>
+                  <Input
+                    autoComplete="new-password"
+                    id="auth-password"
+                    onChange={(event) => updatePassword(event.target.value)}
+                    type="password"
+                    value={password}
+                  />
+                </div>
               </div>
-              <div className="grid gap-1.5">
-                <Label htmlFor="auth-password">
-                  {t("pages.settings.auth.password")}
-                </Label>
-                <Input
-                  autoComplete="new-password"
-                  id="auth-password"
-                  onChange={(event) => updatePassword(event.target.value)}
-                  type="password"
-                  value={password}
-                />
-              </div>
-            </div>
+            )}
 
             <p className="max-w-[480px] text-xs text-muted-foreground">
               {provider === "keenetic"

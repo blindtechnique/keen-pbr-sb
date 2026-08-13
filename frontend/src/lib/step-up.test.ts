@@ -5,6 +5,7 @@ import {
   isStepUpRequired,
   requestStepUpGrant,
   resetStepUpState,
+  setProtectedTransportUnavailableHandler,
   setStepUpPrompt,
 } from "./step-up"
 
@@ -13,7 +14,7 @@ afterEach(() => {
 })
 
 const okResponse = () => ({ ok: true }) as Response
-const failedResponse = () => ({ ok: false }) as Response
+const failedResponse = () => new Response("", { status: 403 })
 const credentials = () => ({ username: "admin", password: "secret" })
 
 describe("isStepUpRequired", () => {
@@ -89,6 +90,25 @@ describe("requestStepUpGrant", () => {
     setStepUpPrompt(() => Promise.resolve(credentials()))
 
     expect(await requestStepUpGrant(fetchImpl)).toBe(false)
+  })
+
+  test("revokes credential UI on a transport race refusal", async () => {
+    const revoked = mock(() => undefined)
+    setProtectedTransportUnavailableHandler(revoked)
+    setStepUpPrompt(() => Promise.resolve(credentials()))
+    const fetchImpl = mock(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            error: "protected_secret_transport_unavailable",
+          }),
+          { status: 403 }
+        )
+      )
+    )
+
+    expect(await requestStepUpGrant(fetchImpl)).toBe(false)
+    expect(revoked).toHaveBeenCalledTimes(1)
   })
 
   test("prompts once when several requests need a grant together", async () => {

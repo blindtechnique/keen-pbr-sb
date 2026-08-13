@@ -95,11 +95,11 @@ import {
   InvalidBackupBundleError,
   parseBackupBundle,
   restoreBackup as restoreBackupBundle,
-  rollbackBackup,
   type BackupSelection,
 } from "@/lib/backup"
 import {
   NFQWS_UPDATE_QUERY_KEY,
+  classifyNfqwsUpdateNotice,
   nfqwsAction,
   nfqwsUpdateQueryOptions,
   type NfqwsActionResult,
@@ -109,6 +109,7 @@ import {
 import { copyText } from "@/lib/clipboard"
 import { cn } from "@/lib/utils"
 import {
+  nfqwsUpgradeBlockKind,
   nfqwsUpgradeAllowed,
   type NfqwsUpgradeCapability,
 } from "@/lib/nfqws-upgrade-capability"
@@ -180,7 +181,6 @@ type OperationState = {
   success?: boolean
   title: string
   output: string
-  rollbackAvailable: boolean
 }
 
 type DraftFile = {
@@ -192,8 +192,7 @@ type DraftFile = {
 type RunOperation = (
   title: string,
   operation: () => Promise<NfqwsActionResult>,
-  successMessage: string,
-  rollbackAvailable?: boolean
+  successMessage: string
 ) => Promise<boolean>
 
 export function NfqwsPage() {
@@ -209,6 +208,10 @@ export function NfqwsPage() {
     refetchInterval: 10_000,
   })
   const status = query.data
+  const upgradeBlockedDescription =
+    nfqwsUpgradeBlockKind(status?.upgrade_capability) === "metadata_unverified"
+      ? t("nfqws.upgradeMetadataUnverifiedDescription")
+      : t("nfqws.upgradeUnavailableDescription")
   const backupImportRef = useRef<HTMLInputElement>(null)
   const [backupOpen, setBackupOpen] = useState(false)
   const [backupImportScope, setBackupImportScope] =
@@ -233,7 +236,6 @@ export function NfqwsPage() {
     pending: false,
     title: "",
     output: "",
-    rollbackAvailable: false,
   })
   const serviceToggleMutation = useMutation({
     mutationFn: (payload: Record<string, unknown>) => nfqwsAction(payload),
@@ -247,18 +249,12 @@ export function NfqwsPage() {
     enabled: status?.installed === true,
   })
 
-  const runOperation: RunOperation = async (
-    title,
-    execute,
-    successMessage,
-    rollbackAvailable = false
-  ) => {
+  const runOperation: RunOperation = async (title, execute, successMessage) => {
     setOperation({
       open: true,
       pending: true,
       title,
       output: t("nfqws.operationRunning"),
-      rollbackAvailable: false,
     })
     try {
       const result = await execute()
@@ -274,7 +270,6 @@ export function NfqwsPage() {
               name: result.strategy_created,
             })}`
           : output,
-        rollbackAvailable,
       })
       return true
     } catch (error) {
@@ -285,7 +280,6 @@ export function NfqwsPage() {
         success: false,
         title,
         output: message,
-        rollbackAvailable,
       })
       return false
     }
@@ -294,7 +288,7 @@ export function NfqwsPage() {
   const runUpgrade = async () => {
     setUpgradeOpen(false)
     if (!nfqwsUpgradeAllowed(status?.upgrade_capability)) {
-      toast.error(t("nfqws.upgradeUnavailableDescription"), {
+      toast.error(upgradeBlockedDescription, {
         richColors: true,
       })
       return
@@ -322,7 +316,6 @@ export function NfqwsPage() {
           success: false,
           title: t("nfqws.upgrade"),
           output: error instanceof Error ? error.message : String(error),
-          rollbackAvailable: false,
         })
         return
       }
@@ -330,8 +323,7 @@ export function NfqwsPage() {
     const completed = await runOperation(
       t("nfqws.upgrade"),
       () => nfqwsAction({ action: "upgrade" }),
-      t("nfqws.operationCompleted"),
-      true
+      t("nfqws.operationCompleted")
     )
     if (completed) {
       try {
@@ -361,7 +353,12 @@ export function NfqwsPage() {
         force: true,
       })
       queryClient.setQueryData(NFQWS_UPDATE_QUERY_KEY, latest)
-      if (latest.available) {
+      const notice = classifyNfqwsUpdateNotice(latest)
+      if (notice === "degraded") {
+        toast.warning(t("nfqws.updateStateUnverified"), {
+          richColors: true,
+        })
+      } else if (notice === "available") {
         toast.success(t("nfqws.updateAvailable", { version: latest.latest }))
       } else {
         toast.success(t("nfqws.upToDate"))
@@ -639,7 +636,7 @@ export function NfqwsPage() {
                 <Alert>
                   <AlertTitle>{t("nfqws.upgradeUnavailableTitle")}</AlertTitle>
                   <AlertDescription>
-                    {t("nfqws.upgradeUnavailableDescription")}
+                    {upgradeBlockedDescription}
                   </AlertDescription>
                 </Alert>
               ) : null}
@@ -724,7 +721,7 @@ export function NfqwsPage() {
                       // когда нажать её всё равно нельзя.
                       disabledReason:
                         status.upgrade_capability?.available === false
-                          ? t("nfqws.upgradeUnavailableDescription")
+                          ? upgradeBlockedDescription
                           : undefined,
                       onSelect: () => setUpgradeOpen(true),
                     },
@@ -739,8 +736,7 @@ export function NfqwsPage() {
                           t("nfqws.captureRestorePoint"),
                           () =>
                             nfqwsAction({ action: "capture_restore_point" }),
-                          t("nfqws.operationCompleted"),
-                          true
+                          t("nfqws.operationCompleted")
                         ),
                     },
                     {
@@ -850,19 +846,10 @@ export function NfqwsPage() {
             onClose={() =>
               setOperation((current) => ({ ...current, open: false }))
             }
-            onRollback={() =>
-              void runOperation(
-                t("nfqws.rollback"),
-                async () => {
-                  await rollbackBackup()
-                  return { ok: true, output: t("nfqws.rollbackCompleted") }
-                },
-                t("nfqws.rollbackCompleted")
-              )
-            }
             operation={operation}
           />
           <NfqwsUpgradeDialog
+            capability={status.upgrade_capability}
             downloadBackup={downloadUpgradeBackup}
             latest={updateQuery.data?.latest}
             onDownloadBackupChange={setDownloadUpgradeBackup}
@@ -877,8 +864,7 @@ export function NfqwsPage() {
               void runOperation(
                 t("nfqws.restoreComponent"),
                 () => nfqwsAction({ action: "restore_component" }),
-                t("nfqws.operationCompleted"),
-                true
+                t("nfqws.operationCompleted")
               )
             }}
             open={restoreOpen}
@@ -913,19 +899,18 @@ const progressStepKeys: Record<string, string> = {
 }
 
 function useComponentTransactionProgress() {
-  const [progress, setProgress] =
-    useState<ComponentTransactionProgress | null>(null)
+  const [progress, setProgress] = useState<ComponentTransactionProgress | null>(
+    null
+  )
   useEffect(() => subscribeComponentTransaction(setProgress), [])
   return progress
 }
 
 function NfqwsOperationDialog({
   onClose,
-  onRollback,
   operation,
 }: {
   onClose: () => void
-  onRollback: () => void
   operation: OperationState
 }) {
   const { t } = useTranslation()
@@ -976,12 +961,6 @@ function NfqwsOperationDialog({
           {operation.output}
         </div>
         <DialogFooter>
-          {operation.rollbackAvailable && !operation.pending ? (
-            <Button onClick={onRollback} variant="destructive">
-              <RotateCcwIcon />
-              {t("nfqws.rollback")}
-            </Button>
-          ) : null}
           <Button
             disabled={operation.pending}
             onClick={onClose}
@@ -1114,6 +1093,7 @@ function NfqwsBackupDialog({
 }
 
 function NfqwsUpgradeDialog({
+  capability,
   downloadBackup,
   latest,
   onDownloadBackupChange,
@@ -1121,6 +1101,7 @@ function NfqwsUpgradeDialog({
   onUpgrade,
   open,
 }: {
+  capability?: NfqwsUpgradeCapability
   downloadBackup: boolean
   latest?: string
   onDownloadBackupChange: (checked: boolean) => void
@@ -1144,6 +1125,14 @@ function NfqwsUpgradeDialog({
             {t("nfqws.automaticBackupDescription")}
           </AlertDescription>
         </Alert>
+        {capability?.mode === "guarded_opkg" ? (
+          <Alert variant="destructive">
+            <AlertTitle>{t("nfqws.upgradeGuardedTitle")}</AlertTitle>
+            <AlertDescription>
+              {t("nfqws.upgradeGuardedDescription")}
+            </AlertDescription>
+          </Alert>
+        ) : null}
         <label className="flex cursor-pointer items-start gap-3 rounded-md border p-3">
           <Checkbox
             checked={downloadBackup}
@@ -2593,8 +2582,6 @@ function NfqwsSection({
   )
 }
 
-/** Порог, после которого строка запуска сворачивается. Восемь строк сплошного
- *  цветного текста прочитать невозможно, а короткую — можно и нужно. */
 /**
  * Редкие действия под одной кнопкой: обновление пакета, точки возврата,
  * резервные копии, перечитывание конфигурации.

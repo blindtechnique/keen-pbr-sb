@@ -19,11 +19,15 @@ export const setStepUpPrompt = (handler: StepUpPrompt | null) => {
 // at once would otherwise open a stack of identical password dialogs, and the
 // user answering the first would still be looking at the rest.
 let pendingGrant: Promise<boolean> | null = null
+let protectedTransportUnavailableHandler: (() => void) | null = null
 
-export const isStepUpRequired = (
-  status: number,
-  payload: unknown
-): boolean => {
+export const setProtectedTransportUnavailableHandler = (
+  handler: (() => void) | null
+) => {
+  protectedTransportUnavailableHandler = handler
+}
+
+export const isStepUpRequired = (status: number, payload: unknown): boolean => {
   if (status !== 403) {
     return false
   }
@@ -68,6 +72,21 @@ export const requestStepUpGrant = async (
       body: JSON.stringify(credentials),
     })
 
+    if (!response.ok) {
+      const payload = await response
+        .clone()
+        .json()
+        .catch(() => null)
+      if (
+        response.status === 403 &&
+        payload &&
+        typeof payload === "object" &&
+        (payload as Record<string, unknown>).error ===
+          "protected_secret_transport_unavailable"
+      ) {
+        protectedTransportUnavailableHandler?.()
+      }
+    }
     return response.ok
   })()
 
@@ -125,4 +144,5 @@ export const fetchWithStepUp = async (
 export const resetStepUpState = () => {
   promptHandler = null
   pendingGrant = null
+  protectedTransportUnavailableHandler = null
 }

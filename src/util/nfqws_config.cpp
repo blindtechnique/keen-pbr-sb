@@ -101,6 +101,16 @@ bool nfqws_config_has_owned_rotator_telemetry(const std::string& content) {
            span.reporter != std::string::npos;
 }
 
+bool nfqws_config_matches_packaged_strategy(
+    const std::string& content,
+    const std::string& packaged_content,
+    const std::string& wan_rendered_packaged_content) {
+    const auto identity = nfqws_config_strategy_identity(content);
+    return identity == nfqws_config_strategy_identity(packaged_content) ||
+           identity == nfqws_config_strategy_identity(
+                           wan_rendered_packaged_content);
+}
+
 std::string nfqws_config_with_isp_interfaces(
     const std::string& content, const std::vector<std::string>& interfaces) {
     if (interfaces.empty()) return content;

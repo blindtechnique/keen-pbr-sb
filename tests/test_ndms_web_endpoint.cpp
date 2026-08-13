@@ -53,6 +53,25 @@ TEST_CASE("NDMS web addresses prefer Bridge0 and reject unsafe interfaces") {
     CHECK(addresses[1].interface_id == "Bridge2");
 }
 
+TEST_CASE("NDMS web locality requires explicit connected and non-global flags") {
+    for (const std::string field : {"connected", "global", "admin-only"}) {
+        SUBCASE(("missing " + field).c_str()) {
+            auto interfaces = nlohmann::json::object();
+            interfaces["Bridge0"] =
+                private_interface("Bridge0", "192.168.1.1");
+            interfaces["Bridge0"].erase(field);
+            CHECK(parse_ndms_web_addresses(interfaces).empty());
+        }
+        SUBCASE(("malformed " + field).c_str()) {
+            auto interfaces = nlohmann::json::object();
+            interfaces["Bridge0"] =
+                private_interface("Bridge0", "192.168.1.1");
+            interfaces["Bridge0"][field] = nlohmann::json::array();
+            CHECK(parse_ndms_web_addresses(interfaces).empty());
+        }
+    }
+}
+
 TEST_CASE("NDMS structured HTTP config accepts decimal string and integer") {
     const auto from_string =
         parse_ndms_http_service_config({{"port", "17777"}});

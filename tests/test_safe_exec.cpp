@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <string>
 #include <sys/stat.h>
+#include <thread>
 #include <unistd.h>
 #include <utility>
 
@@ -429,6 +430,34 @@ TEST_CASE("safe_exec_capture: ignored SIGTERM cannot hang capture") {
     CHECK(result.exit_code == -1);
     CHECK(result.timed_out);
     CHECK(elapsed < std::chrono::seconds{2});
+}
+
+TEST_CASE("safe_exec_capture kills a descendant after its leader exits") {
+    TempDir temp_dir;
+    const auto marker = temp_dir.path() / "late-descendant-write";
+    const auto result = safe_exec_capture(
+        {"/bin/sh",
+         "-c",
+         // The leader exits immediately. Its TERM-ignoring descendant keeps
+         // stdout open and would write after safe_exec_capture returned in the
+         // old implementation, racing a caller's recovery phase.
+         "(trap '' TERM; sleep 1; printf late > \"$1\") & exit 0",
+         "safe-exec-descendant",
+         marker.string()},
+        /*suppress_stderr=*/false,
+        /*max_bytes=*/1024,
+        /*capture_stderr=*/true,
+        /*drain_after_limit=*/true,
+        SafeExecFailureLog::Suppressed,
+        SafeExecTimeouts{
+            std::chrono::milliseconds{100},
+            std::chrono::milliseconds{100}});
+
+    CHECK(result.exit_code == -1);
+    CHECK(result.timed_out);
+    CHECK_FALSE(result.termination_uncertain);
+    std::this_thread::sleep_for(std::chrono::milliseconds{1100});
+    CHECK_FALSE(std::filesystem::exists(marker));
 }
 
 TEST_CASE("safe_exec_capture: suppressed timeout stays out of user log") {

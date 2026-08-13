@@ -9,10 +9,12 @@
 #include "api/sse_broadcaster.hpp"
 #include "util/nfqws_validator.hpp"
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include <unistd.h>
@@ -236,7 +238,7 @@ TEST_CASE("successful nfqws apply requests the coalesced PPE firewall reconcile"
     CHECK(refresh_requests == 1U);
 }
 
-TEST_CASE("nfqws upgrade is gated before every mutation without exact rollback") {
+TEST_CASE("nfqws guarded upgrade acquires the lease before every mutation") {
     const int port = test_support::isolated_api_port(7);
     test_support::EnvironmentVariableGuard auth_file(
         "KEEN_PBR_AUTH_FILE", test_support::missing_auth_path(port));
@@ -245,6 +247,11 @@ TEST_CASE("nfqws upgrade is gated before every mutation without exact rollback")
         broadcaster, "/tmp/keen-pbr-nfqws-api-lease-context.json");
 
     std::vector<std::string> operations;
+    std::size_t refresh_requests = 0;
+    context.request_netfilter_runtime_refresh_fn = [&]() {
+        ++refresh_requests;
+        return true;
+    };
     context.maintenance_lease_factory_fn =
         [&operations](std::string operation)
             -> std::unique_ptr<MaintenanceLease> {
@@ -272,9 +279,14 @@ TEST_CASE("nfqws upgrade is gated before every mutation without exact rollback")
     REQUIRE(status_response->status == 200);
     const auto status_payload =
         nlohmann::json::parse(status_response->body);
-    CHECK_FALSE(status_payload.at("upgrade_capability")
-                    .at("available")
-                    .get<bool>());
+    const auto& capability = status_payload.at("upgrade_capability");
+    CHECK(capability.at("available").get<bool>());
+    CHECK(capability.at("mode") == "guarded_opkg");
+    CHECK_FALSE(capability.at("exact_previous_ipk").get<bool>());
+    CHECK_FALSE(capability.at("verified_target_ipk").get<bool>());
+    CHECK_FALSE(capability.at("exact_opkg_metadata_rollback").get<bool>());
+    CHECK_FALSE(capability.at("boot_recovery").get<bool>());
+    CHECK_FALSE(capability.at("limitation").get<std::string>().empty());
     CHECK_FALSE(status_payload.at("restore_capability")
                     .at("exact_package_state")
                     .get<bool>());
@@ -282,16 +294,247 @@ TEST_CASE("nfqws upgrade is gated before every mutation without exact rollback")
     REQUIRE(response != nullptr);
     CHECK(response->status == 409);
     const auto payload = nlohmann::json::parse(response->body);
-    CHECK(payload.at("error") == "nfqws_upgrade_unavailable");
-    const auto& capability = payload.at("upgrade_capability");
-    CHECK_FALSE(capability.at("available").get<bool>());
-    CHECK_FALSE(capability.at("exact_previous_ipk").get<bool>());
-    CHECK_FALSE(capability.at("verified_target_ipk").get<bool>());
-    CHECK_FALSE(capability.at("exact_opkg_metadata_rollback").get<bool>());
-    CHECK_FALSE(capability.at("boot_recovery").get<bool>());
-    // Most important assertion: the capability gate is before even the lease.
-    // Therefore backup, capture, journal and opkg are unreachable as well.
-    CHECK(operations.empty());
+    CHECK(payload.at("error").get<std::string>().find("active") !=
+          std::string::npos);
+    // The held lease refuses before backup, journal, opkg and the mutation-side
+    // netfilter guard. The named operation is retained for lock diagnostics.
+    REQUIRE(operations.size() == 1U);
+    CHECK(operations.front() == "nfqws-upgrade");
+    CHECK(refresh_requests == 0U);
+}
+
+TEST_CASE("post-opkg footprint faults require captured-file recovery") {
+    PackageFootprint before;
+    before.files.push_back(PackageFileState{
+        "/opt/usr/bin/nfqws2", true, false, std::string(64U, 'a')});
+    before.present_count = 1U;
+
+    SUBCASE("the observer throws after package mutation") {
+        const auto assessment =
+            assess_nfqws_post_upgrade_footprint_for_testing(
+                before, []() -> PackageFootprint {
+                    throw ApiError(
+                        "cannot establish the post-opkg footprint", 409);
+                });
+        CHECK(assessment.recovery_required);
+        CHECK(assessment.binary_outcome ==
+              PackageBinaryOutcome::indeterminate);
+        CHECK(assessment.error.find("post-opkg footprint") !=
+              std::string::npos);
+    }
+
+    SUBCASE("the observer returns bounded but incomplete evidence") {
+        const auto assessment =
+            assess_nfqws_post_upgrade_footprint_for_testing(
+                before, [] {
+                    PackageFootprint incomplete;
+                    incomplete.complete = false;
+                    incomplete.errors.emplace_back(
+                        "/opt/usr/bin/nfqws2");
+                    return incomplete;
+                });
+        CHECK(assessment.recovery_required);
+        CHECK(assessment.binary_outcome ==
+              PackageBinaryOutcome::indeterminate);
+        CHECK(assessment.error ==
+              "post-upgrade package footprint is incomplete");
+    }
+}
+
+TEST_CASE("nfqws opkg upgrade uses fixed argv and classifies timeout as unknown") {
+    std::vector<std::vector<std::string>> commands;
+    std::vector<SafeExecTimeouts> deadlines;
+    std::size_t call = 0;
+    const auto result = run_nfqws_bounded_opkg_for_testing(
+        [&](const std::vector<std::string>& argv,
+            SafeExecTimeouts timeout) {
+            commands.push_back(argv);
+            deadlines.push_back(timeout);
+            ExecCaptureResult execution;
+            if (call++ == 0U) {
+                execution.exit_code = 0;
+                execution.stdout_output = "feed updated\n";
+                return execution;
+            }
+            execution.exit_code = -1;
+            execution.stdout_output = "maintainer script started\n";
+            execution.timed_out = true;
+            return execution;
+        });
+
+    REQUIRE(commands.size() == 2U);
+    CHECK(commands[0] ==
+          std::vector<std::string>{"/opt/bin/opkg", "update"});
+    CHECK(commands[1] == std::vector<std::string>{
+                              "/opt/bin/opkg",
+                              "upgrade",
+                              "nfqws2-keenetic"});
+    REQUIRE(deadlines.size() == 2U);
+    CHECK(deadlines[0].timeout == std::chrono::minutes{10});
+    CHECK(deadlines[0].kill_grace == std::chrono::seconds{5});
+    CHECK(deadlines[1].timeout == std::chrono::minutes{10});
+    CHECK(result.upgrade_started);
+    CHECK(result.timed_out);
+    CHECK_FALSE(result.termination_uncertain);
+    CHECK(result.status != 0);
+    CHECK(result.output.find("outcome is unknown") != std::string::npos);
+
+    std::size_t recovery_calls = 0;
+    const auto guarded = guard_nfqws_post_mutation_for_testing(
+        [&] { return result.status != 0 || result.timed_out; },
+        [&] {
+            ++recovery_calls;
+            return true;
+        });
+    CHECK(guarded.operation_completed);
+    CHECK(guarded.component_broken);
+    CHECK(guarded.recovery_attempted);
+    CHECK(guarded.rolled_back);
+    CHECK(recovery_calls == 1U);
+}
+
+TEST_CASE("uncertain opkg termination forbids observation and recovery") {
+    std::size_t call = 0;
+    const auto result = run_nfqws_bounded_opkg_for_testing(
+        [&](const std::vector<std::string>&,
+            SafeExecTimeouts) {
+            ExecCaptureResult execution;
+            if (call++ == 0U) {
+                execution.exit_code = 0;
+                return execution;
+            }
+            execution.exit_code = -1;
+            execution.timed_out = true;
+            execution.termination_uncertain = true;
+            return execution;
+        });
+
+    REQUIRE(result.upgrade_started);
+    CHECK(result.timed_out);
+    CHECK(result.termination_uncertain);
+    CHECK(result.status != 0);
+    CHECK(result.output.find("could not be proven fully terminated") !=
+          std::string::npos);
+
+    std::size_t recovery_calls = 0;
+    const auto guarded = guard_nfqws_post_mutation_for_testing(
+        [&] { return true; },
+        [&] {
+            ++recovery_calls;
+            return true;
+        },
+        /*recovery_allowed=*/false);
+    CHECK(guarded.operation_completed);
+    CHECK(guarded.component_broken);
+    CHECK_FALSE(guarded.recovery_attempted);
+    CHECK_FALSE(guarded.rolled_back);
+    CHECK(recovery_calls == 0U);
+}
+
+TEST_CASE("nfqws journal remains degraded after file-only package recovery") {
+    SUBCASE("a normal verified upgrade may clear its transaction") {
+        CHECK(should_clear_nfqws_upgrade_journal_for_testing(
+            /*component_broken=*/false,
+            /*package_mutation_started=*/true,
+            /*rolled_back=*/false,
+            /*termination_uncertain=*/false));
+    }
+
+    SUBCASE("a quiesced feed update failure did not mutate the package") {
+        CHECK(should_clear_nfqws_upgrade_journal_for_testing(
+            /*component_broken=*/false,
+            /*package_mutation_started=*/false,
+            /*rolled_back=*/false,
+            /*termination_uncertain=*/false));
+    }
+
+    SUBCASE("captured files do not roll back opkg metadata") {
+        CHECK_FALSE(should_clear_nfqws_upgrade_journal_for_testing(
+            /*component_broken=*/true,
+            /*package_mutation_started=*/true,
+            /*rolled_back=*/true,
+            /*termination_uncertain=*/false));
+    }
+
+    SUBCASE("an uncertain live mutator can never authorize finalization") {
+        CHECK_FALSE(should_clear_nfqws_upgrade_journal_for_testing(
+            /*component_broken=*/true,
+            /*package_mutation_started=*/true,
+            /*rolled_back=*/false,
+            /*termination_uncertain=*/true));
+    }
+
+    CHECK(nfqws_package_metadata_verified_for_testing(
+        /*transaction_present=*/false));
+    CHECK_FALSE(nfqws_package_metadata_verified_for_testing(
+        /*transaction_present=*/true));
+}
+
+TEST_CASE("explicit captured-file restore never claims exact package state") {
+    for (const bool files_restored : {false, true}) {
+        CAPTURE(files_restored);
+        const auto finalization =
+            finalize_nfqws_captured_file_restore_for_testing(files_restored);
+        CHECK_FALSE(finalization.ok);
+        CHECK_FALSE(finalization.clear_journal);
+        CHECK_FALSE(finalization.package_metadata_verified);
+        CHECK(finalization.terminal_state ==
+              (files_restored ? "metadata_unverified" : "incomplete"));
+    }
+}
+
+TEST_CASE("nfqws optimistic status is invalidated by a none-to-none mutation") {
+    CHECK(nfqws_optimistic_publish_survives_mutation_for_testing(
+        /*mutation_between_reads=*/false));
+    CHECK_FALSE(nfqws_optimistic_publish_survives_mutation_for_testing(
+        /*mutation_between_reads=*/true));
+}
+
+TEST_CASE("every post-opkg exception enters the captured-file recovery funnel") {
+    for (const auto& stage : {
+             std::string("footprint observation"),
+             std::string("config observation"),
+             std::string("runtime observation"),
+             std::string("outcome description"),
+         }) {
+        CAPTURE(stage);
+        bool opkg_completed = false;
+        std::size_t recovery_calls = 0;
+        const auto guarded = guard_nfqws_post_mutation_for_testing(
+            [&]() -> bool {
+                opkg_completed = true;
+                throw std::runtime_error("fault at " + stage);
+            },
+            [&] {
+                ++recovery_calls;
+                return true;
+            });
+
+        CHECK(opkg_completed);
+        CHECK_FALSE(guarded.operation_completed);
+        CHECK(guarded.component_broken);
+        CHECK(guarded.recovery_attempted);
+        CHECK(guarded.rolled_back);
+        CHECK(guarded.operation_error.find(stage) != std::string::npos);
+        CHECK(guarded.recovery_error.empty());
+        CHECK(recovery_calls == 1U);
+    }
+}
+
+TEST_CASE("uncertain post-opkg recovery retains a broken result") {
+    const auto guarded = guard_nfqws_post_mutation_for_testing(
+        []() -> bool {
+            throw std::runtime_error("verification failed");
+        },
+        []() -> bool {
+            throw std::runtime_error("restore verification failed");
+        });
+
+    CHECK(guarded.component_broken);
+    CHECK(guarded.recovery_attempted);
+    CHECK_FALSE(guarded.rolled_back);
+    CHECK(guarded.operation_error == "verification failed");
+    CHECK(guarded.recovery_error == "restore verification failed");
 }
 
 } // namespace keen_pbr3

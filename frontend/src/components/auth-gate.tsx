@@ -21,7 +21,16 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Input } from "@/components/ui/input"
-import { parseAuthStatus, type AuthStatus } from "@/lib/auth-status"
+import {
+  authCredentialsMayBeCollected,
+  parseAuthStatus,
+  refreshCredentialTransportStatus,
+  type AuthStatus,
+} from "@/lib/auth-status"
+import {
+  AuthStatusContext,
+  TrustedLocalConnectionRevocationContext,
+} from "@/lib/auth-status-context"
 import { cn } from "@/lib/utils"
 
 const LANGUAGE_OPTIONS = [
@@ -189,6 +198,20 @@ export function AuthGate({ children }: { children: ReactNode }) {
   const [statusUnavailable, setStatusUnavailable] = useState(false)
   const hasTrustedStatus = useRef(false)
 
+  const revokeTrustedLocalConnection = useCallback(() => {
+    setPassword("")
+    setStatus((current) =>
+      current
+        ? {
+            ...current,
+            trustedLocalConnection: false,
+            trustedLocalConnectionGeneration: null,
+            trustedLocalConnectionValidUntilMs: 0,
+          }
+        : current
+    )
+  }, [])
+
   const refresh = useCallback(async () => {
     try {
       const response = await fetch("/api/auth/status", { cache: "no-store" })
@@ -201,11 +224,16 @@ export function AuthGate({ children }: { children: ReactNode }) {
       setStatusUnavailable(false)
       setStatus(nextStatus)
     } catch {
+      // Keep the established page/session state for ordinary offline UX, but
+      // revoke the short-lived local-HTTP file capability immediately. A
+      // cached status response must never keep a secret-bearing picker alive
+      // after its no-store refresh failed.
+      revokeTrustedLocalConnection()
       if (!hasTrustedStatus.current) {
         setStatusUnavailable(true)
       }
     }
-  }, [])
+  }, [revokeTrustedLocalConnection])
 
   useEffect(() => {
     void refresh()
@@ -213,8 +241,59 @@ export function AuthGate({ children }: { children: ReactNode }) {
     return () => window.clearInterval(timer)
   }, [refresh])
 
+  useEffect(() => {
+    if (
+      !status?.trustedLocalConnection ||
+      status.trustedLocalConnectionGeneration === null
+    ) {
+      return
+    }
+    const generation = status.trustedLocalConnectionGeneration
+    const delay = Math.max(
+      0,
+      status.trustedLocalConnectionValidUntilMs - Date.now()
+    )
+    const timer = window.setTimeout(() => {
+      setStatus((current) =>
+        current?.trustedLocalConnectionGeneration === generation
+          ? {
+              ...current,
+              trustedLocalConnection: false,
+              trustedLocalConnectionGeneration: null,
+              trustedLocalConnectionValidUntilMs: 0,
+            }
+          : current
+      )
+    }, delay)
+    return () => window.clearTimeout(timer)
+  }, [
+    status?.trustedLocalConnection,
+    status?.trustedLocalConnectionGeneration,
+    status?.trustedLocalConnectionValidUntilMs,
+  ])
+
+  useEffect(() => {
+    if (!authCredentialsMayBeCollected(status)) {
+      setPassword("")
+    }
+  }, [status])
+
   const submit = async (event: FormEvent) => {
     event.preventDefault()
+    if (!authCredentialsMayBeCollected(status)) {
+      setPassword("")
+      setError(t("auth.unavailable"))
+      return
+    }
+    if (status?.provider === "keenetic") {
+      const freshStatus = await refreshCredentialTransportStatus()
+      if (!freshStatus) {
+        revokeTrustedLocalConnection()
+        setError(t("auth.protectedTransportRequired"))
+        return
+      }
+      setStatus(freshStatus)
+    }
     setPending(true)
     setError("")
     try {
@@ -225,6 +304,19 @@ export function AuthGate({ children }: { children: ReactNode }) {
       })
       if (!response.ok) {
         const body = await response.json().catch(() => null)
+        setPassword("")
+        const protectedTransportUnavailable =
+          response.status === 403 &&
+          body &&
+          typeof body === "object" &&
+          "error" in body &&
+          body.error === "protected_secret_transport_unavailable"
+        if (protectedTransportUnavailable) {
+          revokeTrustedLocalConnection()
+          setError(t("auth.protectedTransportRequired"))
+          setShowCredentialsHelp(false)
+          return
+        }
         const endpointUnavailable =
           response.status === 503 &&
           body &&
@@ -242,6 +334,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
       setPassword("")
       await refresh()
     } catch {
+      setPassword("")
       setError(t("auth.unavailable"))
     } finally {
       setPending(false)
@@ -285,7 +378,69 @@ export function AuthGate({ children }: { children: ReactNode }) {
       </AuthPage>
     )
   }
-  if (!status.enabled || status.authenticated) return children
+  if (!status.enabled && status.networkApiBlocked) {
+    return (
+      <AuthPage>
+        <section
+          aria-labelledby="auth-loopback-only-title"
+          className="w-full rounded-[6px] px-1 py-8 text-center lg:min-h-[432px] lg:border lg:border-input lg:px-10 lg:py-10"
+        >
+          <h1
+            className="text-2xl font-semibold text-foreground sm:text-3xl"
+            id="auth-loopback-only-title"
+          >
+            {t("auth.loopbackOnlyTitle")}
+          </h1>
+          <p className="mt-3 text-base text-muted-foreground">
+            {t("auth.loopbackOnlyDescription")}
+          </p>
+        </section>
+      </AuthPage>
+    )
+  }
+  if (!status.enabled || status.authenticated) {
+    return (
+      <TrustedLocalConnectionRevocationContext.Provider
+        value={revokeTrustedLocalConnection}
+      >
+        <AuthStatusContext.Provider value={status}>
+          {children}
+        </AuthStatusContext.Provider>
+      </TrustedLocalConnectionRevocationContext.Provider>
+    )
+  }
+
+  if (!authCredentialsMayBeCollected(status)) {
+    return (
+      <AuthPage>
+        <section
+          aria-labelledby="auth-protected-transport-title"
+          className="w-full rounded-[6px] px-1 py-8 text-center lg:min-h-[432px] lg:border lg:border-input lg:px-10 lg:py-10"
+        >
+          <h1
+            className="text-2xl font-semibold text-foreground sm:text-3xl"
+            id="auth-protected-transport-title"
+          >
+            {status.error || status.provider === null
+              ? t("auth.unavailableTitle")
+              : t("auth.protectedTransportTitle")}
+          </h1>
+          <p className="mt-3 text-base text-muted-foreground">
+            {status.error || status.provider === null
+              ? t("auth.unavailable")
+              : t("auth.protectedTransportRequired")}
+          </p>
+          <Button
+            className="mt-7 h-14 w-full text-base shadow-none hover:shadow-none active:translate-y-0"
+            onClick={() => void refresh()}
+            type="button"
+          >
+            {t("auth.retry")}
+          </Button>
+        </section>
+      </AuthPage>
+    )
+  }
 
   return (
     <AuthPage>

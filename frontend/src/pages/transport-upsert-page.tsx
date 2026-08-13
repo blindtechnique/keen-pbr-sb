@@ -7,6 +7,7 @@ import { useLocation } from "wouter"
 import type { ApiError } from "@/api/client"
 import {
   TransportConfigOperationOperation,
+  TransportSpecType,
   type TransportSpec,
   type TransportStatus,
 } from "@/api/generated/model"
@@ -108,8 +109,17 @@ export function TransportUpsertPage({
   const configMutation = usePostTransportConfigMutation({
     mutation: {
       onSuccess: (_data, variables) => {
+        const isNativeTracker =
+          variables.data.transport?.type === TransportSpecType.native
         toast.success(
-          t(`transports.configMessages.${variables.data.operation}`)
+          isNativeTracker
+            ? t(
+                variables.data.operation ===
+                  TransportConfigOperationOperation.create
+                  ? "transports.configMessages.nativeLinked"
+                  : "transports.configMessages.nativeTrackerUpdated"
+              )
+            : t(`transports.configMessages.${variables.data.operation}`)
         )
         navigate("/transports")
       },
@@ -125,17 +135,24 @@ export function TransportUpsertPage({
   // конфигурации, — отдельная мутация с отдельным сообщением об ошибке.
   const routeMutation = usePostConfigMutation()
   const close = () => navigate("/transports")
+  const editsNativeTracker =
+    mode === "edit" && initial?.type === TransportSpecType.native
   const title =
     mode === "create"
       ? t("transports.form.createTitle")
-      : t("transports.form.editTitle")
+      : editsNativeTracker
+        ? t("transports.form.editNativeTrackerTitle")
+        : t("transports.form.editTitle")
+  const description = editsNativeTracker
+    ? t("transports.form.editNativeTrackerDescription")
+    : t("transports.form.description")
 
   if (loadFailed) {
     return (
       <UpsertPage
         cardDescription={t("transports.form.loadErrorDescription")}
         cardTitle={t("transports.form.loadErrorTitle")}
-        description={t("transports.form.description")}
+        description={description}
         onClose={close}
         presentation={presentation}
         title={title}
@@ -171,9 +188,9 @@ export function TransportUpsertPage({
   if (loading || !loadedConfig) {
     return (
       <UpsertPage
-        cardDescription={t("transports.form.description")}
+        cardDescription={description}
         cardTitle={title}
-        description={t("transports.form.description")}
+        description={description}
         onClose={close}
         presentation={presentation}
         title={title}
@@ -250,7 +267,13 @@ export function TransportUpsertPage({
         { data: createLinkedTransportApplyRequest(spec, killSwitchValue) },
         {
           onSuccess: () => {
-            toast.success(t("transports.configMessages.create"))
+            toast.success(
+              t(
+                spec.type === TransportSpecType.native
+                  ? "transports.configMessages.nativeLinked"
+                  : "transports.configMessages.create"
+              )
+            )
             navigate("/transports")
           },
           onError: (mutationError) => {
@@ -331,13 +354,13 @@ export function TransportUpsertPage({
 
   return (
     <UpsertPage
-      cardDescription={t("transports.form.description")}
+      cardDescription={description}
       cardTitle={
         initial?.display_name?.trim() ||
         initial?.tag ||
         t("transports.form.createTitle")
       }
-      description={t("transports.form.description")}
+      description={description}
       dirty={dirty}
       onClose={close}
       presentation={presentation}

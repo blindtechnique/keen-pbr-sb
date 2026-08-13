@@ -22,10 +22,10 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <cstdint>
-#include <cstdio>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -62,10 +62,12 @@ constexpr const char* kNfqwsJournal =
     "/opt/var/lib/keen-pbr/nfqws-transaction.json";
 constexpr const char* kNfqwsCapture =
     "/opt/var/lib/keen-pbr/nfqws-restore-point";
-constexpr const char* kNfqwsUpgradeUnavailableReason =
-    "Safe in-panel upgrade is unavailable: an exact previous IPK, a pinned "
-    "and verified target IPK, exact opkg metadata rollback and boot-time "
-    "transaction recovery are not installed yet. No package command was run.";
+constexpr const char* kNfqwsUpgradeLimitation =
+    "Runs the currently configured opkg upgrade path under the shared "
+    "maintenance lease and "
+    "captures the installed files before mutation, but it does not preserve "
+    "an exact previous IPK, pin and verify the target IPK, restore exact opkg "
+    "metadata, or recover an interrupted transaction after reboot.";
 constexpr const char* kListsDir = "/opt/etc/nfqws2/lists";
 constexpr const char* kLuaDir = "/opt/etc/nfqws2/lua";
 constexpr const char* kLogDir = "/opt/var/log";
@@ -81,6 +83,78 @@ constexpr const char* kUserStrategies = "/opt/etc/keen-pbr/nfqws-strategies";
 constexpr const char* kDurabilityWarning =
     "Warning: the nfqws file is visible, but directory durability could not "
     "be confirmed. Runtime reconciliation continued.";
+
+std::atomic<std::uint64_t>& nfqws_transaction_generation() noexcept {
+    static std::atomic<std::uint64_t> generation{0};
+    return generation;
+}
+
+struct NfqwsTransactionSnapshot {
+    std::uint64_t generation{0};
+    ComponentTransactionStatus transaction;
+    bool stable{false};
+};
+
+NfqwsTransactionSnapshot read_nfqws_transaction_snapshot() {
+    const auto before =
+        nfqws_transaction_generation().load(std::memory_order_acquire);
+    auto transaction = read_component_transaction(kNfqwsJournal);
+    const auto after =
+        nfqws_transaction_generation().load(std::memory_order_acquire);
+    return NfqwsTransactionSnapshot{
+        after, std::move(transaction), before == after};
+}
+
+bool nfqws_snapshot_is_clean(
+    const NfqwsTransactionSnapshot& snapshot) noexcept {
+    // Odd is the publication window between the generation bump and the
+    // durable journal write/clear. The path may still look absent in that
+    // window, but absence is not a clean snapshot until the writer closes the
+    // seqlock with the next (even) generation.
+    return snapshot.stable && (snapshot.generation % 2U) == 0U &&
+           snapshot.transaction.state == ComponentTransactionState::none;
+}
+
+bool nfqws_snapshot_allows_optimistic_publish(
+    const NfqwsTransactionSnapshot& initial,
+    const NfqwsTransactionSnapshot& current) noexcept {
+    return nfqws_snapshot_is_clean(initial) &&
+           nfqws_snapshot_is_clean(current) &&
+           initial.generation == current.generation;
+}
+
+void write_nfqws_transaction(
+    const ComponentTransactionRecord& record) {
+    // Advance before publishing the journal. A reader that straddles this
+    // boundary either sees the durable record or a changed generation and
+    // must withhold every optimistic version/update claim.
+    nfqws_transaction_generation().fetch_add(1, std::memory_order_acq_rel);
+    try {
+        write_component_transaction(kNfqwsJournal, record);
+    } catch (...) {
+        nfqws_transaction_generation().fetch_add(
+            1, std::memory_order_release);
+        throw;
+    }
+    nfqws_transaction_generation().fetch_add(1, std::memory_order_release);
+}
+
+bool clear_nfqws_transaction() {
+    // A failed clear is still a state transition attempt. Increment first so
+    // a concurrent reader cannot publish evidence collected on the other side
+    // of it; the retained journal remains the durable fail-closed authority.
+    nfqws_transaction_generation().fetch_add(1, std::memory_order_acq_rel);
+    const bool cleared = clear_component_transaction(kNfqwsJournal);
+    nfqws_transaction_generation().fetch_add(1, std::memory_order_release);
+    return cleared;
+}
+
+const char* nfqws_snapshot_state_name(
+    const NfqwsTransactionSnapshot& snapshot) noexcept {
+    return snapshot.stable
+               ? component_transaction_state_name(snapshot.transaction.state)
+               : "changed_during_read";
+}
 
 class NfqwsNetfilterRefreshGuard final {
 public:
@@ -349,23 +423,116 @@ std::pair<fs::path, std::string> file_path(const std::string& category,
     throw ApiError("unsupported nfqws file", 400);
 }
 
-std::string run_command(const std::string& command, int& status) {
-    std::array<char, 1024> buffer{};
-    std::string output;
-    FILE* pipe = popen((command + " 2>&1").c_str(), "r");
-    if (!pipe) throw ApiError("failed to run nfqws command", 500);
-    while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe)) {
-        if (output.size() < 128U * 1024U) output += buffer.data();
+std::string installed_version() {
+    constexpr size_t kMaxStatusBytes = 64U * 1024U;
+    const auto result = safe_exec_capture(
+        {"/opt/bin/opkg", "status", "nfqws2-keenetic"},
+        /*suppress_stderr=*/false,
+        kMaxStatusBytes,
+        /*capture_stderr=*/true,
+        /*drain_after_limit=*/true,
+        SafeExecFailureLog::DiagnosticOnly,
+        SafeExecTimeouts{std::chrono::seconds{30}, std::chrono::seconds{2}});
+    if (result.timed_out) {
+        throw ApiError("timed out while reading the installed nfqws2 version",
+                       504);
     }
-    status = pclose(pipe);
-    return output;
+    if (result.exit_code != 0 || result.truncated) return {};
+
+    std::istringstream lines(result.stdout_output);
+    std::string line;
+    constexpr std::string_view prefix{"Version: "};
+    while (std::getline(lines, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.rfind(prefix, 0) == 0) {
+            return line.substr(prefix.size());
+        }
+    }
+    return {};
 }
 
-std::string installed_version() {
-    int status = 0;
-    auto output = run_command("/opt/bin/opkg status nfqws2-keenetic | awk -F': ' '/^Version:/ {print $2; exit}'", status);
-    while (!output.empty() && (output.back() == '\n' || output.back() == '\r')) output.pop_back();
-    return output;
+struct BoundedOpkgUpgradeResult {
+    std::string output;
+    int status{-1};
+    bool timed_out{false};
+    bool termination_uncertain{false};
+    bool upgrade_started{false};
+};
+
+using NfqwsExecCapture = std::function<ExecCaptureResult(
+    const std::vector<std::string>&, SafeExecTimeouts)>;
+
+BoundedOpkgUpgradeResult run_bounded_nfqws_opkg_upgrade(
+    const NfqwsExecCapture& execute) {
+    // Updating feed metadata and running maintainer scripts can both be slow on
+    // flash-backed routers, so this is deliberately much longer than the
+    // ordinary command deadline. It is still finite: the maintenance lease and
+    // nfqws mutex must never be held forever by a wedged opkg or descendant.
+    constexpr auto kOpkgCommandTimeout = std::chrono::minutes{10};
+    constexpr auto kOpkgKillGrace = std::chrono::seconds{5};
+    constexpr size_t kMaxOutputPerCommand = 64U * 1024U;
+    const SafeExecTimeouts timeouts{kOpkgCommandTimeout, kOpkgKillGrace};
+
+    BoundedOpkgUpgradeResult combined;
+    auto run_step = [&](const std::vector<std::string>& argv,
+                        std::string_view label) {
+        auto result = execute(argv, timeouts);
+        combined.output += result.stdout_output;
+        if (!combined.output.empty() && combined.output.back() != '\n') {
+            combined.output += '\n';
+        }
+        if (result.truncated) {
+            combined.output += std::string(label) +
+                               " output was truncated after " +
+                               std::to_string(kMaxOutputPerCommand) +
+                               " bytes.\n";
+        }
+        if (result.timed_out) {
+            combined.timed_out = true;
+            combined.output += std::string(label) +
+                               " exceeded the 10 minute deadline; the "
+                               "package-manager outcome is unknown.\n";
+        }
+        if (result.termination_uncertain) {
+            combined.termination_uncertain = true;
+            combined.output +=
+                std::string(label) +
+                " could not be proven fully terminated. No component "
+                "inspection or captured-file recovery may run while a "
+                "package-manager descendant could still be mutating it.\n";
+        }
+        combined.status = result.exit_code;
+        if ((result.timed_out || result.termination_uncertain) &&
+            combined.status == 0) {
+            combined.status = -1;
+        }
+        return combined.status == 0 && !result.timed_out &&
+               !result.termination_uncertain;
+    };
+
+    if (!run_step({"/opt/bin/opkg", "update"}, "opkg update")) {
+        return combined;
+    }
+
+    combined.upgrade_started = true;
+    (void)run_step(
+        {"/opt/bin/opkg", "upgrade", "nfqws2-keenetic"},
+        "opkg upgrade nfqws2-keenetic");
+    return combined;
+}
+
+BoundedOpkgUpgradeResult run_bounded_nfqws_opkg_upgrade() {
+    return run_bounded_nfqws_opkg_upgrade(
+        [](const std::vector<std::string>& argv, SafeExecTimeouts timeouts) {
+            return safe_exec_capture(
+                argv,
+                /*suppress_stderr=*/false,
+                64U * 1024U,
+                /*capture_stderr=*/true,
+                /*drain_after_limit=*/true,
+                SafeExecFailureLog::Enabled,
+                timeouts);
+        });
 }
 
 std::array<unsigned long, 3> semantic_version(const std::string& value) {
@@ -388,29 +555,105 @@ bool newer_version(const std::string& latest, const std::string& current) {
     return semantic_version(latest) > semantic_version(current);
 }
 
+bool nfqws_package_metadata_verified(
+    ComponentTransactionState transaction_state) noexcept {
+    return transaction_state == ComponentTransactionState::none;
+}
+
+bool should_clear_nfqws_upgrade_journal(
+    bool component_broken,
+    bool package_mutation_started,
+    bool rolled_back,
+    bool termination_uncertain) noexcept {
+    // A file-only rollback after opkg started cannot reconcile the package
+    // database, and an uncertain mutator cannot authorize any finalization.
+    // In both cases the durable record is the marker that suppresses version
+    // and update claims until manual package repair.
+    return !component_broken && !termination_uncertain &&
+           !(package_mutation_started && rolled_back);
+}
+
+struct CapturedRestoreFinalization {
+    bool ok{false};
+    bool clear_journal{false};
+    bool package_metadata_verified{false};
+    const char* terminal_state{"incomplete"};
+};
+
+CapturedRestoreFinalization finalize_captured_file_restore(
+    bool files_restored) noexcept {
+    // Even a byte- and runtime-complete restore is not an exact package
+    // rollback: opkg metadata and newly introduced paths remain untouched.
+    return CapturedRestoreFinalization{
+        false,
+        false,
+        false,
+        files_restored ? "metadata_unverified" : "incomplete"};
+}
+
 nlohmann::json nfqws_update_status(bool force = false) {
     static std::mutex mutex;
     static nlohmann::json cached;
     static std::chrono::steady_clock::time_point checked_at{};
     constexpr auto kCacheLifetime = std::chrono::minutes(30);
 
+    const auto initial_snapshot = read_nfqws_transaction_snapshot();
+    auto blocked_status = [](const NfqwsTransactionSnapshot& snapshot) {
+        std::error_code installed_error;
+        return nlohmann::json{
+            {"ok", true},
+            {"installed", fs::is_regular_file(kBinary, installed_error)},
+            {"current", ""},
+            {"latest", ""},
+            {"available", false},
+            {"release_url", ""},
+            {"package_metadata_verified", false},
+            {"blocked_reason", "nfqws_package_metadata_unverified"},
+            {"transaction_state",
+             nfqws_snapshot_state_name(snapshot)}};
+    };
+    if (!nfqws_snapshot_is_clean(initial_snapshot)) {
+        return blocked_status(initial_snapshot);
+    }
+
     const std::lock_guard lock(mutex);
     const auto now = std::chrono::steady_clock::now();
+    auto publish_optimistic = [&](nlohmann::json candidate,
+                                  bool replace_cache) {
+        // Revalidate after every version read and remote fetch, immediately
+        // before cache publication/return. A mutation that appeared and even
+        // finished during this request changes the in-process generation, so
+        // none->none cannot turn a stale observation into an "up to date"
+        // claim. An active/retained journal is independently fail-closed.
+        const auto current_snapshot = read_nfqws_transaction_snapshot();
+        if (!nfqws_snapshot_allows_optimistic_publish(
+                initial_snapshot, current_snapshot)) {
+            return blocked_status(current_snapshot);
+        }
+        if (replace_cache) {
+            cached = candidate;
+            checked_at = now;
+        }
+        return candidate;
+    };
     const auto current = installed_version();
     if (current.empty()) {
-        cached = nlohmann::json{{"ok", true},
-                                {"installed", false},
-                                {"current", ""},
-                                {"latest", ""},
-                                {"available", false},
-                                {"release_url", ""}};
-        checked_at = now;
-        return cached;
+        return publish_optimistic(
+            nlohmann::json{{"ok", true},
+                           {"installed", false},
+                           {"current", ""},
+                           {"latest", ""},
+                           {"available", false},
+                           {"release_url", ""},
+                           {"package_metadata_verified", true},
+                           {"blocked_reason", ""},
+                           {"transaction_state", "none"}},
+            /*replace_cache=*/true);
     }
     if (!force && !cached.empty() && cached.value("installed", false) &&
         cached.value("current", std::string{}) == current &&
         now - checked_at < kCacheLifetime) {
-        return cached;
+        return publish_optimistic(cached, /*replace_cache=*/false);
     }
 
     HttpClient client;
@@ -421,14 +664,18 @@ nlohmann::json nfqws_update_status(bool force = false) {
     const auto latest = release.value("tag_name", std::string{});
     if (latest.empty()) throw ApiError("nfqws2 release does not contain a version", 502);
 
-    cached = nlohmann::json{{"ok", true},
-                            {"installed", true},
-                            {"current", current},
-                            {"latest", latest},
-                            {"available", newer_version(latest, current)},
-                            {"release_url", release.value("html_url", std::string{})}};
-    checked_at = now;
-    return cached;
+    return publish_optimistic(
+        nlohmann::json{
+            {"ok", true},
+            {"installed", true},
+            {"current", current},
+            {"latest", latest},
+            {"available", newer_version(latest, current)},
+            {"release_url", release.value("html_url", std::string{})},
+            {"package_metadata_verified", true},
+            {"blocked_reason", ""},
+            {"transaction_state", "none"}},
+        /*replace_cache=*/true);
 }
 
 std::mutex& nfqws_operation_mutex() {
@@ -490,15 +737,54 @@ PackageFootprint require_nfqws_footprint() {
     return footprint;
 }
 
-nlohmann::json nfqws_upgrade_capability() {
+struct PostUpgradeFootprintAssessment {
+    PackageFootprint footprint;
+    PackageFootprintDiff diff;
+    PackageBinaryOutcome binary_outcome{
+        PackageBinaryOutcome::indeterminate};
+    bool recovery_required{true};
+    std::string error;
+};
+
+PostUpgradeFootprintAssessment assess_post_upgrade_footprint(
+    const PackageFootprint& before,
+    const std::function<PackageFootprint()>& observe_after) {
+    PostUpgradeFootprintAssessment assessment;
+    try {
+        assessment.footprint = observe_after();
+        if (!assessment.footprint.complete) {
+            assessment.error =
+                "post-upgrade package footprint is incomplete";
+            return assessment;
+        }
+        assessment.binary_outcome = judge_package_binary(
+            before, assessment.footprint, kBinary);
+        assessment.diff =
+            diff_package_footprint(before, assessment.footprint);
+        assessment.recovery_required = false;
+    } catch (const std::exception& error) {
+        assessment.error = error.what();
+    } catch (...) {
+        assessment.error = "unknown package-footprint observation failure";
+    }
+    return assessment;
+}
+
+nlohmann::json nfqws_upgrade_capability(
+    bool package_metadata_verified) {
     return nlohmann::json{
-        {"available", false},
-        {"mode", "blocked_fail_closed"},
+        {"available", package_metadata_verified},
+        {"mode", "guarded_opkg"},
         {"exact_previous_ipk", false},
         {"verified_target_ipk", false},
         {"exact_opkg_metadata_rollback", false},
         {"boot_recovery", false},
-        {"reason", kNfqwsUpgradeUnavailableReason},
+        {"package_metadata_verified", package_metadata_verified},
+        {"blocked_reason",
+         package_metadata_verified
+             ? ""
+             : "nfqws_package_metadata_unverified"},
+        {"limitation", kNfqwsUpgradeLimitation},
     };
 }
 
@@ -829,11 +1115,11 @@ bool wait_for_nfqws_exit(std::chrono::milliseconds timeout) {
 
 // Runs the nfqws2 init script under a deadline.
 //
-// The generic run_command() above uses popen/pclose, and pclose waits for the
-// child with no deadline at all. A hung init script therefore blocked the HTTP
-// worker forever - while holding nfqws_operation_mutex, so every subsequent
-// nfqws request piled up behind it and the whole section of the UI froze with
-// no way back short of restarting the daemon.
+// An older popen/pclose path waited for the child with no deadline at all. A
+// hung init script therefore blocked the HTTP worker forever - while holding
+// nfqws_operation_mutex, so every subsequent nfqws request piled up behind it
+// and the whole section of the UI froze with no way back short of restarting
+// the daemon.
 //
 // safe_exec_capture takes argv rather than a shell string, which this path
 // does not need anyway: the arguments are a fixed script path and a fixed
@@ -910,6 +1196,118 @@ std::string run_nfqws_service_command(const std::string& command, int& status) {
     return output;
 }
 
+struct PostMutationGuardResult {
+    bool operation_completed{false};
+    bool component_broken{true};
+    bool recovery_attempted{false};
+    bool rolled_back{false};
+    std::string operation_error;
+    std::string recovery_error;
+};
+
+PostMutationGuardResult guard_nfqws_post_mutation(
+    const std::function<bool()>& operation,
+    const std::function<bool()>& recover,
+    const std::function<bool()>& recovery_allowed) {
+    PostMutationGuardResult result;
+    try {
+        result.component_broken = operation();
+        result.operation_completed = true;
+    } catch (const std::exception& error) {
+        result.operation_error = error.what();
+    } catch (...) {
+        result.operation_error = "unknown post-mutation failure";
+    }
+
+    if (!result.component_broken) return result;
+
+    // A timed-out process tree may have escaped its retained process group.
+    // In that case touching the same files is not recovery: it is a concurrent
+    // mutation racing an untrusted maintainer script. Leave both the component
+    // and journal alone until an operator can prove the mutator is gone.
+    try {
+        if (!recovery_allowed()) return result;
+    } catch (const std::exception& error) {
+        result.recovery_error = error.what();
+        return result;
+    } catch (...) {
+        result.recovery_error = "unknown recovery-admission failure";
+        return result;
+    }
+
+    result.recovery_attempted = true;
+    try {
+        result.rolled_back = recover();
+    } catch (const std::exception& error) {
+        result.recovery_error = error.what();
+    } catch (...) {
+        result.recovery_error = "unknown captured-file recovery failure";
+    }
+    return result;
+}
+
+// Best-effort recovery for every failure after opkg is allowed to start. This
+// function deliberately does not clear the transaction journal: its caller may
+// do that only after both captured bytes and the pre-upgrade runtime state are
+// verified. Any exception is caught by guard_nfqws_post_mutation(), so an
+// uncertain recovery keeps the durable journal and blocks another upgrade.
+bool restore_nfqws_capture_after_failed_upgrade(
+    const ComponentTransactionRecord& record,
+    TransactionProgress& progress,
+    std::string& output) {
+    const auto capture_state = verify_component_capture(kNfqwsCapture);
+    if (capture_state != ComponentCaptureState::usable) {
+        output +=
+            "\nThe upgrade left the component broken and there is no usable "
+            "restore point to return to (";
+        output += component_capture_state_name(capture_state);
+        output += ").\n";
+        return false;
+    }
+
+    progress.step("rollback");
+    output +=
+        "\nThe upgrade did not finish safely; restoring the captured bytes.\n";
+    if (!nfqws_fully_stopped()) {
+        int stop_status = 0;
+        output += run_nfqws_service_command("stop", stop_status);
+    }
+    if (!nfqws_fully_stopped()) {
+        output +=
+            "nfqws2 could not be verified stopped; captured files were not "
+            "written and the transaction record was retained.\n";
+        return false;
+    }
+
+    const auto restored = restore_component_files(kNfqwsCapture);
+    output += restored.complete
+                  ? "Restored " + std::to_string(restored.restored) +
+                        " files.\n"
+                  : "Restore did not complete: " +
+                        (restored.refused.empty()
+                             ? std::to_string(restored.failed.size()) +
+                                   " file(s) failed"
+                             : restored.refused) +
+                        ".\n";
+    if (!restored.complete) return false;
+
+    bool runtime_restored = false;
+    if (record.runtime_was_running) {
+        int start_status = 0;
+        output += run_nfqws_service_command("start", start_status);
+        runtime_restored =
+            start_status == 0 && nfqws_running_installed_image();
+    } else {
+        runtime_restored = nfqws_fully_stopped();
+    }
+    if (!runtime_restored) {
+        output +=
+            "The captured files were restored, but the pre-upgrade runtime "
+            "state could not be verified; the transaction record was retained.\n";
+    }
+    return runtime_restored;
+}
+
 void append_files(nlohmann::json& files, const fs::path& directory,
                   const std::string& category, const std::string& suffix,
                   bool removable) {
@@ -955,10 +1353,12 @@ nlohmann::json list_strategies() {
             // the generated WAN list or our owned telemetry arguments. Keep
             // that exact semantic copy canonical, but never let a copied
             // marker hide a real user edit as an approved profile.
-            const auto expected = render_wan_interfaces(packaged_content);
-            const bool canonical =
-                nfqws_config_strategy_identity(content) ==
-                nfqws_config_strategy_identity(expected);
+            bool canonical = true;
+            if (overridden) {
+                const auto expected = render_wan_interfaces(packaged_content);
+                canonical = nfqws_config_matches_packaged_strategy(
+                    content, packaged_content, expected);
+            }
             result.push_back({{"name", name}, {"builtin", true}, {"overridden", overridden},
                               {"canonical", canonical}, {"content", content}});
             names.insert(name);
@@ -1303,6 +1703,9 @@ void register_nfqws_handler_impl(
     server.get("/api/nfqws", []() -> std::string {
         std::error_code ec;
         const bool installed = fs::is_regular_file(kBinary, ec);
+        const auto initial_snapshot = read_nfqws_transaction_snapshot();
+        const bool initially_metadata_verified =
+            nfqws_snapshot_is_clean(initial_snapshot);
         const auto processes =
             installed ? nfqws_processes() : std::vector<pid_t>{};
         const bool process_running = !processes.empty();
@@ -1333,40 +1736,55 @@ void register_nfqws_handler_impl(
                 }
             }
         }
-        return nlohmann::json{{"installed", installed}, {"running", running},
-                              {"process_running", process_running},
-                              {"queue_active", queue_active},
-                              {"version", installed ? installed_version() : ""},
-                              {"files", files}, {"strategies", strategies},
-                              {"active_strategy", active_strategy},
-                              {"rotator_state", nfqws_rotator_state_json(
-                                                    active_content,
-                                                    processes)},
-                              // Surfaced here rather than only on the next
-                              // attempt. A reboot in the middle of a package
-                              // operation leaves a record nobody reads until
-                              // an operator tries to upgrade again, and the
-                              // moment to learn that something was interrupted
-                              // is before deciding what to do next.
-                              {"transaction_state",
-                               component_transaction_state_name(
-                                   read_component_transaction(kNfqwsJournal)
-                                       .state)},
-                               {"restore_point",
-                                component_capture_state_name(
-                                    cached_restore_point_state())},
-                               {"upgrade_capability",
-                                nfqws_upgrade_capability()},
-                               {"restore_capability",
-                                nlohmann::json{
-                                    {"available",
-                                     cached_restore_point_state() ==
-                                         ComponentCaptureState::usable},
-                                    {"exact_package_state", false},
-                                    {"limitation",
-                                     "Restores captured files only; it does "
-                                     "not restore opkg metadata or remove "
-                                     "files introduced later."}}}}
+        std::string version;
+        if (installed && initially_metadata_verified) {
+            version = installed_version();
+        }
+        const auto rotator_state =
+            nfqws_rotator_state_json(active_content, processes);
+        const auto restore_point_state = cached_restore_point_state();
+        // `installed_version`, directory walks and runtime inspection above
+        // all take time. Revalidate directly before publication so a package
+        // transaction that started or completed during the read cannot leave
+        // an optimistic version/capability response behind.
+        const auto current_snapshot = read_nfqws_transaction_snapshot();
+        const bool package_metadata_verified =
+            nfqws_snapshot_allows_optimistic_publish(
+                initial_snapshot, current_snapshot);
+        if (!package_metadata_verified) version.clear();
+        const auto& published_snapshot = package_metadata_verified
+                                             ? initial_snapshot
+                                             : current_snapshot;
+        return nlohmann::json{
+                   {"installed", installed},
+                   {"running", running},
+                   {"process_running", process_running},
+                   {"queue_active", queue_active},
+                   {"version", version},
+                   {"package_metadata_verified", package_metadata_verified},
+                   {"files", files},
+                   {"strategies", strategies},
+                   {"active_strategy", active_strategy},
+                   {"rotator_state", rotator_state},
+                   // Surfaced here rather than only on the next attempt. A
+                   // reboot or a concurrent package operation makes the
+                   // package version unverified before another mutation is
+                   // considered.
+                   {"transaction_state",
+                    nfqws_snapshot_state_name(published_snapshot)},
+                   {"restore_point",
+                    component_capture_state_name(
+                        restore_point_state)},
+                   {"upgrade_capability",
+                    nfqws_upgrade_capability(package_metadata_verified)},
+                   {"restore_capability",
+                    nlohmann::json{
+                        {"available",
+                         restore_point_state == ComponentCaptureState::usable},
+                        {"exact_package_state", false},
+                        {"limitation",
+                         "Restores captured files only; it does not restore "
+                         "opkg metadata or remove files introduced later."}}}}
             .dump();
     });
 
@@ -1459,19 +1877,6 @@ void register_nfqws_handler_impl(
                 .dump();
         }
         if (action == "upgrade") {
-            // Fail closed before the maintenance lease, backup, journal,
-            // capture or package manager can mutate anything. The installed
-            // bytes snapshot is useful for a manual repair, but it is not an
-            // exact package transaction: there is no pinned old IPK, opkg
-            // database snapshot, inventory of new paths, or boot recovery
-            // consumer yet. Calling the partial mechanism an automatic
-            // rollback would be the dangerous part.
-            throw ApiError(kNfqwsUpgradeUnavailableReason, 409,
-                           nlohmann::json{
-                               {"error", "nfqws_upgrade_unavailable"},
-                               {"upgrade_capability",
-                                nfqws_upgrade_capability()}}
-                               .dump());
             // The only nfqws action that mutates installed packages, and until
             // now the only package mutation in the process that took no
             // cross-process lease. An in-process mutex bounds nothing outside
@@ -1539,7 +1944,7 @@ void register_nfqws_handler_impl(
             record.config_sha256 = config_before.active_sha256;
             record.runtime_was_running = runtime_before.process_present;
             record.owner_is_operation_process = false;
-            write_component_transaction(kNfqwsJournal, record);
+            write_nfqws_transaction(record);
 
             // Taken before opkg, because these bytes stop existing the moment
             // it runs and cannot be reconstructed afterwards.
@@ -1561,7 +1966,7 @@ void register_nfqws_handler_impl(
             if (!capture.complete ||
                 capture_state != ComponentCaptureState::usable) {
                 const bool journal_cleared =
-                    clear_component_transaction(kNfqwsJournal);
+                    clear_nfqws_transaction();
                 progress.finish("capture_incomplete");
                 throw ApiError(
                     journal_cleared
@@ -1575,95 +1980,201 @@ void register_nfqws_handler_impl(
             // Promoted immediately before the package manager runs, and not a
             // line earlier: from here on anything on disk may have changed.
             record.phase = ComponentTransactionPhase::mutating;
-            write_component_transaction(kNfqwsJournal, record);
+            write_nfqws_transaction(record);
             progress.step("install");
-            int status = 0;
-            output += run_command("/opt/bin/opkg update && /opt/bin/opkg upgrade nfqws2-keenetic", status);
-            progress.step("verify");
-            record.phase = ComponentTransactionPhase::verifying;
-            write_component_transaction(kNfqwsJournal, record);
-            const auto footprint_after = require_nfqws_footprint();
-            const auto binary_outcome = judge_package_binary(
-                footprint_before, footprint_after, kBinary);
-            const auto footprint_diff =
-                diff_package_footprint(footprint_before, footprint_after);
-            const auto config_outcome =
-                judge_nfqws_config(config_before, observe_nfqws_config());
-            const auto runtime_after = observe_nfqws_runtime();
-            const auto runtime_outcome = judge_nfqws_runtime(
-                runtime_before, runtime_after,
-                installed_binary_digest(footprint_after));
-            describe_package_change(output, binary_outcome, footprint_diff);
-            describe_runtime_outcome(output, runtime_outcome);
-            describe_config_outcome(output, config_outcome);
+            // opkg may stop/start nfqws2 and replace the process image or its
+            // NFQUEUE contract. Arm only at the mutation boundary: every exit
+            // after this point asks the existing control-loop writer to
+            // reconcile PPE/netfilter state, while preflight refusals remain
+            // free of firewall side effects.
+            NfqwsNetfilterRefreshGuard refresh_guard(ctx);
+            int status = -1;
             bool durable = true;
-            if (status == 0) {
-                output += "\nInstalled nfqws2 version: " + installed_version() + "\n";
-            }
-            const bool binary_unverified =
-                binary_outcome != PackageBinaryOutcome::replaced &&
-                binary_outcome != PackageBinaryOutcome::unchanged;
-            const bool config_broken =
-                config_outcome == NfqwsConfigOutcome::lost ||
-                config_outcome == NfqwsConfigOutcome::replaced_by_package;
-            const bool runtime_state_changed =
-                runtime_before.process_present != runtime_after.process_present;
-            const bool component_broken =
-                status != 0 || binary_unverified || config_broken ||
-                runtime_state_changed ||
-                nfqws_runtime_is_failure(runtime_outcome);
-            bool rolled_back = false;
-            if (component_broken &&
-                verify_component_capture(kNfqwsCapture) ==
-                    ComponentCaptureState::usable) {
-                progress.step("rollback");
-                output +=
-                    "\nThe upgrade left the component broken; restoring the "
-                    "captured bytes.\n";
-                if (!nfqws_fully_stopped()) {
-                    int stop_status = 0;
-                    output += run_nfqws_service_command("stop", stop_status);
-                }
-                ComponentRestoreResult restored;
-                if (nfqws_fully_stopped())
-                    restored = restore_component_files(kNfqwsCapture);
-                output += restored.complete
-                              ? "Restored " +
-                                    std::to_string(restored.restored) +
-                                    " files.\n"
-                              : "Restore did not complete: " +
-                                    (restored.refused.empty()
-                                         ? std::to_string(
-                                               restored.failed.size()) +
-                                               " file(s) failed"
-                                         : restored.refused) +
-                                    ".\n";
-                bool runtime_restored = false;
-                if (restored.complete && record.runtime_was_running) {
-                    int start_status = 0;
-                    output += run_nfqws_service_command("start", start_status);
-                    runtime_restored = start_status == 0 &&
-                                       nfqws_running_installed_image();
-                } else if (restored.complete) {
-                    runtime_restored = nfqws_fully_stopped();
-                }
-                rolled_back = restored.complete && runtime_restored;
-            } else if (component_broken) {
-                // Said plainly rather than left to be inferred from silence.
-                output +=
-                    "\nThe upgrade left the component broken and there is no "
-                    "complete restore point to return to.\n";
-            }
+            PackageBinaryOutcome binary_outcome =
+                PackageBinaryOutcome::indeterminate;
+            bool footprint_verified = false;
+            std::string config_outcome_name = "unknown";
+            std::string runtime_outcome_name = "unknown";
             std::string created;
-            if (!component_broken) {
-                created = save_updated_default_strategy(
-                    previous, candidates_before_upgrade, durable);
-                append_durability_warning(output, durable);
+            bool package_mutation_started = false;
+            bool package_command_returned = false;
+            bool termination_uncertain = false;
+            bool recovery_safe = false;
+
+            // This is the single exception boundary after the durable journal
+            // says opkg may mutate the component. Every command, observation,
+            // description and post-upgrade config write is inside it. A throw
+            // therefore becomes the same captured-file recovery decision as a
+            // non-zero opkg exit or a failed runtime check, rather than escaping
+            // with a mutated package and only the firewall guard left to run.
+            const auto post_mutation = guard_nfqws_post_mutation(
+                [&]() {
+                    const auto opkg = run_bounded_nfqws_opkg_upgrade();
+                    package_command_returned = true;
+                    package_mutation_started = opkg.upgrade_started;
+                    termination_uncertain = opkg.termination_uncertain;
+                    status = opkg.status;
+                    output += opkg.output;
+
+                    if (termination_uncertain) {
+                        output +=
+                            "\nThe package-manager process tree could not be "
+                            "proven stopped. Post-upgrade inspection and "
+                            "captured-file recovery were deliberately skipped "
+                            "so they cannot race a live mutator. The durable "
+                            "transaction record was retained; stop/inspect "
+                            "the process tree and repair the package state "
+                            "manually.\n";
+                        return true;
+                    }
+
+                    // A failed `opkg update` changed feed metadata at most; it
+                    // never reached the installed nfqws2 package. Once its
+                    // process group is proven gone, there are no component
+                    // bytes to inspect or restore and the journal may be
+                    // cleared normally. The non-zero status still makes the
+                    // requested upgrade fail.
+                    if (!package_mutation_started) {
+                        output +=
+                            "\nopkg upgrade nfqws2-keenetic was not started; "
+                            "the installed component was not mutated and no "
+                            "captured-file recovery was needed.\n";
+                        return false;
+                    }
+
+                    // From here onward the executor has returned with a
+                    // quiesced process group. Observation failures may safely
+                    // enter the single captured-file recovery funnel.
+                    recovery_safe = true;
+
+                    progress.step("verify");
+                    record.phase = ComponentTransactionPhase::verifying;
+                    write_nfqws_transaction(record);
+                    const auto footprint_assessment =
+                        assess_post_upgrade_footprint(
+                            footprint_before,
+                            [] { return require_nfqws_footprint(); });
+                    binary_outcome = footprint_assessment.binary_outcome;
+                    footprint_verified =
+                        !footprint_assessment.recovery_required;
+                    const auto config_outcome = judge_nfqws_config(
+                        config_before, observe_nfqws_config());
+                    config_outcome_name =
+                        nfqws_config_outcome_name(config_outcome);
+                    const auto runtime_after = observe_nfqws_runtime();
+                    const auto runtime_outcome = judge_nfqws_runtime(
+                        runtime_before, runtime_after,
+                        footprint_assessment.recovery_required
+                            ? std::string{}
+                            : installed_binary_digest(
+                                  footprint_assessment.footprint));
+                    runtime_outcome_name =
+                        nfqws_runtime_outcome_name(runtime_outcome);
+                    if (footprint_assessment.recovery_required) {
+                        output +=
+                            "\nThe package footprint could not be established "
+                            "after opkg; treating the component as broken and "
+                            "attempting the captured-file restore";
+                        if (!footprint_assessment.error.empty()) {
+                            output += ": " + footprint_assessment.error;
+                        }
+                        output += ".\n";
+                    } else {
+                        describe_package_change(
+                            output,
+                            binary_outcome,
+                            footprint_assessment.diff);
+                    }
+                    describe_runtime_outcome(output, runtime_outcome);
+                    describe_config_outcome(output, config_outcome);
+
+                    const bool binary_unverified =
+                        binary_outcome != PackageBinaryOutcome::replaced &&
+                        binary_outcome != PackageBinaryOutcome::unchanged;
+                    const bool config_broken =
+                        config_outcome == NfqwsConfigOutcome::lost ||
+                        config_outcome ==
+                            NfqwsConfigOutcome::replaced_by_package;
+                    const bool runtime_state_changed =
+                        runtime_before.process_present !=
+                        runtime_after.process_present;
+                    bool component_broken =
+                        status != 0 ||
+                        footprint_assessment.recovery_required ||
+                        binary_unverified || config_broken ||
+                        runtime_state_changed ||
+                        nfqws_runtime_is_failure(runtime_outcome);
+                    if (status == 0 && !component_broken) {
+                        const auto version = installed_version();
+                        if (version.empty()) {
+                            component_broken = true;
+                            output +=
+                                "\nThe installed nfqws2 version could not be "
+                                "verified; attempting the captured-file "
+                                "restore.\n";
+                        } else {
+                            output +=
+                                "\nInstalled nfqws2 version: " + version +
+                                "\n";
+                        }
+                    }
+                    if (!component_broken) {
+                        created = save_updated_default_strategy(
+                            previous, candidates_before_upgrade, durable);
+                        append_durability_warning(output, durable);
+                    }
+                    return component_broken;
+                },
+                [&]() {
+                    return restore_nfqws_capture_after_failed_upgrade(
+                        record, progress, output);
+                },
+                [&]() { return recovery_safe; });
+
+            const bool component_broken = post_mutation.component_broken;
+            const bool rolled_back = post_mutation.rolled_back;
+            if (!post_mutation.operation_error.empty()) {
+                if (status == 0) status = 1;
+                output += "\nA post-mutation nfqws2 step failed: " +
+                          post_mutation.operation_error + ".\n";
+                if (post_mutation.recovery_attempted) {
+                    output +=
+                        "The failure was routed through captured-file "
+                        "recovery.\n";
+                }
+            }
+            if (!post_mutation.recovery_error.empty()) {
+                output +=
+                    "Captured-file recovery itself failed or became uncertain: " +
+                    post_mutation.recovery_error + ".\n";
+            }
+            const bool recovery_blocked =
+                component_broken && !post_mutation.recovery_attempted;
+            if (recovery_blocked && !termination_uncertain) {
+                output +=
+                    "Captured-file recovery was not attempted because the "
+                    "package-manager execution did not return enough evidence "
+                    "to prove that mutation had stopped. The transaction "
+                    "record was retained for manual recovery.\n";
+            }
+            const bool package_metadata_unverified =
+                package_mutation_started && rolled_back;
+            if (package_metadata_unverified) {
+                output +=
+                    "\nThe captured files and runtime were restored, but opkg "
+                    "metadata and files introduced by the package were not. "
+                    "The transaction remains degraded and web upgrades stay "
+                    "blocked until the package state is repaired manually.\n";
             }
             bool journal_cleared = false;
-            if (!component_broken || rolled_back)
+            if (should_clear_nfqws_upgrade_journal(
+                    component_broken,
+                    package_mutation_started,
+                    rolled_back,
+                    termination_uncertain)) {
                 journal_cleared =
-                    clear_component_transaction(kNfqwsJournal);
+                    clear_nfqws_transaction();
+            }
             if (!journal_cleared) {
                 output +=
                     "\nThe transaction record was retained because the "
@@ -1677,23 +2188,47 @@ void register_nfqws_handler_impl(
             // response - a closed tab, a dropped connection - still learns the
             // operation ended rather than showing progress forever.
             progress.finish(!journal_cleared
-                                ? "journal_retained"
+                                ? termination_uncertain
+                                      ? "termination_uncertain"
+                                      : package_metadata_unverified
+                                            ? "metadata_unverified"
+                                            : "journal_retained"
                                 : component_broken
                                       ? (rolled_back ? "rolled_back" : "broken")
                                       : std::string{});
+            const bool firewall_reconcile_pending =
+                refresh_guard.request_now();
             return nlohmann::json{{"ok", status == 0 && !component_broken &&
                                           journal_cleared},
                                   {"rolled_back", rolled_back},
                                   {"journal_retained", !journal_cleared},
+                                  {"package_mutation_started",
+                                   package_mutation_started},
+                                  {"package_command_returned",
+                                   package_command_returned},
+                                  {"package_metadata_verified",
+                                   journal_cleared &&
+                                       !package_metadata_unverified},
+                                  {"termination_uncertain",
+                                   termination_uncertain},
+                                  {"recovery_attempted",
+                                   post_mutation.recovery_attempted},
+                                  {"recovery_blocked_reason",
+                                   termination_uncertain
+                                       ? "package_manager_termination_uncertain"
+                                       : recovery_blocked
+                                             ? "package_manager_quiescence_unverified"
+                                             : ""},
                                   {"output", output}, {"status", status},
                                   {"strategy_created", created},
                                   {"durable", durable},
                                   {"binary_outcome",
                                    package_binary_outcome_name(binary_outcome)},
-                                  {"config_outcome",
-                                   nfqws_config_outcome_name(config_outcome)},
-                                  {"runtime_outcome",
-                                   nfqws_runtime_outcome_name(runtime_outcome)},
+                                  {"footprint_verified", footprint_verified},
+                                  {"config_outcome", config_outcome_name},
+                                  {"runtime_outcome", runtime_outcome_name},
+                                  {"firewall_reconcile_pending",
+                                   firewall_reconcile_pending},
                                   {"warning", durable ? "" : kDurabilityWarning}}.dump();
         }
         if (action == "capture_restore_point") {
@@ -1802,7 +2337,7 @@ void register_nfqws_handler_impl(
             // process. If it throws or its connection dies, the daemon PID
             // surviving must not keep this record classified as in-flight.
             record.owner_is_operation_process = false;
-            write_component_transaction(kNfqwsJournal, record);
+            write_nfqws_transaction(record);
 
             TransactionProgress progress(ctx, "restore");
             NfqwsNetfilterRefreshGuard refresh_guard(ctx);
@@ -1876,20 +2411,33 @@ void register_nfqws_handler_impl(
             output +=
                 "Files added by the newer package were not removed; this "
                 "restores the captured bytes, not the exact former state.\n";
-            bool journal_cleared = false;
-            if (restored.complete && runtime_verified) {
-                journal_cleared =
-                    clear_component_transaction(kNfqwsJournal);
-            }
-            if (!journal_cleared) {
+            const bool files_restored =
+                restored.complete && runtime_verified;
+            // A captured-file restore is intentionally not an opkg
+            // transaction: it neither rewinds the package database nor
+            // removes paths introduced after the capture. Even when every
+            // captured byte and the runtime are verified, clearing this
+            // journal would make GET/check_update trust a newer opkg version
+            // for an older restored binary and could turn the next upgrade
+            // into a false no-op. Keep an explicit degraded state until a
+            // real package-manager repair reconciles both worlds.
+            const auto finalization =
+                finalize_captured_file_restore(files_restored);
+            const bool journal_cleared = finalization.clear_journal;
+            if (files_restored) {
+                output +=
+                    "The captured bytes and runtime were restored, but opkg "
+                    "metadata remains unverified. The transaction record was "
+                    "kept and web upgrades remain blocked until manual package "
+                    "repair.\n";
+            } else {
                 output +=
                     "The transaction record was kept because restoration or "
                     "runtime verification did not finish exactly; the next "
                     "package operation will refuse.\n";
             }
-            const bool ok =
-                restored.complete && runtime_verified && journal_cleared;
-            progress.finish(ok ? std::string{} : "incomplete");
+            const bool ok = finalization.ok;
+            progress.finish(finalization.terminal_state);
             const bool firewall_reconcile_pending =
                 refresh_guard.request_now();
             return nlohmann::json{{"ok", ok},
@@ -1898,6 +2446,9 @@ void register_nfqws_handler_impl(
                                   {"failed", restored.failed.size()},
                                   {"runtime_verified", runtime_verified},
                                   {"journal_retained", !journal_cleared},
+                                  {"package_metadata_verified",
+                                   finalization.package_metadata_verified},
+                                  {"files_restored", files_restored},
                                   {"exact_package_state", false},
                                   {"firewall_reconcile_pending",
                                    firewall_reconcile_pending}}
@@ -2145,6 +2696,105 @@ void register_nfqws_handler(ApiServer& server, ApiContext& ctx) {
 }
 
 #ifdef KEEN_PBR3_TESTING
+NfqwsPostUpgradeFootprintAssessment
+assess_nfqws_post_upgrade_footprint_for_testing(
+    const PackageFootprint& before,
+    std::function<PackageFootprint()> observe_after) {
+    const auto assessment =
+        assess_post_upgrade_footprint(before, observe_after);
+    return NfqwsPostUpgradeFootprintAssessment{
+        assessment.footprint,
+        assessment.diff,
+        assessment.binary_outcome,
+        assessment.recovery_required,
+        assessment.error,
+    };
+}
+
+NfqwsBoundedOpkgTestResult run_nfqws_bounded_opkg_for_testing(
+    std::function<ExecCaptureResult(
+        const std::vector<std::string>&, SafeExecTimeouts)> execute) {
+    const auto result = run_bounded_nfqws_opkg_upgrade(execute);
+    return NfqwsBoundedOpkgTestResult{
+        result.output,
+        result.status,
+        result.timed_out,
+        result.termination_uncertain,
+        result.upgrade_started,
+    };
+}
+
+NfqwsPostMutationGuardTestResult guard_nfqws_post_mutation_for_testing(
+    std::function<bool()> operation,
+    std::function<bool()> recover,
+    bool recovery_allowed) {
+    const auto result =
+        guard_nfqws_post_mutation(
+            operation,
+            recover,
+            [recovery_allowed] { return recovery_allowed; });
+    return NfqwsPostMutationGuardTestResult{
+        result.operation_completed,
+        result.component_broken,
+        result.recovery_attempted,
+        result.rolled_back,
+        result.operation_error,
+        result.recovery_error,
+    };
+}
+
+bool should_clear_nfqws_upgrade_journal_for_testing(
+    bool component_broken,
+    bool package_mutation_started,
+    bool rolled_back,
+    bool termination_uncertain) {
+    return should_clear_nfqws_upgrade_journal(
+        component_broken,
+        package_mutation_started,
+        rolled_back,
+        termination_uncertain);
+}
+
+bool nfqws_package_metadata_verified_for_testing(
+    bool transaction_present) {
+    return nfqws_package_metadata_verified(
+        transaction_present ? ComponentTransactionState::abandoned
+                            : ComponentTransactionState::none);
+}
+
+NfqwsCapturedRestoreFinalizationTestResult
+finalize_nfqws_captured_file_restore_for_testing(bool files_restored) {
+    const auto finalization =
+        finalize_captured_file_restore(files_restored);
+    return NfqwsCapturedRestoreFinalizationTestResult{
+        finalization.ok,
+        finalization.clear_journal,
+        finalization.package_metadata_verified,
+        finalization.terminal_state,
+    };
+}
+
+bool nfqws_optimistic_publish_survives_mutation_for_testing(
+    bool mutation_between_reads) {
+    const auto before_generation =
+        nfqws_transaction_generation().load(std::memory_order_acquire);
+    NfqwsTransactionSnapshot initial{
+        before_generation, ComponentTransactionStatus{}, true};
+    if (mutation_between_reads) {
+        // Each production mutation opens and closes this same two-step
+        // generation. Advancing by one completed mutation models a journal
+        // that appeared and disappeared between two otherwise-clean reads,
+        // without writing the fixed /opt test path.
+        nfqws_transaction_generation().fetch_add(
+            2, std::memory_order_acq_rel);
+    }
+    NfqwsTransactionSnapshot current{
+        nfqws_transaction_generation().load(std::memory_order_acquire),
+        ComponentTransactionStatus{},
+        true};
+    return nfqws_snapshot_allows_optimistic_publish(initial, current);
+}
+
 void register_nfqws_handler_for_test(
     ApiServer& server,
     ApiContext& ctx,

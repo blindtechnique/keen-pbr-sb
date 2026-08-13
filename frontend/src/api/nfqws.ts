@@ -15,6 +15,28 @@ export type NfqwsUpdateStatus = {
   latest: string
   available: boolean
   release_url?: string
+  package_metadata_verified?: boolean
+  blocked_reason?: string
+  transaction_state?: string
+}
+
+export type NfqwsUpdateNotice = "degraded" | "available" | "up_to_date"
+
+// `available: false` is not always an up-to-date verdict. After a captured
+// file restore the backend deliberately withholds current/latest because opkg
+// metadata may describe a different binary. Keep that fail-closed state ahead
+// of every optimistic toast, including if a malformed response also says an
+// update is available.
+export function classifyNfqwsUpdateNotice(
+  status: NfqwsUpdateStatus
+): NfqwsUpdateNotice {
+  if (
+    status.package_metadata_verified === false ||
+    Boolean(status.blocked_reason?.trim())
+  ) {
+    return "degraded"
+  }
+  return status.available ? "available" : "up_to_date"
 }
 
 export type NfqwsRotatorHistogramEntry = {

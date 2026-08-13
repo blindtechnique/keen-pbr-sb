@@ -30,7 +30,8 @@ const std::vector<StepUpProtectedRoute>& step_up_protected_routes() {
     //   POST /api/system/update           - applies a component update
     //   POST /api/system/update/rollback  - replaces the running component set
     //   POST /api/system/naive-component  - installs a component
-    //   POST /api/nfqws                   - installs or updates nfqws
+    //   POST /api/nfqws action=upgrade    - action-scoped below because this
+    //                                        route also serves routine UI work
     //   POST /api/backup/restore          - replaces configuration wholesale
     //   POST /api/backup/rollback         - the same, in the other direction
     //
@@ -66,19 +67,10 @@ const std::vector<StepUpProtectedRoute>& step_up_protected_routes() {
 }
 
 const std::vector<StepUpProtectedAction>& step_up_protected_actions() {
-    // POST /api/nfqws dispatches on an "action" field. Upgrade and restore
-    // install software; replacing the selected component restore point changes
-    // what a later downgrade will write. The rest read files, save strategies,
-    // clear logs and restart the service - things the panel does constantly
-    // and which must not ask for a password.
-    //
-    // `restore_component` is here for the same reason as `upgrade` and not a
-    // weaker one: putting an older binary back is installing software, and an
-    // attacker who can reach the panel would rather downgrade a component to a
-    // version with known holes than upgrade it.
-    //
-    // `import_bundle` was considered and left out: it writes nfqws lists and
-    // configuration, which is an edit like the others, not an install.
+    // POST /api/nfqws dispatches on an "action" field. These entries are
+    // enforced by ApiServer's body-handler wrapper after cpp-httplib has read
+    // the bounded request body and before the nfqws handler can mutate state.
+    // Pre-routing cannot enforce them because req.body does not exist there.
     static const std::vector<StepUpProtectedAction> actions = {
         {"POST", "/api/nfqws", "upgrade"},
         {"POST", "/api/nfqws", "capture_restore_point"},

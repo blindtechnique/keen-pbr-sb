@@ -12013,7 +12013,11 @@ Server::process_request(Stream &strm, const std::string &remote_addr,
     if (pre_routing_handler_ &&
         pre_routing_handler_(req, res) == HandlerResponse::Handled) {
       if (res.status == -1) { res.status = StatusCode::OK_200; }
-      return write_response(strm, close_connection, req, res);
+      auto written = write_response(strm, close_connection, req, res);
+      if (res.get_header_value("Connection") == "close") {
+        connection_closed = true;
+      }
+      return written;
     }
     // Find matching WebSocket handler
     for (const auto &entry : websocket_handlers_) {
@@ -12153,9 +12157,21 @@ Server::process_request(Stream &strm, const std::string &remote_addr,
     ret = write_response(strm, close_connection, req, res);
   }
 
-  // Drain any unconsumed request body to prevent request smuggling on
-  // keep-alive connections.
-  if (!req.body_consumed_ && detail::expect_content(req)) {
+  // write_response_core marks every error response Connection: close. Carry
+  // that wire-level decision into the server loop before considering a drain:
+  // a pre-routing rejection has intentionally not consumed the request body,
+  // and waiting for a malicious client to finish it would pin the worker until
+  // the read timeout even though the response already promised to close.
+  if (res.get_header_value("Connection") == "close") {
+    connection_closed = true;
+  }
+
+  // Drain an unconsumed body only when the connection can carry another
+  // request. A pre-routing security rejection must be able to answer and
+  // close immediately without waiting for a deliberately withheld credential
+  // body; closing the socket removes the request-smuggling boundary entirely.
+  if (!close_connection && !connection_closed && !req.body_consumed_ &&
+      detail::expect_content(req)) {
     int drain_status = 200; // required by read_content signature
     if (!detail::read_content(
             strm, req, payload_max_length_, drain_status, nullptr,

@@ -15,9 +15,11 @@ describe("public routing terminology", () => {
       "Добавить маршрут или группу"
     )
     expect(ruTranslation.transports.title).toBe("VPN и прокси")
-    expect(ruTranslation.transports.add).toBe("Добавить VPN или прокси")
+    expect(ruTranslation.transports.add).toBe(
+      "Добавить прокси или подключить VPN"
+    )
     expect(ruTranslation.transports.form.createTitle).toBe(
-      "Добавить VPN или прокси"
+      "Добавить прокси или подключить VPN"
     )
     expect(ruTranslation.nav.items.routesAndTunnels).toBe("VPN, прокси, группы")
     expect(ruTranslation.pages.routesAndTunnels.title).toBe(
@@ -37,8 +39,10 @@ describe("public routing terminology", () => {
     expect(enTranslation.pages.outbounds.title).toBe("Routes and groups")
     expect(enTranslation.pages.outbounds.actions.new).toBe("Add route or group")
     expect(enTranslation.transports.title).toBe("VPN and proxies")
-    expect(enTranslation.transports.add).toBe("Add VPN or proxy")
-    expect(enTranslation.transports.form.createTitle).toBe("Add VPN or proxy")
+    expect(enTranslation.transports.add).toBe("Add proxy or connect VPN")
+    expect(enTranslation.transports.form.createTitle).toBe(
+      "Add proxy or connect VPN"
+    )
     expect(enTranslation.nav.items.routesAndTunnels).toBe(
       "VPN, proxies, groups"
     )
@@ -51,6 +55,61 @@ describe("public routing terminology", () => {
     expect(enTranslation.pages.outboundUpsert.urltest.groupTitle).toBe(
       "Tier {{index}}"
     )
+  })
+})
+
+describe("nfqws updater truthfulness", () => {
+  test("does not claim the configured opkg source or target package is official", () => {
+    const russian = `${ruTranslation.nfqws.serviceHelp.upgrade} ${ruTranslation.nfqws.upgradeConfirmDescription}`
+    const english = `${enTranslation.nfqws.serviceHelp.upgrade} ${enTranslation.nfqws.upgradeConfirmDescription}`
+
+    expect(russian).not.toContain("официального репозитория")
+    expect(english.toLowerCase()).not.toContain("official repository")
+    expect(russian).toContain("настроенн")
+    expect(english).toContain("configured Entware")
+    expect(russian).toContain("криптографически не проверяет")
+    expect(english).toContain(
+      "does not pin or independently cryptographically verify"
+    )
+  })
+
+  test("does not promise a stale one-click rollback after the request", () => {
+    expect(ruTranslation.nfqws.automaticBackupDescription).toContain(
+      "отката в один клик нет"
+    )
+    expect(enTranslation.nfqws.automaticBackupDescription).toContain(
+      "no attributable one-click rollback"
+    )
+  })
+
+  test("does not describe normal guarded-opkg limitations as the unavailable reason", () => {
+    for (const text of [
+      ruTranslation.nfqws.upgradeUnavailableDescription,
+      enTranslation.nfqws.upgradeUnavailableDescription,
+    ]) {
+      expect(text).not.toContain("IPK")
+      expect(text.toLowerCase()).not.toContain("pin")
+      expect(text.toLowerCase()).not.toContain("reboot")
+      expect(text.toLowerCase()).not.toContain("перезагруз")
+    }
+    expect(ruTranslation.nfqws.upgradeMetadataUnverifiedDescription).toContain(
+      "opkg по SSH"
+    )
+    expect(enTranslation.nfqws.upgradeMetadataUnverifiedDescription).toContain(
+      "opkg over SSH"
+    )
+  })
+
+  test("discloses before file restore that web updates require manual package repair", () => {
+    const russian = `${ruTranslation.nfqws.restoreComponentConfirmDescription} ${ruTranslation.nfqws.restoreComponentLimitDescription}`
+    const english = `${enTranslation.nfqws.restoreComponentConfirmDescription} ${enTranslation.nfqws.restoreComponentLimitDescription}`
+
+    expect(russian).toContain("будут заблокированы")
+    expect(russian).toContain("вручную")
+    expect(russian).toContain("opkg по SSH")
+    expect(english).toContain("stay blocked")
+    expect(english).toContain("manually")
+    expect(english).toContain("opkg over SSH")
   })
 })
 

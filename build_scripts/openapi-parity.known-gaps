@@ -14,6 +14,9 @@
 POST /api/auth/login
 POST /api/auth/logout
 POST /api/auth/settings
+# Bodyless, route-bound grant preflight used before the browser constructs an
+# auth-settings credential body; it shares the same pending auth schema slice.
+POST /api/auth/settings/step-up-preflight
 # Реавторизация поверх сессии для package/NDMS операций. Записан сюда, а не
 # описан по отдельности, чтобы весь блок auth получил схему одним срезом:
 # описать один эндпоинт из пяти — значит закрепить половину контракта, по

@@ -401,6 +401,8 @@ set(SOURCES
   src/keenetic/internal_vpn_service_resolver.cpp
   src/keenetic/internal_vpn_ingress_resolver.cpp
   src/keenetic/ndms_interface_management.cpp
+  src/keenetic/ndms_native_management_preflight.cpp
+  src/keenetic/ndms_native_tunnel_import.cpp
   src/keenetic/ndms_rci_observation.cpp
   src/keenetic/ndms_rci_restorable_snapshot.cpp
   src/keenetic/ndms_web_endpoint.cpp
@@ -514,6 +516,7 @@ set(SOURCES
 if(WITH_API)
   list(APPEND SOURCES
     src/api/server.cpp
+    src/api/trusted_local_connection.cpp
     src/api/auth_runtime.cpp
     src/api/keenetic_auth.cpp
     src/api/connection_query.cpp

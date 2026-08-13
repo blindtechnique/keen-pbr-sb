@@ -176,19 +176,15 @@ TEST_CASE("the method is part of the decision") {
 TEST_CASE("a spare slash or a query string is not a way past the guard") {
     CHECK(requires_step_up("POST", "/api/nfqws/", "upgrade"));
     CHECK(requires_step_up("POST", "/api/nfqws///", "upgrade"));
-    // Normalisation must also reach the check that decides whether to read the
-    // body at all, or a spare slash would skip the action lookup entirely.
     CHECK(path_dispatches_on_action("/api/nfqws///"));
     CHECK(requires_step_up("POST", "/api/backup?groups=all"));
     CHECK(requires_step_up("POST", "/api/backup/restore/?force=1"));
 }
 
-TEST_CASE("the everyday nfqws actions never ask for a password") {
+TEST_CASE("ordinary nfqws actions remain outside the privileged action set") {
     // Every action POST /api/nfqws dispatches on, taken from the handler.
-    // Guarding the route wholesale put a password prompt in front of reading a
-    // list and opening settings - the owner found it by using the panel, and
-    // nothing here would have caught it, because the route list could not say
-    // that one route is sixteen operations.
+    // These must not prompt from the overview controls or background update
+    // polling. The body-aware server wrapper gates the privileged set below.
     const std::vector<std::string> everyday = {
         "check_update", "read_file",      "save_file",      "create_file",
         "delete_file",  "clear_log",      "service",        "save_strategy",
@@ -198,41 +194,27 @@ TEST_CASE("the everyday nfqws actions never ask for a password") {
 
     for (const auto& action : everyday) {
         CHECK_MESSAGE(!requires_step_up("POST", "/api/nfqws", action),
-                      "everyday nfqws action now demands a step-up: "
+                      "ordinary nfqws action unexpectedly needs step-up: "
                           << action);
     }
-}
-
-TEST_CASE("installing nfqws software is what demands a step-up") {
     CHECK(requires_step_up("POST", "/api/nfqws", "upgrade"));
-    // Replacing the selected recovery generation changes what a later
-    // downgrade writes onto the router and the snapshot contains private
-    // configuration, so it shares the package-operation boundary.
     CHECK(requires_step_up("POST", "/api/nfqws",
                            "capture_restore_point"));
-    // Putting an older binary back is installing software too, and an attacker
-    // who can reach the panel would rather downgrade a component to a version
-    // with known holes than upgrade it.
     CHECK(requires_step_up("POST", "/api/nfqws", "restore_component"));
-    // Reading the route without naming an action must not demand one either,
-    // or the same breakage returns through the front door.
     CHECK_FALSE(requires_step_up("POST", "/api/nfqws", ""));
     CHECK_FALSE(requires_step_up("POST", "/api/nfqws"));
 }
 
-TEST_CASE("only the multiplexing route needs its body read") {
+TEST_CASE("only the nfqws body-handler wrapper needs action admission") {
     CHECK(path_dispatches_on_action("/api/nfqws"));
     CHECK(path_dispatches_on_action("/api/nfqws/"));
-    // Everything else is decided by method and path, so the pre-routing guard
-    // must not parse their bodies to find out.
     CHECK_FALSE(path_dispatches_on_action("/api/backup"));
     CHECK_FALSE(path_dispatches_on_action("/api/config"));
     CHECK_FALSE(path_dispatches_on_action("/api/system/update"));
 }
 
-TEST_CASE("an action-scoped entry names an action the handler dispatches on") {
-    // The handler's own list, so a protected action that no longer exists -
-    // renamed, removed - fails here instead of silently guarding nothing.
+TEST_CASE("every protected nfqws action is an existing handler action") {
+    const auto& registered = registered_privileged_routes();
     const std::vector<std::string> dispatched = {
         "check_update", "read_file",       "save_file",     "create_file",
         "delete_file",  "clear_log",       "service",       "upgrade",
@@ -240,8 +222,17 @@ TEST_CASE("an action-scoped entry names an action the handler dispatches on") {
         "import_lists", "import_bundle",   "check_url",     "restore_component",
         "capture_restore_point",
     };
-
     for (const auto& entry : step_up_protected_actions()) {
+        const auto route = std::find_if(
+            registered.begin(), registered.end(),
+            [&](const StepUpProtectedRoute& known) {
+                return known.method == entry.method &&
+                       known.path == entry.path;
+            });
+        CHECK_MESSAGE(
+            route != registered.end(),
+            "protected action serves no such route: "
+                << entry.method << " " << entry.path);
         CHECK_MESSAGE(
             std::find(dispatched.begin(), dispatched.end(), entry.action) !=
                 dispatched.end(),

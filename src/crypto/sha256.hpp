@@ -10,9 +10,18 @@
 
 namespace keen_pbr3 {
 
-class Sha256 {
+class Sha256 final {
 public:
     Sha256() { reset(); }
+    ~Sha256() noexcept { secure_zero_memory(this, sizeof(*this)); }
+
+    // Hash state can contain a raw, not-yet-transformed tail. Do not allow
+    // implicit copies (including copy-like moves) which would create another
+    // lifetime whose cleanup is easy to miss.
+    Sha256(const Sha256&) = delete;
+    Sha256& operator=(const Sha256&) = delete;
+    Sha256(Sha256&&) = delete;
+    Sha256& operator=(Sha256&&) = delete;
 
     void update(const void* data, size_t length) {
         const auto* bytes = static_cast<const uint8_t*>(data);
@@ -49,6 +58,13 @@ public:
     }
 
 private:
+    static void secure_zero_memory(void* memory, size_t length) noexcept {
+        auto* bytes = static_cast<volatile uint8_t*>(memory);
+        for (size_t index = 0; index < length; ++index) {
+            bytes[index] = 0;
+        }
+    }
+
     void reset() {
         buffer_length_ = 0;
         bit_length_ = 0;
@@ -118,6 +134,19 @@ private:
         state_[5] += f;
         state_[6] += g;
         state_[7] += h;
+
+        // The first schedule words can be the input bytes verbatim (for a
+        // 32-byte WireGuard key, half of the block). Clear the stack copy as
+        // soon as the state has absorbed it.
+        secure_zero_memory(words, sizeof(words));
+        secure_zero_memory(&a, sizeof(a));
+        secure_zero_memory(&b, sizeof(b));
+        secure_zero_memory(&c, sizeof(c));
+        secure_zero_memory(&d, sizeof(d));
+        secure_zero_memory(&e, sizeof(e));
+        secure_zero_memory(&f, sizeof(f));
+        secure_zero_memory(&g, sizeof(g));
+        secure_zero_memory(&h, sizeof(h));
     }
 
     void finish(uint8_t* digest) {

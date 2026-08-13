@@ -649,17 +649,15 @@ export function canonicalNfqwsProfileTier(
  *
  * Пока пользовательской копии нет, расхождению взяться неоткуда: правка
  * встроенной стратегии идёт через `save_strategy`, который эту копию и
- * создаёт, а применение пишет только `nfqws2.conf`. Проверка на `overridden`
- * нужна потому, что на роутере `canonical` приходит ложным и без копии:
- * backend сравнивает пакетный текст с текстом, где уже подставлен
- * `ISP_INTERFACE`, а нормализация идентичности трогает только строки
- * телеметрии ротатора.
+ * создаёт, а применение пишет только `nfqws2.conf`. Для копии совпадение
+ * подтверждает только явный `canonical: true`: старый backend без этого поля
+ * не может доказать, что профиль не менялся.
  */
 export function nfqwsProfileMatchesPackage(
   strategy: NfqwsProfileCandidate
 ): boolean {
   if (!strategy.overridden) return true
-  return strategy.canonical !== false
+  return strategy.canonical === true
 }
 
 export type NfqwsBuiltinStrategyDisplayKey =

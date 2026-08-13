@@ -132,9 +132,11 @@ std::vector<NdmsWebAddress> parse_ndms_web_addresses(
         const auto connected = bool_value(object, "connected");
         const auto global = bool_value(object, "global");
         const auto admin_only = bool_value(object, "admin-only");
-        if (!connected.value_or(false) ||
-            global.value_or(false) ||
-            admin_only.value_or(false)) {
+        // These fields are security evidence, not optional display metadata.
+        // Missing or malformed values must not be interpreted as safe.
+        if (!connected.has_value() || !*connected ||
+            !global.has_value() || *global ||
+            !admin_only.has_value() || *admin_only) {
             continue;
         }
 

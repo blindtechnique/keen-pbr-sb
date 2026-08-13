@@ -601,18 +601,20 @@ export function TransportConfigForm({
             </Field>
           </div>
         ) : null}
-        <div className="flex items-center justify-between gap-3 py-1">
-          <Label htmlFor="transport-auto-start">
-            {t("transports.form.autoStart")}
-          </Label>
-          <Switch
-            checked={spec.auto_start ?? false}
-            id="transport-auto-start"
-            onCheckedChange={(checked) =>
-              setSpec({ ...spec, auto_start: checked })
-            }
-          />
-        </div>
+        {isSingBox ? (
+          <div className="flex items-center justify-between gap-3 py-1">
+            <Label htmlFor="transport-auto-start">
+              {t("transports.form.autoStart")}
+            </Label>
+            <Switch
+              checked={spec.auto_start ?? false}
+              id="transport-auto-start"
+              onCheckedChange={(checked) =>
+                setSpec({ ...spec, auto_start: checked })
+              }
+            />
+          </div>
+        ) : null}
         {/* Выбор страны доступен и в диалоге (просьба владельца): флаг у
             туннеля помогает различать серверы, это не тонкая настройка. */}
         <Field label={t("transports.form.countryDisplay")}>

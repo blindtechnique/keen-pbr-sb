@@ -142,6 +142,16 @@ export function NativeInterfaceDetails({
         />
       </div>
 
+      <div className="space-y-1 rounded-md bg-muted/50 p-3 text-xs text-muted-foreground">
+        <p>{t("transports.nativeInterface.managementReadOnlyDescription")}</p>
+        <p>
+          <span className="font-medium text-foreground">
+            {t("transports.nativeInterface.managementBlockersTitle")}:
+          </span>{" "}
+          {managementReadinessTitle(managementReadiness?.blockers, t)}
+        </p>
+      </div>
+
       <InterfaceTraffic
         labels={{
           receive: t("transports.traffic.receive"),

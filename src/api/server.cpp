@@ -5,6 +5,7 @@
 #include "auth_runtime.hpp"
 #include "handler_remote_access.hpp"
 #include "keenetic_auth.hpp"
+#include "trusted_local_connection.hpp"
 
 #include "../config/config_writer.hpp"
 #include "step_up.hpp"
@@ -115,6 +116,16 @@ AuthLoginVerifiedHook& auth_login_verified_hook() {
     return hook;
 }
 
+std::mutex& credential_handler_admission_hook_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+CredentialHandlerAdmissionHook& credential_handler_admission_hook() {
+    static CredentialHandlerAdmissionHook hook;
+    return hook;
+}
+
 void invoke_auth_settings_publication_hook(
     AuthSettingsPublicationStage stage) {
     AuthSettingsPublicationHook hook;
@@ -154,6 +165,17 @@ void invoke_auth_login_verified_hook() {
         hook = auth_login_verified_hook();
     }
     if (hook) hook();
+}
+
+void invoke_credential_handler_admission_hook(
+    const std::string_view path) {
+    CredentialHandlerAdmissionHook hook;
+    {
+        const std::lock_guard<std::mutex> lock(
+            credential_handler_admission_hook_mutex());
+        hook = credential_handler_admission_hook();
+    }
+    if (hook) hook(path);
 }
 
 void configure_auth_settings_write_fault(
@@ -651,6 +673,51 @@ bool is_loopback_address(const std::string& address) {
     return address == "127.0.0.1" || address == "::1" || address == "::ffff:127.0.0.1";
 }
 
+#ifdef KEEN_PBR3_TESTING
+std::mutex& trusted_local_connection_evaluator_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+TrustedLocalConnectionEvaluatorForTesting&
+trusted_local_connection_evaluator() {
+    static TrustedLocalConnectionEvaluatorForTesting evaluator;
+    return evaluator;
+}
+
+std::optional<bool> invoke_trusted_local_connection_evaluator(
+    const std::string_view remote_address,
+    const std::string_view local_address,
+    const bool require_credential_freshness) {
+    TrustedLocalConnectionEvaluatorForTesting evaluator;
+    {
+        const std::lock_guard<std::mutex> lock(
+            trusted_local_connection_evaluator_mutex());
+        evaluator = trusted_local_connection_evaluator();
+    }
+    if (!evaluator) return std::nullopt;
+    return evaluator(
+        remote_address, local_address, require_credential_freshness);
+}
+#endif
+
+bool has_forwarding_identity_headers(const httplib::Request& request) {
+    // There is no configured trusted reverse-proxy boundary. cpp-httplib's
+    // remote/local addresses therefore come from the accepted socket, and a
+    // request carrying proxy identity hints is denied for the secret-import
+    // locality capability instead of trying to interpret any of them.
+    static constexpr std::array<const char*, 5> names{
+        "Forwarded",
+        "X-Forwarded-For",
+        "X-Forwarded-Host",
+        "X-Forwarded-Proto",
+        "X-Real-IP",
+    };
+    return std::any_of(
+        names.begin(), names.end(),
+        [&](const char* name) { return request.has_header(name); });
+}
+
 bool valid_local_transport_manager_request(const httplib::Request& request) {
     if (request.path != "/api/runtime/outbounds" || !is_loopback_address(request.remote_addr)) {
         return false;
@@ -682,6 +749,25 @@ bool valid_local_transport_manager_request(const httplib::Request& request) {
 bool is_sensitive_backup_path(const std::string& path) {
     return path == "/api/backup" || path.rfind("/api/backup/", 0) == 0;
 }
+
+struct AuthSettingsAdmission {
+    bool authenticated_session{false};
+    bool no_auth_loopback_recovery{false};
+};
+
+constexpr const char* kAuthSettingsAdmissionKey =
+    "keen-pbr.auth-settings-admission";
+
+struct CredentialAuthAdmission {
+    std::uint64_t auth_generation{0U};
+    std::string provider;
+    bool auth_enabled{false};
+    bool trusted_local_connection{false};
+    bool authenticated_session{false};
+};
+
+constexpr const char* kCredentialAuthAdmissionKey =
+    "keen-pbr.credential-auth-admission";
 
 } // namespace
 
@@ -737,10 +823,38 @@ void reset_auth_login_verified_hook_for_testing() {
         auth_login_verified_hook_mutex());
     auth_login_verified_hook() = {};
 }
+
+void set_credential_handler_admission_hook_for_testing(
+    CredentialHandlerAdmissionHook hook) {
+    const std::lock_guard<std::mutex> lock(
+        credential_handler_admission_hook_mutex());
+    credential_handler_admission_hook() = std::move(hook);
+}
+
+void reset_credential_handler_admission_hook_for_testing() {
+    const std::lock_guard<std::mutex> lock(
+        credential_handler_admission_hook_mutex());
+    credential_handler_admission_hook() = {};
+}
+
+void set_trusted_local_connection_evaluator_for_testing(
+    TrustedLocalConnectionEvaluatorForTesting evaluator) {
+    const std::lock_guard<std::mutex> lock(
+        trusted_local_connection_evaluator_mutex());
+    trusted_local_connection_evaluator() = std::move(evaluator);
+}
+
+void reset_trusted_local_connection_evaluator_for_testing() {
+    const std::lock_guard<std::mutex> lock(
+        trusted_local_connection_evaluator_mutex());
+    trusted_local_connection_evaluator() = {};
+}
 #endif
 
 struct ApiServer::Impl {
     httplib::Server server;
+    std::unique_ptr<TrustedLocalConnectionCache>
+        trusted_local_connection_cache;
     std::string host;
     int port;
     std::thread listen_thread;
@@ -778,6 +892,31 @@ struct ApiServer::Impl {
         auth_forward_capacity_for(kNdmsDefaultLockoutThreshold),
         kNdmsDefaultLockoutObservation};
 
+    TrustedLocalConnectionDecision evaluate_trusted_local_connection(
+        const httplib::Request& request,
+        const bool require_credential_freshness) {
+        if (has_forwarding_identity_headers(request)) return {};
+#ifdef KEEN_PBR3_TESTING
+        if (const auto overridden =
+                invoke_trusted_local_connection_evaluator(
+                    request.remote_addr,
+                    request.local_addr,
+                    require_credential_freshness)) {
+            return TrustedLocalConnectionDecision{
+                *overridden, *overridden ? 1U : 0U,
+                *overridden ? std::chrono::seconds{1}
+                            : std::chrono::seconds{}};
+        }
+#endif
+        return trusted_local_connection_cache != nullptr
+                   ? trusted_local_connection_cache->evaluate(
+                         request.remote_addr,
+                         request.local_addr,
+                         false,
+                         require_credential_freshness)
+                   : TrustedLocalConnectionDecision{};
+    }
+
     WebAuthConfig auth_snapshot() {
         std::lock_guard lock(auth_mutex);
         return auth;
@@ -795,9 +934,17 @@ struct ApiServer::Impl {
 
     void replace_auth(WebAuthConfig replacement) {
         apply_forward_budget(replacement);
-        std::lock_guard lock(auth_mutex);
-        auth = std::move(replacement);
-        advance_auth_generation_locked();
+        {
+            std::lock_guard lock(auth_mutex);
+            auth = std::move(replacement);
+            advance_auth_generation_locked();
+        }
+        // A locality proof must not cross an authentication publication.
+        // Network-only changes are bounded by the cache TTL; auth changes are
+        // synchronously invalidated here.
+        if (trusted_local_connection_cache) {
+            trusted_local_connection_cache->invalidate();
+        }
     }
 
     void close_authenticated_streams_locked() noexcept {
@@ -1151,6 +1298,23 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
     }
 
     impl_->replace_auth(load_web_auth_config());
+    impl_->trusted_local_connection_cache =
+        std::make_unique<TrustedLocalConnectionCache>(
+            []() -> std::optional<TrustedLocalConnectionSnapshot> {
+                // Fixed-loopback RCI supplies the private/non-global NDMS
+                // classification; the challenge probe proves this exact
+                // numeric address is the router's management service. One
+                // verified address is intentionally sufficient for the MVP.
+                const auto endpoint = discover_keenetic_auth_endpoint();
+                if (!endpoint) return std::nullopt;
+                auto interfaces =
+                    system_trusted_local_interface_addresses();
+                if (interfaces.empty()) return std::nullopt;
+                return TrustedLocalConnectionSnapshot{
+                    {endpoint->host},
+                    std::move(interfaces),
+                };
+            });
     impl_->server.Get("/api/auth/status", [state = impl_.get()](const httplib::Request& req,
                                                                   httplib::Response& res) {
         const auto auth = state->auth_snapshot();
@@ -1161,11 +1325,32 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
             const auto token = cookie_value(req, "keen_pbr_session");
             authenticated = state->sessions.contains(token);
         }
+        const bool credential_transport_preflight =
+            req.has_param("credential_transport") &&
+            req.get_param_value("credential_transport") == "1";
+        TrustedLocalConnectionDecision local_decision;
+        if (auth.enabled &&
+            (authenticated || auth.uses_router_account()) &&
+            state->trusted_local_connection_cache != nullptr) {
+            local_decision =
+                state->evaluate_trusted_local_connection(
+                    req, credential_transport_preflight);
+        }
         nlohmann::json response{
             {"enabled", auth.enabled},
             {"provider", auth.provider},
             {"authenticated", authenticated},
+            {"trusted_local_connection", local_decision.trusted},
         };
+        if (local_decision.trusted) {
+            // String encoding avoids JavaScript integer truncation. The
+            // remaining lifetime lets the browser expire the UI capability
+            // even if the next no-store status refresh fails.
+            response["trusted_local_connection_generation"] =
+                std::to_string(local_decision.evidence_generation);
+            response["trusted_local_connection_valid_for_seconds"] =
+                local_decision.valid_for.count();
+        }
         if (!auth.enabled) {
             response["no_auth_scope"] = "loopback_only";
             response["network_api_blocked"] = !loopback_request;
@@ -1191,10 +1376,44 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
     // caller cannot use this to probe credentials.
     impl_->server.Post("/api/auth/step-up", [state = impl_.get()](const httplib::Request& req,
                                                                      httplib::Response& res) {
+#ifdef KEEN_PBR3_TESTING
+        invoke_credential_handler_admission_hook(req.path);
+#endif
         auto auth_state = state->auth_snapshot_with_generation();
         auto auth = std::move(auth_state.first);
         auto auth_generation = auth_state.second;
         res.set_header("Cache-Control", "no-store");
+        const auto* admission =
+            res.user_data.get<CredentialAuthAdmission>(
+                kCredentialAuthAdmissionKey);
+        if (auth.uses_router_account() &&
+            (admission == nullptr ||
+             !admission->trusted_local_connection)) {
+            res.status = 403;
+            res.set_content(
+                R"({"error":"protected_secret_transport_unavailable"})",
+                "application/json");
+            return;
+        }
+        if (state->auth_publication_in_progress.load(
+                std::memory_order_acquire)) {
+            res.status = 503;
+            res.set_header("Retry-After", "1");
+            res.set_content(
+                R"({"error":"authentication settings are being published"})",
+                "application/json");
+            return;
+        }
+        if (admission == nullptr ||
+            admission->auth_generation != auth_generation ||
+            admission->provider != auth.provider ||
+            admission->auth_enabled != auth.enabled) {
+            res.status = 409;
+            res.set_content(
+                R"({"error":"authentication settings changed; retry step-up"})",
+                "application/json");
+            return;
+        }
         if (auth.misconfigured) {
             res.status = 503;
             res.set_content(
@@ -1206,6 +1425,13 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
             // are already open. Refusing here would only invent a control the
             // deployment does not have.
             res.set_content(R"({"granted":true})", "application/json");
+            return;
+        }
+        if (!admission->authenticated_session) {
+            res.status = 401;
+            res.set_content(
+                R"({"error":"authentication required"})",
+                "application/json");
             return;
         }
         const auto session = cookie_value(req, "keen_pbr_session");
@@ -1224,6 +1450,9 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                 R"({"error":"too many login attempts"})", "application/json");
             return;
         }
+        // Keenetic transport locality was already enforced by pre-routing,
+        // before cpp-httplib admitted req.body. Repeating the RTM/NDMS proof
+        // here would add network work without narrowing the accepted request.
         try {
             const auto body = nlohmann::json::parse(req.body);
             const auto username = body.value("username", std::string{});
@@ -1291,10 +1520,44 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
     });
     impl_->server.Post("/api/auth/login", [state = impl_.get()](const httplib::Request& req,
                                                                    httplib::Response& res) {
+#ifdef KEEN_PBR3_TESTING
+        invoke_credential_handler_admission_hook(req.path);
+#endif
         auto auth_state = state->auth_snapshot_with_generation();
         auto auth = std::move(auth_state.first);
         auto auth_generation = auth_state.second;
         res.set_header("Cache-Control", "no-store");
+        const auto* admission =
+            res.user_data.get<CredentialAuthAdmission>(
+                kCredentialAuthAdmissionKey);
+        if (auth.uses_router_account() &&
+            (admission == nullptr ||
+             !admission->trusted_local_connection)) {
+            res.status = 403;
+            res.set_content(
+                R"({"error":"protected_secret_transport_unavailable"})",
+                "application/json");
+            return;
+        }
+        if (state->auth_publication_in_progress.load(
+                std::memory_order_acquire)) {
+            res.status = 503;
+            res.set_header("Retry-After", "1");
+            res.set_content(
+                R"({"error":"authentication settings are being published"})",
+                "application/json");
+            return;
+        }
+        if (admission == nullptr ||
+            admission->auth_generation != auth_generation ||
+            admission->provider != auth.provider ||
+            admission->auth_enabled != auth.enabled) {
+            res.status = 409;
+            res.set_content(
+                R"({"error":"authentication settings changed; retry login"})",
+                "application/json");
+            return;
+        }
         if (auth.misconfigured) {
             res.status = 503;
             res.set_content(
@@ -1316,6 +1579,9 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                 "application/json");
             return;
         }
+        // Keenetic transport locality was already enforced by pre-routing,
+        // before cpp-httplib admitted req.body. The handler retains the rate
+        // limiter and credential verifier; it must not redo router discovery.
         try {
             const auto body = nlohmann::json::parse(req.body);
             const auto username = body.value("username", std::string{});
@@ -1388,6 +1654,17 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
     impl_->server.Post("/api/auth/settings", [state = impl_.get()](const httplib::Request& req,
                                                                     httplib::Response& res) {
         try {
+            const auto* admission =
+                res.user_data.get<AuthSettingsAdmission>(
+                    kAuthSettingsAdmissionKey);
+            if (admission == nullptr) {
+                res.status = 403;
+                res.set_header("Cache-Control", "no-store");
+                res.set_content(
+                    R"({"error":"authentication admission unavailable"})",
+                    "application/json");
+                return;
+            }
 #ifdef KEEN_PBR3_TESTING
             invoke_auth_settings_admission_hook();
 #endif
@@ -1395,15 +1672,33 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
             // one order when two administrators save at the same time.
             std::lock_guard update_lock(state->auth_update_mutex);
             const auto current_auth = state->auth_snapshot();
-            if (current_auth.enabled) {
+            // Queueing behind another publication can outlive the five-second
+            // credential evidence admitted by pre-routing. Revalidate the
+            // same accepted socket after serialization and before parsing,
+            // forwarding or publishing anything from the settings body.
+            const bool recovery_loopback =
+                admission->no_auth_loopback_recovery &&
+                !current_auth.enabled &&
+                is_loopback_address(req.remote_addr) &&
+                is_loopback_address(req.local_addr);
+            if (!recovery_loopback &&
+                !state->evaluate_trusted_local_connection(req, true).trusted) {
+                res.status = 403;
+                res.set_header("Cache-Control", "no-store");
+                res.set_content(
+                    R"({"error":"protected_secret_transport_unavailable"})",
+                    "application/json");
+                return;
+            }
+            if (admission->authenticated_session) {
                 // A second settings request can pass pre-routing with the old
                 // cookie, then wait here while the first rotation clears that
                 // session. Revalidate after serialization so revoked
                 // authority cannot publish another credential set.
                 const std::lock_guard epoch_lock(
                     state->auth_revocation_mutex);
-                if (!state->sessions.contains(cookie_value(
-                        req, "keen_pbr_session"))) {
+                if (!state->sessions.contains(
+                        cookie_value(req, "keen_pbr_session"))) {
                     res.status = 401;
                     res.set_header("Cache-Control", "no-store");
                     res.set_content(
@@ -1411,6 +1706,22 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                         "application/json");
                     return;
                 }
+                if (!state->step_up_grants.contains(
+                        cookie_value(req, "keen_pbr_session"))) {
+                    res.status = 403;
+                    res.set_header("Cache-Control", "no-store");
+                    res.set_content(
+                        R"({"error":"step_up_required"})",
+                        "application/json");
+                    return;
+                }
+            } else if (!recovery_loopback) {
+                res.status = 401;
+                res.set_header("Cache-Control", "no-store");
+                res.set_content(
+                    R"({"error":"authentication required"})",
+                    "application/json");
+                return;
             }
             const auto body = nlohmann::json::parse(req.body);
             const auto provider = body.value("provider", std::string{"local"});
@@ -1777,12 +2088,47 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                 }
             }
             res.set_content(response.dump(), "application/json");
+        } catch (const nlohmann::json::exception&) {
+            // Parser/type diagnostics can include fragments near the failure.
+            // Authentication settings may contain both the panel password and
+            // Keenetic credentials, so expose only a stable redacted error.
+            res.status = 400;
+            res.set_content(
+                R"({"error":"invalid authentication settings request"})",
+                "application/json");
         } catch (const std::exception& error) {
             res.status = 400;
             res.set_content(nlohmann::json{{"error", error.what()}}.dump(),
                             "application/json");
         }
     });
+    impl_->server.Post(
+        "/api/auth/settings/step-up-preflight",
+        [state = impl_.get()](const httplib::Request& req,
+                             httplib::Response& res) {
+            res.set_header("Cache-Control", "no-store");
+            const auto auth = state->auth_snapshot();
+            if (!auth.enabled) {
+                res.set_content(R"({"granted":true})", "application/json");
+                return;
+            }
+            const auto token = cookie_value(req, "keen_pbr_session");
+            if (!state->sessions.contains(token)) {
+                res.status = 401;
+                res.set_content(
+                    R"({"error":"authentication required"})",
+                    "application/json");
+                return;
+            }
+            if (!state->step_up_grants.contains(token)) {
+                res.status = 403;
+                res.set_content(
+                    R"({"error":"step_up_required"})",
+                    "application/json");
+                return;
+            }
+            res.set_content(R"({"granted":true})", "application/json");
+        });
 
     impl_->server.Post("/api/auth/logout", [state = impl_.get()](const httplib::Request& req,
                                                                     httplib::Response& res) {
@@ -1798,6 +2144,21 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
         // Set this before authentication so both successful responses and
         // rejected requests are excluded from browser and intermediary caches.
         if (is_sensitive_backup_path(req.path)) {
+            res.set_header("Cache-Control", "no-store");
+        }
+
+        const bool no_store_auth_path =
+            req.path == "/api/auth/status" ||
+            req.path == "/api/auth/login" ||
+            req.path == "/api/auth/step-up" ||
+            req.path == "/api/auth/settings" ||
+            req.path == "/api/auth/settings/step-up-preflight" ||
+            req.path == "/api/auth/logout";
+        if (no_store_auth_path) {
+            // This classification is independent of the eventual auth
+            // verdict. A 401/403/503 response at any early boundary must not
+            // leave authentication/session metadata in a browser or proxy
+            // cache.
             res.set_header("Cache-Control", "no-store");
         }
 
@@ -1819,9 +2180,62 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                 "application/json");
             return httplib::Server::HandlerResponse::Handled;
         }
-        const auto auth = state->auth_snapshot();
+        const auto auth_state = state->auth_snapshot_with_generation();
+        const auto& auth = auth_state.first;
+        const auto auth_generation = auth_state.second;
         const bool loopback_request =
             is_loopback_address(req.remote_addr);
+        const bool credential_handler_request =
+            req.method == "POST" &&
+            (req.path == "/api/auth/login" ||
+             req.path == "/api/auth/step-up");
+        if (credential_handler_request) {
+            res.user_data.set(
+                kCredentialAuthAdmissionKey,
+                CredentialAuthAdmission{
+                    auth_generation, auth.provider, auth.enabled, false,
+                    false});
+        }
+        const auto reject_unprotected_secret_transport = [&]() {
+            res.status = 403;
+            res.set_header("Cache-Control", "no-store");
+            res.set_header("Connection", "close");
+            res.set_content(
+                R"({"error":"protected_secret_transport_unavailable"})",
+                "application/json");
+            return httplib::Server::HandlerResponse::Handled;
+        };
+        if (auth.enabled && auth.uses_router_account() &&
+            req.method == "POST" && req.path == "/api/auth/login") {
+            auto login_attempt =
+                state->login_rate_limiter.reserve_attempt(req.remote_addr);
+            if (!login_attempt) {
+                res.status = 429;
+                res.set_header("Retry-After", "60");
+                res.set_content(
+                    R"({"error":"too many login attempts"})",
+                    "application/json");
+                return httplib::Server::HandlerResponse::Handled;
+            }
+            const auto locality =
+                state->evaluate_trusted_local_connection(req, true);
+            if (!locality.trusted) {
+                login_attempt->record_failure();
+                // This runs after headers but before cpp-httplib reads
+                // req.body. Router credentials must never enter daemon memory
+                // from WAN or a proxy-collapsed connection, even when a stale
+                // firewall rule still reaches this listener.
+                return reject_unprotected_secret_transport();
+            }
+            res.user_data.set(
+                kCredentialAuthAdmissionKey,
+                CredentialAuthAdmission{
+                    auth_generation, auth.provider, auth.enabled, true,
+                    false});
+            // The handler owns the attempt that measures credential validity.
+            // Releasing here avoids charging one browser submission twice.
+            login_attempt->release();
+        }
         if (api_request && !auth.enabled && !loopback_request &&
             req.path != "/api/auth/status") {
             const bool cleanup_unverified =
@@ -1839,6 +2253,13 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                 "application/json");
             return httplib::Server::HandlerResponse::Handled;
         }
+        if (!auth.enabled && req.method == "POST" &&
+            req.path == "/api/auth/settings" && loopback_request &&
+            is_loopback_address(req.local_addr)) {
+            res.user_data.set(
+                kAuthSettingsAdmissionKey,
+                AuthSettingsAdmission{false, true});
+        }
         if (!auth.enabled || !api_request ||
             req.path == "/api/auth/status" || req.path == "/api/auth/login" ||
             req.path == "/api/auth/logout") {
@@ -1850,33 +2271,61 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
             // Enforced here rather than in each privileged handler. A guard
             // every handler has to remember to call is a guard that a new
             // handler will not have.
-            //
-            // The body is parsed only for the paths that dispatch on an action
-            // field, and only to read that one field. Doing it for every
-            // request would put a JSON parse in front of the whole API to
-            // answer a question one route asks.
-            std::string step_up_action;
-            if (path_dispatches_on_action(req.path)) {
-                try {
-                    const auto body = nlohmann::json::parse(req.body);
-                    if (body.is_object()) {
-                        const auto found = body.find("action");
-                        if (found != body.end() && found->is_string()) {
-                            step_up_action = found->get<std::string>();
-                        }
-                    }
-                } catch (const std::exception&) {
-                    // An unparseable body names no action, so it needs no
-                    // step-up. The handler will reject it on its own terms
-                    // rather than being told it needs a password first.
-                }
-            }
-            if (requires_step_up(req.method, req.path, step_up_action) &&
+            if (requires_step_up(req.method, req.path) &&
                 !state->step_up_grants.contains(token)) {
                 res.status = 403;
                 res.set_content(
                     R"({"error":"step_up_required"})", "application/json");
                 return httplib::Server::HandlerResponse::Handled;
+            }
+            const bool credential_route =
+                req.method == "POST" &&
+                ((auth.uses_router_account() &&
+                  req.path == "/api/auth/step-up") ||
+                 req.path == "/api/auth/settings" ||
+                 req.path ==
+                     "/api/auth/settings/step-up-preflight");
+            if (credential_route) {
+                auto login_attempt =
+                    state->login_rate_limiter.reserve_attempt(req.remote_addr);
+                if (!login_attempt) {
+                    res.status = 429;
+                    res.set_header("Retry-After", "60");
+                    res.set_content(
+                        R"({"error":"too many login attempts"})",
+                        "application/json");
+                    return httplib::Server::HandlerResponse::Handled;
+                }
+                const auto locality =
+                    state->evaluate_trusted_local_connection(req, true);
+                if (!locality.trusted) {
+                    login_attempt->record_failure();
+                    // The settings body can switch from local to Keenetic
+                    // auth, so its provider cannot safely be discovered by
+                    // parsing first. Gate the whole route before body input.
+                    return reject_unprotected_secret_transport();
+                }
+                login_attempt->release();
+                if (req.path == "/api/auth/step-up") {
+                    res.user_data.set(
+                        kCredentialAuthAdmissionKey,
+                        CredentialAuthAdmission{
+                            auth_generation, auth.provider, auth.enabled,
+                            true, true});
+                }
+            } else if (req.method == "POST" &&
+                       req.path == "/api/auth/step-up") {
+                res.user_data.set(
+                    kCredentialAuthAdmissionKey,
+                    CredentialAuthAdmission{
+                        auth_generation, auth.provider, auth.enabled, false,
+                        true});
+            }
+            if (req.method == "POST" &&
+                req.path == "/api/auth/settings") {
+                res.user_data.set(
+                    kAuthSettingsAdmissionKey,
+                    AuthSettingsAdmission{true, false});
             }
             return httplib::Server::HandlerResponse::Unhandled;
         }
@@ -1941,13 +2390,59 @@ void ApiServer::post(const std::string& path, RouteHandler handler) {
 }
 
 void ApiServer::post(const std::string& path, BodyRouteHandler handler) {
-    impl_->server.Post(path, [h = std::move(handler)](const httplib::Request& req,
-                                                       httplib::Response& res) {
+    impl_->server.Post(path, [state = impl_.get(), h = std::move(handler)](
+                                 const httplib::Request& req,
+                                 httplib::Response& res) {
         const auto trace_id = allocate_trace_id();
         ScopedTraceContext trace_scope(trace_id);
         const auto started_at = std::chrono::steady_clock::now();
         log_request_start(req, "api");
         try {
+            // Action-multiplexed routes cannot be classified by pre-routing:
+            // cpp-httplib deliberately invokes it before reading req.body.
+            // Their bodies are not credential-bearing, so parse only the
+            // bounded action after authenticated admission and enforce the
+            // grant before the application handler can mutate anything.
+            if (path_dispatches_on_action(req.path)) {
+                std::string action;
+                try {
+                    const auto document = nlohmann::json::parse(req.body);
+                    if (document.is_object()) {
+                        const auto found = document.find("action");
+                        if (found != document.end() && found->is_string()) {
+                            action = found->get<std::string>();
+                        }
+                    }
+                } catch (const std::exception&) {
+                    // The application handler owns malformed JSON errors. An
+                    // absent action has no privileged action-specific bypass.
+                }
+                if (requires_step_up(req.method, req.path, action)) {
+                    const auto auth = state->auth_snapshot();
+                    if (auth.enabled) {
+                        const auto token =
+                            cookie_value(req, "keen_pbr_session");
+                        if (!state->sessions.contains(token)) {
+                            res.status = 401;
+                            res.set_content(
+                                R"({"error":"authentication required"})",
+                                "application/json");
+                            log_request_end(
+                                req, "api", res.status, started_at);
+                            return;
+                        }
+                        if (!state->step_up_grants.contains(token)) {
+                            res.status = 403;
+                            res.set_content(
+                                R"({"error":"step_up_required"})",
+                                "application/json");
+                            log_request_end(
+                                req, "api", res.status, started_at);
+                            return;
+                        }
+                    }
+                }
+            }
             std::string result = h(req.body);
             res.set_content(result, "application/json");
             log_request_end(req, "api", res.status == 0 ? 200 : res.status, started_at);
@@ -2313,6 +2808,27 @@ void ApiServer::stop() {
 bool ApiServer::listening() const {
     return impl_->is_listening.load(std::memory_order_acquire) && impl_->server.is_running();
 }
+
+#ifdef KEEN_PBR3_TESTING
+void ApiServer::revoke_step_up_grant_for_testing(const std::string& token) {
+    impl_->step_up_grants.erase(token);
+}
+
+void ApiServer::publish_auth_provider_for_testing(
+    const std::string& provider,
+    const std::string& keenetic_endpoint) {
+    auto replacement = impl_->auth_snapshot();
+    replacement.enabled = true;
+    replacement.misconfigured = false;
+    replacement.provider = provider;
+    if (provider == "keenetic") {
+        replacement.keenetic_endpoint = keenetic_endpoint;
+        replacement.keenetic_endpoint_mode = "manual";
+        replacement.endpoint_unavailable = false;
+    }
+    impl_->replace_auth(std::move(replacement));
+}
+#endif
 
 } // namespace keen_pbr3
 

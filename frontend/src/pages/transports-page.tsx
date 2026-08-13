@@ -65,6 +65,7 @@ import { SectionHeading } from "@/components/shared/section-heading"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
 import { NativeInterfaceDetails } from "@/components/transports/native-interface-details"
+import { NativeWireGuardImportCard } from "@/components/transports/native-wireguard-import-card"
 import { NativeRouteOffer } from "@/components/transports/native-route-offer"
 import { InterfaceTraffic } from "@/components/transports/interface-traffic"
 import { TransportLatencyPill } from "@/components/transports/transport-latency-pill"
@@ -493,8 +494,7 @@ export function TransportsPage({
     // making it silently do nothing.
     const boundTag = (keenConfig?.outbounds ?? []).find(
       (outbound) =>
-        outbound.type === "interface" &&
-        outbound.interface === interfaceName
+        outbound.type === "interface" && outbound.interface === interfaceName
     )?.tag
     runProbeMutation.mutate(boundTag, {
       onError: () => setRequestedProbe(null),
@@ -1113,7 +1113,7 @@ export function TransportsPage({
             transmitted: t("transports.traffic.transmitted"),
             chart: t("transports.traffic.chart"),
             noTraffic: t("transports.traffic.noTraffic"),
-          stale: t("transports.traffic.stale"),
+            stale: t("transports.traffic.stale"),
           }}
           locale={i18n.resolvedLanguage ?? i18n.language}
           // График живёт только на дашборде: рядом с цепочкой зависимостей он
@@ -1649,6 +1649,14 @@ export function TransportsPage({
         disabled={routeOfferMutation.isPending || !keenConfig}
         onCreate={createRouteFromOffer}
         onDismiss={dismissRouteOffer}
+      />
+
+      <NativeWireGuardImportCard
+        requiredGuards={
+          ndmsInventoryQuery.data?.status === 200
+            ? ndmsInventoryQuery.data.data.required_guards
+            : []
+        }
       />
 
       {transportTabs.length > 1 ? (

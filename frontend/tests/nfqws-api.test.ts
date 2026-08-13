@@ -1,6 +1,6 @@
 import { describe, expect, spyOn, test } from "bun:test"
 
-import { nfqwsAction } from "../src/api/nfqws"
+import { classifyNfqwsUpdateNotice, nfqwsAction } from "../src/api/nfqws"
 import { resetStepUpState, setStepUpPrompt } from "../src/lib/step-up"
 
 function jsonResponse(value: unknown, status: number): Response {
@@ -35,11 +35,7 @@ describe("nfqws API errors", () => {
         action: "capture_restore_point",
       })
       expect(result.ok).toBe(true)
-      expect(urls).toEqual([
-        "/api/nfqws",
-        "/api/auth/step-up",
-        "/api/nfqws",
-      ])
+      expect(urls).toEqual(["/api/nfqws", "/api/auth/step-up", "/api/nfqws"])
     } finally {
       resetStepUpState()
       fetchSpy.mockRestore()
@@ -102,5 +98,61 @@ describe("nfqws API errors", () => {
     } finally {
       fetchSpy.mockRestore()
     }
+  })
+})
+
+describe("nfqws update verdict", () => {
+  test("never calls a retained or metadata-unverified package state up to date", () => {
+    expect(
+      classifyNfqwsUpdateNotice({
+        ok: true,
+        current: "",
+        latest: "",
+        available: false,
+        package_metadata_verified: false,
+        blocked_reason: "nfqws_package_metadata_unverified",
+        transaction_state: "abandoned",
+      })
+    ).toBe("degraded")
+
+    expect(
+      classifyNfqwsUpdateNotice({
+        ok: true,
+        current: "1.0.0",
+        latest: "1.1.0",
+        available: true,
+        package_metadata_verified: false,
+      })
+    ).toBe("degraded")
+
+    expect(
+      classifyNfqwsUpdateNotice({
+        ok: true,
+        current: "",
+        latest: "",
+        available: false,
+        blocked_reason: "nfqws_package_metadata_unverified",
+      })
+    ).toBe("degraded")
+  })
+
+  test("keeps verified and legacy update verdicts", () => {
+    expect(
+      classifyNfqwsUpdateNotice({
+        ok: true,
+        current: "1.0.0",
+        latest: "1.1.0",
+        available: true,
+        package_metadata_verified: true,
+      })
+    ).toBe("available")
+    expect(
+      classifyNfqwsUpdateNotice({
+        ok: true,
+        current: "1.1.0",
+        latest: "1.1.0",
+        available: false,
+      })
+    ).toBe("up_to_date")
   })
 })
