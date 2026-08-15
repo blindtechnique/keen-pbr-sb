@@ -117,7 +117,7 @@ std::string ndms_native_ownership_revision(
     update_field(hasher, record.marker);
     update_field(hasher, kind_name(record.kind));
     update_field(hasher, record.target_full_revision);
-    return hasher.hex_digest();
+    return std::string("ndms-native-owner-v1-") + hasher.hex_digest();
 }
 
 NdmsNativeOwnershipStore::NdmsNativeOwnershipStore(

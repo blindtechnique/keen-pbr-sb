@@ -54,6 +54,53 @@ NdmsNativeImportRecoveryAdmission admit_ndms_native_import_recovery(
     const NdmsNativeImportWalStore& store,
     const NdmsNativeImportWalRecord& classified_record,
     const NdmsNativeImportRecoveryObservation& observation) {
+    auto admission = NdmsNativeImportRecoveryLease::admit_common(
+        store, classified_record);
+    if (admission.state !=
+        NdmsNativeImportRecoveryAdmissionState::admitted) {
+        return admission;
+    }
+    // Re-derived from the re-read record under the lease, never carried over
+    // from the caller's earlier call - so the action the lease authorizes is
+    // provably about the bytes the store holds right now.
+    const auto action = classify_ndms_native_import_recovery(
+        classified_record, observation);
+    if (action == NdmsNativeImportRecoveryAction::
+                      retry_read_only_observation ||
+        action == NdmsNativeImportRecoveryAction::block_unknown) {
+        admission = NdmsNativeImportRecoveryAdmission{};
+        admission.state = NdmsNativeImportRecoveryAdmissionState::
+            action_not_actionable;
+        return admission;
+    }
+    admission.action = action;
+    return admission;
+}
+
+NdmsNativeImportRecoveryAdmission admit_ndms_native_import_forward(
+    const NdmsNativeImportWalStore& store,
+    const NdmsNativeImportWalRecord& classified_record,
+    const NdmsNativeImportForwardCompletion& completion) {
+    // Judged before the lease is even attempted: an unactionable completion
+    // has nothing to serialize, and the enriched record must still be about
+    // the transaction the CAS will verify.
+    if (!completion.actionable() ||
+        completion.enriched.transaction_id !=
+            classified_record.transaction_id ||
+        completion.enriched.phase != classified_record.phase) {
+        NdmsNativeImportRecoveryAdmission admission;
+        admission.state = NdmsNativeImportRecoveryAdmissionState::
+            action_not_actionable;
+        return admission;
+    }
+    return NdmsNativeImportRecoveryLease::admit_common(
+        store, classified_record);
+}
+
+NdmsNativeImportRecoveryAdmission
+NdmsNativeImportRecoveryLease::admit_common(
+    const NdmsNativeImportWalStore& store,
+    const NdmsNativeImportWalRecord& classified_record) {
     NdmsNativeImportRecoveryAdmission admission;
 
     const auto path = lease_path(store);
@@ -109,21 +156,7 @@ NdmsNativeImportRecoveryAdmission admit_ndms_native_import_recovery(
         return admission;
     }
 
-    // Re-derived from the re-read record under the lease, never carried over
-    // from the caller's earlier call - so the action the lease authorizes is
-    // provably about the bytes the store holds right now.
-    const auto action =
-        classify_ndms_native_import_recovery(*loaded.record, observation);
-    if (action == NdmsNativeImportRecoveryAction::
-                      retry_read_only_observation ||
-        action == NdmsNativeImportRecoveryAction::block_unknown) {
-        admission.state = NdmsNativeImportRecoveryAdmissionState::
-            action_not_actionable;
-        return admission;
-    }
-
     admission.state = NdmsNativeImportRecoveryAdmissionState::admitted;
-    admission.action = action;
     admission.lease = std::move(lease);
     return admission;
 }

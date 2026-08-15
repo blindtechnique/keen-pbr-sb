@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ndms_native_import_forward_plan.hpp"
 #include "ndms_native_import_recovery_observation.hpp"
 #include "ndms_native_import_wal_store.hpp"
 
@@ -50,6 +51,19 @@ private:
         const NdmsNativeImportWalStore&,
         const NdmsNativeImportWalRecord&,
         const NdmsNativeImportRecoveryObservation&);
+    friend NdmsNativeImportRecoveryAdmission
+    admit_ndms_native_import_forward(
+        const NdmsNativeImportWalStore&,
+        const NdmsNativeImportWalRecord&,
+        const NdmsNativeImportForwardCompletion&);
+
+    // The shared half of both entrances: the lease, the bounded inventory,
+    // the validating re-read and the byte-exact CAS. A private member so the
+    // only code that can adopt a descriptor into a lease is the code the two
+    // entrances share.
+    static NdmsNativeImportRecoveryAdmission admit_common(
+        const NdmsNativeImportWalStore& store,
+        const NdmsNativeImportWalRecord& classified_record);
 
     NdmsNativeImportRecoveryLease() = default;
     explicit NdmsNativeImportRecoveryLease(int descriptor) noexcept;
@@ -103,5 +117,18 @@ NdmsNativeImportRecoveryAdmission admit_ndms_native_import_recovery(
 
 const char* ndms_native_import_recovery_admission_state_name(
     NdmsNativeImportRecoveryAdmissionState state) noexcept;
+
+// The forward-completion entrance to the same lease. Recovery and forward
+// completion must exclude each other - both act on the same transaction, and
+// a rollback racing a completion is two writers deciding opposite fates for
+// one interface. Identical inventory and byte-exact CAS against the record
+// the plan was made from; actionability comes from the completion's own plan
+// rather than the recovery classifier, whose verdicts describe recovery and
+// nothing else. `action` stays empty in the admitted result: the plan is the
+// authority here.
+NdmsNativeImportRecoveryAdmission admit_ndms_native_import_forward(
+    const NdmsNativeImportWalStore& store,
+    const NdmsNativeImportWalRecord& classified_record,
+    const NdmsNativeImportForwardCompletion& completion);
 
 } // namespace keen_pbr3

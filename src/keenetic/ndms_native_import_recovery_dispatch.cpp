@@ -1,19 +1,23 @@
 #include "ndms_native_import_recovery_dispatch.hpp"
 
 #include "ndms_native_create_policy.hpp"
+#include "ndms_native_ownership_store.hpp"
 
 namespace keen_pbr3 {
 
 namespace {
 
-bool plan_deletes(const NdmsNativeImportRecoveryPlan& plan) {
+bool plan_contains(const NdmsNativeImportRecoveryPlan& plan,
+                   const NdmsNativeImportRecoveryStep wanted) {
     for (const auto step : plan.steps) {
-        if (step ==
-            NdmsNativeImportRecoveryStep::delete_exact_owned_target) {
-            return true;
-        }
+        if (step == wanted) return true;
     }
     return false;
+}
+
+bool plan_deletes(const NdmsNativeImportRecoveryPlan& plan) {
+    return plan_contains(
+        plan, NdmsNativeImportRecoveryStep::delete_exact_owned_target);
 }
 
 std::optional<NdmsNativeImportWalPhase> phase_of(
@@ -43,7 +47,8 @@ dispatch_ndms_native_import_recovery(
     const NdmsNativeImportWalRecord& record,
     const NdmsNativeImportRecoveryPlan& plan,
     const std::optional<std::string>& marker_target,
-    const NdmsNativeImportRecoveryDeleteExecutor& delete_executor) {
+    const NdmsNativeImportRecoveryDeleteExecutor& delete_executor,
+    NdmsNativeOwnershipStore* const ownership_store) {
     NdmsNativeImportRecoveryDispatchResult result;
 
     if (!lease.held()) {
@@ -73,6 +78,14 @@ dispatch_ndms_native_import_recovery(
         }
     }
 
+    if (plan_contains(plan,
+                      NdmsNativeImportRecoveryStep::publish_ownership) &&
+        ownership_store == nullptr) {
+        result.state = NdmsNativeImportRecoveryDispatchState::
+            ownership_store_missing;
+        return result;
+    }
+
     auto current = record;
     for (const auto step : plan.steps) {
         bool step_ok = false;
@@ -93,11 +106,27 @@ dispatch_ndms_native_import_recovery(
                        NdmsNativeImportRecoveryStep::remove_wal_record) {
                 store.remove_exact(current);
                 step_ok = true;
-            } else {
-                // publish_ownership belongs to the forward coordinator; a
-                // recovery plan carrying it is a contradiction this
-                // dispatcher refuses rather than half-implements.
-                step_ok = false;
+            } else if (step ==
+                       NdmsNativeImportRecoveryStep::publish_ownership) {
+                // The claim is built from the record being dispatched, never
+                // from caller-supplied fields: what ownership asserts is what
+                // the WAL proved.
+                if (current.created_interface.has_value() &&
+                    current.target_full_revision.has_value()) {
+                    NdmsNativeOwnershipRecord claim;
+                    claim.interface_name = *current.created_interface;
+                    claim.transaction_id = current.transaction_id;
+                    claim.marker = current.marker;
+                    claim.kind = current.kind;
+                    claim.target_full_revision =
+                        *current.target_full_revision;
+                    // Carried forward in memory so the very next WAL advance
+                    // publishes the revision of the claim that actually
+                    // exists on disk - one serialization, one digest.
+                    current.ownership_revision =
+                        ownership_store->publish(claim);
+                    step_ok = true;
+                }
             }
         } catch (...) {
             step_ok = false;
@@ -131,6 +160,8 @@ const char* ndms_native_import_recovery_dispatch_state_name(
         return "target_missing";
     case NdmsNativeImportRecoveryDispatchState::target_not_eligible:
         return "target_not_eligible";
+    case NdmsNativeImportRecoveryDispatchState::ownership_store_missing:
+        return "ownership_store_missing";
     case NdmsNativeImportRecoveryDispatchState::step_failed:
         return "step_failed";
     }

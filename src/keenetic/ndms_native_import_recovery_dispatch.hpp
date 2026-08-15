@@ -36,6 +36,7 @@ enum class NdmsNativeImportRecoveryDispatchState {
     plan_empty,
     target_missing,
     target_not_eligible,
+    ownership_store_missing,
     // A step ran and failed. Everything before it is durable, and the WAL
     // record that remains says exactly how far this got.
     step_failed,
@@ -60,6 +61,8 @@ struct NdmsNativeImportRecoveryDispatchResult {
 // exact phase reached, which is precisely what the next recovery pass
 // classifies from - unwinding it would erase the one honest account of how
 // far this got.
+class NdmsNativeOwnershipStore;
+
 NdmsNativeImportRecoveryDispatchResult
 dispatch_ndms_native_import_recovery(
     NdmsNativeImportWalStore& store,
@@ -67,7 +70,11 @@ dispatch_ndms_native_import_recovery(
     const NdmsNativeImportWalRecord& record,
     const NdmsNativeImportRecoveryPlan& plan,
     const std::optional<std::string>& marker_target,
-    const NdmsNativeImportRecoveryDeleteExecutor& delete_executor);
+    const NdmsNativeImportRecoveryDeleteExecutor& delete_executor,
+    // Required only by plans that publish ownership - the forward-completion
+    // ones. A plan that needs it and does not get it is refused before the
+    // first step, like every other missing dependency here.
+    NdmsNativeOwnershipStore* ownership_store = nullptr);
 
 const char* ndms_native_import_recovery_dispatch_state_name(
     NdmsNativeImportRecoveryDispatchState state) noexcept;
