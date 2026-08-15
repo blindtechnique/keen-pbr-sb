@@ -23,6 +23,13 @@ inline constexpr char
 inline constexpr char kNdmsNativeImportBaselineDigestPrefix[] =
     "ndms-native-import-baseline-v1-";
 
+// Exported for the recovery probe builder: a live catalog must be compared
+// against the baseline with the digest the baseline recorded, and two
+// implementations of one digest is how they silently diverge.
+std::string ndms_native_import_protected_catalog_digest(
+    const NdmsInterfaceCatalog& catalog,
+    std::uint8_t expected_target_slot);
+
 enum class NdmsNativeImportBaselineBuildError : std::uint8_t {
     none,
     firmware_unavailable,

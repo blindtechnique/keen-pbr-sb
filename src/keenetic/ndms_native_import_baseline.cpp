@@ -289,6 +289,12 @@ std::optional<std::uint8_t> first_free_slot(
 
 } // namespace
 
+std::string ndms_native_import_protected_catalog_digest(
+    const NdmsInterfaceCatalog& catalog,
+    const std::uint8_t expected_target_slot) {
+    return protected_catalog_digest(catalog, expected_target_slot);
+}
+
 bool NdmsNativeImportPersistedBaseline::operator==(
     const NdmsNativeImportPersistedBaseline& other) const noexcept {
     return expected_created_interface ==
