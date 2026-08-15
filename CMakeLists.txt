@@ -411,6 +411,7 @@ set(SOURCES
   src/keenetic/ndms_native_import_transport.cpp
   src/keenetic/ndms_native_import_wal.cpp
   src/keenetic/ndms_native_import_recovery_observation.cpp
+  src/keenetic/ndms_native_import_recovery_lease.cpp
   src/keenetic/ndms_native_import_wal_store.cpp
   src/keenetic/ndms_native_management_preflight.cpp
   src/keenetic/ndms_native_mutation_plan.cpp

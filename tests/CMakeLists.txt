@@ -49,6 +49,7 @@ add_executable(keen-pbr-tests
   test_ndms_native_import_transport.cpp
   test_ndms_native_import_wal.cpp
   test_ndms_native_import_recovery_observation.cpp
+  test_ndms_native_import_recovery_lease.cpp
   test_ndms_native_management_preflight.cpp
   test_ndms_native_mutation_plan.cpp
   test_ndms_native_import_response.cpp
@@ -232,6 +233,7 @@ add_executable(keen-pbr-tests
   ../src/keenetic/ndms_native_import_transport.cpp
   ../src/keenetic/ndms_native_import_wal.cpp
   ../src/keenetic/ndms_native_import_recovery_observation.cpp
+  ../src/keenetic/ndms_native_import_recovery_lease.cpp
   ../src/keenetic/ndms_native_import_wal_store.cpp
   ../src/keenetic/ndms_native_management_preflight.cpp
   ../src/keenetic/ndms_native_mutation_plan.cpp
@@ -332,6 +334,7 @@ add_executable(keen-pbr-native-tunnel-import-tests
   test_ndms_native_import_transport.cpp
   test_ndms_native_import_wal.cpp
   test_ndms_native_import_recovery_observation.cpp
+  test_ndms_native_import_recovery_lease.cpp
   test_ndms_native_import_wal_store.cpp
   test_ndms_native_mutation_plan.cpp
   test_ndms_native_import_response.cpp
@@ -347,6 +350,7 @@ add_executable(keen-pbr-native-tunnel-import-tests
   ../src/keenetic/ndms_native_import_transport.cpp
   ../src/keenetic/ndms_native_import_wal.cpp
   ../src/keenetic/ndms_native_import_recovery_observation.cpp
+  ../src/keenetic/ndms_native_import_recovery_lease.cpp
   ../src/keenetic/ndms_native_import_wal_store.cpp
   ../src/keenetic/ndms_native_mutation_plan.cpp
   ../src/keenetic/ndms_native_import_response.cpp
