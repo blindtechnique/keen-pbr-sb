@@ -2,13 +2,24 @@
 
 #include "../src/keenetic/ndms_native_import_recovery_observation.hpp"
 
+#include "../src/keenetic/ndms_native_import_baseline.hpp"
+#include "../src/keenetic/ndms_native_import_recovery_probe.hpp"
+
+#include <nlohmann/json.hpp>
+
 #include <string>
+#include <vector>
 
 namespace keen_pbr3 {
 
 namespace {
 
-const std::string kBaselineCatalog(64U, 'a');
+// The prefixed shape the producers actually emit. Written as prefix + hex
+// rather than as a bare digest: a bare fixture is what let the validator
+// demand a shape no producer has ever emitted, with every test agreeing.
+const std::string kBaselineCatalog =
+    std::string(kNdmsNativeImportProtectedCatalogDigestPrefix) +
+    std::string(64U, 'a');
 const std::string kRevision(64U, 'b');
 
 // Wireguard5 occupied-free baseline: all slots free.
@@ -96,9 +107,15 @@ TEST_CASE("a moving world is observed again, not acted on") {
                     record_fixture(), earlier, later, std::nullopt)
                     .authoritative);
 
-    // A protected catalog that changed between the reads.
+    // A protected catalog that changed between the reads. Prefixed, so this
+    // case fails on the drift it is named for; a bare digest would make the
+    // probe internally invalid and the assertion would pass for the wrong
+    // reason.
     auto drifting = probe_fixture(42U);
-    drifting.protected_catalog_sha256 = std::string(64U, 'c');
+    drifting.protected_catalog_sha256 =
+        std::string(kNdmsNativeImportProtectedCatalogDigestPrefix) +
+        std::string(64U, 'c');
+    REQUIRE(drifting.protected_catalog_sha256 != kBaselineCatalog);
     CHECK_FALSE(build_ndms_native_import_recovery_observation(
                     record_fixture(), probe_fixture(41U), drifting,
                     std::nullopt)
@@ -129,7 +146,9 @@ TEST_CASE("catalog drift against the baseline is reported, not hidden") {
     // authoritative observation of drift, and hiding it behind a retry would
     // stall recovery on a world that is not going to change back.
     auto record = record_fixture();
-    record.baseline.protected_catalog_sha256 = std::string(64U, 'd');
+    record.baseline.protected_catalog_sha256 =
+        std::string(kNdmsNativeImportProtectedCatalogDigestPrefix) +
+        std::string(64U, 'd');
     const auto observation = build_ndms_native_import_recovery_observation(
         record, probe_fixture(41U), probe_fixture(42U), std::nullopt);
     CHECK(observation.authoritative);
@@ -222,6 +241,53 @@ TEST_CASE("two markers are counted, and counted is all they need to be") {
     CHECK(observation.authoritative);
     CHECK(observation.marker_match_count == 2U);
     CHECK_FALSE(observation.marker_target.has_value());
+}
+
+TEST_CASE("probes built by the real producer are accepted by this checker") {
+    // The test that was missing, and whose absence let this module reject
+    // every probe production could ever hand it. Nothing here is hand-built:
+    // the probes come from build_ndms_native_import_recovery_probe and the
+    // baseline digest from the same exported producer the probe uses, so a
+    // checker that disagrees with either has nowhere to hide.
+    auto payload = nlohmann::json::object();
+    for (const auto* name :
+         {"Wireguard0", "Wireguard1", "Wireguard2", "Wireguard3",
+          "Wireguard4"}) {
+        payload[name] = {{"type", "Wireguard"},
+                         {"interface-name", name},
+                         {"description", "occupied"}};
+    }
+
+    NdmsCatalogSnapshot snapshot;
+    snapshot.catalog = parse_ndms_interface_catalog(payload);
+    snapshot.status = NdmsCatalogCacheStatus::fresh;
+    snapshot.refreshed = true;
+    snapshot.observation_epoch = 7U;
+    snapshot.invalidation_epoch = 7U;
+
+    const std::string marker = "kpbr-ni-v1-" + std::string(32U, 'a');
+    const auto build_probe = [&](const std::uint64_t generation) {
+        snapshot.observation_generation = generation;
+        return build_ndms_native_import_recovery_probe(snapshot, 5U, marker,
+                                                       {});
+    };
+
+    NdmsNativeImportWalRecord record;
+    record.baseline.observation_generation = 40U;
+    record.baseline.observation_epoch = 7U;
+    record.baseline.protected_catalog_sha256 =
+        ndms_native_import_protected_catalog_digest(snapshot.catalog, 5U);
+    record.baseline.occupancy_hex = std::string(32U, '0');
+
+    const auto observation = build_ndms_native_import_recovery_observation(
+        record, build_probe(41U), build_probe(42U), std::nullopt);
+    CHECK(observation.authoritative);
+    CHECK(observation.marker_match_count == 0U);
+    // The producer emits the prefixed form; that is the shape, not an
+    // accident of this fixture.
+    CHECK(ndms_native_import_prefixed_sha256(
+        record.baseline.protected_catalog_sha256,
+        kNdmsNativeImportProtectedCatalogDigestPrefix));
 }
 
 } // namespace keen_pbr3

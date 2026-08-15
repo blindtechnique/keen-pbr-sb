@@ -9,18 +9,22 @@ namespace keen_pbr3 {
 
 namespace {
 
-bool lower_hex_digest(const std::string& value) {
-    return value.size() == 64U &&
-           std::all_of(value.begin(), value.end(), [](const char ch) {
-               return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
-           });
+// Checked against the producer's own prefix constant, not against a shape
+// guessed here. This used to demand a bare 64-hex digest while every producer
+// - the probe builder and the persisted baseline alike - emits the prefixed
+// form, so no real probe was ever internally valid and no observation could
+// ever be authoritative. The hand-built fixtures were bare, so the tests
+// agreed with the checker and never with production.
+bool catalog_digest_well_formed(const std::string& value) {
+    return ndms_native_import_prefixed_sha256(
+        value, kNdmsNativeImportProtectedCatalogDigestPrefix);
 }
 
 bool probe_internally_valid(
     const NdmsNativeImportRecoveryCatalogProbe& probe) {
     if (probe.observation_generation == 0U ||
         !probe.marker_scan_complete ||
-        !lower_hex_digest(probe.protected_catalog_sha256)) {
+        !catalog_digest_well_formed(probe.protected_catalog_sha256)) {
         return false;
     }
     for (const auto& sighting : probe.marker_sightings) {

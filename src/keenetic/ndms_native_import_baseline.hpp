@@ -23,6 +23,15 @@ inline constexpr char
 inline constexpr char kNdmsNativeImportBaselineDigestPrefix[] =
     "ndms-native-import-baseline-v1-";
 
+// Exported for every consumer that has to CHECK one of the digests above.
+// The digests are emitted prefixed; a checker that tests for a bare 64-hex
+// string rejects every real value, and because hand-built fixtures are bare by
+// habit, its tests pass while production never does. That is exactly what
+// happened to the recovery observation builder, so there is now one
+// implementation and the callers pass the producer's own prefix constant.
+bool ndms_native_import_prefixed_sha256(std::string_view value,
+                                        std::string_view prefix) noexcept;
+
 // Exported for the recovery probe builder: a live catalog must be compared
 // against the baseline with the digest the baseline recorded, and two
 // implementations of one digest is how they silently diverge.

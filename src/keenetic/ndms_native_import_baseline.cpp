@@ -33,9 +33,7 @@ bool lower_hex(const std::string_view value) noexcept {
 bool prefixed_sha256(
     const std::string_view value,
     const std::string_view prefix) noexcept {
-    return value.size() == prefix.size() + 64U &&
-           value.compare(0U, prefix.size(), prefix) == 0 &&
-           lower_hex(value.substr(prefix.size()));
+    return ndms_native_import_prefixed_sha256(value, prefix);
 }
 
 void update_tagged_field(
@@ -288,6 +286,14 @@ std::optional<std::uint8_t> first_free_slot(
 }
 
 } // namespace
+
+bool ndms_native_import_prefixed_sha256(
+    const std::string_view value,
+    const std::string_view prefix) noexcept {
+    return value.size() == prefix.size() + 64U &&
+           value.compare(0U, prefix.size(), prefix) == 0 &&
+           lower_hex(value.substr(prefix.size()));
+}
 
 std::string ndms_native_import_protected_catalog_digest(
     const NdmsInterfaceCatalog& catalog,
