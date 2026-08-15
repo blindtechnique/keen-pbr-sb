@@ -74,7 +74,13 @@ dispatch_ndms_native_import_recovery(
     // Required only by plans that publish ownership - the forward-completion
     // ones. A plan that needs it and does not get it is refused before the
     // first step, like every other missing dependency here.
-    NdmsNativeOwnershipStore* ownership_store = nullptr);
+    NdmsNativeOwnershipStore* ownership_store = nullptr,
+    // Called immediately before each step executes. Exists for the
+    // crash-at-each-phase acceptance, whose driver dies here on purpose: the
+    // property under test is that a crash between any two steps leaves a WAL
+    // the next recovery pass finishes from. Never called after a failure.
+    const std::function<void(NdmsNativeImportRecoveryStep)>&
+        step_observer = nullptr);
 
 const char* ndms_native_import_recovery_dispatch_state_name(
     NdmsNativeImportRecoveryDispatchState state) noexcept;

@@ -48,7 +48,9 @@ dispatch_ndms_native_import_recovery(
     const NdmsNativeImportRecoveryPlan& plan,
     const std::optional<std::string>& marker_target,
     const NdmsNativeImportRecoveryDeleteExecutor& delete_executor,
-    NdmsNativeOwnershipStore* const ownership_store) {
+    NdmsNativeOwnershipStore* const ownership_store,
+    const std::function<void(NdmsNativeImportRecoveryStep)>&
+        step_observer) {
     NdmsNativeImportRecoveryDispatchResult result;
 
     if (!lease.held()) {
@@ -88,6 +90,7 @@ dispatch_ndms_native_import_recovery(
 
     auto current = record;
     for (const auto step : plan.steps) {
+        if (step_observer) step_observer(step);
         bool step_ok = false;
         try {
             if (const auto phase = phase_of(step)) {
