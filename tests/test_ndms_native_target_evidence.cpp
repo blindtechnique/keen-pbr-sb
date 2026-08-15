@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include "../src/keenetic/ndms_native_secret_redaction.hpp"
 #include "../src/keenetic/ndms_native_target_evidence.hpp"
 
 #include <string>
@@ -161,6 +162,43 @@ TEST_CASE("the firmware really returns a preshared key, and that stops us") {
         carrying["security-level"] = {{"private", value}};
         CHECK(build_ndms_native_target_evidence("Wireguard0", carrying,
                                                 status(), empty_asc())
+                  .failure->reason == Reason::secret_material_present);
+    }
+}
+
+TEST_CASE("the redacted measured document is the one that gets through") {
+    // The whole point of the refusal above: this pairing - the real document,
+    // redacted by the production redactor - is what a caller actually holds,
+    // and it must work end to end.
+    const auto redacted = redact_ndms_secret_material(
+        nlohmann::json::parse(kMeasuredConfig), "Wireguard0");
+    const auto result = build_ndms_native_target_evidence(
+        "Wireguard0", redacted, status(), empty_asc());
+    REQUIRE(result.evidence.has_value());
+    CHECK(result.evidence->full_revision.rfind("ndms-rci-full-v1-", 0U) == 0U);
+    // The secret is not in the revision's input, so it cannot be in anything
+    // derived from it.
+    CHECK(redacted.dump().find("cHNrQmFzZTY0VmFsdWVFeGFtcGxlPQ==") ==
+          std::string::npos);
+
+    // A rotated key must still move the revision - that is why the redactor
+    // digests rather than drops.
+    auto rotated = nlohmann::json::parse(kMeasuredConfig);
+    rotated["wireguard"]["peer"][0]["preshared-key"] = "cm90YXRlZEtleQ==";
+    CHECK(build_ndms_native_target_evidence(
+              "Wireguard0",
+              redact_ndms_secret_material(rotated, "Wireguard0"), status(),
+              empty_asc())
+              .evidence->full_revision != result.evidence->full_revision);
+
+    // And a marker of the wrong shape is not a marker: a caller who redacted
+    // badly is stopped, not trusted.
+    for (const char* wrong : {"kpbr-redacted-v1-", "kpbr-redacted-v1-zz",
+                              "not-a-marker", ""}) {
+        auto bad = redacted;
+        bad["wireguard"]["peer"][0]["preshared-key"] = wrong;
+        CHECK(build_ndms_native_target_evidence("Wireguard0", bad, status(),
+                                                empty_asc())
                   .failure->reason == Reason::secret_material_present);
     }
 }

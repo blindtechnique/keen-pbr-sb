@@ -1,5 +1,6 @@
 #include "ndms_native_target_evidence.hpp"
 
+#include "ndms_native_secret_redaction.hpp"
 #include "ndms_wireguard_identity.hpp"
 
 #include "../crypto/sha256.hpp"
@@ -19,31 +20,25 @@ NdmsNativeTargetEvidenceResult refuse(const Reason reason) {
     return result;
 }
 
-// Any key that could carry secret material. Deliberately a substring match:
-// an unknown future key is refused rather than missed.
-bool key_could_name_a_secret(const std::string& key) {
-    std::string lowered = key;
-    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
-                   [](const unsigned char ch) {
-                       return static_cast<char>(std::tolower(ch));
-                   });
-    return lowered.find("private") != std::string::npos ||
-           lowered.find("preshared") != std::string::npos ||
-           lowered.find("secret") != std::string::npos;
-}
-
 // Measured on NC-1812 across all five occupied slots: every one of them
 // carries wireguard.peer[].preshared-key, and Wireguard0 alone also carries
 // security-level.private - a boolean access-level flag set to private on that
 // interface and to public on the others. A boolean cannot hold key material,
 // so counting it would refuse an interface over its access level while an
-// identical neighbour passed. Only a string, object or array under such a key
-// can carry something, and those still refuse.
+// identical neighbour passed.
+//
+// The one thing a secret-naming key may hold is a redaction marker, which is
+// a digest of the secret rather than the secret. Anything else - a plain
+// string, an object, an array, a marker with one character changed - refuses,
+// so a caller who forgets to redact, or redacts into the wrong shape, is
+// stopped rather than trusted.
 bool mentions_secret(const nlohmann::json& document) {
     if (document.is_object()) {
         for (const auto& [key, value] : document.items()) {
-            if (key_could_name_a_secret(key) && !value.is_boolean() &&
-                !value.is_number() && !value.is_null()) {
+            if (ndms_key_could_name_a_secret(key) && !value.is_boolean() &&
+                !value.is_number() && !value.is_null() &&
+                !(value.is_string() && is_ndms_secret_redaction_marker(
+                                           value.get<std::string>()))) {
                 return true;
             }
             if (mentions_secret(value)) return true;

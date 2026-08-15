@@ -60,12 +60,13 @@ struct NdmsNativeTargetEvidenceResult {
 // link we may call down, and "down" is what authorizes an exact-owned delete.
 //
 // If any secret-looking material appears in either document, the read is
-// refused outright rather than sanitized: a firmware that started returning
-// private keys is a changed world, and the safe response is to stop, not to
-// quietly strip it and carry on. "Secret-looking" means a key that could hold
-// material - a boolean or a number under such a key cannot, and the measured
-// documents carry exactly one: security-level.private, an access-level flag
-// that is set on some interfaces and not others.
+// refused rather than sanitized here: sanitizing is the caller's job, done
+// before this sees the document, with redact_ndms_secret_material. "Secret-
+// looking" means a key that could hold material - a boolean or a number under
+// such a key cannot, and the measured documents carry exactly one:
+// security-level.private, an access-level flag set on some interfaces and not
+// others. A redaction marker is the one string such a key may hold; a marker
+// with a character changed is not one, and refuses.
 NdmsNativeTargetEvidenceResult build_ndms_native_target_evidence(
     const std::string& interface_name,
     const nlohmann::json& config_document,

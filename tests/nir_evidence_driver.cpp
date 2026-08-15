@@ -12,12 +12,15 @@
 //   nir-evidence-driver verdict <name> <config> <status> <asc>
 //       Runs the real builder on the documents as read.
 //   nir-evidence-driver filtered <name> <config> <status> <asc>
-//       Drops the keys the guard matches - the filtering the header tells the
-//       caller to do - then runs the same builder and prints the revision.
+//       Runs the production redactor over the config first - the sanitizing
+//       the header tells the caller to do - then the same builder, and prints
+//       the revision. This is the whole real path: firmware document in,
+//       revision out, with nothing hand-written in between.
 //
 // Exit code is 0 whenever the run itself completed; the verdict is on stdout,
 // so a sweep over several interfaces does not stop at the first refusal.
 
+#include "../src/keenetic/ndms_native_secret_redaction.hpp"
 #include "../src/keenetic/ndms_native_target_evidence.hpp"
 
 #include <nlohmann/json.hpp>
@@ -27,28 +30,16 @@
 #include <cstdio>
 #include <fstream>
 #include <string>
+#include <vector>
 
 namespace keen_pbr3 {
 namespace {
-
-// Deliberately duplicates the production predicate rather than exporting it:
-// the driver must not be able to drift the thing it is measuring.
-bool key_matches_guard(const std::string& key) {
-    std::string lowered = key;
-    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
-                   [](const unsigned char ch) {
-                       return static_cast<char>(std::tolower(ch));
-                   });
-    return lowered.find("private") != std::string::npos ||
-           lowered.find("preshared") != std::string::npos ||
-           lowered.find("secret") != std::string::npos;
-}
 
 void scan(const nlohmann::json& document, const std::string& path) {
     if (document.is_object()) {
         for (const auto& [key, value] : document.items()) {
             const auto here = path + "/" + key;
-            if (key_matches_guard(key)) {
+            if (ndms_key_could_name_a_secret(key)) {
                 std::printf("  matched %s (%s)\n", here.c_str(),
                             value.type_name());
             }
@@ -63,23 +54,80 @@ void scan(const nlohmann::json& document, const std::string& path) {
     }
 }
 
-nlohmann::json without_matched_keys(const nlohmann::json& document) {
+unsigned count_secret_named_keys(const nlohmann::json& document) {
+    unsigned total = 0U;
     if (document.is_object()) {
-        auto copy = nlohmann::json::object();
         for (const auto& [key, value] : document.items()) {
-            if (key_matches_guard(key)) continue;
-            copy[key] = without_matched_keys(value);
+            if (ndms_key_could_name_a_secret(key)) ++total;
+            total += count_secret_named_keys(value);
         }
-        return copy;
+    } else if (document.is_array()) {
+        for (const auto& element : document) {
+            total += count_secret_named_keys(element);
+        }
+    }
+    return total;
+}
+
+// Every secret-named key that could carry material holds a marker. Booleans
+// are skipped for the same reason the guard skips them.
+bool all_secret_keys_are_markers(const nlohmann::json& document) {
+    if (document.is_object()) {
+        for (const auto& [key, value] : document.items()) {
+            if (ndms_key_could_name_a_secret(key) && !value.is_boolean() &&
+                !value.is_number() && !value.is_null() &&
+                !(value.is_string() && is_ndms_secret_redaction_marker(
+                                           value.get<std::string>()))) {
+                return false;
+            }
+            if (!all_secret_keys_are_markers(value)) return false;
+        }
+    } else if (document.is_array()) {
+        for (const auto& element : document) {
+            if (!all_secret_keys_are_markers(element)) return false;
+        }
+    }
+    return true;
+}
+
+// The check that matters most: not "did the expected field change" but "is any
+// string the firmware gave us still present in the bytes we are about to
+// hash". Collects every string in the raw document and looks for it in the
+// redacted dump.
+void collect_secret_strings(const nlohmann::json& document,
+                            bool under_secret_key,
+                            std::vector<std::string>& into) {
+    if (document.is_object()) {
+        for (const auto& [key, value] : document.items()) {
+            collect_secret_strings(
+                value, under_secret_key || ndms_key_could_name_a_secret(key),
+                into);
+        }
+        return;
     }
     if (document.is_array()) {
-        auto copy = nlohmann::json::array();
         for (const auto& element : document) {
-            copy.push_back(without_matched_keys(element));
+            collect_secret_strings(element, under_secret_key, into);
         }
-        return copy;
+        return;
     }
-    return document;
+    if (under_secret_key && document.is_string()) {
+        into.push_back(document.get<std::string>());
+    }
+}
+
+bool raw_secret_values_absent(const nlohmann::json& raw,
+                              const nlohmann::json& redacted) {
+    std::vector<std::string> secrets;
+    collect_secret_strings(raw, false, secrets);
+    const auto bytes = redacted.dump();
+    for (const auto& secret : secrets) {
+        if (!secret.empty() &&
+            bytes.find(secret) != std::string::npos) {
+            return false;
+        }
+    }
+    return true;
 }
 
 nlohmann::json load(const char* path) {
@@ -136,7 +184,17 @@ int main(int argc, char** argv) {
     auto config = load(argv[3]);
     const auto status = load(argv[4]);
     const auto asc = load(argv[5]);
-    if (mode == "filtered") config = without_matched_keys(config);
+    if (mode == "filtered") {
+        const auto raw = config;
+        config = redact_ndms_secret_material(config, name);
+        // Reported, because a driver that silently printed a revision over a
+        // document still holding secrets would be the worst possible result.
+        std::printf("%s redaction: %u secret-named keys, all markers=%s, "
+                    "raw values gone=%s\n",
+                    name.c_str(), count_secret_named_keys(config),
+                    all_secret_keys_are_markers(config) ? "yes" : "no",
+                    raw_secret_values_absent(raw, config) ? "yes" : "no");
+    }
     report(name, build_ndms_native_target_evidence(name, config, status, asc));
     return 0;
 }
