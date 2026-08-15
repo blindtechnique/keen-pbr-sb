@@ -418,6 +418,7 @@ set(SOURCES
   src/keenetic/ndms_native_import_forward_plan.cpp
   src/keenetic/ndms_native_import_recovery_probe.cpp
   src/crypto/chacha20poly1305.cpp
+  src/keenetic/ndms_native_secret_snapshot.cpp
   src/keenetic/ndms_native_import_wal_store.cpp
   src/keenetic/ndms_native_management_preflight.cpp
   src/keenetic/ndms_native_mutation_plan.cpp
