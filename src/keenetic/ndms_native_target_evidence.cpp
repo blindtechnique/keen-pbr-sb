@@ -19,20 +19,31 @@ NdmsNativeTargetEvidenceResult refuse(const Reason reason) {
     return result;
 }
 
-// Any key that could carry secret material. Measured absent today; if the
-// firmware ever starts returning one, that is a changed world and this must
-// stop rather than sanitize.
+// Any key that could carry secret material. Deliberately a substring match:
+// an unknown future key is refused rather than missed.
+bool key_could_name_a_secret(const std::string& key) {
+    std::string lowered = key;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                   [](const unsigned char ch) {
+                       return static_cast<char>(std::tolower(ch));
+                   });
+    return lowered.find("private") != std::string::npos ||
+           lowered.find("preshared") != std::string::npos ||
+           lowered.find("secret") != std::string::npos;
+}
+
+// Measured on NC-1812 across all five occupied slots: every one of them
+// carries wireguard.peer[].preshared-key, and Wireguard0 alone also carries
+// security-level.private - a boolean access-level flag set to private on that
+// interface and to public on the others. A boolean cannot hold key material,
+// so counting it would refuse an interface over its access level while an
+// identical neighbour passed. Only a string, object or array under such a key
+// can carry something, and those still refuse.
 bool mentions_secret(const nlohmann::json& document) {
     if (document.is_object()) {
         for (const auto& [key, value] : document.items()) {
-            std::string lowered = key;
-            std::transform(lowered.begin(), lowered.end(), lowered.begin(),
-                           [](const unsigned char ch) {
-                               return static_cast<char>(std::tolower(ch));
-                           });
-            if (lowered.find("private") != std::string::npos ||
-                lowered.find("preshared") != std::string::npos ||
-                lowered.find("secret") != std::string::npos) {
+            if (key_could_name_a_secret(key) && !value.is_boolean() &&
+                !value.is_number() && !value.is_null()) {
                 return true;
             }
             if (mentions_secret(value)) return true;
@@ -45,6 +56,28 @@ bool mentions_secret(const nlohmann::json& document) {
         }
     }
     return false;
+}
+
+// The ASC document answers three different things, and only two of them are
+// protocols. Measured: "{}" for plain WireGuard; jc/jmin/jmax present for
+// AmneziaWG; and for an interface that does not exist, a non-empty object
+// holding an RCI error envelope - status: [{status: "error", ...}]. An
+// emptiness test reads that third answer as AmneziaWG, so classify instead,
+// and refuse anything that is none of the three.
+std::optional<NdmsNativeAscClass> classify_asc(
+    const nlohmann::json& asc_document) {
+    if (!asc_document.is_object()) return std::nullopt;
+    // The error envelope, exactly as the firmware writes it.
+    if (asc_document.contains("status") &&
+        asc_document["status"].is_array()) {
+        return std::nullopt;
+    }
+    if (asc_document.empty()) return NdmsNativeAscClass::plain_wireguard;
+    if (asc_document.contains("jc") && asc_document.contains("jmin") &&
+        asc_document.contains("jmax")) {
+        return NdmsNativeAscClass::amnezia_wg;
+    }
+    return std::nullopt;
 }
 
 void update_field(Sha256& hasher, const std::string& value) {
@@ -118,15 +151,16 @@ NdmsNativeTargetEvidenceResult build_ndms_native_target_evidence(
                          "public-key", std::string{}));
     }
 
+    const auto asc_class = classify_asc(asc_document);
+    if (!asc_class) return refuse(Reason::asc_not_classifiable);
+
     NdmsNativeTargetEvidenceResult result;
     NdmsNativeImportRecoveryTargetEvidence evidence;
     evidence.interface_name = interface_name;
     evidence.link_down = link == "down";
     evidence.full_revision = "ndms-rci-full-v1-" + hasher.hex_digest();
     result.evidence = std::move(evidence);
-    // Measured discriminator: plain WireGuard answers "{}" here; a non-empty
-    // ASC object is AmneziaWG. Never inferred from a name.
-    result.amnezia = asc_document.is_object() && !asc_document.empty();
+    result.asc_class = asc_class;
     return result;
 }
 
@@ -145,8 +179,21 @@ const char* ndms_native_target_read_failure_name(
         return "link_state_unknown";
     case Reason::secret_material_present:
         return "secret_material_present";
+    case Reason::asc_not_classifiable:
+        return "asc_not_classifiable";
     }
     return "config_not_object";
+}
+
+const char* ndms_native_asc_class_name(
+    const NdmsNativeAscClass value) noexcept {
+    switch (value) {
+    case NdmsNativeAscClass::plain_wireguard:
+        return "plain_wireguard";
+    case NdmsNativeAscClass::amnezia_wg:
+        return "amnezia_wg";
+    }
+    return "plain_wireguard";
 }
 
 } // namespace keen_pbr3

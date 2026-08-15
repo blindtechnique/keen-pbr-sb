@@ -64,11 +64,36 @@ const char* kMeasuredStatus = R"({
   "summary": {"layer": {"conf": "running", "link": "pending"}}
 })";
 
+// Measured on WG4: the AmneziaWG parameter set, values as strings, h1..h4 as
+// ranges. i1 is truncated here - its length is irrelevant to classification.
+const char* kMeasuredAmneziaAsc = R"({
+  "jc": "5", "jmin": "8", "jmax": "120", "s1": "47", "s2": "83",
+  "h1": "118216543-118249247", "h2": "634794136-634842665",
+  "h3": "1487164881-1487208055", "h4": "2130401938-2130405751",
+  "s3": "24", "s4": "12", "i1": "<b 0xc0000000010b285e6327>"
+})";
+
+// Measured by asking the ASC endpoint about a slot that does not exist. Not
+// empty, and not a protocol: an emptiness test reads this as AmneziaWG.
+const char* kMeasuredAscErrorEnvelope = R"({
+  "status": [
+    {
+      "status": "error",
+      "code": "6553609",
+      "ident": "Wireguard::Interface",
+      "message": "unable to find Wireguard5 in \"Wireguard::Interface\"."
+    }
+  ]
+})";
+
 nlohmann::json config() {
     return nlohmann::json::parse(kConfigWithoutSecrets);
 }
 nlohmann::json status() { return nlohmann::json::parse(kMeasuredStatus); }
 nlohmann::json empty_asc() { return nlohmann::json::parse("{}"); }
+nlohmann::json amnezia_asc() {
+    return nlohmann::json::parse(kMeasuredAmneziaAsc);
+}
 
 } // namespace
 
@@ -87,21 +112,81 @@ TEST_CASE("the measured documents yield usable evidence") {
     CHECK(result.evidence->full_revision.size() ==
           std::string("ndms-rci-full-v1-").size() + 64U);
     // Measured discriminator: plain WireGuard answers "{}" for ASC.
-    CHECK_FALSE(result.amnezia);
+    REQUIRE(result.asc_class.has_value());
+    CHECK(*result.asc_class == NdmsNativeAscClass::plain_wireguard);
 }
 
 TEST_CASE("the firmware really returns a preshared key, and that stops us") {
     // Not hypothetical: this is the live shape of
-    // show/rc/interface/Wireguard0 measured on 2026-08-16. Sanitizing it away
-    // and carrying on would put peer secrets into a revision digest and into
-    // whatever logs the caller keeps; refusing is the only safe answer, and
-    // it is why the caller must read a filtered document.
+    // show/rc/interface/Wireguard0 measured on 2026-08-16, and the sweep over
+    // the router's five occupied slots found a preshared-key in every one.
+    // Sanitizing it away and carrying on would put peer secrets into a
+    // revision digest and into whatever logs the caller keeps; refusing is the
+    // only safe answer, and it is why the caller must read a filtered
+    // document.
     const auto result = build_ndms_native_target_evidence(
         "Wireguard0", nlohmann::json::parse(kMeasuredConfig), status(),
         empty_asc());
     REQUIRE(result.failure.has_value());
     CHECK(result.failure->reason == Reason::secret_material_present);
     CHECK_FALSE(result.evidence.has_value());
+
+    // ...and the preshared key alone is what stops us. The measured document
+    // also carries security-level.private, which a bare substring match on key
+    // names would have counted too - so without this the refusal above is
+    // over-determined and proves nothing about the secret.
+    auto without_key = nlohmann::json::parse(kMeasuredConfig);
+    without_key["wireguard"]["peer"][0].erase("preshared-key");
+    REQUIRE(without_key.contains("security-level"));
+    REQUIRE(without_key["security-level"]["private"] == true);
+    const auto allowed = build_ndms_native_target_evidence(
+        "Wireguard0", without_key, status(), empty_asc());
+    CHECK_FALSE(allowed.failure.has_value());
+
+    // Measured on the live router: Wireguard0 is security-level private while
+    // Wireguard1-4 are public. Counting a boolean flag would have refused one
+    // interface over its access level while identical neighbours passed.
+    auto flag_only = config();
+    flag_only["security-level"] = {{"private", true}};
+    CHECK_FALSE(build_ndms_native_target_evidence("Wireguard0", flag_only,
+                                                  status(), empty_asc())
+                    .failure.has_value());
+
+    // The narrowing is by value type, not by key name: anything under such a
+    // key that could actually hold material still refuses.
+    for (const auto& value :
+         {nlohmann::json("material"), nlohmann::json::object({{"k", "v"}}),
+          nlohmann::json::array({"material"})}) {
+        auto carrying = config();
+        carrying["security-level"] = {{"private", value}};
+        CHECK(build_ndms_native_target_evidence("Wireguard0", carrying,
+                                                status(), empty_asc())
+                  .failure->reason == Reason::secret_material_present);
+    }
+}
+
+TEST_CASE("an ASC that is not a protocol is refused, never called Amnezia") {
+    // Measured: the endpoint answers an absent interface with a non-empty
+    // object carrying an RCI error envelope. Classifying by non-emptiness -
+    // which is what this module did until the live sweep - reads that as
+    // AmneziaWG, and a transient error on a live plain interface would have
+    // silently changed its protocol.
+    const auto envelope = build_ndms_native_target_evidence(
+        "Wireguard0", config(), status(),
+        nlohmann::json::parse(kMeasuredAscErrorEnvelope));
+    REQUIRE(envelope.failure.has_value());
+    CHECK(envelope.failure->reason == Reason::asc_not_classifiable);
+    CHECK_FALSE(envelope.asc_class.has_value());
+
+    // Neither is a shape we have never measured.
+    for (const auto& unknown :
+         {nlohmann::json::parse(R"({"unexpected": 1})"),
+          nlohmann::json::parse(R"({"jc": "5"})"), nlohmann::json::array(),
+          nlohmann::json("text")}) {
+        CHECK(build_ndms_native_target_evidence("Wireguard0", config(),
+                                                status(), unknown)
+                  .failure->reason == Reason::asc_not_classifiable);
+    }
 }
 
 TEST_CASE("both documents must agree they describe this interface") {
@@ -194,13 +279,28 @@ TEST_CASE("the revision is stable, and moves when the interface moves") {
           baseline.evidence->full_revision);
 }
 
-TEST_CASE("a non-empty ASC is the measured AmneziaWG discriminator") {
+TEST_CASE("the measured AmneziaWG parameter set is the discriminator") {
+    // Measured on Wireguard1: an AmneziaWG interface carries its parameters in
+    // BOTH reads - a wireguard.asc block in the config document and the same
+    // values from the dedicated ASC endpoint.
+    auto awg_config = config();
+    awg_config["wireguard"]["asc"] = amnezia_asc();
+
     const auto amnezia = build_ndms_native_target_evidence(
-        "Wireguard0", config(), status(),
-        nlohmann::json::parse(R"({"jc": 4, "jmin": 40})"));
+        "Wireguard0", awg_config, status(), amnezia_asc());
     REQUIRE(amnezia.evidence.has_value());
     // Reported from evidence, never inferred from a name.
-    CHECK(amnezia.amnezia);
+    REQUIRE(amnezia.asc_class.has_value());
+    CHECK(*amnezia.asc_class == NdmsNativeAscClass::amnezia_wg);
+
+    // Because the config carries the block too, converting an interface
+    // between the protocols moves the revision - the CAS notices, without the
+    // revision having to digest the separate ASC read.
+    const auto plain = build_ndms_native_target_evidence(
+        "Wireguard0", config(), status(), empty_asc());
+    CHECK(amnezia.evidence->full_revision != plain.evidence->full_revision);
+    REQUIRE(plain.asc_class.has_value());
+    CHECK(*plain.asc_class == NdmsNativeAscClass::plain_wireguard);
 }
 
 } // namespace keen_pbr3
