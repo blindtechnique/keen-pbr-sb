@@ -1308,15 +1308,29 @@ enum class ResolverRuntimeRecoveryAction : std::uint8_t {
     preserve,
     refresh_running_reason,
     recover_resolver_broken,
+    // The resolver recovered, but another owner broke the runtime and still
+    // owns it. Drop this chain's own latch and leave the runtime alone.
+    clear_resolver_latch_only,
 };
 
 // RuntimeState::broken is shared by several independent recovery owners.  A
 // successful dnsmasq stream may clear only the exact latch installed by this
 // resolver chain; URLTEST/firewall/apply failures remain authoritative.
+//
+// `resolver_latched` is this chain's OWN record that it exhausted, kept
+// separately from the shared runtime reason. It has to be separate: the
+// exhaustion path publishes kResolverReloadExhaustedRuntimeReason only when it
+// finds the runtime still `running`, so whenever anything else broke the
+// runtime first - which is the ordinary case during boot, where urltest and
+// firewall reconciliation fail seconds earlier - the resolver's reason is
+// never written, and a recovery keyed solely on that reason could never fire
+// again. Recording the latch independently restores it without ever letting
+// the resolver clear a `broken` that belongs to someone else.
 inline ResolverRuntimeRecoveryAction plan_resolver_runtime_recovery(
     bool routing_runtime_active,
     RuntimeState state,
-    std::string_view reason) noexcept {
+    std::string_view reason,
+    bool resolver_latched = false) noexcept {
     if (!routing_runtime_active) {
         return ResolverRuntimeRecoveryAction::preserve;
     }
@@ -1328,7 +1342,71 @@ inline ResolverRuntimeRecoveryAction plan_resolver_runtime_recovery(
         reason == kResolverReloadPendingRuntimeReason) {
         return ResolverRuntimeRecoveryAction::refresh_running_reason;
     }
+    // Another owner holds the runtime. The resolver may retire only its own
+    // latch, and the runtime stays broken until that owner recovers.
+    if (resolver_latched && state == RuntimeState::broken) {
+        return ResolverRuntimeRecoveryAction::clear_resolver_latch_only;
+    }
     return ResolverRuntimeRecoveryAction::preserve;
+}
+
+// Why a resolver reload retry was not scheduled. Every one of these paths used
+// to return silently, which is how a chain that stops retrying forever leaves
+// no trace: the operator sees a resolver stuck on its fallback and a log that
+// says nothing after the last bounded attempt.
+enum class ResolverReloadScheduleDecline : std::uint8_t {
+    scheduled,
+    no_scheduler,
+    already_scheduled,
+    routing_inactive,
+    generation_superseded,
+};
+
+inline ResolverReloadScheduleDecline classify_resolver_reload_schedule(
+    bool scheduler_available,
+    bool retry_already_scheduled,
+    bool routing_runtime_active,
+    std::uint64_t expected_generation,
+    std::uint64_t current_generation) noexcept {
+    if (!scheduler_available) {
+        return ResolverReloadScheduleDecline::no_scheduler;
+    }
+    if (retry_already_scheduled) {
+        return ResolverReloadScheduleDecline::already_scheduled;
+    }
+    if (!routing_runtime_active) {
+        return ResolverReloadScheduleDecline::routing_inactive;
+    }
+    if (expected_generation != current_generation) {
+        return ResolverReloadScheduleDecline::generation_superseded;
+    }
+    return ResolverReloadScheduleDecline::scheduled;
+}
+
+// Only `already_scheduled` is routine: the chain is armed, this call is a
+// duplicate. The rest each mean no retry will happen from this call, and the
+// operator has no other way to learn it.
+inline bool resolver_reload_schedule_decline_is_notable(
+    ResolverReloadScheduleDecline decline) noexcept {
+    return decline != ResolverReloadScheduleDecline::scheduled &&
+           decline != ResolverReloadScheduleDecline::already_scheduled;
+}
+
+inline const char* resolver_reload_schedule_decline_name(
+    ResolverReloadScheduleDecline decline) noexcept {
+    switch (decline) {
+    case ResolverReloadScheduleDecline::scheduled:
+        return "scheduled";
+    case ResolverReloadScheduleDecline::no_scheduler:
+        return "no scheduler";
+    case ResolverReloadScheduleDecline::already_scheduled:
+        return "a retry is already armed";
+    case ResolverReloadScheduleDecline::routing_inactive:
+        return "routing runtime is not active";
+    case ResolverReloadScheduleDecline::generation_superseded:
+        return "runtime generation was superseded";
+    }
+    return "unknown";
 }
 
 template <typename Reload>

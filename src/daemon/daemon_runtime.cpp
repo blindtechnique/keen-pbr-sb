@@ -4933,11 +4933,27 @@ void Daemon::cancel_resolver_reload_retry() {
 void Daemon::schedule_resolver_reload_retry(
     std::size_t attempt,
     std::uint64_t runtime_generation) {
-    if (!scheduler_ || resolver_reload_retry_task_id_ >= 0 ||
-        !runtime_recovery_is_current(
-            routing_runtime_active_,
-            runtime_generation,
-            runtime_generation_.load(std::memory_order_acquire))) {
+    const auto decline = classify_resolver_reload_schedule(
+        scheduler_ != nullptr,
+        resolver_reload_retry_task_id_ >= 0,
+        routing_runtime_active_,
+        runtime_generation,
+        runtime_generation_.load(std::memory_order_acquire));
+    if (decline != ResolverReloadScheduleDecline::scheduled) {
+        // Every branch here used to return in silence. When the declined call
+        // is the one that would have armed maintenance, the resolver stops
+        // retrying for good and the log's last word on the subject is the
+        // bounded chain's exhaustion - which is exactly how an operator ends
+        // up with a resolver stuck on its fallback and nothing to read.
+        if (resolver_reload_schedule_decline_is_notable(decline)) {
+            try {
+                Logger::instance().warn(
+                    "Resolver reload retry (attempt {}) was not scheduled: {}",
+                    attempt,
+                    resolver_reload_schedule_decline_name(decline));
+            } catch (...) {
+            }
+        }
         return;
     }
 
@@ -5255,6 +5271,12 @@ void Daemon::complete_resolver_reload_retry_attempt(
                 resolver_reload_incidents_.record_failure(incident_key);
         }
         if (incident.notify) {
+            // Recorded before the transition and independently of it. The
+            // transition below can only publish this chain's reason when the
+            // runtime is still running; during a real boot something else has
+            // usually broken it seconds earlier, and a recovery keyed only on
+            // that reason could then never fire again.
+            resolver_reload_latched_ = true;
             Logger::instance().error(
                 "Resolver reload did not recover after {} bounded attempts; "
                 "routing remains active and quiet maintenance will retry "
@@ -5265,6 +5287,11 @@ void Daemon::complete_resolver_reload_retry_attempt(
                 transition_runtime_or_throw(
                     RuntimeState::broken,
                     kResolverReloadExhaustedRuntimeReason.data());
+            } else {
+                Logger::instance().warn(
+                    "Resolver latch recorded while the runtime was already "
+                    "held by another owner for: {}",
+                    runtime_state_machine_.reason());
             }
         }
         refresh_resolver_config_hash_actual_async();
@@ -5299,10 +5326,28 @@ bool Daemon::acknowledge_verified_resolver_reload(
     const auto runtime_recovery_action = plan_resolver_runtime_recovery(
         routing_runtime_active_,
         runtime_state_machine_.state(),
-        runtime_state_machine_.reason());
+        runtime_state_machine_.reason(),
+        resolver_reload_latched_);
     if (runtime_recovery_action == ResolverRuntimeRecoveryAction::preserve) {
         return false;
     }
+    if (runtime_recovery_action ==
+        ResolverRuntimeRecoveryAction::clear_resolver_latch_only) {
+        // The resolver is healthy again, but the runtime is broken for a
+        // reason this chain did not write and must not overwrite. Retire our
+        // own latch and say so - otherwise the only trace of a resolver that
+        // recovered under someone else's broken runtime is silence.
+        resolver_reload_latched_ = false;
+        try {
+            Logger::instance().warn(
+                "Resolver reload recovered, but the runtime stays broken for "
+                "an unrelated reason: {}",
+                runtime_state_machine_.reason());
+        } catch (...) {
+        }
+        return false;
+    }
+    resolver_reload_latched_ = false;
 
     // Both broken -> applying and running -> applying are legal. No
     // intermediate publication occurs: this bridge replaces only the exact

@@ -507,6 +507,92 @@ TEST_CASE("URLTEST transient exhaustion and permanent escalation share one bell"
     CHECK(notifications == 1U);
 }
 
+TEST_CASE("the resolver's own latch survives another owner breaking first") {
+    using Action = ResolverRuntimeRecoveryAction;
+    const auto exhausted = kResolverReloadExhaustedRuntimeReason;
+
+    // Unchanged: when this chain owns the broken runtime, it recovers it.
+    CHECK(plan_resolver_runtime_recovery(true, RuntimeState::broken,
+                                         exhausted, true) ==
+          Action::recover_resolver_broken);
+    CHECK(plan_resolver_runtime_recovery(true, RuntimeState::broken,
+                                         exhausted, false) ==
+          Action::recover_resolver_broken);
+
+    // The measured boot ordering: urltest or firewall reconciliation breaks
+    // the runtime seconds before the resolver's bounded chain exhausts, so the
+    // exhaustion path never publishes its own reason. Keyed only on the
+    // reason, a later verified reload found nothing to act on and this chain
+    // stayed latched with no way back.
+    CHECK(plan_resolver_runtime_recovery(
+              true, RuntimeState::broken,
+              "urltest selection rollback failed", true) ==
+          Action::clear_resolver_latch_only);
+
+    // ...and it retires ONLY its own latch. The runtime belongs to the other
+    // owner; clearing it here would call a broken router healthy.
+    CHECK(plan_resolver_runtime_recovery(
+              true, RuntimeState::broken,
+              "urltest selection rollback failed", false) ==
+          Action::preserve);
+    CHECK(plan_resolver_runtime_recovery(
+              true, RuntimeState::broken, "configuration apply failed",
+              false) == Action::preserve);
+
+    // A latch cannot resurrect a runtime that is not broken, and an inactive
+    // routing runtime still preserves everything.
+    CHECK(plan_resolver_runtime_recovery(true, RuntimeState::running,
+                                         "runtime start complete", true) ==
+          Action::preserve);
+    CHECK(plan_resolver_runtime_recovery(false, RuntimeState::broken,
+                                         exhausted, true) ==
+          Action::preserve);
+    CHECK(plan_resolver_runtime_recovery(
+              true, RuntimeState::running,
+              kResolverReloadPendingRuntimeReason, true) ==
+          Action::refresh_running_reason);
+}
+
+TEST_CASE("a retry that will never be scheduled says so") {
+    using Decline = ResolverReloadScheduleDecline;
+    CHECK(classify_resolver_reload_schedule(true, false, true, 7U, 7U) ==
+          Decline::scheduled);
+    CHECK(classify_resolver_reload_schedule(false, false, true, 7U, 7U) ==
+          Decline::no_scheduler);
+    CHECK(classify_resolver_reload_schedule(true, true, true, 7U, 7U) ==
+          Decline::already_scheduled);
+    CHECK(classify_resolver_reload_schedule(true, false, false, 7U, 7U) ==
+          Decline::routing_inactive);
+    // The silent killer: a generation bump between the failure and the
+    // re-arm drops maintenance for good, and the log's last word on the
+    // resolver was the bounded chain's exhaustion.
+    CHECK(classify_resolver_reload_schedule(true, false, true, 7U, 8U) ==
+          Decline::generation_superseded);
+
+    // An armed chain is not news; every other decline means no retry will
+    // happen from this call and nothing else will say so.
+    CHECK_FALSE(resolver_reload_schedule_decline_is_notable(
+        Decline::scheduled));
+    CHECK_FALSE(resolver_reload_schedule_decline_is_notable(
+        Decline::already_scheduled));
+    CHECK(resolver_reload_schedule_decline_is_notable(Decline::no_scheduler));
+    CHECK(resolver_reload_schedule_decline_is_notable(
+        Decline::routing_inactive));
+    CHECK(resolver_reload_schedule_decline_is_notable(
+        Decline::generation_superseded));
+
+    // Ordering matters, and every pair has to be pinned or a reordering
+    // passes: each of these holds two decline conditions at once.
+    CHECK(classify_resolver_reload_schedule(false, true, false, 1U, 2U) ==
+          Decline::no_scheduler);
+    CHECK(classify_resolver_reload_schedule(true, true, false, 1U, 2U) ==
+          Decline::already_scheduled);
+    // Routing being down is the fact an operator can act on; a superseded
+    // generation is a consequence of it, so it must not mask it.
+    CHECK(classify_resolver_reload_schedule(true, false, false, 1U, 2U) ==
+          Decline::routing_inactive);
+}
+
 TEST_CASE("resolver streams committed LKG only while routing is active") {
     CHECK(resolver_lkg_stream_available(
         RuntimeState::running, true, true));

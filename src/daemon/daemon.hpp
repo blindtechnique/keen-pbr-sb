@@ -993,6 +993,13 @@ private:
     bool resolver_reload_retry_pending_{false};
     std::size_t resolver_reload_retry_pending_attempt_{0};
     std::uint64_t resolver_reload_retry_pending_generation_{0};
+    // This chain's own record that its bounded retries were exhausted, kept
+    // apart from the shared runtime reason. The exhaustion path can publish
+    // kResolverReloadExhaustedRuntimeReason only when it finds the runtime
+    // still running; during a boot something else has usually broken it
+    // seconds earlier, and a recovery keyed only on that reason could then
+    // never fire. Cleared by a verified reload, never by another owner.
+    bool resolver_reload_latched_{false};
     // A failed Keenetic DNS rollback must restore firewall before resolver
     // bytes may advance. Unlike retry_pending(), this generation latch remains
     // set after bounded firewall retries are exhausted and is released only by
