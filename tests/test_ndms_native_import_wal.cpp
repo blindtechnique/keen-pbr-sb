@@ -381,6 +381,60 @@ TEST_CASE("native import recovery never retries an ambiguous import POST") {
               record, exact_owned_target()) ==
           NdmsNativeImportRecoveryAction::
               rollback_delete_exact_owned);
+
+    // The observation the real builder would produce for THIS record. The
+    // codec forbids target_full_revision at this phase, and the observation
+    // sets target_fingerprint_matches only from a revision the record carries
+    // - so a fingerprint here is not merely absent, it is impossible. The
+    // assertion above passes on an observation that could never exist, which
+    // is why demanding the fingerprint went unnoticed while it sent every
+    // crashed import to block_unknown: an orphaned interface left on the
+    // router and a WAL record blocking every future import.
+    REQUIRE_FALSE(record.target_full_revision.has_value());
+    auto unverifiable = exact_owned_target();
+    unverifiable.target_fingerprint_matches = false;
+    CHECK(classify_ndms_native_import_recovery(record, unverifiable) ==
+          NdmsNativeImportRecoveryAction::
+              rollback_delete_exact_owned);
+
+    // ...and the marker triple is still doing the work: drop any leg of it and
+    // the rollback is refused.
+    for (const auto& weaken :
+         {+[](NdmsNativeImportRecoveryObservation& o) {
+              o.target_absent_in_baseline = false;
+          },
+          +[](NdmsNativeImportRecoveryObservation& o) {
+              o.target_down = false;
+          },
+          +[](NdmsNativeImportRecoveryObservation& o) {
+              o.marker_target = "Wireguard0";
+          }}) {
+        auto weakened = unverifiable;
+        weaken(weakened);
+        CHECK(classify_ndms_native_import_recovery(record, weakened) ==
+              NdmsNativeImportRecoveryAction::block_unknown);
+    }
+}
+
+TEST_CASE("a recorded fingerprint that does not match still refuses") {
+    // Where the codec DOES mandate a revision, a mismatch is a changed world
+    // and must block - the relaxation above must not reach these phases.
+    auto record = prepared_record();
+    record.phase = NdmsNativeImportWalPhase::target_verified;
+    reserve(record);
+    record_response(record);
+    verify_target(record);
+    REQUIRE(record.target_full_revision.has_value());
+
+    CHECK(classify_ndms_native_import_recovery(
+              record, exact_owned_target()) ==
+          NdmsNativeImportRecoveryAction::
+              rollback_delete_exact_owned);
+
+    auto moved = exact_owned_target();
+    moved.target_fingerprint_matches = false;
+    CHECK(classify_ndms_native_import_recovery(record, moved) ==
+          NdmsNativeImportRecoveryAction::block_unknown);
 }
 
 TEST_CASE("prepared native import WAL can recover without generation advance") {
@@ -423,9 +477,17 @@ TEST_CASE("native import recovery blocks protected ambiguous and mismatched targ
     CHECK(classify_ndms_native_import_recovery(record, multiple) ==
           NdmsNativeImportRecoveryAction::block_unknown);
 
-    auto mismatch = exact_owned_target();
-    mismatch.target_fingerprint_matches = false;
-    CHECK(classify_ndms_native_import_recovery(record, mismatch) ==
+    // A fingerprint mismatch used to be asserted here, and it pinned the
+    // defect rather than a guarantee: this phase cannot carry a revision, so
+    // target_fingerprint_matches is false in every observation the real
+    // builder can produce, and the assertion quietly stated that a crashed
+    // inflight import always blocks. The mismatch guarantee it was meant to
+    // express is now pinned where a revision can actually exist, in "a
+    // recorded fingerprint that does not match still refuses".
+    auto missing_created = exact_owned_target();
+    missing_created.target_fingerprint_matches = false;
+    missing_created.target_absent_in_baseline = false;
+    CHECK(classify_ndms_native_import_recovery(record, missing_created) ==
           NdmsNativeImportRecoveryAction::block_unknown);
 
     auto protected_changed = exact_owned_target();

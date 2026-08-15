@@ -506,13 +506,31 @@ std::optional<std::uint32_t> parse_optional_generation(
     return static_cast<std::uint32_t>(parsed);
 }
 
+// The fingerprint is demanded exactly when the record is allowed to carry
+// one. validate_record forbids target_full_revision at prepared,
+// import_may_be_inflight and response_recorded, and the observation can set
+// target_fingerprint_matches only from a revision the record carries - so
+// requiring it unconditionally made this false at precisely the phases a
+// crashed import lands on, and every such import ended in block_unknown: the
+// interface it created stayed on the router forever and its WAL record blocked
+// every future import.
+//
+// At those phases ownership rests on the marker triple, which is what the
+// design intends and all the evidence that exists there. The marker is derived
+// from this transaction's own id, so exactly one interface carrying it was
+// created by this transaction; the slot was free in the baseline; the carrier
+// is down; the slot is inside the managed range. A revision would add nothing,
+// because nothing ever read this target to record one.
 bool exact_owned_target(
     const NdmsNativeImportWalRecord& record,
     const NdmsNativeImportRecoveryObservation& observation) noexcept {
     if (observation.marker_match_count != 1U ||
         !observation.marker_target.has_value() ||
         !observation.target_absent_in_baseline ||
-        !observation.target_down ||
+        !observation.target_down) {
+        return false;
+    }
+    if (record.target_full_revision.has_value() &&
         !observation.target_fingerprint_matches) {
         return false;
     }
