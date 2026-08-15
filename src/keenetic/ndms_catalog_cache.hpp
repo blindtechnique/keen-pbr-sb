@@ -35,6 +35,22 @@ struct NdmsCatalogSnapshot {
     // derive durations, and this router has no battery-backed RTC, so the wall
     // clock steps once NTP catches up.
     std::optional<std::chrono::steady_clock::time_point> observed_at;
+
+    // Monotonic process-local identity of the last catalog accepted from
+    // firmware. It advances only when a parsed response belongs to the
+    // current invalidation epoch. Cache hits, failed refreshes and rejected
+    // pre-invalidation completions retain the previous value. Zero means no
+    // catalog has ever been accepted by this cache instance.
+    std::uint64_t observation_generation{0};
+
+    // Topology epoch in which the retained catalog was accepted, and the
+    // cache's current topology epoch respectively. After invalidate(), a
+    // retained last-known-good catalog intentionally has
+    // observation_epoch < invalidation_epoch until a replacement observation
+    // is accepted. These are safe process-local counters, not firmware
+    // revisions and not mutation authorization.
+    std::uint64_t observation_epoch{0};
+    std::uint64_t invalidation_epoch{0};
 };
 
 // Thread-safe, single-flight cache for the loopback NDMS request. Failed
@@ -87,6 +103,8 @@ private:
     std::uint64_t refresh_generation_{0};
     std::uint64_t invalidation_epoch_{0};
     std::uint64_t last_completed_refresh_epoch_{0};
+    std::uint64_t accepted_observation_generation_{0};
+    std::uint64_t accepted_observation_epoch_{0};
 };
 
 // Shared by the daemon runtime and the API inventory. This prevents duplicate

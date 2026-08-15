@@ -43,16 +43,31 @@ export function authEndpointModeLabelKey(mode: KeeneticEndpointMode) {
  */
 export function authCredentialsMayBeCollected(
   status: AuthStatus | null,
-  nowMs = Date.now()
+  nowMs = Date.now(),
+  secureHttpsContext = currentSecureHttpsContext()
 ): boolean {
   return (
     status !== null &&
     status.error === undefined &&
     (status.provider === "local" ||
       (status.provider === "keenetic" &&
-        status.trustedLocalConnection &&
-        status.trustedLocalConnectionGeneration !== null &&
-        nowMs < status.trustedLocalConnectionValidUntilMs))
+        (secureHttpsContext ||
+          (status.trustedLocalConnection &&
+            status.trustedLocalConnectionGeneration !== null &&
+            nowMs < status.trustedLocalConnectionValidUntilMs))))
+  )
+}
+
+/**
+ * Browser-side half of the KeenDNS HTTPS credential boundary. The backend
+ * independently verifies the immutable HTTPS Origin and that the accepted
+ * socket peer is the router proxy before reading a Keenetic password.
+ */
+export function currentSecureHttpsContext(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    window.location.protocol === "https:" &&
+    window.isSecureContext === true
   )
 }
 
@@ -63,7 +78,8 @@ export function authCredentialsMayBeCollected(
  */
 export async function refreshCredentialTransportStatus(
   fetchImpl: typeof fetch = fetch,
-  clock: () => number = Date.now
+  clock: () => number = Date.now,
+  secureHttpsContext = currentSecureHttpsContext()
 ): Promise<AuthStatus | null> {
   try {
     // The proof lifetime starts no later than request dispatch. A slow
@@ -80,7 +96,8 @@ export async function refreshCredentialTransportStatus(
     if (!response.ok) return null
     const status = parseAuthStatus(await response.json(), startedAtMs)
     const validationNowMs = clock()
-    return status && authCredentialsMayBeCollected(status, validationNowMs)
+    return status &&
+      authCredentialsMayBeCollected(status, validationNowMs, secureHttpsContext)
       ? status
       : null
   } catch {

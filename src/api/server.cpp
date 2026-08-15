@@ -762,7 +762,8 @@ struct CredentialAuthAdmission {
     std::uint64_t auth_generation{0U};
     std::string provider;
     bool auth_enabled{false};
-    bool trusted_local_connection{false};
+    bool protected_secret_transport{false};
+    bool https_reverse_proxy{false};
     bool authenticated_session{false};
 };
 
@@ -915,6 +916,38 @@ struct ApiServer::Impl {
                          false,
                          require_credential_freshness)
                    : TrustedLocalConnectionDecision{};
+    }
+
+    struct ProtectedSecretTransportDecision {
+        bool protected_transport{false};
+        bool https_reverse_proxy{false};
+    };
+
+    ProtectedSecretTransportDecision evaluate_protected_secret_transport(
+        const httplib::Request& request,
+        const bool require_credential_freshness) {
+        const auto local = evaluate_trusted_local_connection(
+            request, require_credential_freshness);
+        if (local.trusted) return {true, false};
+
+        // KeenDNS terminates browser HTTPS on the router and forwards the
+        // request to this plaintext listener. Proxy headers alone grant
+        // nothing: a single browser Origin must say HTTPS, and the accepted
+        // TCP peer itself must be an address owned by this router kernel.
+        const bool unambiguous_headers =
+            request.get_header_value_count("Origin") == 1U &&
+            request.get_header_value_count("Sec-Fetch-Site") <= 1U &&
+            request.get_header_value_count("X-Forwarded-Proto") <= 1U;
+        const auto interfaces = system_trusted_local_interface_addresses();
+        const bool trusted_proxy = unambiguous_headers &&
+            trusted_router_https_proxy_connection_is_proven(
+                request.remote_addr,
+                request.local_addr,
+                request.get_header_value("Origin"),
+                request.get_header_value("Sec-Fetch-Site"),
+                request.get_header_value("X-Forwarded-Proto"),
+                interfaces);
+        return {trusted_proxy, trusted_proxy};
     }
 
     WebAuthConfig auth_snapshot() {
@@ -1388,7 +1421,7 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                 kCredentialAuthAdmissionKey);
         if (auth.uses_router_account() &&
             (admission == nullptr ||
-             !admission->trusted_local_connection)) {
+             !admission->protected_secret_transport)) {
             res.status = 403;
             res.set_content(
                 R"({"error":"protected_secret_transport_unavailable"})",
@@ -1532,7 +1565,7 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                 kCredentialAuthAdmissionKey);
         if (auth.uses_router_account() &&
             (admission == nullptr ||
-             !admission->trusted_local_connection)) {
+             !admission->protected_secret_transport)) {
             res.status = 403;
             res.set_content(
                 R"({"error":"protected_secret_transport_unavailable"})",
@@ -1639,9 +1672,11 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                     return;
                 }
             }
-            res.set_header("Set-Cookie", "keen_pbr_session=" + *token +
-                           "; Path=/; HttpOnly; SameSite=Strict; Max-Age=" +
-                           std::to_string(session_ttl.count()));
+            auto cookie = "keen_pbr_session=" + *token +
+                          "; Path=/; HttpOnly; SameSite=Strict; Max-Age=" +
+                          std::to_string(session_ttl.count());
+            if (admission->https_reverse_proxy) cookie += "; Secure";
+            res.set_header("Set-Cookie", cookie);
             res.set_content(R"({"authenticated":true})", "application/json");
         } catch (const std::exception&) {
             login_attempt->record_failure();
@@ -2134,7 +2169,13 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                                                                     httplib::Response& res) {
         const auto token = cookie_value(req, "keen_pbr_session");
         (void)state->revoke_auth_session(token);
-        res.set_header("Set-Cookie", "keen_pbr_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
+        auto cookie = std::string{
+            "keen_pbr_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"};
+        if (state->evaluate_protected_secret_transport(req, false)
+                .https_reverse_proxy) {
+            cookie += "; Secure";
+        }
+        res.set_header("Set-Cookie", cookie);
         res.set_header("Cache-Control", "no-store");
         res.set_content(R"({"authenticated":false})", "application/json");
     });
@@ -2194,7 +2235,7 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                 kCredentialAuthAdmissionKey,
                 CredentialAuthAdmission{
                     auth_generation, auth.provider, auth.enabled, false,
-                    false});
+                    false, false});
         }
         const auto reject_unprotected_secret_transport = [&]() {
             res.status = 403;
@@ -2217,21 +2258,21 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                     "application/json");
                 return httplib::Server::HandlerResponse::Handled;
             }
-            const auto locality =
-                state->evaluate_trusted_local_connection(req, true);
-            if (!locality.trusted) {
+            const auto transport =
+                state->evaluate_protected_secret_transport(req, true);
+            if (!transport.protected_transport) {
                 login_attempt->record_failure();
                 // This runs after headers but before cpp-httplib reads
                 // req.body. Router credentials must never enter daemon memory
-                // from WAN or a proxy-collapsed connection, even when a stale
-                // firewall rule still reaches this listener.
+                // from WAN or an unattested proxy connection, even when a
+                // stale firewall rule still reaches this listener.
                 return reject_unprotected_secret_transport();
             }
             res.user_data.set(
                 kCredentialAuthAdmissionKey,
                 CredentialAuthAdmission{
                     auth_generation, auth.provider, auth.enabled, true,
-                    false});
+                    transport.https_reverse_proxy, false});
             // The handler owns the attempt that measures credential validity.
             // Releasing here avoids charging one browser submission twice.
             login_attempt->release();
@@ -2296,9 +2337,16 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                         "application/json");
                     return httplib::Server::HandlerResponse::Handled;
                 }
-                const auto locality =
-                    state->evaluate_trusted_local_connection(req, true);
-                if (!locality.trusted) {
+                const bool router_step_up =
+                    auth.uses_router_account() &&
+                    req.path == "/api/auth/step-up";
+                const auto transport = router_step_up
+                    ? state->evaluate_protected_secret_transport(req, true)
+                    : Impl::ProtectedSecretTransportDecision{
+                          state->evaluate_trusted_local_connection(req, true)
+                              .trusted,
+                          false};
+                if (!transport.protected_transport) {
                     login_attempt->record_failure();
                     // The settings body can switch from local to Keenetic
                     // auth, so its provider cannot safely be discovered by
@@ -2311,7 +2359,7 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                         kCredentialAuthAdmissionKey,
                         CredentialAuthAdmission{
                             auth_generation, auth.provider, auth.enabled,
-                            true, true});
+                            true, transport.https_reverse_proxy, true});
                 }
             } else if (req.method == "POST" &&
                        req.path == "/api/auth/step-up") {
@@ -2319,7 +2367,7 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                     kCredentialAuthAdmissionKey,
                     CredentialAuthAdmission{
                         auth_generation, auth.provider, auth.enabled, false,
-                        true});
+                        false, true});
             }
             if (req.method == "POST" &&
                 req.path == "/api/auth/settings") {

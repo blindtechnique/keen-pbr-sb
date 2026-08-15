@@ -26,6 +26,27 @@ namespace {
 
 constexpr auto kCredentialSnapshotMaximumAge = std::chrono::seconds{5};
 
+// Linux UAPI route attributes are append-only.  The Keenetic Entware
+// toolchain ships headers which stop at RTA_MFC_STATS, while current kernels
+// may still return the later attributes below.  Keep their stable UAPI values
+// available without requiring newer build-host headers.
+constexpr std::uint16_t kRouteAttributeVia =
+    static_cast<std::uint16_t>(RTA_MFC_STATS + 1);
+constexpr std::uint16_t kRouteAttributeNewDestination =
+    static_cast<std::uint16_t>(RTA_MFC_STATS + 2);
+constexpr std::uint16_t kRouteAttributeEncapsulationType =
+    static_cast<std::uint16_t>(RTA_MFC_STATS + 4);
+constexpr std::uint16_t kRouteAttributeEncapsulation =
+    static_cast<std::uint16_t>(RTA_MFC_STATS + 5);
+
+bool indirect_route_attribute(const std::uint16_t type) noexcept {
+    return type == RTA_GATEWAY || type == RTA_MULTIPATH ||
+           type == kRouteAttributeVia ||
+           type == kRouteAttributeNewDestination ||
+           type == kRouteAttributeEncapsulation ||
+           type == kRouteAttributeEncapsulationType;
+}
+
 struct ParsedAddress {
     int family{AF_UNSPEC};
     std::array<std::uint8_t, 16> bytes{};
@@ -93,6 +114,103 @@ bool unusable_peer_address(const ParsedAddress& address) noexcept {
     const bool link_local =
         address.bytes[0] == 0xfeU && (address.bytes[1] & 0xc0U) == 0x80U;
     return unspecified || link_local || address.bytes[0] == 0xffU;
+}
+
+bool strict_https_origin(const std::string_view origin) noexcept {
+    constexpr std::string_view prefix{"https://"};
+    if (origin.size() <= prefix.size() || origin.size() > 512U ||
+        origin.substr(0U, prefix.size()) != prefix) {
+        return false;
+    }
+
+    // Origin serialisation contains only scheme and authority. Reject paths,
+    // userinfo, lists and non-ASCII/control bytes rather than trying to turn a
+    // browser signal into a general URL parser.
+    const auto authority = origin.substr(prefix.size());
+    for (const unsigned char character : authority) {
+        if (character <= 0x20U || character >= 0x7fU || character == '/' ||
+            character == '\\' || character == '?' || character == '#' ||
+            character == '@' || character == ',' || character == ';') {
+            return false;
+        }
+    }
+    if (authority.empty()) return false;
+
+    const auto valid_port = [](const std::string_view port) noexcept {
+        if (port.empty() || port.size() > 5U) return false;
+        unsigned int value = 0U;
+        for (const unsigned char character : port) {
+            if (character < '0' || character > '9') return false;
+            value = value * 10U + static_cast<unsigned int>(character - '0');
+        }
+        return value > 0U && value <= 65535U;
+    };
+    const auto valid_dns_name = [](const std::string_view host) noexcept {
+        if (host.empty() || host.size() > 253U || host.front() == '.' ||
+            host.back() == '.') {
+            return false;
+        }
+        std::size_t label_size = 0U;
+        bool label_starts_with_hyphen = false;
+        unsigned char previous = 0U;
+        for (const unsigned char character : host) {
+            if (character == '.') {
+                if (label_size == 0U || label_size > 63U ||
+                    label_starts_with_hyphen || previous == '-') {
+                    return false;
+                }
+                label_size = 0U;
+                label_starts_with_hyphen = false;
+                previous = character;
+                continue;
+            }
+            const bool alphanumeric =
+                (character >= 'a' && character <= 'z') ||
+                (character >= 'A' && character <= 'Z') ||
+                (character >= '0' && character <= '9');
+            if (!alphanumeric && character != '-') return false;
+            if (label_size == 0U) label_starts_with_hyphen = character == '-';
+            ++label_size;
+            previous = character;
+        }
+        return label_size > 0U && label_size <= 63U &&
+               !label_starts_with_hyphen && previous != '-';
+    };
+
+    if (authority.front() == '[') {
+        const auto closing = authority.find(']');
+        if (closing == std::string_view::npos || closing == 1U) return false;
+        const auto parsed = parse_address(authority.substr(1U, closing - 1U));
+        if (!parsed || parsed->family != AF_INET6) return false;
+        const auto suffix = authority.substr(closing + 1U);
+        return suffix.empty() ||
+               (suffix.front() == ':' && valid_port(suffix.substr(1U)));
+    }
+
+    const auto colon = authority.find(':');
+    if (colon != std::string_view::npos &&
+        authority.find(':', colon + 1U) != std::string_view::npos) {
+        return false;
+    }
+    const auto host = authority.substr(0U, colon);
+    if (colon != std::string_view::npos &&
+        !valid_port(authority.substr(colon + 1U))) {
+        return false;
+    }
+    const auto parsed = parse_address(host);
+    return (parsed && parsed->family == AF_INET) || valid_dns_name(host);
+}
+
+bool kernel_owned_address(
+    const ParsedAddress& address,
+    const std::vector<TrustedLocalInterfaceAddress>& interfaces) noexcept {
+    return std::any_of(
+        interfaces.begin(), interfaces.end(),
+        [&](const TrustedLocalInterfaceAddress& interface) {
+            if (!interface.up) return false;
+            const auto candidate = parse_address(interface.address);
+            return candidate && equal_address(*candidate, address);
+        });
 }
 
 bool contiguous_netmask(const ParsedAddress& mask) noexcept {
@@ -254,6 +372,45 @@ bool trusted_local_connection_is_proven(
            equal_address(*route_destination, *remote);
 }
 
+bool trusted_router_https_proxy_connection_is_proven(
+    const std::string_view remote_address,
+    const std::string_view local_address,
+    const std::string_view origin,
+    const std::string_view sec_fetch_site,
+    const std::string_view x_forwarded_proto,
+    const std::vector<TrustedLocalInterfaceAddress>& interface_addresses)
+    noexcept {
+    if (!strict_https_origin(origin) ||
+        (!sec_fetch_site.empty() && sec_fetch_site != "same-origin") ||
+        (!x_forwarded_proto.empty() && x_forwarded_proto != "https")) {
+        return false;
+    }
+
+    const auto remote = parse_address(remote_address);
+    const auto local = parse_address(local_address);
+    if (!remote || !local || remote->family != local->family) return false;
+
+    const bool remote_loopback = loopback_address(*remote);
+    const bool local_loopback = loopback_address(*local);
+    if (remote_loopback || local_loopback) {
+        // The proxy can connect loopback-to-loopback or select an exact router
+        // interface as its destination. A network peer can never be paired
+        // with a loopback accepted address.
+        return remote_loopback &&
+               (local_loopback ||
+                kernel_owned_address(*local, interface_addresses));
+    }
+    if (unusable_peer_address(*remote) || unusable_peer_address(*local)) {
+        return false;
+    }
+
+    // Both endpoints must be exact addresses currently owned by this kernel.
+    // A LAN/WAN client can spoof Origin or X-Forwarded-Proto, but it cannot
+    // complete a TCP connection whose peer address belongs to the router.
+    return equal_address(*remote, *local) &&
+           kernel_owned_address(*remote, interface_addresses);
+}
+
 std::vector<TrustedLocalInterfaceAddress>
 system_trusted_local_interface_addresses() {
     ifaddrs* raw = nullptr;
@@ -380,12 +537,7 @@ std::optional<TrustedLocalRouteProof> system_trusted_local_route_proof(
         for (auto* attribute = RTM_RTA(route_message);
              RTA_OK(attribute, attributes_length);
              attribute = RTA_NEXT(attribute, attributes_length)) {
-            if (attribute->rta_type == RTA_GATEWAY ||
-                attribute->rta_type == RTA_VIA ||
-                attribute->rta_type == RTA_MULTIPATH ||
-                attribute->rta_type == RTA_NEWDST ||
-                attribute->rta_type == RTA_ENCAP ||
-                attribute->rta_type == RTA_ENCAP_TYPE) {
+            if (indirect_route_attribute(attribute->rta_type)) {
                 indirect = true;
             }
             if (attribute->rta_type != RTA_OIF) continue;

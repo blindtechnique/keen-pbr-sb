@@ -11,6 +11,8 @@ namespace keen_pbr3 {
 
 constexpr std::size_t kNdmsNativeTunnelImportMaximumBytes =
     256U * 1024U;
+constexpr std::size_t kNdmsNativeTunnelImportMaximumUriBytes =
+    512U * 1024U;
 
 enum class NdmsNativeTunnelImportErrorCode {
     input_too_large,
@@ -24,6 +26,7 @@ enum class NdmsNativeTunnelImportErrorCode {
     unknown_section,
     duplicate_section,
     duplicate_field,
+    duplicate_peer,
     unknown_field,
     dangerous_directive,
     missing_required_field,
@@ -139,16 +142,19 @@ struct NdmsNativeTunnelImportPreview {
     std::optional<std::string> endpoint_host;
     std::optional<std::uint16_t> endpoint_port;
     std::optional<std::uint16_t> persistent_keepalive;
+    std::optional<std::uint16_t> listen_port;
+    std::optional<std::uint32_t> mtu;
     std::vector<std::string> amnezia_parameter_names;
     bool has_private_key{false};
     std::size_t preshared_key_count{0};
     std::string revision;
 };
 
-// Accepts a bounded wg-quick/AmneziaWG .conf body. URI schemes, including
-// `vpn://` and non-standard `wireguard://`, fail closed until their decoding
-// path can guarantee secure wipe of every secret-bearing allocation. This
-// function performs no I/O and no mutation.
+// Accepts a bounded wg-quick/AmneziaWG .conf body or the official Amnezia
+// `vpn://` envelope when it contains exactly one unambiguous WG/AWG client
+// config. Other URI schemes fail closed. Every secret-bearing allocation in
+// the URI decoder is explicitly wiped. This function performs no I/O and no
+// mutation.
 NdmsNativeTunnelImport parse_ndms_native_tunnel_import(
     std::string input);
 

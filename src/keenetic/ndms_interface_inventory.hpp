@@ -2,6 +2,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -26,6 +28,28 @@ enum class NdmsInterfaceRole {
     client,
     server,
     unknown,
+};
+
+inline constexpr std::size_t kNdmsWireguardCatalogSlotCount = 127U;
+
+enum class NdmsWireguardCatalogSlotState : std::uint8_t {
+    absent,
+    occupied,
+    unsafe,
+};
+
+// Fixed, non-secret evidence for the measured Wireguard0..Wireguard126
+// firmware namespace. An occupied slot has exactly one structurally valid RCI
+// claimant. Unsafe means the parser observed a scalar record, duplicate,
+// conflicting identity or another malformed claim that must not be collapsed
+// into the UI inventory's deterministic duplicate winner.
+struct NdmsWireguardCatalogSlotEvidence {
+    NdmsWireguardCatalogSlotState state{
+        NdmsWireguardCatalogSlotState::absent};
+    // Domain-separated SHA-256 over the canonical slot, exact RCI record id,
+    // effective firmware interface name and the existing non-secret structural
+    // allowlist. Empty for absent and unsafe slots.
+    std::string structural_revision;
 };
 
 struct NdmsTunnelInterface {
@@ -71,6 +95,14 @@ struct NdmsInterfaceCatalog {
     // resolution is intentionally a separate pure pass.
     std::vector<NdmsInterfaceMetadata> interface_metadata;
     std::vector<NdmsTunnelInterface> tunnels;
+    // Mutation/recovery consumers must require this flag and reject every
+    // unsafe slot. Runtime kernel resolution copies this raw-firmware evidence
+    // unchanged; connected/link/uptime never participate in its revisions.
+    std::array<
+        NdmsWireguardCatalogSlotEvidence,
+        kNdmsWireguardCatalogSlotCount>
+        wireguard_slots{};
+    bool wireguard_slot_evidence_complete{false};
     // Compatibility view keyed only by a kernel interface name observed in
     // the runtime-name input. It is empty on an unresolved catalog.
     nlohmann::json names;

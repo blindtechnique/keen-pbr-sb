@@ -1525,6 +1525,49 @@ TEST_CASE("Keenetic login rejects untrusted and forwarded transport before body 
     CHECK(spoofed->status == 403);
     // Forwarding headers are denied before the injectable socket evaluator.
     CHECK(evaluations.load(std::memory_order_relaxed) == 1U);
+
+    const httplib::Headers plaintext_proxy{
+        {"Origin", "http://vpn.router.keenetic.pro"},
+        {"Sec-Fetch-Site", "same-origin"},
+        {"X-Forwarded-Proto", "https"},
+    };
+    const auto plaintext = client.Post(
+        "/api/auth/login", plaintext_proxy, "still not JSON", "application/json");
+    REQUIRE(plaintext != nullptr);
+    CHECK(plaintext->status == 403);
+    // A claimed forwarding scheme cannot override the browser-visible HTTP
+    // Origin, and the direct-local evaluator remains bypassed.
+    CHECK(evaluations.load(std::memory_order_relaxed) == 1U);
+
+}
+
+TEST_CASE("Keenetic login rejects ambiguous HTTPS proxy headers") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    write_text(
+        auth_path,
+        R"({"enabled":true,"provider":"keenetic","keenetic_endpoint_mode":"manual","keenetic_endpoint":"127.0.0.1:8080"})");
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+    TrustedLocalConnectionEvaluatorGuard local_transport(
+        [](std::string_view, std::string_view, bool) { return false; });
+
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+    httplib::Client client("127.0.0.1", configured_port(config));
+    const httplib::Headers duplicate_origin{
+        {"Origin", "https://one.router.keenetic.pro"},
+        {"Origin", "https://two.router.keenetic.pro"},
+    };
+    const auto response = client.Post(
+        "/api/auth/login", duplicate_origin, "must not be parsed",
+        "application/json");
+
+    REQUIRE(response != nullptr);
+    CHECK(response->status == 403);
+    CHECK(nlohmann::json::parse(response->body).at("error") ==
+          "protected_secret_transport_unavailable");
 }
 
 TEST_CASE("Keenetic credential gates answer and close before a withheld body") {
@@ -1615,6 +1658,93 @@ TEST_CASE("Keenetic login and step-up use trusted local HTTP transport") {
     CHECK(nlohmann::json::parse(step_up->body).at("granted").get<bool>());
     CHECK(evaluations.load(std::memory_order_relaxed) == 2U);
     CHECK(forwarded_credentials.load(std::memory_order_relaxed) == 2U);
+}
+
+TEST_CASE("Keenetic login and step-up allow router-owned HTTPS proxy transport") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    std::atomic<unsigned int> forwarded_credentials{0U};
+    httplib::Server router;
+    router.Get("/auth", [](const httplib::Request&,
+                            httplib::Response& response) {
+        response.status = 401;
+        response.set_header("X-NDM-Realm", "Keenetic");
+        response.set_header("X-NDM-Challenge", "challenge");
+    });
+    router.Post("/auth", [&forwarded_credentials](
+                             const httplib::Request&,
+                             httplib::Response& response) {
+        forwarded_credentials.fetch_add(1U, std::memory_order_relaxed);
+        response.status = 200;
+    });
+    BoundHttpServer running_router(router);
+    write_text(
+        auth_path,
+        nlohmann::json{
+            {"enabled", true},
+            {"provider", "keenetic"},
+            {"keenetic_endpoint_mode", "manual"},
+            {"keenetic_endpoint",
+             "127.0.0.1:" + std::to_string(running_router.port())},
+        }.dump());
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+    std::atomic<unsigned int> local_evaluations{0U};
+    TrustedLocalConnectionEvaluatorGuard local_transport(
+        [&](std::string_view, std::string_view, bool) {
+            local_evaluations.fetch_add(1U, std::memory_order_relaxed);
+            return false;
+        });
+
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+    httplib::Client client("127.0.0.1", configured_port(config));
+    const httplib::Headers https_proxy{
+        {"Origin", "https://vpn.router.keenetic.pro"},
+        {"Sec-Fetch-Site", "same-origin"},
+        {"X-Forwarded-For", "198.51.100.25"},
+        {"X-Forwarded-Proto", "https"},
+    };
+    const auto login = client.Post(
+        "/api/auth/login",
+        https_proxy,
+        R"({"username":"admin","password":"router-secret"})",
+        "application/json");
+    REQUIRE(login != nullptr);
+    REQUIRE(login->status == 200);
+    CHECK(login->get_header_value("Set-Cookie").find("; Secure") !=
+          std::string::npos);
+
+    auto step_up_headers = https_proxy;
+    step_up_headers.emplace("Cookie", session_cookie(*login));
+    const auto step_up = client.Post(
+        "/api/auth/step-up",
+        step_up_headers,
+        R"({"username":"admin","password":"router-secret"})",
+        "application/json");
+    REQUIRE(step_up != nullptr);
+    CHECK(step_up->status == 200);
+    CHECK(nlohmann::json::parse(step_up->body).at("granted").get<bool>());
+    // X-Forwarded-For prevents this request from entering the direct-LAN
+    // evaluator; only the separate router-owned HTTPS proof may admit it.
+    CHECK(local_evaluations.load(std::memory_order_relaxed) == 0U);
+    CHECK(forwarded_credentials.load(std::memory_order_relaxed) == 2U);
+
+    const auto settings = client.Post(
+        "/api/auth/settings",
+        step_up_headers,
+        R"({"enabled":true,"provider":"keenetic"})",
+        "application/json");
+    REQUIRE(settings != nullptr);
+    CHECK(settings->status == 403);
+
+    const auto logout = client.Post(
+        "/api/auth/logout", step_up_headers, "", "application/json");
+    REQUIRE(logout != nullptr);
+    CHECK(logout->status == 200);
+    CHECK(logout->get_header_value("Set-Cookie").find("; Secure") !=
+          std::string::npos);
 }
 
 TEST_CASE("Keenetic step-up rejects stale local proof before forwarding credentials") {

@@ -435,9 +435,9 @@ export const enTranslation = {
     invalidCredentials: "Invalid username or password.",
     unavailable: "The authentication service is unavailable.",
     unavailableTitle: "Unable to verify access",
-    protectedTransportTitle: "Use a direct local connection",
+    protectedTransportTitle: "Use local access or HTTPS",
     protectedTransportRequired:
-      "Router-account credentials are available only over a direct local connection verified by the router. This external or proxy connection cannot ask for them.",
+      "Router-account credentials can be entered over a direct local connection or a protected Keenetic HTTPS domain. External and proxied HTTP remain blocked.",
     loopbackOnlyTitle: "Sign-in is disabled",
     loopbackOnlyDescription:
       "The API is now loopback-only and this LAN browser cannot change its settings. Run recovery on the router itself or restore auth.json over SSH to enable sign-in again.",
@@ -890,23 +890,47 @@ export const enTranslation = {
       hideHidden: "Stop showing hidden interfaces",
     },
     nativeImport: {
-      title: "Import WireGuard / AmneziaWG from a file",
+      title: "Import WireGuard / AmneziaWG",
       description:
-        "Through an authenticated direct local connection verified by the router, select or drop a client .conf file. A preliminary structural check runs only in this browser: the application does not send the source text or keys over the network or store them. Key values stay hidden in the preview, but the endpoint may be shown. Creating the Keenetic interface is still disabled.",
+        "Import is available after sign-in over a protected Keenetic HTTPS domain or a direct local connection verified by the router. A preliminary structural check runs only in this browser: the application does not send or store the source text, URI, or keys. Key values stay hidden in the preview, but the endpoint may be shown. Creating the Keenetic interface is still disabled.",
+      fileDescription:
+        "Select or drop a WireGuard/AmneziaWG client file. It is parsed only in this browser; the source file and keys are not sent over the network.",
       transportBlockedTitle: "A protected sign-in is required for import",
       transportBlockedDescription:
-        "Open the panel through the router's local management address. Import and drag-and-drop are available only after the router verifies an authenticated direct local connection. External or proxied HTTP is blocked; the local network must still be trusted against interception.",
-      dropzoneLabel: "Select or drop a WireGuard configuration file",
-      dropzone: "Drop a .conf here or click to choose",
-      fileHint: "One text .conf file, up to {{size}} KiB",
+        "Open the panel through a protected Keenetic HTTPS domain or the router's local management address, then sign in. External or proxied HTTP is blocked; the local network must still be trusted against interception.",
+      dropzoneLabel: "Select or drop a WireGuard or Amnezia configuration file",
+      dropzone: "Drop a .conf/.vpn here or click to choose",
+      fileHint:
+        "One file: .conf up to {{confSize}} KiB or Amnezia .vpn up to {{uriSize}} KiB",
+      uriPasteLabel: "Amnezia URI",
+      uriPastePlaceholder: "Paste vpn://… here with Ctrl+V",
+      uriPasteHint:
+        "The URI is parsed immediately on paste and is not retained in the field or page state.",
+      pastedInput: "Pasted WireGuard / AmneziaWG input",
+      analyzing: "Checking: {{name}}",
       clear: "Remove the selected file",
-      errorTitle: "File was not accepted",
+      errorTitle: "Input was not accepted",
       redactedNotice:
-        "This is a local preliminary structural preview, not confirmation that the configuration is ready. Key values stay hidden, but the endpoint may be shown. Apply remains disabled.",
+        "This is a local preliminary structural preview, not confirmation that the configuration is ready. Key values stay hidden, but the endpoint may be shown. The suggested name is not written anywhere and must be explicitly accepted or changed during a future save. Apply remains disabled.",
+      aliasConflictTitle: "The suggested name is already in use",
+      aliasConflictDescription:
+        "KeeneticOS already has an interface with this display or technical name. A different name must be explicitly chosen before a future save; the existing interface was not changed.",
       apply: "Create interface in Keenetic",
       applyBlockedTitle: "Interface creation is disabled for now",
       applyBlockedDescription:
-        "The router-verified local preview channel is active, but no key-transfer/apply API, typed KeeneticOS commands, automatic backup, ownership checks, concurrent-change protection or rollback exist yet. The file cannot be applied to the router.",
+        "The panel checks the file or URI safely in this browser only. The server now describes the future create-only flow, but no keys are sent and the Keenetic write API remains disabled.",
+      createOnlyRange:
+        "A future import may create only a new interface in the {{first}}–{{last}} range; existing and protected interfaces must remain unchanged.",
+      readinessBlockers: "Why apply is not available yet",
+      blockers: {
+        writer_disabled: "the apply API and Keenetic writes are disabled",
+        allocator_range_unfenced:
+          "Keenetic cannot yet be constrained to the eligible name range",
+        recovery_journal_not_integrated:
+          "the recovery journal is not connected to startup yet",
+        reconcile_barrier_not_integrated:
+          "catalog and firewall convergence cannot yet be confirmed",
+      },
       requiredGuards: "Required safeguards not ready",
       guards: {
         typed_rci: "typed RCI commands",
@@ -927,13 +951,16 @@ export const enTranslation = {
         endpoint: "Endpoint",
         hiddenOrMultiple: "Not set or multiple peers",
         keepalive: "Keepalive",
+        listenPort: "Local port",
+        mtu: "MTU",
+        aliasSuggestion: "Suggested name",
         seconds: "{{count}} s",
         amneziaParameters: "Amnezia parameters",
       },
       errors: {
         "single-file-only": "Select exactly one file.",
-        "conf-extension-required":
-          "A file with the .conf extension is required.",
+        "supported-extension-required":
+          "A file with the .conf or .vpn extension is required.",
         "empty-file": "The file is empty.",
         "file-too-large": "The file exceeds the size limit.",
         "not-text": "The file is not a valid text .conf.",
@@ -941,13 +968,20 @@ export const enTranslation = {
         input_too_large: "The configuration exceeds the size limit.",
         invalid_encoding: "The configuration contains invalid text.",
         unsupported_uri:
-          "This field accepts a plain .conf. URI import will arrive with safe backend apply support.",
-        invalid_base64: "A WireGuard key has an invalid format.",
+          "Only the official Amnezia vpn:// URI is supported; other URI schemes are rejected.",
+        invalid_base64: "The Amnezia URI contains damaged base64url data.",
+        invalid_compression:
+          "The Amnezia URI contains damaged or unsupported compressed data.",
+        invalid_json: "The Amnezia URI does not contain valid JSON.",
+        unsupported_json_schema:
+          "The Amnezia URI does not contain exactly one unambiguous WireGuard/AmneziaWG client configuration.",
         malformed_line: "Invalid syntax near line {{line}}.",
         unknown_section: "Unknown section near line {{line}}.",
         duplicate_section:
           "The [Interface] section repeats near line {{line}}.",
         duplicate_field: "A field repeats near line {{line}}.",
+        duplicate_peer:
+          "The same peer public key is repeated in the configuration.",
         unknown_field: "Unknown field near line {{line}}.",
         dangerous_directive:
           "Up/Down command directives are forbidden for security (line {{line}}).",
@@ -1034,7 +1068,7 @@ export const enTranslation = {
       nativeInterfaceUnavailableDisabled: "unavailable: disabled in KeeneticOS",
       nativeInterfaceHint:
         "keen-pbr-sb does not create or edit the selected interface: it must already be configured in KeeneticOS. An “unavailable” interface is usually disabled there; VPN servers cannot be selected because outgoing traffic cannot be routed into them. Hidden interfaces remain in this list and are clearly marked.",
-      singBox: "sing-box connection",
+      singBox: "sing-box/Amnezia/WireGuard connection",
       singBoxLegacy: "sing-box (legacy VLESS configuration)",
       interface: "Interface name",
       autoStart: "Start automatically",
@@ -1049,7 +1083,8 @@ export const enTranslation = {
       },
       shareLink: "Connection link",
       shareLinkHint:
-        "Supports VLESS, VMess, Trojan, Shadowsocks, Hysteria2, TUIC, AnyTLS, SOCKS and HTTP proxy links.",
+        "Supports VLESS, VMess, Trojan, Shadowsocks, Hysteria2, TUIC, AnyTLS, SOCKS and HTTP proxy links, plus Amnezia vpn:// URIs for WireGuard/AmneziaWG.",
+      importFile: "Import file",
       outboundJson: "sing-box connection JSON",
       outboundJsonHint:
         "Advanced mode for any connection type supported by the installed sing-box version. The tag is assigned automatically.",

@@ -5,13 +5,16 @@
 
 #include <arpa/inet.h>
 #include <nlohmann/json.hpp>
+#include <zlib.h>
 
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <charconv>
+#include <cstdlib>
 #include <limits>
 #include <map>
+#include <new>
 #include <set>
 #include <string_view>
 #include <utility>
@@ -129,6 +132,630 @@ bool begins_with_uri_scheme(const std::string& value) {
             return std::isalnum(character) != 0 || character == '+' ||
                    character == '-' || character == '.';
         });
+}
+
+bool valid_ip_address(const std::string& value);
+
+class JsonCursor {
+public:
+    explicit JsonCursor(const std::string& input) : input_(input) {}
+
+    char peek() {
+        skip_whitespace();
+        if (offset_ >= input_.size()) invalid();
+        return input_[offset_];
+    }
+
+    bool consume(const char expected) {
+        skip_whitespace();
+        if (offset_ < input_.size() && input_[offset_] == expected) {
+            ++offset_;
+            return true;
+        }
+        return false;
+    }
+
+    void expect(const char expected) {
+        if (!consume(expected)) invalid();
+    }
+
+    std::string read_string() {
+        return read_string_impl(true);
+    }
+
+    void skip_value(const std::size_t depth = 0U) {
+        if (depth > 32U) invalid();
+        const auto token = peek();
+        if (token == '"') {
+            static_cast<void>(read_string_impl(false));
+            return;
+        }
+        if (token == '{') {
+            expect('{');
+            if (consume('}')) return;
+            while (true) {
+                static_cast<void>(read_string_impl(false));
+                expect(':');
+                skip_value(depth + 1U);
+                if (consume('}')) return;
+                expect(',');
+            }
+        }
+        if (token == '[') {
+            expect('[');
+            if (consume(']')) return;
+            while (true) {
+                skip_value(depth + 1U);
+                if (consume(']')) return;
+                expect(',');
+            }
+        }
+        if (token == 't') {
+            consume_literal("true");
+            return;
+        }
+        if (token == 'f') {
+            consume_literal("false");
+            return;
+        }
+        if (token == 'n') {
+            consume_literal("null");
+            return;
+        }
+        read_number();
+    }
+
+    void finish() {
+        skip_whitespace();
+        if (offset_ != input_.size()) invalid();
+    }
+
+    std::string read_integer_text() {
+        skip_whitespace();
+        const auto begin = offset_;
+        read_number();
+        return input_.substr(begin, offset_ - begin);
+    }
+
+private:
+    [[noreturn]] static void invalid() {
+        fail(NdmsNativeTunnelImportErrorCode::invalid_json);
+    }
+
+    void skip_whitespace() {
+        while (offset_ < input_.size()) {
+            const auto value = static_cast<unsigned char>(input_[offset_]);
+            if (value != 0x20U && value != 0x09U && value != 0x0AU &&
+                value != 0x0DU) {
+                break;
+            }
+            ++offset_;
+        }
+    }
+
+    static int hex_value(const char character) {
+        if (character >= '0' && character <= '9') return character - '0';
+        if (character >= 'a' && character <= 'f') {
+            return character - 'a' + 10;
+        }
+        if (character >= 'A' && character <= 'F') {
+            return character - 'A' + 10;
+        }
+        return -1;
+    }
+
+    std::uint32_t read_hex_quad() {
+        if (offset_ + 4U > input_.size()) invalid();
+        std::uint32_t value = 0U;
+        for (std::size_t index = 0U; index < 4U; ++index) {
+            const auto digit = hex_value(input_[offset_++]);
+            if (digit < 0) invalid();
+            value = (value << 4U) | static_cast<std::uint32_t>(digit);
+        }
+        return value;
+    }
+
+    static void append_utf8(std::string& output,
+                            const std::uint32_t codepoint) {
+        if (codepoint <= 0x7FU) {
+            output.push_back(static_cast<char>(codepoint));
+        } else if (codepoint <= 0x7FFU) {
+            output.push_back(static_cast<char>(0xC0U | (codepoint >> 6U)));
+            output.push_back(static_cast<char>(
+                0x80U | (codepoint & 0x3FU)));
+        } else if (codepoint <= 0xFFFFU) {
+            output.push_back(static_cast<char>(0xE0U | (codepoint >> 12U)));
+            output.push_back(static_cast<char>(
+                0x80U | ((codepoint >> 6U) & 0x3FU)));
+            output.push_back(static_cast<char>(
+                0x80U | (codepoint & 0x3FU)));
+        } else {
+            output.push_back(static_cast<char>(0xF0U | (codepoint >> 18U)));
+            output.push_back(static_cast<char>(
+                0x80U | ((codepoint >> 12U) & 0x3FU)));
+            output.push_back(static_cast<char>(
+                0x80U | ((codepoint >> 6U) & 0x3FU)));
+            output.push_back(static_cast<char>(
+                0x80U | (codepoint & 0x3FU)));
+        }
+    }
+
+    std::string read_string_impl(const bool capture) {
+        skip_whitespace();
+        if (offset_ >= input_.size() || input_[offset_] != '"') invalid();
+        ++offset_;
+        std::string output;
+        if (capture) output.reserve(64U);
+        while (offset_ < input_.size()) {
+            const auto character =
+                static_cast<unsigned char>(input_[offset_++]);
+            if (character == '"') return output;
+            if (character < 0x20U) invalid();
+            if (character != '\\') {
+                if (capture) output.push_back(static_cast<char>(character));
+                continue;
+            }
+            if (offset_ >= input_.size()) invalid();
+            const auto escaped = input_[offset_++];
+            char decoded = '\0';
+            switch (escaped) {
+            case '"': decoded = '"'; break;
+            case '\\': decoded = '\\'; break;
+            case '/': decoded = '/'; break;
+            case 'b': decoded = '\b'; break;
+            case 'f': decoded = '\f'; break;
+            case 'n': decoded = '\n'; break;
+            case 'r': decoded = '\r'; break;
+            case 't': decoded = '\t'; break;
+            case 'u': {
+                auto codepoint = read_hex_quad();
+                if (codepoint >= 0xD800U && codepoint <= 0xDBFFU) {
+                    if (offset_ + 2U > input_.size() ||
+                        input_[offset_] != '\\' ||
+                        input_[offset_ + 1U] != 'u') {
+                        invalid();
+                    }
+                    offset_ += 2U;
+                    const auto low = read_hex_quad();
+                    if (low < 0xDC00U || low > 0xDFFFU) invalid();
+                    codepoint = 0x10000U +
+                        ((codepoint - 0xD800U) << 10U) +
+                        (low - 0xDC00U);
+                } else if (codepoint >= 0xDC00U && codepoint <= 0xDFFFU) {
+                    invalid();
+                }
+                if (capture) append_utf8(output, codepoint);
+                continue;
+            }
+            default:
+                invalid();
+            }
+            if (capture) output.push_back(decoded);
+        }
+        invalid();
+    }
+
+    void consume_literal(const std::string_view literal) {
+        if (input_.size() - offset_ < literal.size() ||
+            input_.compare(offset_, literal.size(), literal) != 0) {
+            invalid();
+        }
+        offset_ += literal.size();
+    }
+
+    void read_number() {
+        skip_whitespace();
+        if (offset_ >= input_.size()) invalid();
+        if (input_[offset_] == '-') ++offset_;
+        if (offset_ >= input_.size()) invalid();
+        if (input_[offset_] == '0') {
+            ++offset_;
+            if (offset_ < input_.size() &&
+                std::isdigit(static_cast<unsigned char>(input_[offset_]))) {
+                invalid();
+            }
+        } else {
+            if (input_[offset_] < '1' || input_[offset_] > '9') invalid();
+            while (offset_ < input_.size() &&
+                   std::isdigit(static_cast<unsigned char>(input_[offset_]))) {
+                ++offset_;
+            }
+        }
+        if (offset_ < input_.size() && input_[offset_] == '.') {
+            ++offset_;
+            if (offset_ >= input_.size() ||
+                !std::isdigit(static_cast<unsigned char>(input_[offset_]))) {
+                invalid();
+            }
+            while (offset_ < input_.size() &&
+                   std::isdigit(static_cast<unsigned char>(input_[offset_]))) {
+                ++offset_;
+            }
+        }
+        if (offset_ < input_.size() &&
+            (input_[offset_] == 'e' || input_[offset_] == 'E')) {
+            ++offset_;
+            if (offset_ < input_.size() &&
+                (input_[offset_] == '+' || input_[offset_] == '-')) {
+                ++offset_;
+            }
+            if (offset_ >= input_.size() ||
+                !std::isdigit(static_cast<unsigned char>(input_[offset_]))) {
+                invalid();
+            }
+            while (offset_ < input_.size() &&
+                   std::isdigit(static_cast<unsigned char>(input_[offset_]))) {
+                ++offset_;
+            }
+        }
+    }
+
+    const std::string& input_;
+    std::size_t offset_{0U};
+};
+
+template <typename Handler>
+void parse_json_object(JsonCursor& cursor, Handler&& handler) {
+    cursor.expect('{');
+    if (cursor.consume('}')) return;
+    while (true) {
+        auto key = cursor.read_string();
+        WipeStringGuard key_guard(key);
+        cursor.expect(':');
+        handler(key, cursor);
+        if (cursor.consume('}')) return;
+        cursor.expect(',');
+    }
+}
+
+template <typename Handler>
+void parse_json_array(JsonCursor& cursor, Handler&& handler) {
+    cursor.expect('[');
+    if (cursor.consume(']')) return;
+    std::size_t index = 0U;
+    while (true) {
+        handler(index++, cursor);
+        if (cursor.consume(']')) return;
+        cursor.expect(',');
+    }
+}
+
+[[noreturn]] void unsupported_json_schema() {
+    fail(NdmsNativeTunnelImportErrorCode::unsupported_json_schema);
+}
+
+struct AmneziaVpnCandidate {
+    NdmsNativeTunnelImportKind expected_kind{
+        NdmsNativeTunnelImportKind::wireguard};
+    std::string config;
+    std::optional<std::uint32_t> mtu;
+    std::optional<std::uint16_t> listen_port;
+
+    AmneziaVpnCandidate() = default;
+    ~AmneziaVpnCandidate() { secure_wipe(config); }
+    AmneziaVpnCandidate(const AmneziaVpnCandidate&) = delete;
+    AmneziaVpnCandidate& operator=(const AmneziaVpnCandidate&) = delete;
+    AmneziaVpnCandidate(AmneziaVpnCandidate&& other) noexcept
+        : expected_kind(other.expected_kind),
+          config(std::move(other.config)), mtu(other.mtu),
+          listen_port(other.listen_port) {
+        secure_wipe(other.config);
+    }
+    AmneziaVpnCandidate& operator=(AmneziaVpnCandidate&& other) noexcept {
+        if (this != &other) {
+            secure_wipe(config);
+            expected_kind = other.expected_kind;
+            config = std::move(other.config);
+            mtu = other.mtu;
+            listen_port = other.listen_port;
+            secure_wipe(other.config);
+        }
+        return *this;
+    }
+};
+
+std::uint32_t read_json_bounded_integer(
+    JsonCursor& cursor, const std::uint32_t minimum,
+    const std::uint32_t maximum) {
+    std::string value;
+    if (cursor.peek() == '"') {
+        value = cursor.read_string();
+    } else {
+        value = cursor.read_integer_text();
+    }
+    if (value.empty()) unsupported_json_schema();
+    std::uint32_t parsed = 0U;
+    const auto result = std::from_chars(
+        value.data(), value.data() + value.size(), parsed);
+    if (result.ec != std::errc{} ||
+        result.ptr != value.data() + value.size() ||
+        parsed < minimum || parsed > maximum) {
+        unsupported_json_schema();
+    }
+    return parsed;
+}
+
+AmneziaVpnCandidate parse_amnezia_last_config(
+    std::string json,
+    const NdmsNativeTunnelImportKind expected_kind) {
+    WipeStringGuard json_guard(json);
+    if (json.size() > kNdmsNativeTunnelImportMaximumBytes ||
+        !valid_utf8(json) || json.find('\0') != std::string::npos) {
+        unsupported_json_schema();
+    }
+    JsonCursor cursor(json);
+    AmneziaVpnCandidate candidate;
+    candidate.expected_kind = expected_kind;
+    bool saw_config = false;
+    bool saw_mtu = false;
+    bool saw_port = false;
+    parse_json_object(cursor, [&](const std::string& key, JsonCursor& value) {
+        if (key == "config") {
+            if (saw_config || value.peek() != '"') unsupported_json_schema();
+            candidate.config = value.read_string();
+            saw_config = true;
+        } else if (key == "mtu") {
+            if (saw_mtu) unsupported_json_schema();
+            candidate.mtu = read_json_bounded_integer(value, 576U, 65535U);
+            saw_mtu = true;
+        } else if (key == "port") {
+            if (saw_port) unsupported_json_schema();
+            candidate.listen_port = static_cast<std::uint16_t>(
+                read_json_bounded_integer(value, 1U, 65535U));
+            saw_port = true;
+        } else {
+            value.skip_value();
+        }
+    });
+    cursor.finish();
+    if (!saw_config || candidate.config.empty() ||
+        candidate.config.size() > kNdmsNativeTunnelImportMaximumBytes) {
+        unsupported_json_schema();
+    }
+    return candidate;
+}
+
+AmneziaVpnCandidate parse_amnezia_protocol_object(
+    JsonCursor& cursor,
+    const NdmsNativeTunnelImportKind expected_kind) {
+    std::string last_config;
+    WipeStringGuard last_config_guard(last_config);
+    bool saw_last_config = false;
+    parse_json_object(cursor, [&](const std::string& key, JsonCursor& value) {
+        if (key == "last_config") {
+            if (saw_last_config || value.peek() != '"') {
+                unsupported_json_schema();
+            }
+            last_config = value.read_string();
+            saw_last_config = true;
+        } else {
+            value.skip_value();
+        }
+    });
+    if (!saw_last_config) unsupported_json_schema();
+    return parse_amnezia_last_config(std::move(last_config), expected_kind);
+}
+
+std::optional<AmneziaVpnCandidate> parse_amnezia_container(
+    JsonCursor& cursor) {
+    std::optional<AmneziaVpnCandidate> candidate;
+    parse_json_object(cursor, [&](const std::string& key, JsonCursor& value) {
+        std::optional<NdmsNativeTunnelImportKind> kind;
+        if (key == "awg") {
+            kind = NdmsNativeTunnelImportKind::amnezia_wireguard;
+        } else if (key == "wireguard") {
+            kind = NdmsNativeTunnelImportKind::wireguard;
+        }
+        if (!kind) {
+            value.skip_value();
+            return;
+        }
+        if (candidate || value.peek() != '{') unsupported_json_schema();
+        candidate.emplace(parse_amnezia_protocol_object(value, *kind));
+    });
+    return candidate;
+}
+
+struct AmneziaVpnEnvelope {
+    AmneziaVpnCandidate candidate;
+    std::optional<std::string> primary_dns;
+    std::optional<std::string> secondary_dns;
+};
+
+AmneziaVpnEnvelope parse_amnezia_envelope(std::string json) {
+    WipeStringGuard json_guard(json);
+    if (json.size() > kNdmsNativeTunnelImportMaximumBytes ||
+        !valid_utf8(json) || json.find('\0') != std::string::npos) {
+        fail(NdmsNativeTunnelImportErrorCode::invalid_json);
+    }
+    JsonCursor cursor(json);
+    std::optional<AmneziaVpnCandidate> candidate;
+    std::optional<std::string> primary_dns;
+    std::optional<std::string> secondary_dns;
+    bool saw_containers = false;
+    bool saw_dns1 = false;
+    bool saw_dns2 = false;
+    parse_json_object(cursor, [&](const std::string& key, JsonCursor& value) {
+        if (key == "containers") {
+            if (saw_containers || value.peek() != '[') {
+                unsupported_json_schema();
+            }
+            saw_containers = true;
+            parse_json_array(value, [&](std::size_t, JsonCursor& item) {
+                if (item.peek() != '{') unsupported_json_schema();
+                auto current = parse_amnezia_container(item);
+                if (current) {
+                    if (candidate) unsupported_json_schema();
+                    candidate.emplace(std::move(*current));
+                }
+            });
+        } else if (key == "dns1" || key == "dns2") {
+            auto& seen = key == "dns1" ? saw_dns1 : saw_dns2;
+            auto& destination = key == "dns1" ? primary_dns : secondary_dns;
+            if (seen || value.peek() != '"') unsupported_json_schema();
+            auto dns = value.read_string();
+            WipeStringGuard dns_guard(dns);
+            if (!valid_ip_address(dns)) unsupported_json_schema();
+            destination = std::move(dns);
+            seen = true;
+        } else {
+            value.skip_value();
+        }
+    });
+    cursor.finish();
+    if (!saw_containers || !candidate) unsupported_json_schema();
+    return AmneziaVpnEnvelope{
+        std::move(*candidate), std::move(primary_dns),
+        std::move(secondary_dns)};
+}
+
+std::string decode_base64url(std::string_view value) {
+    std::size_t padding = 0U;
+    while (!value.empty() && value.back() == '=') {
+        ++padding;
+        value.remove_suffix(1U);
+    }
+    if (padding > 2U || value.empty() || value.size() % 4U == 1U ||
+        (padding != 0U && (value.size() + padding) % 4U != 0U)) {
+        fail(NdmsNativeTunnelImportErrorCode::invalid_base64);
+    }
+    const auto decode = [](const unsigned char character) -> int {
+        if (character >= 'A' && character <= 'Z') return character - 'A';
+        if (character >= 'a' && character <= 'z') {
+            return character - 'a' + 26;
+        }
+        if (character >= '0' && character <= '9') {
+            return character - '0' + 52;
+        }
+        if (character == '-') return 62;
+        if (character == '_') return 63;
+        return -1;
+    };
+    std::string output;
+    output.reserve((value.size() * 3U) / 4U + 2U);
+    std::uint32_t accumulator = 0U;
+    unsigned bits = 0U;
+    for (const auto character : value) {
+        const auto decoded = decode(static_cast<unsigned char>(character));
+        if (decoded < 0) {
+            secure_wipe(output);
+            fail(NdmsNativeTunnelImportErrorCode::invalid_base64);
+        }
+        accumulator = (accumulator << 6U) |
+            static_cast<std::uint32_t>(decoded);
+        bits += 6U;
+        if (bits >= 8U) {
+            bits -= 8U;
+            output.push_back(static_cast<char>(accumulator >> bits));
+            accumulator &= bits == 0U ? 0U : ((1U << bits) - 1U);
+        }
+    }
+    if ((bits != 0U && accumulator != 0U) ||
+        (padding == 1U && value.size() % 4U != 3U) ||
+        (padding == 2U && value.size() % 4U != 2U)) {
+        secure_wipe(output);
+        fail(NdmsNativeTunnelImportErrorCode::invalid_base64);
+    }
+    return output;
+}
+
+struct alignas(std::max_align_t) SecureZlibAllocationHeader {
+    std::size_t size{0U};
+};
+
+voidpf secure_zlib_allocate(voidpf, const uInt items, const uInt size) {
+    if (items != 0U && size >
+            std::numeric_limits<std::size_t>::max() / items) {
+        return nullptr;
+    }
+    const auto payload =
+        static_cast<std::size_t>(items) * static_cast<std::size_t>(size);
+    if (payload > std::numeric_limits<std::size_t>::max() -
+                      sizeof(SecureZlibAllocationHeader)) {
+        return nullptr;
+    }
+    auto* raw = static_cast<unsigned char*>(std::calloc(
+        1U, sizeof(SecureZlibAllocationHeader) + payload));
+    if (raw == nullptr) return nullptr;
+    static_cast<void>(
+        new (raw) SecureZlibAllocationHeader{payload});
+    return raw + sizeof(SecureZlibAllocationHeader);
+}
+
+void secure_zlib_free(voidpf, voidpf address) {
+    if (address == nullptr) return;
+    auto* raw = static_cast<unsigned char*>(address) -
+        sizeof(SecureZlibAllocationHeader);
+    const auto* header =
+        reinterpret_cast<const SecureZlibAllocationHeader*>(raw);
+    const auto total = sizeof(SecureZlibAllocationHeader) + header->size;
+    volatile unsigned char* bytes = raw;
+    for (std::size_t index = 0U; index < total; ++index) {
+        bytes[index] = 0U;
+    }
+    std::free(raw);
+}
+
+std::string decompress_qcompress(std::string compressed) {
+    WipeStringGuard compressed_guard(compressed);
+    if (compressed.size() < 6U) {
+        fail(NdmsNativeTunnelImportErrorCode::invalid_compression);
+    }
+    const auto expected =
+        (static_cast<std::uint32_t>(
+             static_cast<unsigned char>(compressed[0])) << 24U) |
+        (static_cast<std::uint32_t>(
+             static_cast<unsigned char>(compressed[1])) << 16U) |
+        (static_cast<std::uint32_t>(
+             static_cast<unsigned char>(compressed[2])) << 8U) |
+        static_cast<std::uint32_t>(
+             static_cast<unsigned char>(compressed[3]));
+    if (expected == 0U) {
+        fail(NdmsNativeTunnelImportErrorCode::invalid_compression);
+    }
+    if (expected > kNdmsNativeTunnelImportMaximumBytes) {
+        fail(NdmsNativeTunnelImportErrorCode::limit_exceeded);
+    }
+    std::string output(expected, '\0');
+    z_stream stream{};
+    stream.zalloc = secure_zlib_allocate;
+    stream.zfree = secure_zlib_free;
+    stream.next_in = reinterpret_cast<Bytef*>(&compressed[4]);
+    stream.avail_in = static_cast<uInt>(compressed.size() - 4U);
+    stream.next_out = reinterpret_cast<Bytef*>(&output[0]);
+    stream.avail_out = static_cast<uInt>(output.size());
+    if (inflateInit(&stream) != Z_OK) {
+        secure_wipe(output);
+        fail(NdmsNativeTunnelImportErrorCode::invalid_compression);
+    }
+    const auto status = inflate(&stream, Z_FINISH);
+    const auto output_size = stream.total_out;
+    const auto remaining_input = stream.avail_in;
+    static_cast<void>(inflateEnd(&stream));
+    if (status != Z_STREAM_END || output_size != expected ||
+        remaining_input != 0U) {
+        secure_wipe(output);
+        fail(NdmsNativeTunnelImportErrorCode::invalid_compression);
+    }
+    return output;
+}
+
+void replace_uri_placeholder(
+    std::string& config, const std::string_view placeholder,
+    const std::optional<std::string>& replacement) {
+    auto offset = config.find(placeholder);
+    if (offset == std::string::npos) return;
+    if (!replacement || replacement->empty() ||
+        !valid_ip_address(*replacement)) {
+        unsupported_json_schema();
+    }
+    while (offset != std::string::npos) {
+        config.replace(offset, placeholder.size(), *replacement);
+        if (config.size() > kNdmsNativeTunnelImportMaximumBytes) {
+            fail(NdmsNativeTunnelImportErrorCode::limit_exceeded);
+        }
+        offset = config.find(placeholder, offset + replacement->size());
+    }
 }
 
 std::string strip_inline_comment(const std::string& line) {
@@ -653,9 +1280,13 @@ NdmsNativeTunnelImport parse_conf(
     std::vector<NdmsNativeTunnelImportPeer> peers;
     peers.reserve(parsed.peers.size());
     std::size_t total_allowed_ips = 0U;
+    std::set<std::string> public_keys;
     for (auto& fields : parsed.peers) {
         const auto& public_key = required_field(fields, "publickey");
         validate_wireguard_key(public_key);
+        if (!public_keys.insert(public_key).second) {
+            fail(NdmsNativeTunnelImportErrorCode::duplicate_peer);
+        }
         auto allowed_ips = parse_cidr_list(
             required_field(fields, "allowedips"),
             kMaximumAllowedIpsPerPeer);
@@ -701,6 +1332,42 @@ NdmsNativeTunnelImport parse_conf(
         std::move(awg),
         std::move(peers),
     };
+}
+
+NdmsNativeTunnelImport parse_amnezia_vpn_uri(std::string input) {
+    WipeStringGuard input_guard(input);
+    if (input.rfind("vpn://", 0U) != 0U || input.size() <= 6U) {
+        fail(NdmsNativeTunnelImportErrorCode::unsupported_uri);
+    }
+    auto compressed = decode_base64url(
+        std::string_view(input).substr(6U));
+    auto json = decompress_qcompress(std::move(compressed));
+    auto envelope = parse_amnezia_envelope(std::move(json));
+    replace_uri_placeholder(
+        envelope.candidate.config, "$PRIMARY_DNS", envelope.primary_dns);
+    replace_uri_placeholder(
+        envelope.candidate.config, "$SECONDARY_DNS", envelope.secondary_dns);
+
+    auto parsed = parse_conf(
+        std::move(envelope.candidate.config),
+        NdmsNativeTunnelImportSource::amnezia_vpn_uri);
+    if (parsed.kind != envelope.candidate.expected_kind) {
+        unsupported_json_schema();
+    }
+    if (envelope.candidate.mtu) {
+        if (parsed.mtu && parsed.mtu != envelope.candidate.mtu) {
+            unsupported_json_schema();
+        }
+        parsed.mtu = envelope.candidate.mtu;
+    }
+    if (envelope.candidate.listen_port) {
+        if (parsed.listen_port &&
+            parsed.listen_port != envelope.candidate.listen_port) {
+            unsupported_json_schema();
+        }
+        parsed.listen_port = envelope.candidate.listen_port;
+    }
+    return parsed;
 }
 
 nlohmann::json optional_string_json(
@@ -787,6 +1454,8 @@ const char* ndms_native_tunnel_import_error_code_name(
         return "duplicate_section";
     case NdmsNativeTunnelImportErrorCode::duplicate_field:
         return "duplicate_field";
+    case NdmsNativeTunnelImportErrorCode::duplicate_peer:
+        return "duplicate_peer";
     case NdmsNativeTunnelImportErrorCode::unknown_field:
         return "unknown_field";
     case NdmsNativeTunnelImportErrorCode::dangerous_directive:
@@ -862,7 +1531,7 @@ const char* ndms_native_tunnel_import_kind_name(
 
 NdmsNativeTunnelImport parse_ndms_native_tunnel_import(
     std::string input) {
-    if (input.size() > kNdmsNativeTunnelImportMaximumBytes) {
+    if (input.size() > kNdmsNativeTunnelImportMaximumUriBytes) {
         secure_wipe(input);
         fail(NdmsNativeTunnelImportErrorCode::input_too_large);
     }
@@ -873,15 +1542,13 @@ NdmsNativeTunnelImport parse_ndms_native_tunnel_import(
     auto trimmed = trim_ascii(input);
     WipeStringGuard trimmed_guard(trimmed);
     if (trimmed.rfind("vpn://", 0U) == 0U) {
-        // nlohmann's AllocatorType cannot cover its lexer: raw token_string is
-        // a hard-coded std::vector<char>, while error token/exception copies
-        // are hard-coded std::string. Both may contain a complete nested
-        // config and are freed without wiping. Keep vpn:// disabled rather
-        // than advertise an allocator guarantee the lexer cannot provide.
-        fail(NdmsNativeTunnelImportErrorCode::unsupported_uri);
+        return parse_amnezia_vpn_uri(std::move(trimmed));
     }
     if (begins_with_uri_scheme(trimmed)) {
         fail(NdmsNativeTunnelImportErrorCode::unsupported_uri);
+    }
+    if (trimmed.size() > kNdmsNativeTunnelImportMaximumBytes) {
+        fail(NdmsNativeTunnelImportErrorCode::input_too_large);
     }
     return parse_conf(trimmed,
                       NdmsNativeTunnelImportSource::wireguard_conf);
@@ -906,6 +1573,8 @@ build_ndms_native_tunnel_import_preview(
         preview.persistent_keepalive =
             input.peers.front().persistent_keepalive;
     }
+    preview.listen_port = input.listen_port;
+    preview.mtu = input.mtu;
     if (input.awg) {
         preview.amnezia_parameter_names = {
             "Jc", "Jmin", "Jmax", "S1", "S2",

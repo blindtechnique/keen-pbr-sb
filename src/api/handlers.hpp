@@ -8,6 +8,7 @@
 #include "../config/config.hpp"
 #include "../daemon/config_store.hpp"
 #include "../health/routing_health.hpp"
+#include "../keenetic/ndms_native_import_readiness.hpp"
 #include "../log/logger.hpp"
 #include "../runtime/lifecycle_operation.hpp"
 #include "../runtime/runtime_mutation_admission.hpp"
@@ -154,6 +155,11 @@ struct ApiContext {
     // never runs firewall commands itself.  Optional tail placement preserves
     // aggregate initializers used by tests and embedders.
     std::function<bool()> request_netfilter_runtime_refresh_fn;
+    // Optional tail callback exposes only the daemon's redacted, atomic boot
+    // observation. It must never inspect disk or authorize mutation. An
+    // absent callback means the feature remains dormant.
+    std::function<NdmsNativeImportJournalReadinessState()>
+        get_ndms_native_import_readiness_fn;
 
     Config get_visible_config() const {
         return get_visible_config_fn();

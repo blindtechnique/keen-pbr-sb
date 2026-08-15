@@ -7,6 +7,10 @@ const PUBLIC_KEY = `${"B".repeat(42)}A=`
 const PRESHARED_KEY = `${"C".repeat(42)}A=`
 const SECOND_PUBLIC_KEY = `${"D".repeat(42)}A=`
 
+function indexedPublicKey(index: number): string {
+  return Buffer.alloc(32, index).toString("base64")
+}
+
 function peerConfig({
   publicKey = PUBLIC_KEY,
   allowedIps = "0.0.0.0/0",
@@ -123,6 +127,7 @@ Endpoint = awg.example:13231
         preshared_key_peer_count: 0,
         endpoint_host: "awg.example",
         endpoint_port: 13231,
+        listen_port: 13231,
         amnezia_parameter_names: [
           "Jc",
           "Jmin",
@@ -195,6 +200,14 @@ Endpoint = second.example:51820
     expect(result.preview.persistent_keepalive).toBeUndefined()
   })
 
+  test("rejects duplicate peer public keys before save", () => {
+    expect(
+      parseNativeWireGuardConfigPreview(
+        nativeConfig({ peers: [peerConfig(), peerConfig()] })
+      )
+    ).toEqual({ ok: false, code: "duplicate_peer" })
+  })
+
   test("validates key shape without returning the rejected value", () => {
     const invalidKey = "not-a-wireguard-key"
     const result = parseNativeWireGuardConfigPreview(`
@@ -210,7 +223,7 @@ Endpoint = vpn.example:51820
     expect(JSON.stringify(result)).not.toContain(invalidKey)
   })
 
-  test("rejects URIs in the local .conf preview until backend import exists", () => {
+  test("keeps URI decoding out of the plain .conf parser", () => {
     expect(parseNativeWireGuardConfigPreview("vpn://secret-payload")).toEqual({
       ok: false,
       code: "unsupported_uri",
@@ -334,7 +347,7 @@ UnknownSecret = value-that-must-not-be-returned
     ).join(",")
     const fivePeers = Array.from({ length: 5 }, (_, index) =>
       peerConfig({
-        publicKey: index % 2 ? SECOND_PUBLIC_KEY : PUBLIC_KEY,
+        publicKey: indexedPublicKey(index),
         allowedIps: block,
         endpoint: `peer-${index}.example:51820`,
       })
@@ -345,7 +358,7 @@ UnknownSecret = value-that-must-not-be-returned
 
     const tooManyPeers = Array.from({ length: 65 }, (_, index) =>
       peerConfig({
-        publicKey: index % 2 ? SECOND_PUBLIC_KEY : PUBLIC_KEY,
+        publicKey: indexedPublicKey(index),
         endpoint: `peer-${index}.example:51820`,
       })
     )

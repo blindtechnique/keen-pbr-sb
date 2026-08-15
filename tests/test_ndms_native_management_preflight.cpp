@@ -120,6 +120,8 @@ TEST_CASE("measured native RCI read plans are fixed-origin and always probe ASC"
 TEST_CASE("unmeasured or unsafe RCI identities never produce request paths") {
     for (const auto& name : {
              "Wireguard",
+             "Wireguard00",
+             "Wireguard127",
              "wireguard7",
              "Wireguard7/../../system",
              "nwg7",

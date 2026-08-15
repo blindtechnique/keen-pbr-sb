@@ -30,6 +30,8 @@
 #include "../health/url_tester.hpp"
 #include "../keenetic/internal_vpn_ingress_resolver.hpp"
 #include "../keenetic/internal_vpn_runtime_target.hpp"
+#include "../keenetic/ndms_native_import_readiness.hpp"
+#include "../keenetic/ndms_native_import_wal_store.hpp"
 #include "../lists/list_set_usage.hpp"
 #include "../routing/interface_monitor.hpp"
 #include "../routing/firewall_state.hpp"
@@ -1066,6 +1068,13 @@ private:
     // Snapshot stores
     ConfigStore config_store_;
     ListService list_service_;
+    // Report-only startup observation. The store is inventoried exactly once
+    // before NDMS/routing startup; API workers read only the redacted atomic
+    // summary and can never turn it into mutation authority.
+    NdmsNativeImportWalStore ndms_native_import_wal_store_;
+    std::atomic<NdmsNativeImportJournalReadinessState>
+        ndms_native_import_journal_readiness_{
+            NdmsNativeImportJournalReadinessState::unavailable};
     RuntimeStateStore runtime_state_store_;
     LifecycleOperationStore lifecycle_operation_store_;
     LifecycleOperationCoordinator lifecycle_operations_{lifecycle_operation_store_};

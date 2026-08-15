@@ -1,5 +1,7 @@
 #include "ndms_native_management_preflight.hpp"
 
+#include "ndms_wireguard_identity.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
@@ -9,25 +11,10 @@ namespace keen_pbr3 {
 
 namespace {
 
-constexpr std::string_view kWireguardPrefix{"Wireguard"};
-
 bool has_prefix(const std::string& value,
                 const std::string_view prefix) {
     return value.size() >= prefix.size() &&
            std::equal(prefix.begin(), prefix.end(), value.begin());
-}
-
-bool measured_wireguard_name(const std::string& value) {
-    if (value.size() <= kWireguardPrefix.size() ||
-        !has_prefix(value, kWireguardPrefix)) {
-        return false;
-    }
-    return std::all_of(
-        value.begin() + static_cast<std::ptrdiff_t>(kWireguardPrefix.size()),
-        value.end(),
-        [](const unsigned char character) {
-            return std::isdigit(character) != 0;
-        });
 }
 
 bool native_kind(const NdmsTunnelKind kind) noexcept {
@@ -118,7 +105,8 @@ std::optional<std::vector<NdmsNativeRciReadRequest>>
 measured_ndms_native_read_plan(
     const NdmsTunnelInterface& interface) {
     if (!native_kind(interface.kind) ||
-        !measured_wireguard_name(interface.firmware_interface_name)) {
+        !parse_ndms_wireguard_identity(
+             interface.firmware_interface_name).has_value()) {
         return std::nullopt;
     }
 

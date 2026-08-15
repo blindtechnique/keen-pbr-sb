@@ -379,6 +379,21 @@ export function TransportUpsertPage({
         key={`${mode}:${transportTag ?? "new"}`}
         killSwitchAvailable={mode === "create" || Boolean(linkedOutbound)}
         nativeCandidates={nativeCandidates}
+        nativeImportInterfaces={
+          ndmsInventoryQuery.data?.status === 200
+            ? ndmsInventoryQuery.data.data.interfaces
+            : []
+        }
+        nativeImportReadiness={
+          ndmsInventoryQuery.data?.status === 200
+            ? ndmsInventoryQuery.data.data.native_import_readiness
+            : undefined
+        }
+        nativeImportRequiredGuards={
+          ndmsInventoryQuery.data?.status === 200
+            ? ndmsInventoryQuery.data.data.required_guards
+            : []
+        }
         onDirtyChange={setDirty}
         onSubmit={saveTransport}
         presentation={presentation}

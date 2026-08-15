@@ -39,7 +39,19 @@ add_executable(keen-pbr-tests
   test_ndms_vpn_server_service.cpp
   test_internal_vpn_service_resolver.cpp
   test_ndms_interface_management.cpp
+  test_ndms_native_allocator_fence.cpp
+  test_ndms_native_create_policy.cpp
+  test_ndms_native_import_baseline.cpp
+  test_ndms_native_import_executor.cpp
+  test_ndms_native_import_readiness.cpp
+  test_ndms_native_import_startup_recovery.cpp
+  test_ndms_native_import_request.cpp
+  test_ndms_native_import_transport.cpp
+  test_ndms_native_import_wal.cpp
   test_ndms_native_management_preflight.cpp
+  test_ndms_native_mutation_plan.cpp
+  test_ndms_native_import_response.cpp
+  test_ndms_native_reconcile_barrier.cpp
   test_ndms_native_tunnel_import.cpp
   test_ndms_rci_observation.cpp
   test_ndms_rci_restorable_snapshot.cpp
@@ -209,8 +221,22 @@ add_executable(keen-pbr-tests
   ../src/keenetic/internal_vpn_service_resolver.cpp
   ../src/keenetic/internal_vpn_ingress_resolver.cpp
   ../src/keenetic/ndms_interface_management.cpp
+  ../src/keenetic/ndms_native_allocator_fence.cpp
+  ../src/keenetic/ndms_native_create_policy.cpp
+  ../src/keenetic/ndms_native_import_baseline.cpp
+  ../src/keenetic/ndms_native_import_executor.cpp
+  ../src/keenetic/ndms_native_import_readiness.cpp
+  ../src/keenetic/ndms_native_import_startup_recovery.cpp
+  ../src/keenetic/ndms_native_import_request.cpp
+  ../src/keenetic/ndms_native_import_transport.cpp
+  ../src/keenetic/ndms_native_import_wal.cpp
+  ../src/keenetic/ndms_native_import_wal_store.cpp
   ../src/keenetic/ndms_native_management_preflight.cpp
+  ../src/keenetic/ndms_native_mutation_plan.cpp
+  ../src/keenetic/ndms_native_import_response.cpp
+  ../src/keenetic/ndms_native_reconcile_barrier.cpp
   ../src/keenetic/ndms_native_tunnel_import.cpp
+  ../src/keenetic/ndms_wireguard_identity.cpp
   ../src/keenetic/ndms_rci_observation.cpp
   ../src/keenetic/ndms_rci_restorable_snapshot.cpp
   ../src/health/url_tester.cpp
@@ -290,17 +316,48 @@ add_test(
   COMMAND keen-pbr-cache-generation-tests
 )
 
-# Keep the secret-bearing native WG/AWG import parser independently buildable.
-# It has no daemon, API, RCI, or router dependency.
+# Keep the secret-bearing native WG/AWG import transaction boundary
+# independently buildable. It has no daemon, API route or router dependency.
 add_executable(keen-pbr-native-tunnel-import-tests
   test_main.cpp
+  test_ndms_native_allocator_fence.cpp
+  test_ndms_native_create_policy.cpp
+  test_ndms_native_import_baseline.cpp
+  test_ndms_native_import_executor.cpp
+  test_ndms_native_import_readiness.cpp
+  test_ndms_native_import_startup_recovery.cpp
+  test_ndms_native_import_request.cpp
+  test_ndms_native_import_transport.cpp
+  test_ndms_native_import_wal.cpp
+  test_ndms_native_import_wal_store.cpp
+  test_ndms_native_mutation_plan.cpp
+  test_ndms_native_import_response.cpp
+  test_ndms_native_reconcile_barrier.cpp
   test_ndms_native_tunnel_import.cpp
+  ../src/keenetic/ndms_native_allocator_fence.cpp
+  ../src/keenetic/ndms_native_create_policy.cpp
+  ../src/keenetic/ndms_native_import_baseline.cpp
+  ../src/keenetic/ndms_native_import_executor.cpp
+  ../src/keenetic/ndms_native_import_readiness.cpp
+  ../src/keenetic/ndms_native_import_startup_recovery.cpp
+  ../src/keenetic/ndms_native_import_request.cpp
+  ../src/keenetic/ndms_native_import_transport.cpp
+  ../src/keenetic/ndms_native_import_wal.cpp
+  ../src/keenetic/ndms_native_import_wal_store.cpp
+  ../src/keenetic/ndms_native_mutation_plan.cpp
+  ../src/keenetic/ndms_native_import_response.cpp
+  ../src/keenetic/ndms_native_reconcile_barrier.cpp
   ../src/keenetic/ndms_native_tunnel_import.cpp
+  ../src/keenetic/ndms_wireguard_identity.cpp
+  ../src/keenetic/ndms_interface_inventory.cpp
 )
 set_target_properties(keen-pbr-native-tunnel-import-tests PROPERTIES
   CXX_STANDARD 17
   CXX_STANDARD_REQUIRED YES
   CXX_EXTENSIONS NO
+)
+target_compile_definitions(
+  keen-pbr-native-tunnel-import-tests PRIVATE KEEN_PBR3_TESTING
 )
 target_include_directories(keen-pbr-native-tunnel-import-tests PRIVATE
   ${CMAKE_SOURCE_DIR}/include
@@ -309,8 +366,15 @@ target_include_directories(keen-pbr-native-tunnel-import-tests PRIVATE
 )
 target_link_libraries(keen-pbr-native-tunnel-import-tests PRIVATE
   nlohmann_json::nlohmann_json
+  ${KEEN_PBR_CURL_TARGET}
+  PkgConfig::ZLIB
 )
 keen_pbr_apply_project_options(keen-pbr-native-tunnel-import-tests)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+   CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+  target_link_libraries(
+    keen-pbr-native-tunnel-import-tests PRIVATE stdc++fs)
+endif()
 add_test(
   NAME keen-pbr-native-tunnel-import-tests
   COMMAND keen-pbr-native-tunnel-import-tests

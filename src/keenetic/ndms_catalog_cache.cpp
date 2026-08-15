@@ -86,12 +86,24 @@ NdmsCatalogSnapshot NdmsCatalogCache::snapshot_locked(
             now_fn_() >= refresh_after_) {
             effective_status = NdmsCatalogCacheStatus::stale;
         }
-        return {*catalog_, effective_status, refreshed, catalog_observed_at_};
+        return {
+            *catalog_,
+            effective_status,
+            refreshed,
+            catalog_observed_at_,
+            accepted_observation_generation_,
+            accepted_observation_epoch_,
+            invalidation_epoch_,
+        };
     }
     return {
         unavailable_catalog(),
         NdmsCatalogCacheStatus::unavailable,
         refreshed,
+        std::nullopt,
+        accepted_observation_generation_,
+        accepted_observation_epoch_,
+        invalidation_epoch_,
     };
 }
 
@@ -111,6 +123,11 @@ NdmsCatalogSnapshot NdmsCatalogCache::force_refresh() {
 void NdmsCatalogCache::invalidate() {
     std::lock_guard<std::mutex> lock(mutex_);
     ++invalidation_epoch_;
+    if (invalidation_epoch_ == 0U) {
+        // Zero is the initial epoch. Do not make a wrapped process-local
+        // counter indistinguishable from a never-invalidated cache.
+        ++invalidation_epoch_;
+    }
     if (catalog_) {
         status_ = NdmsCatalogCacheStatus::stale;
     } else {
@@ -178,6 +195,14 @@ NdmsCatalogSnapshot NdmsCatalogCache::get_impl(bool force_refresh) {
             // the firmware's relative counters into durations. Same clock as
             // the TTL deadlines, read once so the two cannot disagree.
             catalog_observed_at_ = completed_at;
+            ++accepted_observation_generation_;
+            if (accepted_observation_generation_ == 0U) {
+                // Reserve zero for "no accepted observation". Reaching this
+                // branch would require 2^64 accepted RCI reads in one daemon
+                // process, but keeping the sentinel invariant is free.
+                ++accepted_observation_generation_;
+            }
+            accepted_observation_epoch_ = fetch_invalidation_epoch;
             status_ = NdmsCatalogCacheStatus::fresh;
             refresh_after_ = completed_at + cache_ttl_;
         } else {

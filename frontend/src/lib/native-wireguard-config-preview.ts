@@ -14,6 +14,8 @@ export interface NativeWireGuardImportPreview {
   readonly endpoint_host?: string
   readonly endpoint_port?: number
   readonly persistent_keepalive?: number
+  readonly listen_port?: number
+  readonly mtu?: number
   /** Parameter names only, never values. */
   readonly amnezia_parameter_names: readonly string[]
 }
@@ -23,10 +25,14 @@ export type NativeWireGuardImportErrorCode =
   | "invalid_encoding"
   | "unsupported_uri"
   | "invalid_base64"
+  | "invalid_compression"
+  | "invalid_json"
+  | "unsupported_json_schema"
   | "malformed_line"
   | "unknown_section"
   | "duplicate_section"
   | "duplicate_field"
+  | "duplicate_peer"
   | "unknown_field"
   | "dangerous_directive"
   | "missing_required_field"
@@ -246,12 +252,17 @@ export function parseNativeWireGuardConfigPreview(
     dnsCount = validatedDns.value
   }
 
-  const listenPort = interfaceSection.fields.get("listenport")
-  const mtu = interfaceSection.fields.get("mtu")
+  const listenPortValue = interfaceSection.fields.get("listenport")
+  const mtuValue = interfaceSection.fields.get("mtu")
+  const listenPort =
+    listenPortValue === undefined
+      ? undefined
+      : parseInteger(listenPortValue, 0, 65_535)
+  const mtu =
+    mtuValue === undefined ? undefined : parseInteger(mtuValue, 576, 65_535)
   if (
-    (listenPort !== undefined &&
-      parseInteger(listenPort, 0, 65_535) === undefined) ||
-    (mtu !== undefined && parseInteger(mtu, 576, 65_535) === undefined)
+    (listenPortValue !== undefined && listenPort === undefined) ||
+    (mtuValue !== undefined && mtu === undefined)
   ) {
     return { ok: false, code: "invalid_field" }
   }
@@ -272,6 +283,7 @@ export function parseNativeWireGuardConfigPreview(
 
   let allowedIpCount = 0
   let presharedKeyCount = 0
+  const publicKeys = new Set<string>()
   let onlyEndpoint: { readonly host: string; readonly port: number } | undefined
   let onlyPersistentKeepalive: number | undefined
   for (const peer of peers) {
@@ -282,6 +294,10 @@ export function parseNativeWireGuardConfigPreview(
     if (!isWireGuardKey(publicKey)) {
       return { ok: false, code: "invalid_field" }
     }
+    if (publicKeys.has(publicKey)) {
+      return { ok: false, code: "duplicate_peer" }
+    }
+    publicKeys.add(publicKey)
 
     const allowedIpsValue = requiredField(peer.fields, "allowedips")
     if (allowedIpsValue === undefined) {
@@ -352,6 +368,8 @@ export function parseNativeWireGuardConfigPreview(
       ...(onlyPersistentKeepalive !== undefined
         ? { persistent_keepalive: onlyPersistentKeepalive }
         : {}),
+      ...(listenPort !== undefined ? { listen_port: listenPort } : {}),
+      ...(mtu !== undefined ? { mtu } : {}),
       amnezia_parameter_names: awg.value ?? [],
     },
   }

@@ -1,0 +1,218 @@
+#pragma once
+
+#include "ndms_native_allocator_fence.hpp"
+#include "ndms_native_import_transport.hpp"
+#include "ndms_native_import_wal_store.hpp"
+
+#include <cstdint>
+#include <optional>
+#include <string>
+
+namespace keen_pbr3 {
+
+// Safe, non-secret material prepared by the future mutation planner. The
+// coordinator deliberately accepts an already parsed, move-only request
+// separately so this object can never become another credential lifetime.
+struct NdmsNativeImportExecutionPlan final {
+    std::string expected_created_interface;
+    std::string generation_ticket;
+    std::string firmware_identity;
+    std::string allocator_implementation_digest;
+    NdmsNativeAllocatorFenceMode fence_mode{
+        NdmsNativeAllocatorFenceMode::bounded_atomic_import};
+};
+
+// The maintenance generation protects the transaction/reconcile sequence.
+// The allocator generation is the authoritative generation bound into the
+// opaque allocator receipt. Keeping them separate prevents a local
+// maintenance reservation from being mistaken for an NDMS allocator fence.
+struct NdmsNativeImportGenerationSnapshot final {
+    std::uint32_t maintenance_generation{0U};
+    std::uint64_t allocator_generation{0U};
+};
+
+class NdmsNativeImportGenerationCoordinator {
+public:
+    virtual ~NdmsNativeImportGenerationCoordinator() = default;
+
+    virtual NdmsNativeImportGenerationSnapshot observe() = 0;
+
+    // Reserves exactly base + 1 for this transaction. Implementations must
+    // return nullopt on contention and must not silently skip generations.
+    virtual std::optional<std::uint32_t> reserve_next(
+        const std::string& transaction_id,
+        const std::string& generation_ticket,
+        std::uint32_t maintenance_base_generation) = 0;
+};
+
+class NdmsNativeImportExecutorClock {
+public:
+    virtual ~NdmsNativeImportExecutorClock() = default;
+    virtual NdmsNativeAllocatorMonotonicTime now() const noexcept = 0;
+};
+
+class NdmsNativeImportSteadyClock final
+    : public NdmsNativeImportExecutorClock {
+public:
+    NdmsNativeAllocatorMonotonicTime now() const noexcept override;
+};
+
+// Narrow publisher boundary for deterministic ordering tests. The production
+// adapter below delegates to the hardened NdmsNativeImportWalStore and does
+// not expose load/removal: execution can append intent/evidence only.
+class NdmsNativeImportWalPublisher {
+public:
+    virtual ~NdmsNativeImportWalPublisher() = default;
+
+    // Atomically rejects a new transaction unless the complete durable store
+    // is safe and empty, then publishes its prepared record.
+    virtual NdmsNativeImportWalAdmissionState begin_prepared_exclusive(
+        const NdmsNativeImportWalRecord& record) = 0;
+    virtual void publish(const NdmsNativeImportWalRecord& record) = 0;
+};
+
+class NdmsNativeImportWalStorePublisher final
+    : public NdmsNativeImportWalPublisher {
+public:
+    explicit NdmsNativeImportWalStorePublisher(
+        NdmsNativeImportWalStore& store) noexcept;
+
+    NdmsNativeImportWalAdmissionState begin_prepared_exclusive(
+        const NdmsNativeImportWalRecord& record) override;
+    void publish(const NdmsNativeImportWalRecord& record) override;
+
+private:
+    NdmsNativeImportWalStore& store_;
+};
+
+struct NdmsNativeImportExecutionResult;
+#ifdef KEEN_PBR3_TESTING
+class NdmsNativeImportExecutorTestIssuer;
+#endif
+
+// Dependency injection is intentionally opaque in production. A caller
+// cannot substitute a fake clock, WAL, generation source or transport after
+// obtaining a real allocator receipt. There is no production construction
+// authority; a future concrete wrapper must be added deliberately.
+class NdmsNativeImportExecutorDependencies final {
+public:
+    NdmsNativeImportExecutorDependencies(
+        const NdmsNativeImportExecutorDependencies&) = delete;
+    NdmsNativeImportExecutorDependencies& operator=(
+        const NdmsNativeImportExecutorDependencies&) = delete;
+    NdmsNativeImportExecutorDependencies(
+        NdmsNativeImportExecutorDependencies&&) noexcept = default;
+    NdmsNativeImportExecutorDependencies& operator=(
+        NdmsNativeImportExecutorDependencies&&) noexcept = default;
+
+private:
+    NdmsNativeImportExecutorDependencies(
+        NdmsNativeImportWalPublisher* wal,
+        NdmsNativeImportGenerationCoordinator* generations,
+        NdmsNativeLoopbackRciPostBackend* transport,
+        NdmsNativeImportExecutorClock* clock) noexcept;
+
+    NdmsNativeImportWalPublisher* wal_{nullptr};
+    NdmsNativeImportGenerationCoordinator* generations_{nullptr};
+    NdmsNativeLoopbackRciPostBackend* transport_{nullptr};
+    NdmsNativeImportExecutorClock* clock_{nullptr};
+
+#ifdef KEEN_PBR3_TESTING
+    friend class NdmsNativeImportExecutorTestIssuer;
+#endif
+    friend NdmsNativeImportExecutionResult
+    execute_ndms_native_import_transaction(
+        NdmsNativeWireguardImportRequest,
+        const NdmsNativeImportExecutionPlan&,
+        const NdmsNativeImportBaselineEvidence&,
+        std::optional<NdmsNativeAllocatorFenceReceipt>,
+        const NdmsNativeImportExecutorDependencies&);
+};
+
+#ifdef KEEN_PBR3_TESTING
+class NdmsNativeImportExecutorTestIssuer final {
+public:
+    static NdmsNativeImportExecutorDependencies issue(
+        NdmsNativeImportWalPublisher* wal,
+        NdmsNativeImportGenerationCoordinator* generations,
+        NdmsNativeLoopbackRciPostBackend* transport,
+        NdmsNativeImportExecutorClock* clock) noexcept;
+};
+#endif
+
+enum class NdmsNativeImportExecutionStatus : std::uint8_t {
+    blocked,
+    recovery_required,
+    response_recorded_needs_verification,
+};
+
+enum class NdmsNativeImportExecutionStop : std::uint8_t {
+    none,
+    missing_dependency,
+    request_identity_invalid,
+    expected_target_ineligible,
+    baseline_mismatch,
+    incompatible_fence_mode,
+    fence_required,
+    request_binding_failed,
+    generation_observation_failed,
+    fence_invalid,
+    unfinished_transaction_present,
+    prepared_wal_publish_failed,
+    generation_reservation_failed,
+    generation_changed,
+    inflight_wal_publish_failed,
+    fence_lost_after_intent,
+    transport_failed,
+    response_wal_publish_failed,
+    ambiguous_response,
+};
+
+struct NdmsNativeImportExecutionResult final {
+    NdmsNativeImportExecutionStatus status{
+        NdmsNativeImportExecutionStatus::blocked};
+    NdmsNativeImportExecutionStop stop{
+        NdmsNativeImportExecutionStop::none};
+    NdmsNativeAllocatorFenceValidationError fence_error{
+        NdmsNativeAllocatorFenceValidationError::none};
+    bool prepared_wal_published{false};
+    bool inflight_wal_published{false};
+    bool response_wal_published{false};
+    // True only once the fixed backend boundary is known to have been
+    // entered. This does not imply that curl_easy_perform() started.
+    bool backend_call_confirmed{false};
+    // True only at the final irreversible perform boundary.
+    bool dispatch_perform_started{false};
+    bool request_may_have_been_dispatched{false};
+    std::optional<NdmsNativeImportResponseManifestV2> response_manifest;
+    NdmsNativeImportRecoveryAction recovery_action{
+        NdmsNativeImportRecoveryAction::block_unknown};
+};
+
+// Binds one non-secret request identity, its request-derived candidate
+// revision and the exact pre-dispatch target into the allocator receipt.
+// Binary field tags plus fixed-width lengths make the encoding unambiguous.
+std::string ndms_native_import_request_binding_digest(
+    const NdmsNativeWireguardImportRequest& request,
+    const std::string& expected_created_interface);
+
+// Executes the create-only stock import boundary. There is no delete,
+// ownership publish, API registration, retry or recovery mutation here.
+//
+// A receipt is intentionally consumed through a move-only optional: production
+// code cannot construct or replay one, and the measured KeeneticOS 5.1.1
+// provider always returns nullopt. Consequently this function cannot reach
+// transport on that firmware.
+NdmsNativeImportExecutionResult execute_ndms_native_import_transaction(
+    NdmsNativeWireguardImportRequest request,
+    const NdmsNativeImportExecutionPlan& plan,
+    const NdmsNativeImportBaselineEvidence& baseline,
+    std::optional<NdmsNativeAllocatorFenceReceipt> receipt,
+    const NdmsNativeImportExecutorDependencies& dependencies);
+
+const char* ndms_native_import_execution_status_name(
+    NdmsNativeImportExecutionStatus status) noexcept;
+const char* ndms_native_import_execution_stop_name(
+    NdmsNativeImportExecutionStop stop) noexcept;
+
+} // namespace keen_pbr3

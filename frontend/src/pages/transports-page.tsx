@@ -65,7 +65,6 @@ import { SectionHeading } from "@/components/shared/section-heading"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
 import { NativeInterfaceDetails } from "@/components/transports/native-interface-details"
-import { NativeWireGuardImportCard } from "@/components/transports/native-wireguard-import-card"
 import { NativeRouteOffer } from "@/components/transports/native-route-offer"
 import { InterfaceTraffic } from "@/components/transports/interface-traffic"
 import { TransportLatencyPill } from "@/components/transports/transport-latency-pill"
@@ -1649,14 +1648,6 @@ export function TransportsPage({
         disabled={routeOfferMutation.isPending || !keenConfig}
         onCreate={createRouteFromOffer}
         onDismiss={dismissRouteOffer}
-      />
-
-      <NativeWireGuardImportCard
-        requiredGuards={
-          ndmsInventoryQuery.data?.status === 200
-            ? ndmsInventoryQuery.data.data.required_guards
-            : []
-        }
       />
 
       {transportTabs.length > 1 ? (

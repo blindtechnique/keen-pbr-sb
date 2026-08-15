@@ -5,6 +5,8 @@
 #include "../keenetic/ndms_catalog_cache.hpp"
 #include "../keenetic/ndms_interface_inventory.hpp"
 #include "../keenetic/ndms_interface_management.hpp"
+#include "../keenetic/ndms_native_create_policy.hpp"
+#include "../keenetic/ndms_native_import_readiness.hpp"
 #include "../keenetic/ndms_vpn_server_service_cache.hpp"
 
 #include <nlohmann/json.hpp>
@@ -136,9 +138,97 @@ api::NdmsInterfaceManagementReadiness api_management_readiness(
     return result;
 }
 
+api::NdmsNativeImportTargetRange native_import_target_range(
+    const NdmsNativeWireguardTargetRange& source) {
+    api::NdmsNativeImportTargetRange range{};
+    range.prefix = api::NdmsNativeImportTargetPrefix::WIREGUARD;
+    range.first_index = source.first_index;
+    range.last_index = source.last_index;
+    return range;
+}
+
+api::NdmsNativeImportJournalState api_native_import_journal_state(
+    const NdmsNativeImportJournalReadinessState state) noexcept {
+    switch (state) {
+    case NdmsNativeImportJournalReadinessState::clean_never_activated:
+        return api::NdmsNativeImportJournalState::CLEAN_NEVER_ACTIVATED;
+    case NdmsNativeImportJournalReadinessState::clean:
+        return api::NdmsNativeImportJournalState::CLEAN;
+    case NdmsNativeImportJournalReadinessState::recovery_required:
+        return api::NdmsNativeImportJournalState::RECOVERY_REQUIRED;
+    case NdmsNativeImportJournalReadinessState::unsafe:
+        return api::NdmsNativeImportJournalState::UNSAFE;
+    case NdmsNativeImportJournalReadinessState::unavailable:
+        return api::NdmsNativeImportJournalState::UNAVAILABLE;
+    }
+    return api::NdmsNativeImportJournalState::UNAVAILABLE;
+}
+
+api::NdmsNativeImportReadiness native_import_readiness(
+    const NdmsNativeImportReadinessProvider& readiness_provider) {
+    const auto policy = preview_ndms_native_create_policy();
+    api::NdmsNativeImportReadiness readiness{};
+    readiness.preview_only = policy.preview_only;
+    readiness.apply_available = policy.apply_available;
+    readiness.operation = policy.operation;
+    readiness.request_name = policy.request_name;
+    readiness.allocator_range =
+        native_import_target_range(policy.allocator_range);
+    readiness.eligible_returned_targets = native_import_target_range(
+        policy.eligible_returned_targets);
+    readiness.protected_targets.reserve(policy.protected_targets.size());
+    for (const auto& range : policy.protected_targets) {
+        readiness.protected_targets.push_back(
+            native_import_target_range(range));
+    }
+    readiness.journal_state =
+        api::NdmsNativeImportJournalState::DORMANT;
+    if (readiness_provider) {
+        try {
+            readiness.journal_state = api_native_import_journal_state(
+                readiness_provider());
+        } catch (...) {
+            // The endpoint stays available and fail-closed. A provider fault
+            // can only degrade the redacted report; it cannot change any
+            // mutation flag or remove an independent blocker.
+            readiness.journal_state =
+                api::NdmsNativeImportJournalState::UNAVAILABLE;
+        }
+    }
+    readiness.reconcile_barrier_state =
+        api::NdmsNativeImportReconcileBarrierState::DORMANT;
+    readiness.blockers.reserve(policy.blockers.size());
+    for (const auto blocker : policy.blockers) {
+        switch (blocker) {
+        case NdmsNativeCreatePolicyBlocker::writer_disabled:
+            readiness.blockers.push_back(
+                api::NdmsNativeImportBlocker::WRITER_DISABLED);
+            break;
+        case NdmsNativeCreatePolicyBlocker::allocator_range_unfenced:
+            readiness.blockers.push_back(
+                api::NdmsNativeImportBlocker::ALLOCATOR_RANGE_UNFENCED);
+            break;
+        case NdmsNativeCreatePolicyBlocker::
+            recovery_journal_not_integrated:
+            readiness.blockers.push_back(
+                api::NdmsNativeImportBlocker::
+                    RECOVERY_JOURNAL_NOT_INTEGRATED);
+            break;
+        case NdmsNativeCreatePolicyBlocker::
+            reconcile_barrier_not_integrated:
+            readiness.blockers.push_back(
+                api::NdmsNativeImportBlocker::
+                    RECONCILE_BARRIER_NOT_INTEGRATED);
+            break;
+        }
+    }
+    return readiness;
+}
+
 api::NdmsInterfaceInventoryResponse typed_inventory(
     const NdmsInterfaceCatalog& catalog,
-    NdmsCatalogCacheStatus catalog_status) {
+    NdmsCatalogCacheStatus catalog_status,
+    const NdmsNativeImportReadinessProvider& readiness_provider) {
     api::NdmsInterfaceInventoryResponse response{};
     response.available =
         catalog.firmware_available &&
@@ -152,6 +242,8 @@ api::NdmsInterfaceInventoryResponse typed_inventory(
         api::RequiredGuard::OWNERSHIP_CHECK,
         api::RequiredGuard::OPTIMISTIC_REVISION,
     };
+    response.native_import_readiness =
+        native_import_readiness(readiness_provider);
 
     response.interfaces.reserve(catalog.tunnels.size());
     for (const auto& tunnel : catalog.tunnels) {
@@ -249,6 +341,7 @@ void register_ndms_names_routes(
     ApiServer& server,
     NdmsCatalogCache& cache,
     RuntimeInterfaceNamesFn runtime_interface_names_fn,
+    NdmsNativeImportReadinessProvider native_import_readiness_provider,
     TrafficInterfacesObserver traffic_interfaces_observer = {}) {
     server.get(
         "/api/system/interface-names",
@@ -272,6 +365,7 @@ void register_ndms_names_routes(
         "/api/system/ndms/interfaces",
         [&cache,
          runtime_interface_names_fn,
+         native_import_readiness_provider,
          traffic_interfaces_observer]() -> std::string {
             const auto response =
                 catalog_for_response(cache, runtime_interface_names_fn);
@@ -286,7 +380,10 @@ void register_ndms_names_routes(
                 traffic_interfaces_observer(std::move(interface_names));
             }
             return nlohmann::json(
-                       typed_inventory(response.catalog, response.status))
+                       typed_inventory(
+                           response.catalog,
+                           response.status,
+                           native_import_readiness_provider))
                 .dump();
         });
 }
@@ -320,6 +417,7 @@ void register_ndms_names_handler(ApiServer& server, ApiContext& ctx) {
             }
             return names;
         },
+        ctx.get_ndms_native_import_readiness_fn,
         [&ctx](std::vector<std::string> names) {
             ctx.replace_interface_traffic_targets(
                 "native-tunnels", std::move(names));
@@ -332,13 +430,16 @@ void register_ndms_names_handler(ApiServer& server, ApiContext& ctx) {
 void register_ndms_names_handler_for_tests(ApiServer& server,
                                            NdmsCatalogCache& cache,
                                            std::vector<std::string>
-                                               runtime_interface_names) {
+                                               runtime_interface_names,
+                                           NdmsNativeImportReadinessProvider
+                                               native_import_readiness_provider) {
     register_ndms_names_routes(
         server,
         cache,
         [runtime_interface_names = std::move(runtime_interface_names)] {
             return runtime_interface_names;
-        });
+        },
+        std::move(native_import_readiness_provider));
 }
 
 void register_ndms_vpn_server_services_handler_for_tests(

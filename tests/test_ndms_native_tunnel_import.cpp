@@ -1,4 +1,6 @@
 #include <doctest/doctest.h>
+#include <nlohmann/json.hpp>
+#include <zlib.h>
 
 #include "crypto/sha256.hpp"
 #include "keenetic/ndms_native_tunnel_import.hpp"
@@ -9,6 +11,7 @@
 #include <new>
 #include <string>
 #include <type_traits>
+#include <vector>
 
 using namespace keen_pbr3;
 
@@ -72,6 +75,65 @@ std::string awg_conf() {
     return value;
 }
 
+std::string base64url(const std::string& input) {
+    static constexpr char alphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    std::string output;
+    output.reserve((input.size() * 4U + 2U) / 3U);
+    std::uint32_t accumulator = 0U;
+    unsigned bits = 0U;
+    for (const auto character : input) {
+        accumulator = (accumulator << 8U) |
+            static_cast<unsigned char>(character);
+        bits += 8U;
+        while (bits >= 6U) {
+            bits -= 6U;
+            output.push_back(alphabet[(accumulator >> bits) & 0x3FU]);
+            accumulator &= bits == 0U ? 0U : ((1U << bits) - 1U);
+        }
+    }
+    if (bits != 0U) {
+        output.push_back(alphabet[(accumulator << (6U - bits)) & 0x3FU]);
+    }
+    return output;
+}
+
+std::string qcompress_uri(const std::string& input) {
+    uLongf compressed_size = compressBound(
+        static_cast<uLong>(input.size()));
+    std::string compressed(4U + compressed_size, '\0');
+    const auto size = static_cast<std::uint32_t>(input.size());
+    compressed[0] = static_cast<char>((size >> 24U) & 0xFFU);
+    compressed[1] = static_cast<char>((size >> 16U) & 0xFFU);
+    compressed[2] = static_cast<char>((size >> 8U) & 0xFFU);
+    compressed[3] = static_cast<char>(size & 0xFFU);
+    REQUIRE(compress2(
+                reinterpret_cast<Bytef*>(&compressed[4]),
+                &compressed_size,
+                reinterpret_cast<const Bytef*>(input.data()),
+                static_cast<uLong>(input.size()), 8) == Z_OK);
+    compressed.resize(4U + compressed_size);
+    return "vpn://" + base64url(compressed);
+}
+
+std::string amnezia_vpn_uri(
+    const std::string& conf,
+    const std::string& protocol = "awg") {
+    const nlohmann::json last_config{
+        {"config", conf}, {"mtu", "1420"}, {"port", 51820},
+    };
+    const nlohmann::json container{
+        {"container", "amnezia-" + protocol},
+        {protocol, {{"last_config", last_config.dump()}}},
+    };
+    const nlohmann::json envelope{
+        {"dns1", "1.1.1.1"},
+        {"dns2", "2606:4700:4700::1111"},
+        {"containers", nlohmann::json::array({container})},
+    };
+    return qcompress_uri(envelope.dump());
+}
+
 NdmsNativeTunnelImportErrorCode rejected_code(std::string input) {
     try {
         static_cast<void>(
@@ -126,6 +188,9 @@ TEST_CASE("strict WireGuard conf produces a redacted preview") {
           std::optional<std::uint16_t>{443U});
     CHECK(preview.persistent_keepalive ==
           std::optional<std::uint16_t>{25U});
+    CHECK(preview.listen_port ==
+          std::optional<std::uint16_t>{51820U});
+    CHECK(preview.mtu == std::optional<std::uint32_t>{1420U});
     CHECK(preview.has_private_key);
     CHECK(preview.preshared_key_count == 1U);
     CHECK(preview.amnezia_parameter_names.empty());
@@ -336,9 +401,83 @@ TEST_CASE("parser bounds raw input, lines and peer count") {
           NdmsNativeTunnelImportErrorCode::limit_exceeded);
 }
 
-TEST_CASE("URI imports stay disabled until their parser can wipe all allocations") {
+TEST_CASE("duplicate peers and unsupported URI schemes fail closed") {
+    auto duplicate_peer = wg_conf();
+    const auto peer = duplicate_peer.substr(
+        duplicate_peer.find("[Peer]"));
+    duplicate_peer += "\n" + peer;
+    CHECK(rejected_code(duplicate_peer) ==
+          NdmsNativeTunnelImportErrorCode::duplicate_peer);
+
+    CHECK(rejected_code("vpn://%%%%") ==
+          NdmsNativeTunnelImportErrorCode::invalid_base64);
     CHECK(rejected_code("vpn://AAAAAA") ==
-          NdmsNativeTunnelImportErrorCode::unsupported_uri);
+          NdmsNativeTunnelImportErrorCode::invalid_compression);
     CHECK(rejected_code("wireguard://not-standard") ==
           NdmsNativeTunnelImportErrorCode::unsupported_uri);
+}
+
+TEST_CASE("official Amnezia vpn URI extracts one redacted AWG config") {
+    auto conf = awg_conf();
+    const auto dns = conf.find(
+        "DNS = 1.1.1.1, 2606:4700:4700::1111");
+    REQUIRE(dns != std::string::npos);
+    conf.replace(
+        dns, std::string("DNS = 1.1.1.1, 2606:4700:4700::1111").size(),
+        "DNS = $PRIMARY_DNS, $SECONDARY_DNS");
+
+    auto parsed = parse_ndms_native_tunnel_import(
+        amnezia_vpn_uri(conf));
+    CHECK(parsed.source ==
+          NdmsNativeTunnelImportSource::amnezia_vpn_uri);
+    CHECK(parsed.kind ==
+          NdmsNativeTunnelImportKind::amnezia_wireguard);
+    CHECK(parsed.dns_servers == std::vector<std::string>{
+        "1.1.1.1", "2606:4700:4700::1111"});
+    CHECK(parsed.mtu == std::optional<std::uint32_t>{1420U});
+    CHECK(parsed.listen_port == std::optional<std::uint16_t>{51820U});
+
+    const auto preview = build_ndms_native_tunnel_import_preview(parsed);
+    CHECK(preview.has_private_key);
+    CHECK(preview.preshared_key_count == 1U);
+    CHECK(preview.revision.rfind("ndms-native-import-v1-", 0U) == 0U);
+    CHECK(preview.revision.find(key('P')) == std::string::npos);
+    CHECK(preview.revision.find(key('S')) == std::string::npos);
+}
+
+TEST_CASE("Amnezia vpn URI supports an unambiguous vanilla WireGuard container") {
+    auto parsed = parse_ndms_native_tunnel_import(
+        amnezia_vpn_uri(wg_conf(), "wireguard"));
+    CHECK(parsed.source ==
+          NdmsNativeTunnelImportSource::amnezia_vpn_uri);
+    CHECK(parsed.kind == NdmsNativeTunnelImportKind::wireguard);
+    CHECK(parsed.peers.size() == 1U);
+}
+
+TEST_CASE("Amnezia vpn URI rejects invalid JSON and ambiguous schemas") {
+    CHECK(rejected_code(qcompress_uri("not-json")) ==
+          NdmsNativeTunnelImportErrorCode::invalid_json);
+    CHECK(rejected_code(qcompress_uri(R"({"containers":[]})")) ==
+          NdmsNativeTunnelImportErrorCode::unsupported_json_schema);
+
+    const nlohmann::json last_config{{"config", wg_conf()}};
+    const nlohmann::json protocol{
+        {"last_config", last_config.dump()},
+    };
+    const nlohmann::json ambiguous{
+        {"containers", nlohmann::json::array({
+            {{"wireguard", protocol}}, {{"wireguard", protocol}},
+        })},
+    };
+    CHECK(rejected_code(qcompress_uri(ambiguous.dump())) ==
+          NdmsNativeTunnelImportErrorCode::unsupported_json_schema);
+
+    const nlohmann::json wrong_kind{
+        {"containers", nlohmann::json::array({
+            {{"wireguard", {{"last_config",
+                nlohmann::json{{"config", awg_conf()}}.dump()}}}},
+        })},
+    };
+    CHECK(rejected_code(qcompress_uri(wrong_kind.dump())) ==
+          NdmsNativeTunnelImportErrorCode::unsupported_json_schema);
 }

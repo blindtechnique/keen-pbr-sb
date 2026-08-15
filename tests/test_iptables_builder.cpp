@@ -864,12 +864,43 @@ TEST_CASE("exact TCP reset builder is tuple-scoped ACK-guarded and hook-first") 
   CHECK(T::exact_tcp_reset_rules_match(
       keenetic_rendered, {first, second}));
 
+  auto keenetic_maskless = keenetic_rendered;
+  for (const std::string full_mask :
+       {"0x70000/0xffffffff", "0x30000/0xffffffff"}) {
+    const auto full_mask_at = keenetic_maskless.find(full_mask);
+    REQUIRE(full_mask_at != std::string::npos);
+    keenetic_maskless.erase(
+        full_mask_at + full_mask.find('/'),
+        std::string{"/0xffffffff"}.size());
+  }
+  CHECK(T::exact_tcp_reset_rules_match(
+      keenetic_maskless, {first, second}));
+
+  auto mixed_mark_rendering = keenetic_rendered;
+  const auto first_full_mask =
+      mixed_mark_rendering.find("0x70000/0xffffffff");
+  REQUIRE(first_full_mask != std::string::npos);
+  mixed_mark_rendering.erase(
+      first_full_mask + std::string{"0x70000"}.size(),
+      std::string{"/0xffffffff"}.size());
+  CHECK(T::exact_tcp_reset_rules_match(
+      mixed_mark_rendering, {first, second}));
+
   auto wrong_mark = keenetic_rendered;
   const auto mark = wrong_mark.find("0x70000/0xffffffff");
   REQUIRE(mark != std::string::npos);
   wrong_mark.replace(mark, std::string{"0x70000"}.size(), "0x60000");
   CHECK_FALSE(T::exact_tcp_reset_rules_match(
       wrong_mark, {first, second}));
+
+  auto partial_mask = keenetic_rendered;
+  const auto full_mask = partial_mask.find("0x70000/0xffffffff");
+  REQUIRE(full_mask != std::string::npos);
+  partial_mask.replace(
+      full_mask, std::string{"0x70000/0xffffffff"}.size(),
+      "0x70000/0xff0000");
+  CHECK_FALSE(T::exact_tcp_reset_rules_match(
+      partial_mask, {first, second}));
 
   auto broadened = keenetic_rendered;
   const auto destination = broadened.find("-d 31.13.72.53/32 ");

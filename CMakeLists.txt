@@ -401,8 +401,22 @@ set(SOURCES
   src/keenetic/internal_vpn_service_resolver.cpp
   src/keenetic/internal_vpn_ingress_resolver.cpp
   src/keenetic/ndms_interface_management.cpp
+  src/keenetic/ndms_native_allocator_fence.cpp
+  src/keenetic/ndms_native_create_policy.cpp
+  src/keenetic/ndms_native_import_baseline.cpp
+  src/keenetic/ndms_native_import_executor.cpp
+  src/keenetic/ndms_native_import_readiness.cpp
+  src/keenetic/ndms_native_import_startup_recovery.cpp
+  src/keenetic/ndms_native_import_request.cpp
+  src/keenetic/ndms_native_import_transport.cpp
+  src/keenetic/ndms_native_import_wal.cpp
+  src/keenetic/ndms_native_import_wal_store.cpp
   src/keenetic/ndms_native_management_preflight.cpp
+  src/keenetic/ndms_native_mutation_plan.cpp
+  src/keenetic/ndms_native_import_response.cpp
+  src/keenetic/ndms_native_reconcile_barrier.cpp
   src/keenetic/ndms_native_tunnel_import.cpp
+  src/keenetic/ndms_wireguard_identity.cpp
   src/keenetic/ndms_rci_observation.cpp
   src/keenetic/ndms_rci_restorable_snapshot.cpp
   src/keenetic/ndms_web_endpoint.cpp

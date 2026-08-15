@@ -125,6 +125,64 @@ TEST_CASE("loopback and link-local peers never grant browser import authority") 
             "fe80::1", "fe80::2", "br0", true, true}));
 }
 
+TEST_CASE("router-owned HTTPS proxy is distinct from direct local authority") {
+    const std::vector<TrustedLocalInterfaceAddress> interfaces{
+        {"lo", "127.0.0.1", "255.0.0.0", true, true},
+        {"br0", "192.168.50.1", "255.255.255.0", true, false},
+        {"eth2", "203.0.113.7", "255.255.255.0", true, false},
+    };
+
+    CHECK(trusted_router_https_proxy_connection_is_proven(
+        "127.0.0.1", "127.0.0.1", "https://vpn.router.keenetic.pro",
+        "same-origin", "https", interfaces));
+    CHECK(trusted_router_https_proxy_connection_is_proven(
+        "192.168.50.1", "192.168.50.1",
+        "https://vpn.router.keenetic.pro:5443", "same-origin",
+        "", interfaces));
+
+    // Browser-visible HTTP and malformed/list origins never become protected,
+    // even when the request came from a router-local proxy socket.
+    CHECK_FALSE(trusted_router_https_proxy_connection_is_proven(
+        "127.0.0.1", "127.0.0.1", "http://vpn.router.keenetic.pro",
+        "same-origin", "https", interfaces));
+    CHECK_FALSE(trusted_router_https_proxy_connection_is_proven(
+        "127.0.0.1", "127.0.0.1",
+        "https://vpn.router.keenetic.pro/path", "same-origin", "https",
+        interfaces));
+    CHECK_FALSE(trusted_router_https_proxy_connection_is_proven(
+        "127.0.0.1", "127.0.0.1", "https://one, https://two",
+        "same-origin", "https", interfaces));
+    CHECK_FALSE(trusted_router_https_proxy_connection_is_proven(
+        "127.0.0.1", "127.0.0.1", "https://:", "same-origin",
+        "https", interfaces));
+    CHECK_FALSE(trusted_router_https_proxy_connection_is_proven(
+        "127.0.0.1", "127.0.0.1",
+        "https://user@vpn.router.keenetic.pro", "same-origin", "https",
+        interfaces));
+    CHECK_FALSE(trusted_router_https_proxy_connection_is_proven(
+        "127.0.0.1", "127.0.0.1", "https://vpn.router.keenetic.pro",
+        "cross-site", "https", interfaces));
+    CHECK_FALSE(trusted_router_https_proxy_connection_is_proven(
+        "127.0.0.1", "127.0.0.1", "https://vpn.router.keenetic.pro",
+        "same-origin", "http", interfaces));
+
+    // A normal LAN or WAN peer is not the router proxy, regardless of Origin.
+    CHECK_FALSE(trusted_router_https_proxy_connection_is_proven(
+        "192.168.50.24", "192.168.50.1",
+        "https://vpn.router.keenetic.pro", "same-origin", "https",
+        interfaces));
+    CHECK_FALSE(trusted_router_https_proxy_connection_is_proven(
+        "198.51.100.24", "203.0.113.7",
+        "https://vpn.router.keenetic.pro", "same-origin", "https",
+        interfaces));
+
+    auto down = interfaces;
+    down[1].up = false;
+    CHECK_FALSE(trusted_router_https_proxy_connection_is_proven(
+        "192.168.50.1", "192.168.50.1",
+        "https://vpn.router.keenetic.pro", "same-origin", "https", down));
+}
+
 TEST_CASE("trusted local discovery is cached for a bounded TTL") {
     using namespace std::chrono_literals;
     auto now = TrustedLocalConnectionCache::Clock::time_point{};

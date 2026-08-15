@@ -296,6 +296,8 @@ Daemon::Daemon(Config config,
     : config_store_(config)
     , list_service_(config.daemon.value_or(DaemonConfig{}).cache_dir.value_or("/var/cache/keen-pbr"),
                     max_file_size_bytes(config))
+    , ndms_native_import_wal_store_(
+          "/opt/var/lib/keen-pbr/native-import-wal")
     , config_(std::move(config))
     , config_path_(std::move(config_path))
     , opts_(std::move(opts))
@@ -3957,6 +3959,30 @@ void Daemon::run() {
     auto& log = Logger::instance();
 
     try {
+        auto native_import_readiness =
+            NdmsNativeImportJournalReadinessState::unavailable;
+        try {
+            const auto native_import_inventory =
+                ndms_native_import_wal_store_.try_inventory();
+            native_import_readiness =
+                summarize_ndms_native_import_readiness(
+                    native_import_inventory);
+        } catch (...) {
+            // Startup inventory is observational. Even an unexpected local
+            // allocation/runtime failure must fail the report closed without
+            // taking down the already-working routing daemon.
+        }
+        ndms_native_import_journal_readiness_.store(
+            native_import_readiness, std::memory_order_release);
+        // Deliberately log only the collapsed enum. Inventory entries can
+        // contain transaction identifiers and filenames, neither of which
+        // belongs in the API or routine daemon logs.
+        log.info(
+            "Native import WAL startup observation: state={} (report-only; "
+            "writer and recovery remain disabled).",
+            ndms_native_import_journal_readiness_state_name(
+                native_import_readiness));
+
     // Startup happens before the event loop. It is the one lifecycle point
     // where a bounded shared-cache refresh may safely query loopback NDMS.
     // Prime Keenetic DNS explicitly before the first route/firewall mutation;

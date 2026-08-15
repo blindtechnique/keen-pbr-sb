@@ -1,0 +1,65 @@
+#include "ndms_native_import_readiness.hpp"
+
+#include <algorithm>
+
+namespace keen_pbr3 {
+namespace {
+
+bool complete_valid_inventory(
+    const NdmsNativeImportWalInventory& inventory) noexcept {
+    return std::all_of(
+        inventory.items.begin(),
+        inventory.items.end(),
+        [](const NdmsNativeImportWalInventoryItem& item) {
+            return item.state == NdmsNativeImportWalLoadState::valid &&
+                   item.transaction_id.has_value() &&
+                   item.record.has_value();
+        });
+}
+
+} // namespace
+
+NdmsNativeImportJournalReadinessState
+summarize_ndms_native_import_readiness(
+    const NdmsNativeImportWalInventory& inventory) noexcept {
+    switch (inventory.state) {
+    case NdmsNativeImportWalInventoryState::absent:
+        return NdmsNativeImportJournalReadinessState::
+            clean_never_activated;
+    case NdmsNativeImportWalInventoryState::ready:
+        if (inventory.items.empty()) {
+            return NdmsNativeImportJournalReadinessState::clean;
+        }
+        return complete_valid_inventory(inventory)
+                   ? NdmsNativeImportJournalReadinessState::
+                         recovery_required
+                   : NdmsNativeImportJournalReadinessState::unsafe;
+    case NdmsNativeImportWalInventoryState::unsafe_store:
+    case NdmsNativeImportWalInventoryState::directory_limit_exceeded:
+    case NdmsNativeImportWalInventoryState::record_limit_exceeded:
+        return NdmsNativeImportJournalReadinessState::unsafe;
+    case NdmsNativeImportWalInventoryState::busy:
+    case NdmsNativeImportWalInventoryState::io_error:
+        return NdmsNativeImportJournalReadinessState::unavailable;
+    }
+    return NdmsNativeImportJournalReadinessState::unavailable;
+}
+
+const char* ndms_native_import_journal_readiness_state_name(
+    const NdmsNativeImportJournalReadinessState state) noexcept {
+    switch (state) {
+    case NdmsNativeImportJournalReadinessState::clean_never_activated:
+        return "clean_never_activated";
+    case NdmsNativeImportJournalReadinessState::clean:
+        return "clean";
+    case NdmsNativeImportJournalReadinessState::recovery_required:
+        return "recovery_required";
+    case NdmsNativeImportJournalReadinessState::unsafe:
+        return "unsafe";
+    case NdmsNativeImportJournalReadinessState::unavailable:
+        return "unavailable";
+    }
+    return "unavailable";
+}
+
+} // namespace keen_pbr3

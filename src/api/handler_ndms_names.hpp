@@ -7,10 +7,14 @@
 #include "handlers.hpp"
 #include "server.hpp"
 
+#include <functional>
 #include <string>
 #include <vector>
 
 namespace keen_pbr3 {
+
+using NdmsNativeImportReadinessProvider =
+    std::function<NdmsNativeImportJournalReadinessState()>;
 
 // Human names for interfaces, taken from the router's own configuration.
 //
@@ -25,7 +29,9 @@ void register_ndms_names_handler(ApiServer& server, ApiContext& ctx);
 void register_ndms_names_handler_for_tests(ApiServer& server,
                                            NdmsCatalogCache& cache,
                                            std::vector<std::string>
-                                               runtime_interface_names = {});
+                                               runtime_interface_names = {},
+                                           NdmsNativeImportReadinessProvider
+                                               native_import_readiness_provider = {});
 void register_ndms_vpn_server_services_handler_for_tests(
     ApiServer& server,
     NdmsVpnServerServiceCache& cache);

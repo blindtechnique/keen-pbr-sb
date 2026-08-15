@@ -151,7 +151,7 @@ describe("authentication status contract", () => {
     }
   })
 
-  test("collects Keenetic credentials only while fresh evidence is live", () => {
+  test("collects Keenetic credentials over fresh local proof or secure HTTPS", () => {
     const status = parseAuthStatus(
       {
         enabled: true,
@@ -165,7 +165,24 @@ describe("authentication status contract", () => {
     )
     expect(authCredentialsMayBeCollected(status, 5_999)).toBe(true)
     expect(authCredentialsMayBeCollected(status, 6_000)).toBe(false)
+    expect(authCredentialsMayBeCollected(status, 99_000, true)).toBe(true)
     expect(authCredentialsMayBeCollected(null, 1_000)).toBe(false)
+
+    const remoteKeenetic = parseAuthStatus(
+      {
+        enabled: true,
+        authenticated: false,
+        provider: "keenetic",
+        trusted_local_connection: false,
+      },
+      1_000
+    )
+    expect(authCredentialsMayBeCollected(remoteKeenetic, 1_000, true)).toBe(
+      true
+    )
+    expect(authCredentialsMayBeCollected(remoteKeenetic, 1_000, false)).toBe(
+      false
+    )
     expect(
       authCredentialsMayBeCollected(
         parseAuthStatus(
@@ -232,6 +249,26 @@ describe("authentication status contract", () => {
       cache: "no-store",
       credentials: "same-origin",
     })
+  })
+
+  test("accepts a fresh status over browser-proven HTTPS without local proof", async () => {
+    const remoteStatus = (async () =>
+      new Response(
+        JSON.stringify({
+          enabled: true,
+          authenticated: false,
+          provider: "keenetic",
+          trusted_local_connection: false,
+        }),
+        { status: 200 }
+      )) as typeof fetch
+
+    expect(
+      await refreshCredentialTransportStatus(remoteStatus, () => 1_000, true)
+    ).toMatchObject({ provider: "keenetic", trustedLocalConnection: false })
+    expect(
+      await refreshCredentialTransportStatus(remoteStatus, () => 1_000, false)
+    ).toBeNull()
   })
 
   test("fails credential preflight closed", async () => {

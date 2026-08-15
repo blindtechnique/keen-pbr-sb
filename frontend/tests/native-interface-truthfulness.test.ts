@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test"
 
-import { NdmsManagementBlocker } from "@/api/generated/model"
+import {
+  NdmsManagementBlocker,
+  NdmsNativeImportReadinessBlockersItem,
+} from "@/api/generated/model"
 import { enTranslation } from "../src/i18n/en"
 import { ruTranslation } from "../src/i18n/ru"
 
@@ -64,7 +67,10 @@ describe("native Keenetic interface wording", () => {
     )
     expect(
       ruTranslation.transports.nativeImport.transportBlockedDescription
-    ).toContain("подтверждения роутером")
+    ).toContain("HTTPS-домену Keenetic")
+    expect(
+      ruTranslation.transports.nativeImport.transportBlockedDescription
+    ).toContain("HTTP заблокирован")
     expect(ruTranslation.transports.nativeImport.redactedNotice).toContain(
       "предварительное"
     )
@@ -83,12 +89,31 @@ describe("native Keenetic interface wording", () => {
     )
     expect(
       enTranslation.transports.nativeImport.transportBlockedDescription
-    ).toContain("router verifies")
+    ).toContain("Keenetic HTTPS domain")
+    expect(
+      enTranslation.transports.nativeImport.transportBlockedDescription
+    ).toContain("HTTP is blocked")
     expect(enTranslation.transports.nativeImport.redactedNotice).toContain(
       "preliminary"
     )
     expect(enTranslation.transports.nativeImport.redactedNotice).not.toContain(
       "backend"
+    )
+  })
+
+  test("describes every preview-only native import blocker", () => {
+    for (const blocker of Object.values(
+      NdmsNativeImportReadinessBlockersItem
+    )) {
+      expect(ruTranslation.transports.nativeImport.blockers[blocker]).toBeTruthy()
+      expect(enTranslation.transports.nativeImport.blockers[blocker]).toBeTruthy()
+    }
+
+    expect(ruTranslation.transports.nativeImport.applyBlockedDescription).toContain(
+      "ключи никуда не отправляются"
+    )
+    expect(enTranslation.transports.nativeImport.applyBlockedDescription).toContain(
+      "no keys are sent"
     )
   })
 })

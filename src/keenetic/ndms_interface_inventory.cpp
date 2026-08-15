@@ -1,5 +1,7 @@
 #include "ndms_interface_inventory.hpp"
 
+#include "ndms_wireguard_identity.hpp"
+
 #include "../crypto/sha256.hpp"
 
 #include <arpa/inet.h>
@@ -456,6 +458,220 @@ std::string inventory_revision(const nlohmann::json& entry) {
         nlohmann::json::error_handler_t::replace));
 }
 
+constexpr std::string_view kWireguardIdentityPrefix{"Wireguard"};
+constexpr std::string_view kWireguardSlotRevisionPrefix{
+    "ndms-wg-slot-v1-"};
+
+bool wireguard_prefixed(const std::string_view value) noexcept {
+    return value.size() >= kWireguardIdentityPrefix.size() &&
+           value.compare(
+               0U,
+               kWireguardIdentityPrefix.size(),
+               kWireguardIdentityPrefix) == 0;
+}
+
+std::optional<std::uint8_t> malformed_wireguard_slot_hint(
+    const std::string_view value) noexcept {
+    if (!wireguard_prefixed(value)) return std::nullopt;
+    const auto suffix = value.substr(kWireguardIdentityPrefix.size());
+    if (suffix.empty()) return std::nullopt;
+
+    unsigned int slot = 0U;
+    for (const char character : suffix) {
+        if (character < '0' || character > '9') return std::nullopt;
+        slot = slot * 10U +
+               static_cast<unsigned int>(character - '0');
+        if (slot >= kNdmsWireguardCatalogSlotCount) {
+            return std::nullopt;
+        }
+    }
+    return static_cast<std::uint8_t>(slot);
+}
+
+void mark_wireguard_slot_unsafe(
+    NdmsInterfaceCatalog& catalog,
+    const std::uint8_t slot) {
+    auto& evidence = catalog.wireguard_slots[slot];
+    evidence.state = NdmsWireguardCatalogSlotState::unsafe;
+    evidence.structural_revision.clear();
+    catalog.wireguard_slot_evidence_complete = false;
+}
+
+void mark_malformed_wireguard_name(
+    NdmsInterfaceCatalog& catalog,
+    const std::string_view value) {
+    if (!wireguard_prefixed(value)) return;
+    catalog.wireguard_slot_evidence_complete = false;
+    if (const auto slot = malformed_wireguard_slot_hint(value)) {
+        mark_wireguard_slot_unsafe(catalog, *slot);
+    }
+}
+
+void update_slot_revision_field(
+    Sha256& hasher,
+    const std::uint8_t tag,
+    const void* data,
+    const std::size_t size) {
+    hasher.update(&tag, sizeof(tag));
+    std::array<std::uint8_t, 8U> encoded_size{};
+    std::uint64_t remaining = size;
+    for (std::size_t index = 0U;
+         index < encoded_size.size(); ++index) {
+        encoded_size[encoded_size.size() - 1U - index] =
+            static_cast<std::uint8_t>(remaining & 0xffU);
+        remaining >>= 8U;
+    }
+    hasher.update(encoded_size.data(), encoded_size.size());
+    hasher.update(data, size);
+}
+
+void update_slot_revision_field(
+    Sha256& hasher,
+    const std::uint8_t tag,
+    const std::string_view value) {
+    update_slot_revision_field(
+        hasher, tag, value.data(), value.size());
+}
+
+std::string wireguard_slot_structural_revision(
+    const std::uint8_t slot,
+    const std::string_view record_id,
+    const std::string_view effective_interface_name,
+    const std::string_view entry_revision) {
+    constexpr std::string_view domain{
+        "keen-pbr.ndms-wireguard-slot-evidence.v1"};
+    Sha256 hasher;
+    update_slot_revision_field(hasher, 0U, domain);
+    update_slot_revision_field(
+        hasher, 1U, &slot, sizeof(slot));
+    update_slot_revision_field(hasher, 2U, record_id);
+    update_slot_revision_field(
+        hasher, 3U, effective_interface_name);
+    update_slot_revision_field(hasher, 4U, entry_revision);
+    return std::string{kWireguardSlotRevisionPrefix} +
+           hasher.hex_digest();
+}
+
+void occupy_wireguard_slot(
+    NdmsInterfaceCatalog& catalog,
+    const std::uint8_t slot,
+    std::string structural_revision) {
+    auto& evidence = catalog.wireguard_slots[slot];
+    if (evidence.state != NdmsWireguardCatalogSlotState::absent) {
+        mark_wireguard_slot_unsafe(catalog, slot);
+        return;
+    }
+    evidence.state = NdmsWireguardCatalogSlotState::occupied;
+    evidence.structural_revision = std::move(structural_revision);
+}
+
+bool wireguard_typed_record(const nlohmann::json& entry) {
+    const auto kind = classify(entry);
+    return kind.has_value() &&
+           (*kind == NdmsTunnelKind::wireguard ||
+            *kind == NdmsTunnelKind::amnezia_wireguard);
+}
+
+void collect_wireguard_slot_evidence(
+    NdmsInterfaceCatalog& catalog,
+    const std::string& record_id,
+    const nlohmann::json& entry) {
+    const auto canonical_key =
+        parse_ndms_wireguard_identity(record_id);
+    const auto trimmed_record_id = trim_ascii_whitespace(record_id);
+    const bool malformed_key =
+        !canonical_key.has_value() &&
+        wireguard_prefixed(trimmed_record_id);
+    if (malformed_key) {
+        mark_malformed_wireguard_name(
+            catalog, trimmed_record_id);
+    }
+
+    if (!entry.is_object()) {
+        if (canonical_key) {
+            mark_wireguard_slot_unsafe(
+                catalog, canonical_key->slot);
+        }
+        return;
+    }
+
+    const auto name_field = entry.find("interface-name");
+    const bool malformed_name_field =
+        name_field != entry.end() && !name_field->is_string();
+    std::string effective_interface_name = trimmed_record_id;
+    if (name_field != entry.end() && name_field->is_string()) {
+        const auto declared = trim_ascii_whitespace(
+            name_field->get_ref<const std::string&>());
+        if (!declared.empty()) {
+            effective_interface_name = declared;
+        }
+    }
+
+    const auto canonical_effective_name =
+        parse_ndms_wireguard_identity(effective_interface_name);
+    const bool malformed_effective_name =
+        !canonical_effective_name.has_value() &&
+        wireguard_prefixed(effective_interface_name);
+    if (malformed_effective_name) {
+        mark_malformed_wireguard_name(
+            catalog, effective_interface_name);
+    }
+
+    if (malformed_name_field) {
+        if (canonical_key) {
+            mark_wireguard_slot_unsafe(
+                catalog, canonical_key->slot);
+        }
+        if (wireguard_typed_record(entry) || canonical_key ||
+            malformed_key) {
+            catalog.wireguard_slot_evidence_complete = false;
+        }
+        return;
+    }
+
+    if (canonical_key && canonical_effective_name &&
+        canonical_key->slot != canonical_effective_name->slot) {
+        mark_wireguard_slot_unsafe(catalog, canonical_key->slot);
+        mark_wireguard_slot_unsafe(
+            catalog, canonical_effective_name->slot);
+        return;
+    }
+
+    if (canonical_key && !canonical_effective_name) {
+        // An exact numbered RCI key that declares another effective identity
+        // cannot be reduced to either claimant safely.
+        mark_wireguard_slot_unsafe(catalog, canonical_key->slot);
+        return;
+    }
+
+    const auto claimed_identity = canonical_effective_name
+        ? canonical_effective_name
+        : canonical_key;
+    if (claimed_identity) {
+        if (malformed_key || malformed_effective_name) {
+            mark_wireguard_slot_unsafe(
+                catalog, claimed_identity->slot);
+            return;
+        }
+        const auto entry_revision = inventory_revision(entry);
+        occupy_wireguard_slot(
+            catalog,
+            claimed_identity->slot,
+            wireguard_slot_structural_revision(
+                claimed_identity->slot,
+                record_id,
+                effective_interface_name,
+                entry_revision));
+        return;
+    }
+
+    if (wireguard_typed_record(entry)) {
+        // A typed WG/AWG object outside the measured numbered namespace can
+        // affect allocator reasoning, but cannot be assigned to one slot.
+        catalog.wireguard_slot_evidence_complete = false;
+    }
+}
+
 } // namespace
 
 std::optional<std::string> resolve_ndms_kernel_name(
@@ -488,10 +704,12 @@ NdmsInterfaceCatalog parse_ndms_interface_catalog(
     catalog.names = nlohmann::json::object();
     if (!interfaces.is_object()) return catalog;
     catalog.firmware_available = true;
+    catalog.wireguard_slot_evidence_complete = true;
 
     std::vector<ParsedEntry> parsed_entries;
     parsed_entries.reserve(interfaces.size());
     for (const auto& [id, entry] : interfaces.items()) {
+        collect_wireguard_slot_evidence(catalog, id, entry);
         if (!entry.is_object()) continue;
 
         const auto raw_firmware_interface_name =

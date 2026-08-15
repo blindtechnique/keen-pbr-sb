@@ -8,6 +8,7 @@
 import type { NdmsCatalogStatus } from './ndmsCatalogStatus';
 import type { NdmsInterfaceInventoryResponseMutationMode } from './ndmsInterfaceInventoryResponseMutationMode';
 import type { NdmsInterfaceInventoryResponseRequiredGuardsItem } from './ndmsInterfaceInventoryResponseRequiredGuardsItem';
+import type { NdmsNativeImportReadiness } from './ndmsNativeImportReadiness';
 import type { NdmsTunnelInterface } from './ndmsTunnelInterface';
 
 export interface NdmsInterfaceInventoryResponse {
@@ -18,5 +19,6 @@ export interface NdmsInterfaceInventoryResponse {
   read_only: boolean;
   mutation_mode: NdmsInterfaceInventoryResponseMutationMode;
   required_guards: NdmsInterfaceInventoryResponseRequiredGuardsItem[];
+  native_import_readiness: NdmsNativeImportReadiness;
   interfaces: NdmsTunnelInterface[];
 }

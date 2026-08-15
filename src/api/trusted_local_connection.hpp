@@ -58,6 +58,22 @@ bool trusted_local_connection_is_proven(
     const TrustedLocalConnectionSnapshot& snapshot,
     const std::optional<TrustedLocalRouteProof>& route) noexcept;
 
+// Proves the narrow reverse-proxy case used by KeenDNS HTTPS web
+// applications. The browser's immutable Origin scheme proves that the public
+// hop was HTTPS, while the accepted socket peer must be the router itself
+// (loopback or an exact live kernel-owned interface address). Forwarding
+// headers alone are deliberately not an input and can never grant authority.
+// This capability is for router-account login/step-up only; it is not a local
+// management proof and must not be used to change authentication settings.
+bool trusted_router_https_proxy_connection_is_proven(
+    std::string_view remote_address,
+    std::string_view local_address,
+    std::string_view origin,
+    std::string_view sec_fetch_site,
+    std::string_view x_forwarded_proto,
+    const std::vector<TrustedLocalInterfaceAddress>& interface_addresses)
+    noexcept;
+
 // Reads only kernel-owned interface metadata. NDMS authority remains a
 // separate input so tests can exercise the decision without router calls.
 std::vector<TrustedLocalInterfaceAddress>

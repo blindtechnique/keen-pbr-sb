@@ -1027,6 +1027,10 @@ void Daemon::setup_api() {
         }
         return admitted;
     };
+    api_ctx_->get_ndms_native_import_readiness_fn = [this]() noexcept {
+        return ndms_native_import_journal_readiness_.load(
+            std::memory_order_acquire);
+    };
     refresh_interface_traffic_config_targets(config_);
     lifecycle_operation_store_.set_publish_callback([this]() {
         if (status_stream_) status_stream_->reconcile();

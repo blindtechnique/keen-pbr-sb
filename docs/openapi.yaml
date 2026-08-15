@@ -3538,6 +3538,96 @@ components:
           items:
             $ref: "#/components/schemas/NdmsVpnServerService"
 
+    NdmsNativeImportTargetRange:
+      title: NdmsNativeImportTargetRange
+      type: object
+      required:
+        - prefix
+        - first_index
+        - last_index
+      properties:
+        prefix:
+          title: NdmsNativeImportTargetPrefix
+          type: string
+          enum: [Wireguard]
+        first_index:
+          type: integer
+          minimum: 0
+          maximum: 126
+        last_index:
+          type: integer
+          minimum: 0
+          maximum: 126
+
+    NdmsNativeImportReadiness:
+      title: NdmsNativeImportReadiness
+      type: object
+      required:
+        - preview_only
+        - apply_available
+        - operation
+        - request_name
+        - allocator_range
+        - eligible_returned_targets
+        - protected_targets
+        - journal_state
+        - reconcile_barrier_state
+        - blockers
+      properties:
+        preview_only:
+          type: boolean
+          enum: [true]
+        apply_available:
+          type: boolean
+          enum: [false]
+        operation:
+          type: string
+          pattern: ^interface\.wireguard\.import$
+          description: Exact stock KeeneticOS create-only RCI action.
+        request_name:
+          type: string
+          maxLength: 0
+          description: >
+            Must stay empty so the stock action allocates a new interface and
+            cannot target an existing interface supplied by the client.
+        allocator_range:
+          $ref: "#/components/schemas/NdmsNativeImportTargetRange"
+        eligible_returned_targets:
+          $ref: "#/components/schemas/NdmsNativeImportTargetRange"
+        protected_targets:
+          type: array
+          items:
+            $ref: "#/components/schemas/NdmsNativeImportTargetRange"
+        journal_state:
+          title: NdmsNativeImportJournalState
+          type: string
+          description: >
+            Redacted report-only boot observation of the native-import WAL.
+            This state never authorizes Apply or removes the independent
+            recovery_journal_not_integrated blocker. clean_never_activated is
+            clean only while every production writer/provider stays disabled.
+          enum:
+            - dormant
+            - clean_never_activated
+            - clean
+            - recovery_required
+            - unsafe
+            - unavailable
+        reconcile_barrier_state:
+          title: NdmsNativeImportReconcileBarrierState
+          type: string
+          enum: [dormant]
+        blockers:
+          type: array
+          items:
+            title: NdmsNativeImportBlocker
+            type: string
+            enum:
+              - writer_disabled
+              - allocator_range_unfenced
+              - recovery_journal_not_integrated
+              - reconcile_barrier_not_integrated
+
     NdmsInterfaceInventoryResponse:
       type: object
       required:
@@ -3546,6 +3636,7 @@ components:
         - read_only
         - mutation_mode
         - required_guards
+        - native_import_readiness
         - interfaces
       properties:
         available:
@@ -3571,6 +3662,8 @@ components:
               - automatic_backup
               - ownership_check
               - optimistic_revision
+        native_import_readiness:
+          $ref: "#/components/schemas/NdmsNativeImportReadiness"
         interfaces:
           type: array
           items:

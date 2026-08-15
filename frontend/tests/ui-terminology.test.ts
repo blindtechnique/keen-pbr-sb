@@ -21,6 +21,18 @@ describe("public routing terminology", () => {
     expect(ruTranslation.transports.form.createTitle).toBe(
       "Добавить прокси или подключить VPN"
     )
+    expect(ruTranslation.transports.form.singBox).toBe(
+      "Подключение sing-box/Amnezia/WireGuard"
+    )
+    expect(ruTranslation.transports.form.shareLink).toBe("Ссылка подключения")
+    expect(ruTranslation.transports.form.importFile).toBe("Импорт файла")
+    expect(ruTranslation.transports.form.outboundJson).toBe(
+      "JSON подключения sing-box"
+    )
+    expect(ruTranslation.transports.form.shareLinkHint).toContain(
+      "Поддерживаются ссылки VLESS, VMess, Trojan, Shadowsocks, Hysteria2, TUIC, AnyTLS, SOCKS и HTTP-прокси"
+    )
+    expect(ruTranslation.transports.form.shareLinkHint).toContain("vpn://")
     expect(ruTranslation.nav.items.routesAndTunnels).toBe("VPN, прокси, группы")
     expect(ruTranslation.pages.routesAndTunnels.title).toBe(
       "VPN, прокси, группы"
@@ -43,6 +55,15 @@ describe("public routing terminology", () => {
     expect(enTranslation.transports.form.createTitle).toBe(
       "Add proxy or connect VPN"
     )
+    expect(enTranslation.transports.form.singBox).toBe(
+      "sing-box/Amnezia/WireGuard connection"
+    )
+    expect(enTranslation.transports.form.shareLink).toBe("Connection link")
+    expect(enTranslation.transports.form.importFile).toBe("Import file")
+    expect(enTranslation.transports.form.outboundJson).toBe(
+      "sing-box connection JSON"
+    )
+    expect(enTranslation.transports.form.shareLinkHint).toContain("vpn://")
     expect(enTranslation.nav.items.routesAndTunnels).toBe(
       "VPN, proxies, groups"
     )

@@ -211,6 +211,166 @@ TEST_CASE("NDMS inventory keeps malformed records from discarding the catalog") 
     CHECK(catalog.tunnels[0].label == "Рабочий туннель 東京");
 }
 
+TEST_CASE("NDMS inventory publishes complete fixed Wireguard slot evidence") {
+    const auto payload = nlohmann::json{
+        {"Wireguard0",
+         {{"type", "Wireguard"},
+          {"interface-name", "Wireguard0"},
+          {"description", "System"}}},
+        {"Alias5",
+         {{"type", "Bridge"},
+          {"interface-name", "Wireguard5"},
+          {"description", "Reserved by another record"}}},
+        {"Wireguard98",
+         {{"type", "Bridge"},
+          {"description", "Key fallback"}}},
+        {"Bridge0",
+         {{"type", "Bridge"}, {"interface-name", "br0"}}},
+    };
+
+    const auto catalog = parse_ndms_interface_catalog(payload);
+    CHECK(catalog.wireguard_slots.size() ==
+          kNdmsWireguardCatalogSlotCount);
+    CHECK(catalog.wireguard_slot_evidence_complete);
+    for (const std::size_t slot : {0U, 5U, 98U}) {
+        CAPTURE(slot);
+        const auto& evidence = catalog.wireguard_slots[slot];
+        CHECK(evidence.state ==
+              NdmsWireguardCatalogSlotState::occupied);
+        CHECK(evidence.structural_revision.rfind(
+                  "ndms-wg-slot-v1-", 0U) == 0U);
+        CHECK(evidence.structural_revision.size() ==
+              std::string{"ndms-wg-slot-v1-"}.size() + 64U);
+    }
+    CHECK(catalog.wireguard_slots[1].state ==
+          NdmsWireguardCatalogSlotState::absent);
+    CHECK(catalog.wireguard_slots[1].structural_revision.empty());
+    CHECK(catalog.wireguard_slots[126].state ==
+          NdmsWireguardCatalogSlotState::absent);
+
+    const auto resolved = resolve_ndms_kernel_names(
+        catalog, {"nwg0", "nwg5", "nwg98", "br0"});
+    CHECK(resolved.wireguard_slot_evidence_complete);
+    for (std::size_t slot = 0U;
+         slot < kNdmsWireguardCatalogSlotCount; ++slot) {
+        CHECK(resolved.wireguard_slots[slot].state ==
+              catalog.wireguard_slots[slot].state);
+        CHECK(resolved.wireguard_slots[slot].structural_revision ==
+              catalog.wireguard_slots[slot].structural_revision);
+    }
+}
+
+TEST_CASE("NDMS Wireguard slot evidence fails closed on unsafe identities") {
+    SUBCASE("scalar canonical key") {
+        const auto catalog = parse_ndms_interface_catalog(
+            nlohmann::json{{"Wireguard5", 17}});
+        CHECK_FALSE(catalog.wireguard_slot_evidence_complete);
+        CHECK(catalog.wireguard_slots[5].state ==
+              NdmsWireguardCatalogSlotState::unsafe);
+        CHECK(catalog.wireguard_slots[5].structural_revision.empty());
+    }
+
+    SUBCASE("duplicate effective name") {
+        const auto catalog = parse_ndms_interface_catalog(
+            nlohmann::json{
+                {"First",
+                 {{"type", "Wireguard"},
+                  {"interface-name", "Wireguard5"}}},
+                {"Second",
+                 {{"type", "Wireguard"},
+                  {"interface-name", "Wireguard5"}}},
+            });
+        CHECK_FALSE(catalog.wireguard_slot_evidence_complete);
+        CHECK(catalog.wireguard_slots[5].state ==
+              NdmsWireguardCatalogSlotState::unsafe);
+    }
+
+    SUBCASE("canonical key conflicts with effective name") {
+        const auto catalog = parse_ndms_interface_catalog(
+            nlohmann::json{
+                {"Wireguard5",
+                 {{"type", "Wireguard"},
+                  {"interface-name", "Wireguard6"}}},
+            });
+        CHECK_FALSE(catalog.wireguard_slot_evidence_complete);
+        CHECK(catalog.wireguard_slots[5].state ==
+              NdmsWireguardCatalogSlotState::unsafe);
+        CHECK(catalog.wireguard_slots[6].state ==
+              NdmsWireguardCatalogSlotState::unsafe);
+    }
+
+    SUBCASE("leading-zero identity") {
+        const auto catalog = parse_ndms_interface_catalog(
+            nlohmann::json{
+                {"Wireguard05",
+                 {{"type", "Wireguard"}}},
+            });
+        CHECK_FALSE(catalog.wireguard_slot_evidence_complete);
+        CHECK(catalog.wireguard_slots[5].state ==
+              NdmsWireguardCatalogSlotState::unsafe);
+    }
+
+    SUBCASE("malformed effective-name field") {
+        const auto catalog = parse_ndms_interface_catalog(
+            nlohmann::json{
+                {"Wireguard7",
+                 {{"type", "Wireguard"},
+                  {"interface-name", 7}}},
+            });
+        CHECK_FALSE(catalog.wireguard_slot_evidence_complete);
+        CHECK(catalog.wireguard_slots[7].state ==
+              NdmsWireguardCatalogSlotState::unsafe);
+    }
+
+    SUBCASE("out-of-range identity") {
+        const auto catalog = parse_ndms_interface_catalog(
+            nlohmann::json{
+                {"Alias",
+                 {{"type", "Wireguard"},
+                  {"interface-name", "Wireguard127"}}},
+            });
+        CHECK_FALSE(catalog.wireguard_slot_evidence_complete);
+    }
+}
+
+TEST_CASE("NDMS Wireguard slot revisions exclude volatile runtime fields") {
+    auto payload = nlohmann::json{
+        {"Evidence",
+         {{"type", "Wireguard"},
+          {"interface-name", "Wireguard8"},
+          {"description", "Stable"},
+          {"connected", true},
+          {"link", true},
+          {"uptime", 10}}},
+    };
+    const auto baseline = parse_ndms_interface_catalog(payload);
+    REQUIRE(baseline.wireguard_slot_evidence_complete);
+    REQUIRE(baseline.wireguard_slots[8].state ==
+            NdmsWireguardCatalogSlotState::occupied);
+    const auto revision =
+        baseline.wireguard_slots[8].structural_revision;
+
+    payload["Evidence"]["connected"] = false;
+    payload["Evidence"]["link"] = false;
+    payload["Evidence"]["uptime"] = 9999;
+    const auto volatile_changed = parse_ndms_interface_catalog(
+        payload, {"nwg8"});
+    CHECK(volatile_changed.wireguard_slots[8].structural_revision ==
+          revision);
+
+    payload["Evidence"]["description"] = "Changed";
+    const auto structural_changed = parse_ndms_interface_catalog(payload);
+    CHECK(structural_changed.wireguard_slots[8].structural_revision !=
+          revision);
+
+    auto different_record_id = payload.at("Evidence");
+    different_record_id["description"] = "Stable";
+    const auto identity_changed = parse_ndms_interface_catalog(
+        nlohmann::json{{"OtherEvidence", different_record_id}});
+    CHECK(identity_changed.wireguard_slots[8].structural_revision !=
+          revision);
+}
+
 TEST_CASE("NDMS inventory preserves known booleans and omits unknown strings") {
     const auto payload = nlohmann::json{
         {"KnownFalse",
@@ -539,6 +699,9 @@ TEST_CASE("NDMS duplicate selection is deterministic") {
     REQUIRE(catalog.tunnels.size() == 2);
     REQUIRE(find_tunnel(catalog, "ADuplicate") != nullptr);
     CHECK(find_tunnel(catalog, "ADuplicate")->label == "First");
+    CHECK_FALSE(catalog.wireguard_slot_evidence_complete);
+    CHECK(catalog.wireguard_slots[9].state ==
+          NdmsWireguardCatalogSlotState::unsafe);
     REQUIRE(find_tunnel(catalog, "AKernelMapping") != nullptr);
     CHECK(find_tunnel(catalog, "AKernelMapping")->kernel_name ==
           std::optional<std::string>{"nwg4"});

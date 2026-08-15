@@ -5,9 +5,12 @@ import {
   type TransportSpec,
 } from "../src/api/generated/model"
 import {
+  TRANSPORT_SOURCE_MODE_ORDER,
   createTransportFormValue,
   inferTransportAliasSuggestion,
+  isNativeImportPreviewOnlyMode,
   isTransportGeoSelectionInvalid,
+  nativeImportFieldsStateBoundaryKey,
   normalizeTransportFormComparable,
   normalizeTransportFormValue,
 } from "../src/components/transports/transport-config-dialog"
@@ -27,6 +30,26 @@ const singBoxTransport: TransportSpec = {
 }
 
 describe("transport form semantics", () => {
+  test("offers link, file import, and JSON in the requested order", () => {
+    expect(TRANSPORT_SOURCE_MODE_ORDER).toEqual(["link", "file", "json"])
+  })
+
+  test("native file and vpn URI previews do not expose a Save action", () => {
+    expect(isNativeImportPreviewOnlyMode("file", false)).toBe(true)
+    expect(isNativeImportPreviewOnlyMode("link", true)).toBe(true)
+    expect(isNativeImportPreviewOnlyMode("link", false)).toBe(false)
+    expect(isNativeImportPreviewOnlyMode("json", false)).toBe(false)
+  })
+
+  test("remounts native preview state when switching file and link sources", () => {
+    const fileKey = nativeImportFieldsStateBoundaryKey("file")
+    const linkKey = nativeImportFieldsStateBoundaryKey("link")
+
+    expect(fileKey).not.toBe(linkKey)
+    expect(nativeImportFieldsStateBoundaryKey("file")).toBe(fileKey)
+    expect(nativeImportFieldsStateBoundaryKey("link")).toBe(linkKey)
+  })
+
   test("uses the preallocated technical identity for a new transport", () => {
     const value = createTransportFormValue(undefined, {
       interfaceName: "kpbrabcd1234",
@@ -74,6 +97,15 @@ describe("transport form semantics", () => {
         }),
       })
     ).toBe("203.0.113.20")
+  })
+
+  test("does not derive an alias from stale fields in file import mode", () => {
+    expect(
+      inferTransportAliasSuggestion("file", {
+        link: "vless://example.net",
+        outbound_json: JSON.stringify({ server: "json.example.net" }),
+      })
+    ).toBeUndefined()
   })
 
   test("opens an existing JSON transport in JSON mode", () => {
@@ -141,6 +173,18 @@ describe("transport form semantics", () => {
 
     expect(submission.spec.link).toBe("vless://replacement")
     expect(submission.spec.display_name).toBe("Основной VLESS")
+    expect(submission.spec.outbound_json).toBeUndefined()
+    expect(submission.options.createOutbound).toBe(false)
+  })
+
+  test("drops stale link and JSON data in file import mode", () => {
+    const value = createTransportFormValue(singBoxTransport)
+    value.spec.link = "vless://stale.example.net"
+    value.sourceMode = "file"
+
+    const submission = normalizeTransportFormValue(value, false)
+
+    expect(submission.spec.link).toBeUndefined()
     expect(submission.spec.outbound_json).toBeUndefined()
     expect(submission.options.createOutbound).toBe(false)
   })

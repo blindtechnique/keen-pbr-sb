@@ -699,6 +699,33 @@ namespace api {
 
     enum class MutationMode : int { DISABLED };
 
+    enum class NdmsNativeImportTargetPrefix : int { WIREGUARD };
+
+    struct NdmsNativeImportTargetRange {
+        int64_t first_index = 0;
+        int64_t last_index = 0;
+        NdmsNativeImportTargetPrefix prefix;
+    };
+
+    enum class NdmsNativeImportBlocker : int { ALLOCATOR_RANGE_UNFENCED, RECONCILE_BARRIER_NOT_INTEGRATED, RECOVERY_JOURNAL_NOT_INTEGRATED, WRITER_DISABLED };
+
+    enum class NdmsNativeImportJournalState : int { CLEAN, CLEAN_NEVER_ACTIVATED, DORMANT, RECOVERY_REQUIRED, UNAVAILABLE, UNSAFE };
+
+    enum class NdmsNativeImportReconcileBarrierState : int { DORMANT };
+
+    struct NdmsNativeImportReadiness {
+        NdmsNativeImportTargetRange allocator_range;
+        bool apply_available = false;
+        std::vector<NdmsNativeImportBlocker> blockers;
+        NdmsNativeImportTargetRange eligible_returned_targets;
+        NdmsNativeImportJournalState journal_state;
+        std::string operation;
+        bool preview_only = false;
+        std::vector<NdmsNativeImportTargetRange> protected_targets;
+        NdmsNativeImportReconcileBarrierState reconcile_barrier_state;
+        std::string request_name;
+    };
+
     enum class RequiredGuard : int { AUTOMATIC_BACKUP, OPTIMISTIC_REVISION, OWNERSHIP_CHECK, TYPED_RCI };
 
     struct NdmsInterfaceInventoryResponse {
@@ -706,6 +733,7 @@ namespace api {
         NdmsCatalogStatus catalog_status;
         std::vector<NdmsTunnelInterfaceElement> interfaces;
         MutationMode mutation_mode;
+        NdmsNativeImportReadiness native_import_readiness;
         bool read_only = false;
         std::vector<RequiredGuard> required_guards;
     };
@@ -1238,6 +1266,8 @@ namespace api {
         std::optional<NdmsInterfaceManagementReadiness> ndms_interface_management_readiness;
         std::optional<Role> ndms_interface_role;
         std::optional<NdmsManagementBlockerElement> ndms_management_blocker;
+        std::optional<NdmsNativeImportReadiness> ndms_native_import_readiness;
+        std::optional<NdmsNativeImportTargetRange> ndms_native_import_target_range;
         std::optional<NdmsTunnelInterfaceElement> ndms_tunnel_interface;
         std::optional<Kind> ndms_tunnel_kind;
         std::optional<NdmsVpnServerKind> ndms_vpn_server_kind;
@@ -1514,6 +1544,12 @@ namespace api {
     void from_json(const json & j, NdmsTunnelInterfaceElement & x);
     void to_json(json & j, const NdmsTunnelInterfaceElement & x);
 
+    void from_json(const json & j, NdmsNativeImportTargetRange & x);
+    void to_json(json & j, const NdmsNativeImportTargetRange & x);
+
+    void from_json(const json & j, NdmsNativeImportReadiness & x);
+    void to_json(json & j, const NdmsNativeImportReadiness & x);
+
     void from_json(const json & j, NdmsInterfaceInventoryResponse & x);
     void to_json(json & j, const NdmsInterfaceInventoryResponse & x);
 
@@ -1756,6 +1792,18 @@ namespace api {
 
     void from_json(const json & j, MutationMode & x);
     void to_json(json & j, const MutationMode & x);
+
+    void from_json(const json & j, NdmsNativeImportTargetPrefix & x);
+    void to_json(json & j, const NdmsNativeImportTargetPrefix & x);
+
+    void from_json(const json & j, NdmsNativeImportBlocker & x);
+    void to_json(json & j, const NdmsNativeImportBlocker & x);
+
+    void from_json(const json & j, NdmsNativeImportJournalState & x);
+    void to_json(json & j, const NdmsNativeImportJournalState & x);
+
+    void from_json(const json & j, NdmsNativeImportReconcileBarrierState & x);
+    void to_json(json & j, const NdmsNativeImportReconcileBarrierState & x);
 
     void from_json(const json & j, RequiredGuard & x);
     void to_json(json & j, const RequiredGuard & x);
@@ -3021,11 +3069,52 @@ namespace api {
         j["role"] = x.role;
     }
 
+    inline void from_json(const json & j, NdmsNativeImportTargetRange& x) {
+        x.first_index = j.at("first_index").get<int64_t>();
+        x.last_index = j.at("last_index").get<int64_t>();
+        x.prefix = j.at("prefix").get<NdmsNativeImportTargetPrefix>();
+    }
+
+    inline void to_json(json & j, const NdmsNativeImportTargetRange & x) {
+        j = json::object();
+        j["first_index"] = x.first_index;
+        j["last_index"] = x.last_index;
+        j["prefix"] = x.prefix;
+    }
+
+    inline void from_json(const json & j, NdmsNativeImportReadiness& x) {
+        x.allocator_range = j.at("allocator_range").get<NdmsNativeImportTargetRange>();
+        x.apply_available = j.at("apply_available").get<bool>();
+        x.blockers = j.at("blockers").get<std::vector<NdmsNativeImportBlocker>>();
+        x.eligible_returned_targets = j.at("eligible_returned_targets").get<NdmsNativeImportTargetRange>();
+        x.journal_state = j.at("journal_state").get<NdmsNativeImportJournalState>();
+        x.operation = j.at("operation").get<std::string>();
+        x.preview_only = j.at("preview_only").get<bool>();
+        x.protected_targets = j.at("protected_targets").get<std::vector<NdmsNativeImportTargetRange>>();
+        x.reconcile_barrier_state = j.at("reconcile_barrier_state").get<NdmsNativeImportReconcileBarrierState>();
+        x.request_name = j.at("request_name").get<std::string>();
+    }
+
+    inline void to_json(json & j, const NdmsNativeImportReadiness & x) {
+        j = json::object();
+        j["allocator_range"] = x.allocator_range;
+        j["apply_available"] = x.apply_available;
+        j["blockers"] = x.blockers;
+        j["eligible_returned_targets"] = x.eligible_returned_targets;
+        j["journal_state"] = x.journal_state;
+        j["operation"] = x.operation;
+        j["preview_only"] = x.preview_only;
+        j["protected_targets"] = x.protected_targets;
+        j["reconcile_barrier_state"] = x.reconcile_barrier_state;
+        j["request_name"] = x.request_name;
+    }
+
     inline void from_json(const json & j, NdmsInterfaceInventoryResponse& x) {
         x.available = j.at("available").get<bool>();
         x.catalog_status = j.at("catalog_status").get<NdmsCatalogStatus>();
         x.interfaces = j.at("interfaces").get<std::vector<NdmsTunnelInterfaceElement>>();
         x.mutation_mode = j.at("mutation_mode").get<MutationMode>();
+        x.native_import_readiness = j.at("native_import_readiness").get<NdmsNativeImportReadiness>();
         x.read_only = j.at("read_only").get<bool>();
         x.required_guards = j.at("required_guards").get<std::vector<RequiredGuard>>();
     }
@@ -3036,6 +3125,7 @@ namespace api {
         j["catalog_status"] = x.catalog_status;
         j["interfaces"] = x.interfaces;
         j["mutation_mode"] = x.mutation_mode;
+        j["native_import_readiness"] = x.native_import_readiness;
         j["read_only"] = x.read_only;
         j["required_guards"] = x.required_guards;
     }
@@ -3925,6 +4015,8 @@ namespace api {
         x.ndms_interface_management_readiness = get_stack_optional<NdmsInterfaceManagementReadiness>(j, "NdmsInterfaceManagementReadiness");
         x.ndms_interface_role = get_stack_optional<Role>(j, "NdmsInterfaceRole");
         x.ndms_management_blocker = get_stack_optional<NdmsManagementBlockerElement>(j, "NdmsManagementBlocker");
+        x.ndms_native_import_readiness = get_stack_optional<NdmsNativeImportReadiness>(j, "NdmsNativeImportReadiness");
+        x.ndms_native_import_target_range = get_stack_optional<NdmsNativeImportTargetRange>(j, "NdmsNativeImportTargetRange");
         x.ndms_tunnel_interface = get_stack_optional<NdmsTunnelInterfaceElement>(j, "NdmsTunnelInterface");
         x.ndms_tunnel_kind = get_stack_optional<Kind>(j, "NdmsTunnelKind");
         x.ndms_vpn_server_kind = get_stack_optional<NdmsVpnServerKind>(j, "NdmsVpnServerKind");
@@ -4070,6 +4162,8 @@ namespace api {
         j["NdmsInterfaceManagementReadiness"] = x.ndms_interface_management_readiness;
         j["NdmsInterfaceRole"] = x.ndms_interface_role;
         j["NdmsManagementBlocker"] = x.ndms_management_blocker;
+        j["NdmsNativeImportReadiness"] = x.ndms_native_import_readiness;
+        j["NdmsNativeImportTargetRange"] = x.ndms_native_import_target_range;
         j["NdmsTunnelInterface"] = x.ndms_tunnel_interface;
         j["NdmsTunnelKind"] = x.ndms_tunnel_kind;
         j["NdmsVpnServerKind"] = x.ndms_vpn_server_kind;
@@ -4716,6 +4810,70 @@ namespace api {
         switch (x) {
             case MutationMode::DISABLED: j = "disabled"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"MutationMode\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, NdmsNativeImportTargetPrefix & x) {
+        if (j == "Wireguard") x = NdmsNativeImportTargetPrefix::WIREGUARD;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsNativeImportTargetPrefix\""); }
+    }
+
+    inline void to_json(json & j, const NdmsNativeImportTargetPrefix & x) {
+        switch (x) {
+            case NdmsNativeImportTargetPrefix::WIREGUARD: j = "Wireguard"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NdmsNativeImportTargetPrefix\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, NdmsNativeImportBlocker & x) {
+        if (j == "allocator_range_unfenced") x = NdmsNativeImportBlocker::ALLOCATOR_RANGE_UNFENCED;
+        else if (j == "reconcile_barrier_not_integrated") x = NdmsNativeImportBlocker::RECONCILE_BARRIER_NOT_INTEGRATED;
+        else if (j == "recovery_journal_not_integrated") x = NdmsNativeImportBlocker::RECOVERY_JOURNAL_NOT_INTEGRATED;
+        else if (j == "writer_disabled") x = NdmsNativeImportBlocker::WRITER_DISABLED;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsNativeImportBlocker\""); }
+    }
+
+    inline void to_json(json & j, const NdmsNativeImportBlocker & x) {
+        switch (x) {
+            case NdmsNativeImportBlocker::ALLOCATOR_RANGE_UNFENCED: j = "allocator_range_unfenced"; break;
+            case NdmsNativeImportBlocker::RECONCILE_BARRIER_NOT_INTEGRATED: j = "reconcile_barrier_not_integrated"; break;
+            case NdmsNativeImportBlocker::RECOVERY_JOURNAL_NOT_INTEGRATED: j = "recovery_journal_not_integrated"; break;
+            case NdmsNativeImportBlocker::WRITER_DISABLED: j = "writer_disabled"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NdmsNativeImportBlocker\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, NdmsNativeImportJournalState & x) {
+        if (j == "clean") x = NdmsNativeImportJournalState::CLEAN;
+        else if (j == "clean_never_activated") x = NdmsNativeImportJournalState::CLEAN_NEVER_ACTIVATED;
+        else if (j == "dormant") x = NdmsNativeImportJournalState::DORMANT;
+        else if (j == "recovery_required") x = NdmsNativeImportJournalState::RECOVERY_REQUIRED;
+        else if (j == "unavailable") x = NdmsNativeImportJournalState::UNAVAILABLE;
+        else if (j == "unsafe") x = NdmsNativeImportJournalState::UNSAFE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsNativeImportJournalState\""); }
+    }
+
+    inline void to_json(json & j, const NdmsNativeImportJournalState & x) {
+        switch (x) {
+            case NdmsNativeImportJournalState::CLEAN: j = "clean"; break;
+            case NdmsNativeImportJournalState::CLEAN_NEVER_ACTIVATED: j = "clean_never_activated"; break;
+            case NdmsNativeImportJournalState::DORMANT: j = "dormant"; break;
+            case NdmsNativeImportJournalState::RECOVERY_REQUIRED: j = "recovery_required"; break;
+            case NdmsNativeImportJournalState::UNAVAILABLE: j = "unavailable"; break;
+            case NdmsNativeImportJournalState::UNSAFE: j = "unsafe"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NdmsNativeImportJournalState\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, NdmsNativeImportReconcileBarrierState & x) {
+        if (j == "dormant") x = NdmsNativeImportReconcileBarrierState::DORMANT;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsNativeImportReconcileBarrierState\""); }
+    }
+
+    inline void to_json(json & j, const NdmsNativeImportReconcileBarrierState & x) {
+        switch (x) {
+            case NdmsNativeImportReconcileBarrierState::DORMANT: j = "dormant"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NdmsNativeImportReconcileBarrierState\": " + std::to_string(static_cast<int>(x)));
         }
     }
 

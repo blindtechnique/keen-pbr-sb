@@ -87,16 +87,26 @@ TEST_CASE("NDMS catalog cache peek never triggers a fetch") {
         before_refresh.status ==
         NdmsCatalogCacheStatus::unavailable);
     CHECK_FALSE(before_refresh.refreshed);
+    CHECK(before_refresh.observation_generation == 0U);
+    CHECK(before_refresh.observation_epoch == 0U);
+    CHECK(before_refresh.invalidation_epoch == 0U);
     CHECK(fetches.load() == 0);
 
     const auto refreshed = cache.get();
     CHECK(refreshed.status == NdmsCatalogCacheStatus::fresh);
     CHECK(refreshed.refreshed);
+    CHECK(refreshed.observation_generation == 1U);
+    CHECK(refreshed.observation_epoch == 0U);
+    CHECK(refreshed.invalidation_epoch == 0U);
     CHECK(fetches.load() == 1);
 
     const auto cached = cache.peek();
     CHECK(cached.status == NdmsCatalogCacheStatus::fresh);
     CHECK_FALSE(cached.refreshed);
+    CHECK(cached.observation_generation ==
+          refreshed.observation_generation);
+    CHECK(cached.observation_epoch == refreshed.observation_epoch);
+    CHECK(cached.invalidation_epoch == refreshed.invalidation_epoch);
     CHECK(fetches.load() == 1);
 }
 
@@ -115,13 +125,16 @@ TEST_CASE("NDMS catalog forced refresh bypasses TTL but remains throttled") {
             return now;
         });
 
-    CHECK(cache.get().status == NdmsCatalogCacheStatus::fresh);
+    const auto initial = cache.get();
+    CHECK(initial.status == NdmsCatalogCacheStatus::fresh);
+    CHECK(initial.observation_generation == 1U);
     CHECK(fetch_count == 1);
 
     label = "Renumbered VPN";
     now += 1s;
     const auto first_forced = cache.force_refresh();
     CHECK(first_forced.refreshed);
+    CHECK(first_forced.observation_generation == 2U);
     CHECK(first_forced.catalog.tunnels.front().label == "Renumbered VPN");
     CHECK(fetch_count == 2);
 
@@ -130,6 +143,7 @@ TEST_CASE("NDMS catalog forced refresh bypasses TTL but remains throttled") {
     const auto throttled = cache.force_refresh();
     CHECK_FALSE(throttled.refreshed);
     CHECK(throttled.status == NdmsCatalogCacheStatus::fresh);
+    CHECK(throttled.observation_generation == 2U);
     CHECK(throttled.catalog.tunnels.front().label == "Renumbered VPN");
     CHECK(fetch_count == 2);
 
@@ -137,6 +151,7 @@ TEST_CASE("NDMS catalog forced refresh bypasses TTL but remains throttled") {
     const auto forced = cache.force_refresh();
     CHECK(forced.status == NdmsCatalogCacheStatus::fresh);
     CHECK(forced.refreshed);
+    CHECK(forced.observation_generation == 3U);
     REQUIRE(forced.catalog.tunnels.size() == 1);
     CHECK(forced.catalog.tunnels.front().label == "Too soon");
     CHECK(fetch_count == 3);
@@ -178,7 +193,11 @@ TEST_CASE("NDMS catalog invalidation revokes authority and permits immediate ref
             return now;
         });
 
-    CHECK(cache.force_refresh().status == NdmsCatalogCacheStatus::fresh);
+    const auto initial = cache.force_refresh();
+    CHECK(initial.status == NdmsCatalogCacheStatus::fresh);
+    CHECK(initial.observation_generation == 1U);
+    CHECK(initial.observation_epoch == 0U);
+    CHECK(initial.invalidation_epoch == 0U);
     CHECK(fetch_count == 1);
 
     now += 1s;
@@ -186,12 +205,18 @@ TEST_CASE("NDMS catalog invalidation revokes authority and permits immediate ref
     const auto invalidated = cache.peek();
     CHECK(invalidated.status == NdmsCatalogCacheStatus::stale);
     CHECK_FALSE(invalidated.refreshed);
+    CHECK(invalidated.observation_generation == 1U);
+    CHECK(invalidated.observation_epoch == 0U);
+    CHECK(invalidated.invalidation_epoch == 1U);
     CHECK(fetch_count == 1);
 
     label = "Renumbered VPN";
     const auto refreshed = cache.force_refresh();
     CHECK(refreshed.status == NdmsCatalogCacheStatus::fresh);
     CHECK(refreshed.refreshed);
+    CHECK(refreshed.observation_generation == 2U);
+    CHECK(refreshed.observation_epoch == 1U);
+    CHECK(refreshed.invalidation_epoch == 1U);
     CHECK(refreshed.catalog.tunnels.front().label == "Renumbered VPN");
     CHECK(fetch_count == 2);
 }
@@ -260,9 +285,15 @@ TEST_CASE("NDMS catalog invalidation rejects an older in-flight response") {
         rejected.status ==
         NdmsCatalogCacheStatus::unavailable);
     CHECK_FALSE(rejected.refreshed);
+    CHECK(rejected.observation_generation == 0U);
+    CHECK(rejected.observation_epoch == 0U);
+    CHECK(rejected.invalidation_epoch == 1U);
     const auto replacement_result = replacement.get();
     CHECK(replacement_result.status == NdmsCatalogCacheStatus::fresh);
     CHECK(replacement_result.refreshed);
+    CHECK(replacement_result.observation_generation == 1U);
+    CHECK(replacement_result.observation_epoch == 1U);
+    CHECK(replacement_result.invalidation_epoch == 1U);
     CHECK(
         replacement_result.catalog.tunnels.front().label ==
         "Post-event catalog");
@@ -315,7 +346,11 @@ TEST_CASE(
             return now;
         });
 
-    CHECK(cache.force_refresh().status == NdmsCatalogCacheStatus::fresh);
+    const auto initial = cache.force_refresh();
+    CHECK(initial.status == NdmsCatalogCacheStatus::fresh);
+    CHECK(initial.observation_generation == 1U);
+    CHECK(initial.observation_epoch == 0U);
+    CHECK(initial.invalidation_epoch == 0U);
     now += 5s;
     auto stale_refresh = std::async(
         std::launch::async,
@@ -350,6 +385,9 @@ TEST_CASE(
     const auto stale_result = stale_refresh.get();
     CHECK(stale_result.status == NdmsCatalogCacheStatus::stale);
     CHECK_FALSE(stale_result.refreshed);
+    CHECK(stale_result.observation_generation == 1U);
+    CHECK(stale_result.observation_epoch == 0U);
+    CHECK(stale_result.invalidation_epoch == 1U);
 
     // No clock advance: the invalidated attempt belongs to the old topology
     // epoch and must not impose its five-second failure throttle on the
@@ -357,6 +395,9 @@ TEST_CASE(
     const auto replacement_result = replacement_refresh.get();
     CHECK(replacement_result.status == NdmsCatalogCacheStatus::fresh);
     CHECK(replacement_result.refreshed);
+    CHECK(replacement_result.observation_generation == 2U);
+    CHECK(replacement_result.observation_epoch == 1U);
+    CHECK(replacement_result.invalidation_epoch == 1U);
     CHECK(
         replacement_result.catalog.tunnels.front().label ==
         "Replacement catalog");
@@ -401,6 +442,9 @@ TEST_CASE("NDMS handler cache preserves its last good catalog") {
 
     const auto first = cache.get();
     CHECK(first.status == NdmsCatalogCacheStatus::fresh);
+    CHECK(first.observation_generation == 1U);
+    CHECK(first.observation_epoch == 0U);
+    CHECK(first.invalidation_epoch == 0U);
     CHECK(first.catalog.firmware_available);
     REQUIRE(first.catalog.tunnels.size() == 1);
     CHECK(first.catalog.tunnels.front().label == "Office VPN");
@@ -410,6 +454,10 @@ TEST_CASE("NDMS handler cache preserves its last good catalog") {
     mode = FetchMode::transport_failure;
     const auto transport_failure = cache.get();
     CHECK(transport_failure.status == NdmsCatalogCacheStatus::stale);
+    CHECK(transport_failure.observation_generation ==
+          first.observation_generation);
+    CHECK(transport_failure.observation_epoch == first.observation_epoch);
+    CHECK(transport_failure.invalidation_epoch == first.invalidation_epoch);
     CHECK(transport_failure.catalog.firmware_available);
     CHECK(transport_failure.catalog.tunnels.front().label == "Office VPN");
     CHECK(fetch_count == 2);
@@ -422,6 +470,9 @@ TEST_CASE("NDMS handler cache preserves its last good catalog") {
     mode = FetchMode::malformed_json;
     const auto parse_failure = cache.get();
     CHECK(parse_failure.status == NdmsCatalogCacheStatus::stale);
+    CHECK(parse_failure.observation_generation ==
+          first.observation_generation);
+    CHECK(parse_failure.observation_epoch == first.observation_epoch);
     CHECK(parse_failure.catalog.tunnels.front().label == "Office VPN");
     CHECK(fetch_count == 3);
 
@@ -429,6 +480,9 @@ TEST_CASE("NDMS handler cache preserves its last good catalog") {
     mode = FetchMode::rci_error;
     const auto rci_error = cache.get();
     CHECK(rci_error.status == NdmsCatalogCacheStatus::stale);
+    CHECK(rci_error.observation_generation ==
+          first.observation_generation);
+    CHECK(rci_error.observation_epoch == first.observation_epoch);
     CHECK(rci_error.catalog.tunnels.front().label == "Office VPN");
     CHECK(fetch_count == 4);
 
@@ -436,6 +490,9 @@ TEST_CASE("NDMS handler cache preserves its last good catalog") {
     mode = FetchMode::empty_object;
     const auto empty_object = cache.get();
     CHECK(empty_object.status == NdmsCatalogCacheStatus::stale);
+    CHECK(empty_object.observation_generation ==
+          first.observation_generation);
+    CHECK(empty_object.observation_epoch == first.observation_epoch);
     CHECK(empty_object.catalog.tunnels.front().label == "Office VPN");
     CHECK(fetch_count == 5);
 
@@ -592,6 +649,36 @@ TEST_CASE("NDMS read-only endpoints share the cache and safety contract") {
                "automatic_backup",
                "ownership_check",
                "optimistic_revision"}));
+    CHECK(inventory["native_import_readiness"] ==
+          nlohmann::json{
+              {"preview_only", true},
+              {"apply_available", false},
+              {"operation", "interface.wireguard.import"},
+              {"request_name", ""},
+              {"allocator_range",
+               {{"prefix", "Wireguard"},
+                {"first_index", 0},
+                {"last_index", 126}}},
+              {"eligible_returned_targets",
+               {{"prefix", "Wireguard"},
+                {"first_index", 5},
+                {"last_index", 98}}},
+              {"protected_targets",
+                nlohmann::json::array(
+                    {nlohmann::json{{"prefix", "Wireguard"},
+                                    {"first_index", 0},
+                                    {"last_index", 4}},
+                     nlohmann::json{{"prefix", "Wireguard"},
+                                    {"first_index", 99},
+                                    {"last_index", 126}}})},
+              {"journal_state", "dormant"},
+              {"reconcile_barrier_state", "dormant"},
+              {"blockers",
+               nlohmann::json::array(
+                   {"writer_disabled",
+                    "allocator_range_unfenced",
+                    "recovery_journal_not_integrated",
+                    "reconcile_barrier_not_integrated"})}});
     REQUIRE(inventory["interfaces"].size() == 1);
     CHECK(inventory["interfaces"][0]["id"] == "Wireguard2");
     CHECK(inventory["interfaces"][0]["firmware_interface_name"] ==
@@ -681,6 +768,10 @@ TEST_CASE("NDMS stale endpoint keeps rows but revokes server-candidate authority
     const auto stale = nlohmann::json::parse(stale_response->body);
     CHECK(stale["available"] == false);
     CHECK(stale["catalog_status"] == "stale");
+    CHECK(stale["native_import_readiness"]["preview_only"] == true);
+    CHECK(stale["native_import_readiness"]["apply_available"] == false);
+    CHECK(stale["native_import_readiness"]["journal_state"] ==
+          "dormant");
     REQUIRE(stale["interfaces"].size() == 1);
     CHECK(stale["interfaces"][0]["id"] == "Wireguard0");
     CHECK(
@@ -690,6 +781,110 @@ TEST_CASE("NDMS stale endpoint keeps rows but revokes server-candidate authority
         stale["interfaces"][0]
              ["internal_vpn_server_role_confirmation_required"] ==
         false);
+}
+
+TEST_CASE("NDMS native import readiness stays report-only for every boot state") {
+    std::atomic<int> ndms_fetch_count{0};
+    NdmsCatalogCache cache([&] {
+        ++ndms_fetch_count;
+        return ndms_payload();
+    });
+
+    using ReadinessState = NdmsNativeImportJournalReadinessState;
+    std::atomic<ReadinessState> cached_boot_state{
+        ReadinessState::unavailable};
+    std::atomic<int> cached_state_reads{0};
+    std::atomic<bool> provider_throws{false};
+    std::atomic<int> wal_boot_scans{0};
+    const auto scan_wal_at_boot = [&] {
+        ++wal_boot_scans;
+        return ReadinessState::clean_never_activated;
+    };
+    // Model production's one startup scan before route registration. HTTP
+    // requests below can read only cached_boot_state through the narrow
+    // provider; the handler has neither a store nor a scan callback.
+    cached_boot_state.store(scan_wal_at_boot());
+
+    ApiConfig config;
+    config.listen = std::string("127.0.0.1:18198");
+    ApiServer server(config);
+    register_ndms_names_handler_for_tests(
+        server,
+        cache,
+        {"nwg2"},
+        [&]() -> ReadinessState {
+            ++cached_state_reads;
+            if (provider_throws.load()) {
+                throw std::runtime_error("redacted provider failure");
+            }
+            return cached_boot_state.load();
+        });
+    server.start();
+
+    httplib::Client client("127.0.0.1", 18198);
+    const auto expected_blockers = nlohmann::json::array(
+        {"writer_disabled",
+         "allocator_range_unfenced",
+         "recovery_journal_not_integrated",
+         "reconcile_barrier_not_integrated"});
+    const std::vector<std::pair<ReadinessState, std::string>> states{
+        {ReadinessState::clean_never_activated,
+         "clean_never_activated"},
+        {ReadinessState::clean, "clean"},
+        {ReadinessState::recovery_required, "recovery_required"},
+        {ReadinessState::unsafe, "unsafe"},
+        {ReadinessState::unavailable, "unavailable"},
+    };
+
+    const auto check_report_only = [&](const httplib::Result& response,
+                                       const std::string& journal_state) {
+        REQUIRE(response != nullptr);
+        REQUIRE(response->status == 200);
+        const auto inventory = nlohmann::json::parse(response->body);
+        const auto& readiness = inventory["native_import_readiness"];
+        CHECK(inventory["read_only"] == true);
+        CHECK(inventory["mutation_mode"] == "disabled");
+        CHECK(readiness["preview_only"] == true);
+        CHECK(readiness["apply_available"] == false);
+        CHECK(readiness["journal_state"] == journal_state);
+        CHECK(readiness["reconcile_barrier_state"] == "dormant");
+        CHECK(readiness["blockers"] == expected_blockers);
+        CHECK(readiness["blockers"].size() == 4);
+        CHECK(response->body.find("transaction_id") ==
+              std::string::npos);
+        CHECK(response->body.find("wal_filename") ==
+              std::string::npos);
+        CHECK(response->body.find("wal-secret-transaction-id") ==
+              std::string::npos);
+    };
+
+    for (const auto& state : states) {
+        cached_boot_state.store(state.first);
+        check_report_only(
+            client.Get("/api/system/ndms/interfaces"), state.second);
+    }
+
+    provider_throws.store(true);
+    check_report_only(
+        client.Get("/api/system/ndms/interfaces"), "unavailable");
+    provider_throws.store(false);
+
+    cached_boot_state.store(ReadinessState::clean);
+    check_report_only(
+        client.Get("/api/system/ndms/interfaces"), "clean");
+    check_report_only(
+        client.Get("/api/system/ndms/interfaces"), "clean");
+
+    const auto post = client.Post(
+        "/api/system/ndms/interfaces", "{}", "application/json");
+    server.stop();
+
+    CHECK(cached_state_reads.load() ==
+          static_cast<int>(states.size()) + 3);
+    CHECK(ndms_fetch_count.load() == 1);
+    CHECK(wal_boot_scans.load() == 1);
+    REQUIRE(post != nullptr);
+    CHECK(post->status == 404);
 }
 
 TEST_CASE("NDMS VPN service endpoint exposes only typed non-secret pools") {

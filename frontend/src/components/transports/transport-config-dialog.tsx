@@ -1,4 +1,4 @@
-import { BracesIcon, LinkIcon } from "lucide-react"
+import { BracesIcon, FileUpIcon, LinkIcon } from "lucide-react"
 import {
   useEffect,
   useMemo,
@@ -8,7 +8,13 @@ import {
 } from "react"
 import { useTranslation } from "react-i18next"
 
-import { TransportSpecType, type TransportSpec } from "@/api/generated/model"
+import {
+  TransportSpecType,
+  type NdmsInterfaceInventoryResponseRequiredGuardsItem,
+  type NdmsNativeImportReadiness,
+  type NdmsTunnelInterface,
+  type TransportSpec,
+} from "@/api/generated/model"
 import { HelpHint } from "@/components/shared/help-hint"
 import { SegmentedControl } from "@/components/shared/segmented-control"
 import { Button } from "@/components/ui/button"
@@ -35,6 +41,7 @@ import {
 } from "@/lib/hidden-native-interfaces"
 import { isSemanticallyDirty } from "@/lib/semantic-dirty"
 import { semanticJsonEqual } from "@/lib/semantic-json"
+import { NativeWireGuardImportFields } from "@/components/transports/native-wireguard-import-card"
 import {
   generateTransportIdentity,
   inferTransportProtocol,
@@ -54,6 +61,9 @@ type Props = {
   /** Есть ли маршрут, которому можно записать kill-switch. Без него поле — обман. */
   killSwitchAvailable?: boolean
   nativeCandidates?: readonly NativeTransportCandidate[]
+  nativeImportInterfaces?: readonly NdmsTunnelInterface[]
+  nativeImportReadiness?: NdmsNativeImportReadiness
+  nativeImportRequiredGuards?: readonly NdmsInterfaceInventoryResponseRequiredGuardsItem[]
   onDirtyChange: (dirty: boolean) => void
   onSubmit: (
     spec: TransportSpec,
@@ -63,7 +73,34 @@ type Props = {
   singBoxAvailable?: boolean
 }
 
-type SourceMode = "link" | "json"
+export type SourceMode = "link" | "file" | "json"
+
+// eslint-disable-next-line react-refresh/only-export-components
+export const TRANSPORT_SOURCE_MODE_ORDER: readonly SourceMode[] = [
+  "link",
+  "file",
+  "json",
+]
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function isNativeImportPreviewOnlyMode(
+  sourceMode: SourceMode,
+  nativeUriActive: boolean
+): boolean {
+  return sourceMode === "file" || nativeUriActive
+}
+
+/**
+ * File reads and pasted native URIs have their own short-lived state. React
+ * must remount that state when the user changes source mode so a completed or
+ * still-running file preview cannot appear beside the ordinary link form.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function nativeImportFieldsStateBoundaryKey(
+  sourceMode: Extract<SourceMode, "link" | "file">
+): string {
+  return `native-import-${sourceMode}`
+}
 
 /** Та же трёхпозиционная шкала, что у маршрута в расширенном редакторе. */
 export type TransportKillSwitchOption = "default" | "enabled" | "disabled"
@@ -115,6 +152,7 @@ export function inferTransportAliasSuggestion(
   sourceMode: SourceMode,
   spec: Pick<TransportSpec, "link" | "outbound_json">
 ): string | undefined {
+  if (sourceMode === "file") return undefined
   if (sourceMode === "json") {
     try {
       const parsed = JSON.parse(spec.outbound_json?.trim() ?? "") as unknown
@@ -271,6 +309,9 @@ export function TransportConfigForm({
   isPending,
   killSwitchAvailable = false,
   nativeCandidates = [],
+  nativeImportInterfaces = [],
+  nativeImportReadiness,
+  nativeImportRequiredGuards = [],
   onDirtyChange,
   onSubmit,
   presentation,
@@ -295,6 +336,7 @@ export function TransportConfigForm({
   )
   const [sourceMode, setSourceMode] = useState<SourceMode>(baseline.sourceMode)
   const [displayNameTouched, setDisplayNameTouched] = useState(false)
+  const [nativeUriActive, setNativeUriActive] = useState(false)
   const showAdvanced = presentation === "page"
   const [technicalIdentityAutomatic, setTechnicalIdentityAutomatic] =
     useState(!initial)
@@ -320,6 +362,10 @@ export function TransportConfigForm({
     spec.type === TransportSpecType.native &&
     !initial &&
     (!selectedNativeCandidate || !selectedNativeCandidate.selectable)
+  const nativeImportPreviewOnly = isNativeImportPreviewOnlyMode(
+    sourceMode,
+    nativeUriActive
+  )
   // Списки для выпадающих полей считаем здесь: `Select` показывает выбранное
   // значение по этому же списку, поэтому он должен быть один и тот же для
   // кнопки и для меню.
@@ -398,7 +444,9 @@ export function TransportConfigForm({
     const protocol =
       nextSourceMode === "link"
         ? inferTransportProtocol(nextSpec.link, undefined)
-        : inferTransportProtocol(undefined, nextSpec.outbound_json)
+        : nextSourceMode === "json"
+          ? inferTransportProtocol(undefined, nextSpec.outbound_json)
+          : undefined
     const identity = generateTransportIdentity({
       existingInterfaces,
       existingTags,
@@ -412,6 +460,7 @@ export function TransportConfigForm({
   }
 
   const selectSourceMode = (nextSourceMode: SourceMode) => {
+    setNativeUriActive(false)
     setSourceMode(nextSourceMode)
     setSpec((current) =>
       withAutomaticTechnicalIdentity(current, nextSourceMode)
@@ -432,6 +481,7 @@ export function TransportConfigForm({
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
+    if (nativeImportPreviewOnly) return
     const submission = normalizeTransportFormValue(formValue, Boolean(initial))
     onSubmit(submission.spec, submission.options)
   }
@@ -753,7 +803,7 @@ export function TransportConfigForm({
             отдельный блок. */}
         {isSingBox ? (
           <div className="grid gap-4">
-            {!singBoxAvailable ? (
+            {!singBoxAvailable && sourceMode !== "file" && !nativeUriActive ? (
               <Alert variant="destructive">
                 <AlertTitle>{t("transports.singBoxMissing.title")}</AlertTitle>
                 <AlertDescription className="space-y-2">
@@ -768,44 +818,58 @@ export function TransportConfigForm({
             <SegmentedControl
               ariaLabel={t("transports.form.sourceMode")}
               onChange={selectSourceMode}
-              options={[
-                {
-                  value: "link",
-                  label: t("transports.form.shareLink"),
-                  icon: LinkIcon,
-                },
-                {
-                  value: "json",
+              options={TRANSPORT_SOURCE_MODE_ORDER.filter(
+                (mode) => !initial || mode !== "file"
+              ).map((mode) => {
+                if (mode === "link") {
+                  return {
+                    value: mode,
+                    label: t("transports.form.shareLink"),
+                    icon: LinkIcon,
+                  }
+                }
+                if (mode === "file") {
+                  return {
+                    value: mode,
+                    label: t("transports.form.importFile"),
+                    icon: FileUpIcon,
+                  }
+                }
+                return {
+                  value: mode,
                   label: t("transports.form.outboundJson"),
                   icon: BracesIcon,
-                },
-              ]}
+                }
+              })}
               value={sourceMode}
             />
             {sourceMode === "link" ? (
-              <Field label={t("transports.form.shareLink")}>
-                <Textarea
-                  className="min-h-28 font-mono text-xs"
-                  onChange={(event) =>
-                    setSpec((current) =>
-                      withAutomaticTechnicalIdentity({
-                        ...current,
-                        link: event.target.value,
-                      })
-                    )
-                  }
-                  placeholder={
-                    initial
-                      ? t("transports.form.keepConnection")
-                      : "vless://…  vmess://…  trojan://…  ss://…  hy2://…  tuic://…"
-                  }
-                  required={!initial}
-                  value={spec.link ?? ""}
-                />
-                <p className="text-xs text-muted-foreground">
-                  {t("transports.form.shareLinkHint")}
-                </p>
-              </Field>
+              <NativeWireGuardImportFields
+                existingInterfaces={nativeImportInterfaces}
+                key={nativeImportFieldsStateBoundaryKey("link")}
+                linkRequired={!initial}
+                linkValue={spec.link ?? ""}
+                mode="link"
+                onLinkChange={(value) =>
+                  setSpec((current) =>
+                    withAutomaticTechnicalIdentity({
+                      ...current,
+                      link: value,
+                    })
+                  )
+                }
+                onNativeUriActiveChange={setNativeUriActive}
+                readiness={nativeImportReadiness}
+                requiredGuards={nativeImportRequiredGuards}
+              />
+            ) : sourceMode === "file" ? (
+              <NativeWireGuardImportFields
+                existingInterfaces={nativeImportInterfaces}
+                key={nativeImportFieldsStateBoundaryKey("file")}
+                mode="file"
+                readiness={nativeImportReadiness}
+                requiredGuards={nativeImportRequiredGuards}
+              />
             ) : (
               <Field label={t("transports.form.outboundJson")}>
                 {/* Та же высота, что у ссылки подключения: разные высоты
@@ -899,21 +963,25 @@ export function TransportConfigForm({
           type="button"
           variant="outline"
         >
-          {t("common.cancel")}
+          {t(nativeImportPreviewOnly ? "common.close" : "common.cancel")}
         </Button>
-        <Button
-          disabled={
-            isPending ||
-            !isDirty ||
-            Boolean(displayNameError) ||
-            nativeSelectionInvalid ||
-            geoSelectionInvalid
-          }
-          size="xl"
-          type="submit"
-        >
-          {isPending ? t("transports.form.saving") : t("transports.form.save")}
-        </Button>
+        {!nativeImportPreviewOnly ? (
+          <Button
+            disabled={
+              isPending ||
+              !isDirty ||
+              Boolean(displayNameError) ||
+              nativeSelectionInvalid ||
+              geoSelectionInvalid
+            }
+            size="xl"
+            type="submit"
+          >
+            {isPending
+              ? t("transports.form.saving")
+              : t("transports.form.save")}
+          </Button>
+        ) : null}
       </div>
     </form>
   )

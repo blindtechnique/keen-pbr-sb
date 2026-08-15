@@ -2,7 +2,10 @@ import { describe, expect, test } from "bun:test"
 
 import {
   NATIVE_WIREGUARD_CONF_MAX_BYTES,
+  NATIVE_WIREGUARD_URI_MAX_BYTES,
+  classifyNativeWireGuardSensitiveInput,
   createNativeWireGuardFileReadGate,
+  normalizeNativeWireGuardSensitiveInput,
   validateNativeWireGuardImportFile,
   validateNativeWireGuardImportText,
 } from "@/lib/native-wireguard-import-file"
@@ -16,6 +19,13 @@ describe("native WireGuard .conf intake", () => {
         type: "",
       })
     ).toBeUndefined()
+    expect(
+      validateNativeWireGuardImportFile({
+        name: "provider.vpn",
+        size: 2048,
+        type: "",
+      })
+    ).toBeUndefined()
   })
 
   test("rejects the wrong extension, empty files and oversized input", () => {
@@ -25,7 +35,7 @@ describe("native WireGuard .conf intake", () => {
         size: 64,
         type: "text/plain",
       })
-    ).toBe("conf-extension-required")
+    ).toBe("supported-extension-required")
     expect(
       validateNativeWireGuardImportFile({
         name: "profile.conf",
@@ -37,6 +47,13 @@ describe("native WireGuard .conf intake", () => {
       validateNativeWireGuardImportFile({
         name: "profile.conf",
         size: NATIVE_WIREGUARD_CONF_MAX_BYTES + 1,
+        type: "text/plain",
+      })
+    ).toBe("file-too-large")
+    expect(
+      validateNativeWireGuardImportFile({
+        name: "profile.vpn",
+        size: NATIVE_WIREGUARD_URI_MAX_BYTES + 1,
         type: "text/plain",
       })
     ).toBe("file-too-large")
@@ -53,6 +70,48 @@ describe("native WireGuard .conf intake", () => {
     expect(
       validateNativeWireGuardImportText("[Interface]\nAddress=10.0.0.2/32")
     ).toBeUndefined()
+  })
+
+  test("intercepts native URIs case-insensitively before normal link state", () => {
+    for (const value of ["vpn://payload", "VPN://payload", "  VpN://payload"]) {
+      expect(classifyNativeWireGuardSensitiveInput(value)).toBe("vpn-uri")
+      expect(normalizeNativeWireGuardSensitiveInput(value, "vpn-uri")).toBe(
+        "vpn://payload"
+      )
+    }
+    for (const value of [
+      "# exported profile\nVPN://payload",
+      "Amnezia: vpn://payload",
+      "https://provider.example/help\nvpn://payload",
+    ]) {
+      expect(classifyNativeWireGuardSensitiveInput(value)).toBe("vpn-uri")
+      expect(normalizeNativeWireGuardSensitiveInput(value, "vpn-uri")).toBe(
+        "vpn://payload"
+      )
+    }
+    expect(
+      validateNativeWireGuardImportText(
+        `VPN://${"a".repeat(NATIVE_WIREGUARD_CONF_MAX_BYTES)}`
+      )
+    ).toBeUndefined()
+    expect(classifyNativeWireGuardSensitiveInput("vless://example.net")).toBe(
+      undefined
+    )
+  })
+
+  test("intercepts raw or malformed key-bearing configs before Save state", () => {
+    for (const value of [
+      "[Interface]\nPrivateKey = secret",
+      "[peer]\nPublicKey = public",
+      "PrivateKey = secret-without-section",
+      "PrivateKey: secret-without-equals",
+      "preshared_key=secret",
+    ]) {
+      expect(classifyNativeWireGuardSensitiveInput(value)).toBe("config")
+      expect(normalizeNativeWireGuardSensitiveInput(value, "config")).toBe(
+        value
+      )
+    }
   })
 
   test("invalidates stale asynchronous reads after a newer choice or clear", () => {

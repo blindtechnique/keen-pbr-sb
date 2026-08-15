@@ -1938,7 +1938,9 @@ bool rendered_mark_equals(
     std::uint32_t expected) {
     const auto separator = rendered.find('/');
     if (separator == std::string::npos) {
-        return false;
+        std::uint32_t value = 0U;
+        return parse_rendered_uint32(rendered, value) &&
+               value == expected;
     }
     std::uint32_t value = 0U;
     std::uint32_t mask = 0U;
