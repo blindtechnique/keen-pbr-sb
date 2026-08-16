@@ -59,6 +59,7 @@ add_executable(keen-pbr-tests
   test_ndms_native_secret_snapshot.cpp
   test_ndms_native_secret_redaction.cpp
   test_ndms_native_interface_delete.cpp
+  test_ndms_native_tunnel_removal.cpp
   test_ndms_native_target_evidence.cpp
   test_ndms_native_management_preflight.cpp
   test_ndms_native_mutation_plan.cpp
@@ -253,6 +254,7 @@ add_executable(keen-pbr-tests
   ../src/keenetic/ndms_native_secret_snapshot.cpp
   ../src/keenetic/ndms_native_secret_redaction.cpp
   ../src/keenetic/ndms_native_interface_delete.cpp
+  ../src/keenetic/ndms_native_tunnel_removal.cpp
   ../src/keenetic/ndms_native_target_evidence.cpp
   ../src/keenetic/ndms_native_import_wal_store.cpp
   ../src/keenetic/ndms_native_management_preflight.cpp
@@ -364,6 +366,7 @@ add_executable(keen-pbr-native-tunnel-import-tests
   test_ndms_native_secret_snapshot.cpp
   test_ndms_native_secret_redaction.cpp
   test_ndms_native_interface_delete.cpp
+  test_ndms_native_tunnel_removal.cpp
   test_ndms_native_target_evidence.cpp
   test_ndms_native_import_wal_store.cpp
   test_ndms_native_mutation_plan.cpp
@@ -390,6 +393,7 @@ add_executable(keen-pbr-native-tunnel-import-tests
   ../src/keenetic/ndms_native_secret_snapshot.cpp
   ../src/keenetic/ndms_native_secret_redaction.cpp
   ../src/keenetic/ndms_native_interface_delete.cpp
+  ../src/keenetic/ndms_native_tunnel_removal.cpp
   ../src/keenetic/ndms_native_target_evidence.cpp
   ../src/keenetic/ndms_native_import_wal_store.cpp
   ../src/keenetic/ndms_native_mutation_plan.cpp
