@@ -3962,6 +3962,14 @@ void Daemon::run() {
         auto native_import_readiness =
             NdmsNativeImportJournalReadinessState::unavailable;
         try {
+            // Before the inventory is judged: a process that died between
+            // creating its WAL temporary and renaming it into place leaves a
+            // name the inventory reads as unsafe, and without this sweep the
+            // startup report below would say "unsafe" until the first write -
+            // which the unsafe inventory itself refuses. The sweep is
+            // noexcept, removes only this store's own dead-owner temporaries,
+            // and an absent store is simply not its problem.
+            ndms_native_import_wal_store_.sweep_orphaned_temporaries();
             const auto native_import_inventory =
                 ndms_native_import_wal_store_.try_inventory();
             native_import_readiness =
