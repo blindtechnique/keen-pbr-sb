@@ -841,7 +841,9 @@ if(WITH_API)
     test_runtime_outbound_state.cpp
     test_ndms_web_endpoint.cpp
     test_trusted_local_connection.cpp
+    test_local_password_hash.cpp
     ../src/api/server.cpp
+    ../src/api/local_password_hash.cpp
     ../src/api/trusted_local_connection.cpp
     ../src/api/connection_query.cpp
     ../src/api/auth_runtime.cpp

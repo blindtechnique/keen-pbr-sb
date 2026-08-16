@@ -37,9 +37,16 @@ public:
 
     void update(const std::string& text) { update(text.data(), text.size()); }
 
+    // Raw digest, for constructions that consume the bytes rather than their
+    // text - HMAC feeds one digest straight into the next hash.
+    std::array<uint8_t, 32> digest() {
+        std::array<uint8_t, 32> output{};
+        finish(output.data());
+        return output;
+    }
+
     std::string hex_digest() {
-        std::array<uint8_t, 32> digest{};
-        finish(digest.data());
+        const std::array<uint8_t, 32> digest = this->digest();
 
         static constexpr char kHex[] = "0123456789abcdef";
         std::string output;

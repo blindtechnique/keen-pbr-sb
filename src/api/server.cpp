@@ -5,6 +5,7 @@
 #include "auth_runtime.hpp"
 #include "handler_remote_access.hpp"
 #include "keenetic_auth.hpp"
+#include "local_password_hash.hpp"
 #include "trusted_local_connection.hpp"
 
 #include "../config/config_writer.hpp"
@@ -1145,11 +1146,38 @@ struct ApiServer::Impl {
                 }
                 return outcome;
             }
-        } else if (!constant_time_equal(username, auth.username) ||
-                   !constant_time_equal(password, auth.password)) {
-            login_attempt.record_failure();
-            outcome.status = 401;
-            return outcome;
+        } else {
+            // Derived first and unconditionally, so a wrong username costs the
+            // same time as a wrong password. The login limiter already bounds
+            // how often anyone can spend it.
+            const auto verdict =
+                verify_local_password(auth.password, password);
+            if (verdict == LocalPasswordVerdict::unusable) {
+                Logger::instance().error(
+                    "The local credential in auth.json announces a derived key "
+                    "and is not one; no password can match it until it is set "
+                    "again");
+            }
+            const bool accepted =
+                constant_time_equal(username, auth.username) &&
+                (verdict == LocalPasswordVerdict::matched ||
+                 verdict ==
+                     LocalPasswordVerdict::matched_legacy_plaintext);
+            if (!accepted) {
+                login_attempt.record_failure();
+                outcome.status = 401;
+                return outcome;
+            }
+            if (verdict ==
+                LocalPasswordVerdict::matched_legacy_plaintext) {
+                // Accepted, because refusing would lock the operator out of
+                // their own router. Said out loud, because a credential kept
+                // in cleartext is not a resting state.
+                Logger::instance().warn(
+                    "The local password is still stored in cleartext; saving "
+                    "it again in the authentication settings replaces it with "
+                    "a derived key");
+            }
         }
 
         login_attempt.record_success();
@@ -1965,7 +1993,32 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                     return;
                 }
                 document["username"] = username;
-                document["password"] = password;
+                if (password.empty()) {
+                    // Only reachable while authentication is disabled: an
+                    // enabled provider without credentials was refused above.
+                    // There is nothing to derive a key from.
+                    document["password"] = std::string{};
+                } else {
+                    const auto salt = random_session_token();
+                    const std::string derived =
+                        salt ? encode_local_password_hash(
+                                   password,
+                                   *salt,
+                                   kLocalPasswordHashIterations)
+                             : std::string{};
+                    if (derived.empty()) {
+                        // Without entropy there is no salt, and without a salt
+                        // the only thing left to store is the password itself.
+                        // Refuse instead: a failure the operator can retry is
+                        // better than a silent downgrade to cleartext.
+                        res.status = 500;
+                        res.set_content(
+                            R"({"error":"cannot_derive_password_key"})",
+                            "application/json");
+                        return;
+                    }
+                    document["password"] = derived;
+                }
             }
 
             if (!requested_enabled) {

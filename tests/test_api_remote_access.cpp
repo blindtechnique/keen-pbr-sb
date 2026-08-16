@@ -5,6 +5,7 @@
 #include <nlohmann/json.hpp>
 
 #include "../src/api/handler_remote_access.hpp"
+#include "../src/api/local_password_hash.hpp"
 #include "../src/api/handler_dns_test.hpp"
 #include "../src/api/handler_status_events.hpp"
 #include "../src/api/sse_broadcaster.hpp"
@@ -1919,7 +1920,16 @@ TEST_CASE("queued credential rotation loses revoked session authority") {
     CHECK(first_status == 200);
     CHECK(second_status == 401);
     const auto stored = nlohmann::json::parse(std::ifstream(auth_path));
-    CHECK(stored.at("password") == "first-secret");
+    // The credential on disk is the first writer's and is not the password
+    // itself: what is stored is a derived key, so the winner is identified by
+    // what it verifies rather than by what it reads.
+    const auto persisted = stored.at("password").get<std::string>();
+    CHECK(persisted != "first-secret");
+    CHECK(local_password_hash_encoded(persisted));
+    CHECK(verify_local_password(persisted, "first-secret") ==
+          LocalPasswordVerdict::matched);
+    CHECK(verify_local_password(persisted, "second-secret") ==
+          LocalPasswordVerdict::mismatched);
 }
 
 TEST_CASE("verified login cannot publish a session after auth rotation") {

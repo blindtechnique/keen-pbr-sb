@@ -7,6 +7,7 @@
 #include "../src/api/auth_runtime.hpp"
 #include "../src/api/handler_remote_access.hpp"
 #include "../src/api/keenetic_auth.hpp"
+#include "../src/api/local_password_hash.hpp"
 #include "../src/api/server.hpp"
 #include "../src/log/logger.hpp"
 
@@ -463,7 +464,15 @@ TEST_CASE("auth settings are replaced atomically with private permissions") {
     const auto stored = nlohmann::json::parse(
         std::ifstream(auth_path));
     CHECK(stored.at("username") == "new");
-    CHECK(stored.at("password") == "new-secret");
+    // What is written is a derived key, never the password. The file is 0600,
+    // but that is the only thing between it and anyone who reads it, and a
+    // rescue snapshot copies this file as well.
+    const auto persisted = stored.at("password").get<std::string>();
+    CHECK(persisted != "new-secret");
+    CHECK(persisted.find("new-secret") == std::string::npos);
+    CHECK(local_password_hash_encoded(persisted));
+    CHECK(verify_local_password(persisted, "new-secret") ==
+          LocalPasswordVerdict::matched);
 
     // Changing authentication invalidates every session from the old mode.
     const auto old_session_status =
@@ -648,7 +657,10 @@ TEST_CASE(
     REQUIRE(stored_file.is_open());
     const auto stored = nlohmann::json::parse(stored_file);
     CHECK(stored.at("username") == "new");
-    CHECK(stored.at("password") == "new-secret");
+    const auto persisted = stored.at("password").get<std::string>();
+    CHECK(persisted != "new-secret");
+    CHECK(verify_local_password(persisted, "new-secret") ==
+          LocalPasswordVerdict::matched);
 
     // The old session is invalidated and the newly visible credentials are
     // authoritative in memory immediately, not only after a process restart.

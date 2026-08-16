@@ -548,6 +548,7 @@ set(SOURCES
 if(WITH_API)
   list(APPEND SOURCES
     src/api/server.cpp
+    src/api/local_password_hash.cpp
     src/api/trusted_local_connection.cpp
     src/api/auth_runtime.cpp
     src/api/keenetic_auth.cpp
