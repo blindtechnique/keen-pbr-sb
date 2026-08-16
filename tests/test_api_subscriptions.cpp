@@ -96,27 +96,35 @@ struct FakeManager {
     std::vector<nlohmann::json> created;
     std::atomic<int> create_status{201};
     std::string create_error_body;
+    std::string late_existing_link;
+    std::atomic<bool> expose_late_existing{false};
 
     explicit FakeManager(const std::filesystem::path& directory) {
         server.Get(
             "/v1/config/transports",
-            [](const httplib::Request& request,
-               httplib::Response& response) {
+            [this](const httplib::Request& request,
+                   httplib::Response& response) {
                 if (request.get_header_value("Authorization") !=
                     "Bearer test-secret") {
                     response.status = 401;
                     return;
                 }
-                response.set_content(
-                    nlohmann::json::array(
-                        {{{"tag", "nl"},
-                          {"type", "sing-box"},
-                          {"interface", "vless1"},
-                          {"link_fingerprint",
-                           subscription_link_fingerprint(
-                               kConfiguredLink)}}})
-                        .dump(),
-                    "application/json");
+                auto transports = nlohmann::json::array(
+                    {{{"tag", "nl"},
+                      {"type", "sing-box"},
+                      {"interface", "vless1"},
+                      {"link_fingerprint",
+                       subscription_link_fingerprint(kConfiguredLink)}}});
+                if (expose_late_existing.load(std::memory_order_acquire)) {
+                    transports.push_back(
+                        {{"tag", "late"},
+                         {"type", "sing-box"},
+                         {"interface", "vless9"},
+                         {"link_fingerprint",
+                          subscription_link_fingerprint(
+                              late_existing_link)}});
+                }
+                response.set_content(transports.dump(), "application/json");
             });
         server.Post(
             "/v1/config/transports",
@@ -356,6 +364,45 @@ TEST_CASE("apply creates the selected entry through the manager") {
     CHECK(second.at("results")[0].at("outcome") == "already_imported");
     CHECK(second.at("results")[0].at("error").is_null());
     CHECK(harness.manager->created.size() == 1U);
+}
+
+TEST_CASE("apply rechecks link identity after acquiring the mutation lease") {
+    constexpr int api_port = 18287;
+    SubscriptionsHarness harness(api_port);
+    const std::string link =
+        "vless://44444444-4444-4444-4444-444444444444@late.example:443"
+        "#Late";
+    harness.fetch_body = link + "\n";
+    httplib::Client client("127.0.0.1", api_port);
+    const auto preview_id = preview_and_get_id(client);
+
+    // Simulate another serialized writer finishing after preview but exactly
+    // when this apply acquires the common lease. Reading manager state before
+    // the lease makes this test POST a duplicate; reading under it observes
+    // the winner and returns the benign tri-state outcome without a POST.
+    harness.manager->late_existing_link = link;
+    harness.context.maintenance_lease_factory_fn =
+        [&harness](std::string) -> std::unique_ptr<MaintenanceLease> {
+        harness.manager->expose_late_existing.store(
+            true, std::memory_order_release);
+        return std::make_unique<SubscriptionsTestMaintenanceLease>();
+    };
+
+    const auto response = client.Post(
+        "/api/subscriptions/apply",
+        nlohmann::json{
+            {"preview_id", preview_id},
+            {"selections", nlohmann::json::array({{{"line", 1}}})},
+        }
+            .dump(),
+        "application/json");
+    REQUIRE(response != nullptr);
+    REQUIRE(response->status == 200);
+    const auto body = nlohmann::json::parse(response->body);
+    REQUIRE(body.at("results").size() == 1U);
+    CHECK(body.at("results")[0].at("outcome") == "already_imported");
+    CHECK(body.at("results")[0].at("error").is_null());
+    CHECK(harness.manager->created.empty());
 }
 
 TEST_CASE("apply refuses what the preview did not offer") {

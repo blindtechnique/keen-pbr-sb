@@ -439,13 +439,18 @@ void register_subscriptions_handler_impl(
 
             const auto endpoint =
                 load_transport_manager_endpoint(ctx.config_path);
-            auto existing = read_existing_transports(endpoint);
-            std::set<std::string> taken = existing.interfaces;
-            taken.insert(existing.tags.begin(), existing.tags.end());
 
             try {
                 auto maintenance =
                     ctx.acquire_maintenance_lease("subscription-import");
+                // Preview state is advisory. Another serialized mutation can
+                // create the same transport after preview, so identity and
+                // naming must be refreshed only after this apply owns the
+                // common mutation lease. Reading first leaves a deterministic
+                // duplicate window between the GET and lease acquisition.
+                auto existing = read_existing_transports(endpoint);
+                std::set<std::string> taken = existing.interfaces;
+                taken.insert(existing.tags.begin(), existing.tags.end());
                 (void)maintenance->reserve(maintenance->base_generation());
 
                 httplib::Client client(endpoint.host, endpoint.port);
@@ -456,6 +461,15 @@ void register_subscriptions_handler_impl(
                 };
 
                 api::SubscriptionApplyResponse response;
+                const auto mark_consumed = [&request](const std::size_t line) {
+                    auto& registry = preview_registry();
+                    std::lock_guard<std::mutex> lock(registry.mutex);
+                    const auto found =
+                        registry.sessions.find(request.preview_id);
+                    if (found != registry.sessions.end()) {
+                        found->second.consumed_lines.insert(line);
+                    }
+                };
                 for (const auto& entry : entries) {
                     api::SubscriptionApplyResultElement result;
                     result.line = static_cast<int64_t>(entry.line);
@@ -477,6 +491,24 @@ void register_subscriptions_handler_impl(
                         // nothing to fix. Reporting it as one would teach
                         // the operator to distrust the report.
                         result.outcome = api::Outcome::ALREADY_IMPORTED;
+                        response.results.push_back(std::move(result));
+                        continue;
+                    }
+
+                    const auto fingerprint =
+                        subscription_link_fingerprint(entry.link);
+                    if (fingerprint.empty()) {
+                        result.outcome = api::Outcome::FAILED;
+                        result.error = "cannot derive link identity";
+                        response.results.push_back(std::move(result));
+                        continue;
+                    }
+                    if (existing.link_fingerprints.count(fingerprint) != 0U) {
+                        // A previous or concurrent serialized operation won
+                        // after preview. This is the same benign state as a
+                        // consumed line: no POST and nothing to repair.
+                        result.outcome = api::Outcome::ALREADY_IMPORTED;
+                        mark_consumed(entry.line);
                         response.results.push_back(std::move(result));
                         continue;
                     }
@@ -524,13 +556,8 @@ void register_subscriptions_handler_impl(
                         result.outcome = api::Outcome::CREATED;
                         taken.insert(entry.tag);
                         taken.insert(interface_name);
-                        auto& registry = preview_registry();
-                        std::lock_guard<std::mutex> lock(registry.mutex);
-                        const auto found =
-                            registry.sessions.find(request.preview_id);
-                        if (found != registry.sessions.end()) {
-                            found->second.consumed_lines.insert(entry.line);
-                        }
+                        existing.link_fingerprints.insert(fingerprint);
+                        mark_consumed(entry.line);
                     }
                     response.results.push_back(std::move(result));
                 }
