@@ -166,6 +166,18 @@ public:
     // transaction; the future executor owns that policy decision.
     void remove_exact(const NdmsNativeImportWalRecord& expected);
 
+    // Removes this store's own temporaries left behind by a process that died
+    // between creating one and renaming it into place. Publishing already does
+    // this, but a read cannot: an orphan makes every inventory unsafe, so
+    // recovery refuses with inventory_not_ready and no write is ever attempted
+    // that could clean up. Call it once at startup, before the first recovery
+    // scan, or a crash inside publish leaves the feature permanently refusing
+    // with only a manual rm on the router as the remedy.
+    //
+    // Best effort and never throws. Only our own prefix, only a dead owner,
+    // only the exact shape the writer creates; anything else is left alone.
+    void sweep_orphaned_temporaries() noexcept;
+
     const std::filesystem::path& state_directory() const noexcept;
 
 private:

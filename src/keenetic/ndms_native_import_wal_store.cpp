@@ -7,7 +7,10 @@
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
+#include <limits>
 #include <mutex>
+#include <optional>
+#include <signal.h>
 #include <string_view>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -684,6 +687,108 @@ std::string create_temporary(int directory_fd,
         "Temporary native import WAL name space is exhausted");
 }
 
+// The owning pid encoded by create_temporary, or nothing if the name is not
+// one of ours. Parsed strictly: a name we cannot read as our own temporary is
+// somebody else's, and this must never widen into a general directory cleaner.
+std::optional<pid_t> temporary_owner_pid(const std::string& filename) {
+    if (filename.size() <= kTemporaryPrefix.size() ||
+        filename.compare(0U, kTemporaryPrefix.size(), kTemporaryPrefix) !=
+            0) {
+        return std::nullopt;
+    }
+    const std::size_t pid_begin = kTemporaryPrefix.size();
+    const std::size_t separator = filename.find('.', pid_begin);
+    if (separator == std::string::npos || separator == pid_begin ||
+        separator + 1U == filename.size()) {
+        return std::nullopt;
+    }
+    std::uint64_t parsed = 0U;
+    for (std::size_t index = pid_begin; index < separator; ++index) {
+        const auto character =
+            static_cast<unsigned char>(filename[index]);
+        if (character < '0' || character > '9') return std::nullopt;
+        const unsigned int digit = character - '0';
+        const auto limit = static_cast<std::uint64_t>(
+            std::numeric_limits<pid_t>::max());
+        if (parsed > (limit - digit) / 10U) return std::nullopt;
+        parsed = parsed * 10U + digit;
+    }
+    if (parsed == 0U) return std::nullopt;
+    return static_cast<pid_t>(parsed);
+}
+
+bool process_may_still_exist(const pid_t pid) noexcept {
+    if (pid == ::getpid()) return true;
+    if (::kill(pid, 0) == 0) return true;
+    return errno != ESRCH;
+}
+
+// publish_impl creates its temporary as a real directory entry and only then
+// writes, fsyncs and renames it. A process killed inside that window - a power
+// cut on the USB /opt is enough - leaves the temporary behind, and nothing
+// swept it. inventory_from_directory calls every unrecognized name an unsafe
+// entry, so recovery_permitted() then stayed false forever: the surviving
+// transaction could never be rolled back, completed or removed, and no new
+// import could be admitted. The only remedy was an rm on the router.
+//
+// Modelled on cleanup_orphaned_temporaries in src/backup/restore_journal.cpp,
+// which already does exactly this for the identical write pattern. Removal is
+// deliberately narrow: only our own prefix, only a dead owner, only the exact
+// shape create_temporary produces, and only if a second stat still describes
+// the same inode. Anything else is left for an operator to look at.
+//
+// Failures are swallowed: a directory we could not tidy is the situation we
+// were already in, and letting it throw would turn a best-effort sweep into a
+// new way for publish to fail.
+void cleanup_orphaned_temporaries(int directory_fd,
+                                  const StorePolicy& policy) noexcept {
+    const int duplicate = ::dup(directory_fd);
+    if (duplicate < 0) return;
+    DIR* stream = ::fdopendir(duplicate);
+    if (stream == nullptr) {
+        (void)::close(duplicate);
+        return;
+    }
+    // The dup shares its offset with directory_fd. Without the rewinds this
+    // sweep starts wherever the last consumer stopped, and - worse - leaves
+    // the offset at end-of-directory, so the inventory read that follows on
+    // the same fd sees an EMPTY store: publish would then admit a second
+    // transaction beside the first, the exact double-admission the exclusive
+    // path exists to prevent. Caught by the cross-process admission test the
+    // moment this target was made buildable again.
+    ::rewinddir(stream);
+    while (const dirent* item = ::readdir(stream)) {
+        const std::string filename(item->d_name);
+        const auto owner = temporary_owner_pid(filename);
+        if (!owner.has_value() || process_may_still_exist(*owner)) continue;
+
+        struct stat scanned {};
+        if (::fstatat(directory_fd, filename.c_str(), &scanned,
+                      AT_SYMLINK_NOFOLLOW) != 0) {
+            continue;
+        }
+        // An early out, not the enforcement: the revalidation below re-tests
+        // the same shape, and mutation shows only the pair is load-bearing.
+        if (!exact_file_metadata(scanned, policy)) continue;
+
+        struct stat revalidated {};
+        if (::fstatat(directory_fd, filename.c_str(), &revalidated,
+                      AT_SYMLINK_NOFOLLOW) != 0) {
+            continue;
+        }
+        // Same inode, still the same shape: nothing was swapped underneath
+        // between the decision and the unlink.
+        if (!exact_file_metadata(revalidated, policy) ||
+            revalidated.st_dev != scanned.st_dev ||
+            revalidated.st_ino != scanned.st_ino) {
+            continue;
+        }
+        (void)::unlinkat(directory_fd, filename.c_str(), 0);
+    }
+    ::rewinddir(stream);
+    (void)::closedir(stream);
+}
+
 StorePolicy make_policy(
 #ifdef KEEN_PBR3_TESTING
     const NdmsNativeImportWalStoreTestHooks& hooks
@@ -774,6 +879,11 @@ NdmsNativeImportWalStore::publish_impl(
         throw NdmsNativeImportWalStoreError(error.what());
     }
     DirectoryLock directory_lock(directory.get(), LOCK_EX);
+
+    // Before the inventory is judged, not after: our own crash residue would
+    // otherwise be read as a foreign entry and refuse the very write that
+    // would make progress.
+    cleanup_orphaned_temporaries(directory.get(), policy);
 
     const auto before_inventory =
         inventory_from_directory(directory.get(), policy);
@@ -913,6 +1023,24 @@ NdmsNativeImportWalLoadResult NdmsNativeImportWalStore::load(
         return directory_error_result(error);
     } catch (...) {
         return {NdmsNativeImportWalLoadState::io_error, std::nullopt};
+    }
+}
+
+void NdmsNativeImportWalStore::sweep_orphaned_temporaries() noexcept {
+    const StorePolicy policy = make_policy(
+#ifdef KEEN_PBR3_TESTING
+        test_hooks_
+#endif
+    );
+    try {
+        std::lock_guard<std::mutex> lock(store_mutex());
+        auto directory = open_store_directory(
+            state_directory_, false, policy);
+        DirectoryLock directory_lock(directory.get(), LOCK_EX);
+        cleanup_orphaned_temporaries(directory.get(), policy);
+    } catch (...) {
+        // An absent or unsafe store directory is not this function's problem
+        // to report: every other entry point already classifies it.
     }
 }
 

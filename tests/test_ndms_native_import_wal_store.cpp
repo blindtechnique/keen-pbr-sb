@@ -701,6 +701,82 @@ TEST_CASE("native import WAL recovery inventory is sorted and fail closed") {
         NdmsNativeImportWalStoreError);
 }
 
+TEST_CASE("a dead process's temporary cannot brick the store") {
+    // The scenario: a process died between create_temporary and renameat - a
+    // power cut during the fsync on the USB /opt is enough. Its temporary is a
+    // real directory entry; the inventory reads any unrecognized name as an
+    // unsafe entry; and before the sweep existed, recovery_permitted() was
+    // false forever - recovery refused, publish refused, remove refused, with
+    // a manual rm on the router as the only remedy.
+    WalStoreTempDirectory temporary;
+    const auto state = temporary.path / "state";
+    NdmsNativeImportWalStore store(state, unprivileged_test_hooks());
+    admit_prepared(store, store_prepared_record('a'));
+
+    // Written the way create_temporary writes it, owned by a pid that is not
+    // alive. Init never dies, so no pid is reliably dead; instead use a value
+    // above the default kernel pid ceiling, which kill(2) reports ESRCH for.
+    const auto orphan =
+        state / ".keen-pbr-native-import-wal.4194200.7";
+    write_private_file(orphan, "torn half-written record");
+    REQUIRE(std::filesystem::exists(orphan));
+
+    auto poisoned = store.inventory();
+    REQUIRE(poisoned.state == NdmsNativeImportWalInventoryState::ready);
+    CHECK_FALSE(poisoned.recovery_permitted());
+
+    // The read-only path: startup sweeps, then the same inventory call is
+    // whole again - no write ever had to succeed to get here.
+    store.sweep_orphaned_temporaries();
+    CHECK_FALSE(std::filesystem::exists(orphan));
+    auto swept = store.inventory();
+    REQUIRE(swept.state == NdmsNativeImportWalInventoryState::ready);
+    CHECK(swept.recovery_permitted());
+
+    // The write path heals itself too: with a fresh orphan in place, publish
+    // sweeps before judging the inventory instead of throwing on it.
+    write_private_file(orphan, "torn again");
+    auto record = store_prepared_record('a');
+    record.phase = NdmsNativeImportWalPhase::import_may_be_inflight;
+    record.reserved_generation = 42U;
+    store.publish(record);
+    CHECK_FALSE(std::filesystem::exists(orphan));
+}
+
+TEST_CASE("the sweep removes only dead-owner temporaries of the exact shape") {
+    WalStoreTempDirectory temporary;
+    const auto state = temporary.path / "state";
+    NdmsNativeImportWalStore store(state, unprivileged_test_hooks());
+    admit_prepared(store, store_prepared_record('a'));
+
+    // Our own live process: possibly mid-publish, never touched.
+    const auto live = state / (".keen-pbr-native-import-wal." +
+                               std::to_string(::getpid()) + ".3");
+    // A foreign name: not ours to judge, stays for the operator.
+    const auto foreign = state / "FOREIGN";
+    // Our prefix but no parsable pid: unknown provenance, stays.
+    const auto unparsable =
+        state / ".keen-pbr-native-import-wal.notapid.1";
+    // A dead owner but the wrong shape: 0644 is not what the writer creates.
+    const auto wrong_shape =
+        state / ".keen-pbr-native-import-wal.4194201.1";
+    for (const auto& path : {live, foreign, unparsable, wrong_shape}) {
+        write_private_file(path, "x");
+    }
+    REQUIRE(::chmod(wrong_shape.c_str(), 0644) == 0);
+
+    store.sweep_orphaned_temporaries();
+
+    CHECK(std::filesystem::exists(live));
+    CHECK(std::filesystem::exists(foreign));
+    CHECK(std::filesystem::exists(unparsable));
+    CHECK(std::filesystem::exists(wrong_shape));
+
+    // And the record the store actually owns is untouched throughout.
+    CHECK(store.load(std::string(32U, 'a')).state ==
+          NdmsNativeImportWalLoadState::valid);
+}
+
 TEST_CASE("native import WAL inventory stays bounded") {
     SUBCASE("directory entry limit returns no partial inventory") {
         WalStoreTempDirectory temporary;

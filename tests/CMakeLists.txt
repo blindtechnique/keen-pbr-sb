@@ -391,6 +391,7 @@ add_executable(keen-pbr-native-tunnel-import-tests
   ../src/keenetic/ndms_native_mutation_plan.cpp
   ../src/keenetic/ndms_native_import_response.cpp
   ../src/keenetic/ndms_native_reconcile_barrier.cpp
+  ../src/config/config_writer.cpp
   ../src/keenetic/ndms_native_tunnel_import.cpp
   ../src/keenetic/ndms_wireguard_identity.cpp
   ../src/keenetic/ndms_interface_inventory.cpp
