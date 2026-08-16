@@ -107,6 +107,21 @@ TEST_CASE("a moving world is observed again, not acted on") {
                     record_fixture(), earlier, later, std::nullopt)
                     .authoritative);
 
+    // A revision that moved between the reads: same interface, same link
+    // state, different bytes. The production comment names this as one of the
+    // three disagreements that must degrade the observation, but until this
+    // case no test could fail if the full_revision comparison were deleted
+    // from sightings_agree - the suite varied only set size and link_down.
+    auto revised = probe_fixture(42U);
+    revised.marker_sightings.push_back(sighting_fixture());
+    revised.marker_sightings.front().full_revision =
+        "ndms-rci-full-v1-" + std::string(64U, 'e');
+    auto steady = probe_fixture(41U);
+    steady.marker_sightings.push_back(sighting_fixture());
+    CHECK_FALSE(build_ndms_native_import_recovery_observation(
+                    record_fixture(), steady, revised, std::nullopt)
+                    .authoritative);
+
     // A protected catalog that changed between the reads. Prefixed, so this
     // case fails on the drift it is named for; a bare digest would make the
     // probe internally invalid and the assertion would pass for the wrong

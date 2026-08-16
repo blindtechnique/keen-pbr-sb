@@ -43,12 +43,16 @@ TEST_CASE("an abort cleans up only the record") {
 TEST_CASE("a rollback publishes its intent before the delete may run") {
     const auto steps = steps_for(Phase::response_recorded,
                                  Action::rollback_delete_exact_owned);
-    REQUIRE(steps.size() == 5U);
+    REQUIRE(steps.size() == 6U);
     CHECK(steps[0] == Step::advance_wal_rollback_requested);
-    CHECK(steps[1] == Step::advance_wal_delete_may_be_inflight);
-    CHECK(steps[2] == Step::delete_exact_owned_target);
-    CHECK(steps[3] == Step::advance_wal_absence_verified);
-    CHECK(steps[4] == Step::remove_wal_record);
+    // The claim retraction sits after the durable intent and before the
+    // delete: a crash on either side re-enters through plans that retract
+    // again, so every path to remove_wal_record has retired the claim.
+    CHECK(steps[1] == Step::remove_ownership_claim);
+    CHECK(steps[2] == Step::advance_wal_delete_may_be_inflight);
+    CHECK(steps[3] == Step::delete_exact_owned_target);
+    CHECK(steps[4] == Step::advance_wal_absence_verified);
+    CHECK(steps[5] == Step::remove_wal_record);
 
     // The delete must never precede the published intent: a crash between
     // them would leave a deletion nobody recorded the reason for.
@@ -64,15 +68,18 @@ TEST_CASE("a rollback publishes its intent before the delete may run") {
 TEST_CASE("a retried delete does not republish a phase it already holds") {
     const auto from_requested = steps_for(Phase::rollback_requested,
                                           Action::retry_exact_owned_delete);
-    REQUIRE(from_requested.size() == 4U);
-    CHECK(from_requested[0] == Step::advance_wal_delete_may_be_inflight);
+    REQUIRE(from_requested.size() == 5U);
+    CHECK(from_requested[0] == Step::remove_ownership_claim);
+    CHECK(from_requested[1] == Step::advance_wal_delete_may_be_inflight);
 
     const auto from_inflight = steps_for(Phase::delete_may_be_inflight,
                                          Action::retry_exact_owned_delete);
-    REQUIRE(from_inflight.size() == 3U);
+    REQUIRE(from_inflight.size() == 4U);
     // Re-publishing delete_may_be_inflight from itself would be a
-    // self-transition the codec has no reason to allow.
-    CHECK(from_inflight[0] == Step::delete_exact_owned_target);
+    // self-transition the codec has no reason to allow - but the retraction
+    // stays: this action IS the crash path, and the claim may still stand.
+    CHECK(from_inflight[0] == Step::remove_ownership_claim);
+    CHECK(from_inflight[1] == Step::delete_exact_owned_target);
 }
 
 TEST_CASE("a target reappearing after proven absence is nobody's to delete") {
@@ -84,10 +91,14 @@ TEST_CASE("a target reappearing after proven absence is nobody's to delete") {
 TEST_CASE("completing a rollback never moves the WAL backwards") {
     CHECK(steps_for(Phase::delete_may_be_inflight,
                     Action::complete_rollback) ==
-          (std::vector<Step>{Step::advance_wal_absence_verified,
+          (std::vector<Step>{Step::remove_ownership_claim,
+                             Step::advance_wal_absence_verified,
                              Step::remove_wal_record}));
+    // A crash after the delete but before the retraction lands exactly here,
+    // so the bookkeeping includes retiring the claim.
     CHECK(steps_for(Phase::absence_verified, Action::complete_rollback) ==
-          std::vector<Step>{Step::remove_wal_record});
+          (std::vector<Step>{Step::remove_ownership_claim,
+                             Step::remove_wal_record}));
     // ...and a forward phase has no rollback to complete.
     CHECK(steps_for(Phase::response_recorded,
                     Action::complete_rollback)

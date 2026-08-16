@@ -87,6 +87,20 @@ dispatch_ndms_native_import_recovery(
             ownership_store_missing;
         return result;
     }
+    // The retraction needs the store only when the record could actually have
+    // published a claim: publish_ownership builds claims from exactly these
+    // two fields, and the codec preserves them through every rollback phase.
+    // A record without them cannot own a claim, and demanding a store then
+    // would refuse rollbacks that have nothing to retract.
+    if (plan_contains(
+            plan, NdmsNativeImportRecoveryStep::remove_ownership_claim) &&
+        record.created_interface.has_value() &&
+        record.target_full_revision.has_value() &&
+        ownership_store == nullptr) {
+        result.state = NdmsNativeImportRecoveryDispatchState::
+            ownership_store_missing;
+        return result;
+    }
 
     auto current = record;
     for (const auto step : plan.steps) {
@@ -109,6 +123,42 @@ dispatch_ndms_native_import_recovery(
                        NdmsNativeImportRecoveryStep::remove_wal_record) {
                 store.remove_exact(current);
                 step_ok = true;
+            } else if (step == NdmsNativeImportRecoveryStep::
+                                   remove_ownership_claim) {
+                if (!current.created_interface.has_value() ||
+                    !current.target_full_revision.has_value()) {
+                    // No claim can exist: publish_ownership builds one from
+                    // exactly these fields, and this record never had them.
+                    step_ok = true;
+                } else {
+                    // Reconstructed from the record, byte for byte the claim
+                    // publish_ownership would have written for it. Only that
+                    // claim is retracted; anything else on the slot is another
+                    // transaction's assertion and stays.
+                    NdmsNativeOwnershipRecord claim;
+                    claim.interface_name = *current.created_interface;
+                    claim.transaction_id = current.transaction_id;
+                    claim.marker = current.marker;
+                    claim.kind = current.kind;
+                    claim.target_full_revision =
+                        *current.target_full_revision;
+                    const auto existing = ownership_store->read(
+                        *current.created_interface);
+                    if (existing.state ==
+                        NdmsNativeOwnershipReadState::absent) {
+                        step_ok = true;
+                    } else if (existing.state ==
+                                   NdmsNativeOwnershipReadState::valid &&
+                               !(*existing.record == claim)) {
+                        step_ok = true;
+                    } else if (existing.state ==
+                               NdmsNativeOwnershipReadState::valid) {
+                        step_ok = ownership_store->remove_exact(claim);
+                    }
+                    // Unreadable stays step_ok=false: a torn claim is evidence
+                    // of an interrupted publish, and "nothing to retract" is
+                    // exactly the reading that must not come from a torn one.
+                }
             } else if (step ==
                        NdmsNativeImportRecoveryStep::publish_ownership) {
                 // The claim is built from the record being dispatched, never

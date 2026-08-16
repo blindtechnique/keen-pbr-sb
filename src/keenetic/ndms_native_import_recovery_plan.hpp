@@ -17,6 +17,16 @@ enum class NdmsNativeImportRecoveryStep {
     advance_wal_ownership_published,
     // Rollback of an import that must not survive.
     advance_wal_rollback_requested,
+    // Retracts this transaction's own durable ownership claim, if one exists.
+    // A crash between publish_ownership and advance_wal_ownership_published
+    // leaves the WAL at target_verified with a claim already on disk; the
+    // rollback that follows deletes the interface, and without this step the
+    // claim survived as a durable assertion that keen-pbr owns a slot that is
+    // now free - covering whatever an operator later creates there by hand.
+    // No-op when the record could not have published a claim, tolerant of an
+    // absent claim, and it never touches a claim that is not byte-exactly
+    // this transaction's own.
+    remove_ownership_claim,
     advance_wal_delete_may_be_inflight,
     delete_exact_owned_target,
     advance_wal_absence_verified,

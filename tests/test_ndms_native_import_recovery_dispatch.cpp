@@ -4,11 +4,13 @@
 
 #include "../src/keenetic/ndms_catalog_cache.hpp"
 #include "../src/keenetic/ndms_interface_inventory.hpp"
+#include "../src/keenetic/ndms_native_ownership_store.hpp"
 
 #include <nlohmann/json.hpp>
 
 #include <cerrno>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -187,7 +189,7 @@ TEST_CASE("a rollback publishes intent, deletes under it, and finishes") {
         });
     CHECK(result.state ==
           NdmsNativeImportRecoveryDispatchState::completed);
-    CHECK(result.completed_steps == 5U);
+    CHECK(result.completed_steps == 6U);
     CHECK(deletes == 1U);
     CHECK(phase_at_delete ==
           NdmsNativeImportWalPhase::delete_may_be_inflight);
@@ -220,7 +222,7 @@ TEST_CASE("a failed delete leaves the durable account of how far this got") {
     REQUIRE(result.failed_step.has_value());
     CHECK(*result.failed_step ==
           NdmsNativeImportRecoveryStep::delete_exact_owned_target);
-    CHECK(result.completed_steps == 2U);
+    CHECK(result.completed_steps == 3U);
 
     // Nothing unwound: the record still says delete_may_be_inflight, which is
     // exactly what the next recovery pass classifies from.
@@ -287,6 +289,208 @@ TEST_CASE("the dispatcher refuses before the first step, loudly") {
     REQUIRE(loaded.recovery_permitted());
     CHECK(loaded.record->phase ==
           NdmsNativeImportWalPhase::import_may_be_inflight);
+}
+
+namespace {
+
+// The record a crash between publish_ownership and
+// advance_wal_ownership_published leaves behind: target_verified on disk,
+// claim already durable.
+NdmsNativeImportWalRecord verified_record() {
+    auto record = inflight_record();
+    record.phase = NdmsNativeImportWalPhase::target_verified;
+    record.response_manifest_sha256 =
+        "ndms-import-response-manifest-v2-" + std::string(64U, 'f');
+    record.created_interface = "Wireguard5";
+    record.target_full_revision =
+        "ndms-rci-full-v1-" + std::string(64U, 'd');
+    return record;
+}
+
+NdmsNativeOwnershipRecord claim_of(
+    const NdmsNativeImportWalRecord& record) {
+    NdmsNativeOwnershipRecord claim;
+    claim.interface_name = *record.created_interface;
+    claim.transaction_id = record.transaction_id;
+    claim.marker = record.marker;
+    claim.kind = record.kind;
+    claim.target_full_revision = *record.target_full_revision;
+    return claim;
+}
+
+// The WAL store owns its directory outright: any name it does not recognize
+// makes the whole inventory unsafe - that is the design, and it caught this
+// file's first draft putting the ownership directory INSIDE the store. Root
+// the two stores as siblings under the temp directory instead.
+NdmsNativeImportWalStore sibling_wal_store(const TempDirectory& directory) {
+    NdmsNativeImportWalStoreTestHooks hooks;
+    hooks.allow_current_process_owner = true;
+    return NdmsNativeImportWalStore(directory.path / "wal", hooks);
+}
+
+void publish_verified_chain(NdmsNativeImportWalStore& store,
+                            const NdmsNativeImportWalRecord& verified) {
+    REQUIRE(store.publish_prepared_exclusive(prepared_record()) ==
+            NdmsNativeImportWalAdmissionState::admitted);
+    auto inflight = inflight_record();
+    store.publish(inflight);
+    auto responded = inflight;
+    responded.phase = NdmsNativeImportWalPhase::response_recorded;
+    responded.response_manifest_sha256 = verified.response_manifest_sha256;
+    store.publish(responded);
+    store.publish(verified);
+}
+
+} // namespace
+
+TEST_CASE("rolling back a published claim retracts it, and only it") {
+    // The crash this exists for: forward completion published the ownership
+    // claim, died before advancing the WAL, and recovery rolls back from
+    // target_verified. Before the retraction step the rollback deleted the
+    // interface and removed the WAL record but left the claim - a durable
+    // assertion that keen-pbr owns a slot that is now free, covering whatever
+    // an operator later creates there by hand.
+    TempDirectory directory;
+    auto store = sibling_wal_store(directory);
+    NdmsNativeOwnershipStore ownership(directory.path / "ownership");
+    const auto record = verified_record();
+    publish_verified_chain(store, record);
+    ownership.publish(claim_of(record));
+    REQUIRE(ownership.read("Wireguard5").state ==
+            NdmsNativeOwnershipReadState::valid);
+
+    auto admission = admit_ndms_native_import_recovery(
+        store, record, owned_target_observation());
+    REQUIRE(admission.state ==
+            NdmsNativeImportRecoveryAdmissionState::admitted);
+    REQUIRE(*admission.action ==
+            NdmsNativeImportRecoveryAction::rollback_delete_exact_owned);
+    const auto plan =
+        plan_ndms_native_import_recovery(record, *admission.action);
+
+    const auto result = dispatch_ndms_native_import_recovery(
+        store, admission.lease, record, plan, "Wireguard5",
+        [](const std::string&, const std::string&) {
+            return NdmsNativeImportRecoveryDeleteOutcome::
+                deleted_confirmed;
+        },
+        &ownership);
+    CHECK(result.state ==
+          NdmsNativeImportRecoveryDispatchState::completed);
+    CHECK(store.load(record.transaction_id).state ==
+          NdmsNativeImportWalLoadState::absent);
+    // The whole point: the store reports clean AND the claim is gone.
+    CHECK(ownership.read("Wireguard5").state ==
+          NdmsNativeOwnershipReadState::absent);
+}
+
+TEST_CASE("a rollback that could hold a claim refuses without the store") {
+    TempDirectory directory;
+    auto store = sibling_wal_store(directory);
+    const auto record = verified_record();
+    publish_verified_chain(store, record);
+
+    auto admission = admit_ndms_native_import_recovery(
+        store, record, owned_target_observation());
+    REQUIRE(admission.state ==
+            NdmsNativeImportRecoveryAdmissionState::admitted);
+    const auto plan =
+        plan_ndms_native_import_recovery(record, *admission.action);
+
+    // This record carries the exact fields publish_ownership builds a claim
+    // from, so a dispatcher without the store cannot know whether a claim
+    // stands - and must refuse before the first step rather than roll back
+    // around it.
+    const auto refused = dispatch_ndms_native_import_recovery(
+        store, admission.lease, record, plan, "Wireguard5",
+        [](const std::string&, const std::string&) {
+            return NdmsNativeImportRecoveryDeleteOutcome::
+                deleted_confirmed;
+        },
+        nullptr);
+    CHECK(refused.state == NdmsNativeImportRecoveryDispatchState::
+                               ownership_store_missing);
+    CHECK(refused.completed_steps == 0U);
+    CHECK(store.load(record.transaction_id).state ==
+          NdmsNativeImportWalLoadState::valid);
+
+    // An inflight record has no such fields, no possible claim, and keeps
+    // its store-less rollback - the pre-existing crash-driver path.
+    const auto bare = inflight_record();
+    CHECK_FALSE(bare.created_interface.has_value());
+}
+
+TEST_CASE("a foreign claim on the slot survives our rollback untouched") {
+    TempDirectory directory;
+    auto store = sibling_wal_store(directory);
+    NdmsNativeOwnershipStore ownership(directory.path / "ownership");
+    const auto record = verified_record();
+    publish_verified_chain(store, record);
+    // Another transaction's claim over the same slot. Retracting it would
+    // erase somebody else's ownership on the strength of our rollback.
+    auto foreign = claim_of(record);
+    foreign.transaction_id = std::string(32U, 'e');
+    foreign.marker = "kpbr-ni-v1-" + foreign.transaction_id;
+    ownership.publish(foreign);
+
+    auto admission = admit_ndms_native_import_recovery(
+        store, record, owned_target_observation());
+    REQUIRE(admission.state ==
+            NdmsNativeImportRecoveryAdmissionState::admitted);
+    const auto plan =
+        plan_ndms_native_import_recovery(record, *admission.action);
+    const auto result = dispatch_ndms_native_import_recovery(
+        store, admission.lease, record, plan, "Wireguard5",
+        [](const std::string&, const std::string&) {
+            return NdmsNativeImportRecoveryDeleteOutcome::
+                deleted_confirmed;
+        },
+        &ownership);
+    CHECK(result.state ==
+          NdmsNativeImportRecoveryDispatchState::completed);
+
+    const auto surviving = ownership.read("Wireguard5");
+    REQUIRE(surviving.state == NdmsNativeOwnershipReadState::valid);
+    CHECK(surviving.record->transaction_id == foreign.transaction_id);
+}
+
+TEST_CASE("a torn claim stops the rollback instead of being read as absent") {
+    TempDirectory directory;
+    auto store = sibling_wal_store(directory);
+    NdmsNativeOwnershipStore ownership(directory.path / "ownership");
+    const auto record = verified_record();
+    publish_verified_chain(store, record);
+    ownership.publish(claim_of(record));
+    {
+        std::ofstream torn(directory.path / "ownership" / "Wireguard5",
+                           std::ios::binary | std::ios::trunc);
+        torn << "half a claim";
+    }
+
+    auto admission = admit_ndms_native_import_recovery(
+        store, record, owned_target_observation());
+    REQUIRE(admission.state ==
+            NdmsNativeImportRecoveryAdmissionState::admitted);
+    const auto plan =
+        plan_ndms_native_import_recovery(record, *admission.action);
+    const auto result = dispatch_ndms_native_import_recovery(
+        store, admission.lease, record, plan, "Wireguard5",
+        [](const std::string&, const std::string&) {
+            return NdmsNativeImportRecoveryDeleteOutcome::
+                deleted_confirmed;
+        },
+        &ownership);
+    // A torn claim is evidence of an interrupted publish. Reading it as
+    // "nothing to retract" and carrying on is exactly the collapse the
+    // ownership store refuses elsewhere; the dispatcher must not shortcut it.
+    CHECK(result.state ==
+          NdmsNativeImportRecoveryDispatchState::step_failed);
+    REQUIRE(result.failed_step.has_value());
+    CHECK(*result.failed_step ==
+          NdmsNativeImportRecoveryStep::remove_ownership_claim);
+    // The WAL still holds the durable account for the next pass.
+    CHECK(store.load(record.transaction_id).state ==
+          NdmsNativeImportWalLoadState::valid);
 }
 
 } // namespace keen_pbr3

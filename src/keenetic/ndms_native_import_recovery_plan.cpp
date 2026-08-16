@@ -53,7 +53,13 @@ NdmsNativeImportRecoveryPlan plan_ndms_native_import_recovery(
             record.phase != Phase::target_verified) {
             return plan;
         }
+        // The claim retraction sits after the durable intent and before the
+        // delete: a crash on either side re-enters through
+        // retry_exact_owned_delete or complete_rollback, both of which retract
+        // again - the retraction is idempotent, so every path to
+        // remove_wal_record has retired the claim first.
         plan.steps = {Step::advance_wal_rollback_requested,
+                      Step::remove_ownership_claim,
                       Step::advance_wal_delete_may_be_inflight,
                       Step::delete_exact_owned_target,
                       Step::advance_wal_absence_verified,
@@ -73,24 +79,31 @@ NdmsNativeImportRecoveryPlan plan_ndms_native_import_recovery(
             record.phase != Phase::delete_may_be_inflight) {
             return plan;
         }
-        plan.steps = {Step::advance_wal_delete_may_be_inflight,
+        // The retraction is repeated here because this action IS the crash
+        // path of the sequence above: the claim may still stand.
+        plan.steps = {Step::remove_ownership_claim,
+                      Step::advance_wal_delete_may_be_inflight,
                       Step::delete_exact_owned_target,
                       Step::advance_wal_absence_verified,
                       Step::remove_wal_record};
         if (record.phase == Phase::delete_may_be_inflight) {
             // Already published; re-publishing the same phase would be a
             // self-transition the codec has no reason to allow.
-            plan.steps.erase(plan.steps.begin());
+            plan.steps.erase(plan.steps.begin() + 1);
         }
         return plan;
 
     case Action::complete_rollback:
-        // Absence is already proven stable; what remains is bookkeeping.
+        // Absence is already proven stable; what remains is bookkeeping - and
+        // the claim retraction is part of the bookkeeping, because a crash
+        // after the delete but before the retraction lands exactly here.
         if (!rollback_phase(record.phase)) return plan;
         if (record.phase == Phase::absence_verified) {
-            plan.steps = {Step::remove_wal_record};
+            plan.steps = {Step::remove_ownership_claim,
+                          Step::remove_wal_record};
         } else {
-            plan.steps = {Step::advance_wal_absence_verified,
+            plan.steps = {Step::remove_ownership_claim,
+                          Step::advance_wal_absence_verified,
                           Step::remove_wal_record};
         }
         return plan;
@@ -109,6 +122,8 @@ const char* ndms_native_import_recovery_step_name(
         return "advance_wal_ownership_published";
     case Step::advance_wal_rollback_requested:
         return "advance_wal_rollback_requested";
+    case Step::remove_ownership_claim:
+        return "remove_ownership_claim";
     case Step::advance_wal_delete_may_be_inflight:
         return "advance_wal_delete_may_be_inflight";
     case Step::delete_exact_owned_target:
