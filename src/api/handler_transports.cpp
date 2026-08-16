@@ -856,16 +856,22 @@ static void register_transports_handler_impl(
                            502);
         }
         try {
-            const auto body = nlohmann::json::parse(response->body);
+            auto body = nlohmann::json::parse(response->body);
             if (!body.is_array()) {
                 throw ApiError("transport manager returned an invalid config response", 502);
             }
-            for (const auto& spec : body) {
+            for (auto& spec : body) {
                 if (!valid_transport_spec_display_name(spec, false)) {
                     throw ApiError(
                         "transport manager returned an invalid transport alias",
                         502);
                 }
+                // The manager needs this identity internally so subscription
+                // previews can recognise an existing secret link without
+                // reading it. A SHA-256 of that link is still an offline
+                // verifier for low-entropy proxy passwords and must not cross
+                // the browser-facing API boundary.
+                spec.erase("link_fingerprint");
             }
             return body.dump();
         } catch (const nlohmann::json::exception&) {

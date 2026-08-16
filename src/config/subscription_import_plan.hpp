@@ -129,10 +129,11 @@ bool subscription_scheme_supported(const std::string& scheme) noexcept;
 // This exists as a digest rather than the link because the other half of the
 // comparison cannot be anything else: transport-manager blanks the stored link
 // in its redacted state (config.go redactedSpecsLocked) precisely because it
-// carries the credential, and publishes this digest instead. The rule below
-// and LinkFingerprint in singbox.go are one contract in two languages; each
-// side pins it in its own tests, because a drift here does not fail loudly -
-// it just stops ever matching.
+// carries the credential, and publishes this digest only to the loopback
+// daemon. The rule below and LinkFingerprint in singbox.go are one internal
+// contract in two languages; each side pins it in its own tests, because a
+// drift here does not fail loudly - it just stops ever matching. The browser
+// API must strip the digest: weak proxy passwords make it an offline verifier.
 std::string subscription_link_fingerprint(const std::string& link);
 
 // Normalizes a remark into a candidate tag matching "^[a-z][a-z0-9_]{0,23}$".

@@ -113,7 +113,8 @@ std::string random_preview_token() {
 // The transports that already exist, as the two sets the plan and the naming
 // need. Read from the manager's redacted state: the tags are public, and the
 // identities arrive as link fingerprints precisely so this caller never has
-// to see a link.
+// to see a link. They are sensitive internal metadata and never belong in a
+// browser-facing response.
 struct ExistingTransports {
     std::set<std::string> tags;
     std::set<std::string> interfaces;

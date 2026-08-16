@@ -56,18 +56,21 @@ type TransportSpec struct {
 	CountryCode  string     `json:"country_code,omitempty"`
 	Country      string     `json:"country,omitempty"`
 	VLESS        *VLESSSpec `json:"vless,omitempty"` // Legacy configuration compatibility.
-	// Set only on redacted output, never accepted on input and never stored.
-	// See LinkFingerprint: it lets a caller that must not see Link still tell
-	// whether it is holding the same connection.
+	// Set only on the loopback manager's redacted output, never accepted on
+	// input and never stored. It is internal sensitive identity metadata: the
+	// public API strips it before replying to a browser.
 	LinkFingerprint string `json:"link_fingerprint,omitempty"`
 }
 
-// LinkFingerprint identifies a share link without disclosing it.
+// LinkFingerprint identifies a share link without returning the link itself.
+// It is not public-safe: for low-entropy passwords this digest is an offline
+// verifier and therefore stays inside the daemon-manager trust boundary.
 //
 // Redacted state blanks Link because it carries the credential - a VLESS UUID,
 // a Trojan password. That leaves a caller unable to answer the one question a
 // subscription import has to ask: is this entry already configured here? The
-// digest answers it and discloses nothing.
+// digest answers it without returning the raw link. It still verifies guesses,
+// which is why it must never cross the internal daemon-manager boundary.
 //
 // The fragment is removed first, and that is a contract, not a detail: a
 // fragment is the provider's label, and the same connection listed twice under

@@ -1160,7 +1160,6 @@ namespace api {
         std::optional<GeoMode> geo_mode;
         std::string interface;
         std::optional<std::string> link;
-        std::optional<std::string> link_fingerprint;
         std::optional<int64_t> mtu;
         std::optional<std::string> outbound_json;
         std::string tag;
@@ -3978,7 +3977,6 @@ namespace api {
         x.geo_mode = get_stack_optional<GeoMode>(j, "geo_mode");
         x.interface = j.at("interface").get<std::string>();
         x.link = get_stack_optional<std::string>(j, "link");
-        x.link_fingerprint = get_stack_optional<std::string>(j, "link_fingerprint");
         x.mtu = get_stack_optional<int64_t>(j, "mtu");
         x.outbound_json = get_stack_optional<std::string>(j, "outbound_json");
         x.tag = j.at("tag").get<std::string>();
@@ -3997,7 +3995,6 @@ namespace api {
         j["geo_mode"] = x.geo_mode;
         j["interface"] = x.interface;
         j["link"] = x.link;
-        j["link_fingerprint"] = x.link_fingerprint;
         j["mtu"] = x.mtu;
         j["outbound_json"] = x.outbound_json;
         j["tag"] = x.tag;

@@ -26,12 +26,6 @@ export interface TransportSpec {
   /** Share link accepted by transport-manager. Supported schemes include vless, vmess, trojan, shadowsocks, hysteria2, tuic, anytls, socks and HTTP proxies. Blank on update preserves the stored secret.
    */
   link?: string;
-  /**
-     * Derived identity of `link`: SHA-256 of the link with its fragment removed. Present only in responses, where `link` is blanked because it carries the credential, and rejected if supplied on a write. It lets a caller that must not see the link still tell whether it is holding the same connection - the subscription importer uses it to recognise an entry that is already configured. Absent for transports defined by `outbound_json`, which have no share link.
-
-     * @pattern ^[0-9a-f]{64}$
-     */
-  link_fingerprint?: string;
   /** A complete sing-box outbound JSON object for protocols without a standard share-link format. Blank on update preserves the stored secret.
    */
   outbound_json?: string;

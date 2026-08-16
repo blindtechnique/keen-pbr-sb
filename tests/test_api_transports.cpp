@@ -232,9 +232,10 @@ TEST_CASE("transports handler proxies authenticated companion response") {
         response.set_content(
             nlohmann::json::array({
                 {{"tag", "native_one"},
-                 {"display_name", "Домашний туннель"},
-                 {"type", "native"},
-                 {"interface", "nwg1"}},
+                  {"display_name", "Домашний туннель"},
+                  {"type", "native"},
+                  {"interface", "nwg1"},
+                  {"link_fingerprint", std::string(64U, 'a')}},
             }).dump(),
             "application/json");
     });
@@ -346,6 +347,8 @@ TEST_CASE("transports handler proxies authenticated companion response") {
     CHECK(nlohmann::json::parse(config_response->body)[0]["tag"] == "native_one");
     CHECK(nlohmann::json::parse(config_response->body)[0]["display_name"] ==
           "Домашний туннель");
+    CHECK_FALSE(nlohmann::json::parse(config_response->body)[0].contains(
+        "link_fingerprint"));
     REQUIRE(create_response != nullptr);
     CHECK(create_response->status == 200);
     CHECK(nlohmann::json::parse(create_response->body)["status"] == "created");
