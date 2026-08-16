@@ -117,11 +117,9 @@ public:
         const std::string& keenetic_endpoint = {});
 
     // Drives one credential poll and reports what it concluded, as the name
-    // of an NdmsCredentialChange. The production path reaches the same code
-    // from pre-routing, where its only observable effect is that sessions
-    // stop working - which is not something a test can distinguish from
-    // never having had one. This seam is what keeps the chain provably
-    // non-inert.
+    // of an NdmsCredentialChange. The production worker reaches the same code;
+    // API pre-routing deliberately does not. This seam keeps revocation
+    // deterministic without waiting for the production 30-second cadence.
     std::string poll_router_credentials_for_testing();
 #endif
 

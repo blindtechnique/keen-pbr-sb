@@ -2025,6 +2025,125 @@ TEST_CASE("web login refuses to exceed the global session cap") {
     CHECK(overflow->get_header_value("Set-Cookie").empty());
 }
 
+TEST_CASE("API requests never perform the router credential RCI read") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    write_text(
+        auth_path,
+        R"({"enabled":true,"provider":"keenetic",)"
+        R"("keenetic_endpoint_mode":"manual",)"
+        R"("keenetic_endpoint":"127.0.0.1:80"})");
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+
+    std::atomic<unsigned int> reads{0U};
+    httplib::Server ndms;
+    ndms.Get("/rci/show/rc/user",
+             [&reads](const httplib::Request&, httplib::Response& response) {
+                 reads.fetch_add(1U, std::memory_order_relaxed);
+                 response.set_content(
+                     R"({"admin":{"password":{"nt":{"hash":"aaaa"}},"tag":["http"]}})",
+                     "application/json");
+             });
+    BoundHttpServer running_ndms(ndms);
+    EnvironmentVariableGuard endpoint_override(
+        "KEEN_PBR_TEST_NDMS_USER_ENDPOINT",
+        "http://127.0.0.1:" + std::to_string(running_ndms.port()) +
+            "/rci/show/rc/user");
+    // The reviewed implementation used this override to make every request
+    // due. Keeping it here makes the regression fail on that implementation;
+    // the worker-based implementation intentionally ignores it.
+    EnvironmentVariableGuard legacy_interval_override(
+        "KEEN_PBR_TEST_NDMS_USER_INTERVAL_MS", "0");
+
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+    httplib::Client client("127.0.0.1", configured_port(config));
+    for (int request = 0; request < 8; ++request) {
+        const auto response = client.Get("/api/auth/status");
+        REQUIRE(response != nullptr);
+        CHECK(response->status == 200);
+    }
+    server.stop();
+
+    // One startup read establishes the baseline before sessions can be
+    // published. The worker then waits 30 seconds; the eight requests cannot
+    // wake it or perform RCI inline.
+    CHECK(reads.load(std::memory_order_relaxed) == 1U);
+}
+
+TEST_CASE("concurrent router credential polls never queue another RCI read") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    write_text(
+        auth_path,
+        R"({"enabled":true,"provider":"keenetic",)"
+        R"("keenetic_endpoint_mode":"manual",)"
+        R"("keenetic_endpoint":"127.0.0.1:80"})");
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+
+    std::mutex read_mutex;
+    std::condition_variable read_cv;
+    bool entered = false;
+    bool release = false;
+    unsigned int reads = 0U;
+    httplib::Server ndms;
+    ndms.Get("/rci/show/rc/user",
+             [&](const httplib::Request&, httplib::Response& response) {
+                 std::unique_lock lock(read_mutex);
+                 ++reads;
+                 if (reads == 1U) {
+                     response.set_content(
+                         R"({"admin":{"password":{"nt":{"hash":"aaaa"}},"tag":["http"]}})",
+                         "application/json");
+                     return;
+                 }
+                 entered = true;
+                 read_cv.notify_all();
+                 read_cv.wait(lock, [&]() { return release; });
+                 response.set_content(
+                     R"({"admin":{"password":{"nt":{"hash":"aaaa"}},"tag":["http"]}})",
+                     "application/json");
+             });
+    BoundHttpServer running_ndms(ndms);
+    EnvironmentVariableGuard endpoint_override(
+        "KEEN_PBR_TEST_NDMS_USER_ENDPOINT",
+        "http://127.0.0.1:" + std::to_string(running_ndms.port()) +
+            "/rci/show/rc/user");
+
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+    std::string first_outcome;
+    std::thread first([&]() {
+        first_outcome = server.poll_router_credentials_for_testing();
+    });
+
+    bool first_entered = false;
+    {
+        std::unique_lock lock(read_mutex);
+        first_entered = read_cv.wait_for(
+            lock, std::chrono::seconds{5}, [&]() { return entered; });
+    }
+    std::string concurrent_outcome;
+    if (first_entered) {
+        concurrent_outcome = server.poll_router_credentials_for_testing();
+    }
+    {
+        std::lock_guard lock(read_mutex);
+        release = true;
+    }
+    read_cv.notify_all();
+    first.join();
+    server.stop();
+
+    REQUIRE(first_entered);
+    CHECK(concurrent_outcome == "concurrent");
+    CHECK(first_outcome == "unchanged");
+}
+
 TEST_CASE("an external router credential change revokes the session cohort") {
     // The revocation machinery already existed; what this pins is the trigger.
     // An inert revocation is the one kind nobody notices, because nothing
@@ -2066,16 +2185,12 @@ TEST_CASE("an external router credential change revokes the session cohort") {
         "KEEN_PBR_TEST_NDMS_USER_ENDPOINT",
         "http://127.0.0.1:" + std::to_string(ndms_port) +
             "/rci/show/rc/user");
-    EnvironmentVariableGuard interval_override(
-        "KEEN_PBR_TEST_NDMS_USER_INTERVAL_MS", "0");
-
     const auto config = auth_api_config();
     ApiServer server(config);
     server.start();
 
-    // The first successful read is a baseline, not a change: otherwise every
-    // daemon start would log its operators out.
-    CHECK(server.poll_router_credentials_for_testing() == "unknown");
+    // Startup already established the baseline before the listener admitted a
+    // session. A repeat is unchanged, not a second baseline.
     CHECK(server.poll_router_credentials_for_testing() == "unchanged");
 
     // The firmware becomes unreachable. That is not evidence of a change, and

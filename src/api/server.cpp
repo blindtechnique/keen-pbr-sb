@@ -23,6 +23,7 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <cstdint>
 #include <filesystem>
@@ -34,6 +35,7 @@
 #include <optional>
 #include <sstream>
 #include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 #include <nlohmann/json.hpp>
@@ -452,12 +454,12 @@ constexpr std::chrono::seconds kChallengeProbeTtl{60};
 // Where the firmware publishes its user configuration, measured on 5.1.1 as a
 // ~1.4 KiB document whose digest is stable between reads. The bound is far
 // above that and exists so a firmware that answers with something else cannot
-// pull an unbounded body into the request path.
+// pull an unbounded body into the worker.
 constexpr const char* kNdmsUserDocumentEndpoint =
     "http://127.0.0.1:79/rci/show/rc/user";
 constexpr std::size_t kCredentialDocumentMaximumBytes = 256U * 1024U;
-// Long enough that the read is invisible against request traffic, short enough
-// that a session does not outlive a password change by a coffee break.
+// The worker waits this long between attempts. No API request advances or
+// shortens the interval.
 constexpr std::chrono::seconds kCredentialGenerationInterval{30};
 
 // The loopback RCI port is fixed by the firmware, so a test cannot stand a
@@ -472,25 +474,6 @@ std::string ndms_user_document_endpoint() {
     }
 #endif
     return kNdmsUserDocumentEndpoint;
-}
-
-// Same reason: the 30 s interval makes a second poll unobservable inside a
-// test, and an interval that cannot be shortened would leave the "a later
-// change is seen too" case untested.
-std::chrono::milliseconds credential_generation_interval() {
-#ifdef KEEN_PBR3_TESTING
-    if (const char* configured =
-            std::getenv("KEEN_PBR_TEST_NDMS_USER_INTERVAL_MS")) {
-        if (*configured != '\0') {
-            try {
-                return std::chrono::milliseconds(std::stoll(configured));
-            } catch (const std::exception&) {
-            }
-        }
-    }
-#endif
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-        kCredentialGenerationInterval);
 }
 
 struct WebAuthConfig {
@@ -936,7 +919,10 @@ struct ApiServer::Impl {
     // dropped where it was parsed.
     std::mutex credential_generation_mutex;
     NdmsCredentialGeneration credential_generation;
-    std::chrono::steady_clock::time_point credential_generation_next_read{};
+    std::mutex credential_generation_worker_mutex;
+    std::condition_variable credential_generation_worker_cv;
+    std::thread credential_generation_worker;
+    bool credential_generation_worker_stop{false};
     AuthLoginRateLimiter login_rate_limiter;
     // Sized from the firmware defaults measured on a live Keenetic. Reading
     // the router's actual policy over RCI is a separate slice; until then the
@@ -1295,13 +1281,10 @@ struct ApiServer::Impl {
     }
 
     // Revokes every session and event stream when the router account's
-    // credentials change outside this daemon.
-    //
-    // Driven from the request path rather than a timer, for the same reason
-    // the lockout policy above is: the daemon does not block booting on NDMS
-    // probes, and a session only needs revoking at the moment someone tries to
-    // use it. An idle session that outlives a password change never serves a
-    // request, so revoking it eagerly buys nothing.
+    // credentials change outside this daemon. This routine is called only by
+    // the bounded background worker below (and by an explicit testing seam),
+    // never by an API request: even a one-second RCI timeout does not belong in
+    // pre-routing.
     //
     // Only the router-account provider is watched. A local password lives in
     // auth.json, and changing it there already advances the generation through
@@ -1316,22 +1299,27 @@ struct ApiServer::Impl {
             }
         }
 
-        // try_lock, not lock: this runs before every API request, and queueing
-        // the whole server behind one RCI read would turn a slow firmware into
-        // a slow daemon. Another thread already reading is as good as this one
-        // reading.
+        // try_lock, not lock: a test seam or a future explicit wake-up cannot
+        // queue behind the periodic read or start a second RCI transaction.
+        // Another thread already reading is as good as this one reading.
         std::unique_lock lock(credential_generation_mutex, std::try_to_lock);
         if (!lock.owns_lock()) return "concurrent";
-        const auto now = std::chrono::steady_clock::now();
-        if (now < credential_generation_next_read) return "not_due";
-        credential_generation_next_read = now + credential_generation_interval();
 
         std::string document;
         try {
             HttpClient client;
             client.set_timeout(std::chrono::seconds(1));
             client.set_max_response_size(kCredentialDocumentMaximumBytes);
-            document = client.download(ndms_user_document_endpoint());
+            HttpRequestOptions options;
+            options.destination_filter = [](const std::string& address) {
+                // The production URL is the firmware's fixed numeric loopback
+                // endpoint. Keep the testing override useful for a different
+                // port, but never let a redirect, proxy or future hostname
+                // turn this privileged read into a non-loopback connection.
+                return address == "127.0.0.1";
+            };
+            document = client.download(
+                ndms_user_document_endpoint(), options);
         } catch (const std::exception&) {
             // Deliberately left empty. An unreadable document is `unknown`,
             // which neither revokes nor replaces the stored generation, so a
@@ -1353,11 +1341,50 @@ struct ApiServer::Impl {
         // Said out loud because an operator whose session just died deserves
         // to find the reason in the log. The digest is not part of it: it is a
         // fingerprint of the credential state and belongs nowhere.
-        Logger::instance().warn(
-            "Router account credentials changed outside keen-pbr; every "
-            "session and event stream has been revoked");
         revoke_auth_sessions();
+        try {
+            Logger::instance().warn(
+                "Router account credentials changed outside keen-pbr; every "
+                "session and event stream has been revoked");
+        } catch (...) {
+            // The revocation is the security boundary. A diagnostic sink is
+            // not allowed to prevent it or terminate the periodic worker.
+        }
         return ndms_credential_change_name(change);
+    }
+
+    void start_credential_generation_worker() {
+        std::lock_guard lock(credential_generation_worker_mutex);
+        if (credential_generation_worker.joinable()) return;
+        credential_generation_worker_stop = false;
+        credential_generation_worker = std::thread([this]() {
+            std::unique_lock worker_lock(
+                credential_generation_worker_mutex);
+            while (!credential_generation_worker_cv.wait_for(
+                worker_lock,
+                kCredentialGenerationInterval,
+                [this]() { return credential_generation_worker_stop; })) {
+                worker_lock.unlock();
+                try {
+                    (void)revoke_sessions_if_router_credentials_changed();
+                } catch (...) {
+                    // Keep the worker alive. The read itself is fail-closed:
+                    // unknown input never replaces the last known generation.
+                }
+                worker_lock.lock();
+            }
+        });
+    }
+
+    void stop_credential_generation_worker() noexcept {
+        {
+            std::lock_guard lock(credential_generation_worker_mutex);
+            credential_generation_worker_stop = true;
+        }
+        credential_generation_worker_cv.notify_all();
+        if (credential_generation_worker.joinable()) {
+            credential_generation_worker.join();
+        }
     }
 
     void apply_forward_budget(const WebAuthConfig& config) {
@@ -2392,11 +2419,6 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                 "application/json");
             return httplib::Server::HandlerResponse::Handled;
         }
-        // Before the session is looked at, so a credential change that already
-        // happened takes effect on this very request rather than the next one.
-        if (api_request) {
-            state->revoke_sessions_if_router_credentials_changed();
-        }
         const auto auth_state = state->auth_snapshot_with_generation();
         const auto& auth = auth_state.first;
         const auto auth_generation = auth_state.second;
@@ -2909,6 +2931,7 @@ bool ApiServer::register_static_root(const std::string& frontend_root) {
 
 void ApiServer::start() {
     if (impl_->is_listening.load(std::memory_order_acquire) && impl_->server.is_running()) {
+        impl_->start_credential_generation_worker();
         return;
     }
 
@@ -2917,6 +2940,16 @@ void ApiServer::start() {
     {
         KPBR_LOCK_GUARD(impl_->state_mutex);
         impl_->listen_error_message.clear();
+    }
+
+    // Establish the router credential baseline before the server can publish
+    // a session. This is the sole bounded startup read (one-second timeout),
+    // not request-path work; subsequent observations belong to the worker.
+    try {
+        (void)impl_->revoke_sessions_if_router_credentials_changed();
+    } catch (...) {
+        // Unknown remains unknown and the periodic worker retries. Startup is
+        // not made dependent on a diagnostic sink or a temporarily absent RCI.
     }
 
     impl_->listen_thread = std::thread([this]() {
@@ -2968,6 +3001,7 @@ void ApiServer::start() {
 
     if (impl_->server.is_running()) {
         impl_->is_listening.store(true, std::memory_order_release);
+        impl_->start_credential_generation_worker();
         return;
     }
 
@@ -3018,6 +3052,9 @@ std::optional<SystemAuthHealthSnapshot> ApiServer::system_auth_health() {
 }
 
 void ApiServer::stop() {
+    if (impl_) {
+        impl_->stop_credential_generation_worker();
+    }
     if (impl_ && impl_->server.is_running()) {
         impl_->server.stop();
     }
