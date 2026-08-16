@@ -453,6 +453,7 @@ set(SOURCES
   src/util/nfqws_runtime_state.cpp
   src/config/config.cpp
   src/config/config_writer.cpp
+  src/config/subscription_fetch_policy.cpp
   src/config/dependency_analysis.cpp
   src/config/list_delete_planner.cpp
   src/config/routing_state.cpp

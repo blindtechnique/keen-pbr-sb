@@ -86,6 +86,7 @@ add_executable(keen-pbr-tests
   test_config_store.cpp
   test_catalog_setup_planner.cpp
   test_config_writer.cpp
+  test_subscription_fetch_policy.cpp
   test_dependency_analysis.cpp
   test_list_delete_planner.cpp
   test_routing_state.cpp
@@ -161,6 +162,7 @@ add_executable(keen-pbr-tests
   ../src/daemon/daemon_dns_probe.cpp
   ../src/setup/catalog_setup_planner.cpp
   ../src/config/config_writer.cpp
+  ../src/config/subscription_fetch_policy.cpp
   ../src/util/last_command_failure.cpp
   ../src/backup/persistent_snapshot.cpp
   ../src/backup/restore_journal.cpp
