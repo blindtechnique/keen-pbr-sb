@@ -252,7 +252,28 @@ int recover(const std::string& directory) {
         std::fprintf(stderr, "store not empty after recovery\n");
         return 2;
     }
-    std::printf("recovered clean\n");
+    // The claim invariant the retraction step exists for. A forward resume
+    // rests on the published claim and must keep it; every other outcome is a
+    // rollback or an abort, after which a surviving claim would durably
+    // assert keen-pbr ownership of a slot that is now free - the exact
+    // residue the crash window between publish_ownership and
+    // advance_wal_ownership_published used to leave.
+    const auto final_claim = ownership.read("Wireguard5");
+    const bool forward_completed =
+        *admission.action ==
+        NdmsNativeImportRecoveryAction::resume_forward_reconcile;
+    if (forward_completed &&
+        final_claim.state != NdmsNativeOwnershipReadState::valid) {
+        std::fprintf(stderr, "forward recovery lost the ownership claim\n");
+        return 2;
+    }
+    if (!forward_completed &&
+        final_claim.state != NdmsNativeOwnershipReadState::absent) {
+        std::fprintf(stderr, "claim survived a rollback recovery\n");
+        return 2;
+    }
+    std::printf("recovered clean (claim %s)\n",
+                forward_completed ? "kept" : "retired");
     return 0;
 }
 
