@@ -220,6 +220,20 @@ LinkParts split_link(const std::string& link) {
     if (parts.scheme == "vmess") return parts;
     if (parts.scheme == "ss" && at == std::string::npos) return parts;
 
+    // An unsupported scheme has no syntax contract here, so its authority is
+    // opaque and may itself be a credential. For supported credential-bearing
+    // schemes, the host is knowable only after a literal userinfo delimiter.
+    // A malformed `trojan://secret`, for example, is rejected later by the
+    // manager; showing `secret` as its endpoint would leak the very value the
+    // preview promises never to return. Only ordinary proxy schemes admit a
+    // genuinely credential-free authority.
+    if (!subscription_scheme_supported(parts.scheme)) return parts;
+    if (at == std::string::npos && parts.scheme != "socks" &&
+        parts.scheme != "socks5" && parts.scheme != "http" &&
+        parts.scheme != "https") {
+        return parts;
+    }
+
     parts.endpoint =
         at == std::string::npos ? authority : authority.substr(at + 1U);
     return parts;

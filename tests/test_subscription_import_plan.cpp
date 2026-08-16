@@ -107,6 +107,29 @@ TEST_CASE("vmess and legacy shadowsocks keep their payload closed") {
     CHECK(plan.candidates[2].endpoint == "e.example:8388");
 }
 
+TEST_CASE("an unparsed authority is never published as an endpoint") {
+    // Credential-bearing schemes require a literal userinfo delimiter before
+    // this parser can identify a host. Without it, the authority may be the
+    // password/UUID that made the link malformed. Unsupported schemes are
+    // opaque for the same reason. Ordinary HTTP/SOCKS proxy URLs are the only
+    // supported forms whose bare authority is unambiguously an endpoint.
+    const std::string body =
+        "vless://uuid-without-a-host\n"
+        "trojan://password-without-a-host\n"
+        "hy2://auth-without-a-host\n"
+        "wireguard://private-key-material\n"
+        "https://proxy.example:8443\n"
+        "socks5://proxy.example:1080\n";
+    const auto plan = plan_subscription_import(body, kNoTags, kNoFingerprints);
+
+    REQUIRE(plan.candidates.size() == 6U);
+    for (std::size_t index = 0U; index < 4U; ++index) {
+        CHECK(plan.candidates[index].endpoint.empty());
+    }
+    CHECK(plan.candidates[4].endpoint == "proxy.example:8443");
+    CHECK(plan.candidates[5].endpoint == "proxy.example:1080");
+}
+
 TEST_CASE("a base64 subscription body is decoded") {
     const std::string plain =
         "vless://11111111-1111-1111-1111-111111111111@a.example:443#NL\n"
