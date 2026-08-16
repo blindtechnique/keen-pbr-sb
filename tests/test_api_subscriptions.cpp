@@ -428,14 +428,14 @@ TEST_CASE("apply refuses what the preview did not offer") {
     CHECK(harness.manager->created.front().at("tag") == "nl_two");
 }
 
-TEST_CASE("a manager error that echoes the link is not repeated") {
-    // The manager's share-link parser wraps url.Parse errors, and Go's url
-    // errors quote the URL they failed on - credential included. An error
-    // that names the secret it refused to store is worse than a blunt one.
+TEST_CASE("manager response text is never reflected through the API") {
+    // Parser diagnostics can quote or transform the credential-bearing link.
+    // A substring filter cannot cover percent-decoding or future parser
+    // normalizations, so only the status class crosses this boundary.
     constexpr int api_port = 18286;
     SubscriptionsHarness harness(api_port);
     const std::string link =
-        "vless://33333333-3333-3333-3333-333333333333@d.example:443#X";
+        "trojan://p%40ss@d.example:443#X";
     harness.fetch_body = link + "\n";
     httplib::Client client("127.0.0.1", api_port);
     const auto preview_id = preview_and_get_id(client);
@@ -458,12 +458,12 @@ TEST_CASE("a manager error that echoes the link is not repeated") {
     CHECK(body.at("results")[0].at("outcome") == "failed");
     const auto error =
         body.at("results")[0].at("error").get<std::string>();
-    CHECK(error.find("33333333-3333") == std::string::npos);
-    CHECK(error.find("HTTP 400") != std::string::npos);
+    CHECK(error == "transport manager refused this entry (HTTP 400)");
+    CHECK(error.find("p%40ss") == std::string::npos);
     // A partial echo is the same leak: the credential lives between "://"
     // and "@", and an error quoting only that fragment has quoted the secret.
     harness.manager->create_error_body =
-        "user \"33333333-3333-3333-3333-333333333333\" is not valid";
+        "user \"p%40ss\" is not valid";
     const auto partial = client.Post(
         "/api/subscriptions/apply",
         nlohmann::json{
@@ -477,11 +477,11 @@ TEST_CASE("a manager error that echoes the link is not repeated") {
               .at("results")[0]
               .at("error")
               .get<std::string>()
-              .find("33333333-3333") == std::string::npos);
+              .find("p%40ss") == std::string::npos);
 
-    // ...and an error that does not echo the link passes through, because
-    // the manager's text is the useful one.
-    harness.manager->create_error_body = "tag already exists";
+    // Percent-decoded output does not contain an exact substring from the
+    // original link, but it is still the same password.
+    harness.manager->create_error_body = "password p@ss is not valid";
     const auto second = client.Post(
         "/api/subscriptions/apply",
         nlohmann::json{
@@ -492,9 +492,27 @@ TEST_CASE("a manager error that echoes the link is not repeated") {
         "application/json");
     REQUIRE(second != nullptr);
     const auto second_body = nlohmann::json::parse(second->body);
-    CHECK(second_body.at("results")[0]
-              .at("error")
-              .get<std::string>() == "tag already exists");
+    CHECK(second_body.at("results")[0].at("error") ==
+          "transport manager refused this entry (HTTP 400)");
+    CHECK(second->body.find("p@ss") == std::string::npos);
+
+    // Even apparently harmless text is not a safe protocol field: future
+    // manager versions may put arbitrary parser context in it.
+    harness.manager->create_error_body = "tag already exists";
+    const auto harmless = client.Post(
+        "/api/subscriptions/apply",
+        nlohmann::json{
+            {"preview_id", preview_id},
+            {"selections", nlohmann::json::array({{{"line", 1}}})},
+        }
+            .dump(),
+        "application/json");
+    REQUIRE(harmless != nullptr);
+    CHECK(nlohmann::json::parse(harmless->body)
+              .at("results")[0]
+              .at("error") ==
+          "transport manager refused this entry (HTTP 400)");
+    CHECK(harmless->body.find("tag already exists") == std::string::npos);
 }
 
 TEST_CASE("the production fetcher carries the destination policy") {

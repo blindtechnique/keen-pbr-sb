@@ -221,34 +221,11 @@ bool valid_override_tag(const std::string& tag) {
     return true;
 }
 
-// The manager's error text is useful, except when it echoes the link: its
-// share-link parser wraps url.Parse errors, and Go's url errors quote the URL
-// they failed on - credential included. An error that names the secret it
-// refused to store is worse than a blunt one.
-//
-// The userinfo is checked separately from the whole link, because an error
-// that quotes only a fragment of the URL still leaks everything that matters:
-// the credential lives between "://" and "@", and that substring alone is the
-// secret.
-std::string sanitized_manager_error(const std::string& text,
-                                    const std::string& link,
-                                    const int status) {
-    bool echoes_secret = text.empty() || text.find(link) != std::string::npos;
-    if (!echoes_secret) {
-        const auto scheme_end = link.find("://");
-        if (scheme_end != std::string::npos) {
-            const auto at = link.rfind('@');
-            if (at != std::string::npos && at > scheme_end + 3U) {
-                const std::string userinfo =
-                    link.substr(scheme_end + 3U, at - scheme_end - 3U);
-                echoes_secret = !userinfo.empty() &&
-                                text.find(userinfo) != std::string::npos;
-            }
-        }
-    }
-    if (!echoes_secret) {
-        return text;
-    }
+// Manager response text is parser-controlled and can echo or transform any
+// part of the credential-bearing link (percent-decoding is enough to defeat a
+// substring filter). It belongs in the manager's root-only diagnostics, never
+// in this browser-facing API.
+std::string sanitized_manager_error(const int status) {
     return "transport manager refused this entry (HTTP " +
            std::to_string(status) + ")";
 }
@@ -541,8 +518,8 @@ void register_subscriptions_handler_impl(
                     } else if (created->status < 200 ||
                                created->status >= 300) {
                         result.outcome = api::Outcome::FAILED;
-                        result.error = sanitized_manager_error(
-                            created->body, entry.link, created->status);
+                        result.error =
+                            sanitized_manager_error(created->status);
                     } else {
                         result.outcome = api::Outcome::CREATED;
                         taken.insert(entry.tag);
