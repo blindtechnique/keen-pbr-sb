@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace keen_pbr3 {
 
@@ -70,6 +71,20 @@ public:
     // False means the claim survived - because it differs, or because the
     // remove failed - and the caller must treat it as still standing.
     bool remove_exact(const NdmsNativeOwnershipRecord& expected);
+
+    // Every interface name this store currently holds a file for, sorted.
+    // Names that could never be claimed are skipped rather than reported: a
+    // file called Wireguard0 is foreign residue, and a caller enumerating
+    // claims must not be handed one it is forbidden to act on.
+    //
+    // Reading a claim can still fail per name - this only says which names
+    // exist. An unreadable directory yields nothing, which callers must not
+    // read as "no claims": use the returned flag.
+    struct Listing {
+        bool readable{false};
+        std::vector<std::string> interface_names;
+    };
+    Listing list_claimed_interfaces() const;
 
     const std::filesystem::path& state_directory() const noexcept;
 

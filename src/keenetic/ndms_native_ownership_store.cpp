@@ -196,6 +196,35 @@ bool NdmsNativeOwnershipStore::remove_exact(
            NdmsNativeOwnershipReadState::absent;
 }
 
+NdmsNativeOwnershipStore::Listing
+NdmsNativeOwnershipStore::list_claimed_interfaces() const {
+    Listing listing;
+    std::error_code error;
+    const auto status = std::filesystem::status(state_directory_, error);
+    if (!std::filesystem::status_known(status)) return listing;
+    if (!std::filesystem::exists(status)) {
+        // A store that was never written is readable and empty, not broken.
+        listing.readable = true;
+        return listing;
+    }
+    if (!std::filesystem::is_directory(status)) return listing;
+
+    std::filesystem::directory_iterator iterator(state_directory_, error);
+    if (error) return listing;
+    for (const auto& entry : iterator) {
+        const auto name = entry.path().filename().string();
+        // Only names this store could ever have claimed. Anything else is
+        // foreign residue, and handing it to a caller that enumerates claims
+        // would offer it something it is forbidden to act on.
+        if (!claimable_interface(name)) continue;
+        listing.interface_names.push_back(name);
+    }
+    std::sort(listing.interface_names.begin(),
+              listing.interface_names.end());
+    listing.readable = true;
+    return listing;
+}
+
 const std::filesystem::path&
 NdmsNativeOwnershipStore::state_directory() const noexcept {
     return state_directory_;
