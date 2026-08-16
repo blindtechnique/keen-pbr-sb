@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstring>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -27,6 +28,7 @@ SubscriptionDestinationVerdict judge_ipv4(const in_addr& address) noexcept {
     };
     const auto first = octet(24U);
     const auto second = octet(16U);
+    const auto third = octet(8U);
 
     if (host == 0U) return SubscriptionDestinationVerdict::unspecified;
     if (first == 127U) return SubscriptionDestinationVerdict::loopback;
@@ -59,6 +61,12 @@ SubscriptionDestinationVerdict judge_ipv4(const in_addr& address) noexcept {
     // place a subscription legitimately lives.
     if (first == 0U) return SubscriptionDestinationVerdict::reserved;
     if (first == 192U && second == 0U) {
+        return SubscriptionDestinationVerdict::reserved;
+    }
+    // 192.88.99.0/24 - the deprecated 6to4 relay anycast block. It is not a
+    // public destination even though it sits outside the broader 192.0/16
+    // protocol-assignment block above.
+    if (first == 192U && second == 88U && third == 99U) {
         return SubscriptionDestinationVerdict::reserved;
     }
     if (first == 198U && (second == 18U || second == 19U)) {
@@ -139,6 +147,33 @@ SubscriptionDestinationVerdict judge_ipv6(const in6_addr& address) noexcept {
                    ? SubscriptionDestinationVerdict::allowed
                    : verdict;
     }
+
+    // Native public IPv6 unicast is allocated from 2000::/3. Rejecting
+    // everything else closes deprecated site-local (fec0::/10), discard-only
+    // (100::/64), IPv4-compatible and future/reserved space instead of
+    // silently treating every syntactically valid IPv6 address as public.
+    // IPv4-mapped, 6to4 and NAT64 were handled above because their embedded
+    // IPv4 destination is the authority.
+    if ((bytes[0] & 0xE0U) != 0x20U) {
+        return SubscriptionDestinationVerdict::reserved;
+    }
+
+    // IETF protocol assignments under 2001::/23 (including Teredo,
+    // benchmarking and ORCHID) and documentation prefixes are special-use,
+    // not subscription origins. 3ffe::/16 is the retired 6bone block and
+    // 3fff::/20 is documentation space.
+    if (bytes[0] == 0x20U && bytes[1] == 0x01U &&
+        (bytes[2] <= 0x01U ||
+         (bytes[2] == 0x0DU && bytes[3] == 0xB8U))) {
+        return SubscriptionDestinationVerdict::reserved;
+    }
+    if (bytes[0] == 0x3FU && bytes[1] == 0xFEU) {
+        return SubscriptionDestinationVerdict::reserved;
+    }
+    if (bytes[0] == 0x3FU && bytes[1] == 0xFFU &&
+        (bytes[2] & 0xF0U) == 0x00U) {
+        return SubscriptionDestinationVerdict::reserved;
+    }
     return SubscriptionDestinationVerdict::allowed;
 }
 
@@ -150,17 +185,28 @@ SubscriptionDestinationVerdict subscription_destination_permitted(
         return SubscriptionDestinationVerdict::unparsable;
     }
     // A scope suffix (fe80::1%br0) is stripped before parsing; the address in
-    // front of it is what decides, and it is link-local anyway.
+    // front of it is what decides, and it is link-local anyway. Keep this
+    // allocation-free: the function is noexcept and is called from libcurl's
+    // socket callback, so an allocating substr() would turn memory pressure
+    // into std::terminate instead of a fail-closed refusal.
     const auto scope = address.find('%');
-    const std::string bare =
-        scope == std::string::npos ? address : address.substr(0U, scope);
+    std::array<char, INET6_ADDRSTRLEN> scoped_address{};
+    const char* bare = address.c_str();
+    if (scope != std::string::npos) {
+        if (scope == 0U || scope >= scoped_address.size()) {
+            return SubscriptionDestinationVerdict::unparsable;
+        }
+        std::memcpy(scoped_address.data(), address.data(), scope);
+        scoped_address[scope] = '\0';
+        bare = scoped_address.data();
+    }
 
     in_addr v4{};
-    if (::inet_pton(AF_INET, bare.c_str(), &v4) == 1) {
+    if (::inet_pton(AF_INET, bare, &v4) == 1) {
         return judge_ipv4(v4);
     }
     in6_addr v6{};
-    if (::inet_pton(AF_INET6, bare.c_str(), &v6) == 1) {
+    if (::inet_pton(AF_INET6, bare, &v6) == 1) {
         return judge_ipv6(v6);
     }
     // Not an address at all. This function is the last gate before a
