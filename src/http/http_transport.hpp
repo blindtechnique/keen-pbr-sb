@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <stdexcept>
@@ -30,6 +31,21 @@ struct HttpTransportRequest {
     bool discard_body{false};
     size_t max_response_size{size_t{8} * 1024U * 1024U};
     HttpCancellationToken cancellation;
+    // Consulted with every address this transfer is about to connect to,
+    // written as text, and refused by returning false.
+    //
+    // It has to live here rather than in the caller, because the caller cannot
+    // see these addresses. A URL judged before the request names a host, not a
+    // destination: the name is resolved later and may point anywhere, and with
+    // CURLOPT_FOLLOWLOCATION every one of the redirect hops below opens its own
+    // connection to an address that never appeared in the URL. A destination
+    // policy applied anywhere except here is a policy the transfer can walk
+    // around.
+    //
+    // Unset means unfiltered, which is what every existing caller wants: list
+    // and catalog downloads go to addresses the operator configured, not to
+    // ones an attacker supplied.
+    std::function<bool(const std::string&)> destination_filter;
 };
 
 struct HttpTransportResponse {

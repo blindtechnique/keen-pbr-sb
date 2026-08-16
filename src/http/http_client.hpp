@@ -23,6 +23,11 @@ void capture_response_header_line(std::string_view header,
 struct HttpRequestOptions {
     uint32_t fwmark{0};
     HttpCancellationToken cancellation;
+    // Judges every address the transfer connects to, redirect hops included.
+    // See HttpTransportRequest::destination_filter: a caller fetching a URL it
+    // did not choose must set this, because judging the URL beforehand judges
+    // a name and not a destination.
+    std::function<bool(const std::string&)> destination_filter;
 };
 
 class HttpError : public std::runtime_error {

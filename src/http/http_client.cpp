@@ -17,16 +17,16 @@ std::string trim_header_value(const std::string& value) {
 }
 HttpTransportRequest request_for(const std::string& url, std::chrono::seconds timeout,
                                  const std::string& user_agent, size_t max_size,
-                                 uint32_t fwmark,
-                                 HttpCancellationToken cancellation) {
+                                 const HttpRequestOptions& options) {
     HttpTransportRequest request;
     request.url = url;
     request.timeout_ms = static_cast<long>(timeout.count() * 1000);
     request.user_agent = user_agent;
-    request.fwmark = fwmark;
+    request.fwmark = options.fwmark;
     request.max_redirects = 5;
     request.max_response_size = max_size;
-    request.cancellation = std::move(cancellation);
+    request.cancellation = options.cancellation;
+    request.destination_filter = options.destination_filter;
     return request;
 }
 bool cancellation_requested(const HttpCancellationToken& cancellation) {
@@ -69,8 +69,7 @@ std::string HttpClient::download(const std::string& url, const HttpRequestOption
     throw_if_cancelled(options.cancellation);
     try {
         auto response = transport_->perform(request_for(
-            url, timeout_, user_agent_, max_response_size_, options.fwmark,
-            options.cancellation));
+            url, timeout_, user_agent_, max_response_size_, options));
         throw_if_cancelled(options.cancellation);
         throw_for_status(response.status_code);
         return response.body;
@@ -86,7 +85,7 @@ ConditionalDownloadResult HttpClient::download_conditional(
     const HttpRequestOptions& options) {
     throw_if_cancelled(options.cancellation);
     auto request = request_for(url, timeout_, user_agent_, max_response_size_,
-                               options.fwmark, options.cancellation);
+                               options);
     if (!if_none_match.empty()) request.headers.push_back("If-None-Match: " + if_none_match);
     if (!if_modified_since.empty()) request.headers.push_back("If-Modified-Since: " + if_modified_since);
     try {

@@ -4,8 +4,10 @@
 #include <climits>
 #include <cctype>
 #include <cstring>
+#include <arpa/inet.h>
 #include <curl/curl.h>
 #include <memory>
+#include <netinet/in.h>
 #include <sys/socket.h>
 
 namespace keen_pbr3 {
@@ -24,7 +26,16 @@ void setopt(CURL* curl, CURLoption option, T value) {
     if (rc != CURLE_OK) fail(rc, "curl_easy_setopt");
 }
 
-struct TransferContext { const HttpTransportRequest* request; HttpTransportResponse* response; int mark_errno{0}; int bind_errno{0}; };
+struct TransferContext {
+    const HttpTransportRequest* request;
+    HttpTransportResponse* response;
+    int mark_errno{0};
+    int bind_errno{0};
+    // The address the destination filter refused, kept so the failure says
+    // which one it was. Without it curl reports a plain connection failure and
+    // a refusal by policy becomes indistinguishable from an unreachable host.
+    std::string refused_address;
+};
 bool cancellation_requested(const HttpTransportRequest& request) {
     return request.cancellation &&
            request.cancellation->load(std::memory_order_relaxed);
@@ -79,6 +90,34 @@ int sockopt_callback(void* opaque, curl_socket_t fd, curlsocktype) {
     context->mark_errno = errno;
     return CURL_SOCKOPT_ERROR;
 }
+// Runs once per connection this transfer opens - the first one and every
+// redirect hop - with the address curl has already resolved and is about to
+// connect to. This is the only point where that address is knowable and the
+// connection is still preventable.
+curl_socket_t opensocket_callback(void* opaque, curlsocktype,
+                                  struct curl_sockaddr* address) {
+    auto* context = static_cast<TransferContext*>(opaque);
+    const auto& request = *context->request;
+    char text[INET6_ADDRSTRLEN] = {};
+    const void* raw = nullptr;
+    if (address->family == AF_INET) {
+        raw = &reinterpret_cast<const sockaddr_in*>(&address->addr)->sin_addr;
+    } else if (address->family == AF_INET6) {
+        raw = &reinterpret_cast<const sockaddr_in6*>(&address->addr)->sin6_addr;
+    }
+    // An address family we cannot render is one we cannot judge, and an
+    // unjudged address is refused: this callback exists to be the last word.
+    if (raw == nullptr ||
+        ::inet_ntop(address->family, raw, text, sizeof(text)) == nullptr) {
+        context->refused_address = "unrepresentable address";
+        return CURL_SOCKET_BAD;
+    }
+    if (!request.destination_filter(text)) {
+        context->refused_address = text;
+        return CURL_SOCKET_BAD;
+    }
+    return ::socket(address->family, address->socktype, address->protocol);
+}
 void restrict_protocols(CURL* curl) {
 #if LIBCURL_VERSION_NUM >= 0x075500
     setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
@@ -111,6 +150,10 @@ HttpTransportResponse LibcurlHttpTransport::perform(const HttpTransportRequest& 
     setopt(curl.get(), CURLOPT_HEADERDATA, &response);
     setopt(curl.get(), CURLOPT_SOCKOPTFUNCTION, sockopt_callback);
     setopt(curl.get(), CURLOPT_SOCKOPTDATA, &context);
+    if (request.destination_filter) {
+        setopt(curl.get(), CURLOPT_OPENSOCKETFUNCTION, opensocket_callback);
+        setopt(curl.get(), CURLOPT_OPENSOCKETDATA, &context);
+    }
     setopt(curl.get(), CURLOPT_ERRORBUFFER, error_buffer);
     if (request.cancellation) {
         setopt(curl.get(), CURLOPT_NOPROGRESS, 0L);
@@ -133,6 +176,14 @@ HttpTransportResponse LibcurlHttpTransport::perform(const HttpTransportRequest& 
         if (result == CURLE_ABORTED_BY_CALLBACK &&
             cancellation_requested(request)) {
             throw HttpTransportCancelled("HTTP request cancelled");
+        }
+        if (!context.refused_address.empty()) {
+            // Said before curl's own text, and said distinctly: a refusal by
+            // policy is not an unreachable host, and an operator who reads it
+            // as one will go looking for a network fault that is not there.
+            throw HttpTransportError(
+                "HTTP request refused: the destination policy does not permit " +
+                context.refused_address);
         }
         std::string message = error_buffer[0] ? error_buffer : curl_easy_strerror(result);
         if (context.bind_errno) {

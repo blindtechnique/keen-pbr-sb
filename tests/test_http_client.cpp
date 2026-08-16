@@ -4,6 +4,9 @@
 #include "../src/http/curl_runtime.hpp"
 #include "../src/health/url_tester.hpp"
 
+#include <string>
+#include <vector>
+
 namespace {
 
 class FakeTransport final : public keen_pbr3::HttpTransport {
@@ -109,6 +112,98 @@ TEST_CASE("http client builds conditional transport request and maps errors") {
     CHECK(transport->request.headers.size() == 2);
     transport->fail = true;
     CHECK_THROWS_AS(client.download("https://example.test/a"), keen_pbr3::HttpError);
+}
+
+TEST_CASE("a destination filter reaches the transport on both download paths") {
+    auto transport = std::make_shared<FakeTransport>();
+    keen_pbr3::HttpClient client(transport);
+    keen_pbr3::HttpRequestOptions options;
+    options.destination_filter = [](const std::string&) { return true; };
+
+    (void)client.download("https://example.test/a", options);
+    CHECK(static_cast<bool>(transport->request.destination_filter));
+
+    transport->request = {};
+    (void)client.download_conditional(
+        "https://example.test/a", "", "", options);
+    CHECK(static_cast<bool>(transport->request.destination_filter));
+
+    // Unset stays unset: list and catalog downloads go to addresses the
+    // operator configured, and filtering them would be a behaviour change
+    // dressed up as a security one.
+    transport->request = {};
+    (void)client.download("https://example.test/a");
+    CHECK_FALSE(static_cast<bool>(transport->request.destination_filter));
+}
+
+TEST_CASE("the destination filter judges the address curl resolved") {
+    // Runs against loopback with no listener: the filter fires before connect,
+    // so nothing has to be listening for the refusal to be observable, and the
+    // accepted case reaching a connection failure is what proves the filter is
+    // deciding rather than failing everything.
+    keen_pbr3::CurlRuntime curl_runtime;
+
+    SUBCASE("a refused address fails the request and says so") {
+        std::vector<std::string> seen;
+        keen_pbr3::HttpClient client;
+        client.set_timeout(std::chrono::seconds(5));
+        keen_pbr3::HttpRequestOptions options;
+        options.destination_filter = [&seen](const std::string& address) {
+            seen.push_back(address);
+            return false;
+        };
+        try {
+            (void)client.download("http://127.0.0.1:9/", options);
+            FAIL("Expected the destination filter to refuse");
+        } catch (const keen_pbr3::HttpError& error) {
+            const std::string message = error.what();
+            CHECK(message.find("destination policy") != std::string::npos);
+            CHECK(message.find("127.0.0.1") != std::string::npos);
+        }
+        REQUIRE(seen.size() == 1U);
+        CHECK(seen.front() == "127.0.0.1");
+    }
+
+    SUBCASE("an accepted address is not refused by the filter") {
+        std::vector<std::string> seen;
+        keen_pbr3::HttpClient client;
+        client.set_timeout(std::chrono::seconds(5));
+        keen_pbr3::HttpRequestOptions options;
+        options.destination_filter = [&seen](const std::string& address) {
+            seen.push_back(address);
+            return true;
+        };
+        try {
+            (void)client.download("http://127.0.0.1:9/", options);
+        } catch (const keen_pbr3::HttpError& error) {
+            // Nothing is listening, so a connection failure is expected. What
+            // must not appear is the policy refusal.
+            const std::string message = error.what();
+            CHECK(message.find("destination policy") == std::string::npos);
+        }
+        REQUIRE_FALSE(seen.empty());
+        CHECK(seen.front() == "127.0.0.1");
+    }
+
+    SUBCASE("an IPv6 destination is rendered as an address, not as bytes") {
+        std::vector<std::string> seen;
+        keen_pbr3::HttpClient client;
+        client.set_timeout(std::chrono::seconds(5));
+        keen_pbr3::HttpRequestOptions options;
+        options.destination_filter = [&seen](const std::string& address) {
+            seen.push_back(address);
+            return false;
+        };
+        try {
+            (void)client.download("http://[::1]:9/", options);
+        } catch (const keen_pbr3::HttpError&) {
+        }
+        if (!seen.empty()) {
+            // Some builders run without an IPv6 loopback route; when the stack
+            // is there, the filter must receive something it can parse.
+            CHECK(seen.front() == "::1");
+        }
+    }
 }
 
 TEST_CASE("http client propagates and honors cooperative cancellation") {
