@@ -8,6 +8,7 @@ import {
   postListsRefresh,
   postListDeleteStage,
   postConfig,
+  postConfigDiscard,
   postConfigSave,
   postRecommendedListSetup,
   postRoutingTest,
@@ -17,6 +18,7 @@ import {
   usePostListsRefresh,
   usePostListDeleteStage,
   usePostConfig,
+  usePostConfigDiscard,
   usePostConfigSave,
   usePostRecommendedListSetup,
   usePostRoutingTest,
@@ -46,6 +48,7 @@ type UsePostListDeleteStageOptions = Parameters<
   typeof usePostListDeleteStage<ApiError>
 >[0]
 type UsePostConfigOptions = Parameters<typeof usePostConfig>[0]
+type UsePostConfigDiscardOptions = Parameters<typeof usePostConfigDiscard>[0]
 type UsePostConfigSaveOptions = Parameters<typeof usePostConfigSave>[0]
 type UsePostRecommendedListSetupOptions = Parameters<
   typeof usePostRecommendedListSetup
@@ -118,6 +121,7 @@ export const usePostTransportConfigApplyMutation = () => {
 
 export {
   postConfig,
+  postConfigDiscard,
   postConfigSave,
   postListDeleteStage,
   postRecommendedListSetup,
@@ -354,6 +358,31 @@ export const useApplyConfigMutation = (options?: UsePostConfigSaveOptions) => {
   })
 }
 
+export const useDiscardConfigMutation = (
+  options?: UsePostConfigDiscardOptions
+) => {
+  const queryClient = useQueryClient()
+
+  return usePostConfigDiscard({
+    ...options,
+    mutation: {
+      ...options?.mutation,
+      onSuccess: async (data, variables, onMutateResult, context) => {
+        for (const queryKey of invalidationKeysAfterConfigMutation) {
+          await queryClient.invalidateQueries({ queryKey })
+        }
+
+        await options?.mutation?.onSuccess?.(
+          data,
+          variables,
+          onMutateResult,
+          context
+        )
+      },
+    },
+  })
+}
+
 export const usePostRoutingTestMutation = (
   options?: UsePostRoutingTestOptions
 ) => usePostRoutingTest(options)
@@ -386,20 +415,25 @@ export function isConfigMutationPending(
   postConfigSaveCount: number,
   listDeleteStageCount = 0,
   postTransportConfigCount = 0,
-  postTransportConfigApplyCount = 0
+  postTransportConfigApplyCount = 0,
+  postConfigDiscardCount = 0
 ) {
   return (
     postConfigCount > 0 ||
     postConfigSaveCount > 0 ||
     listDeleteStageCount > 0 ||
     postTransportConfigCount > 0 ||
-    postTransportConfigApplyCount > 0
+    postTransportConfigApplyCount > 0 ||
+    postConfigDiscardCount > 0
   )
 }
 
 export const useConfigMutationPending = () => {
   const postConfigCount = useIsMutating({ mutationKey: ["postConfig"] })
   const postConfigSaveCount = useIsMutating({ mutationKey: ["postConfigSave"] })
+  const postConfigDiscardCount = useIsMutating({
+    mutationKey: ["postConfigDiscard"],
+  })
   const listDeleteStageCount = useIsMutating({
     mutationKey: ["postListDeleteStage"],
   })
@@ -415,7 +449,8 @@ export const useConfigMutationPending = () => {
     postConfigSaveCount,
     listDeleteStageCount,
     postTransportConfigCount,
-    postTransportConfigApplyCount
+    postTransportConfigApplyCount,
+    postConfigDiscardCount
   )
 }
 
@@ -426,7 +461,10 @@ export const useRoutingControlPendingState = () => {
   })
   const draftPostPending = postConfigCount > 0 || listDeleteStageCount > 0
   const applyPending = useIsMutating({ mutationKey: ["postConfigSave"] }) > 0
-  const configMutationPending = draftPostPending || applyPending
+  const discardPending =
+    useIsMutating({ mutationKey: ["postConfigDiscard"] }) > 0
+  const configMutationPending =
+    draftPostPending || applyPending || discardPending
   const startPending =
     useIsMutating({ mutationKey: serviceActionMutationKey("start") }) > 0
   const stopPending =
@@ -436,6 +474,7 @@ export const useRoutingControlPendingState = () => {
 
   return {
     applyPending,
+    discardPending,
     draftPostPending,
     configMutationPending,
     startPending,

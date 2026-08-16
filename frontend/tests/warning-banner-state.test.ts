@@ -1,8 +1,15 @@
+import { readFileSync } from "node:fs"
+
 import { describe, expect, test } from "bun:test"
 
 import type { HealthResponse } from "../src/api/generated/model"
 import { getWarningBannerMode } from "../src/components/layout/warning-banner-state"
 import { retainLifecycleOperation } from "../src/components/layout/warning-banner-state"
+
+const warningBannerSource = readFileSync(
+  new URL("../src/components/layout/warning-banner.tsx", import.meta.url),
+  "utf8"
+)
 
 function health(overrides: Partial<HealthResponse>): HealthResponse {
   return {
@@ -85,5 +92,16 @@ describe("getWarningBannerMode", () => {
         stages: [],
       })
     ).toBeNull()
+  })
+})
+
+describe("WarningBanner draft actions", () => {
+  test("offers guarded discard alongside apply for a pending draft", () => {
+    expect(warningBannerSource).toContain("useDiscardConfigMutation")
+    expect(warningBannerSource).toContain("state.hasDraftConfig")
+    expect(warningBannerSource).toContain("discardConfigMutation.mutate()")
+    expect(warningBannerSource).toContain('t("warning.actions.discard")')
+    expect(warningBannerSource).toContain("handleApplyAndReload")
+    expect(warningBannerSource).toContain("state.isActionDisabled")
   })
 })

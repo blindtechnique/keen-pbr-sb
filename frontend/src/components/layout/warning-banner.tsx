@@ -1,12 +1,16 @@
 import { useLayoutEffect, useRef } from "react"
-import { SaveIcon } from "lucide-react"
+import { RotateCcwIcon, SaveIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
+import { toast } from "sonner"
 
 import {
   useApplyConfigMutation,
+  useDiscardConfigMutation,
   usePostServiceActionMutation,
 } from "@/api/mutations"
+import type { ApiError } from "@/api/client"
 import { Button } from "@/components/ui/button"
+import { getApiErrorMessage } from "@/lib/api-errors"
 import { cn } from "@/lib/utils"
 import type {
   WarningBannerMode,
@@ -22,6 +26,13 @@ export function WarningBanner({
 }) {
   const { t } = useTranslation()
   const applyConfigMutation = useApplyConfigMutation()
+  const discardConfigMutation = useDiscardConfigMutation({
+    mutation: {
+      onError: (error) => {
+        toast.error(getApiErrorMessage(error as ApiError), { richColors: true })
+      },
+    },
+  })
   const restartServiceMutation = usePostServiceActionMutation("restart")
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -103,29 +114,45 @@ export function WarningBanner({
             </p>
           </div>
 
-          {!isConverging && !isLifecycle ? (
-            <Button
-              disabled={state.isActionDisabled}
-              onClick={handleApplyAndReload}
-              size="sm"
-              className="shrink-0"
-            >
-              <SaveIcon className="mr-1 h-4 w-4" />
-              {state.actionPending
-                ? t("warning.actions.applyingAndRestarting")
-                : t("warning.actions.applyAndRestart")}
-            </Button>
-          ) : null}
-          {state.mode === "lifecycle-error" ? (
-            <Button
-              onClick={state.dismissFailure}
-              size="sm"
-              variant="outline"
-              className="shrink-0"
-            >
-              {t("lifecycle.dismiss")}
-            </Button>
-          ) : null}
+          <div className="flex shrink-0 gap-2">
+            {!isConverging && !isLifecycle && state.hasDraftConfig ? (
+              <Button
+                disabled={state.isActionDisabled}
+                onClick={() => discardConfigMutation.mutate()}
+                size="sm"
+                variant="outline"
+                className="shrink-0"
+              >
+                <RotateCcwIcon className="mr-1 h-4 w-4" />
+                {discardConfigMutation.isPending
+                  ? t("warning.actions.discarding")
+                  : t("warning.actions.discard")}
+              </Button>
+            ) : null}
+            {!isConverging && !isLifecycle ? (
+              <Button
+                disabled={state.isActionDisabled}
+                onClick={handleApplyAndReload}
+                size="sm"
+                className="shrink-0"
+              >
+                <SaveIcon className="mr-1 h-4 w-4" />
+                {state.actionPending
+                  ? t("warning.actions.applyingAndRestarting")
+                  : t("warning.actions.applyAndRestart")}
+              </Button>
+            ) : null}
+            {state.mode === "lifecycle-error" ? (
+              <Button
+                onClick={state.dismissFailure}
+                size="sm"
+                variant="outline"
+                className="shrink-0"
+              >
+                {t("lifecycle.dismiss")}
+              </Button>
+            ) : null}
+          </div>
         </div>
 
         {isLifecycle && state.operationSteps.length > 0 ? (

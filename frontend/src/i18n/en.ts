@@ -1217,6 +1217,8 @@ export const enTranslation = {
     actions: {
       applying: "Applying...",
       apply: "Apply",
+      discarding: "Discarding...",
+      discard: "Discard changes",
       applyingAndRestarting: "Applying & Restarting...",
       applyAndRestart: "Apply & Restart",
       restarting: "Restarting...",
