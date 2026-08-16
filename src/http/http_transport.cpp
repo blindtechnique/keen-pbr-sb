@@ -1,6 +1,7 @@
 #include "http_transport.hpp"
 
 #include <cerrno>
+#include <array>
 #include <climits>
 #include <cctype>
 #include <cstring>
@@ -34,24 +35,38 @@ struct TransferContext {
     // The address the destination filter refused, kept so the failure says
     // which one it was. Without it curl reports a plain connection failure and
     // a refusal by policy becomes indistinguishable from an unreachable host.
-    std::string refused_address;
+    std::array<char, INET6_ADDRSTRLEN> refused_address{};
+    enum class CallbackFailure : std::uint8_t {
+        none,
+        response_body,
+        response_header,
+        destination_filter,
+    } callback_failure{CallbackFailure::none};
 };
 bool cancellation_requested(const HttpTransportRequest& request) {
     return request.cancellation &&
            request.cancellation->load(std::memory_order_relaxed);
 }
-int progress_callback(void* opaque, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+int progress_callback(void* opaque, curl_off_t, curl_off_t, curl_off_t,
+                      curl_off_t) noexcept {
     const auto* context = static_cast<const TransferContext*>(opaque);
     return cancellation_requested(*context->request) ? 1 : 0;
 }
-size_t write_callback(char* data, size_t size, size_t count, void* opaque) {
+size_t write_callback(char* data, size_t size, size_t count,
+                      void* opaque) noexcept {
     if (count && size > SIZE_MAX / count) return 0;
     auto* context = static_cast<TransferContext*>(opaque);
     const size_t total = size * count;
     if (context->request->discard_body) return total;
     if (total > context->request->max_response_size - context->response->body.size()) return 0;
-    context->response->body.append(data, total);
-    return total;
+    try {
+        context->response->body.append(data, total);
+        return total;
+    } catch (...) {
+        context->callback_failure =
+            TransferContext::CallbackFailure::response_body;
+        return 0;
+    }
 }
 std::string trim(std::string value) {
     const auto first = value.find_first_not_of(" \t\r\n");
@@ -59,20 +74,34 @@ std::string trim(std::string value) {
     const auto last = value.find_last_not_of(" \t\r\n");
     return value.substr(first, last - first + 1);
 }
-size_t header_callback(char* data, size_t size, size_t count, void* opaque) {
+size_t header_callback(char* data, size_t size, size_t count,
+                       void* opaque) noexcept {
     if (count && size > SIZE_MAX / count) return 0;
-    auto* response = static_cast<HttpTransportResponse*>(opaque);
-    std::string line(data, size * count);
-    if (line.rfind("HTTP/", 0) == 0) { response->headers.clear(); return line.size(); }
-    const auto colon = line.find(':');
-    if (colon != std::string::npos) {
-        std::string name = line.substr(0, colon);
-        for (char& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        response->headers[name] = trim(line.substr(colon + 1));
+    auto* context = static_cast<TransferContext*>(opaque);
+    try {
+        std::string line(data, size * count);
+        if (line.rfind("HTTP/", 0) == 0) {
+            context->response->headers.clear();
+            return line.size();
+        }
+        const auto colon = line.find(':');
+        if (colon != std::string::npos) {
+            std::string name = line.substr(0, colon);
+            for (char& c : name) {
+                c = static_cast<char>(
+                    std::tolower(static_cast<unsigned char>(c)));
+            }
+            context->response->headers[name] =
+                trim(line.substr(colon + 1));
+        }
+        return line.size();
+    } catch (...) {
+        context->callback_failure =
+            TransferContext::CallbackFailure::response_header;
+        return 0;
     }
-    return line.size();
 }
-int sockopt_callback(void* opaque, curl_socket_t fd, curlsocktype) {
+int sockopt_callback(void* opaque, curl_socket_t fd, curlsocktype) noexcept {
     auto* context = static_cast<TransferContext*>(opaque);
     const auto& request = *context->request;
     // Bind before the mark: a request that asked to be attributable must fail
@@ -95,7 +124,7 @@ int sockopt_callback(void* opaque, curl_socket_t fd, curlsocktype) {
 // connect to. This is the only point where that address is knowable and the
 // connection is still preventable.
 curl_socket_t opensocket_callback(void* opaque, curlsocktype,
-                                  struct curl_sockaddr* address) {
+                                  struct curl_sockaddr* address) noexcept {
     auto* context = static_cast<TransferContext*>(opaque);
     const auto& request = *context->request;
     char text[INET6_ADDRSTRLEN] = {};
@@ -109,11 +138,23 @@ curl_socket_t opensocket_callback(void* opaque, curlsocktype,
     // unjudged address is refused: this callback exists to be the last word.
     if (raw == nullptr ||
         ::inet_ntop(address->family, raw, text, sizeof(text)) == nullptr) {
-        context->refused_address = "unrepresentable address";
+        constexpr char message[] = "unrepresentable address";
+        std::memcpy(context->refused_address.data(), message, sizeof(message));
         return CURL_SOCKET_BAD;
     }
-    if (!request.destination_filter(text)) {
-        context->refused_address = text;
+    bool permitted = false;
+    try {
+        permitted = request.destination_filter(text);
+    } catch (...) {
+        // A caller-controlled policy is invoked from libcurl's C stack. No
+        // C++ exception may cross it; an unevaluable destination is refused.
+        context->callback_failure =
+            TransferContext::CallbackFailure::destination_filter;
+        return CURL_SOCKET_BAD;
+    }
+    if (!permitted) {
+        std::memcpy(context->refused_address.data(), text,
+                    std::strlen(text) + 1U);
         return CURL_SOCKET_BAD;
     }
     return ::socket(address->family, address->socktype, address->protocol);
@@ -147,10 +188,17 @@ HttpTransportResponse LibcurlHttpTransport::perform(const HttpTransportRequest& 
     setopt(curl.get(), CURLOPT_WRITEFUNCTION, write_callback);
     setopt(curl.get(), CURLOPT_WRITEDATA, &context);
     setopt(curl.get(), CURLOPT_HEADERFUNCTION, header_callback);
-    setopt(curl.get(), CURLOPT_HEADERDATA, &response);
+    setopt(curl.get(), CURLOPT_HEADERDATA, &context);
     setopt(curl.get(), CURLOPT_SOCKOPTFUNCTION, sockopt_callback);
     setopt(curl.get(), CURLOPT_SOCKOPTDATA, &context);
     if (request.destination_filter) {
+        // A proxy is the address CURLOPT_OPENSOCKETFUNCTION sees. Letting
+        // libcurl inherit one from the environment would therefore approve
+        // the proxy while leaving the proxy free to resolve and reach a
+        // forbidden destination. Filtered fetches must connect directly.
+        // This branch is deliberately absent for legacy unfiltered callers.
+        setopt(curl.get(), CURLOPT_PROXY, "");
+        setopt(curl.get(), CURLOPT_NOPROXY, "*");
         setopt(curl.get(), CURLOPT_OPENSOCKETFUNCTION, opensocket_callback);
         setopt(curl.get(), CURLOPT_OPENSOCKETDATA, &context);
     }
@@ -177,13 +225,30 @@ HttpTransportResponse LibcurlHttpTransport::perform(const HttpTransportRequest& 
             cancellation_requested(request)) {
             throw HttpTransportCancelled("HTTP request cancelled");
         }
-        if (!context.refused_address.empty()) {
+        if (context.refused_address.front() != '\0') {
             // Said before curl's own text, and said distinctly: a refusal by
             // policy is not an unreachable host, and an operator who reads it
             // as one will go looking for a network fault that is not there.
             throw HttpTransportError(
-                "HTTP request refused: the destination policy does not permit " +
-                context.refused_address);
+                std::string{
+                    "HTTP request refused: the destination policy does not permit "} +
+                context.refused_address.data());
+        }
+        if (context.callback_failure ==
+            TransferContext::CallbackFailure::destination_filter) {
+            throw HttpTransportError(
+                "HTTP request refused: the destination policy could not "
+                "evaluate an address");
+        }
+        if (context.callback_failure ==
+            TransferContext::CallbackFailure::response_body) {
+            throw HttpTransportError(
+                "HTTP request failed while storing the response body");
+        }
+        if (context.callback_failure ==
+            TransferContext::CallbackFailure::response_header) {
+            throw HttpTransportError(
+                "HTTP request failed while storing response headers");
         }
         std::string message = error_buffer[0] ? error_buffer : curl_easy_strerror(result);
         if (context.bind_errno) {

@@ -6,6 +6,8 @@
 
 #include <string>
 #include <vector>
+#include <cstdlib>
+#include <optional>
 
 namespace {
 
@@ -21,6 +23,27 @@ public:
         if (fail) throw keen_pbr3::HttpTransportError("transport unavailable");
         return response;
     }
+};
+
+class EnvironmentVariableGuard {
+public:
+    EnvironmentVariableGuard(const char* name, const std::string& value)
+        : name_(name) {
+        if (const char* previous = std::getenv(name)) previous_ = previous;
+        REQUIRE(::setenv(name, value.c_str(), 1) == 0);
+    }
+
+    ~EnvironmentVariableGuard() {
+        if (previous_) {
+            (void)::setenv(name_.c_str(), previous_->c_str(), 1);
+        } else {
+            (void)::unsetenv(name_.c_str());
+        }
+    }
+
+private:
+    std::string name_;
+    std::optional<std::string> previous_;
 };
 
 constexpr const char* kReadmeUrl =
@@ -204,6 +227,52 @@ TEST_CASE("the destination filter judges the address curl resolved") {
             CHECK(seen.front() == "::1");
         }
     }
+
+    SUBCASE("a throwing policy is refused without escaping libcurl's C stack") {
+        keen_pbr3::HttpClient client;
+        client.set_timeout(std::chrono::seconds(5));
+        keen_pbr3::HttpRequestOptions options;
+        options.destination_filter = [](const std::string&) -> bool {
+            throw std::runtime_error("policy failure");
+        };
+        try {
+            (void)client.download("http://127.0.0.1:9/", options);
+            FAIL("Expected the destination filter to fail closed");
+        } catch (const keen_pbr3::HttpError& error) {
+            CHECK(std::string(error.what()).find("could not evaluate") !=
+                  std::string::npos);
+        }
+    }
+}
+
+TEST_CASE("a filtered request never delegates destination policy to a proxy") {
+    // CURLOPT_OPENSOCKETFUNCTION sees the proxy address when a proxy is in
+    // use. If a filtered request inherited this environment, approving the
+    // proxy would let it resolve and reach a forbidden destination itself.
+    EnvironmentVariableGuard http_proxy(
+        "http_proxy", "http://127.0.0.2:9");
+    EnvironmentVariableGuard all_proxy(
+        "ALL_PROXY", "http://127.0.0.2:9");
+    EnvironmentVariableGuard no_proxy("no_proxy", "");
+    EnvironmentVariableGuard upper_no_proxy("NO_PROXY", "");
+
+    std::vector<std::string> seen;
+    keen_pbr3::CurlRuntime curl_runtime;
+    keen_pbr3::HttpClient client;
+    client.set_timeout(std::chrono::seconds(5));
+    keen_pbr3::HttpRequestOptions options;
+    options.destination_filter = [&seen](const std::string& address) {
+        seen.push_back(address);
+        return address == "127.0.0.1";
+    };
+    try {
+        (void)client.download("http://127.0.0.1:9/", options);
+    } catch (const keen_pbr3::HttpError& error) {
+        CHECK(std::string(error.what()).find("destination policy") ==
+              std::string::npos);
+    }
+    REQUIRE_FALSE(seen.empty());
+    CHECK(seen.front() == "127.0.0.1");
 }
 
 TEST_CASE("http client propagates and honors cooperative cancellation") {
