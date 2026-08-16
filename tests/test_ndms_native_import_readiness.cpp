@@ -34,6 +34,11 @@ TEST_CASE("native import readiness distinguishes never-activated and empty journ
     empty.state = NdmsNativeImportWalInventoryState::ready;
     CHECK(summarize_ndms_native_import_readiness(empty) ==
           NdmsNativeImportJournalReadinessState::clean);
+    CHECK_FALSE(
+        ndms_native_import_inventory_permits_ownership_reconciliation(
+            absent));
+    CHECK(ndms_native_import_inventory_permits_ownership_reconciliation(
+        empty));
 }
 
 TEST_CASE("native import readiness reports every valid retained journal as recovery-required") {
@@ -53,6 +58,9 @@ TEST_CASE("native import readiness reports every valid retained journal as recov
         CHECK(summarize_ndms_native_import_readiness(inventory) ==
               NdmsNativeImportJournalReadinessState::
                   recovery_required);
+        CHECK_FALSE(
+            ndms_native_import_inventory_permits_ownership_reconciliation(
+                inventory));
     }
 }
 
@@ -83,6 +91,9 @@ TEST_CASE("native import readiness rejects incomplete or unsafe inventories") {
         CAPTURE(static_cast<int>(state));
         CHECK(summarize_ndms_native_import_readiness(inventory) ==
               NdmsNativeImportJournalReadinessState::unsafe);
+        CHECK_FALSE(
+            ndms_native_import_inventory_permits_ownership_reconciliation(
+                inventory));
     }
 }
 
@@ -96,6 +107,9 @@ TEST_CASE("native import readiness collapses unavailable inventory without ident
         CAPTURE(static_cast<int>(inventory_state));
         CHECK(summarize_ndms_native_import_readiness(inventory) ==
               NdmsNativeImportJournalReadinessState::unavailable);
+        CHECK_FALSE(
+            ndms_native_import_inventory_permits_ownership_reconciliation(
+                inventory));
     }
 
     for (const auto state : {

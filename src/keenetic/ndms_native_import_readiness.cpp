@@ -45,6 +45,12 @@ summarize_ndms_native_import_readiness(
     return NdmsNativeImportJournalReadinessState::unavailable;
 }
 
+bool ndms_native_import_inventory_permits_ownership_reconciliation(
+    const NdmsNativeImportWalInventory& inventory) noexcept {
+    return inventory.state == NdmsNativeImportWalInventoryState::ready &&
+           inventory.items.empty();
+}
+
 const char* ndms_native_import_journal_readiness_state_name(
     const NdmsNativeImportJournalReadinessState state) noexcept {
     switch (state) {

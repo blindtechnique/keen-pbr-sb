@@ -3984,15 +3984,19 @@ void Daemon::run() {
             // deleted by an operator whose process then died leaves a durable
             // claim over a slot that is now free; the live caller learns of it
             // from removed_claim_survived, and nothing else would ever notice.
-            // Skipped whenever a WAL transaction is in flight - the recovery
-            // dispatcher retracts its own claim, and a second remover racing
-            // it would turn that retirement into a failure.
-            const bool transaction_in_flight =
-                !native_import_inventory.items.empty();
+            // Skip unless this exact bounded snapshot proves a ready, empty
+            // WAL. Busy, unsafe, I/O-failed and absent stores are unknown for
+            // mutation authority even though `absent` is a useful report-only
+            // state while the writer remains disabled. The recovery dispatcher
+            // retracts its own claim, and a second remover racing it would turn
+            // that retirement into a failure.
+            const bool transaction_in_flight_or_unknown =
+                !ndms_native_import_inventory_permits_ownership_reconciliation(
+                    native_import_inventory);
             const auto reconciled =
                 reconcile_ndms_native_ownership_claims(
                     ndms_native_ownership_store_,
-                    transaction_in_flight,
+                    transaction_in_flight_or_unknown,
                     ndms_native_interface_delete_production_dependencies());
             if (!reconciled.store_readable) {
                 log.warn(

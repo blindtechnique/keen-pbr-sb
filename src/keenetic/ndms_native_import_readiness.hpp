@@ -32,6 +32,15 @@ NdmsNativeImportJournalReadinessState
 summarize_ndms_native_import_readiness(
     const NdmsNativeImportWalInventory& inventory) noexcept;
 
+// Ownership reconciliation removes durable claims.  It may run only when the
+// same bounded snapshot proves that the WAL store exists, was inspected
+// completely, and contains no transaction.  `absent` is intentionally not
+// enough authority here: it is a report-only clean state while the writer is
+// disabled, not proof that no other process owns an unpublished/recovery
+// transition.
+bool ndms_native_import_inventory_permits_ownership_reconciliation(
+    const NdmsNativeImportWalInventory& inventory) noexcept;
+
 const char* ndms_native_import_journal_readiness_state_name(
     NdmsNativeImportJournalReadinessState state) noexcept;
 
