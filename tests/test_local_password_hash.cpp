@@ -102,6 +102,11 @@ TEST_CASE("a damaged derived key never falls back to a plaintext comparison") {
         "kpbr-pbkdf2-sha256-v1$1000$" + kSalt,
         // Iteration count of zero: no derivation happened.
         "kpbr-pbkdf2-sha256-v1$0$" + kSalt + "$" + std::string(64U, 'a'),
+        // The cost comes from disk and must not be able to stall the login
+        // worker for an attacker-chosen number of rounds.
+        "kpbr-pbkdf2-sha256-v1$" +
+            std::to_string(kLocalPasswordHashMaximumIterations + 1U) + "$" +
+            kSalt + "$" + std::string(64U, 'a'),
         "kpbr-pbkdf2-sha256-v1$abc$" + kSalt + "$" + std::string(64U, 'a'),
         // Salt too short to be one.
         "kpbr-pbkdf2-sha256-v1$1000$0123$" + std::string(64U, 'a'),
@@ -131,6 +136,14 @@ TEST_CASE("a salt that is not one is refused rather than used") {
         CHECK(encode_local_password_hash("hunter2", salt, 1000U).empty());
     }
     CHECK(encode_local_password_hash("hunter2", kSalt, 0U).empty());
+    CHECK(encode_local_password_hash(
+              "hunter2", kSalt,
+              kLocalPasswordHashMaximumIterations + 1U)
+              .empty());
+    CHECK(local_password_derive_hex(
+              "hunter2", kSalt,
+              kLocalPasswordHashMaximumIterations + 1U)
+              .empty());
     // The accepted minimum is exactly kLocalPasswordSaltBytes.
     CHECK(kSalt.size() == kLocalPasswordSaltBytes * 2U);
     CHECK_FALSE(encode_local_password_hash("hunter2", kSalt, 1U).empty());

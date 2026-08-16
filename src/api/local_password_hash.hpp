@@ -29,11 +29,15 @@ namespace keen_pbr3 {
 //
 //     kpbr-pbkdf2-sha256-v1$<iterations>$<salt-hex>$<digest-hex>
 //
-// Nothing else in auth.json changes shape. A stored value that is not in this
-// form is a password from before this existed; verification still accepts it,
-// because refusing would lock the operator out of their own router, and the
-// caller is told which of the two it matched so the state can be surfaced
-// rather than silently carried.
+// auth.json carries this representation in a separate `password_format`
+// member. That discriminator is required: an existing plaintext password is
+// allowed to begin with the encoding marker, and guessing its representation
+// from the password bytes would lock that owner out. The low-level verifier
+// still reports legacy values for compatibility, but persistence callers must
+// select the branch from the explicit format field.
+
+inline constexpr char kLocalPasswordHashFormat[] =
+    "kpbr-pbkdf2-sha256-v1";
 
 // Measured, not estimated: on the NC-1812 (ARMv8, three cores available to
 // Entware) this costs 475 ms, reproducible to 0.2% across runs while the
@@ -42,6 +46,11 @@ namespace keen_pbr3 {
 // hung. A login is rate-limited to three failures per 100 s, so the worst an
 // attacker can spend of the daemon's CPU on this path is about 1.4%.
 inline constexpr std::uint32_t kLocalPasswordHashIterations = 60000U;
+// The encoded cost is data read from disk, so it needs a ceiling. 120000 was
+// measured at 948 ms on the target router; larger or corrupted values must not
+// turn one login attempt into an unbounded CPU stall. Raising the production
+// cost later must raise this reviewed ceiling deliberately as well.
+inline constexpr std::uint32_t kLocalPasswordHashMaximumIterations = 120000U;
 // 16 bytes. Enough that two installs never share a salt, small enough that the
 // encoded line stays readable.
 inline constexpr std::size_t kLocalPasswordSaltBytes = 16U;
@@ -78,9 +87,9 @@ std::string local_password_derive_hex(const std::string& password,
                                       std::uint32_t iterations);
 
 // Derives the stored form. `salt_hex` must be lowercase hex of at least
-// kLocalPasswordSaltBytes bytes and `iterations` must be non-zero; returns an
-// empty string otherwise, which callers must treat as a failure to store
-// rather than as a value to write.
+// kLocalPasswordSaltBytes bytes and `iterations` must be within the reviewed
+// cost ceiling; returns an empty string otherwise, which callers must treat as
+// a failure to store rather than as a value to write.
 std::string encode_local_password_hash(const std::string& password,
                                        const std::string& salt_hex,
                                        std::uint32_t iterations);

@@ -487,6 +487,10 @@ struct WebAuthConfig {
     bool keenetic_endpoint_from_ndms{false};
     std::string username;
     std::string password;
+    // auth.json selects the representation explicitly. Inferring it from the
+    // password bytes would make a legacy plaintext password beginning with the
+    // PBKDF2 marker impossible to use.
+    bool local_password_derived{false};
     std::chrono::seconds session_ttl{std::chrono::hours(24 * 7)};
     // The firmware's brute-force policy, read once alongside endpoint
     // discovery. Empty means the read failed, which keeps the conservative
@@ -558,6 +562,8 @@ WebAuthConfig load_web_auth_config() {
             document.value("keenetic_endpoint_mode", std::string{"auto"});
         config.username = document.value("username", std::string{});
         config.password = document.value("password", std::string{});
+        const auto password_format =
+            document.value("password_format", std::string{});
         const auto ttl = document.value("session_ttl_seconds", 604800);
 #ifdef KEEN_PBR3_TESTING
         constexpr auto minimum_session_ttl = 1;
@@ -574,6 +580,17 @@ WebAuthConfig load_web_auth_config() {
                     "auth.json contains an unknown provider");
             }
             config.provider = "local";
+        }
+        if (!config.uses_router_account() && !password_format.empty()) {
+            if (password_format != kLocalPasswordHashFormat) {
+                return misconfigured_web_auth(
+                    "auth.json contains an unknown local password format");
+            }
+            if (!local_password_hash_encoded(config.password)) {
+                return misconfigured_web_auth(
+                    "auth.json contains an invalid derived local password");
+            }
+            config.local_password_derived = true;
         }
         if (config.uses_router_account()) {
             if (config.keenetic_endpoint_mode != "auto" &&
@@ -1104,7 +1121,7 @@ struct ApiServer::Impl {
         const std::string& password) noexcept {
         try {
             const auto salt = random_session_token();
-            const std::string derived =
+            std::string derived =
                 salt ? encode_local_password_hash(
                            password, *salt, kLocalPasswordHashIterations)
                      : std::string{};
@@ -1127,6 +1144,7 @@ struct ApiServer::Impl {
                 if (auth_generation != verified_generation ||
                     !auth.enabled || auth.misconfigured ||
                     auth.provider != "local" ||
+                    auth.local_password_derived ||
                     !constant_time_equal(auth.username, username) ||
                     !constant_time_equal(auth.password, password)) {
                     return;
@@ -1151,6 +1169,7 @@ struct ApiServer::Impl {
                 !document.at("username").is_string() ||
                 !document.contains("password") ||
                 !document.at("password").is_string() ||
+                !document.value("password_format", std::string{}).empty() ||
                 !constant_time_equal(
                     document.at("username").get<std::string>(), username) ||
                 !constant_time_equal(
@@ -1158,6 +1177,7 @@ struct ApiServer::Impl {
                 return;
             }
             document["password"] = derived;
+            document["password_format"] = kLocalPasswordHashFormat;
 
             AtomicFileWriteOptions write_options;
             write_options.default_file_mode = 0600;
@@ -1205,13 +1225,18 @@ struct ApiServer::Impl {
                 std::lock_guard auth_lock(auth_mutex);
                 if (auth_generation != verified_generation ||
                     auth.provider != "local" ||
+                    auth.local_password_derived ||
                     !constant_time_equal(auth.username, username) ||
                     !constant_time_equal(auth.password, password)) {
                     return;
                 }
             }
-            verified_auth.password = derived;
-            replace_auth(verified_auth);
+            // No allocating copy after the rename: a memory-pressure failure
+            // must not leave the live process on plaintext while the next boot
+            // reads the derived representation.
+            verified_auth.password = std::move(derived);
+            verified_auth.local_password_derived = true;
+            replace_auth(std::move(verified_auth));
             auto current = auth_snapshot_with_generation();
             verified_auth = std::move(current.first);
             verified_generation = current.second;
@@ -1340,11 +1365,19 @@ struct ApiServer::Impl {
                 return outcome;
             }
         } else {
-            // Derived first and unconditionally, so a wrong username costs the
-            // same time as a wrong password. The login limiter already bounds
-            // how often anyone can spend it.
-            const auto verdict =
-                verify_local_password(auth.password, password);
+            // auth.json, not the password bytes, selects the representation.
+            // A legacy plaintext value may legitimately begin with the hash
+            // marker; treating that marker as a discriminator would lock its
+            // owner out before migration could run.
+            const auto verdict = auth.local_password_derived
+                                     ? verify_local_password(
+                                           auth.password, password)
+                                     : constant_time_equal(
+                                           auth.password, password)
+                                           ? LocalPasswordVerdict::
+                                                 matched_legacy_plaintext
+                                           : LocalPasswordVerdict::
+                                                 mismatched_legacy_plaintext;
             if (verdict == LocalPasswordVerdict::unusable) {
                 Logger::instance().error(
                     "The local credential in auth.json announces a derived key "
@@ -2293,6 +2326,11 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                     // enabled provider without credentials was refused above.
                     // There is nothing to derive a key from.
                     document["password"] = std::string{};
+                    // The representation tag describes the value beside it.
+                    // Retaining an earlier PBKDF2 tag with this deliberately
+                    // empty disabled credential would make the next boot
+                    // classify auth.json as corrupted.
+                    document.erase("password_format");
                 } else {
                     const auto salt = random_session_token();
                     const std::string derived =
@@ -2313,6 +2351,8 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                         return;
                     }
                     document["password"] = derived;
+                    document["password_format"] =
+                        kLocalPasswordHashFormat;
                 }
             }
 

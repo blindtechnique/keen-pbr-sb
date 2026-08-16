@@ -11,7 +11,7 @@ namespace keen_pbr3 {
 
 namespace {
 
-constexpr const char* kPrefix = "kpbr-pbkdf2-sha256-v1";
+constexpr const char* kPrefix = kLocalPasswordHashFormat;
 
 void secure_zero(void* memory, const std::size_t length) noexcept {
     auto* bytes = static_cast<volatile unsigned char*>(memory);
@@ -138,7 +138,10 @@ bool decode(const std::string& stored, DecodedHash& decoded) {
     }
     decoded.iterations = static_cast<std::uint32_t>(
         std::strtoul(iterations_text.c_str(), nullptr, 10));
-    if (decoded.iterations == 0U) return false;
+    if (decoded.iterations == 0U ||
+        decoded.iterations > kLocalPasswordHashMaximumIterations) {
+        return false;
+    }
 
     decoded.salt_hex = stored.substr(first + 1U, second - first - 1U);
     decoded.digest_hex = stored.substr(second + 1U);
@@ -178,14 +181,19 @@ bool local_password_hash_encoded(const std::string& stored) noexcept {
 std::string local_password_derive_hex(const std::string& password,
                                       const std::string& salt,
                                       const std::uint32_t iterations) {
-    if (iterations == 0U) return {};
+    if (iterations == 0U ||
+        iterations > kLocalPasswordHashMaximumIterations) {
+        return {};
+    }
     return hex_of(pbkdf2_sha256(password, salt, iterations));
 }
 
 std::string encode_local_password_hash(const std::string& password,
                                        const std::string& salt_hex,
                                        const std::uint32_t iterations) {
-    if (iterations == 0U || !lowercase_hex(salt_hex) ||
+    if (iterations == 0U ||
+        iterations > kLocalPasswordHashMaximumIterations ||
+        !lowercase_hex(salt_hex) ||
         salt_hex.size() < kLocalPasswordSaltBytes * 2U) {
         return {};
     }
@@ -202,8 +210,9 @@ LocalPasswordVerdict verify_local_password(const std::string& stored,
     // The marker alone is enough to claim the format; the separator is not
     // required. A stored value that begins with it and then fails to decode is
     // corruption, and a corrupted hash must not become a password whose shape
-    // an attacker already knows. The cost is that no password may begin with
-    // this exact marker, which is a fair trade for closing that door.
+    // an attacker already knows. This low-level compatibility API has no
+    // external discriminator; auth.json callers do, and select their legacy
+    // branch from `password_format` before calling this function.
     const std::string marker(kPrefix);
     const bool claims_to_be_a_hash =
         stored.compare(0U, marker.size(), marker) == 0;

@@ -1045,6 +1045,16 @@ TEST_CASE("auth settings need step-up and cannot switch to Keenetic while WAN is
           "step_up_required");
 
     grant_step_up(client, headers, "admin", "secret");
+    const auto before_blocked_switch =
+        nlohmann::json::parse(std::ifstream(auth_path));
+    REQUIRE(before_blocked_switch.at("provider") == "local");
+    REQUIRE(before_blocked_switch.at("password_format") ==
+            kLocalPasswordHashFormat);
+    const auto migrated_password =
+        before_blocked_switch.at("password").get<std::string>();
+    REQUIRE(local_password_hash_encoded(migrated_password));
+    REQUIRE(verify_local_password(migrated_password, "secret") ==
+            LocalPasswordVerdict::matched);
     const auto blocked = client.Post(
         "/api/auth/settings", headers, request_body, "application/json");
     server.stop();
@@ -1055,7 +1065,11 @@ TEST_CASE("auth settings need step-up and cannot switch to Keenetic while WAN is
           "remote_access_incompatible_with_keenetic_auth");
     const auto stored = nlohmann::json::parse(std::ifstream(auth_path));
     CHECK(stored.at("provider") == "local");
-    CHECK(stored.at("password") == "secret");
+    CHECK(stored == before_blocked_switch);
+    CHECK(stored.at("password") == migrated_password);
+    CHECK(verify_local_password(
+              stored.at("password").get<std::string>(), "secret") ==
+          LocalPasswordVerdict::matched);
 }
 
 TEST_CASE("remote access shares the middleware auth file authority") {

@@ -436,6 +436,7 @@ TEST_CASE("a successful legacy login atomically migrates auth.json") {
     const auto stored = nlohmann::json::parse(std::ifstream(auth_path));
     const auto persisted = stored.at("password").get<std::string>();
     CHECK(persisted != "legacy-secret");
+    CHECK(stored.at("password_format") == kLocalPasswordHashFormat);
     CHECK(local_password_hash_encoded(persisted));
     CHECK(verify_local_password(persisted, "legacy-secret") ==
           LocalPasswordVerdict::matched);
@@ -456,6 +457,102 @@ TEST_CASE("a successful legacy login atomically migrates auth.json") {
         "application/json");
     REQUIRE(after_restart != nullptr);
     CHECK(after_restart->status == 200);
+}
+
+TEST_CASE("an untagged legacy password may look exactly like a hash") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    const std::string legacy = encode_local_password_hash(
+        "not-the-owner-password",
+        "0123456789abcdef0123456789abcdef",
+        1000U);
+    REQUIRE(local_password_hash_encoded(legacy));
+    write_text(
+        auth_path,
+        nlohmann::json{
+            {"enabled", true},
+            {"provider", "local"},
+            {"username", "admin"},
+            {"password", legacy},
+        }
+                .dump());
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+
+    const auto config = auth_api_config();
+    {
+        ApiServer server(config);
+        server.start();
+        httplib::Client client("127.0.0.1", configured_port(config));
+        const auto login = client.Post(
+            "/api/auth/login",
+            nlohmann::json{
+                {"username", "admin"},
+                {"password", legacy},
+            }
+                .dump(),
+            "application/json");
+        REQUIRE(login != nullptr);
+        REQUIRE(login->status == 200);
+        server.stop();
+    }
+
+    const auto stored = nlohmann::json::parse(std::ifstream(auth_path));
+    REQUIRE(stored.at("password_format") == kLocalPasswordHashFormat);
+    const auto persisted = stored.at("password").get<std::string>();
+    REQUIRE(local_password_hash_encoded(persisted));
+    CHECK(verify_local_password(persisted, legacy) ==
+          LocalPasswordVerdict::matched);
+
+    // The atomic password+format publication remains usable after restart.
+    ApiServer restarted(config);
+    restarted.start();
+    httplib::Client restarted_client(
+        "127.0.0.1", configured_port(config));
+    const auto after_restart = restarted_client.Post(
+        "/api/auth/login",
+        nlohmann::json{
+            {"username", "admin"},
+            {"password", legacy},
+        }
+            .dump(),
+        "application/json");
+    REQUIRE(after_restart != nullptr);
+    CHECK(after_restart->status == 200);
+}
+
+TEST_CASE("an explicitly tagged damaged local password fails closed") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    write_text(
+        auth_path,
+        nlohmann::json{
+            {"enabled", true},
+            {"provider", "local"},
+            {"username", "admin"},
+            {"password", kLocalPasswordHashFormat},
+            {"password_format", kLocalPasswordHashFormat},
+        }
+                .dump());
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+    httplib::Client client("127.0.0.1", configured_port(config));
+    const auto status = get_auth_status(client);
+    CHECK(status.at("error") == "auth_misconfigured");
+    const auto login = client.Post(
+        "/api/auth/login",
+        nlohmann::json{
+            {"username", "admin"},
+            {"password", kLocalPasswordHashFormat},
+        }
+            .dump(),
+        "application/json");
+    REQUIRE(login != nullptr);
+    CHECK(login->status == 503);
 }
 
 TEST_CASE("a pre-commit migration failure never locks out the legacy owner") {
@@ -485,6 +582,7 @@ TEST_CASE("a pre-commit migration failure never locks out the legacy owner") {
 
     const auto stored = nlohmann::json::parse(std::ifstream(auth_path));
     CHECK(stored.at("password") == "legacy-secret");
+    CHECK_FALSE(stored.contains("password_format"));
 }
 
 TEST_CASE("a post-rename migration sync failure keeps old and new boots usable") {
@@ -514,6 +612,7 @@ TEST_CASE("a post-rename migration sync failure keeps old and new boots usable")
 
     const auto stored = nlohmann::json::parse(std::ifstream(auth_path));
     const auto persisted = stored.at("password").get<std::string>();
+    CHECK(stored.at("password_format") == kLocalPasswordHashFormat);
     CHECK(local_password_hash_encoded(persisted));
     CHECK(verify_local_password(persisted, "legacy-secret") ==
           LocalPasswordVerdict::matched);
@@ -591,6 +690,7 @@ TEST_CASE("auth settings are replaced atomically with private permissions") {
     const auto persisted = stored.at("password").get<std::string>();
     CHECK(persisted != "new-secret");
     CHECK(persisted.find("new-secret") == std::string::npos);
+    CHECK(stored.at("password_format") == kLocalPasswordHashFormat);
     CHECK(local_password_hash_encoded(persisted));
     CHECK(verify_local_password(persisted, "new-secret") ==
           LocalPasswordVerdict::matched);
@@ -655,6 +755,74 @@ TEST_CASE("authentication cannot be disabled while remote access is desired") {
     CHECK(nlohmann::json::parse(status->body)
               .at("authenticated")
               .get<bool>());
+}
+
+TEST_CASE("disabling local authentication removes the derived format tag") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    const auto remote_path = directory.path / "remote-access.json";
+    const auto derived = encode_local_password_hash(
+        "secret", "0123456789abcdef0123456789abcdef", 1000U);
+    REQUIRE(local_password_hash_encoded(derived));
+    write_text(
+        auth_path,
+        nlohmann::json{
+            {"enabled", true},
+            {"provider", "local"},
+            {"username", "admin"},
+            {"password", derived},
+            {"password_format", kLocalPasswordHashFormat},
+        }
+            .dump());
+    write_text(remote_path, R"({"enabled":false,"port":12121})");
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+    EnvironmentVariableGuard remote_file(
+        "KEEN_PBR_TEST_REMOTE_SETTINGS_FILE", remote_path.string());
+    VerifiedClosedRemoteAccessGuard remote_access_closed;
+    TrustedLocalConnectionEvaluatorGuard trusted_local_transport(
+        [](std::string_view, std::string_view, bool) { return true; });
+
+    const auto config = auth_api_config();
+    {
+        ApiServer server(config);
+        server.start();
+        httplib::Client client("127.0.0.1", configured_port(config));
+        const auto login = client.Post(
+            "/api/auth/login",
+            R"({"username":"admin","password":"secret"})",
+            "application/json");
+        REQUIRE(login != nullptr);
+        REQUIRE(login->status == 200);
+        const httplib::Headers headers{
+            {"Cookie", session_cookie(*login)},
+        };
+        grant_local_step_up(client, headers, "admin", "secret");
+
+        const auto disable = client.Post(
+            "/api/auth/settings",
+            headers,
+            R"({"enabled":false,"provider":"local"})",
+            "application/json");
+        REQUIRE(disable != nullptr);
+        CHECK(disable->status == 200);
+        server.stop();
+    }
+
+    const auto stored = nlohmann::json::parse(std::ifstream(auth_path));
+    CHECK_FALSE(stored.at("enabled").get<bool>());
+    CHECK(stored.at("password") == "");
+    CHECK_FALSE(stored.contains("password_format"));
+
+    // Restart must load the deliberately disabled state instead of treating a
+    // stale representation tag as a damaged derived credential.
+    ApiServer restarted(config);
+    restarted.start();
+    httplib::Client restarted_client(
+        "127.0.0.1", configured_port(config));
+    const auto status = get_auth_status(restarted_client);
+    CHECK_FALSE(status.at("enabled").get<bool>());
+    CHECK_FALSE(status.contains("error"));
 }
 
 TEST_CASE(
@@ -783,6 +951,7 @@ TEST_CASE(
     CHECK(stored.at("username") == "new");
     const auto persisted = stored.at("password").get<std::string>();
     CHECK(persisted != "new-secret");
+    CHECK(stored.at("password_format") == kLocalPasswordHashFormat);
     CHECK(verify_local_password(persisted, "new-secret") ==
           LocalPasswordVerdict::matched);
 
