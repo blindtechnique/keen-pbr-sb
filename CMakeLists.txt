@@ -423,6 +423,7 @@ set(SOURCES
   src/keenetic/ndms_native_interface_delete.cpp
   src/keenetic/ndms_native_tunnel_removal.cpp
   src/keenetic/ndms_native_ownership_reconcile.cpp
+  src/keenetic/ndms_native_remove_policy.cpp
   src/keenetic/ndms_native_interface_delete_production.cpp
   src/keenetic/ndms_native_target_evidence.cpp
   src/keenetic/ndms_native_import_wal_store.cpp
