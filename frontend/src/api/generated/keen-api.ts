@@ -54,6 +54,10 @@ import type {
   RuntimeInterfaceInventoryResponse,
   RuntimeInventoryResponse,
   RuntimeOutboundsResponse,
+  SubscriptionApplyRequest,
+  SubscriptionApplyResponse,
+  SubscriptionPreviewRequest,
+  SubscriptionPreviewResponse,
   TransportActionRequest,
   TransportActionResponse,
   TransportConfigApplyRequest,
@@ -1135,6 +1139,102 @@ export const usePostConfigSave = <TError = ErrorResponse,
         TContext
       > => {
       return useMutation(getPostConfigSaveMutationOptions(options), queryClient);
+    }
+
+/**
+ * Drops the staged in-memory draft and returns the visible configuration to the persisted one. Nothing is written to disk and the routing runtime is not touched. This is the counterpart to `POST /api/config/save`: several endpoints — backup restore, catalog setup, linked-transport creation, reload and list refresh — refuse to run while a draft is staged, and this is the exit that does not apply the draft. Takes no body: staging already replaces an existing draft without a compare-and-swap, so discarding does not require one either.
+
+ * @summary Discard the staged config draft
+ */
+export type postConfigDiscardResponse200 = {
+  data: ConfigUpdateResponse
+  status: 200
+}
+
+export type postConfigDiscardResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postConfigDiscardResponse500 = {
+  data: ErrorResponse
+  status: 500
+}
+
+export type postConfigDiscardResponseSuccess = (postConfigDiscardResponse200) & {
+  headers: Headers;
+};
+export type postConfigDiscardResponseError = (postConfigDiscardResponse400 | postConfigDiscardResponse500) & {
+  headers: Headers;
+};
+
+export type postConfigDiscardResponse = (postConfigDiscardResponseSuccess | postConfigDiscardResponseError)
+
+export const getPostConfigDiscardUrl = () => {
+
+
+
+
+  return `/api/config/discard`
+}
+
+export const postConfigDiscard = async ( options?: RequestInit): Promise<postConfigDiscardResponse> => {
+
+  return apiFetch<postConfigDiscardResponse>(getPostConfigDiscardUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+export const getPostConfigDiscardMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postConfigDiscard>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postConfigDiscard>>, TError,void, TContext> => {
+
+const mutationKey = ['postConfigDiscard'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postConfigDiscard>>, void> = () => {
+
+
+          return  postConfigDiscard(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostConfigDiscardMutationResult = NonNullable<Awaited<ReturnType<typeof postConfigDiscard>>>
+
+    export type PostConfigDiscardMutationError = ErrorResponse
+
+    /**
+ * @summary Discard the staged config draft
+ */
+export const usePostConfigDiscard = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postConfigDiscard>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postConfigDiscard>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getPostConfigDiscardMutationOptions(options), queryClient);
     }
 
 /**
@@ -3009,6 +3109,210 @@ export function useGetTransportConfigExport<TData = Awaited<ReturnType<typeof ge
 
 
 
+
+/**
+ * Validates the URL, fetches the body with the subscription destination policy applied to every address actually connected to (redirects included), decodes it, and returns an import plan: deduplicated candidates with derived tags and named conflicts against the transports that already exist. Nothing is created and nothing is stored on disk. The raw share links never leave the daemon - they carry credentials - so the response holds a preview identifier the apply call references instead. A preview expires after ten minutes and after a daemon restart.
+
+ * @summary Fetch a sing-box subscription and plan its import
+ */
+export type postSubscriptionPreviewResponse200 = {
+  data: SubscriptionPreviewResponse
+  status: 200
+}
+
+export type postSubscriptionPreviewResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postSubscriptionPreviewResponse502 = {
+  data: ErrorResponse
+  status: 502
+}
+
+export type postSubscriptionPreviewResponse503 = {
+  data: ErrorResponse
+  status: 503
+}
+
+export type postSubscriptionPreviewResponseSuccess = (postSubscriptionPreviewResponse200) & {
+  headers: Headers;
+};
+export type postSubscriptionPreviewResponseError = (postSubscriptionPreviewResponse400 | postSubscriptionPreviewResponse502 | postSubscriptionPreviewResponse503) & {
+  headers: Headers;
+};
+
+export type postSubscriptionPreviewResponse = (postSubscriptionPreviewResponseSuccess | postSubscriptionPreviewResponseError)
+
+export const getPostSubscriptionPreviewUrl = () => {
+
+
+
+
+  return `/api/subscriptions/preview`
+}
+
+export const postSubscriptionPreview = async (subscriptionPreviewRequest: SubscriptionPreviewRequest, options?: RequestInit): Promise<postSubscriptionPreviewResponse> => {
+
+  return apiFetch<postSubscriptionPreviewResponse>(getPostSubscriptionPreviewUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      subscriptionPreviewRequest,)
+  }
+);}
+
+
+
+
+export const getPostSubscriptionPreviewMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSubscriptionPreview>>, TError,{data: SubscriptionPreviewRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postSubscriptionPreview>>, TError,{data: SubscriptionPreviewRequest}, TContext> => {
+
+const mutationKey = ['postSubscriptionPreview'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postSubscriptionPreview>>, {data: SubscriptionPreviewRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postSubscriptionPreview(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostSubscriptionPreviewMutationResult = NonNullable<Awaited<ReturnType<typeof postSubscriptionPreview>>>
+    export type PostSubscriptionPreviewMutationBody = SubscriptionPreviewRequest
+    export type PostSubscriptionPreviewMutationError = ErrorResponse
+
+    /**
+ * @summary Fetch a sing-box subscription and plan its import
+ */
+export const usePostSubscriptionPreview = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSubscriptionPreview>>, TError,{data: SubscriptionPreviewRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postSubscriptionPreview>>,
+        TError,
+        {data: SubscriptionPreviewRequest},
+        TContext
+      > => {
+      return useMutation(getPostSubscriptionPreviewMutationOptions(options), queryClient);
+    }
+
+/**
+ * Creates one managed sing-box transport per selected candidate of an earlier preview, through the same transport-manager create pipeline as manual creation - there is no separate import writer. Entries are created independently and the response reports each outcome; a failed entry does not roll back the ones already created, and a successfully created entry is marked consumed so re-applying the same preview cannot duplicate it.
+
+ * @summary Create transports from selected subscription entries
+ */
+export type postSubscriptionApplyResponse200 = {
+  data: SubscriptionApplyResponse
+  status: 200
+}
+
+export type postSubscriptionApplyResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postSubscriptionApplyResponse410 = {
+  data: ErrorResponse
+  status: 410
+}
+
+export type postSubscriptionApplyResponse503 = {
+  data: ErrorResponse
+  status: 503
+}
+
+export type postSubscriptionApplyResponseSuccess = (postSubscriptionApplyResponse200) & {
+  headers: Headers;
+};
+export type postSubscriptionApplyResponseError = (postSubscriptionApplyResponse400 | postSubscriptionApplyResponse410 | postSubscriptionApplyResponse503) & {
+  headers: Headers;
+};
+
+export type postSubscriptionApplyResponse = (postSubscriptionApplyResponseSuccess | postSubscriptionApplyResponseError)
+
+export const getPostSubscriptionApplyUrl = () => {
+
+
+
+
+  return `/api/subscriptions/apply`
+}
+
+export const postSubscriptionApply = async (subscriptionApplyRequest: SubscriptionApplyRequest, options?: RequestInit): Promise<postSubscriptionApplyResponse> => {
+
+  return apiFetch<postSubscriptionApplyResponse>(getPostSubscriptionApplyUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      subscriptionApplyRequest,)
+  }
+);}
+
+
+
+
+export const getPostSubscriptionApplyMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSubscriptionApply>>, TError,{data: SubscriptionApplyRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postSubscriptionApply>>, TError,{data: SubscriptionApplyRequest}, TContext> => {
+
+const mutationKey = ['postSubscriptionApply'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postSubscriptionApply>>, {data: SubscriptionApplyRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postSubscriptionApply(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostSubscriptionApplyMutationResult = NonNullable<Awaited<ReturnType<typeof postSubscriptionApply>>>
+    export type PostSubscriptionApplyMutationBody = SubscriptionApplyRequest
+    export type PostSubscriptionApplyMutationError = ErrorResponse
+
+    /**
+ * @summary Create transports from selected subscription entries
+ */
+export const usePostSubscriptionApply = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSubscriptionApply>>, TError,{data: SubscriptionApplyRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postSubscriptionApply>>,
+        TError,
+        {data: SubscriptionApplyRequest},
+        TContext
+      > => {
+      return useMutation(getPostSubscriptionApplyMutationOptions(options), queryClient);
+    }
 
 /**
  * Builds and validates a deterministic candidate from the server-owned catalogue snapshot and the current active configuration. No durable or runtime state is changed. Existing configuration drafts are rejected so the preview cannot silently include unrelated edits.

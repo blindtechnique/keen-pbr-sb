@@ -23,6 +23,8 @@ import {
   usePostTransportAction,
   usePostTransportConfigApply,
   usePostTransportConfig,
+  usePostSubscriptionPreview,
+  usePostSubscriptionApply,
 } from "@/api/generated/keen-api"
 import {
   TransportConfigApplyRequestOperation,
@@ -54,6 +56,12 @@ type UsePostTransportActionOptions = Parameters<
 >[0]
 type UsePostTransportConfigOptions = Parameters<
   typeof usePostTransportConfig
+>[0]
+type UsePostSubscriptionPreviewOptions = Parameters<
+  typeof usePostSubscriptionPreview
+>[0]
+type UsePostSubscriptionApplyOptions = Parameters<
+  typeof usePostSubscriptionApply
 >[0]
 
 export function createLinkedTransportApplyRequest(
@@ -154,6 +162,49 @@ export const usePostTransportConfigMutation = (
     mutation: {
       ...options?.mutation,
       onSuccess: async (data, variables, onMutateResult, context) => {
+        await queryClient.invalidateQueries({
+          queryKey: queryKeys.transportConfig(),
+        })
+        await queryClient.invalidateQueries({
+          queryKey: queryKeys.transports(),
+        })
+        await queryClient.invalidateQueries({
+          queryKey: queryKeys.runtimeInterfaces(),
+        })
+        await queryClient.invalidateQueries({
+          queryKey: queryKeys.runtimeOutbounds(),
+        })
+        await options?.mutation?.onSuccess?.(
+          data,
+          variables,
+          onMutateResult,
+          context
+        )
+      },
+    },
+  })
+}
+
+// Preview is a read dressed as a POST: it fetches and plans but mutates
+// nothing, so there is nothing to invalidate.
+export const usePostSubscriptionPreviewMutation = (
+  options?: UsePostSubscriptionPreviewOptions
+) => {
+  return usePostSubscriptionPreview(options)
+}
+
+export const usePostSubscriptionApplyMutation = (
+  options?: UsePostSubscriptionApplyOptions
+) => {
+  const queryClient = useQueryClient()
+
+  return usePostSubscriptionApply({
+    ...options,
+    mutation: {
+      ...options?.mutation,
+      onSuccess: async (data, variables, onMutateResult, context) => {
+        // Same set as a manual transport create: apply reaches the same
+        // manager pipeline, so the same views go stale.
         await queryClient.invalidateQueries({
           queryKey: queryKeys.transportConfig(),
         })

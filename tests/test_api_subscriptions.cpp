@@ -460,6 +460,25 @@ TEST_CASE("a manager error that echoes the link is not repeated") {
         body.at("results")[0].at("error").get<std::string>();
     CHECK(error.find("33333333-3333") == std::string::npos);
     CHECK(error.find("HTTP 400") != std::string::npos);
+    // A partial echo is the same leak: the credential lives between "://"
+    // and "@", and an error quoting only that fragment has quoted the secret.
+    harness.manager->create_error_body =
+        "user \"33333333-3333-3333-3333-333333333333\" is not valid";
+    const auto partial = client.Post(
+        "/api/subscriptions/apply",
+        nlohmann::json{
+            {"preview_id", preview_id},
+            {"selections", nlohmann::json::array({{{"line", 1}}})},
+        }
+            .dump(),
+        "application/json");
+    REQUIRE(partial != nullptr);
+    CHECK(nlohmann::json::parse(partial->body)
+              .at("results")[0]
+              .at("error")
+              .get<std::string>()
+              .find("33333333-3333") == std::string::npos);
+
     // ...and an error that does not echo the link passes through, because
     // the manager's text is the useful one.
     harness.manager->create_error_body = "tag already exists";

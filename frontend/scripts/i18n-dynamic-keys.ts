@@ -33,6 +33,34 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
       "The discard confirmation names the sources by their panel titles; ListSourceGroup is a closed union in list-upsert-utils.ts.",
   },
   {
+    file: "src/components/transports/subscription-import-dialog.tsx",
+    argument: "`transports.subscriptionImport.documentKind.${*}`",
+    keys: ["transports.subscriptionImport.documentKind.*"],
+    reason:
+      "document_kind is the generated SubscriptionPreviewResponseDocumentKind union from the OpenAPI enum.",
+  },
+  {
+    file: "src/components/transports/subscription-import-dialog.tsx",
+    argument: "`transports.subscriptionImport.problems.${*}`",
+    keys: ["transports.subscriptionImport.problems.*"],
+    reason:
+      "SelectionProblem.kind is a closed union in subscription-import-model.ts.",
+  },
+  {
+    file: "src/components/transports/subscription-import-dialog.tsx",
+    argument: "`transports.subscriptionImport.dispositions.${*}`",
+    keys: ["transports.subscriptionImport.dispositions.*"],
+    reason:
+      "disposition is the generated SubscriptionPreviewCandidateDisposition union; importable renders no badge.",
+  },
+  {
+    file: "src/components/transports/subscription-import-dialog.tsx",
+    argument: "`transports.subscriptionImport.urlRefused.${*}`",
+    keys: ["transports.subscriptionImport.urlRefused.*"],
+    reason:
+      "The refusal reason is narrowed to the four literals of the backend's SubscriptionUrlVerdict before the call; anything else falls back to the raw error message.",
+  },
+  {
     file: "src/components/layout/header-health-indicator.tsx",
     argument: "`headerHealth.${*}`",
     keys: ["headerHealth.*"],

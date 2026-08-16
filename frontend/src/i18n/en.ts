@@ -993,6 +993,62 @@ export const enTranslation = {
       },
     },
     setupWizard: "Setup wizard",
+    subscriptionImport: {
+      open: "Import subscription",
+      title: "Subscription import",
+      description:
+        "Fetches a sing-box subscription, shows what it contains, and creates a transport for each entry you select. Connection links stay on the router and never reach the browser.",
+      urlPlaceholder: "https://provider.example/subscription",
+      urlHint:
+        "http and https only. URLs with credentials before the host name (user:password@) are refused: a URL ends up in logs and history.",
+      fetch: "Fetch",
+      apply: "Import selected ({{count}})",
+      done: "Done",
+      discardConfirm:
+        "Close the import and discard the current selection?",
+      expired:
+        "The preview has expired - the daemon keeps it for ten minutes.",
+      expiredRefetch: "Fetch again",
+      problemsSummary:
+        "Entries marked in the list need attention: {{count}}.",
+      urlRefused: {
+        scheme_not_allowed:
+          "Only http and https subscriptions can be fetched.",
+        credentials_in_url:
+          "The URL carries credentials before the host name. They would end up in logs and history; ask the provider for a link without them.",
+        destination_not_permitted:
+          "The URL points at the router itself or a private network. A subscription lives on the public internet.",
+        malformed: "This is not a fetchable URL.",
+      },
+      tagLabel: "Tag",
+      unnamed: "Entry on line {{line}}",
+      createdSummary: "Transports created: {{count}}.",
+      failedEntry: "Line {{line}} ({{tag}}) was not created",
+      nextSteps:
+        "The created transports are stopped and not yet routed. Start them and link outbounds from the transports list.",
+      dispositions: {
+        duplicate_in_document: "duplicate of line {{line}}",
+        already_configured: "already configured",
+        tag_conflict: "name is taken",
+        scheme_not_supported: "unsupported scheme",
+        malformed: "not a connection link",
+      },
+      problems: {
+        tag_required: "choose a free name",
+        tag_invalid: "lowercase letters, digits and _, up to 24",
+        tag_duplicate: "this name is used twice",
+      },
+      documentKind: {
+        json_document:
+          "This is a sing-box configuration file, not a subscription. Add it as a JSON connection in the transport dialog instead.",
+        empty: "The subscription is empty.",
+        unrecognized:
+          "The response is not a subscription: no connection links found. Check the URL - some providers serve an HTML page when the link is wrong.",
+        too_large: "The response is too large to be a subscription.",
+        link_list: "No entries.",
+        base64_link_list: "No entries.",
+      },
+    },
     routeOffer: {
       title: "KeeneticOS interface detected",
       question:
