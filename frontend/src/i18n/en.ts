@@ -1023,6 +1023,8 @@ export const enTranslation = {
       tagLabel: "Tag",
       unnamed: "Entry on line {{line}}",
       createdSummary: "Transports created: {{count}}.",
+      alreadyImportedSummary:
+        "Already imported by an earlier run and left alone: {{count}}.",
       failedEntry: "Line {{line}} ({{tag}}) was not created",
       nextSteps:
         "The created transports are stopped and not yet routed. Start them and link outbounds from the transports list.",

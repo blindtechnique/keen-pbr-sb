@@ -318,7 +318,7 @@ TEST_CASE("apply creates the selected entry through the manager") {
     const auto body = nlohmann::json::parse(response->body);
     REQUIRE(body.at("results").size() == 1U);
     const auto& result = body.at("results")[0];
-    CHECK(result.at("created").get<bool>());
+    CHECK(result.at("outcome") == "created");
     CHECK(result.at("tag") == "fresh_nl");
     // vless1 belongs to the existing transport; the derived name is the next
     // free one, by the same rule the manual dialog uses.
@@ -350,11 +350,11 @@ TEST_CASE("apply creates the selected entry through the manager") {
     REQUIRE(again != nullptr);
     REQUIRE(again->status == 200);
     const auto second = nlohmann::json::parse(again->body);
-    CHECK_FALSE(second.at("results")[0].at("created").get<bool>());
-    CHECK(second.at("results")[0]
-              .at("error")
-              .get<std::string>()
-              .find("already imported") != std::string::npos);
+    // Not a failure: nothing went wrong and there is nothing to fix. Its own
+    // outcome, so the UI need not read an English error string to tell a
+    // benign repeat from a real one.
+    CHECK(second.at("results")[0].at("outcome") == "already_imported");
+    CHECK(second.at("results")[0].at("error").is_null());
     CHECK(harness.manager->created.size() == 1U);
 }
 
@@ -422,7 +422,7 @@ TEST_CASE("apply refuses what the preview did not offer") {
     REQUIRE(resolved != nullptr);
     REQUIRE(resolved->status == 200);
     const auto body = nlohmann::json::parse(resolved->body);
-    CHECK(body.at("results")[0].at("created").get<bool>());
+    CHECK(body.at("results")[0].at("outcome") == "created");
     CHECK(body.at("results")[0].at("tag") == "nl_two");
     REQUIRE(harness.manager->created.size() == 1U);
     CHECK(harness.manager->created.front().at("tag") == "nl_two");
@@ -455,7 +455,7 @@ TEST_CASE("a manager error that echoes the link is not repeated") {
     REQUIRE(response != nullptr);
     REQUIRE(response->status == 200);
     const auto body = nlohmann::json::parse(response->body);
-    CHECK_FALSE(body.at("results")[0].at("created").get<bool>());
+    CHECK(body.at("results")[0].at("outcome") == "failed");
     const auto error =
         body.at("results")[0].at("error").get<std::string>();
     CHECK(error.find("33333333-3333") == std::string::npos);

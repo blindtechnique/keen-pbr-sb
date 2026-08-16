@@ -1,4 +1,4 @@
-import { CheckCircle2Icon, XCircleIcon } from "lucide-react"
+import { CheckCircle2Icon, InfoIcon, XCircleIcon } from "lucide-react"
 import { useState } from "react"
 
 import type { ApiError } from "@/api/client"
@@ -447,8 +447,19 @@ function DispositionBadge({
 
 function ResultsView({ results }: { results: SubscriptionApplyResponse }) {
   const { t } = useTranslation()
-  const created = results.results.filter((result) => result.created)
-  const failed = results.results.filter((result) => !result.created)
+  // Three outcomes, not two. An entry an earlier apply already created is not
+  // a failure: nothing went wrong and there is nothing to fix. Painting it red
+  // teaches the operator to distrust the report, which costs more than the
+  // line is worth.
+  const created = results.results.filter(
+    (result) => result.outcome === "created"
+  )
+  const alreadyImported = results.results.filter(
+    (result) => result.outcome === "already_imported"
+  )
+  const failed = results.results.filter(
+    (result) => result.outcome === "failed"
+  )
 
   return (
     <div className="space-y-2">
@@ -458,6 +469,16 @@ function ResultsView({ results }: { results: SubscriptionApplyResponse }) {
           <AlertDescription>
             {t("transports.subscriptionImport.createdSummary", {
               count: created.length,
+            })}
+          </AlertDescription>
+        </Alert>
+      ) : null}
+      {alreadyImported.length > 0 ? (
+        <Alert>
+          <InfoIcon />
+          <AlertDescription>
+            {t("transports.subscriptionImport.alreadyImportedSummary", {
+              count: alreadyImported.length,
             })}
           </AlertDescription>
         </Alert>

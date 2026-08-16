@@ -1028,6 +1028,8 @@ export const ruTranslation = {
       tagLabel: "Тег",
       unnamed: "Запись в строке {{line}}",
       createdSummary: "Создано транспортов: {{count}}.",
+      alreadyImportedSummary:
+        "Уже импортированы прошлым запуском и оставлены как есть: {{count}}.",
       failedEntry: "Строка {{line}} ({{tag}}) не создана",
       nextSteps:
         "Созданные транспорты остановлены и ещё не маршрутизируются. Запустите их и привяжите outbound в списке транспортов.",

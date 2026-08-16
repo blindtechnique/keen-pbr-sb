@@ -176,6 +176,7 @@ export * from './statusEventSnapshotType';
 export * from './subscriptionApplyRequest';
 export * from './subscriptionApplyResponse';
 export * from './subscriptionApplyResult';
+export * from './subscriptionApplyResultOutcome';
 export * from './subscriptionApplySelection';
 export * from './subscriptionPreviewCandidate';
 export * from './subscriptionPreviewCandidateDisposition';

@@ -1072,11 +1072,13 @@ namespace api {
         std::vector<SubscriptionApplySelectionElement> selections;
     };
 
+    enum class Outcome : int { ALREADY_IMPORTED, CREATED, FAILED };
+
     struct SubscriptionApplyResultElement {
-        bool created = false;
         std::optional<std::string> error;
         std::optional<std::string> interface;
         int64_t line = 0;
+        Outcome outcome;
         std::optional<std::string> tag;
     };
 
@@ -1946,6 +1948,9 @@ namespace api {
 
     void from_json(const json & j, StatusEventSnapshotType & x);
     void to_json(json & j, const StatusEventSnapshotType & x);
+
+    void from_json(const json & j, Outcome & x);
+    void to_json(json & j, const Outcome & x);
 
     void from_json(const json & j, Disposition & x);
     void to_json(json & j, const Disposition & x);
@@ -3834,19 +3839,19 @@ namespace api {
     }
 
     inline void from_json(const json & j, SubscriptionApplyResultElement& x) {
-        x.created = j.at("created").get<bool>();
         x.error = get_stack_optional<std::string>(j, "error");
         x.interface = get_stack_optional<std::string>(j, "interface");
         x.line = j.at("line").get<int64_t>();
+        x.outcome = j.at("outcome").get<Outcome>();
         x.tag = get_stack_optional<std::string>(j, "tag");
     }
 
     inline void to_json(json & j, const SubscriptionApplyResultElement & x) {
         j = json::object();
-        j["created"] = x.created;
         j["error"] = x.error;
         j["interface"] = x.interface;
         j["line"] = x.line;
+        j["outcome"] = x.outcome;
         j["tag"] = x.tag;
     }
 
@@ -5429,6 +5434,22 @@ namespace api {
         switch (x) {
             case StatusEventSnapshotType::SNAPSHOT: j = "snapshot"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"StatusEventSnapshotType\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, Outcome & x) {
+        if (j == "already_imported") x = Outcome::ALREADY_IMPORTED;
+        else if (j == "created") x = Outcome::CREATED;
+        else if (j == "failed") x = Outcome::FAILED;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"Outcome\""); }
+    }
+
+    inline void to_json(json & j, const Outcome & x) {
+        switch (x) {
+            case Outcome::ALREADY_IMPORTED: j = "already_imported"; break;
+            case Outcome::CREATED: j = "created"; break;
+            case Outcome::FAILED: j = "failed"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"Outcome\": " + std::to_string(static_cast<int>(x)));
         }
     }
 

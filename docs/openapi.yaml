@@ -1662,12 +1662,21 @@ components:
 
     SubscriptionApplyResult:
       type: object
-      required: [line, created]
+      required: [line, outcome]
       properties:
         line:
           type: integer
-        created:
-          type: boolean
+        outcome:
+          type: string
+          enum: [created, already_imported, failed]
+          description: >
+            What happened to this entry. `already_imported` means an earlier
+            apply of the same preview already created it - a preview is a
+            one-shot import, so re-applying a line cannot duplicate the
+            transport it produced. It is deliberately not `failed`: nothing
+            went wrong and there is nothing for the operator to fix, and
+            presenting it as an error would teach them to distrust the
+            report.
         tag:
           type: string
           description: The tag the transport was created with.
@@ -1679,7 +1688,10 @@ components:
             indistinguishable from a hand-made one.
         error:
           type: string
-          description: Why this entry was not created. Never contains the link.
+          description: >
+            Why this entry failed. Present only with `outcome: failed`, and
+            never contains the link - a transport manager error that echoes
+            the share link is replaced before it reaches here.
 
     SubscriptionApplyResponse:
       type: object

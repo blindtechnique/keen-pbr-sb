@@ -495,9 +495,10 @@ void register_subscriptions_handler_impl(
                                 entry.line) != 0U;
                     }
                     if (already_consumed) {
-                        result.created = false;
-                        result.error =
-                            "already imported by an earlier apply";
+                        // Not a failure: nothing went wrong and there is
+                        // nothing to fix. Reporting it as one would teach
+                        // the operator to distrust the report.
+                        result.outcome = api::Outcome::ALREADY_IMPORTED;
                         response.results.push_back(std::move(result));
                         continue;
                     }
@@ -505,7 +506,7 @@ void register_subscriptions_handler_impl(
                     const std::string interface_name =
                         derive_subscription_interface(entry.scheme, taken);
                     if (interface_name.empty()) {
-                        result.created = false;
+                        result.outcome = api::Outcome::FAILED;
                         result.error =
                             "no free interface name could be derived";
                         response.results.push_back(std::move(result));
@@ -534,15 +535,15 @@ void register_subscriptions_handler_impl(
                         spec.dump(),
                         "application/json");
                     if (!created) {
-                        result.created = false;
+                        result.outcome = api::Outcome::FAILED;
                         result.error = "transport manager is unavailable";
                     } else if (created->status < 200 ||
                                created->status >= 300) {
-                        result.created = false;
+                        result.outcome = api::Outcome::FAILED;
                         result.error = sanitized_manager_error(
                             created->body, entry.link, created->status);
                     } else {
-                        result.created = true;
+                        result.outcome = api::Outcome::CREATED;
                         taken.insert(entry.tag);
                         taken.insert(interface_name);
                         auto& registry = preview_registry();
