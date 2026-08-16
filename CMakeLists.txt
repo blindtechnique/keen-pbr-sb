@@ -420,6 +420,8 @@ set(SOURCES
   src/crypto/chacha20poly1305.cpp
   src/keenetic/ndms_native_secret_snapshot.cpp
   src/keenetic/ndms_native_secret_redaction.cpp
+  src/keenetic/ndms_native_interface_delete.cpp
+  src/keenetic/ndms_native_interface_delete_production.cpp
   src/keenetic/ndms_native_target_evidence.cpp
   src/keenetic/ndms_native_import_wal_store.cpp
   src/keenetic/ndms_native_management_preflight.cpp
