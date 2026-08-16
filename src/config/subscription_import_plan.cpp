@@ -1,5 +1,7 @@
 #include "subscription_import_plan.hpp"
 
+#include "../crypto/sha256.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -17,7 +19,7 @@ std::string lowercased(std::string value) {
     return value;
 }
 
-std::string trimmed(const std::string& value) {
+std::string trimmed_copy(const std::string& value) {
     const auto begin = value.find_first_not_of(" \t\r\n\f\v");
     if (begin == std::string::npos) return {};
     const auto end = value.find_last_not_of(" \t\r\n\f\v");
@@ -95,7 +97,7 @@ std::vector<DocumentLine> candidate_lines(const std::string& text) {
         auto end = text.find('\n', begin);
         if (end == std::string::npos) end = text.size();
         ++number;
-        const std::string line = trimmed(text.substr(begin, end - begin));
+        const std::string line = trimmed_copy(text.substr(begin, end - begin));
         // '#' starts a comment only at the start of a line: inside a link it
         // introduces the remark.
         if (!line.empty() && line.front() != '#') {
@@ -328,10 +330,20 @@ std::string derive_subscription_tag(const std::string& remark,
     return tag;
 }
 
+std::string subscription_link_fingerprint(const std::string& link) {
+    const std::string trimmed = trimmed_copy(link);
+    if (trimmed.empty()) return {};
+    const auto hash = trimmed.find('#');
+    const std::string identity =
+        hash == std::string::npos ? trimmed : trimmed.substr(0U, hash);
+    if (identity.empty()) return {};
+    return Sha256::hex(identity);
+}
+
 SubscriptionImportPlan plan_subscription_import(
     const std::string& body,
     const std::set<std::string>& existing_tags,
-    const std::set<std::string>& existing_links) {
+    const std::set<std::string>& existing_link_fingerprints) {
     SubscriptionImportPlan plan;
 
     if (body.size() > kSubscriptionMaximumBytes) {
@@ -339,7 +351,7 @@ SubscriptionImportPlan plan_subscription_import(
         return plan;
     }
 
-    const std::string head = trimmed(body);
+    const std::string head = trimmed_copy(body);
     if (head.empty()) {
         plan.kind = SubscriptionDocumentKind::empty;
         return plan;
@@ -361,7 +373,7 @@ SubscriptionImportPlan plan_subscription_import(
             if (looks_like_link_list(decoded_lines)) {
                 lines = std::move(decoded_lines);
                 plan.kind = SubscriptionDocumentKind::base64_link_list;
-            } else if (trimmed(decoded).empty()) {
+            } else if (trimmed_copy(decoded).empty()) {
                 plan.kind = SubscriptionDocumentKind::empty;
                 return plan;
             } else {
@@ -409,8 +421,8 @@ SubscriptionImportPlan plan_subscription_import(
                 candidate.disposition =
                     SubscriptionCandidateDisposition::duplicate_in_document;
                 candidate.duplicate_of = seen->second;
-            } else if (existing_links.count(link) != 0U ||
-                       existing_links.count(parts.identity) != 0U) {
+            } else if (existing_link_fingerprints.count(
+                           Sha256::hex(parts.identity)) != 0U) {
                 first_occurrence.emplace(parts.identity, index);
                 candidate.disposition =
                     SubscriptionCandidateDisposition::already_configured;

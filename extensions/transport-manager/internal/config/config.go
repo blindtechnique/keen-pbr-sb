@@ -339,6 +339,10 @@ func (a *Admin) redactedSpecsLocked() []transport.TransportSpec {
 	copy(result, a.config.Transports)
 	for i := range result {
 		result[i].BootstrapDNS = append([]string(nil), result[i].BootstrapDNS...)
+		// Computed before Link is blanked, and only here: the fingerprint is
+		// output, never input, so a caller cannot assert an identity it does
+		// not hold the link for.
+		result[i].LinkFingerprint = transport.LinkFingerprint(result[i].Link)
 		result[i].Link = ""
 		result[i].OutboundJSON = ""
 		if result[i].VLESS != nil {

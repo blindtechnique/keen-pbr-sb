@@ -2,6 +2,8 @@ package transport
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -54,6 +56,37 @@ type TransportSpec struct {
 	CountryCode  string     `json:"country_code,omitempty"`
 	Country      string     `json:"country,omitempty"`
 	VLESS        *VLESSSpec `json:"vless,omitempty"` // Legacy configuration compatibility.
+	// Set only on redacted output, never accepted on input and never stored.
+	// See LinkFingerprint: it lets a caller that must not see Link still tell
+	// whether it is holding the same connection.
+	LinkFingerprint string `json:"link_fingerprint,omitempty"`
+}
+
+// LinkFingerprint identifies a share link without disclosing it.
+//
+// Redacted state blanks Link because it carries the credential - a VLESS UUID,
+// a Trojan password. That leaves a caller unable to answer the one question a
+// subscription import has to ask: is this entry already configured here? The
+// digest answers it and discloses nothing.
+//
+// The fragment is removed first, and that is a contract, not a detail: a
+// fragment is the provider's label, and the same connection listed twice under
+// two names is one connection. The subscription importer on the C++ side
+// derives its own identity by the same rule, so a change to either half breaks
+// the comparison silently - both sides pin it in tests.
+func LinkFingerprint(link string) string {
+	trimmed := strings.TrimSpace(link)
+	if trimmed == "" {
+		return ""
+	}
+	if hash := strings.IndexByte(trimmed, '#'); hash >= 0 {
+		trimmed = trimmed[:hash]
+	}
+	if trimmed == "" {
+		return ""
+	}
+	digest := sha256.Sum256([]byte(trimmed))
+	return hex.EncodeToString(digest[:])
 }
 
 type VLESSSpec struct {
@@ -167,6 +200,12 @@ func NewFromSpec(spec TransportSpec, binary, runtimeDir string, health ...Routin
 func ValidateTransportSpec(spec TransportSpec) error {
 	if !validTag.MatchString(spec.Tag) || !validInterface.MatchString(spec.Interface) {
 		return fmt.Errorf("invalid tag or interface")
+	}
+	// Output only. Accepting it would let a caller claim an identity for a
+	// link it does not have, and a stored value would go stale the moment the
+	// link changed - the redacted view derives it fresh every time.
+	if spec.LinkFingerprint != "" {
+		return fmt.Errorf("link_fingerprint is derived and cannot be supplied")
 	}
 	if err := ValidateDisplayName(spec.DisplayName); err != nil {
 		return err

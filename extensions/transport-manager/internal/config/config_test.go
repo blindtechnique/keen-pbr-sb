@@ -652,3 +652,54 @@ func TestRuntimeSettingsRequireOnlyAutostartManagedProxies(t *testing.T) {
 		t.Fatal("stopped autostart managed proxy was reported ready")
 	}
 }
+
+// The redacted view is the only thing a subscription import can see, so the
+// question "is this connection already configured?" has to be answerable from
+// it - without the link that would answer it directly.
+func TestRedactedStateCarriesAnIdentityButNotTheLink(t *testing.T) {
+	const link = "vless://11111111-1111-1111-1111-111111111111@a.example:443#NL"
+	admin := &Admin{}
+	admin.config.Transports = []transport.TransportSpec{{
+		Tag:       "example",
+		Interface: "tun-example",
+		Type:      "sing-box",
+		Link:      link,
+	}}
+
+	specs, _ := admin.State()
+	if len(specs) != 1 {
+		t.Fatalf("expected one spec, got %d", len(specs))
+	}
+	if specs[0].Link != "" {
+		t.Fatalf("the link must stay redacted, got %q", specs[0].Link)
+	}
+	want := transport.LinkFingerprint(link)
+	if specs[0].LinkFingerprint != want {
+		t.Fatalf("LinkFingerprint = %q, want %q", specs[0].LinkFingerprint, want)
+	}
+	// ...and redacting must not have edited what is stored.
+	if admin.config.Transports[0].Link != link {
+		t.Fatalf("the stored link was modified by redaction")
+	}
+	if admin.config.Transports[0].LinkFingerprint != "" {
+		t.Fatalf("the fingerprint must not be persisted")
+	}
+}
+
+func TestRedactedStateLeavesLinklessTransportsWithoutAnIdentity(t *testing.T) {
+	admin := &Admin{}
+	admin.config.Transports = []transport.TransportSpec{{
+		Tag:          "byjson",
+		Interface:    "tun-byjson",
+		Type:         "sing-box",
+		OutboundJSON: `{"type":"vless"}`,
+	}}
+
+	specs, _ := admin.State()
+	if specs[0].LinkFingerprint != "" {
+		t.Fatalf("a transport without a share link has no link identity")
+	}
+	if specs[0].OutboundJSON != "" {
+		t.Fatalf("outbound JSON must stay redacted")
+	}
+}

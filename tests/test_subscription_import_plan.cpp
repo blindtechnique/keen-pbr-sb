@@ -13,7 +13,7 @@ using Kind = SubscriptionDocumentKind;
 using Disposition = SubscriptionCandidateDisposition;
 
 const std::set<std::string> kNoTags;
-const std::set<std::string> kNoLinks;
+const std::set<std::string> kNoFingerprints;
 
 std::string base64_of(const std::string& value) {
     static const char* alphabet =
@@ -52,7 +52,7 @@ TEST_CASE("a plain link list is planned entry by entry") {
     const std::string body =
         "vless://11111111-1111-1111-1111-111111111111@a.example:443?security=tls#NL%2001\n"
         "trojan://secret@b.example:8443#DE%2001\n";
-    const auto plan = plan_subscription_import(body, kNoTags, kNoLinks);
+    const auto plan = plan_subscription_import(body, kNoTags, kNoFingerprints);
 
     CHECK(plan.kind == Kind::link_list);
     REQUIRE(plan.candidates.size() == 2U);
@@ -74,7 +74,7 @@ TEST_CASE("a candidate has nowhere to put a credential") {
     // that using them is a deliberate act.
     const std::string body =
         "vless://11111111-1111-1111-1111-111111111111@a.example:443#A\n";
-    const auto plan = plan_subscription_import(body, kNoTags, kNoLinks);
+    const auto plan = plan_subscription_import(body, kNoTags, kNoFingerprints);
 
     REQUIRE(plan.candidates.size() == 1U);
     const auto& candidate = plan.candidates[0];
@@ -95,7 +95,7 @@ TEST_CASE("vmess and legacy shadowsocks keep their payload closed") {
         "vmess://eyJhZGQiOiJjLmV4YW1wbGUiLCJpZCI6InNlY3JldC11dWlkIn0=#VM\n"
         "ss://YWVzLTI1Ni1nY206c2VjcmV0QGQuZXhhbXBsZTo4Mzg4#SSLEGACY\n"
         "ss://YWVzLTI1Ni1nY206c2VjcmV0@e.example:8388#SSMODERN\n";
-    const auto plan = plan_subscription_import(body, kNoTags, kNoLinks);
+    const auto plan = plan_subscription_import(body, kNoTags, kNoFingerprints);
 
     REQUIRE(plan.candidates.size() == 3U);
     CHECK(plan.candidates[0].scheme == "vmess");
@@ -112,7 +112,7 @@ TEST_CASE("a base64 subscription body is decoded") {
         "vless://11111111-1111-1111-1111-111111111111@a.example:443#NL\n"
         "trojan://secret@b.example:8443#DE\n";
     const auto plan =
-        plan_subscription_import(base64_of(plain), kNoTags, kNoLinks);
+        plan_subscription_import(base64_of(plain), kNoTags, kNoFingerprints);
 
     CHECK(plan.kind == Kind::base64_link_list);
     REQUIRE(plan.candidates.size() == 2U);
@@ -131,7 +131,7 @@ TEST_CASE("the url-safe base64 alphabet and missing padding are accepted") {
     }
     while (!encoded.empty() && encoded.back() == '=') encoded.pop_back();
 
-    const auto plan = plan_subscription_import(encoded, kNoTags, kNoLinks);
+    const auto plan = plan_subscription_import(encoded, kNoTags, kNoFingerprints);
     CHECK(plan.kind == Kind::base64_link_list);
     REQUIRE(plan.candidates.size() == 1U);
     CHECK(plan.candidates[0].endpoint == "a.example:443");
@@ -145,7 +145,7 @@ TEST_CASE("repeated entries are offered once") {
         "vless://u@a.example:443#First\n"
         "vless://u@a.example:443#Renamed%20later\n"
         "vless://u@b.example:443#Different\n";
-    const auto plan = plan_subscription_import(body, kNoTags, kNoLinks);
+    const auto plan = plan_subscription_import(body, kNoTags, kNoFingerprints);
 
     REQUIRE(plan.candidates.size() == 4U);
     CHECK(plan.candidates[0].disposition == Disposition::importable);
@@ -157,14 +157,69 @@ TEST_CASE("repeated entries are offered once") {
 }
 
 TEST_CASE("an entry already configured is reported, not offered again") {
+    // The comparison is against a digest, because the other half of it can be
+    // nothing else: transport-manager blanks the stored link in its redacted
+    // state, since the link carries the credential.
     const std::string link = "vless://u@a.example:443#NL";
     const std::string body = link + "\nvless://u@b.example:443#DE\n";
     const auto plan = plan_subscription_import(
-        body, kNoTags, std::set<std::string>{link});
+        body,
+        kNoTags,
+        std::set<std::string>{subscription_link_fingerprint(link)});
 
     REQUIRE(plan.candidates.size() == 2U);
     CHECK(plan.candidates[0].disposition == Disposition::already_configured);
     CHECK(plan.candidates[1].disposition == Disposition::importable);
+}
+
+TEST_CASE("a configured entry is recognised through a renamed label") {
+    // The provider relabels entries between fetches. If a label changed the
+    // identity, every refetch would offer to import what is already there.
+    const std::string configured = "vless://u@a.example:443#Netherlands%2001";
+    const std::string body = "vless://u@a.example:443#NL-2\n";
+    const auto plan = plan_subscription_import(
+        body,
+        kNoTags,
+        std::set<std::string>{subscription_link_fingerprint(configured)});
+
+    REQUIRE(plan.candidates.size() == 1U);
+    CHECK(plan.candidates[0].disposition == Disposition::already_configured);
+}
+
+TEST_CASE("the link fingerprint is the contract transport-manager mirrors") {
+    // LinkFingerprint in singbox.go derives the same value from the same rule.
+    // Nothing at build time couples them, so both sides pin it: a drift here
+    // does not fail loudly, it just stops ever matching.
+    const std::string identity = "vless://u@a.example:443?security=tls";
+    const std::string fingerprint = subscription_link_fingerprint(identity);
+
+    // The exact value transport.LinkFingerprint produces for this link. A
+    // shared rule stated twice is not a shared rule until one side's answer is
+    // written down where the other side's tests can see it.
+    CHECK(fingerprint ==
+          "6005eaff07bcbb5ec4fb1c8d192197f961c9c369a74b39861a2e5d37d4bffb50");
+    CHECK(fingerprint.size() == 64U);
+    CHECK(fingerprint == subscription_link_fingerprint(identity + "#NL"));
+    CHECK(fingerprint ==
+          subscription_link_fingerprint("  " + identity + "#other  "));
+    CHECK(fingerprint !=
+          subscription_link_fingerprint("vless://u@b.example:443?security=tls"));
+    // A transport built from outbound JSON has no share link, and a
+    // subscription - a list of links - can never collide with one.
+    for (const char* empty : {"", "   ", "#only-a-fragment"}) {
+        CHECK(subscription_link_fingerprint(empty).empty());
+    }
+}
+
+TEST_CASE("without any known transports nothing is called already configured") {
+    // An empty fingerprint set means the transports could not be read, not
+    // that there are no conflicts. The plan must not invent the difference;
+    // saying so is the caller's job.
+    const std::string body = "vless://u@a.example:443#NL\n";
+    const auto plan = plan_subscription_import(body, kNoTags, kNoFingerprints);
+
+    REQUIRE(plan.candidates.size() == 1U);
+    CHECK(plan.candidates[0].disposition == Disposition::importable);
 }
 
 TEST_CASE("a tag an existing transport owns is a conflict, not a rename") {
@@ -172,7 +227,7 @@ TEST_CASE("a tag an existing transport owns is a conflict, not a rename") {
     // with the provider's, and the operator is the one who has to decide.
     const std::string body = "vless://u@a.example:443#NL\n";
     const auto plan = plan_subscription_import(
-        body, std::set<std::string>{"nl"}, kNoLinks);
+        body, std::set<std::string>{"nl"}, kNoFingerprints);
 
     REQUIRE(plan.candidates.size() == 1U);
     CHECK(plan.candidates[0].disposition == Disposition::tag_conflict);
@@ -186,7 +241,7 @@ TEST_CASE("two entries of one document may not claim one tag") {
         "vless://u@a.example:443#NL\n"
         "vless://u@b.example:443#nl\n"
         "vless://u@c.example:443#nL\n";
-    const auto plan = plan_subscription_import(body, kNoTags, kNoLinks);
+    const auto plan = plan_subscription_import(body, kNoTags, kNoFingerprints);
 
     REQUIRE(plan.candidates.size() == 3U);
     CHECK(plan.candidates[0].suggested_tag == "nl");
@@ -236,7 +291,7 @@ TEST_CASE("a uniquifying suffix cannot push a tag past the pattern") {
     const std::string body =
         "vless://u@a.example:443#" + remark + "\n" +
         "vless://u@b.example:443#" + remark + "\n";
-    const auto plan = plan_subscription_import(body, kNoTags, kNoLinks);
+    const auto plan = plan_subscription_import(body, kNoTags, kNoFingerprints);
 
     REQUIRE(plan.candidates.size() == 2U);
     CHECK(plan.candidates[0].suggested_tag.size() <=
@@ -255,7 +310,7 @@ TEST_CASE("a remark may not lie about the entry it labels") {
     const std::string body =
         "vless://u@evil.example:443#safe\xE2\x80\xAE""elpmaxe.dog\n"
         "vless://u@a.example:443#tab\there\n";
-    const auto plan = plan_subscription_import(body, kNoTags, kNoLinks);
+    const auto plan = plan_subscription_import(body, kNoTags, kNoFingerprints);
 
     REQUIRE(plan.candidates.size() == 2U);
     CHECK(plan.candidates[0].remark.find("\xE2\x80\xAE") == std::string::npos);
@@ -270,7 +325,7 @@ TEST_CASE("a scheme transport-manager will not accept is named as such") {
         "ssr://legacy-scheme\n"
         "wireguard://not-a-real-share-link\n"
         "vless://u@a.example:443#ok\n";
-    const auto plan = plan_subscription_import(body, kNoTags, kNoLinks);
+    const auto plan = plan_subscription_import(body, kNoTags, kNoFingerprints);
 
     REQUIRE(plan.candidates.size() == 3U);
     CHECK(plan.candidates[0].disposition == Disposition::scheme_not_supported);
@@ -298,7 +353,7 @@ TEST_CASE("comments and blank lines do not become entries") {
         "   \n"
         "vless://u@a.example:443#NL\n"
         "\n";
-    const auto plan = plan_subscription_import(body, kNoTags, kNoLinks);
+    const auto plan = plan_subscription_import(body, kNoTags, kNoFingerprints);
 
     REQUIRE(plan.candidates.size() == 1U);
     // ...but they still count: the line reported is the one in the document
@@ -309,29 +364,29 @@ TEST_CASE("comments and blank lines do not become entries") {
 
 TEST_CASE("a fragment '#' inside a link is a remark, not a comment") {
     const std::string body = "vless://u@a.example:443#NL\n";
-    const auto plan = plan_subscription_import(body, kNoTags, kNoLinks);
+    const auto plan = plan_subscription_import(body, kNoTags, kNoFingerprints);
     REQUIRE(plan.candidates.size() == 1U);
     CHECK(plan.candidates[0].remark == "NL");
 }
 
 TEST_CASE("a sing-box configuration document is named, not called garbage") {
     for (const char* body : {"{\"outbounds\": []}", "  [ {\"type\": \"vless\"} ]"}) {
-        const auto plan = plan_subscription_import(body, kNoTags, kNoLinks);
+        const auto plan = plan_subscription_import(body, kNoTags, kNoFingerprints);
         CHECK(plan.kind == Kind::json_document);
         CHECK(plan.candidates.empty());
     }
 }
 
 TEST_CASE("a body that is not a subscription is refused, not half-read") {
-    const auto empty = plan_subscription_import("", kNoTags, kNoLinks);
+    const auto empty = plan_subscription_import("", kNoTags, kNoFingerprints);
     CHECK(empty.kind == Kind::empty);
     CHECK(empty.candidates.empty());
 
-    const auto blank = plan_subscription_import("\n \n\n", kNoTags, kNoLinks);
+    const auto blank = plan_subscription_import("\n \n\n", kNoTags, kNoFingerprints);
     CHECK(blank.kind == Kind::empty);
 
     const auto html = plan_subscription_import(
-        "<html><body>Login required</body></html>", kNoTags, kNoLinks);
+        "<html><body>Login required</body></html>", kNoTags, kNoFingerprints);
     CHECK(html.kind == Kind::unrecognized);
     CHECK(html.candidates.empty());
 }
@@ -340,7 +395,7 @@ TEST_CASE("an oversized body is refused whole rather than truncated") {
     // A silently shortened import is a worse answer than a refused one: the
     // operator would have no way to see what was dropped.
     const std::string oversized(kSubscriptionMaximumBytes + 1U, 'a');
-    const auto plan = plan_subscription_import(oversized, kNoTags, kNoLinks);
+    const auto plan = plan_subscription_import(oversized, kNoTags, kNoFingerprints);
     CHECK(plan.kind == Kind::too_large);
     CHECK(plan.candidates.empty());
     CHECK(plan.links.empty());
@@ -350,7 +405,7 @@ TEST_CASE("an oversized body is refused whole rather than truncated") {
         many += "vless://u@h" + std::to_string(i) + ".example:443#n\n";
     }
     REQUIRE(many.size() <= kSubscriptionMaximumBytes);
-    const auto crowded = plan_subscription_import(many, kNoTags, kNoLinks);
+    const auto crowded = plan_subscription_import(many, kNoTags, kNoFingerprints);
     CHECK(crowded.kind == Kind::too_large);
     CHECK(crowded.candidates.empty());
     CHECK(crowded.links.empty());
@@ -364,7 +419,7 @@ TEST_CASE("links stay positionally aligned with candidates") {
         "ssr://unsupported\n"
         "vless://u@a.example:443#NL\n"
         "vless://u@a.example:443#NL\n";
-    const auto plan = plan_subscription_import(body, kNoTags, kNoLinks);
+    const auto plan = plan_subscription_import(body, kNoTags, kNoFingerprints);
 
     REQUIRE(plan.candidates.size() == 4U);
     REQUIRE(plan.links.size() == plan.candidates.size());

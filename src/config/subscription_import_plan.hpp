@@ -62,7 +62,7 @@ enum class SubscriptionCandidateDisposition : std::uint8_t {
     // The same endpoint appeared earlier in this same document. Subscriptions
     // routinely repeat entries; only the first occurrence is offered.
     duplicate_in_document,
-    // Byte-identical to a link already configured as a transport.
+    // The same connection is already configured as a transport.
     already_configured,
     // The tag derived from the remark is taken by an existing transport whose
     // link is different. Needs the operator to choose, not a silent rename.
@@ -122,17 +122,33 @@ inline constexpr std::size_t kSubscriptionMaximumTagLength = 24U;
 // and a test pins the coupling.
 bool subscription_scheme_supported(const std::string& scheme) noexcept;
 
+// The identity of a share link, as lowercase SHA-256 hex of the link with its
+// fragment removed. A fragment is the provider's label, and one connection
+// listed twice under two names is one connection.
+//
+// This exists as a digest rather than the link because the other half of the
+// comparison cannot be anything else: transport-manager blanks the stored link
+// in its redacted state (config.go redactedSpecsLocked) precisely because it
+// carries the credential, and publishes this digest instead. The rule below
+// and LinkFingerprint in singbox.go are one contract in two languages; each
+// side pins it in its own tests, because a drift here does not fail loudly -
+// it just stops ever matching.
+std::string subscription_link_fingerprint(const std::string& link);
+
 // Normalizes a remark into a candidate tag matching "^[a-z][a-z0-9_]{0,23}$".
 // Returns an empty string only if it cannot, which it never does: a remark
 // with nothing usable in it falls back to a positional name.
 std::string derive_subscription_tag(const std::string& remark,
                                     std::size_t position);
 
-// Builds the plan. `existing_tags` and `existing_links` describe the transports
-// already configured; both may be empty.
+// Builds the plan. `existing_tags` and `existing_link_fingerprints` describe
+// the transports already configured; both may be empty, and an empty
+// fingerprint set means no candidate can be reported as already configured -
+// a caller that could not read the transports must say so rather than present
+// the absence as "no conflicts".
 SubscriptionImportPlan plan_subscription_import(
     const std::string& body,
     const std::set<std::string>& existing_tags,
-    const std::set<std::string>& existing_links);
+    const std::set<std::string>& existing_link_fingerprints);
 
 } // namespace keen_pbr3
