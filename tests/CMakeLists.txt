@@ -843,6 +843,7 @@ if(WITH_API)
     test_api_nfqws.cpp
     test_runtime_outbound_state.cpp
     test_ndms_web_endpoint.cpp
+    test_ndms_credential_generation.cpp
     test_trusted_local_connection.cpp
     test_local_password_hash.cpp
     ../src/api/server.cpp
@@ -852,6 +853,7 @@ if(WITH_API)
     ../src/api/auth_runtime.cpp
     ../src/api/keenetic_auth.cpp
     ../src/keenetic/ndms_web_endpoint.cpp
+    ../src/keenetic/ndms_credential_generation.cpp
     ../src/api/sse_broadcaster.cpp
     ../src/api/status_stream.cpp
     ../src/api/health_response.cpp

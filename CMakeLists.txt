@@ -436,6 +436,7 @@ set(SOURCES
   src/keenetic/ndms_rci_observation.cpp
   src/keenetic/ndms_rci_restorable_snapshot.cpp
   src/keenetic/ndms_web_endpoint.cpp
+  src/keenetic/ndms_credential_generation.cpp
   src/keenetic/ndms_lockout_policy.cpp
   src/api/system_auth_capability.cpp
   src/api/step_up.cpp
