@@ -455,6 +455,7 @@ set(SOURCES
   src/config/config_writer.cpp
   src/config/subscription_fetch_policy.cpp
   src/config/subscription_import_plan.cpp
+  src/config/subscription_transport_naming.cpp
   src/config/dependency_analysis.cpp
   src/config/list_delete_planner.cpp
   src/config/routing_state.cpp
@@ -570,6 +571,8 @@ if(WITH_API)
     src/api/handler_runtime_inventory.cpp
     src/api/handler_diagnostic_tasks.cpp
     src/api/handler_transports.cpp
+    src/api/handler_subscriptions.cpp
+    src/api/transport_manager_endpoint.cpp
     src/api/handler_test_routing.cpp
     src/api/handler_dns_test.cpp
     src/api/handler_connections.cpp

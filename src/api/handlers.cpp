@@ -13,6 +13,7 @@
 #include "handler_diagnostic_tasks.hpp"
 #include "handler_test_routing.hpp"
 #include "handler_transports.hpp"
+#include "handler_subscriptions.hpp"
 #include "handler_dns_test.hpp"
 #include "handler_connections.hpp"
 #include "handler_nfqws.hpp"
@@ -48,6 +49,7 @@ void register_api_handlers(ApiServer& server, ApiContext& ctx) {
     register_diagnostic_tasks_handler(server, ctx);
     register_test_routing_handler(server, ctx);
     register_transports_handler(server, ctx);
+    register_subscriptions_handler(server, ctx);
     register_dns_test_handler(server, ctx);
     register_connections_handler(server, ctx);
     register_nfqws_handler(server, ctx);

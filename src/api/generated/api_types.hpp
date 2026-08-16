@@ -1062,6 +1062,53 @@ namespace api {
         StatusEventSnapshotType type;
     };
 
+    struct SubscriptionApplySelectionElement {
+        int64_t line = 0;
+        std::optional<std::string> tag;
+    };
+
+    struct SubscriptionApplyRequest {
+        std::string preview_id;
+        std::vector<SubscriptionApplySelectionElement> selections;
+    };
+
+    struct SubscriptionApplyResultElement {
+        bool created = false;
+        std::optional<std::string> error;
+        std::optional<std::string> interface;
+        int64_t line = 0;
+        std::optional<std::string> tag;
+    };
+
+    struct SubscriptionApplyResponse {
+        std::vector<SubscriptionApplyResultElement> results;
+    };
+
+    enum class Disposition : int { ALREADY_CONFIGURED, DUPLICATE_IN_DOCUMENT, IMPORTABLE, MALFORMED, SCHEME_NOT_SUPPORTED, TAG_CONFLICT };
+
+    struct SubscriptionPreviewCandidate {
+        Disposition disposition;
+        std::optional<int64_t> duplicate_of;
+        std::optional<std::string> endpoint;
+        int64_t line = 0;
+        std::optional<std::string> remark;
+        std::optional<std::string> scheme;
+        std::optional<std::string> suggested_tag;
+    };
+
+    struct SubscriptionPreviewRequest {
+        std::string url;
+    };
+
+    enum class DocumentKind : int { BASE64_LINK_LIST, EMPTY, JSON_DOCUMENT, LINK_LIST, TOO_LARGE, UNRECOGNIZED };
+
+    struct SubscriptionPreviewResponse {
+        std::vector<SubscriptionPreviewCandidate> candidates;
+        DocumentKind document_kind;
+        int64_t expires_in_seconds = 0;
+        std::string preview_id;
+    };
+
     enum class Action : int { DOWN, RESTART, UP };
 
     struct TransportActionRequest {
@@ -1325,6 +1372,13 @@ namespace api {
         std::optional<StatusEventOutbounds> status_event_outbounds;
         std::optional<StatusEventService> status_event_service;
         std::optional<StatusEventSnapshot> status_event_snapshot;
+        std::optional<SubscriptionApplyRequest> subscription_apply_request;
+        std::optional<SubscriptionApplyResponse> subscription_apply_response;
+        std::optional<SubscriptionApplyResultElement> subscription_apply_result;
+        std::optional<SubscriptionApplySelectionElement> subscription_apply_selection;
+        std::optional<SubscriptionPreviewCandidate> subscription_preview_candidate;
+        std::optional<SubscriptionPreviewRequest> subscription_preview_request;
+        std::optional<SubscriptionPreviewResponse> subscription_preview_response;
         std::optional<TransportActionRequest> transport_action_request;
         std::optional<TransportActionResponse> transport_action_response;
         std::optional<TransportConfigApplyRequest> transport_config_apply_request;
@@ -1659,6 +1713,27 @@ namespace api {
     void from_json(const json & j, StatusEventSnapshot & x);
     void to_json(json & j, const StatusEventSnapshot & x);
 
+    void from_json(const json & j, SubscriptionApplySelectionElement & x);
+    void to_json(json & j, const SubscriptionApplySelectionElement & x);
+
+    void from_json(const json & j, SubscriptionApplyRequest & x);
+    void to_json(json & j, const SubscriptionApplyRequest & x);
+
+    void from_json(const json & j, SubscriptionApplyResultElement & x);
+    void to_json(json & j, const SubscriptionApplyResultElement & x);
+
+    void from_json(const json & j, SubscriptionApplyResponse & x);
+    void to_json(json & j, const SubscriptionApplyResponse & x);
+
+    void from_json(const json & j, SubscriptionPreviewCandidate & x);
+    void to_json(json & j, const SubscriptionPreviewCandidate & x);
+
+    void from_json(const json & j, SubscriptionPreviewRequest & x);
+    void to_json(json & j, const SubscriptionPreviewRequest & x);
+
+    void from_json(const json & j, SubscriptionPreviewResponse & x);
+    void to_json(json & j, const SubscriptionPreviewResponse & x);
+
     void from_json(const json & j, TransportActionRequest & x);
     void to_json(json & j, const TransportActionRequest & x);
 
@@ -1871,6 +1946,12 @@ namespace api {
 
     void from_json(const json & j, StatusEventSnapshotType & x);
     void to_json(json & j, const StatusEventSnapshotType & x);
+
+    void from_json(const json & j, Disposition & x);
+    void to_json(json & j, const Disposition & x);
+
+    void from_json(const json & j, DocumentKind & x);
+    void to_json(json & j, const DocumentKind & x);
 
     void from_json(const json & j, Action & x);
     void to_json(json & j, const Action & x);
@@ -3730,6 +3811,99 @@ namespace api {
         j["type"] = x.type;
     }
 
+    inline void from_json(const json & j, SubscriptionApplySelectionElement& x) {
+        x.line = j.at("line").get<int64_t>();
+        x.tag = get_stack_optional<std::string>(j, "tag");
+    }
+
+    inline void to_json(json & j, const SubscriptionApplySelectionElement & x) {
+        j = json::object();
+        j["line"] = x.line;
+        j["tag"] = x.tag;
+    }
+
+    inline void from_json(const json & j, SubscriptionApplyRequest& x) {
+        x.preview_id = j.at("preview_id").get<std::string>();
+        x.selections = j.at("selections").get<std::vector<SubscriptionApplySelectionElement>>();
+    }
+
+    inline void to_json(json & j, const SubscriptionApplyRequest & x) {
+        j = json::object();
+        j["preview_id"] = x.preview_id;
+        j["selections"] = x.selections;
+    }
+
+    inline void from_json(const json & j, SubscriptionApplyResultElement& x) {
+        x.created = j.at("created").get<bool>();
+        x.error = get_stack_optional<std::string>(j, "error");
+        x.interface = get_stack_optional<std::string>(j, "interface");
+        x.line = j.at("line").get<int64_t>();
+        x.tag = get_stack_optional<std::string>(j, "tag");
+    }
+
+    inline void to_json(json & j, const SubscriptionApplyResultElement & x) {
+        j = json::object();
+        j["created"] = x.created;
+        j["error"] = x.error;
+        j["interface"] = x.interface;
+        j["line"] = x.line;
+        j["tag"] = x.tag;
+    }
+
+    inline void from_json(const json & j, SubscriptionApplyResponse& x) {
+        x.results = j.at("results").get<std::vector<SubscriptionApplyResultElement>>();
+    }
+
+    inline void to_json(json & j, const SubscriptionApplyResponse & x) {
+        j = json::object();
+        j["results"] = x.results;
+    }
+
+    inline void from_json(const json & j, SubscriptionPreviewCandidate& x) {
+        x.disposition = j.at("disposition").get<Disposition>();
+        x.duplicate_of = get_stack_optional<int64_t>(j, "duplicate_of");
+        x.endpoint = get_stack_optional<std::string>(j, "endpoint");
+        x.line = j.at("line").get<int64_t>();
+        x.remark = get_stack_optional<std::string>(j, "remark");
+        x.scheme = get_stack_optional<std::string>(j, "scheme");
+        x.suggested_tag = get_stack_optional<std::string>(j, "suggested_tag");
+    }
+
+    inline void to_json(json & j, const SubscriptionPreviewCandidate & x) {
+        j = json::object();
+        j["disposition"] = x.disposition;
+        j["duplicate_of"] = x.duplicate_of;
+        j["endpoint"] = x.endpoint;
+        j["line"] = x.line;
+        j["remark"] = x.remark;
+        j["scheme"] = x.scheme;
+        j["suggested_tag"] = x.suggested_tag;
+    }
+
+    inline void from_json(const json & j, SubscriptionPreviewRequest& x) {
+        x.url = j.at("url").get<std::string>();
+    }
+
+    inline void to_json(json & j, const SubscriptionPreviewRequest & x) {
+        j = json::object();
+        j["url"] = x.url;
+    }
+
+    inline void from_json(const json & j, SubscriptionPreviewResponse& x) {
+        x.candidates = j.at("candidates").get<std::vector<SubscriptionPreviewCandidate>>();
+        x.document_kind = j.at("document_kind").get<DocumentKind>();
+        x.expires_in_seconds = j.at("expires_in_seconds").get<int64_t>();
+        x.preview_id = j.at("preview_id").get<std::string>();
+    }
+
+    inline void to_json(json & j, const SubscriptionPreviewResponse & x) {
+        j = json::object();
+        j["candidates"] = x.candidates;
+        j["document_kind"] = x.document_kind;
+        j["expires_in_seconds"] = x.expires_in_seconds;
+        j["preview_id"] = x.preview_id;
+    }
+
     inline void from_json(const json & j, TransportActionRequest& x) {
         x.action = j.at("action").get<Action>();
         x.tag = j.at("tag").get<std::string>();
@@ -4076,6 +4250,13 @@ namespace api {
         x.status_event_outbounds = get_stack_optional<StatusEventOutbounds>(j, "StatusEventOutbounds");
         x.status_event_service = get_stack_optional<StatusEventService>(j, "StatusEventService");
         x.status_event_snapshot = get_stack_optional<StatusEventSnapshot>(j, "StatusEventSnapshot");
+        x.subscription_apply_request = get_stack_optional<SubscriptionApplyRequest>(j, "SubscriptionApplyRequest");
+        x.subscription_apply_response = get_stack_optional<SubscriptionApplyResponse>(j, "SubscriptionApplyResponse");
+        x.subscription_apply_result = get_stack_optional<SubscriptionApplyResultElement>(j, "SubscriptionApplyResult");
+        x.subscription_apply_selection = get_stack_optional<SubscriptionApplySelectionElement>(j, "SubscriptionApplySelection");
+        x.subscription_preview_candidate = get_stack_optional<SubscriptionPreviewCandidate>(j, "SubscriptionPreviewCandidate");
+        x.subscription_preview_request = get_stack_optional<SubscriptionPreviewRequest>(j, "SubscriptionPreviewRequest");
+        x.subscription_preview_response = get_stack_optional<SubscriptionPreviewResponse>(j, "SubscriptionPreviewResponse");
         x.transport_action_request = get_stack_optional<TransportActionRequest>(j, "TransportActionRequest");
         x.transport_action_response = get_stack_optional<TransportActionResponse>(j, "TransportActionResponse");
         x.transport_config_apply_request = get_stack_optional<TransportConfigApplyRequest>(j, "TransportConfigApplyRequest");
@@ -4223,6 +4404,13 @@ namespace api {
         j["StatusEventOutbounds"] = x.status_event_outbounds;
         j["StatusEventService"] = x.status_event_service;
         j["StatusEventSnapshot"] = x.status_event_snapshot;
+        j["SubscriptionApplyRequest"] = x.subscription_apply_request;
+        j["SubscriptionApplyResponse"] = x.subscription_apply_response;
+        j["SubscriptionApplyResult"] = x.subscription_apply_result;
+        j["SubscriptionApplySelection"] = x.subscription_apply_selection;
+        j["SubscriptionPreviewCandidate"] = x.subscription_preview_candidate;
+        j["SubscriptionPreviewRequest"] = x.subscription_preview_request;
+        j["SubscriptionPreviewResponse"] = x.subscription_preview_response;
         j["TransportActionRequest"] = x.transport_action_request;
         j["TransportActionResponse"] = x.transport_action_response;
         j["TransportConfigApplyRequest"] = x.transport_config_apply_request;
@@ -5241,6 +5429,50 @@ namespace api {
         switch (x) {
             case StatusEventSnapshotType::SNAPSHOT: j = "snapshot"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"StatusEventSnapshotType\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, Disposition & x) {
+        if (j == "already_configured") x = Disposition::ALREADY_CONFIGURED;
+        else if (j == "duplicate_in_document") x = Disposition::DUPLICATE_IN_DOCUMENT;
+        else if (j == "importable") x = Disposition::IMPORTABLE;
+        else if (j == "malformed") x = Disposition::MALFORMED;
+        else if (j == "scheme_not_supported") x = Disposition::SCHEME_NOT_SUPPORTED;
+        else if (j == "tag_conflict") x = Disposition::TAG_CONFLICT;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"Disposition\""); }
+    }
+
+    inline void to_json(json & j, const Disposition & x) {
+        switch (x) {
+            case Disposition::ALREADY_CONFIGURED: j = "already_configured"; break;
+            case Disposition::DUPLICATE_IN_DOCUMENT: j = "duplicate_in_document"; break;
+            case Disposition::IMPORTABLE: j = "importable"; break;
+            case Disposition::MALFORMED: j = "malformed"; break;
+            case Disposition::SCHEME_NOT_SUPPORTED: j = "scheme_not_supported"; break;
+            case Disposition::TAG_CONFLICT: j = "tag_conflict"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"Disposition\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, DocumentKind & x) {
+        if (j == "base64_link_list") x = DocumentKind::BASE64_LINK_LIST;
+        else if (j == "empty") x = DocumentKind::EMPTY;
+        else if (j == "json_document") x = DocumentKind::JSON_DOCUMENT;
+        else if (j == "link_list") x = DocumentKind::LINK_LIST;
+        else if (j == "too_large") x = DocumentKind::TOO_LARGE;
+        else if (j == "unrecognized") x = DocumentKind::UNRECOGNIZED;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"DocumentKind\""); }
+    }
+
+    inline void to_json(json & j, const DocumentKind & x) {
+        switch (x) {
+            case DocumentKind::BASE64_LINK_LIST: j = "base64_link_list"; break;
+            case DocumentKind::EMPTY: j = "empty"; break;
+            case DocumentKind::JSON_DOCUMENT: j = "json_document"; break;
+            case DocumentKind::LINK_LIST: j = "link_list"; break;
+            case DocumentKind::TOO_LARGE: j = "too_large"; break;
+            case DocumentKind::UNRECOGNIZED: j = "unrecognized"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"DocumentKind\": " + std::to_string(static_cast<int>(x)));
         }
     }
 
