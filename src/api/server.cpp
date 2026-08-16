@@ -518,10 +518,15 @@ WebAuthConfig misconfigured_web_auth(const std::string& message) {
     return config;
 }
 
-WebAuthConfig load_web_auth_config() {
+std::filesystem::path web_auth_config_path() {
     const char* configured = std::getenv("KEEN_PBR_AUTH_FILE");
-    const std::filesystem::path path = configured && *configured
-        ? configured : "/opt/etc/keen-pbr/auth.json";
+    return configured && *configured
+               ? std::filesystem::path{configured}
+               : std::filesystem::path{"/opt/etc/keen-pbr/auth.json"};
+}
+
+WebAuthConfig load_web_auth_config() {
+    const std::filesystem::path path = web_auth_config_path();
 
     std::error_code status_error;
     const auto status = std::filesystem::symlink_status(path, status_error);
@@ -1087,6 +1092,156 @@ struct ApiServer::Impl {
         KeeneticAuthResult keenetic;
     };
 
+    // A successful legacy login is the only authority needed to replace its
+    // exact cleartext credential with an equivalent derived key. Migration is
+    // best-effort and representation-only: every pre-commit failure leaves the
+    // old file/runtime valid and the login succeeds; every post-rename path
+    // publishes the matching derived credential to memory before returning.
+    void migrate_legacy_local_password(
+        WebAuthConfig& verified_auth,
+        std::uint64_t& verified_generation,
+        const std::string& username,
+        const std::string& password) noexcept {
+        try {
+            const auto salt = random_session_token();
+            const std::string derived =
+                salt ? encode_local_password_hash(
+                           password, *salt, kLocalPasswordHashIterations)
+                     : std::string{};
+            if (derived.empty()) {
+                try {
+                    Logger::instance().warn(
+                        "Cannot migrate the legacy local password because "
+                        "secure key derivation was unavailable");
+                } catch (...) {
+                }
+                return;
+            }
+
+            // Serialize with explicit settings publications. A queued
+            // migration revalidates both the in-memory generation and the
+            // exact on-disk legacy value before it can replace anything.
+            std::lock_guard update_lock(auth_update_mutex);
+            {
+                std::lock_guard auth_lock(auth_mutex);
+                if (auth_generation != verified_generation ||
+                    !auth.enabled || auth.misconfigured ||
+                    auth.provider != "local" ||
+                    !constant_time_equal(auth.username, username) ||
+                    !constant_time_equal(auth.password, password)) {
+                    return;
+                }
+            }
+
+            const auto path = web_auth_config_path();
+            std::error_code status_error;
+            const auto status =
+                std::filesystem::symlink_status(path, status_error);
+            if (status_error || !std::filesystem::is_regular_file(status)) {
+                return;
+            }
+            std::ifstream input(path);
+            if (!input) return;
+            auto document = nlohmann::json::parse(input);
+            if (!document.is_object() ||
+                !document.value("enabled", false) ||
+                document.value("provider", std::string{"local"}) !=
+                    "local" ||
+                !document.contains("username") ||
+                !document.at("username").is_string() ||
+                !document.contains("password") ||
+                !document.at("password").is_string() ||
+                !constant_time_equal(
+                    document.at("username").get<std::string>(), username) ||
+                !constant_time_equal(
+                    document.at("password").get<std::string>(), password)) {
+                return;
+            }
+            document["password"] = derived;
+
+            AtomicFileWriteOptions write_options;
+            write_options.default_file_mode = 0600;
+            write_options.file_mode = static_cast<mode_t>(0600);
+            bool committed = false;
+            write_options.committed_result = &committed;
+#ifdef KEEN_PBR3_TESTING
+            configure_auth_settings_write_fault(write_options);
+#endif
+            bool durable = true;
+            try {
+                write_file_atomically(
+                    path.string(), document.dump() + "\n", write_options);
+            } catch (const AtomicFileWriteError& error) {
+                if (!committed && !error.committed()) {
+                    try {
+                        Logger::instance().warn(
+                            "The legacy local password remains usable because "
+                            "its atomic migration did not commit: {}",
+                            error.what());
+                    } catch (...) {
+                    }
+                    return;
+                }
+                durable = false;
+            } catch (const std::exception& error) {
+                if (!committed) {
+                    try {
+                        Logger::instance().warn(
+                            "The legacy local password remains usable because "
+                            "its migration failed before commit: {}",
+                            error.what());
+                    } catch (...) {
+                    }
+                    return;
+                }
+                durable = false;
+            }
+
+            // Settings writes share auth_update_mutex, so the exact generation
+            // validated above is still current in production. Recheck anyway:
+            // testing seams and future publishers must not let a stale login
+            // overwrite a newer provider in memory.
+            {
+                std::lock_guard auth_lock(auth_mutex);
+                if (auth_generation != verified_generation ||
+                    auth.provider != "local" ||
+                    !constant_time_equal(auth.username, username) ||
+                    !constant_time_equal(auth.password, password)) {
+                    return;
+                }
+            }
+            verified_auth.password = derived;
+            replace_auth(verified_auth);
+            auto current = auth_snapshot_with_generation();
+            verified_auth = std::move(current.first);
+            verified_generation = current.second;
+
+            try {
+                if (durable) {
+                    Logger::instance().info(
+                        "The legacy cleartext local password in auth.json was "
+                        "migrated to a derived key");
+                } else {
+                    Logger::instance().warn(
+                        "The legacy local password was migrated and published, "
+                        "but the auth.json directory sync did not complete");
+                }
+            } catch (...) {
+            }
+        } catch (const std::exception& error) {
+            try {
+                Logger::instance().warn(
+                    "The legacy local password remains usable after migration "
+                    "was skipped: {}",
+                    error.what());
+            } catch (...) {
+            }
+        } catch (...) {
+            // Authentication against the already-verified legacy value remains
+            // valid. A later successful login retries the migration.
+        }
+    }
+
     CredentialOutcome forward_keenetic_credentials(
         const std::string& endpoint,
         const std::string& username,
@@ -1208,13 +1363,8 @@ struct ApiServer::Impl {
             }
             if (verdict ==
                 LocalPasswordVerdict::matched_legacy_plaintext) {
-                // Accepted, because refusing would lock the operator out of
-                // their own router. Said out loud, because a credential kept
-                // in cleartext is not a resting state.
-                Logger::instance().warn(
-                    "The local password is still stored in cleartext; saving "
-                    "it again in the authentication settings replaces it with "
-                    "a derived key");
+                migrate_legacy_local_password(
+                    auth, auth_generation_snapshot, username, password);
             }
         }
 
@@ -2180,9 +2330,7 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
             ScopedAuthPublicationLatch auth_publication(
                 state->auth_publication_in_progress);
 
-            const char* configured = std::getenv("KEEN_PBR_AUTH_FILE");
-            const std::filesystem::path path = configured && *configured
-                ? configured : "/opt/etc/keen-pbr/auth.json";
+            const std::filesystem::path path = web_auth_config_path();
             AtomicFileWriteOptions write_options;
             write_options.default_file_mode = 0600;
             write_options.file_mode = static_cast<mode_t>(0600);

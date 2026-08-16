@@ -409,6 +409,127 @@ TEST_CASE("a non-regular auth path also fails closed") {
     CHECK(status.at("error") == "auth_misconfigured");
 }
 
+TEST_CASE("a successful legacy login atomically migrates auth.json") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    write_text(
+        auth_path,
+        R"({"enabled":true,"provider":"local","username":"admin","password":"legacy-secret","owner_note":"preserve-me"})");
+    REQUIRE(::chmod(auth_path.c_str(), 0644) == 0);
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+
+    const auto config = auth_api_config();
+    {
+        ApiServer server(config);
+        server.start();
+        httplib::Client client("127.0.0.1", configured_port(config));
+        const auto login = client.Post(
+            "/api/auth/login",
+            R"({"username":"admin","password":"legacy-secret"})",
+            "application/json");
+        REQUIRE(login != nullptr);
+        REQUIRE(login->status == 200);
+        server.stop();
+    }
+
+    const auto stored = nlohmann::json::parse(std::ifstream(auth_path));
+    const auto persisted = stored.at("password").get<std::string>();
+    CHECK(persisted != "legacy-secret");
+    CHECK(local_password_hash_encoded(persisted));
+    CHECK(verify_local_password(persisted, "legacy-secret") ==
+          LocalPasswordVerdict::matched);
+    CHECK(stored.at("owner_note") == "preserve-me");
+    struct stat metadata {};
+    REQUIRE(::stat(auth_path.c_str(), &metadata) == 0);
+    CHECK((metadata.st_mode & 0777) == 0600);
+
+    // A crash/restart after the rename reads the new representation and still
+    // admits the owner with the same password.
+    ApiServer restarted(config);
+    restarted.start();
+    httplib::Client restarted_client(
+        "127.0.0.1", configured_port(config));
+    const auto after_restart = restarted_client.Post(
+        "/api/auth/login",
+        R"({"username":"admin","password":"legacy-secret"})",
+        "application/json");
+    REQUIRE(after_restart != nullptr);
+    CHECK(after_restart->status == 200);
+}
+
+TEST_CASE("a pre-commit migration failure never locks out the legacy owner") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    const std::string legacy =
+        R"({"enabled":true,"provider":"local","username":"admin","password":"legacy-secret"})";
+    write_text(auth_path, legacy);
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+    EnvironmentVariableGuard write_fault(
+        "KEEN_PBR_TEST_AUTH_WRITE_FAULT", "write");
+
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+    httplib::Client client("127.0.0.1", configured_port(config));
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        const auto login = client.Post(
+            "/api/auth/login",
+            R"({"username":"admin","password":"legacy-secret"})",
+            "application/json");
+        REQUIRE(login != nullptr);
+        CHECK(login->status == 200);
+    }
+    server.stop();
+
+    const auto stored = nlohmann::json::parse(std::ifstream(auth_path));
+    CHECK(stored.at("password") == "legacy-secret");
+}
+
+TEST_CASE("a post-rename migration sync failure keeps old and new boots usable") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    write_text(
+        auth_path,
+        R"({"enabled":true,"provider":"local","username":"admin","password":"legacy-secret"})");
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+    EnvironmentVariableGuard write_fault(
+        "KEEN_PBR_TEST_AUTH_WRITE_FAULT", "directory_fsync");
+
+    const auto config = auth_api_config();
+    {
+        ApiServer server(config);
+        server.start();
+        httplib::Client client("127.0.0.1", configured_port(config));
+        const auto login = client.Post(
+            "/api/auth/login",
+            R"({"username":"admin","password":"legacy-secret"})",
+            "application/json");
+        REQUIRE(login != nullptr);
+        CHECK(login->status == 200);
+        server.stop();
+    }
+
+    const auto stored = nlohmann::json::parse(std::ifstream(auth_path));
+    const auto persisted = stored.at("password").get<std::string>();
+    CHECK(local_password_hash_encoded(persisted));
+    CHECK(verify_local_password(persisted, "legacy-secret") ==
+          LocalPasswordVerdict::matched);
+
+    ApiServer restarted(config);
+    restarted.start();
+    httplib::Client restarted_client(
+        "127.0.0.1", configured_port(config));
+    const auto after_restart = restarted_client.Post(
+        "/api/auth/login",
+        R"({"username":"admin","password":"legacy-secret"})",
+        "application/json");
+    REQUIRE(after_restart != nullptr);
+    CHECK(after_restart->status == 200);
+}
+
 TEST_CASE("auth settings are replaced atomically with private permissions") {
     AuthTempDir directory;
     const auto auth_path = directory.path / "auth.json";
@@ -607,7 +728,10 @@ TEST_CASE(
     CHECK(forwarded_credentials.load(std::memory_order_relaxed) == 0U);
     const auto stored = nlohmann::json::parse(std::ifstream(auth_path));
     CHECK(stored.at("provider") == "local");
-    CHECK(stored.at("password") == "local-secret");
+    const auto retained = stored.at("password").get<std::string>();
+    CHECK(local_password_hash_encoded(retained));
+    CHECK(verify_local_password(retained, "local-secret") ==
+          LocalPasswordVerdict::matched);
 }
 
 TEST_CASE(
