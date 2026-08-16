@@ -323,6 +323,8 @@ TEST_CASE("a uniquifying suffix cannot push a tag past the pattern") {
           kSubscriptionMaximumTagLength);
     CHECK(plan.candidates[0].suggested_tag !=
           plan.candidates[1].suggested_tag);
+    CHECK(plan.candidates[1].suggested_tag ==
+          "a_very_long_remark_tha_2");
     CHECK(plan.candidates[1].disposition == Disposition::importable);
 }
 
