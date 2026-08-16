@@ -9,7 +9,7 @@ import {
   ScrollTextIcon,
   SparklesIcon,
 } from "lucide-react"
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { useLocation } from "wouter"
 import { toast } from "sonner"
@@ -92,19 +92,22 @@ import {
   buildUpdatedConfigForListUpsert,
   createListDnsServerSelectItems,
   createListDraft,
+  discardsDownloadRoute,
+  getActiveSourceGroupsFromDraft,
+  getDiscardedSourceGroups,
   getDraftFromMapEntry,
+  isSourceGroupPopulated,
+  narrowDraftToSourceGroups,
   normalizeListDraftForComparison,
   normalizeQuickSetupForComparison,
-  splitLines,
+  LIST_SOURCE_GROUPS,
   type ListDraft,
+  type ListSourceGroup,
   type QuickSetup,
 } from "@/pages/list-upsert-utils"
 
-type ListSourceGroup = "url" | "file" | "inline"
 type ListFieldName = (typeof LIST_FIELD_NAMES)[keyof typeof LIST_FIELD_NAMES]
 
-const LIST_SOURCE_GROUPS: ListSourceGroup[] = ["url", "file", "inline"]
-const DEFAULT_SOURCE_GROUP: ListSourceGroup = "url"
 const LIST_FIELD_NAMES = {
   displayName: "displayName",
   name: "name",
@@ -122,11 +125,6 @@ const LIST_SOURCE_GROUP_ICONS = {
   file: FileTextIcon,
   inline: ScrollTextIcon,
 } satisfies Record<ListSourceGroup, typeof CloudIcon>
-const LIST_SOURCE_GROUP_FIELDS = {
-  url: [LIST_FIELD_NAMES.url],
-  file: [LIST_FIELD_NAMES.file],
-  inline: [LIST_FIELD_NAMES.domains, LIST_FIELD_NAMES.ipCidrs],
-} satisfies Record<ListSourceGroup, ListFieldName[]>
 
 const sampleNewList: ListDraft = {
   displayName: "",
@@ -283,9 +281,13 @@ function ListForm({
   const [, navigate] = useLocation()
   const close = useUpsertPageClose()
   const recommendedSetup = presentation === "dialog" && mode === "create"
+  const initialSourceGroups = useMemo(
+    () => getActiveSourceGroupsFromDraft(draft),
+    [draft]
+  )
   const [activeSourceGroups, setActiveSourceGroups] = useState<
     ListSourceGroup[]
-  >(() => getActiveSourceGroupsFromDraft(draft))
+  >(initialSourceGroups)
   const postConfigMutation = usePostConfigMutation()
   const postRecommendedListSetupMutation = usePostRecommendedListSetupMutation()
   const isMobile = useIsMobile()
@@ -414,7 +416,7 @@ function ListForm({
           }
         }
 
-        const valueToPersist =
+        const namedValue =
           mode === "create" && !value.name.trim()
             ? {
                 ...value,
@@ -423,6 +425,20 @@ function ListForm({
                 }),
               }
             : value
+        // The single place the unchosen sources are removed, so validation
+        // below judges exactly the document that will be written.
+        const discardedSourceGroups = getDiscardedSourceGroups(
+          namedValue,
+          activeSourceGroups
+        )
+        const losesDownloadRoute = discardsDownloadRoute(
+          namedValue,
+          activeSourceGroups
+        )
+        const valueToPersist = narrowDraftToSourceGroups(
+          namedValue,
+          activeSourceGroups
+        )
         const nameError = getListNameError(
           valueToPersist.name,
           existingListNames,
@@ -485,6 +501,27 @@ function ListForm({
             richColors: true,
           })
           return undefined
+        }
+        // Asked once, here, where the loss actually happens - and asked about
+        // what is being lost by name. The old prompt fired on every switch,
+        // said only "the currently filled fields", and never mentioned the
+        // download route it also reset.
+        if (discardedSourceGroups.length > 0 || losesDownloadRoute) {
+          const discarded = discardedSourceGroups.map((group) =>
+            t(`pages.listUpsert.sourceGroups.${group}.title`)
+          )
+          if (losesDownloadRoute) {
+            discarded.push(t("pages.listUpsert.sourceSwitcher.downloadRoute"))
+          }
+          if (
+            !window.confirm(
+              t("pages.listUpsert.sourceSwitcher.confirmDiscard", {
+                discarded: discarded.join(", "),
+              })
+            )
+          ) {
+            return undefined
+          }
         }
         let configForList = loadedConfig
         let quickSetupForSave = quickSetup
@@ -626,62 +663,34 @@ function ListForm({
     recommendedSetup &&
     recommendedDnsPreset !== initialRecommendedDnsPreset &&
     compatibleDnsServers.length === 0
+  // Switching sources no longer edits a field, so the form itself sees nothing.
+  // It still changes what saving will write, which is what "unsaved" means.
+  const hasSourceSelectionChange =
+    activeSourceGroups.length !== initialSourceGroups.length ||
+    activeSourceGroups.some((group) => !initialSourceGroups.includes(group))
   const isDirty =
     formIsDirty ||
     hasDnsServerChange ||
     hasQuickSetupChange ||
-    hasRecommendedDnsPresetChange
+    hasRecommendedDnsPresetChange ||
+    hasSourceSelectionChange
 
   useEffect(() => {
     onDirtyChange(isDirty)
   }, [isDirty, onDirtyChange])
 
+  // Choosing which source to edit shows one panel and hides the others. It
+  // does not touch a single field: what is typed survives a look around, and
+  // the sources that were not chosen are dropped once, at save, where the loss
+  // is announced. Clearing here made the editor unable to round-trip a list the
+  // backend accepts - ListConfig allows url, file and inline together, and the
+  // only reachable edit was to reduce such a list to one of them.
   const handleSourceGroupSelect = (group: ListSourceGroup) => {
-    const currentValues = form.state.values
-    const filledActiveGroups = activeSourceGroups.filter((sourceGroup) =>
-      isSourceGroupPopulated(sourceGroup, currentValues)
-    )
-    const groupsToClear = filledActiveGroups.filter(
-      (sourceGroup) => sourceGroup !== group
-    )
-
-    if (
-      groupsToClear.length === 0 &&
-      activeSourceGroups.length === 1 &&
-      activeSourceGroups[0] === group
-    ) {
+    if (activeSourceGroups.length === 1 && activeSourceGroups[0] === group) {
       return
     }
-
-    if (
-      groupsToClear.length > 0 &&
-      !window.confirm(t("pages.listUpsert.sourceSwitcher.confirmChange"))
-    ) {
-      return
-    }
-
     setActiveSourceGroups([group])
     clearFormServerErrors(form)
-
-    for (const sourceGroup of LIST_SOURCE_GROUPS) {
-      if (sourceGroup === group) {
-        continue
-      }
-
-      for (const fieldName of LIST_SOURCE_GROUP_FIELDS[sourceGroup]) {
-        form.setFieldValue(fieldName, "")
-      }
-    }
-
-    if (group !== "inline") {
-      form.setFieldValue(LIST_FIELD_NAMES.domains, "")
-      form.setFieldValue(LIST_FIELD_NAMES.ipCidrs, "")
-    }
-    if (group !== "url") {
-      form.setFieldValue(LIST_FIELD_NAMES.refreshDetourMode, "inherit")
-      form.setFieldValue(LIST_FIELD_NAMES.detour, "")
-      form.setFieldValue(LIST_FIELD_NAMES.fallbackDetours, [])
-    }
   }
 
   return (
@@ -1545,38 +1554,6 @@ function ListForm({
       </div>
     </form>
   )
-}
-
-function getActiveSourceGroupsFromDraft(draft: ListDraft): ListSourceGroup[] {
-  const populatedGroups: ListSourceGroup[] = []
-
-  if (draft.url.trim()) {
-    populatedGroups.push("url")
-  }
-
-  if (draft.file.trim()) {
-    populatedGroups.push("file")
-  }
-
-  if (
-    splitLines(draft.domains).length > 0 ||
-    splitLines(draft.ipCidrs).length > 0
-  ) {
-    populatedGroups.push("inline")
-  }
-
-  return populatedGroups.length > 0 ? populatedGroups : [DEFAULT_SOURCE_GROUP]
-}
-
-function isSourceGroupPopulated(group: ListSourceGroup, draft: ListDraft) {
-  if (group === "inline") {
-    return (
-      splitLines(draft.domains).length > 0 ||
-      splitLines(draft.ipCidrs).length > 0
-    )
-  }
-
-  return draft[group].trim().length > 0
 }
 
 function getFirstFieldError(errors: unknown[]) {

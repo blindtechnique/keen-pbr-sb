@@ -26,6 +26,13 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
       "Kernel interface kinds are a closed union in kernel-interface-kind.ts.",
   },
   {
+    file: "src/pages/list-upsert-page.tsx",
+    argument: "`pages.listUpsert.sourceGroups.${*}.title`",
+    keys: ["pages.listUpsert.sourceGroups.*.title"],
+    reason:
+      "The discard confirmation names the sources by their panel titles; ListSourceGroup is a closed union in list-upsert-utils.ts.",
+  },
+  {
     file: "src/components/layout/header-health-indicator.tsx",
     argument: "`headerHealth.${*}`",
     keys: ["headerHealth.*"],

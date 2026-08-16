@@ -402,3 +402,95 @@ export function splitLines(value: string) {
     .map((entry) => entry.trim())
     .filter(Boolean)
 }
+
+// Which of a list's sources are in play. ListConfig allows url, file and
+// inline entries together - the schema says "at least one of", not "exactly
+// one" - so this is a set, not a choice, and the editor has to be able to
+// carry a list that arrives with several.
+export type ListSourceGroup = "url" | "file" | "inline"
+
+export const LIST_SOURCE_GROUPS: ListSourceGroup[] = ["url", "file", "inline"]
+
+export const LIST_SOURCE_GROUP_FIELDS = {
+  url: ["url"],
+  file: ["file"],
+  inline: ["domains", "ipCidrs"],
+} satisfies Record<ListSourceGroup, (keyof ListDraft)[]>
+
+export function isSourceGroupPopulated(
+  group: ListSourceGroup,
+  draft: ListDraft
+) {
+  if (group === "inline") {
+    return (
+      splitLines(draft.domains).length > 0 ||
+      splitLines(draft.ipCidrs).length > 0
+    )
+  }
+
+  return draft[group].trim().length > 0
+}
+
+export function getActiveSourceGroupsFromDraft(
+  draft: ListDraft
+): ListSourceGroup[] {
+  const populated = LIST_SOURCE_GROUPS.filter((group) =>
+    isSourceGroupPopulated(group, draft)
+  )
+  return populated.length > 0 ? populated : ["url"]
+}
+
+// Removes the sources the operator did not choose. This is the only place they
+// are dropped, so validation and persistence judge the same document.
+//
+// Dropping `url` takes the download route with it: refreshDetourMode, detour
+// and fallbackDetours describe how a URL is fetched and mean nothing without
+// one. That coupling is why discarding has to be announced in terms of both.
+export function narrowDraftToSourceGroups(
+  draft: ListDraft,
+  groups: ListSourceGroup[]
+): ListDraft {
+  const narrowed: ListDraft = { ...draft }
+
+  for (const group of LIST_SOURCE_GROUPS) {
+    if (groups.includes(group)) {
+      continue
+    }
+    for (const fieldName of LIST_SOURCE_GROUP_FIELDS[group]) {
+      narrowed[fieldName] = ""
+    }
+  }
+
+  if (!groups.includes("url")) {
+    narrowed.refreshDetourMode = "inherit"
+    narrowed.detour = ""
+    narrowed.fallbackDetours = []
+  }
+
+  return narrowed
+}
+
+// What saving would throw away, named, so a confirmation can list it instead
+// of asking about "the fields" and leaving the operator to work out which.
+export function getDiscardedSourceGroups(
+  draft: ListDraft,
+  groups: ListSourceGroup[]
+): ListSourceGroup[] {
+  return LIST_SOURCE_GROUPS.filter(
+    (group) => !groups.includes(group) && isSourceGroupPopulated(group, draft)
+  )
+}
+
+// The download route survives only alongside a URL, so a selection without one
+// discards whatever was configured for it.
+export function discardsDownloadRoute(
+  draft: ListDraft,
+  groups: ListSourceGroup[]
+) {
+  return (
+    !groups.includes("url") &&
+    (draft.refreshDetourMode !== "inherit" ||
+      draft.detour.trim().length > 0 ||
+      draft.fallbackDetours.length > 0)
+  )
+}

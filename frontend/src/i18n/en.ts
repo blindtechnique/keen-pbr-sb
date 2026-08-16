@@ -3172,9 +3172,10 @@ export const enTranslation = {
       sourceSwitcher: {
         title: "Source type",
         description:
-          "Choose which source to edit. Legacy lists with multiple saved sources stay visible until you switch.",
-        confirmChange:
-          "Switch source type and clear the currently filled fields?",
+          "Choose which source to edit. Switching only changes what is shown; nothing you have typed is lost until you save.",
+        downloadRoute: "download route",
+        confirmDiscard:
+          "Saving keeps only the selected source and discards: {{discarded}}. Continue?",
       },
       sourceGroups: {
         url: {
