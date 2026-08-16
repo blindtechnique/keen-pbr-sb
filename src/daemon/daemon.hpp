@@ -32,6 +32,7 @@
 #include "../keenetic/internal_vpn_runtime_target.hpp"
 #include "../keenetic/ndms_native_import_readiness.hpp"
 #include "../keenetic/ndms_native_import_wal_store.hpp"
+#include "../keenetic/ndms_native_ownership_store.hpp"
 #include "../lists/list_set_usage.hpp"
 #include "../routing/interface_monitor.hpp"
 #include "../routing/firewall_state.hpp"
@@ -1079,6 +1080,10 @@ private:
     // before NDMS/routing startup; API workers read only the redacted atomic
     // summary and can never turn it into mutation authority.
     NdmsNativeImportWalStore ndms_native_import_wal_store_;
+    // Sits beside the WAL store rather than inside it: an unknown name inside
+    // the WAL directory makes every inventory unsafe by design, so its
+    // neighbours must live elsewhere.
+    NdmsNativeOwnershipStore ndms_native_ownership_store_;
     std::atomic<NdmsNativeImportJournalReadinessState>
         ndms_native_import_journal_readiness_{
             NdmsNativeImportJournalReadinessState::unavailable};

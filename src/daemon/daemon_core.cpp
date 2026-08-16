@@ -46,6 +46,8 @@
 #include "../keenetic/internal_vpn_service_resolver.hpp"
 #include "../keenetic/internal_vpn_runtime_generation.hpp"
 #include "../keenetic/ndms_catalog_cache.hpp"
+#include "../keenetic/ndms_native_interface_delete_production.hpp"
+#include "../keenetic/ndms_native_ownership_reconcile.hpp"
 #include "../keenetic/ndms_vpn_server_service_cache.hpp"
 #include "../lists/list_streamer.hpp"
 #include "../log/logger.hpp"
@@ -298,6 +300,8 @@ Daemon::Daemon(Config config,
                     max_file_size_bytes(config))
     , ndms_native_import_wal_store_(
           "/opt/var/lib/keen-pbr/native-import-wal")
+    , ndms_native_ownership_store_(
+          "/opt/var/lib/keen-pbr/native-import-ownership")
     , config_(std::move(config))
     , config_path_(std::move(config_path))
     , opts_(std::move(opts))
@@ -3975,6 +3979,38 @@ void Daemon::run() {
             native_import_readiness =
                 summarize_ndms_native_import_readiness(
                     native_import_inventory);
+
+            // The removal crash window closes here and only here. A tunnel
+            // deleted by an operator whose process then died leaves a durable
+            // claim over a slot that is now free; the live caller learns of it
+            // from removed_claim_survived, and nothing else would ever notice.
+            // Skipped whenever a WAL transaction is in flight - the recovery
+            // dispatcher retracts its own claim, and a second remover racing
+            // it would turn that retirement into a failure.
+            const bool transaction_in_flight =
+                !native_import_inventory.items.empty();
+            const auto reconciled =
+                reconcile_ndms_native_ownership_claims(
+                    ndms_native_ownership_store_,
+                    transaction_in_flight,
+                    ndms_native_interface_delete_production_dependencies());
+            if (!reconciled.store_readable) {
+                log.warn(
+                    "Native import ownership claims could not be read; "
+                    "stale claims cannot be retired this boot.");
+            } else if (!reconciled.retired.empty() ||
+                       !reconciled.unresolved.empty()) {
+                // Counts only. An interface name is not a secret, but the
+                // surrounding report has been deliberately redacted since the
+                // journal observation above and there is no reason to widen it
+                // here.
+                log.info(
+                    "Native import ownership reconciliation: examined={} "
+                    "retired={} unresolved={}",
+                    reconciled.claims_examined,
+                    reconciled.retired.size(),
+                    reconciled.unresolved.size());
+            }
         } catch (...) {
             // Startup inventory is observational. Even an unexpected local
             // allocation/runtime failure must fail the report closed without
