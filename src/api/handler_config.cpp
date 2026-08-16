@@ -1374,6 +1374,43 @@ static void register_config_handler_impl(
                 write_config_file,
                 runtime_options);
         });
+
+    // POST /api/config/discard - drop the staged draft without applying it.
+    //
+    // Six endpoints in this daemon refuse to run while a draft is staged and
+    // tell the operator to save or discard it: backup restore (preview and
+    // apply), catalog setup, linked-transport creation, SIGHUP reload, and
+    // list refresh. Until this route existed there was no discard: the exits
+    // were saving a draft the operator had already decided against - which
+    // applies it to the live routing runtime - or restarting the daemon.
+    //
+    // No request body and no caller-supplied revision, deliberately. Staging
+    // (POST /api/config) already replaces any existing draft without a
+    // compare-and-swap, so requiring one to delete a draft while none is
+    // needed to overwrite it would protect the wrong direction. The narrow
+    // setup endpoints carry base_revision for a different reason: they build
+    // their candidate from a server snapshot the client has seen.
+    //
+    // The mutation lease is taken before the staged state is read. Save holds
+    // the same lease across its CAS read and its apply, so an unguarded
+    // discard could land inside that window and clear a draft the save had
+    // already committed to persisting.
+    server.post(
+        "/api/config/discard",
+        [&ctx]() -> std::string {
+            ApiRuntimeMutationGuard config_operation(
+                ctx, "discard-config");
+            if (!ctx.config_is_draft()) {
+                throw ApiError("No staged config to discard", 400);
+            }
+            ctx.clear_staged_config();
+            config_operation.finish();
+
+            api::ConfigUpdateResponse response;
+            response.status = api::ConfigUpdateResponseStatus::OK;
+            response.message = "Staged config discarded";
+            return nlohmann::json(response).dump();
+        });
 }
 
 void register_config_handler(ApiServer& server, ApiContext& ctx) {

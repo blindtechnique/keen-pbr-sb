@@ -293,6 +293,39 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/config/discard:
+    post:
+      summary: Discard the staged config draft
+      description: >
+        Drops the staged in-memory draft and returns the visible configuration
+        to the persisted one. Nothing is written to disk and the routing
+        runtime is not touched. This is the counterpart to
+        `POST /api/config/save`: several endpoints — backup restore, catalog
+        setup, linked-transport creation, reload and list refresh — refuse to
+        run while a draft is staged, and this is the exit that does not apply
+        the draft. Takes no body: staging already replaces an existing draft
+        without a compare-and-swap, so discarding does not require one either.
+      operationId: postConfigDiscard
+      responses:
+        "200":
+          description: Staged draft discarded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigUpdateResponse"
+        "400":
+          description: No staged config to discard
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Unexpected server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/routing/test:
     post:
       summary: Test routing for an IP or domain

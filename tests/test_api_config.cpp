@@ -2528,6 +2528,180 @@ TEST_CASE(
     CHECK_FALSE(journal.read_active().has_value());
 }
 
+TEST_CASE(
+    "discarding a draft restores the persisted config without applying it") {
+    // The point of the endpoint. Six other endpoints refuse to run while a
+    // draft is staged and tell the operator to save or discard it; before this
+    // route the only exits were saving a draft they had decided against - which
+    // applies it to live routing - or restarting the daemon.
+    constexpr int api_port = 18271;
+    ConfigApiTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    const Config active = make_valid_config("127.0.0.1:12121");
+    const std::string persisted = nlohmann::json(active).dump();
+    write_text(config_path, persisted);
+
+    ConfigStore store(active);
+    const Config draft = make_recommended_list_config(
+        "127.0.0.1:12121", "recommended");
+    store.stage_config(draft, nlohmann::json(draft).dump());
+    REQUIRE(store.config_is_draft());
+
+    SseBroadcaster broadcaster;
+    std::size_t begin_calls = 0;
+    std::size_t finish_calls = 0;
+    std::size_t apply_calls = 0;
+    std::size_t writes = 0;
+    auto context = make_config_context(
+        config_path.string(),
+        broadcaster,
+        active,
+        persisted,
+        begin_calls,
+        finish_calls,
+        apply_calls);
+    connect_config_store(context, store);
+
+    ApiConfig api_config;
+    api_config.listen = "127.0.0.1:" + std::to_string(api_port);
+    ApiServer server(api_config);
+    register_config_handler_for_test(
+        server,
+        context,
+        [&writes](const std::string&, const std::string&) { ++writes; });
+    server.start();
+
+    httplib::Client client("127.0.0.1", api_port);
+    const auto response =
+        client.Post("/api/config/discard", "", "application/json");
+    REQUIRE(response != nullptr);
+    CHECK(response->status == 200);
+
+    const auto after = client.Get("/api/config");
+    server.stop();
+
+    // The draft is gone, not merely hidden.
+    CHECK_FALSE(store.config_is_draft());
+    CHECK_FALSE(store.staged_cas_snapshot().has_value());
+    // Nothing was persisted and nothing was applied: this is the exit that
+    // does not put the abandoned draft into the routing runtime.
+    CHECK(writes == 0U);
+    CHECK(apply_calls == 0U);
+    CHECK(read_text(config_path) == persisted);
+    CHECK(nlohmann::json(store.active_config()) == nlohmann::json(active));
+    // ...and the operator now sees the persisted config, so the six blocked
+    // endpoints are reachable again.
+    REQUIRE(after != nullptr);
+    REQUIRE(after->status == 200);
+    const auto state = nlohmann::json::parse(after->body);
+    CHECK(state.at("is_draft").get<bool>() == false);
+    // The draft's distinctive content is what has to be gone. Comparing whole
+    // documents would compare default materialization instead.
+    CHECK(state.at("config").at("lists").is_null());
+}
+
+TEST_CASE("discard reports having nothing to discard") {
+    constexpr int api_port = 18272;
+    ConfigApiTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    const Config active = make_valid_config("127.0.0.1:12121");
+    ConfigStore store(active);
+    REQUIRE_FALSE(store.config_is_draft());
+
+    SseBroadcaster broadcaster;
+    std::size_t begin_calls = 0;
+    std::size_t finish_calls = 0;
+    std::size_t apply_calls = 0;
+    auto context = make_config_context(
+        config_path.string(),
+        broadcaster,
+        active,
+        nlohmann::json(active).dump(),
+        begin_calls,
+        finish_calls,
+        apply_calls);
+    connect_config_store(context, store);
+
+    ApiConfig api_config;
+    api_config.listen = "127.0.0.1:" + std::to_string(api_port);
+    ApiServer server(api_config);
+    register_config_handler_for_test(
+        server,
+        context,
+        [](const std::string&, const std::string&) {});
+    server.start();
+
+    httplib::Client client("127.0.0.1", api_port);
+    const auto response =
+        client.Post("/api/config/discard", "", "application/json");
+    server.stop();
+
+    REQUIRE(response != nullptr);
+    CHECK(response->status == 400);
+    CHECK(apply_calls == 0U);
+    // The refusal must still release the runtime mutation claim. A discard
+    // that failed while holding it would wedge every other config operation -
+    // including the save this endpoint exists to offer an alternative to.
+    CHECK(begin_calls == 1U);
+    CHECK(finish_calls == begin_calls);
+}
+
+TEST_CASE("discard holds the runtime mutation claim while it runs") {
+    // Save takes the same claim across its CAS read and its apply. An
+    // unguarded discard could land inside that window and clear a draft the
+    // save had already committed to persisting.
+    constexpr int api_port = 18273;
+    ConfigApiTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    const Config active = make_valid_config("127.0.0.1:12121");
+    ConfigStore store(active);
+    const Config draft = make_recommended_list_config(
+        "127.0.0.1:12121", "recommended");
+    store.stage_config(draft, nlohmann::json(draft).dump());
+
+    SseBroadcaster broadcaster;
+    std::size_t begin_calls = 0;
+    std::size_t finish_calls = 0;
+    std::size_t apply_calls = 0;
+    bool draft_present_inside_claim = false;
+    auto context = make_config_context(
+        config_path.string(),
+        broadcaster,
+        active,
+        nlohmann::json(active).dump(),
+        begin_calls,
+        finish_calls,
+        apply_calls);
+    connect_config_store(context, store);
+    context.begin_save_operation_fn =
+        [&begin_calls, &draft_present_inside_claim, &store] {
+            ++begin_calls;
+            // The claim is taken before the staged state is read.
+            draft_present_inside_claim = store.config_is_draft();
+        };
+
+    ApiConfig api_config;
+    api_config.listen = "127.0.0.1:" + std::to_string(api_port);
+    ApiServer server(api_config);
+    register_config_handler_for_test(
+        server,
+        context,
+        [](const std::string&, const std::string&) {});
+    server.start();
+
+    httplib::Client client("127.0.0.1", api_port);
+    const auto response =
+        client.Post("/api/config/discard", "", "application/json");
+    server.stop();
+
+    REQUIRE(response != nullptr);
+    CHECK(response->status == 200);
+    CHECK(begin_calls == 1U);
+    CHECK(finish_calls == 1U);
+    CHECK(draft_present_inside_claim);
+    CHECK_FALSE(store.config_is_draft());
+}
+
 } // namespace keen_pbr3
 
 #endif // WITH_API

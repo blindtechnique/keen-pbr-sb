@@ -434,6 +434,7 @@ private:
 //   POST /api/config          - validate + stage config in memory
 //   POST /api/config/dependencies - analyze references before mutation
 //   POST /api/config/save     - persist staged config and apply it
+//   POST /api/config/discard  - drop the staged draft without applying it
 //   GET  /api/health/routing  - routing and firewall health verification
 //   GET  /api/runtime/outbounds - live outbound/interface runtime state
 //   GET  /api/runtime/interfaces - live system interface inventory
