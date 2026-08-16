@@ -120,8 +120,15 @@ sanitize: ## Build and run the unit suite under AddressSanitizer + UndefinedBeha
 # когда монолитная цель временно сломана чужой правкой. Но собирать их надо
 # всегда: пока их не собирал никто, две из них молча перестали компилироваться,
 # и 35 сценариев с 888 assertions не выполнялись.
+# То же повторилось 16.08 с keen-pbr-native-tunnel-import-tests: цели не было
+# в этом списке вовсе, она потеряла config_writer.cpp и не линковалась днями,
+# унеся с собой весь набор WAL store — его тесты не собираются больше никуда.
+# Инвариант: здесь обязана быть каждая цель из tests/CMakeLists.txt, кроме
+# keen-pbr-firewall-it (нужны Docker и netns, у неё свой `make firewall-it`).
+# Проверяется тестом build_scripts/tests/test_test_target_coverage.py.
 NARROW_TEST_TARGETS := \
 	keen-pbr-cache-generation-tests \
+	keen-pbr-native-tunnel-import-tests \
 	keen-pbr-runtime-mutation-admission-tests \
 	keen-pbr-rescue-tests \
 	keen-pbr-keenetic-dns-refresh-tests \
@@ -133,6 +140,7 @@ NARROW_TEST_TARGETS := \
 test: ## Build and run unit tests (doctest)
 	sh -n install.sh
 	python3 -m unittest build_scripts.tests.test_build_identity -v
+	python3 -m unittest build_scripts.tests.test_test_target_coverage -v
 	cmake -S . -B $(GCC_BUILD_DIR) $(GCC_CMAKE_FLAGS) -DBUILD_TESTS=ON \
 		-DWITH_API=ON -DUSE_KEENETIC_API=ON $(TEST_CMAKE_FLAGS)
 	cmake --build $(GCC_BUILD_DIR) --parallel $(BUILD_JOBS) --target keen-pbr keen-pbr-tests crash-diagnostics-smoke $(NARROW_TEST_TARGETS)
