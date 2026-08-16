@@ -2,6 +2,9 @@
 
 #include "crypto/sha256.hpp"
 #include "keenetic/ndms_native_import_wal.hpp"
+#include "keenetic/ndms_native_target_evidence.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <array>
 #include <chrono>
@@ -76,10 +79,33 @@ void record_response(NdmsNativeImportWalRecord& record) {
         digest("ndms-import-response-manifest-v2-", 'f');
 }
 
+// The revision the production evidence builder actually emits, taken from it
+// rather than spelled out here. Nine test files hardcode this prefix and none
+// used to compare it against its producer - which is exactly the arrangement
+// that let the observation builder demand a catalog-digest shape no producer
+// has ever emitted, with every test agreeing and production always refusing.
+// Deriving it means a divergence between the emitter and the WAL codec turns
+// this suite red instead of passing on a shared guess.
+std::string produced_target_revision() {
+    const auto config = nlohmann::json::parse(R"({
+      "description": "binding fixture",
+      "ip": {"address": {"address": "10.0.0.1", "mask": "255.255.255.0"}},
+      "up": true
+    })");
+    const auto status = nlohmann::json::parse(R"({
+      "id": "Wireguard5", "interface-name": "Wireguard5",
+      "type": "Wireguard", "description": "binding fixture",
+      "link": "down", "state": "up"
+    })");
+    const auto result = build_ndms_native_target_evidence(
+        "Wireguard5", config, status, nlohmann::json::object());
+    REQUIRE(result.evidence.has_value());
+    return result.evidence->full_revision;
+}
+
 void verify_target(NdmsNativeImportWalRecord& record) {
     record.created_interface = "Wireguard5";
-    record.target_full_revision =
-        digest("ndms-rci-full-v1-", 'd');
+    record.target_full_revision = produced_target_revision();
 }
 
 NdmsNativeImportRecoveryObservation stable_absence() {
@@ -414,6 +440,32 @@ TEST_CASE("native import recovery never retries an ambiguous import POST") {
         CHECK(classify_ndms_native_import_recovery(record, weakened) ==
               NdmsNativeImportRecoveryAction::block_unknown);
     }
+}
+
+TEST_CASE("the codec accepts the revision its producer actually emits") {
+    // The binding the chain lacked. The evidence builder emits the target
+    // revision; the WAL codec decides whether a record may carry it; and the
+    // two agreed only by both being handed the same literal in tests. Round
+    // -tripping a real one through serialize/parse is what proves they agree.
+    auto record = prepared_record();
+    record.phase = NdmsNativeImportWalPhase::target_verified;
+    reserve(record);
+    record_response(record);
+    verify_target(record);
+    const auto produced = *record.target_full_revision;
+    CHECK(produced.rfind("ndms-rci-full-v1-", 0U) == 0U);
+
+    const auto serialized = serialize_ndms_native_import_wal(record);
+    const auto parsed = parse_ndms_native_import_wal(serialized);
+    REQUIRE(parsed.target_full_revision.has_value());
+    CHECK(*parsed.target_full_revision == produced);
+
+    // And a revision of the wrong shape is still refused, so the acceptance
+    // above is a decision rather than an absence of checking.
+    auto wrong = record;
+    wrong.target_full_revision = std::string(64U, 'd');
+    CHECK_THROWS_AS(serialize_ndms_native_import_wal(wrong),
+                    NdmsNativeImportWalError);
 }
 
 TEST_CASE("a recorded fingerprint that does not match still refuses") {
