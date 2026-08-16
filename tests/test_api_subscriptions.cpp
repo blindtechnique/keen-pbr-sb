@@ -98,14 +98,18 @@ struct FakeManager {
     std::string create_error_body;
     std::string late_existing_link;
     std::atomic<bool> expose_late_existing{false};
+    std::atomic<bool> rotated_api_key{false};
 
     explicit FakeManager(const std::filesystem::path& directory) {
         server.Get(
             "/v1/config/transports",
             [this](const httplib::Request& request,
                    httplib::Response& response) {
-                if (request.get_header_value("Authorization") !=
-                    "Bearer test-secret") {
+                const auto expected = rotated_api_key.load(
+                                          std::memory_order_acquire)
+                                          ? "Bearer rotated-secret"
+                                          : "Bearer test-secret";
+                if (request.get_header_value("Authorization") != expected) {
                     response.status = 401;
                     return;
                 }
@@ -130,8 +134,11 @@ struct FakeManager {
             "/v1/config/transports",
             [this](const httplib::Request& request,
                    httplib::Response& response) {
-                if (request.get_header_value("Authorization") !=
-                    "Bearer test-secret") {
+                const auto expected = rotated_api_key.load(
+                                          std::memory_order_acquire)
+                                          ? "Bearer rotated-secret"
+                                          : "Bearer test-secret";
+                if (request.get_header_value("Authorization") != expected) {
                     response.status = 401;
                     return;
                 }
@@ -403,6 +410,51 @@ TEST_CASE("apply rechecks link identity after acquiring the mutation lease") {
     CHECK(body.at("results")[0].at("outcome") == "already_imported");
     CHECK(body.at("results")[0].at("error").is_null());
     CHECK(harness.manager->created.empty());
+}
+
+TEST_CASE("apply reads manager authority only after acquiring the mutation lease") {
+    constexpr int api_port = 18289;
+    SubscriptionsHarness harness(api_port);
+    harness.fetch_body =
+        "vless://55555555-5555-5555-5555-555555555555@new.example:443"
+        "#Rotated\n";
+    httplib::Client client("127.0.0.1", api_port);
+    const auto preview_id = preview_and_get_id(client);
+
+    harness.context.maintenance_lease_factory_fn =
+        [&harness](std::string) -> std::unique_ptr<MaintenanceLease> {
+        // Model a serialized Save winning immediately before this apply. The
+        // new manager key becomes authoritative while the lease is acquired.
+        // Reading transports.json before the lease sends the stale key and
+        // fails; reading it under the lease observes one coherent generation.
+        {
+            std::ofstream config(harness.directory.path / "transports.json");
+            config << nlohmann::json{
+                {"listen",
+                 "127.0.0.1:" +
+                     std::to_string(harness.manager->port)},
+                {"api_key", "rotated-secret"},
+            };
+        }
+        harness.manager->rotated_api_key.store(
+            true, std::memory_order_release);
+        return std::make_unique<SubscriptionsTestMaintenanceLease>();
+    };
+
+    const auto response = client.Post(
+        "/api/subscriptions/apply",
+        nlohmann::json{
+            {"preview_id", preview_id},
+            {"selections", nlohmann::json::array({{{"line", 1}}})},
+        }
+            .dump(),
+        "application/json");
+    REQUIRE(response != nullptr);
+    REQUIRE(response->status == 200);
+    const auto body = nlohmann::json::parse(response->body);
+    REQUIRE(body.at("results").size() == 1U);
+    CHECK(body.at("results")[0].at("outcome") == "created");
+    CHECK(harness.manager->created.size() == 1U);
 }
 
 TEST_CASE("apply refuses what the preview did not offer") {

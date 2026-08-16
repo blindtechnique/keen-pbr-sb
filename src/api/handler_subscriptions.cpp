@@ -437,12 +437,15 @@ void register_subscriptions_handler_impl(
                 }
             }
 
-            const auto endpoint =
-                load_transport_manager_endpoint(ctx.config_path);
-
             try {
                 auto maintenance =
                     ctx.acquire_maintenance_lease("subscription-import");
+                // The endpoint and API key belong to the same serialized
+                // configuration as the transports below. Reading them before
+                // the lease would let a concurrent Save publish a new manager
+                // identity while this apply continued with stale authority.
+                const auto endpoint =
+                    load_transport_manager_endpoint(ctx.config_path);
                 // Preview state is advisory. Another serialized mutation can
                 // create the same transport after preview, so identity and
                 // naming must be refreshed only after this apply owns the
