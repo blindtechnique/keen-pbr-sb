@@ -182,10 +182,28 @@ RuntimeStateSnapshot Daemon::build_runtime_state_snapshot() const {
 }
 
 void Daemon::transition_runtime_or_throw(RuntimeState next, const char* reason) {
-    if (runtime_state_machine_.state() == next) return;
+    const auto previous = runtime_state_machine_.state();
+    if (previous == next) return;
     std::string error;
     if (!runtime_state_machine_.transition(next, reason, error)) {
         throw DaemonError(error);
+    }
+    // The one choke point every runtime ownership change passes through, and
+    // the only place its reason reaches the log. Never throws: several
+    // callers transition from catch blocks, and a transition that succeeded
+    // must not be un-happened by a logging failure.
+    try {
+        if (classify_runtime_transition_log(previous, next) ==
+            RuntimeTransitionLogSeverity::warn) {
+            Logger::instance().warn("Runtime state {} -> {}: {}",
+                                    runtime_state_name(previous),
+                                    runtime_state_name(next), reason);
+        } else {
+            Logger::instance().info("Runtime state {} -> {}: {}",
+                                    runtime_state_name(previous),
+                                    runtime_state_name(next), reason);
+        }
+    } catch (...) {
     }
 }
 

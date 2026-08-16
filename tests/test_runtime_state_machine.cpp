@@ -593,6 +593,33 @@ TEST_CASE("a retry that will never be scheduled says so") {
           Decline::routing_inactive);
 }
 
+TEST_CASE("entering and leaving broken are the loud transitions") {
+    using Severity = RuntimeTransitionLogSeverity;
+    // The owner of a broken runtime and its recoverer are the two lines an
+    // operator greps for; everything else is routine lifecycle.
+    CHECK(classify_runtime_transition_log(RuntimeState::running,
+                                          RuntimeState::broken) ==
+          Severity::warn);
+    CHECK(classify_runtime_transition_log(RuntimeState::starting,
+                                          RuntimeState::broken) ==
+          Severity::warn);
+    CHECK(classify_runtime_transition_log(RuntimeState::broken,
+                                          RuntimeState::applying) ==
+          Severity::warn);
+    CHECK(classify_runtime_transition_log(RuntimeState::broken,
+                                          RuntimeState::starting) ==
+          Severity::warn);
+    CHECK(classify_runtime_transition_log(RuntimeState::starting,
+                                          RuntimeState::running) ==
+          Severity::info);
+    CHECK(classify_runtime_transition_log(RuntimeState::running,
+                                          RuntimeState::applying) ==
+          Severity::info);
+    CHECK(classify_runtime_transition_log(RuntimeState::applying,
+                                          RuntimeState::running) ==
+          Severity::info);
+}
+
 TEST_CASE("resolver streams committed LKG only while routing is active") {
     CHECK(resolver_lkg_stream_available(
         RuntimeState::running, true, true));

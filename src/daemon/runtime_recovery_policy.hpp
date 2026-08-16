@@ -1392,6 +1392,26 @@ inline bool resolver_reload_schedule_decline_is_notable(
            decline != ResolverReloadScheduleDecline::already_scheduled;
 }
 
+// How a runtime state transition should reach the log. Every ownership change
+// passes through one daemon choke point, and before that point logged
+// anything the 12.08 boot incident was undiagnosable: the runtime was broken
+// by 09:55:38 with five candidate owners, and not one had written its name
+// anywhere - runtime reasons appeared in no log line at all.
+enum class RuntimeTransitionLogSeverity : std::uint8_t {
+    // Entering broken names the owner; leaving it names the recoverer. Both
+    // are the lines an operator greps for first, so they must stand out.
+    warn,
+    info,
+};
+
+inline RuntimeTransitionLogSeverity classify_runtime_transition_log(
+    const RuntimeState previous, const RuntimeState next) noexcept {
+    return next == RuntimeState::broken ||
+                   previous == RuntimeState::broken
+               ? RuntimeTransitionLogSeverity::warn
+               : RuntimeTransitionLogSeverity::info;
+}
+
 inline const char* resolver_reload_schedule_decline_name(
     ResolverReloadScheduleDecline decline) noexcept {
     switch (decline) {
