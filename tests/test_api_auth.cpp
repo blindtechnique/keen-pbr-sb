@@ -2025,6 +2025,103 @@ TEST_CASE("web login refuses to exceed the global session cap") {
     CHECK(overflow->get_header_value("Set-Cookie").empty());
 }
 
+TEST_CASE("an external router credential change revokes the session cohort") {
+    // The revocation machinery already existed; what this pins is the trigger.
+    // An inert revocation is the one kind nobody notices, because nothing
+    // fails - it just never fires.
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    write_text(
+        auth_path,
+        R"({"enabled":true,"provider":"keenetic",)"
+        R"("keenetic_endpoint_mode":"manual",)"
+        R"("keenetic_endpoint":"127.0.0.1:80"})");
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+
+    // Stands in for the firmware RCI, which lives on a fixed loopback port a
+    // test cannot occupy.
+    std::mutex document_mutex;
+    std::string document =
+        R"({"admin":{"password":{"nt":{"hash":"aaaa"}},"tag":["http"]}})";
+    bool serve = true;
+    httplib::Server ndms;
+    ndms.Get("/rci/show/rc/user",
+             [&](const httplib::Request&, httplib::Response& response) {
+                 std::lock_guard<std::mutex> lock(document_mutex);
+                 if (!serve) {
+                     response.status = 503;
+                     return;
+                 }
+                 response.set_content(document, "application/json");
+             });
+    const int ndms_port = ndms.bind_to_any_port("127.0.0.1");
+    REQUIRE(ndms_port > 0);
+    std::thread ndms_thread([&ndms]() { ndms.listen_after_bind(); });
+    while (!ndms.is_running()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    EnvironmentVariableGuard endpoint_override(
+        "KEEN_PBR_TEST_NDMS_USER_ENDPOINT",
+        "http://127.0.0.1:" + std::to_string(ndms_port) +
+            "/rci/show/rc/user");
+    EnvironmentVariableGuard interval_override(
+        "KEEN_PBR_TEST_NDMS_USER_INTERVAL_MS", "0");
+
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+
+    // The first successful read is a baseline, not a change: otherwise every
+    // daemon start would log its operators out.
+    CHECK(server.poll_router_credentials_for_testing() == "unknown");
+    CHECK(server.poll_router_credentials_for_testing() == "unchanged");
+
+    // The firmware becomes unreachable. That is not evidence of a change, and
+    // it must not become the new baseline either.
+    {
+        std::lock_guard<std::mutex> lock(document_mutex);
+        serve = false;
+    }
+    CHECK(server.poll_router_credentials_for_testing() == "unknown");
+
+    // ...so a password changed while it was unreachable is still seen when it
+    // comes back.
+    {
+        std::lock_guard<std::mutex> lock(document_mutex);
+        serve = true;
+        document =
+            R"({"admin":{"password":{"nt":{"hash":"bbbb"}},"tag":["http"]}})";
+    }
+    CHECK(server.poll_router_credentials_for_testing() == "changed");
+    // ...once. A change already acted on is not a change again.
+    CHECK(server.poll_router_credentials_for_testing() == "unchanged");
+
+    server.stop();
+    ndms.stop();
+    ndms_thread.join();
+}
+
+TEST_CASE("the local provider is not watched over RCI") {
+    // A local password lives in auth.json, and changing it there already
+    // advances the generation. Polling NDMS for it would be watching the
+    // wrong file, and would spend an RCI read per request to do it.
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    write_text(
+        auth_path,
+        R"({"enabled":true,"provider":"local","username":"a","password":"b"})");
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+    CHECK(server.poll_router_credentials_for_testing() == "not_watched");
+    server.stop();
+}
+
 } // namespace keen_pbr3
 
 #endif

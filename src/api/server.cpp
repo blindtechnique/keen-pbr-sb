@@ -11,6 +11,8 @@
 #include "../config/config_writer.hpp"
 #include "step_up.hpp"
 #include "system_auth_capability.hpp"
+#include "../http/http_client.hpp"
+#include "../keenetic/ndms_credential_generation.hpp"
 #include "../keenetic/ndms_lockout_policy.hpp"
 #include "../keenetic/ndms_web_endpoint.hpp"
 #include "../log/logger.hpp"
@@ -446,6 +448,50 @@ bool resolve_static_file_under_root(const std::filesystem::path& root,
 // that a firmware whose web service just came back is noticed while the
 // operator is still looking at the page.
 constexpr std::chrono::seconds kChallengeProbeTtl{60};
+
+// Where the firmware publishes its user configuration, measured on 5.1.1 as a
+// ~1.4 KiB document whose digest is stable between reads. The bound is far
+// above that and exists so a firmware that answers with something else cannot
+// pull an unbounded body into the request path.
+constexpr const char* kNdmsUserDocumentEndpoint =
+    "http://127.0.0.1:79/rci/show/rc/user";
+constexpr std::size_t kCredentialDocumentMaximumBytes = 256U * 1024U;
+// Long enough that the read is invisible against request traffic, short enough
+// that a session does not outlive a password change by a coffee break.
+constexpr std::chrono::seconds kCredentialGenerationInterval{30};
+
+// The loopback RCI port is fixed by the firmware, so a test cannot stand a
+// stub in front of it. Overridable under the testing build only, for the same
+// reason the auth and remote-access files are: a revocation trigger nothing
+// can exercise is a revocation trigger nobody knows is broken.
+std::string ndms_user_document_endpoint() {
+#ifdef KEEN_PBR3_TESTING
+    if (const char* configured =
+            std::getenv("KEEN_PBR_TEST_NDMS_USER_ENDPOINT")) {
+        if (*configured != '\0') return configured;
+    }
+#endif
+    return kNdmsUserDocumentEndpoint;
+}
+
+// Same reason: the 30 s interval makes a second poll unobservable inside a
+// test, and an interval that cannot be shortened would leave the "a later
+// change is seen too" case untested.
+std::chrono::milliseconds credential_generation_interval() {
+#ifdef KEEN_PBR3_TESTING
+    if (const char* configured =
+            std::getenv("KEEN_PBR_TEST_NDMS_USER_INTERVAL_MS")) {
+        if (*configured != '\0') {
+            try {
+                return std::chrono::milliseconds(std::stoll(configured));
+            } catch (const std::exception&) {
+            }
+        }
+    }
+#endif
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        kCredentialGenerationInterval);
+}
 
 struct WebAuthConfig {
     bool enabled{false};
@@ -885,6 +931,12 @@ struct ApiServer::Impl {
     // Short-lived grants keyed by the session token. Same shape as a session,
     // deliberately: a step-up is a session that expires in minutes.
     AuthSessionRegistry step_up_grants{kStepUpGrantCapacity};
+    // The firmware's credential state as we last managed to read it. Only the
+    // digest is kept; the document it came from carries password hashes and is
+    // dropped where it was parsed.
+    std::mutex credential_generation_mutex;
+    NdmsCredentialGeneration credential_generation;
+    std::chrono::steady_clock::time_point credential_generation_next_read{};
     AuthLoginRateLimiter login_rate_limiter;
     // Sized from the firmware defaults measured on a live Keenetic. Reading
     // the router's actual policy over RCI is a separate slice; until then the
@@ -1240,6 +1292,72 @@ struct ApiServer::Impl {
         firmware_forward_budget.reconfigure(
             auth_forward_capacity_for(policy->threshold),
             policy->observation_window);
+    }
+
+    // Revokes every session and event stream when the router account's
+    // credentials change outside this daemon.
+    //
+    // Driven from the request path rather than a timer, for the same reason
+    // the lockout policy above is: the daemon does not block booting on NDMS
+    // probes, and a session only needs revoking at the moment someone tries to
+    // use it. An idle session that outlives a password change never serves a
+    // request, so revoking it eagerly buys nothing.
+    //
+    // Only the router-account provider is watched. A local password lives in
+    // auth.json, and changing it there already advances the generation through
+    // replace_auth - polling NDMS for it would be watching the wrong file.
+    // Returns what this poll concluded, for the testing seam. Production
+    // ignores it: the effect that matters is the revocation below.
+    std::string revoke_sessions_if_router_credentials_changed() {
+        {
+            std::lock_guard auth_lock(auth_mutex);
+            if (!auth.enabled || !auth.uses_router_account()) {
+                return "not_watched";
+            }
+        }
+
+        // try_lock, not lock: this runs before every API request, and queueing
+        // the whole server behind one RCI read would turn a slow firmware into
+        // a slow daemon. Another thread already reading is as good as this one
+        // reading.
+        std::unique_lock lock(credential_generation_mutex, std::try_to_lock);
+        if (!lock.owns_lock()) return "concurrent";
+        const auto now = std::chrono::steady_clock::now();
+        if (now < credential_generation_next_read) return "not_due";
+        credential_generation_next_read = now + credential_generation_interval();
+
+        std::string document;
+        try {
+            HttpClient client;
+            client.set_timeout(std::chrono::seconds(1));
+            client.set_max_response_size(kCredentialDocumentMaximumBytes);
+            document = client.download(ndms_user_document_endpoint());
+        } catch (const std::exception&) {
+            // Deliberately left empty. An unreadable document is `unknown`,
+            // which neither revokes nor replaces the stored generation, so a
+            // change that happens while the firmware is unreachable is still
+            // seen when it comes back.
+            document.clear();
+        }
+
+        const auto current = ndms_credential_generation(document);
+        const auto change =
+            ndms_credential_change(credential_generation, current);
+        if (current.verdict == NdmsCredentialGenerationVerdict::known) {
+            credential_generation = current;
+        }
+        if (change != NdmsCredentialChange::changed) {
+            return ndms_credential_change_name(change);
+        }
+
+        // Said out loud because an operator whose session just died deserves
+        // to find the reason in the log. The digest is not part of it: it is a
+        // fingerprint of the credential state and belongs nowhere.
+        Logger::instance().warn(
+            "Router account credentials changed outside keen-pbr; every "
+            "session and event stream has been revoked");
+        revoke_auth_sessions();
+        return ndms_credential_change_name(change);
     }
 
     void apply_forward_budget(const WebAuthConfig& config) {
@@ -2274,6 +2392,11 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                 "application/json");
             return httplib::Server::HandlerResponse::Handled;
         }
+        // Before the session is looked at, so a credential change that already
+        // happened takes effect on this very request rather than the next one.
+        if (api_request) {
+            state->revoke_sessions_if_router_credentials_changed();
+        }
         const auto auth_state = state->auth_snapshot_with_generation();
         const auto& auth = auth_state.first;
         const auto auth_generation = auth_state.second;
@@ -2928,6 +3051,10 @@ void ApiServer::publish_auth_provider_for_testing(
         replacement.endpoint_unavailable = false;
     }
     impl_->replace_auth(std::move(replacement));
+}
+
+std::string ApiServer::poll_router_credentials_for_testing() {
+    return impl_->revoke_sessions_if_router_credentials_changed();
 }
 #endif
 
