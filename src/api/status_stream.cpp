@@ -98,6 +98,16 @@ SseBroadcaster::SubscriptionPtr StatusStream::subscribe() {
                 make_event_payload("component_transaction",
                                    component_transaction_)));
         }
+        // Replayed for the same reason as the others, and it matters more
+        // here: the install replaces the binary every transport runs on, so a
+        // page opened or reloaded while it is happening has to be told that it
+        // is happening rather than offer the operator a button to start a
+        // second one.
+        if (sing_box_install_initialized_) {
+            initial_frames.push_back(make_named_sse_frame(
+                "sing_box_install",
+                make_event_payload("sing_box_install", sing_box_install_)));
+        }
         // Keep cache mutation, delivery to the previous subscriber cohort and
         // newcomer registration in one order.  Registering first and excluding
         // just that pointer lets a concurrent second subscriber receive a
@@ -228,6 +238,19 @@ void StatusStream::publish_component_transaction(nlohmann::json state) {
         "component_transaction",
         make_event_payload("component_transaction",
                            component_transaction_)));
+}
+
+void StatusStream::publish_sing_box_install(nlohmann::json state) {
+    KPBR_LOCK_GUARD(mutex_);
+    // No equality skip, for the same reason as component_transaction: this
+    // reports progress rather than caching a state that happens to repeat, and
+    // suppressing a repeated phase would stall the display exactly while it is
+    // being watched.
+    sing_box_install_ = std::move(state);
+    sing_box_install_initialized_ = true;
+    broadcaster_.publish(make_named_sse_frame(
+        "sing_box_install",
+        make_event_payload("sing_box_install", sing_box_install_)));
 }
 
 void StatusStream::close_all() {

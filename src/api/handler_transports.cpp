@@ -3,6 +3,7 @@
 #include "handler_transports.hpp"
 #include "handler_config.hpp"
 #include "maintenance_api.hpp"
+#include "status_stream.hpp"
 #include "transport_manager_endpoint.hpp"
 
 #include "../config/config_writer.hpp"
@@ -173,6 +174,76 @@ api::Blocker api_install_blocker(const SingBoxInstallBlocker blocker) {
     }
     return api::Blocker::TRANSPORT_STATE_UNKNOWN;
 }
+
+// The install replaces the binary every sing-box transport runs on and takes a
+// minute or more inside one request. Until this existed the operator watched a
+// spinner: a slow download from GitHub and a hung one looked identical, and a
+// second tab could not tell that anything was happening at all.
+//
+// The name a phase is broadcast under comes from the installer's own sequence
+// (sing_box_install_phase_name), never from a list assembled here, so the
+// display cannot describe a step the code no longer performs.
+//
+// Never throws. An install must not fail because nobody was listening to its
+// progress - which is also why install_pinned_sing_box does not guard the
+// observer call: the guard lives here, at the one place that can actually
+// throw, instead of somewhere it could never fire.
+void publish_sing_box_install_progress(const ApiContext& ctx,
+                                       const std::string& phase,
+                                       const bool active,
+                                       const std::string& outcome) noexcept {
+    if (ctx.status_stream == nullptr) return;
+    try {
+        ctx.status_stream->publish_sing_box_install(nlohmann::json{
+            {"phase", phase},
+            {"active", active},
+            {"pinned_version", KEEN_PBR3_SING_BOX_PINNED_VERSION},
+            {"outcome", outcome}});
+    } catch (...) {
+    }
+}
+
+// Guarantees every page watching is told the install ended, on every path out.
+//
+// Without it a throw between the first phase and the last - a lost maintenance
+// lease, an unreachable manager - leaves every open page rendering progress
+// for an install that stopped minutes ago, and offering no way back. The paths
+// that throw here are failures, which is exactly when somebody is watching.
+//
+// Armed by construction, so it is constructed only once the install is going
+// to be attempted: a refusal that never started one must not broadcast that
+// one finished.
+class SingBoxInstallProgressReporter {
+public:
+    explicit SingBoxInstallProgressReporter(const ApiContext& ctx)
+        : ctx_(ctx) {}
+
+    ~SingBoxInstallProgressReporter() {
+        if (!finished_) {
+            publish_sing_box_install_progress(ctx_, "finished", false,
+                                              "aborted");
+        }
+    }
+
+    SingBoxInstallProgressReporter(const SingBoxInstallProgressReporter&) =
+        delete;
+    SingBoxInstallProgressReporter& operator=(
+        const SingBoxInstallProgressReporter&) = delete;
+
+    void phase(const SingBoxInstallPhase phase) const {
+        publish_sing_box_install_progress(
+            ctx_, sing_box_install_phase_name(phase), true, {});
+    }
+
+    void finish(const std::string& outcome) {
+        publish_sing_box_install_progress(ctx_, "finished", false, outcome);
+        finished_ = true;
+    }
+
+private:
+    const ApiContext& ctx_;
+    bool finished_{false};
+};
 
 bool valid_transport_tag(const std::string& tag) {
     if (tag.empty() || tag.size() > 24 || tag.front() < 'a' || tag.front() > 'z') {
@@ -734,6 +805,11 @@ static void register_transports_handler_impl(
                         "releases/tags/v") +
                     KEEN_PBR3_SING_BOX_PINNED_VERSION;
 
+                // Armed here, after the capability allowed the install and the
+                // lease was taken, so a refusal cannot announce the end of an
+                // install that never began.
+                SingBoxInstallProgressReporter progress(ctx);
+
                 // Anything a previous run left behind is removed first: the
                 // run that failed to clean up is by definition the one that
                 // could not run its own cleanup.
@@ -742,9 +818,17 @@ static void register_transports_handler_impl(
                     production_sing_box_install_steps(paths),
                     release_url,
                     KEEN_PBR3_SING_BOX_PINNED_VERSION,
-                    policy.asset_architecture);
+                    policy.asset_architecture,
+                    [&progress](const SingBoxInstallPhase phase) {
+                        progress.phase(phase);
+                    });
                 discard_sing_box_staging(paths);
+                // Before finish(), so a lost lease is reported as an abort
+                // rather than as the outcome of an install whose result this
+                // request is no longer entitled to publish.
                 maintenance->verify_held();
+                progress.finish(
+                    sing_box_install_outcome_name(report.outcome));
 
                 api::SingBoxInstallResult result;
                 result.install_outcome =

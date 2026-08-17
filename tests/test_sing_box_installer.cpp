@@ -86,8 +86,18 @@ struct Harness {
     }
 
     SingBoxInstallReport run() {
-        return install_pinned_sing_box(steps(), kReleaseUrl, kVersion,
-                                       kArch);
+        // Phases land in the SAME ordered list as the steps, so the tests can
+        // assert the interleaving rather than just the set. A phase announced
+        // after the step it names would still produce the right names in the
+        // right order in two separate lists; here it moves, and the assertion
+        // fails.
+        return install_pinned_sing_box(
+            steps(), kReleaseUrl, kVersion, kArch,
+            [this](const SingBoxInstallPhase phase) {
+                performed.push_back(
+                    std::string("phase:") +
+                    sing_box_install_phase_name(phase));
+            });
     }
 
     bool did(const std::string& step) const {
@@ -217,6 +227,83 @@ TEST_CASE("an installer assembled without its steps installs nothing") {
     const auto report = install_pinned_sing_box(incomplete, kReleaseUrl,
                                                 kVersion, kArch);
     CHECK(report.outcome == Outcome::install_failed);
+}
+
+TEST_CASE("each phase is announced before the step it names") {
+    // What an operator watching this actually needs is not a list of phases
+    // but the guarantee that the one on screen is the one running. Announcing
+    // a phase after its step would leave the display on the previous step
+    // while the slow one is invisible - which is the exact question a progress
+    // display exists to answer.
+    Harness harness;
+    const auto report = harness.run();
+    REQUIRE(report.outcome == Outcome::installed);
+
+    CHECK(harness.performed ==
+          std::vector<std::string>{
+              "phase:reading_release",
+              "fetch:" + std::string(kReleaseUrl),
+              "phase:downloading_archive",
+              "fetch:" + std::string(kArchiveUrl),
+              "phase:downloading_checksums",
+              "fetch:" + std::string(kChecksumsUrl),
+              "phase:verifying_archive",
+              "phase:unpacking",
+              "stage",
+              "phase:checking_staged_version",
+              "read_version",
+              "phase:installing",
+              "install",
+              "phase:recording_marker",
+              "marker",
+          });
+}
+
+TEST_CASE("progress stops at the phase that failed") {
+    // A phase list that runs to the end regardless would tell an operator the
+    // install got as far as `installing` when it never got past the download,
+    // which is worse than no progress at all.
+    Harness harness;
+    harness.responses.erase(kArchiveUrl);
+    const auto report = harness.run();
+    REQUIRE(report.outcome == Outcome::download_failed);
+
+    CHECK(harness.performed ==
+          std::vector<std::string>{
+              "phase:reading_release",
+              "fetch:" + std::string(kReleaseUrl),
+              "phase:downloading_archive",
+              "fetch:" + std::string(kArchiveUrl),
+          });
+}
+
+TEST_CASE("an install with nobody listening still installs") {
+    // The observer is optional and observing must never be load-bearing. This
+    // is the default-argument path every existing caller took before progress
+    // existed.
+    Harness harness;
+    const auto report = install_pinned_sing_box(
+        harness.steps(), kReleaseUrl, kVersion, kArch);
+    CHECK(report.outcome == Outcome::installed);
+}
+
+TEST_CASE("no phase is named like the terminal frame") {
+    // The stream reports the end of the install as phase "finished", which is
+    // not a member of this enum. If a phase were ever added under that name,
+    // a page would render an install as over while it was still running.
+    for (const auto phase :
+         {SingBoxInstallPhase::reading_release,
+          SingBoxInstallPhase::downloading_archive,
+          SingBoxInstallPhase::downloading_checksums,
+          SingBoxInstallPhase::verifying_archive,
+          SingBoxInstallPhase::unpacking,
+          SingBoxInstallPhase::checking_staged_version,
+          SingBoxInstallPhase::installing,
+          SingBoxInstallPhase::recording_marker}) {
+        const std::string name = sing_box_install_phase_name(phase);
+        CHECK(name.size() > 0U);
+        CHECK(name != "finished");
+    }
 }
 
 TEST_CASE("every outcome has a name") {

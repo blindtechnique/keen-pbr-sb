@@ -52,6 +52,34 @@ enum class SingBoxInstallOutcome : std::uint8_t {
 const char* sing_box_install_outcome_name(
     SingBoxInstallOutcome outcome) noexcept;
 
+// The step the install is about to attempt. Named by the sequence itself
+// rather than by the caller: a phase list assembled around the calls can drift
+// from the calls, and this one cannot, because it is emitted from between them.
+//
+// There is no byte count here and no percentage, because there is no honest
+// one to report - HttpClient::download returns a body and exposes no transfer
+// callback (src/http/http_client.hpp:68). What an operator gets is which step
+// is running, which is exactly enough to tell a slow download from a hung one,
+// and that is the question a progress display exists to answer.
+enum class SingBoxInstallPhase : std::uint8_t {
+    reading_release,
+    downloading_archive,
+    downloading_checksums,
+    verifying_archive,
+    unpacking,
+    checking_staged_version,
+    installing,
+    recording_marker,
+};
+
+const char* sing_box_install_phase_name(SingBoxInstallPhase phase) noexcept;
+
+// Called immediately BEFORE the phase it names is attempted. Before, not
+// after, is the whole point: a phase that never advances is how a hung step
+// looks, and a phase reported on completion would leave the display sitting on
+// the previous step while the stuck one is invisible.
+using SingBoxInstallProgress = std::function<void(SingBoxInstallPhase)>;
+
 struct SingBoxInstallReport {
     SingBoxInstallOutcome outcome{SingBoxInstallOutcome::release_refused};
     // Set when `outcome` is release_refused or checksum_mismatch, so the
@@ -84,10 +112,18 @@ struct SingBoxInstallSteps {
 
 // `release_json_url` is fetched first; the pinned version and asset
 // architecture come from the caller, which has already measured them.
+//
+// `progress` is optional and observes only - it cannot change the outcome, and
+// an install must not fail because nobody was listening. It is deliberately
+// not wrapped in a catch here: the only production observer publishes to the
+// status stream and is noexcept (handler_transports.cpp), so a guard around
+// this call could never fire in production, and a guard that cannot fire is a
+// promise the code does not keep.
 SingBoxInstallReport install_pinned_sing_box(
     const SingBoxInstallSteps& steps,
     const std::string& release_json_url,
     const std::string& pinned_version,
-    const std::string& asset_architecture);
+    const std::string& asset_architecture,
+    const SingBoxInstallProgress& progress = {});
 
 } // namespace keen_pbr3

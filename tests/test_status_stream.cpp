@@ -598,4 +598,64 @@ TEST_CASE("status stream suppresses identical list refresh snapshots") {
           std::string::npos);
 }
 
+TEST_CASE("status stream replays the sing-box install to a page opened mid-run") {
+    // The install replaces the binary every transport runs on. A page opened
+    // or reloaded while it is happening has to be told that it is happening -
+    // otherwise it offers the operator a button to start a second one.
+    auto current = make_snapshot();
+    StatusStream stream([&] { return current; });
+    auto subscription = stream.subscribe();
+    REQUIRE(subscription);
+    (void)pop(subscription);
+
+    stream.publish_sing_box_install(nlohmann::json{
+        {"phase", "downloading_archive"},
+        {"active", true},
+        {"pinned_version", "1.13.14"},
+        {"outcome", ""},
+    });
+
+    const auto frame = pop(subscription);
+    CHECK(frame.rfind("event: sing_box_install\n", 0) == 0);
+    CHECK(frame.find("\"type\":\"sing_box_install\"") != std::string::npos);
+    CHECK(frame.find("\"phase\":\"downloading_archive\"") !=
+          std::string::npos);
+
+    stream.unsubscribe(subscription);
+    auto reconnected = stream.subscribe();
+    REQUIRE(reconnected);
+    CHECK(pop(reconnected).rfind("event: snapshot\n", 0) == 0);
+    const auto replay = pop(reconnected);
+    CHECK(replay.rfind("event: sing_box_install\n", 0) == 0);
+    CHECK(replay.find("\"phase\":\"downloading_archive\"") !=
+          std::string::npos);
+}
+
+TEST_CASE("status stream repeats an identical sing-box install phase") {
+    // The opposite rule from the cached datasets above, and deliberately so.
+    // Two identical phases in a row are two events an operator is waiting for;
+    // suppressing the second stalls the display at the moment it is watched.
+    // A retried download that reports the same phase twice must not look like
+    // a stall - which is exactly what an equality skip would make it look like.
+    auto current = make_snapshot();
+    StatusStream stream([&] { return current; });
+    auto subscription = stream.subscribe();
+    REQUIRE(subscription);
+    (void)pop(subscription);
+
+    const nlohmann::json phase{
+        {"phase", "downloading_archive"},
+        {"active", true},
+        {"pinned_version", "1.13.14"},
+        {"outcome", ""},
+    };
+    stream.publish_sing_box_install(phase);
+    CHECK(pop(subscription).rfind("event: sing_box_install\n", 0) == 0);
+
+    stream.publish_sing_box_install(phase);
+    CHECK(queued(subscription) == 1);
+    CHECK(pop(subscription).find("\"phase\":\"downloading_archive\"") !=
+          std::string::npos);
+}
+
 #endif

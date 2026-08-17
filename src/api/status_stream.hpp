@@ -51,6 +51,14 @@ public:
     // reloaded mid-operation - or a second tab - sees where it is rather than
     // nothing at all.
     void publish_component_transaction(nlohmann::json state);
+    // The sing-box install is the same shape of problem as a component
+    // transaction - a minute or more inside one request - but deliberately not
+    // the same event. `component_transaction` is delivered into a single
+    // unfiltered slot on the frontend (component-transaction-events.ts:19,42)
+    // and rendered by the nfqws panel with no check on `component`, so
+    // publishing sing-box steps under that name would draw them on a page
+    // about a different program.
+    void publish_sing_box_install(nlohmann::json state);
     void close_all();
     bool has_subscribers();
 
@@ -67,6 +75,8 @@ private:
     bool list_refresh_initialized_ GUARDED_BY(mutex_){false};
     nlohmann::json component_transaction_ GUARDED_BY(mutex_);
     bool component_transaction_initialized_ GUARDED_BY(mutex_){false};
+    nlohmann::json sing_box_install_ GUARDED_BY(mutex_);
+    bool sing_box_install_initialized_ GUARDED_BY(mutex_){false};
     bool initialized_ GUARDED_BY(mutex_){false};
 };
 
