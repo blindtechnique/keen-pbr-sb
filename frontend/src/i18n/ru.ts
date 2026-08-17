@@ -1008,7 +1008,10 @@ export const ruTranslation = {
       runningPlain: "Устанавливаем…",
       unavailable: "На этом роутере недоступно",
       blockedTitle: "Почему установка недоступна",
-      requestFailed: "Установка не началась",
+      requestRefused: "Установка не началась",
+      requestFailed: "Запрос установки не удался",
+      mayHaveApplied:
+        "К моменту отказа установка уже шла, поэтому бинарь мог быть заменён. Прежде чем повторять, посмотрите установленную версию выше.",
       stagedVersion: "В архиве оказалась версия {{version}}.",
       phaseReadingRelease: "Читаем описание релиза…",
       phaseDownloadingArchive: "Скачиваем архив…",

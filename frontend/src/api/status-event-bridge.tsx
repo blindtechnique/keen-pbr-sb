@@ -17,7 +17,10 @@ import { createStatusQueryResilience } from "@/api/status-event-resilience"
 import { applyDnsProbeStatusEvent } from "@/api/dns-probe-events"
 import { applyComponentTransactionStatusEvent } from "@/api/component-transaction-events"
 import { applyListRefreshStatusEvent } from "@/api/list-refresh-events"
-import { applySingBoxInstallStatusEvent } from "@/api/sing-box-install-events"
+import {
+  applySingBoxInstallStatusEvent,
+  resetSingBoxInstallProgress,
+} from "@/api/sing-box-install-events"
 
 const HIDDEN_DISCONNECT_DELAY_MS = 60_000
 const STATUS_EVENT_NAMES = [
@@ -73,7 +76,21 @@ export function StatusEventBridge() {
       if (source !== null) return
       setConnectionState("connecting")
       source = new EventSource("/api/status/events")
-      source.onopen = () => setConnectionState("connected")
+      source.onopen = () => {
+        // Everything learned from the previous connection is stale by
+        // definition, and the daemon re-sends what is still true as soon as
+        // this one is registered - its subscribe() replays the cached frames
+        // before any new ones. Clearing first and letting the replay restore
+        // it is therefore correct in both directions.
+        //
+        // Without this, a daemon restarted during a sing-box install leaves
+        // every open page believing one is still running: the new process has
+        // no cached frame to replay, so nothing ever contradicts the last
+        // "active" frame the old one sent, and the install button stays
+        // disabled until someone reloads the page.
+        resetSingBoxInstallProgress()
+        setConnectionState("connected")
+      }
       source.onerror = () => setConnectionState("disconnected")
       for (const eventName of STATUS_EVENT_NAMES) {
         source.addEventListener(eventName, (event) => {

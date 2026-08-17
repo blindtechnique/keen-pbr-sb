@@ -14,13 +14,15 @@ import type {
 } from "@/api/generated/model"
 import {
   subscribeSingBoxInstall,
-  type SingBoxInstallProgress,
+  type SingBoxInstallState,
 } from "@/api/sing-box-install-events"
 import { getApiErrorMessage } from "@/lib/api-errors"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import {
   singBoxInstallBlockerKey,
+  singBoxInstallFailureTitleKey,
+  singBoxInstallMayHaveApplied,
   singBoxInstallRefusedBlockers,
   singBoxInstallButtonState,
   singBoxInstallOperationKey,
@@ -32,10 +34,13 @@ import {
   singBoxInstallVerdictKey,
 } from "@/components/transports/sing-box-install-model"
 
-function useSingBoxInstallProgress() {
-  const [progress, setProgress] = useState<SingBoxInstallProgress | null>(null)
-  useEffect(() => subscribeSingBoxInstall(setProgress), [])
-  return progress
+function useSingBoxInstallState() {
+  const [state, setState] = useState<SingBoxInstallState>({
+    progress: null,
+    lastOutcome: null,
+  })
+  useEffect(() => subscribeSingBoxInstall(setState), [])
+  return state
 }
 
 export function SingBoxInstallCard() {
@@ -53,7 +58,7 @@ export function SingBoxInstallCard() {
   // "an install is running". The daemon does not stop installing because a tab
   // closed, so a second tab - or this one after a reload - has to learn it
   // from the stream or it would offer a button to start another.
-  const progress = useSingBoxInstallProgress()
+  const { progress, lastOutcome } = useSingBoxInstallState()
   const running = progress?.active === true
 
   const install = useMutation({
@@ -66,6 +71,9 @@ export function SingBoxInstallCard() {
     onMutate: () => {
       setResult(null)
       setFailure(null)
+      // `lastOutcome` needs no clearing here: the daemon's first phase frame
+      // for this attempt clears it, so a previous install's ending cannot be
+      // read as this one's.
     },
     onSuccess: (data) => {
       setResult(data)
@@ -96,6 +104,11 @@ export function SingBoxInstallCard() {
     : []
   const verdictKey = result ? singBoxInstallVerdictKey(result) : null
   const stagedVersion = result ? singBoxInstallStagedVersion(result) : null
+  const failureTitleKey = singBoxInstallFailureTitleKey(refusedBlockers.length)
+  const mayHaveApplied = singBoxInstallMayHaveApplied(
+    refusedBlockers.length,
+    lastOutcome
+  )
 
   if (capabilityQuery.isError) return null
 
@@ -194,8 +207,15 @@ export function SingBoxInstallCard() {
 
       {failure ? (
         <Alert className="mt-3" variant="destructive">
-          <AlertTitle>{t("transports.singBoxInstall.requestFailed")}</AlertTitle>
+          <AlertTitle>{t(failureTitleKey)}</AlertTitle>
           <AlertDescription>
+            {mayHaveApplied ? (
+              // The daemon re-checks its maintenance lease AFTER the binary is
+              // swapped, so this error can arrive on an install that in fact
+              // completed. Saying it never started would leave the operator
+              // believing their transports still run the old binary.
+              <p>{t("transports.singBoxInstall.mayHaveApplied")}</p>
+            ) : null}
             {refusedBlockers.length > 0 ? (
               // The install re-measured the router and refused. These reasons
               // are newer than the ones above, so they are the ones to act on.

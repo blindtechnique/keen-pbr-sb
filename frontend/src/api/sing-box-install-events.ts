@@ -22,16 +22,36 @@ export type SingBoxInstallProgress = {
   outcome: string
 }
 
-type Listener = (progress: SingBoxInstallProgress | null) => void
+export type SingBoxInstallState = {
+  // Non-null only while an install is under way.
+  progress: SingBoxInstallProgress | null
+  // How the last install ended, or null if one has started since. Kept rather
+  // than discarded because "aborted" is the daemon's way of saying the request
+  // died after the install was already under way - the one case where a failed
+  // request may nonetheless have replaced the binary, and nothing else says so.
+  lastOutcome: string | null
+}
+
+type Listener = (state: SingBoxInstallState) => void
 
 const listeners = new Set<Listener>()
 let current: SingBoxInstallProgress | null = null
+let lastOutcome: string | null = null
+
+function snapshot(): SingBoxInstallState {
+  return { progress: current, lastOutcome }
+}
+
+function notify() {
+  const state = snapshot()
+  for (const listener of listeners) listener(state)
+}
 
 export function subscribeSingBoxInstall(listener: Listener) {
   listeners.add(listener)
   // The stream replays its last frame to a new subscriber, but a component
   // already mounted when that frame arrived would otherwise never see it.
-  listener(current)
+  listener(snapshot())
   return () => {
     listeners.delete(listener)
   }
@@ -41,23 +61,40 @@ export function getSingBoxInstallProgress() {
   return current
 }
 
+export function getSingBoxInstallLastOutcome() {
+  return lastOutcome
+}
+
 export function applySingBoxInstallStatusEvent(serialized: string): boolean {
   const parsed = parse(serialized)
   if (!parsed) return false
-  // A finished install stops being progress rather than becoming progress
-  // that says "finished" forever. The result of the install is reported by
-  // the response to the request that asked for it; this stream answers only
-  // "is one running, and where is it".
-  current = parsed.active ? parsed : null
-  for (const listener of listeners) listener(current)
+  if (parsed.active) {
+    current = parsed
+    // A new install supersedes how the previous one ended, so an outcome
+    // cannot leak across attempts.
+    lastOutcome = null
+  } else {
+    // A finished install stops being progress rather than becoming progress
+    // that says "finished" forever. What the install RETURNED is reported by
+    // the response to the request that asked for it; this stream answers only
+    // "is one running, where is it, and how did the last one end".
+    current = null
+    lastOutcome = parsed.outcome
+  }
+  notify()
   return true
 }
 
-// Exported for tests: a page must not have to fake an EventSource to prove it
-// handles a malformed frame.
+// Called by the status-event bridge every time the stream connects, and by
+// tests. On connect this is what stops a belief formed over a previous
+// connection from outliving it: the daemon replays what is still true
+// immediately afterwards, so clearing first is safe, and not clearing leaves a
+// page that watched an install through a daemon restart convinced it is still
+// running.
 export function resetSingBoxInstallProgress() {
   current = null
-  for (const listener of listeners) listener(current)
+  lastOutcome = null
+  notify()
 }
 
 function parse(serialized: string): SingBoxInstallProgress | null {

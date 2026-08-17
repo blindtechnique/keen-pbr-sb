@@ -472,6 +472,16 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
   },
   {
     file: "src/components/transports/sing-box-install-card.tsx",
+    argument: "failureTitleKey",
+    keys: [
+      "transports.singBoxInstall.requestRefused",
+      "transports.singBoxInstall.requestFailed",
+    ],
+    reason:
+      "singBoxInstallFailureTitleKey returns exactly these two, chosen by whether the refusal named blockers - which the daemon emits only before anything is attempted.",
+  },
+  {
+    file: "src/components/transports/sing-box-install-card.tsx",
     argument: "key",
     keys: ["transports.singBoxInstall.promise*"],
     reason:

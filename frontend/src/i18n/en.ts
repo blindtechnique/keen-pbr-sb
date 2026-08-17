@@ -1003,7 +1003,10 @@ export const enTranslation = {
       runningPlain: "Installing…",
       unavailable: "Not available on this router",
       blockedTitle: "Why this router cannot install sing-box",
-      requestFailed: "The install did not start",
+      requestRefused: "The install did not start",
+      requestFailed: "The install request failed",
+      mayHaveApplied:
+        "The install had already started when this failed, so the binary may already have been replaced. Check the installed version above before retrying.",
       stagedVersion: "The archive contained {{version}}.",
       phaseReadingRelease: "Reading the release…",
       phaseDownloadingArchive: "Downloading the archive…",

@@ -12,6 +12,8 @@ import {
 import {
   singBoxInstallBlockerKey,
   singBoxInstallButtonState,
+  singBoxInstallFailureTitleKey,
+  singBoxInstallMayHaveApplied,
   singBoxInstallOperationKey,
   singBoxInstallOutcomeKey,
   singBoxInstallPhaseKey,
@@ -219,6 +221,35 @@ describe("sing-box install model", () => {
         blockers: ["transports_running"],
       })
     ).toEqual([])
+  })
+
+  it("only claims an install never started when it provably did not", () => {
+    // The daemon emits the blocker body exclusively from the capability
+    // re-check, before the lease and before any work, so blockers prove
+    // nothing was attempted.
+    expect(singBoxInstallFailureTitleKey(2)).toBe(
+      "transports.singBoxInstall.requestRefused"
+    )
+    // Everything else can have failed at any point - including after the swap,
+    // because the daemon verifies it still holds the lease AFTER replacing the
+    // binary. "Did not start" there would leave an operator believing their
+    // transports still run the old binary.
+    expect(singBoxInstallFailureTitleKey(0)).toBe(
+      "transports.singBoxInstall.requestFailed"
+    )
+  })
+
+  it("warns the binary may have changed only when the install was under way", () => {
+    // `aborted` is what the daemon publishes when the request died with the
+    // install already running - the only ending that does not come back in a
+    // response body.
+    expect(singBoxInstallMayHaveApplied(0, "aborted")).toBe(true)
+    // Nothing ended, or it ended by naming a real outcome: no warning.
+    expect(singBoxInstallMayHaveApplied(0, null)).toBe(false)
+    expect(singBoxInstallMayHaveApplied(0, "installed")).toBe(false)
+    expect(singBoxInstallMayHaveApplied(0, "download_failed")).toBe(false)
+    // A refusal that named blockers never began, whatever the stream says.
+    expect(singBoxInstallMayHaveApplied(1, "aborted")).toBe(false)
   })
 
   it("advertises exactly the promises this build does not keep", () => {

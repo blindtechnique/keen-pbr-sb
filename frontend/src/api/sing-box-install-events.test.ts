@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it } from "bun:test"
 
 import {
   applySingBoxInstallStatusEvent,
+  getSingBoxInstallLastOutcome,
   getSingBoxInstallProgress,
   resetSingBoxInstallProgress,
   subscribeSingBoxInstall,
@@ -46,17 +47,33 @@ describe("sing-box install status events", () => {
     expect(getSingBoxInstallProgress()).toBeNull()
   })
 
-  it("treats an aborted install as ended", () => {
-    // The daemon publishes this when the request died before it could report
-    // an outcome - a lost maintenance lease, a throw. The install may well
-    // have happened; what is certain is that nothing is watching it any more.
+  it("keeps how the last install ended", () => {
+    // `aborted` is published when the request died with the install already
+    // under way - a lost maintenance lease, a throw after the swap. The card
+    // needs it to avoid telling an operator the install never started when the
+    // binary may already have been replaced, and nothing else carries it: that
+    // request returns an error, not a result body.
     applySingBoxInstallStatusEvent(
       frame({ phase: "unpacking", active: true, outcome: "" })
     )
+    expect(getSingBoxInstallLastOutcome()).toBeNull()
     applySingBoxInstallStatusEvent(
       frame({ phase: "finished", active: false, outcome: "aborted" })
     )
     expect(getSingBoxInstallProgress()).toBeNull()
+    expect(getSingBoxInstallLastOutcome()).toBe("aborted")
+  })
+
+  it("does not let one install's ending leak into the next", () => {
+    applySingBoxInstallStatusEvent(
+      frame({ phase: "finished", active: false, outcome: "aborted" })
+    )
+    expect(getSingBoxInstallLastOutcome()).toBe("aborted")
+    applySingBoxInstallStatusEvent(
+      frame({ phase: "reading_release", active: true, outcome: "" })
+    )
+    // Otherwise the next failure would inherit the previous one's warning.
+    expect(getSingBoxInstallLastOutcome()).toBeNull()
   })
 
   it("refuses a frame that is not shaped like one", () => {
@@ -91,8 +108,8 @@ describe("sing-box install status events", () => {
       frame({ phase: "verifying_archive", active: true, outcome: "" })
     )
     let seen: string | null | undefined
-    const stop = subscribeSingBoxInstall((progress) => {
-      seen = progress ? progress.phase : null
+    const stop = subscribeSingBoxInstall((state) => {
+      seen = state.progress ? state.progress.phase : null
     })
     // The stream replays its last frame to a new EventSource, but a card
     // mounted after that frame arrived would otherwise never see it.
@@ -125,6 +142,27 @@ describe("sing-box install status events", () => {
     const subscribedNames = bridge.slice(start, end)
 
     expect(subscribedNames).toContain('"sing_box_install"')
+  })
+
+  it("is cleared by the bridge whenever the stream connects", () => {
+    // A belief formed over a previous connection must not outlive it. A daemon
+    // restarted mid-install has no cached frame to replay, so nothing would
+    // ever contradict the last "active" frame the old process sent - the card
+    // would show an install running forever and keep its button disabled.
+    //
+    // Reset on open is safe because the daemon replays what is still true
+    // immediately after registering the subscription.
+    //
+    // This also keeps resetSingBoxInstallProgress from being what it was when
+    // it was written: an exported function with no production caller.
+    const bridge = readFileSync(
+      join(import.meta.dir, "status-event-bridge.tsx"),
+      "utf8"
+    )
+    const open = bridge.indexOf("source.onopen")
+    expect(open).toBeGreaterThanOrEqual(0)
+    const handler = bridge.slice(open, bridge.indexOf("source.onerror"))
+    expect(handler).toContain("resetSingBoxInstallProgress()")
   })
 
   it("is routed to this module by the bridge", () => {

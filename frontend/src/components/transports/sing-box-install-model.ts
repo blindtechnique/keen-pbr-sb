@@ -125,6 +125,44 @@ export function singBoxInstallStagedVersion(
   return result.staged_version ?? null
 }
 
+// What to call a failed install request.
+//
+// "The install did not start" is only true for the refusal that happens before
+// anything is attempted, and the daemon emits that body (reason
+// install_unavailable) exclusively from the capability re-check, before the
+// maintenance lease and before any work - so a refusal with blockers proves
+// nothing started.
+//
+// Everything else can have failed at any point, including after the binary was
+// already replaced: the daemon verifies it still holds the lease AFTER the
+// swap (handler_transports.cpp), so a lease lost during a minute-long install
+// surfaces here as an error even though the install succeeded. Telling an
+// operator it never started would leave them believing their transports still
+// run the old binary.
+export function singBoxInstallFailureTitleKey(
+  refusedBlockerCount: number
+): string {
+  return refusedBlockerCount > 0
+    ? "transports.singBoxInstall.requestRefused"
+    : "transports.singBoxInstall.requestFailed"
+}
+
+// Whether to warn that the install may have gone through despite the error.
+//
+// Keyed off the daemon's own terminal frame rather than anything the page
+// tracked. `aborted` is published by the RAII reporter exactly when the request
+// died with the install already under way - which is the case this warning is
+// for. Every other ending names a real outcome and comes back in the response
+// body, not as an error.
+//
+// A refusal that named blockers never began, whatever the stream says.
+export function singBoxInstallMayHaveApplied(
+  refusedBlockerCount: number,
+  lastOutcome: string | null
+): boolean {
+  return refusedBlockerCount === 0 && lastOutcome === "aborted"
+}
+
 export type InstallButtonState = {
   readonly enabled: boolean
   // Why the button cannot be pressed, when it cannot. Rendered near the button
