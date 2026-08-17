@@ -21,6 +21,16 @@ export function selectConfigIsDraft(response?: getConfigResponse): boolean {
   return response.data.is_draft
 }
 
+export function selectConfigRevision(
+  response?: getConfigResponse
+): string | undefined {
+  if (!response || response.status !== 200) {
+    return undefined
+  }
+
+  return response.data.revision
+}
+
 export function selectListRefreshState(
   response?: getConfigResponse
 ): ConfigStateResponseListRefreshState {

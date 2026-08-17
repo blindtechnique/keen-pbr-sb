@@ -26,6 +26,7 @@ keenetic-packages: transport-manager-build ## Build Keenetic packages inside Ent
 	docker run --rm --user root \
 	  --entrypoint /bin/bash \
 	  -e KEEN_PBR_RELEASE_OVERRIDE="$(KEEN_PBR_RELEASE)" \
+	  -e KEEN_PBR_COMMIT_OVERRIDE="$(KEEN_PBR_COMMIT)" \
 	  -e KEEN_PBR_JOBS="$(KEENETIC_BUILD_JOBS)" \
 	  -e KEEN_PBR_TRANSPORT_MANAGER_BIN="/workspace/build/dist/transport-manager/transport-manager-$(KEENETIC_TRANSPORT_ARCH)" \
 	  -v "$(abspath .):/workspace" \

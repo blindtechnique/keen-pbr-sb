@@ -1,5 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { useEffect, useState } from "react"
+import {
+  forwardRef,
+  useImperativeHandle,
+  useState,
+  type ForwardedRef,
+} from "react"
 import { AlertTriangleIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
@@ -12,10 +17,14 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
-import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
+import type {
+  SettingsSectionController,
+  SettingsSectionState,
+} from "@/components/settings/settings-section-control"
+import { fetchWithStepUp } from "@/lib/step-up"
 
 type RemoteAccess = {
   enabled: boolean
@@ -24,6 +33,20 @@ type RemoteAccess = {
   internal_port: number
   listen?: string
   listen_reachable?: boolean
+  auth_provider?: "local" | "keenetic" | "unavailable"
+  blocked_reason?:
+    | "auth_state_unavailable"
+    | "login_disabled"
+    | "keenetic_auth_plaintext_wan"
+    | "listen_loopback"
+    | null
+  custom_port_supported?: boolean
+  supported_port?: number
+}
+
+type RemoteAccessDraft = {
+  enabled: boolean
+  port: string
 }
 
 /**
@@ -31,7 +54,16 @@ type RemoteAccess = {
  * disabled: an unauthenticated control panel on the open internet is not
  * something a single switch should be able to produce.
  */
-export function RemoteAccessCard() {
+export const RemoteAccessCard = forwardRef(RemoteAccessCardInner)
+
+function RemoteAccessCardInner(
+  {
+    onStateChange,
+  }: {
+    onStateChange: (state: SettingsSectionState) => void
+  },
+  ref: ForwardedRef<SettingsSectionController>
+) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
 
@@ -44,18 +76,13 @@ export function RemoteAccessCard() {
     },
   })
 
-  const [enabled, setEnabled] = useState(false)
-  const [port, setPort] = useState("12121")
-
-  useEffect(() => {
-    if (!query.data) return
-    setEnabled(query.data.enabled)
-    setPort(String(query.data.port))
-  }, [query.data])
+  const [draft, setDraft] = useState<Partial<RemoteAccessDraft>>({})
+  const enabled = draft.enabled ?? query.data?.enabled ?? false
+  const port = draft.port ?? String(query.data?.port ?? 12121)
 
   const saveMutation = useMutation({
     mutationFn: async () => {
-      const response = await fetch("/api/system/remote-access", {
+      const response = await fetchWithStepUp("/api/system/remote-access", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled, port: Number(port) }),
@@ -72,35 +99,89 @@ export function RemoteAccessCard() {
             })
           )
         }
+        if (data.error === "keenetic_auth_plaintext_wan") {
+          throw new Error(t("pages.settings.remoteAccess.keeneticAuthBlocked"))
+        }
+        if (data.error === "custom_port_not_supported_safely") {
+          throw new Error(
+            t("pages.settings.remoteAccess.fixedPortHint", {
+              port: data.supported_port ?? 12121,
+            })
+          )
+        }
         throw new Error(data.error || `HTTP ${response.status}`)
       }
       return data
     },
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["remote-access"] })
+      setDraft({})
+      onStateChange({ dirty: false, valid: true })
       toast.success(t("pages.settings.remoteAccess.saved"))
     },
     onError: (error: Error) => toast.error(error.message, { richColors: true }),
   })
 
   const loginRequired = query.data?.login_required ?? false
+  const keeneticAuth = query.data?.auth_provider === "keenetic"
   // A panel bound to loopback cannot be published at all; from outside that
   // looks exactly like a blocked port, so it has to be said here.
   const listenReachable = query.data?.listen_reachable ?? true
-  const blocked = !loginRequired || !listenReachable
+  const blocked = !loginRequired || !listenReachable || keeneticAuth
+  const getSectionState = (nextDraft = draft): SettingsSectionState => {
+    const nextPort = Number(nextDraft.port ?? port)
+    const nextEnabled = nextDraft.enabled ?? enabled
+    const dirty = Object.keys(nextDraft).length > 0
+    return {
+      dirty,
+      valid:
+        !dirty ||
+        !nextEnabled ||
+        (!blocked &&
+          Number.isInteger(nextPort) &&
+          nextPort === (query.data?.supported_port ?? 12121)),
+    }
+  }
+
+  const updateDraft = (patch: Partial<RemoteAccessDraft>) => {
+    const nextDraft = { ...draft, ...patch }
+    setDraft(nextDraft)
+    onStateChange(getSectionState(nextDraft))
+  }
+
+  useImperativeHandle(ref, () => ({
+    reset: () => {
+      setDraft({})
+      onStateChange({ dirty: false, valid: true })
+    },
+    save: async () => {
+      const state = getSectionState()
+      if (!state.dirty) {
+        return
+      }
+      if (!state.valid) {
+        throw new Error(
+          t("pages.settings.remoteAccess.fixedPortHint", {
+            port: query.data?.supported_port ?? 12121,
+          })
+        )
+      }
+      await saveMutation.mutateAsync()
+    },
+  }))
 
   return (
     <Card size="sm">
       <CardHeader>
         <CardTitle>{t("pages.settings.remoteAccess.title")}</CardTitle>
-        <CardDescription>
+        <CardDescription className="max-w-[480px]">
           {t("pages.settings.remoteAccess.description")}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         {!loginRequired ? (
-          <Alert className="border-warning/40 bg-warning/10">
-            <AlertTriangleIcon className="size-4 text-warning" />
+          <Alert className="max-w-[480px] border-warning/40 bg-warning/10">
+            <AlertTriangleIcon className="size-4 text-warning-foreground" />
             <AlertDescription>
               {t("pages.settings.remoteAccess.loginDisabled")}
             </AlertDescription>
@@ -108,8 +189,8 @@ export function RemoteAccessCard() {
         ) : null}
 
         {!listenReachable ? (
-          <Alert className="border-warning/40 bg-warning/10">
-            <AlertTriangleIcon className="size-4 text-warning" />
+          <Alert className="max-w-[480px] border-warning/40 bg-warning/10">
+            <AlertTriangleIcon className="size-4 text-warning-foreground" />
             <AlertDescription>
               {t("pages.settings.remoteAccess.listenLoopback", {
                 listen: query.data?.listen ?? "",
@@ -118,12 +199,28 @@ export function RemoteAccessCard() {
           </Alert>
         ) : null}
 
+        {keeneticAuth ? (
+          <Alert className="max-w-[480px] border-warning/40 bg-warning/10">
+            <AlertTriangleIcon className="size-4 text-warning-foreground" />
+            <AlertDescription>
+              {t("pages.settings.remoteAccess.keeneticAuthBlocked")}
+            </AlertDescription>
+          </Alert>
+        ) : null}
+
         <div className="flex items-center gap-3">
           <Switch
             checked={enabled}
-            disabled={blocked}
+            disabled={blocked && !enabled}
             id="remote-access-enabled"
-            onCheckedChange={setEnabled}
+            onCheckedChange={(nextEnabled) =>
+              updateDraft({
+                enabled: nextEnabled,
+                ...(nextEnabled
+                  ? { port: String(query.data?.supported_port ?? 12121) }
+                  : {}),
+              })
+            }
           />
           <Label className="cursor-pointer" htmlFor="remote-access-enabled">
             {t("pages.settings.remoteAccess.enabled")}
@@ -132,7 +229,7 @@ export function RemoteAccessCard() {
 
         {enabled ? (
           <>
-            <Alert className="border-destructive/40 bg-destructive/5">
+            <Alert className="max-w-[480px] border-destructive/40 bg-destructive/5">
               <AlertTriangleIcon className="size-4 text-destructive" />
               <AlertDescription>
                 {t("pages.settings.remoteAccess.warning")}
@@ -144,28 +241,20 @@ export function RemoteAccessCard() {
                 {t("pages.settings.remoteAccess.port")}
               </Label>
               <Input
+                disabled
                 id="remote-access-port"
                 inputMode="numeric"
-                onChange={(event) => setPort(event.target.value)}
+                onChange={(event) => updateDraft({ port: event.target.value })}
                 value={port}
               />
               <p className="text-xs text-muted-foreground">
-                {t("pages.settings.remoteAccess.portHint")}
+                {t("pages.settings.remoteAccess.fixedPortHint", {
+                  port: query.data?.supported_port ?? 12121,
+                })}
               </p>
             </div>
           </>
         ) : null}
-
-        <div className="flex justify-end">
-          <Button
-            disabled={saveMutation.isPending || blocked}
-            onClick={() => saveMutation.mutate()}
-          >
-            {saveMutation.isPending
-              ? t("common.saving")
-              : t("pages.settings.remoteAccess.save")}
-          </Button>
-        </div>
       </CardContent>
     </Card>
   )

@@ -1,6 +1,14 @@
 import type { Outbound } from "@/api/generated/model"
-import { useGetTransports } from "@/api/queries"
+import {
+  useGetNdmsInterfaceInventory,
+  useGetTransports,
+} from "@/api/queries"
 import { useInterfaceNames } from "@/hooks/use-interface-names"
+import {
+  buildInterfaceProtocolIndex,
+  protocolForFirmwareType,
+  protocolForKernelName,
+} from "@/lib/interface-protocol"
 
 /**
  * Короткая метка протокола для интерфейса: VLESS, AWG, WG, IKEV2, OPENVPN.
@@ -13,25 +21,27 @@ import { useInterfaceNames } from "@/hooks/use-interface-names"
  */
 export function useInterfaceProtocols() {
   const transportsQuery = useGetTransports()
+  const ndmsInventoryQuery = useGetNdmsInterfaceInventory()
   const { names } = useInterfaceNames()
 
-  const byInterface = new Map<string, string>()
-
-  if (transportsQuery.data?.status === 200) {
-    for (const transport of transportsQuery.data.data) {
-      if (transport.interface && transport.protocol) {
-        byInterface.set(transport.interface, transport.protocol.toUpperCase())
-      }
-    }
-  }
+  const transports =
+    transportsQuery.data?.status === 200 ? transportsQuery.data.data : []
+  const nativeInterfaces =
+    ndmsInventoryQuery.data?.status === 200
+      ? ndmsInventoryQuery.data.data.interfaces
+      : []
+  const byInterface = buildInterfaceProtocolIndex(
+    transports,
+    nativeInterfaces
+  )
 
   const protocolOf = (interfaceName?: string): string => {
     if (!interfaceName) return ""
-    const fromTransport = byInterface.get(interfaceName)
-    if (fromTransport) return fromTransport
-    const fromFirmware = shortenFirmwareType(names[interfaceName]?.type)
-    if (fromFirmware) return fromFirmware
-    return guessFromKernelName(interfaceName)
+    const fromInventory = byInterface.get(interfaceName)
+    if (fromInventory) return fromInventory.label
+    const fromFirmware = protocolForFirmwareType(names[interfaceName]?.type)
+    if (fromFirmware) return fromFirmware.label
+    return protocolForKernelName(interfaceName)?.label ?? ""
   }
 
   return {
@@ -47,46 +57,4 @@ export function useInterfaceProtocols() {
       return labels.join("+")
     },
   }
-}
-
-/**
- * Когда прошивка молчит — читаем имя устройства.
- *
- * Keenetic поднимает и WireGuard, и AmneziaWG одним драйвером и называет оба
- * `nwgN`: различить их по имени невозможно в принципе, поэтому честнее
- * написать «AWG/WG», чем угадывать и ошибаться в половине случаев.
- */
-function guessFromKernelName(name: string): string {
-  const normalized = name.toLowerCase()
-  if (normalized.startsWith("nwg")) return "AWG/WG"
-  if (normalized.startsWith("wg")) return "WG"
-  if (normalized.startsWith("ppp")) return "PPP"
-  if (normalized.startsWith("tun") || normalized.startsWith("tap")) return "VPN"
-  return ""
-}
-
-/**
- * NDMS пишет типы полными словами. В строке рядом с названием нужен ярлык,
- * а не термин, поэтому длинные приводятся к привычным сокращениям, а
- * незнакомые остаются как есть — лучше показать чужое слово, чем ничего.
- */
-function shortenFirmwareType(type?: string): string {
-  if (!type) return ""
-  const normalized = type.toLowerCase()
-  if (normalized.includes("amnezia")) return "AWG"
-  // Прошивка зовёт AmneziaWG вайргардом: под ним он и работает. Показать
-  // одно из двух наугад значило бы врать половине пользователей.
-  if (normalized.includes("wireguard")) return "AWG/WG"
-  if (normalized.includes("ikev1")) return "IKEV1"
-  if (normalized.includes("ikev2")) return "IKEV2"
-  if (normalized.includes("openvpn")) return "OPENVPN"
-  if (normalized.includes("l2tp")) return "L2TP"
-  if (normalized.includes("pptp")) return "PPTP"
-  if (normalized.includes("sstp")) return "SSTP"
-  if (normalized.includes("openconnect")) return "OPENCONNECT"
-  if (normalized.includes("socks5") || normalized.includes("socks")) return "SOCKS5"
-  if (normalized.includes("https")) return "HTTPS"
-  if (normalized.includes("http")) return "HTTP"
-  if (normalized.includes("proxy")) return "PROXY"
-  return type.toUpperCase()
 }

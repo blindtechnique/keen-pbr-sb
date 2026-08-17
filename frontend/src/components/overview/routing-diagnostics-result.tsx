@@ -1,10 +1,13 @@
-import { CircleOff } from "lucide-react"
+import { CircleCheck, CircleHelp, CircleOff, CircleX } from "lucide-react"
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 
-import type { RoutingTestResponse } from "@/api/generated/model"
+import type { ConfigObject, RoutingTestResponse } from "@/api/generated/model"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Checkbox } from "@/components/ui/checkbox"
+import { getListReferenceLabel } from "@/lib/list-display"
+import { createOutboundDisplayNameMap } from "@/lib/outbound-display"
+import { getRouteRuleDisplayName } from "@/pages/routing-rules-utils"
 import {
   Table,
   TableBody,
@@ -25,8 +28,12 @@ const emptyRuleDiagnostics: RoutingTestResponse["rule_diagnostics"] = []
 
 export function RoutingDiagnosticsResult({
   diagnostics,
+  lists,
+  outbounds,
 }: {
   diagnostics: RoutingTestResponse
+  lists?: ConfigObject["lists"]
+  outbounds?: ConfigObject["outbounds"]
 }) {
   const { t } = useTranslation()
   const [showAllRules, setShowAllRules] = useState(false)
@@ -38,22 +45,135 @@ export function RoutingDiagnosticsResult({
   const ipRows = diagnostics.is_domain
     ? diagnostics.resolved_ips
     : [diagnostics.target]
+  const outboundDisplayNames = createOutboundDisplayNameMap(outbounds ?? [])
+  const hasInsufficientContext = diagnostics.results.some(
+    (result) => result.evaluation === "insufficient_context"
+  )
 
   return (
     <div className="space-y-4">
-      {(diagnostics.dns_error || diagnostics.no_matching_rule) && (
+      {(diagnostics.dns_error ||
+        diagnostics.no_matching_rule ||
+        diagnostics.unapplied_draft ||
+        hasInsufficientContext) && (
         <Alert className="border-amber-400/40 bg-amber-50 text-amber-900">
           <AlertDescription className="space-y-1 text-sm">
             {diagnostics.dns_error ? <div>{diagnostics.dns_error}</div> : null}
             {diagnostics.no_matching_rule ? (
               <div>{t("overview.routingDiagnostics.noMatchingRule")}</div>
             ) : null}
+            {diagnostics.unapplied_draft ? (
+              <div>{t("overview.routingDiagnostics.unappliedDraft")}</div>
+            ) : null}
+            {hasInsufficientContext ? (
+              <div>{t("overview.routingDiagnostics.insufficientContext")}</div>
+            ) : null}
           </AlertDescription>
         </Alert>
       )}
 
+      {diagnostics.results.length > 0 ? (
+        <div className="space-y-2">
+          <div className="font-medium">
+            {t("overview.routingDiagnostics.resultTitle")}
+          </div>
+          <div className="overflow-x-auto rounded-md border">
+            <Table className="min-w-[760px]">
+              <TableHeader className="bg-muted/40">
+                <TableRow>
+                  <TableHead>{t("overview.routingDiagnostics.ip")}</TableHead>
+                  <TableHead>
+                    {t("overview.routingDiagnostics.resultListMatch")}
+                  </TableHead>
+                  <TableHead>
+                    {t("overview.routingDiagnostics.expectedOutbound")}
+                  </TableHead>
+                  <TableHead>
+                    {t("overview.routingDiagnostics.actualOutbound")}
+                  </TableHead>
+                  <TableHead className="text-center">
+                    {t("overview.routingDiagnostics.status")}
+                  </TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {diagnostics.results.map((result) => {
+                  const insufficient =
+                    result.evaluation === "insufficient_context"
+                  const listLabel = result.list_match
+                    ? getListReferenceLabel(result.list_match.list, lists)
+                    : null
+                  return (
+                    <TableRow key={result.ip}>
+                      <TableCell className="font-mono text-sm">
+                        {result.ip}
+                      </TableCell>
+                      <TableCell>
+                        {result.list_match && listLabel ? (
+                          <span
+                            className="font-medium text-green-700"
+                            title={result.list_match.list}
+                          >
+                            {result.list_match.via === result.ip
+                              ? listLabel
+                              : t(
+                                  "overview.routingDiagnostics.resultListMatchVia",
+                                  {
+                                    list: listLabel,
+                                    via: result.list_match.via,
+                                  }
+                                )}
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
+                      </TableCell>
+                      <TableCell title={result.expected_outbound}>
+                        {outboundDisplayNames.get(result.expected_outbound) ??
+                          result.expected_outbound}
+                      </TableCell>
+                      <TableCell title={result.actual_outbound}>
+                        {outboundDisplayNames.get(result.actual_outbound) ??
+                          result.actual_outbound}
+                      </TableCell>
+                      <TableCell className="text-center">
+                        <span
+                          className={
+                            insufficient
+                              ? "inline-flex items-center gap-1 font-medium text-amber-700"
+                              : result.ok
+                                ? "inline-flex items-center gap-1 font-medium text-green-700"
+                                : "inline-flex items-center gap-1 font-medium text-red-600"
+                          }
+                        >
+                          {insufficient ? (
+                            <CircleHelp className="h-4 w-4" />
+                          ) : result.ok ? (
+                            <CircleCheck className="h-4 w-4" />
+                          ) : (
+                            <CircleX className="h-4 w-4" />
+                          )}
+                          {insufficient
+                            ? t("overview.routingDiagnostics.statusUnknown")
+                            : result.ok
+                              ? "OK"
+                              : "NOK"}
+                        </span>
+                      </TableCell>
+                    </TableRow>
+                  )
+                })}
+              </TableBody>
+            </Table>
+          </div>
+        </div>
+      ) : null}
+
       {ruleDiagnostics.length > 0 ? (
         <div className="space-y-3">
+          <div className="font-medium">
+            {t("overview.routingDiagnostics.ruleDetailsTitle")}
+          </div>
           <label className="flex items-center gap-2 text-sm text-muted-foreground">
             <Checkbox
               checked={showAllRules}
@@ -80,13 +200,16 @@ export function RoutingDiagnosticsResult({
                     >
                       <div className="space-y-1 py-1">
                         <div className="font-semibold">
-                          #{rule.rule_index + 1}
+                          {getRouteRuleDisplayName(rule.rule, rule.rule_index)}
                         </div>
-                        <div>{rule.outbound}</div>
+                        <div title={rule.outbound}>
+                          {outboundDisplayNames.get(rule.outbound) ??
+                            rule.outbound}
+                        </div>
                         <div className="text-xs text-muted-foreground">
                           {rule.interface_name || t("common.noneShort")}
                         </div>
-                        <RuleConditions rule={rule.rule} />
+                        <RuleConditions lists={lists} rule={rule.rule} />
                       </div>
                     </TableHead>
                   ))}
@@ -103,7 +226,10 @@ export function RoutingDiagnosticsResult({
                       {rule.target_match ? (
                         <span className="text-xs font-medium text-green-700">
                           {t("overview.routingDiagnostics.listMatch", {
-                            list: rule.target_match.list,
+                            list: getListReferenceLabel(
+                              rule.target_match.list,
+                              lists
+                            ),
                             via: rule.target_match.via,
                           })}
                         </span>
@@ -125,10 +251,36 @@ export function RoutingDiagnosticsResult({
                           key={`cell-${rule.rule_index}-${ip}`}
                           className="text-center"
                         >
-                          <IpSetStateIcon
-                            targetInLists={rule.target_in_lists}
-                            inIpset={ipDiag?.in_ipset}
-                          />
+                          <div className="space-y-1">
+                            <IpSetStateIcon
+                              targetInLists={ipDiag?.in_lists ?? false}
+                              inIpset={ipDiag?.in_ipset}
+                            />
+                            {ipDiag?.list_match ? (
+                              <div
+                                className="text-xs font-medium text-green-700"
+                                title={ipDiag.list_match.list}
+                              >
+                                {t("overview.routingDiagnostics.listMatch", {
+                                  list: getListReferenceLabel(
+                                    ipDiag.list_match.list,
+                                    lists
+                                  ),
+                                  via: ipDiag.list_match.via,
+                                })}
+                              </div>
+                            ) : null}
+                            {ipDiag?.evaluation === "insufficient_context" ? (
+                              <div
+                                className="text-xs font-medium text-amber-700"
+                                title={ipDiag.unknown_conditions.join(", ")}
+                              >
+                                {t(
+                                  "overview.routingDiagnostics.packetContextRequired"
+                                )}
+                              </div>
+                            ) : null}
+                          </div>
                         </TableCell>
                       )
                     })}
@@ -146,12 +298,14 @@ export function RoutingDiagnosticsResult({
 }
 
 function RuleConditions({
+  lists,
   rule,
 }: {
+  lists?: ConfigObject["lists"]
   rule: RoutingTestResponse["rule_diagnostics"][number]["rule"]
 }) {
   const { t } = useTranslation()
-  const conditions = getRuleConditions(rule)
+  const conditions = getRuleConditions(rule, lists)
 
   if (conditions.length === 0) {
     return (

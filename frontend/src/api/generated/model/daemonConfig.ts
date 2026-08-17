@@ -6,6 +6,8 @@
  * OpenAPI spec version: 3.0.0
  */
 import type { DaemonConfigFirewallBackend } from './daemonConfigFirewallBackend';
+import type { DaemonConfigMetaUdp443Policy } from './daemonConfigMetaUdp443Policy';
+import type { PpeDeoffloadMode } from './ppeDeoffloadMode';
 
 export interface DaemonConfig {
   /** Path to the PID file. */
@@ -14,6 +16,12 @@ export interface DaemonConfig {
   cache_dir?: string;
   /** Firewall backend selection. */
   firewall_backend?: DaemonConfigFirewallBackend;
+  /** Selective per-flow hardware PPE de-offload policy. `off` removes only the graph owned by keen-pbr. `auto` may install that graph only after the live iptables backend, PPE target, connskip match, active NFQUEUE path and validated strategy ports are all proven. Omitting the field or setting it to `null` is fail-safe `off` until the hardware acceptance matrix allows a different default. This setting never writes `net.hwnat.ppe_enabled`.
+   */
+  ppe_deoffload_mode?: PpeDeoffloadMode | null;
+  /** Whether automatic PPE de-offload may also cover QUIC. Version 1 is restricted to UDP/443; high UDP/WebRTC ports are never inferred from this switch. Effective only when `ppe_deoffload_mode` is `auto`. Omitting the field or setting it to `null` means `false`.
+   */
+  ppe_deoffload_quic_enabled?: boolean | null;
   /**
      * Max stdout bytes captured per firewall verification command (0 = unlimited).
      * @minimum 0
@@ -22,7 +30,27 @@ export interface DaemonConfig {
   /** Whether firewall prefilter rules should bypass packets that already carry a fwmark. Defaults to `true` when omitted or set to `null`.
    */
   skip_marked_packets?: boolean | null;
-  /** Whether keen-pbr should install IPv6 firewall sets/rules and emit IPv6 resolver set targets. Defaults to `true` when omitted or set to `null`. If enabled but the system lacks IPv6 support, keen-pbr logs an error and continues in IPv4-only mode.
+  /** Whether keen-pbr keeps its owned `RETURN` first in the firmware's TTL chain, so a packet nfqws2 already handled is not stripped of the TTL its desync depends on. Defaults to `true` when omitted or set to `null`.
+  On by default because every nfqws2 strategy this project ships uses a TTL-dependent desync, so a router with `ip ttl-fix` enabled breaks all of them at once; an opt-in switch would leave the fix off for everyone who never learns it exists. This is an escape hatch, not a feature flag.
+  Turning it off removes the rule rather than merely stopping future installs: a rule left behind would keep working while the interface says it is off.
+   */
+  ttl_bypass_enabled?: boolean | null;
+  /** Whether a full config apply or runtime restart should clear dynamic dnsmasq-managed firewall sets. Defaults to `true` when omitted or set to `null`. Preserve-set reconciles never clear learned entries.
+   */
+  clear_dynamic_sets_on_apply?: boolean | null;
+  /** After a successfully committed destination-routing change, terminate only observed forwarded flows whose complete conntrack mark is zero and whose destination is newly governed by the changed route. Applications can then reconnect immediately through the new route. This never flushes the conntrack table or removes foreign marks. Defaults to `true` when omitted or set to `null`.
+   */
+  reconnect_unmarked_flows_on_routing_change?: boolean | null;
+  /**
+     * List IDs for the stronger, still targeted reconnect policy. After a successfully committed routing or list-content change, matching forwarded flows are reconnected when they are either completely unmarked or carry a mark owned by keen-pbr. Foreign-only marks, unrelated destinations, and the global conntrack table are never touched. Omitting the field enables packaged recommendations such as the authoritative WhatsApp IP companion; an explicit empty array disables all recommendations.
+
+     * @maxItems 128
+     */
+  reconnect_owned_flows_on_routing_change_lists?: string[] | null;
+  /** WhatsApp/Meta transport preference for the authoritative packaged Meta/WhatsApp IP companion. `balanced` is the recommended default and keeps UDP/443 available. `messages_first` is experimental and rejects forwarded UDP/443 packets only when the companion is selected by one unambiguous active broad route. Affected clients may then fall back to TCP. This may improve initial message delivery, but live Android testing also showed later WhatsApp sessions stalling without sending message data; return to `balanced` if messages remain at zero ticks. Call audio may take 10-20 seconds longer to connect. This policy does not block UDP/3478, UDP/5349, or P2P/high-port media. It also affects Instagram and other Meta traffic inside the authoritative companion ranges. `messages_first` currently requires `ipv6_enabled: false` because the packaged companion has no verified authoritative IPv6 coverage; apply is rejected while IPv6 routing is enabled. Omitting the field or setting it to `null` uses `balanced`.
+   */
+  meta_udp443_policy?: DaemonConfigMetaUdp443Policy;
+  /** Whether keen-pbr should install IPv6 routes/firewall rules and emit IPv6 resolver set targets. When disabled, managed dnsmasq also suppresses AAAA, SVCB, and HTTPS answers so clients cannot use IPv6 hints from service-binding records. This IPv4-only mode also disables automatic HTTP/3 and ECH discovery; ordinary A-record resolution is unaffected. Defaults to `true` when omitted or set to `null`. If enabled but the system lacks IPv6 support, keen-pbr logs an error and continues in IPv4-only mode.
    */
   ipv6_enabled?: boolean | null;
   /** Default strict routing enforcement for interface outbounds. When enabled, an unreachable default route is installed if the outbound gateway/interface cannot be confirmed reachable.

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../config/config.hpp"
+#include "../keenetic/internal_vpn_runtime_target.hpp"
 #include "../lists/list_set_usage.hpp"
 #include "../routing/firewall_state.hpp"
 #include "../routing/policy_rule.hpp"
@@ -29,6 +30,13 @@ inline bool is_reserved_table(uint32_t id) {
 
 using OutboundReachabilityFn = std::function<bool(const Outbound&)>;
 
+// Return URLTEST outbounds that directly or transitively contain one of the
+// changed child outbounds. Results preserve configuration order and contain
+// each URLTEST tag at most once.
+std::vector<std::string> find_affected_urltests(
+    const std::vector<Outbound>& outbounds,
+    const std::vector<std::string>& changed_outbound_tags);
+
 // Populate route tables and policy rules from config. Works for real or dry-run instances.
 void populate_routing_state(const Config& cfg,
                             const OutboundMarkMap& marks,
@@ -38,11 +46,34 @@ void populate_routing_state(const Config& cfg,
                             const std::map<std::string, std::string>* urltest_selections = nullptr,
                             bool ipv6_enabled = true);
 
+// Reconcile one already-planned kernel generation without exposing policy
+// rules before their routes exist. A failed add intentionally leaves the
+// successfully installed prefix tracked for a later convergent retry; obsolete
+// owned state is retired only after both add phases complete.
+void reconcile_kernel_routing_state(
+    RouteTable& routes,
+    PolicyRuleManager& rules,
+    const std::vector<RouteSpec>& desired_routes,
+    const std::vector<RuleSpec>& desired_rules,
+    RouteReconcileMode mode = RouteReconcileMode::Strict);
+
 bool is_interface_outbound_reachable(const Outbound& outbound, NetlinkManager& netlink);
+bool is_interface_outbound_reachable(
+    const Outbound& outbound,
+    const std::vector<DumpedRoute>& main_table_routes);
 
 // Build the global firewall prefilter derived from route-level config.
-// Missing or empty inbound_interfaces leaves interface restriction disabled.
+// Missing or empty inbound_interfaces leaves the legacy interface restriction
+// disabled. Native VPN server overrides can force-include an interface in an
+// active allowlist or explicitly bypass both routing and DNS processing.
 FirewallGlobalPrefilter build_firewall_global_prefilter(const Config& cfg);
+FirewallGlobalPrefilter build_firewall_global_prefilter(
+    const Config& cfg,
+    const std::vector<InternalVpnServer>& effective_internal_vpn_servers);
+FirewallGlobalPrefilter build_firewall_global_prefilter_for_runtime_targets(
+    const Config& cfg,
+    const std::vector<InternalVpnRuntimeTarget>&
+        effective_internal_vpn_targets);
 
 // Build the realized firewall selector criteria for a route rule.
 FirewallRuleCriteria build_firewall_rule_criteria(const RouteRule& rule);

@@ -1,33 +1,43 @@
-import { ArrowRight, Pencil, Plus, Trash2 } from "lucide-react"
-import type { ReactNode } from "react"
+import { Plus, Save } from "lucide-react"
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
+import { toast } from "sonner"
 import { useLocation } from "wouter"
 
 import type { getConfigResponse } from "@/api/generated/keen-api"
 import type { ConfigObject } from "@/api/generated/model/configObject"
-import type { DnsRule } from "@/api/generated/model/dnsRule"
 import { DnsServerType } from "@/api/generated/model/dnsServerType"
 import {
   useConfigMutationPending,
   usePostConfigMutation,
 } from "@/api/mutations"
 import { useGetConfig } from "@/api/queries"
+import { KeenPencilIcon, KeenTrashIcon } from "@/components/shared/keen-icons"
+import {
+  formatDnsServerNames,
+  getDnsServerDeleteImpactItems,
+} from "@/components/delete-impact/dns-server-items"
 import { ActionButtons } from "@/components/shared/action-buttons"
 import { BulkSelectionToolbar } from "@/components/shared/bulk-selection-toolbar"
 import { ConfigSaveErrorAlert } from "@/components/shared/config-save-error-alert"
 import { FallbackServersField } from "@/components/dns/fallback-servers-field"
 import { DataTable } from "@/components/shared/data-table"
-import {
-  DeleteImpactDialog,
-  type DeleteImpactItem,
-} from "@/components/shared/delete-impact-dialog"
+import { SectionHeading } from "@/components/shared/section-heading"
+import { TableSearch } from "@/components/shared/table-search"
+import { DeleteImpactDialog } from "@/components/shared/delete-impact-dialog"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
+import { PageActionBar } from "@/components/shared/page-action-bar"
 import { PageHeader } from "@/components/shared/page-header"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { useRowSelection } from "@/hooks/use-row-selection"
+import { useTableSort } from "@/hooks/use-table-sort"
+import { filterBySearchQuery } from "@/lib/table-search"
+import { useSemanticEditSession } from "@/hooks/use-semantic-edit-session"
+import { createOutboundDisplayNameMap } from "@/lib/outbound-display"
+import { semanticJsonEqual } from "@/lib/semantic-json"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { findDnsPresetByAddress } from "@/data/dns-presets"
 import {
   buildUpdatedConfigForDnsServersDelete,
   getDnsServerDeleteImpact,
@@ -35,6 +45,34 @@ import {
 } from "@/pages/dns-servers-utils"
 
 export function DnsServersPage() {
+  const configQuery = useGetConfig()
+  const config = getConfigData(configQuery.data)
+  const fallback = config?.dns?.fallback ?? []
+  const editorKey = config
+    ? JSON.stringify(fallback)
+    : configQuery.isError
+      ? "error"
+      : "loading"
+
+  return (
+    <DnsServersEditor
+      config={config}
+      configError={configQuery.isError}
+      configLoading={configQuery.isLoading}
+      key={editorKey}
+    />
+  )
+}
+
+function DnsServersEditor({
+  config,
+  configError,
+  configLoading,
+}: {
+  config?: ConfigObject
+  configError: boolean
+  configLoading: boolean
+}) {
   const { t } = useTranslation()
   const [, navigate] = useLocation()
   const [deleteRequest, setDeleteRequest] = useState<{
@@ -45,24 +83,58 @@ export function DnsServersPage() {
   } | null>(null)
   const [deletePreview, setDeletePreview] = useState<typeof deleteRequest>(null)
   const configMutationPending = useConfigMutationPending()
-  const configQuery = useGetConfig()
   const postConfigMutation = usePostConfigMutation()
-
-  const config = getConfigData(configQuery.data)
+  const fallbackSession = useSemanticEditSession(
+    config?.dns?.fallback ?? [],
+    semanticJsonEqual
+  )
 
   // The fallback chain lives here now: it is a property of the servers
   // themselves, not of the per-list rules.
   const handleFallbackChange = (fallback: string[]) => {
-    if (!config) {
+    fallbackSession.setValue(fallback)
+  }
+  const saveFallback = () => {
+    if (!config || !fallbackSession.isDirty) {
       return
     }
-    postConfigMutation.mutate({
-      data: { ...config, dns: { ...config.dns, fallback } },
-    })
+
+    postConfigMutation.mutate(
+      {
+        data: {
+          ...config,
+          dns: { ...config.dns, fallback: fallbackSession.value },
+        },
+      },
+      {
+        onSuccess: () => {
+          toast.success(t("pages.dnsServers.fallbackSaved"))
+        },
+      }
+    )
   }
   const visibleDeleteRequest = deleteRequest ?? deletePreview
   const dnsServers = useMemo(() => config?.dns?.servers ?? [], [config])
-  const serverRowIds = dnsServers.map((server) => server.tag)
+  const outboundNames = useMemo(
+    () => createOutboundDisplayNameMap(config?.outbounds ?? []),
+    [config?.outbounds]
+  )
+  const [search, setSearch] = useState("")
+  const visibleServers = filterBySearchQuery(dnsServers, search, (server) => [
+    server.tag,
+    server.address,
+    findDnsPresetByAddress(server.address)?.name,
+    server.detour,
+  ])
+  const { sorted: sortedServers, sort } = useTableSort(visibleServers, [
+    {
+      index: 0,
+      get: (server) =>
+        findDnsPresetByAddress(server.address)?.name ?? server.tag,
+    },
+    { index: 1, get: (server) => server.address },
+  ])
+  const serverRowIds = sortedServers.map((server) => server.tag)
   const serverSelection = useRowSelection(serverRowIds)
 
   const deleteServersBulk = () => {
@@ -109,33 +181,81 @@ export function DnsServersPage() {
   return (
     <div className="space-y-3">
       <PageHeader
-        actions={
+        description={t("pages.dnsServers.description")}
+        title={t("pages.dnsServers.title")}
+      />
+      <PageActionBar
+        primary={
           <Button
-            disabled={configMutationPending}
+            disabled={configMutationPending || fallbackSession.isDirty}
             onClick={() => navigate("/dns-servers/create")}
           >
             <Plus className="mr-1 h-4 w-4" />
             {t("pages.dnsServers.actions.add")}
           </Button>
         }
-        description={t("pages.dnsServers.description")}
-        title={t("pages.dnsServers.title")}
-      />
+        leading={
+          dnsServers.length > 0 ? (
+            <TableSearch
+              matchCount={visibleServers.length}
+              onChange={(next) => {
+                setSearch(next)
+                serverSelection.clear()
+              }}
+              placeholder={t("pages.dnsServers.searchPlaceholder")}
+              totalCount={dnsServers.length}
+              value={search}
+            />
+          ) : null
+        }
+      >
+        {fallbackSession.isDirty ? (
+          <>
+            <Button
+              disabled={configMutationPending}
+              onClick={fallbackSession.reset}
+              variant="ghost"
+            >
+              {t("common.cancel")}
+            </Button>
+            <Button disabled={configMutationPending} onClick={saveFallback}>
+              <Save className="mr-1 h-4 w-4" />
+              {postConfigMutation.isPending
+                ? t("common.saving")
+                : t("common.save")}
+            </Button>
+          </>
+        ) : null}
+      </PageActionBar>
 
       <ConfigSaveErrorAlert error={postConfigMutation.error} />
 
-      {!configQuery.isLoading && !configQuery.isError ? (
+      {/* На странице два блока — резервная цепочка и сами серверы, — и ни у
+          одного не было имени. Первый подписан своей меткой поля, у второго не
+          было ничего: таблица начиналась сразу после чужого блока, и понять,
+          где кончается одно и начинается другое, можно было только по рамке. */}
+      {!configLoading && !configError ? (
         <div className="mb-4">
           <FallbackServersField
-            config={config}
+            config={
+              config
+                ? {
+                    ...config,
+                    dns: {
+                      ...config.dns,
+                      fallback: fallbackSession.value,
+                    },
+                  }
+                : undefined
+            }
             onChange={handleFallbackChange}
           />
         </div>
       ) : null}
 
-      {configQuery.isLoading ? (
+      {configLoading ? (
         <TableSkeleton />
-      ) : configQuery.isError ? (
+      ) : configError ? (
         <ListPlaceholder
           description={t("pages.dnsServers.loadErrorDescription")}
           title={t("common.unableToLoadData")}
@@ -148,24 +268,30 @@ export function DnsServersPage() {
         />
       ) : (
         <div className="space-y-3">
+          <SectionHeading
+            description={t("pages.dnsServers.sections.servers.description")}
+            title={t("pages.dnsServers.sections.servers.title")}
+          />
           <div className="relative h-0">
-          {serverSelection.hasSelection ? (
-            <BulkSelectionToolbar
-              countLabel={t("pages.dnsServers.bulk.selected", {
-                count: serverSelection.selectedCount,
-              })}
-            >
-              <Button
-                disabled={configMutationPending}
-                onClick={deleteServersBulk}
-                size="sm"
-                variant="destructive"
+            {serverSelection.hasSelection ? (
+              <BulkSelectionToolbar
+                cancelLabel={t("common.cancel")}
+                countLabel={t("pages.dnsServers.bulk.selected", {
+                  count: serverSelection.selectedCount,
+                })}
+                onCancel={serverSelection.clear}
               >
-                <Trash2 className="mr-1 h-4 w-4" />
-                {t("pages.dnsServers.bulk.delete")}
-              </Button>
-            </BulkSelectionToolbar>
-          ) : null}
+                <Button
+                  disabled={configMutationPending || fallbackSession.isDirty}
+                  onClick={deleteServersBulk}
+                  size="sm"
+                  variant="destructive"
+                >
+                  <KeenTrashIcon className="mr-1 h-4 w-4" />
+                  {t("pages.dnsServers.bulk.delete")}
+                </Button>
+              </BulkSelectionToolbar>
+            ) : null}
           </div>
           <DataTable
             headers={[
@@ -174,9 +300,19 @@ export function DnsServersPage() {
               t("pages.dnsServers.headers.outbound"),
               t("pages.dnsServers.headers.actions"),
             ]}
-            rows={dnsServers.map((server) => [
-              <div className="font-medium" key={`${server.tag}-tag`}>
-                {server.tag}
+            rows={sortedServers.map((server) => [
+              <div
+                className="font-medium"
+                key={`${server.tag}-tag`}
+                title={
+                  server.display_name || findDnsPresetByAddress(server.address)
+                    ? server.tag
+                    : undefined
+                }
+              >
+                {server.display_name ??
+                  findDnsPresetByAddress(server.address)?.name ??
+                  server.tag}
               </div>,
               <span
                 className="text-sm text-muted-foreground"
@@ -190,13 +326,15 @@ export function DnsServersPage() {
                 key={`${server.tag}-detour`}
                 variant={server.detour ? "outline" : "secondary"}
               >
-                {server.detour || t("pages.dnsServers.none")}
+                {server.detour
+                  ? (outboundNames.get(server.detour) ?? server.detour)
+                  : t("pages.dnsServers.none")}
               </Badge>,
               <ActionButtons
                 actions={[
                   {
-                    disabled: configMutationPending,
-                    icon: <Pencil className="h-4 w-4" />,
+                    disabled: configMutationPending || fallbackSession.isDirty,
+                    icon: <KeenPencilIcon className="h-4 w-4" />,
                     label: t("common.edit"),
                     onClick: () =>
                       navigate(
@@ -207,15 +345,24 @@ export function DnsServersPage() {
                 key={`${server.tag}-actions`}
               />,
             ])}
+            sort={sort}
             selection={{
               rowIds: serverRowIds,
               selectedIds: serverSelection.selectedIds,
-              disabled: configMutationPending,
+              disabled: configMutationPending || fallbackSession.isDirty,
               onToggle: serverSelection.toggleOne,
               onToggleAll: serverSelection.setAllVisible,
               selectAllLabel: t("common.selection.selectAll"),
               getRowLabel: (rowId) =>
-                t("common.selection.selectRow", { rowLabel: rowId }),
+                t("common.selection.selectRow", {
+                  rowLabel:
+                    dnsServers.find((server) => server.tag === rowId)
+                      ?.display_name ??
+                    findDnsPresetByAddress(
+                      dnsServers.find((server) => server.tag === rowId)?.address
+                    )?.name ??
+                    rowId,
+                }),
             }}
           />
         </div>
@@ -223,7 +370,12 @@ export function DnsServersPage() {
       <DeleteImpactDialog
         confirmLabel={t("pages.dnsServers.deleteDialog.confirm")}
         description={t("pages.dnsServers.deleteDialog.description", {
-          tags: visibleDeleteRequest?.tags.join(", ") ?? "",
+          tags: visibleDeleteRequest
+            ? formatDnsServerNames(
+                visibleDeleteRequest.config,
+                visibleDeleteRequest.tags
+              )
+            : "",
         })}
         impactItems={
           visibleDeleteRequest
@@ -246,99 +398,6 @@ export function DnsServersPage() {
         title={t("pages.dnsServers.deleteDialog.title")}
       />
     </div>
-  )
-}
-
-function getDnsServerDeleteImpactItems(
-  config: ConfigObject | undefined,
-  serverTags: string[],
-  impact: DnsServerDeleteImpact,
-  t: (key: string, options?: Record<string, unknown>) => string
-) {
-  const items: DeleteImpactItem[] = []
-
-  for (const tag of serverTags) {
-    items.push({
-      label: (
-        <>
-          {t("pages.dnsServers.deleteDialog.items.serverPrefix")}{" "}
-          <strong>{tag}</strong>{" "}
-          {t("pages.dnsServers.deleteDialog.items.serverSuffix")}
-        </>
-      ),
-    })
-  }
-
-  for (const index of impact.matchingRuleIndexes) {
-    items.push({
-      label: t("pages.dnsServers.deleteDialog.items.dnsRule", {
-        number: index + 1,
-      }),
-      details: getDnsRuleDetails(config?.dns?.rules?.[index], t),
-    })
-  }
-
-  if (impact.usesFallback) {
-    const fallback = config?.dns?.fallback ?? []
-    items.push({
-      label: t("pages.dnsServers.deleteDialog.items.fallback"),
-      details: [
-        formatDetail(
-          t("pages.dnsRules.primaryServers.title"),
-          <ChangeValue
-            after={formatListValue(
-              fallback.filter((tag) => !serverTags.includes(tag)),
-              t
-            )}
-            before={formatListValue(fallback, t)}
-          />
-        ),
-      ],
-    })
-  }
-
-  return items
-}
-
-function getDnsRuleDetails(
-  rule: DnsRule | undefined,
-  t: (key: string, options?: Record<string, unknown>) => string
-) {
-  if (!rule) {
-    return []
-  }
-
-  return [
-    formatDetail(
-      t("pages.dnsRules.criteriaLabels.lists"),
-      formatListValue(rule.list, t)
-    ),
-    formatDetail(t("pages.dnsRules.headers.serverTag"), rule.server),
-  ]
-}
-
-function formatDetail(label: string, value: ReactNode) {
-  return (
-    <>
-      {label}: {value}
-    </>
-  )
-}
-
-function formatListValue(
-  values: string[],
-  t: (key: string, options?: Record<string, unknown>) => string
-) {
-  return values.length > 0 ? values.join(", ") : t("common.noneShort")
-}
-
-function ChangeValue({ after, before }: { after: string; before: string }) {
-  return (
-    <span className="inline-flex min-w-0 items-center gap-1 leading-4">
-      <span className="min-w-0 truncate">{before}</span>
-      <ArrowRight className="mt-px size-3 shrink-0" />
-      <span className="min-w-0 truncate">{after}</span>
-    </span>
   )
 }
 

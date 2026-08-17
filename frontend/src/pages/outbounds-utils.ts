@@ -1,10 +1,36 @@
 import type { ConfigObject } from "@/api/generated/model/configObject"
+import type { ListConfig } from "@/api/generated/model/listConfig"
+import type { ListRefreshConfig } from "@/api/generated/model/listRefreshConfig"
 import type { Outbound } from "@/api/generated/model/outbound"
+import type { RuntimeOutboundState } from "@/api/generated/model/runtimeOutboundState"
+
+/**
+ * Задержка активного участника — она же значение для сортировки колонки
+ * «Состояние»: у записи без измерения его нет, и такая строка уезжает в конец
+ * независимо от направления.
+ */
+export function firstLatency(
+  runtimeState?: RuntimeOutboundState
+): number | undefined {
+  const active = runtimeState?.interfaces?.find(
+    (entry) => entry.status === "active"
+  )
+  return typeof active?.latency_ms === "number" ? active.latency_ms : undefined
+}
 
 export type OutboundDeleteImpact = {
   deletedOutboundTags: string[]
   routeRuleIndexes: number[]
   dnsServerDetours: string[]
+  listDownloadRoutes: Array<{
+    listName: string
+    before: string[]
+    after: string[]
+  }>
+  globalListRefreshRoute?: {
+    before: string[]
+    after: string[]
+  }
   urltestMemberships: Array<{
     outboundTag: string
     groupIndex: number
@@ -16,11 +42,38 @@ export type OutboundDeleteImpact = {
   }>
 }
 
+/**
+ * Системный маршрут — всё, что не туннель и не группа резервирования.
+ *
+ * Это `wan`, `block` и прочая обвязка: на них держится сам разбор трафика, и
+ * удаление одного из них ломает конфигурацию целиком, обычно молча. Правки
+ * ради — пожалуйста, удаление — нет.
+ */
+export function isSystemOutboundType(type: Outbound["type"]): boolean {
+  return type !== "interface" && type !== "urltest"
+}
+
+/** Теги, которые вообще разрешено удалять. Системные сюда не попадают. */
+export function filterDeletableOutboundTags(
+  config: ConfigObject,
+  tags: Iterable<string>
+): string[] {
+  const systemTags = new Set(
+    (config.outbounds ?? [])
+      .filter((outbound) => isSystemOutboundType(outbound.type))
+      .map((outbound) => outbound.tag)
+  )
+
+  return [...new Set(tags)].filter((tag) => !systemTags.has(tag))
+}
+
 export function getOutboundDeleteImpact(
   config: ConfigObject,
   initialTags: Iterable<string>
 ): OutboundDeleteImpact {
-  const deletedTags = new Set(initialTags)
+  // Отсечь системные здесь, а не только в интерфейсе: расчёт последствий и
+  // сама правка конфигурации ходят разными путями, и защита нужна на общем.
+  const deletedTags = new Set(filterDeletableOutboundTags(config, initialTags))
   let changed = true
 
   while (changed) {
@@ -51,6 +104,41 @@ export function getOutboundDeleteImpact(
   )
   const dnsServerDetours = (config.dns?.servers ?? []).flatMap((server) =>
     server.detour && deletedTags.has(server.detour) ? [server.tag] : []
+  )
+  const listDownloadRoutes: OutboundDeleteImpact["listDownloadRoutes"] =
+    Object.entries(config.lists ?? {}).flatMap(([listName, list]) => {
+      const primaryDetour = list.detour
+      const fallbackDetours = list.fallback_detours ?? []
+      const before = [
+        ...(primaryDetour ? [primaryDetour] : []),
+        ...fallbackDetours,
+      ]
+
+      if (primaryDetour && deletedTags.has(primaryDetour)) {
+        return [{ listName, before, after: [] }]
+      }
+
+      const remainingFallbacks = fallbackDetours.filter(
+        (tag) => !deletedTags.has(tag)
+      )
+      if (remainingFallbacks.length === fallbackDetours.length) {
+        return []
+      }
+
+      return [
+        {
+          listName,
+          before,
+          after: [
+            ...(primaryDetour ? [primaryDetour] : []),
+            ...remainingFallbacks,
+          ],
+        },
+      ]
+    })
+  const globalListRefreshRoute = getListRefreshRouteImpact(
+    config.list_refresh,
+    deletedTags
   )
   const urltestMemberships: OutboundDeleteImpact["urltestMemberships"] = []
   const removedUrltestGroups: OutboundDeleteImpact["removedUrltestGroups"] = []
@@ -89,6 +177,8 @@ export function getOutboundDeleteImpact(
     deletedOutboundTags: deletedTagList,
     routeRuleIndexes,
     dnsServerDetours,
+    listDownloadRoutes,
+    globalListRefreshRoute,
     urltestMemberships,
     removedUrltestGroups,
   }
@@ -124,7 +214,100 @@ export function buildUpdatedConfigForOutboundsDelete(
         return serverWithoutDetour
       }),
     },
+    lists: Object.fromEntries(
+      Object.entries(config.lists ?? {}).map(([name, list]) => [
+        name,
+        cleanupListDownloadRoutes(list, deletedTags),
+      ])
+    ),
+    list_refresh: cleanupListRefreshRoute(config.list_refresh, deletedTags),
   }
+}
+
+function getListRefreshRouteImpact(
+  refresh: ListRefreshConfig | undefined,
+  deletedTags: ReadonlySet<string>
+): OutboundDeleteImpact["globalListRefreshRoute"] {
+  const primaryDetour = refresh?.detour
+  const fallbackDetours = refresh?.fallback_detours ?? []
+  const before = [...(primaryDetour ? [primaryDetour] : []), ...fallbackDetours]
+
+  if (primaryDetour && deletedTags.has(primaryDetour)) {
+    return { before, after: [] }
+  }
+
+  const remainingFallbacks = fallbackDetours.filter(
+    (tag) => !deletedTags.has(tag)
+  )
+  if (remainingFallbacks.length === fallbackDetours.length) {
+    return undefined
+  }
+
+  return {
+    before,
+    after: [...(primaryDetour ? [primaryDetour] : []), ...remainingFallbacks],
+  }
+}
+
+function cleanupListRefreshRoute(
+  refresh: ListRefreshConfig | undefined,
+  deletedTags: ReadonlySet<string>
+): ListRefreshConfig | undefined {
+  if (!refresh) {
+    return undefined
+  }
+
+  if (refresh.detour && deletedTags.has(refresh.detour)) {
+    return {}
+  }
+
+  const fallbackDetours = refresh.fallback_detours ?? []
+  const remainingFallbacks = fallbackDetours.filter(
+    (tag) => !deletedTags.has(tag)
+  )
+  if (remainingFallbacks.length === fallbackDetours.length) {
+    return refresh
+  }
+
+  const nextRefresh = { ...refresh }
+  if (remainingFallbacks.length > 0) {
+    nextRefresh.fallback_detours = remainingFallbacks
+  } else {
+    delete nextRefresh.fallback_detours
+  }
+  return nextRefresh
+}
+
+function cleanupListDownloadRoutes(
+  list: ListConfig,
+  deletedTags: ReadonlySet<string>
+): ListConfig {
+  if (list.detour && deletedTags.has(list.detour)) {
+    const nextList = { ...list }
+    delete nextList.detour
+    delete nextList.fallback_detours
+    // Removing the primary route invalidates an explicit override. Removing
+    // the mode as well restores the schema's inherited default and avoids
+    // leaving an override without its required detour.
+    delete nextList.refresh_detour_mode
+    return nextList
+  }
+
+  const fallbackDetours = list.fallback_detours ?? []
+  const remainingFallbacks = fallbackDetours.filter(
+    (tag) => !deletedTags.has(tag)
+  )
+  if (remainingFallbacks.length === fallbackDetours.length) {
+    return list
+  }
+
+  const nextList = { ...list }
+  if (remainingFallbacks.length > 0) {
+    nextList.fallback_detours = remainingFallbacks
+  } else {
+    delete nextList.fallback_detours
+  }
+  return nextList
 }
 
 function cleanupOutboundReferences(

@@ -1,0 +1,6 @@
+example.com
+*.example.org
+sub.domain.example.net.
+# комментарий
+
+spaced.example.com

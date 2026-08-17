@@ -1,0 +1,55 @@
+# Зарегистрированные пути, ещё не описанные в docs/openapi.yaml.
+#
+# Roadmap: "P0. Довести OpenAPI до всех зарегистрированных API-путей и добавить
+# parity gate." Этот файл — не список исключений, а долг с именами: гейт роняет
+# сборку на любом НОВОМ неописанном пути и требует убрать строку отсюда, как
+# только путь описан.
+#
+# Формат: <METHOD> <path>. Параметры пути записываются как в схеме: {name}.
+#
+# Порядок разбора задан roadmap: сначала необратимые и state-changing
+# update/backup/restore/auth/nfqws/remote-access, затем read-only.
+
+# --- Очередь 1: необратимые и state-changing -------------------------------
+POST /api/auth/login
+POST /api/auth/logout
+POST /api/auth/settings
+# Bodyless, route-bound grant preflight used before the browser constructs an
+# auth-settings credential body; it shares the same pending auth schema slice.
+POST /api/auth/settings/step-up-preflight
+# Реавторизация поверх сессии для package/NDMS операций. Записан сюда, а не
+# описан по отдельности, чтобы весь блок auth получил схему одним срезом:
+# описать один эндпоинт из пяти — значит закрепить половину контракта, по
+# которой фронтенд всё равно не сможет работать без остальных.
+POST /api/auth/step-up
+GET  /api/auth/status
+POST /api/backup
+POST /api/backup/restore
+GET  /api/backup/rollback
+POST /api/backup/rollback
+POST /api/system/update
+POST /api/system/update/check
+POST /api/system/update/rollback
+GET  /api/system/update
+GET  /api/system/update/status
+GET  /api/nfqws
+POST /api/nfqws
+GET  /api/system/remote-access
+POST /api/system/remote-access
+GET  /api/system/naive-component
+POST /api/system/naive-component
+GET  /api/transports/settings
+POST /api/transports/settings
+GET  /api/logs/settings
+POST /api/logs/settings
+
+# --- Очередь 2: read-only --------------------------------------------------
+GET  /api/catalog
+POST /api/catalog/refresh
+GET  /api/connections
+GET  /api/connections/active
+GET  /api/logs
+POST /api/system/geo
+GET  /api/system/interface-names
+GET  /api/system/router
+GET  /api/transports/environment

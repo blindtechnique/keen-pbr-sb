@@ -3,12 +3,13 @@
 set -e
 
 KEEN_PBR_BIN="/usr/sbin/keen-pbr"
+DNSMASQ_HELPER="/usr/lib/keen-pbr/dnsmasq.sh"
 CONFIG_DIR="/etc/keen-pbr"
 CACHE_DIR="/var/cache/keen-pbr"
 FW4_INCLUDE_PATH="/usr/lib/keen-pbr/firewall.sh"
 
 # Paths to bind-mount read-only into the dnsmasq procd jail.
-JAIL_MOUNTS="$KEEN_PBR_BIN $CONFIG_DIR $CACHE_DIR"
+JAIL_MOUNTS="$KEEN_PBR_BIN $DNSMASQ_HELPER $CONFIG_DIR $CACHE_DIR"
 
 [ -r /lib/functions.sh ] && . /lib/functions.sh
 

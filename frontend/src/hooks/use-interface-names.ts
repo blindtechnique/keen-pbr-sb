@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query"
 export type InterfaceName = {
   label: string
   id?: string
+  firmware_interface_name?: string
   type?: string
   connected?: boolean
   link?: boolean
@@ -11,6 +12,45 @@ export type InterfaceName = {
 type InterfaceNamesResponse = {
   available?: boolean
   names?: Record<string, InterfaceName>
+}
+
+export function resolveInterfaceDisplayName(
+  names: Record<string, InterfaceName>,
+  kernelName?: string
+) {
+  if (!kernelName) {
+    return ""
+  }
+
+  return names[kernelName]?.label?.trim() || kernelName
+}
+
+/**
+ * Ищет понятное имя по логическому идентификатору NDMS (например `Bridge0`),
+ * а не по kernel-имени: каталог ключуется kernel-именами, но каждая запись
+ * несёт свои NDMS-идентификаторы. Возвращает undefined, когда прошивка имени
+ * не дала — выдумывать «Домашняя сеть» по одному только `Bridge0` нельзя:
+ * сегмент могли переименовать.
+ */
+export function resolveNdmsInterfaceLabel(
+  names: Record<string, InterfaceName>,
+  ndmsId?: string | null
+): string | undefined {
+  const wanted = ndmsId?.trim()
+  if (!wanted) {
+    return undefined
+  }
+
+  for (const entry of Object.values(names)) {
+    if (entry.id === wanted || entry.firmware_interface_name === wanted) {
+      const label = entry.label?.trim()
+      if (label && label !== wanted) {
+        return label
+      }
+    }
+  }
+
+  return undefined
 }
 
 /**
@@ -42,12 +82,14 @@ export function useInterfaceNames() {
     available: Boolean(query.data?.available),
     /** The router's label for an interface, or the kernel name unchanged. */
     labelFor: (kernelName?: string) =>
-      (kernelName && names[kernelName]?.label) || kernelName || "",
+      resolveInterfaceDisplayName(names, kernelName),
     /** "sddvpn.mooo.com AWG2 (nwg2)" where a label exists, "nwg2" otherwise. */
     describe: (kernelName?: string) => {
       if (!kernelName) return ""
       const label = names[kernelName]?.label
-      return label && label !== kernelName ? `${label} (${kernelName})` : kernelName
+      return label && label !== kernelName
+        ? `${label} (${kernelName})`
+        : kernelName
     },
   }
 }

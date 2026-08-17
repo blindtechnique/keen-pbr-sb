@@ -11,6 +11,7 @@ override_dh_auto_configure:
 		-DKEEN_PBR_DEFAULT_CONFIG_PATH:STRING=/etc/keen-pbr/config.json \
 		-DKEEN_PBR_SYSTEM_RESOLVER_HOOK:STRING=/usr/lib/keen-pbr/dnsmasq.sh \
 		-DKEEN_PBR_TARGET_OS:STRING=debian \
+		-DKEEN_PBR_COMMIT:STRING="$(KEEN_PBR_COMMIT)" \
 		-DWITH_API=OFF
 
 override_dh_auto_test:

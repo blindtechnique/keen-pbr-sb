@@ -7,6 +7,12 @@ import { useGetRuntimeOutbounds } from "@/api/queries"
 import { RuntimeOutboundStatusLabel } from "@/components/shared/runtime-outbound-state"
 import { Badge } from "@/components/ui/badge"
 import {
+  getOutboundSelectDisplayName,
+  getOutboundSelectReferenceLabel,
+  sortOutboundsByDisplayName,
+} from "@/lib/outbound-display"
+import { useInterfaceDisplayNames } from "@/hooks/use-interface-display-names"
+import {
   Select,
   SelectContent,
   SelectGroup,
@@ -40,12 +46,8 @@ export function OutboundSelect({
   disabled,
 }: OutboundSelectProps) {
   const { t } = useTranslation()
-  const runtimeOutboundsQuery = useGetRuntimeOutbounds({
-    query: {
-      refetchInterval: 10_000,
-      refetchIntervalInBackground: false,
-    },
-  })
+  const { labelFor: interfaceLabelFor } = useInterfaceDisplayNames()
+  const runtimeOutboundsQuery = useGetRuntimeOutbounds()
 
   const runtimeOutboundsByTag = useMemo(
     () =>
@@ -65,6 +67,14 @@ export function OutboundSelect({
     placeholder ?? t("pages.routingRuleUpsert.fields.selectOutbound")
   const resolvedGroupLabel =
     groupLabel ?? t("pages.routingRuleUpsert.fields.configuredOutbounds")
+  const outboundByTag = useMemo(
+    () => new Map(outbounds.map((outbound) => [outbound.tag, outbound])),
+    [outbounds]
+  )
+  const sortedOutbounds = useMemo(
+    () => sortOutboundsByDisplayName(outbounds),
+    [outbounds]
+  )
 
   return (
     <Select
@@ -79,12 +89,28 @@ export function OutboundSelect({
               return allowEmpty ? resolvedEmptyLabel : resolvedPlaceholder
             }
 
+            const selectedOutbound = outboundByTag.get(selected) ?? {
+              tag: selected,
+              type: "interface" as const,
+            }
+
             return (
-              <RuntimeOutboundStatusLabel
-                runtimeState={runtimeOutboundsByTag.get(selected)}
-                t={t}
-                title={selected}
-              />
+              <span
+                className="min-w-0"
+                title={getOutboundSelectReferenceLabel(
+                  selectedOutbound,
+                  interfaceLabelFor
+                )}
+              >
+                <RuntimeOutboundStatusLabel
+                  runtimeState={runtimeOutboundsByTag.get(selected)}
+                  t={t}
+                  title={getOutboundSelectDisplayName(
+                    selectedOutbound,
+                    interfaceLabelFor
+                  )}
+                />
+              </span>
             )
           }}
         </SelectValue>
@@ -99,10 +125,11 @@ export function OutboundSelect({
               </span>
             </SelectItem>
           ) : null}
-          {outbounds.map((outbound) => (
+          {sortedOutbounds.map((outbound) => (
             <SelectItem key={outbound.tag} value={outbound.tag}>
               <OutboundSelectOption
                 outbound={outbound}
+                interfaceLabelFor={interfaceLabelFor}
                 runtimeState={runtimeOutboundsByTag.get(outbound.tag)}
                 t={t}
               />
@@ -116,20 +143,32 @@ export function OutboundSelect({
 
 function OutboundSelectOption({
   outbound,
+  interfaceLabelFor,
   runtimeState,
   t,
 }: {
   outbound: Outbound
+  interfaceLabelFor: (interfaceName: string) => string
   runtimeState?: RuntimeOutboundState
   t: (key: string, options?: Record<string, unknown>) => string
 }) {
+  const displayName = getOutboundSelectDisplayName(outbound, interfaceLabelFor)
+
   return (
-    <div className="flex min-w-0 items-center justify-between gap-3">
+    <div
+      className="flex min-w-0 items-center justify-between gap-3"
+      title={getOutboundSelectReferenceLabel(outbound, interfaceLabelFor)}
+    >
       <RuntimeOutboundStatusLabel
         runtimeState={runtimeState}
         t={t}
-        title={outbound.tag}
+        title={displayName}
       />
+      {displayName !== outbound.tag ? (
+        <span className="truncate font-mono text-xs text-muted-foreground">
+          {outbound.tag}
+        </span>
+      ) : null}
       <span className="flex shrink-0 items-center gap-2">
         <Badge size="xs" variant="outline">
           {outbound.type}

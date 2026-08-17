@@ -166,6 +166,106 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/setup/list/stage:
+    post:
+      summary: Stage a recommended beginner list setup
+      description: >
+        Validates and stages a simple list candidate only when the selected
+        list has one dedicated route rule and one dedicated DNS rule whose DNS
+        server uses the same routable outbound. Advanced editors continue to
+        use `/api/config`.
+      operationId: postRecommendedListSetup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecommendedListSetupRequest"
+      responses:
+        "200":
+          description: Recommended list setup staged successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigUpdateResponse"
+        "400":
+          description: Invalid or incomplete recommended setup
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: The visible configuration changed after the dialog was opened
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/setup/lists/delete/stage:
+    post:
+      summary: Safely stage list deletion or replacement
+      description: >
+        Builds the mutation from the server's visible configuration, rewrites
+        route and DNS dependencies, validates the complete candidate, and
+        stages it in memory only when base_revision still matches. A target
+        without replacement_list_id is removed from dependent rules; route or
+        DNS rules left without a valid match condition are deleted. This
+        endpoint never saves, applies, or restarts the routing runtime.
+      operationId: postListDeleteStage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ListDeleteStageRequest"
+      responses:
+        "200":
+          description: Backend-planned deletion staged successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListDeleteStageResponse"
+        "400":
+          description: Invalid target, replacement, or resulting configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: The visible configuration changed after the dialog was opened
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/config/dependencies:
+    post:
+      summary: Analyze configuration dependencies before a mutation
+      description: >
+        Computes references and cascade effects from the daemon's visible
+        configuration. The result is authoritative for previews; callers still
+        submit the actual configuration mutation separately.
+      operationId: analyzeConfigDependencies
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DependencyAnalysisRequest"
+      responses:
+        "200":
+          description: Dependency analysis
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DependencyAnalysisResponse"
+        "400":
+          description: Invalid target
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/config/save:
     post:
       summary: Apply staged config
@@ -188,6 +288,39 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "500":
           description: Save/apply error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/config/discard:
+    post:
+      summary: Discard the staged config draft
+      description: >
+        Drops the staged in-memory draft and returns the visible configuration
+        to the persisted one. Nothing is written to disk and the routing
+        runtime is not touched. This is the counterpart to
+        `POST /api/config/save`: several endpoints — backup restore, catalog
+        setup, linked-transport creation, reload and list refresh — refuse to
+        run while a draft is staged, and this is the exit that does not apply
+        the draft. Takes no body: staging already replaces an existing draft
+        without a compare-and-swap, so discarding does not require one either.
+      operationId: postConfigDiscard
+      responses:
+        "200":
+          description: Staged draft discarded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigUpdateResponse"
+        "400":
+          description: No staged config to discard
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Unexpected server error
           content:
             application/json:
               schema:
@@ -280,13 +413,147 @@ paths:
               schema:
                 $ref: "#/components/schemas/RuntimeInterfaceInventoryResponse"
 
+  /api/runtime/inventory:
+    get:
+      summary: Unified live runtime inventory
+      description: >
+        Returns one coherent WebUI snapshot assembled from the existing service,
+        outbound, and kernel-interface runtime providers. The component endpoints
+        remain available for narrow consumers; this endpoint is the canonical
+        bootstrap payload for clients that need the complete runtime picture.
+      operationId: getRuntimeInventory
+      responses:
+        "200":
+          description: Unified runtime inventory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeInventoryResponse"
+
+  /api/diagnostics/tasks:
+    get:
+      summary: Periodic background task diagnostics
+      description: >
+        Returns a bounded, pull-only snapshot of pre-registered periodic task
+        counters. Reading this endpoint does not subscribe the client to the
+        runtime status stream and the counters are deliberately excluded from
+        health and runtime-inventory payloads.
+      operationId: getDiagnosticTasks
+      responses:
+        "200":
+          description: Bounded periodic task metrics snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PeriodicTaskMetricsResponse"
+
+  /api/connections/query:
+    post:
+      summary: Query a stable page of observed connections
+      description: >
+        Creates a short-lived immutable snapshot on the first request and
+        returns an opaque cursor for following pages. Filtering and sorting are
+        performed on the router so the WebUI does not download the complete
+        bounded conntrack history.
+      operationId: queryConnections
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConnectionQueryRequest"
+      responses:
+        "200":
+          description: Stable connection page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectionPage"
+        "400":
+          description: Invalid query or cursor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Cursor snapshot expired
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/system/ndms/interfaces:
+    get:
+      summary: List native Keenetic tunnel and proxy interfaces
+      description: >
+        Returns a strictly filtered, read-only inventory from NDMS RCI.
+        Bridges, switch ports, VLANs and Wi-Fi interfaces are excluded.
+        Mutation remains disabled until typed RCI commands, ownership checks,
+        optimistic revision checks and an automatic backup are all available.
+      operationId: getNdmsInterfaceInventory
+      responses:
+        "200":
+          description: Native interface capabilities and safety contract
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NdmsInterfaceInventoryResponse"
+
+  /api/system/ndms/vpn-server-services:
+    get:
+      summary: List native Keenetic VPN server services
+      description: >
+        Returns a strictly parsed, read-only inventory of enabled or configured
+        L2TP, IKEv1/IKEv2, SSTP and OpenConnect server services. These
+        services do not have a stable Linux ingress interface while idle, so
+        their client traffic is identified by the address pools reported by
+        NDMS. Secrets and credentials from the running configuration are never
+        returned.
+      operationId: getNdmsVpnServerServices
+      responses:
+        "200":
+          description: Native VPN server service inventory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NdmsVpnServerServiceInventoryResponse"
+
+  /api/status/events:
+    get:
+      summary: Stream live WebUI status
+      description: >
+        Streams named Server-Sent Events for service health, runtime outbounds,
+        system interfaces, interactive DNS probes, and conntrack change
+        notifications. Every connection
+        receives a runtime snapshot first, followed by the current conntrack
+        event-source state when available. Later events contain the complete
+        dataset that changed or a revision which invalidates connection pages.
+        Heartbeat comments are sent every 15 seconds; reconnecting starts with
+        fresh state and no event replay is performed.
+        DNS probe notifications use the `dns_probe` event name and are not
+        included in the initial snapshot.
+      operationId: getStatusEvents
+      responses:
+        "200":
+          description: Live status stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              example: |-
+                event: snapshot
+                data: {"type":"snapshot","data":{"service":{},"outbounds":{"outbounds":[]},"interfaces":{"interfaces":[]}}}
+
   /api/dns/test:
     get:
       summary: Stream DNS test queries
       description: >
         Streams DNS query names observed by the built-in `dns.test_server`
         listener as Server-Sent Events. Each connection receives `HELLO`
-        first, then one event per queried DNS name.
+        first, then one event per queried DNS name. This compatibility stream
+        remains available to API clients; the WebUI consumes the same probe
+        notifications from `/api/status/events` to avoid opening a second
+        long-lived HTTP connection for every check.
       operationId: getDnsTest
       responses:
         "200":
@@ -402,6 +669,63 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/transports/config/apply:
+    post:
+      summary: Atomically create a transport and its linked outgoing route
+      description: >
+        Creates one managed transport and the interface outbound that exposes
+        it to keen-pbr as a single durable transaction. The server derives the
+        outbound tag and interface from the transport, rejects an existing
+        configuration draft or ownership collision, and rolls both resources
+        back when either runtime cannot be committed. This endpoint currently
+        supports creation with `linked_outbound.mode=ensure` only.
+      operationId: postTransportConfigApply
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransportConfigApplyRequest"
+      responses:
+        "200":
+          description: Both resources were committed successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransportConfigApplyResponse"
+        "400":
+          description: Invalid transport, linked outbound, or request shape
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: >
+            A draft exists, a tag or interface is already owned, or another
+            configuration/runtime operation is in progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Transaction, persistence, or rollback failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: Transport manager returned an invalid response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Transport manager, routing runtime, or recovery is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/transports/config/export:
     get:
       summary: Export complete transport configuration
@@ -425,8 +749,574 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+
+  /api/subscriptions/preview:
+    post:
+      summary: Fetch a sing-box subscription and plan its import
+      description: >
+        Validates the URL, fetches the body with the subscription destination
+        policy applied to every address actually connected to (redirects
+        included), decodes it, and returns an import plan: deduplicated
+        candidates with derived tags and named conflicts against the
+        transports that already exist. Nothing is created and nothing is
+        stored on disk. The raw share links never leave the daemon - they
+        carry credentials - so the response holds a preview identifier the
+        apply call references instead. A preview expires after ten minutes
+        and after a daemon restart.
+      operationId: postSubscriptionPreview
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubscriptionPreviewRequest"
+      responses:
+        "200":
+          description: Import plan for the fetched subscription
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriptionPreviewResponse"
+        "400":
+          description: >
+            The URL is refused by policy (scheme, credentials in the URL, or a
+            literal address the destination policy does not permit), or the
+            body is not a subscription.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: The subscription could not be fetched
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Transport manager unavailable - conflicts could not be judged
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/subscriptions/apply:
+    post:
+      summary: Create transports from selected subscription entries
+      description: >
+        Creates one managed sing-box transport per selected candidate of an
+        earlier preview, through the same transport-manager create pipeline as
+        manual creation - there is no separate import writer. Entries are
+        created independently and the response reports each outcome; a failed
+        entry does not roll back the ones already created, and a successfully
+        created entry is marked consumed so re-applying the same preview
+        cannot duplicate it.
+      operationId: postSubscriptionApply
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubscriptionApplyRequest"
+      responses:
+        "200":
+          description: Per-entry creation outcomes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriptionApplyResponse"
+        "400":
+          description: Invalid selection - unknown line, bad tag, or a candidate that is not importable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "410":
+          description: The preview has expired or was never created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Transport manager unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/setup/catalog/preview:
+    post:
+      summary: Preview an authoritative catalogue quick setup
+      description: >
+        Builds and validates a deterministic candidate from the server-owned
+        catalogue snapshot and the current active configuration. No durable or
+        runtime state is changed. Existing configuration drafts are rejected
+        so the preview cannot silently include unrelated edits.
+      operationId: postCatalogSetupPreview
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CatalogSetupPreviewRequest"
+      responses:
+        "200":
+          description: Deterministic setup preview
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogSetupPreviewResponse"
+        "400":
+          description: Invalid intent, catalogue preset, or generated config
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: An unrelated configuration draft already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: The authoritative catalogue snapshot is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/setup/catalog/apply:
+    post:
+      summary: Atomically commit an authoritative catalogue quick setup
+      description: >
+        Rebuilds the candidate from the current server-owned catalogue, checks
+        all preview revisions and warnings, then saves and applies it through
+        the shared configuration WAL and runtime coordinator. Ordinary config
+        staging is serialized with this operation.
+      operationId: postCatalogSetupApply
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CatalogSetupApplyRequest"
+      responses:
+        "200":
+          description: Candidate saved and applied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogSetupApplyResponse"
+        "400":
+          description: Invalid request, intent, preset, or generated config
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: >
+            Preview is stale, warnings were not accepted, a draft exists, or
+            another configuration/runtime operation is in progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Commit or runtime apply failed and was rolled back
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Catalogue, maintenance guardian, or recovery is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 components:
   schemas:
+
+    CatalogSetupMode:
+      type: string
+      enum: [none, outbound, block]
+
+    CatalogSetupDnsMode:
+      type: string
+      enum: [none, automatic, explicit_server]
+
+    CatalogPresetSelection:
+      type: object
+      additionalProperties: false
+      required: [preset_id]
+      properties:
+        preset_id:
+          type: string
+          minLength: 1
+        display_name:
+          type: string
+
+    CatalogSetupIntent:
+      type: object
+      additionalProperties: false
+      required: [selections, mode, dns_mode]
+      properties:
+        selections:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/CatalogPresetSelection"
+        mode:
+          $ref: "#/components/schemas/CatalogSetupMode"
+        outbound_tag:
+          type: string
+        dns_mode:
+          $ref: "#/components/schemas/CatalogSetupDnsMode"
+        dns_server_tag:
+          type: string
+        source_detour_tag:
+          type: string
+        route_display_name:
+          type: string
+        dns_display_name:
+          type: string
+
+    CatalogSetupPreviewRequest:
+      type: object
+      additionalProperties: false
+      required: [intent]
+      properties:
+        intent:
+          $ref: "#/components/schemas/CatalogSetupIntent"
+
+    CatalogSetupApplyRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - intent
+        - base_revision
+        - candidate_revision
+        - preview_token
+        - accept_warnings
+      properties:
+        intent:
+          $ref: "#/components/schemas/CatalogSetupIntent"
+        base_revision:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        candidate_revision:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        preview_token:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        accept_warnings:
+          type: boolean
+
+    CatalogSetupWarning:
+      type: object
+      additionalProperties: false
+      required: [code, path, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - source_detour_not_found
+            - source_detour_not_routable
+            - source_detour_not_applicable
+            - dns_automatic_unavailable
+            - dns_ignored_for_block
+            - dns_detour_missing
+            - dns_detour_mismatch
+            - broad_traffic_scope
+        path:
+          type: string
+        message:
+          type: string
+
+    CatalogSetupListSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - preset_id
+        - technical_id
+        - display_name
+        - already_installed
+        - url_backed
+        - has_inline_domains
+        - has_inline_cidrs
+      properties:
+        preset_id:
+          type: string
+        technical_id:
+          type: string
+        display_name:
+          type: string
+        already_installed:
+          type: boolean
+          description: >
+            True when the authoritative preset is already represented by an
+            existing list. The planner reuses that list, never creates a
+            duplicate, and may still add a requested route or DNS rule that is
+            missing.
+        url_backed:
+          type: boolean
+        has_inline_domains:
+          type: boolean
+        has_inline_cidrs:
+          type: boolean
+        source_detour:
+          type: string
+
+    CatalogSetupRouteRuleSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - technical_id
+        - display_name
+        - outbound
+        - insertion_index
+        - blocking
+      properties:
+        technical_id:
+          type: string
+        display_name:
+          type: string
+        outbound:
+          type: string
+        insertion_index:
+          type: integer
+          minimum: 0
+        blocking:
+          type: boolean
+
+    CatalogSetupDnsRuleSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - technical_id
+        - display_name
+        - server
+        - insertion_index
+      properties:
+        technical_id:
+          type: string
+        display_name:
+          type: string
+        server:
+          type: string
+        insertion_index:
+          type: integer
+          minimum: 0
+
+    CatalogSetupDnsServerSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - technical_id
+        - display_name
+        - address
+        - detour
+        - created
+      properties:
+        technical_id:
+          type: string
+        display_name:
+          type: string
+        address:
+          type: string
+        detour:
+          type: string
+        created:
+          type: boolean
+          description: >
+            True when automatic catalogue setup will create this DNS server.
+            False means an existing server with the exact route detour is
+            reused without changing its definition.
+
+    CatalogSetupBlackholeSummary:
+      type: object
+      additionalProperties: false
+      required: [tag, created]
+      properties:
+        tag:
+          type: string
+        created:
+          type: boolean
+
+    CatalogSetupSummary:
+      type: object
+      additionalProperties: false
+      required: [mode, lists]
+      properties:
+        mode:
+          $ref: "#/components/schemas/CatalogSetupMode"
+        lists:
+          type: array
+          items:
+            $ref: "#/components/schemas/CatalogSetupListSummary"
+        route_rule:
+          $ref: "#/components/schemas/CatalogSetupRouteRuleSummary"
+          description: >
+            Compatibility projection of the first created route rule.
+        route_rules:
+          type: array
+          description: >
+            Independently editable route rules created by the plan. A
+            catalogue setup session creates at most one route rule containing
+            every selected list that still needs the requested route.
+          items:
+            $ref: "#/components/schemas/CatalogSetupRouteRuleSummary"
+        dns_rule:
+          $ref: "#/components/schemas/CatalogSetupDnsRuleSummary"
+          description: >
+            Compatibility projection of the first created DNS rule.
+        dns_rules:
+          type: array
+          description: >
+            Independently editable DNS rules created by the plan. A catalogue
+            setup session creates at most one DNS rule containing every
+            DNS-eligible selected list that still needs the requested server.
+          items:
+            $ref: "#/components/schemas/CatalogSetupDnsRuleSummary"
+        dns_server:
+          $ref: "#/components/schemas/CatalogSetupDnsServerSummary"
+          description: >
+            DNS server reused or created atomically by automatic catalogue
+            setup. Existing unrelated and fallback DNS servers are not
+            modified.
+        blackhole:
+          $ref: "#/components/schemas/CatalogSetupBlackholeSummary"
+
+    CatalogSetupPreviewResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - base_revision
+        - candidate_revision
+        - preview_token
+        - requires_warning_acceptance
+        - summary
+        - warnings
+      properties:
+        base_revision:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        candidate_revision:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        preview_token:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        requires_warning_acceptance:
+          type: boolean
+        summary:
+          $ref: "#/components/schemas/CatalogSetupSummary"
+        warnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/CatalogSetupWarning"
+
+    CatalogSetupApplyResponse:
+      type: object
+      required:
+        - status
+        - message
+        - saved
+        - applied
+        - rolled_back
+        - config_revision
+      properties:
+        status:
+          type: string
+        message:
+          type: string
+        saved:
+          type: boolean
+        applied:
+          type: boolean
+        rolled_back:
+          type: boolean
+        config_revision:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        apply_started_ts:
+          type: integer
+          format: int64
+
+    StatusEventSnapshot:
+      type: object
+      required: [type, data]
+      properties:
+        type:
+          type: string
+          enum: [snapshot]
+        data:
+          $ref: "#/components/schemas/RuntimeInventoryResponse"
+
+    StatusEventService:
+      type: object
+      required: [type, data]
+      properties:
+        type:
+          type: string
+          enum: [service]
+        data:
+          $ref: "#/components/schemas/HealthResponse"
+
+    StatusEventOutbounds:
+      type: object
+      required: [type, data]
+      properties:
+        type:
+          type: string
+          enum: [outbounds]
+        data:
+          $ref: "#/components/schemas/RuntimeOutboundsResponse"
+
+    StatusEventInterfaces:
+      type: object
+      required: [type, data]
+      properties:
+        type:
+          type: string
+          enum: [interfaces]
+        data:
+          $ref: "#/components/schemas/RuntimeInterfaceInventoryResponse"
+
+    StatusEventInterfaceTraffic:
+      type: object
+      required: [type, data]
+      properties:
+        type:
+          type: string
+          enum: [interface_traffic]
+        data:
+          $ref: "#/components/schemas/RuntimeInterfaceTrafficUpdate"
+
+    ConnectionEventState:
+      type: object
+      required: [revision, changed_at, available]
+      properties:
+        revision:
+          type: integer
+          format: int64
+          description: Monotonic conntrack event revision for this daemon process.
+        changed_at:
+          type: integer
+          format: int64
+          description: Unix timestamp of the latest coalesced kernel event.
+        available:
+          type: boolean
+          description: Whether kernel conntrack multicast events are available.
+
+    StatusEventConnections:
+      type: object
+      required: [type, data]
+      properties:
+        type:
+          type: string
+          enum: [connections]
+        data:
+          $ref: "#/components/schemas/ConnectionEventState"
 
     TransportStatus:
       type: object
@@ -434,6 +1324,15 @@ components:
       properties:
         tag:
           type: string
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: >
+            Optional human-readable alias of at most 80 Unicode code points.
+            It must be valid UTF-8, contain a non-whitespace character, and
+            contain no ASCII, C1, or bidirectional control characters. The
+            technical tag remains the stable identity.
         type:
           type: string
         interface:
@@ -454,10 +1353,14 @@ components:
         sni:
           type: string
           description: Server name presented during the TLS handshake.
+        path:
+          $ref: "#/components/schemas/TransportPath"
         network:
           type: string
-          description: Carrier inside the connection - tcp, ws, grpc, http.
+          deprecated: true
+          description: Legacy mixed carrier/framing field. New clients use path.
         state:
+          title: State
           type: string
           enum: [down, starting, up, degraded]
         pid:
@@ -476,6 +1379,30 @@ components:
         next_retry_at:
           type: string
           format: date-time
+
+    TransportPath:
+      type: object
+      required: [wire_transport, framing, confidence]
+      properties:
+        wire_transport:
+          type: string
+          enum: [tcp, udp, tcp_udp, unknown]
+          description: IP transport used between the router and the remote endpoint.
+        framing:
+          type: string
+          enum: [raw, websocket, http, http2, grpc, http_upgrade, quic, wireguard, unknown]
+          description: Application framing layered on top of the wire transport.
+        payload_networks:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            enum: [tcp, udp]
+          description: User traffic families explicitly allowed by the outbound, when declared.
+        confidence:
+          type: string
+          enum: [declared, derived, ambiguous, unknown]
+          description: Whether the path came from config, protocol semantics, or could not be proven.
 
     TransportActionRequest:
       type: object
@@ -506,6 +1433,15 @@ components:
         tag:
           type: string
           pattern: "^[a-z][a-z0-9_]{0,23}$"
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: >
+            Optional human-readable alias of at most 80 Unicode code points.
+            It must be valid UTF-8, contain a non-whitespace character, and
+            contain no ASCII, C1, or bidirectional control characters. It never
+            replaces the stable technical tag.
         type:
           type: string
           enum: [native, sing-box, sing-box-vless-reality]
@@ -588,6 +1524,173 @@ components:
           maximum: 9000
           default: 1420
 
+    SubscriptionPreviewRequest:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          description: >
+            The subscription URL. http/https only; credentials in the URL are
+            refused before the host is even parsed, because a URL reaches the
+            log, the API and frontend storage.
+          example: "https://provider.example/subscription"
+
+    SubscriptionPreviewCandidate:
+      type: object
+      required: [line, disposition]
+      description: >
+        One entry of the fetched subscription. Deliberately has no field that
+        can hold the share link: the link carries the credential, and the
+        preview is built so that forgetting to redact is structurally
+        impossible rather than merely avoided.
+      properties:
+        line:
+          type: integer
+          description: >
+            1-based line in the decoded document as the provider serves it,
+            counting blanks and comments. This is the selection key for apply.
+        scheme:
+          type: string
+          description: Lowercased link scheme, e.g. "vless". Empty when malformed.
+          example: "vless"
+        endpoint:
+          type: string
+          description: >
+            Host and port with any userinfo removed. Empty for vmess and
+            legacy shadowsocks, whose endpoint lives inside a base64 payload
+            that also carries the credential and is therefore not opened.
+          example: "nl1.provider.example:443"
+        remark:
+          type: string
+          description: >
+            The provider's label (URI fragment), percent-decoded, with C0/C1
+            controls and bidirectional override characters removed so the
+            label cannot misrender the entry it describes.
+        suggested_tag:
+          type: string
+          description: >
+            Tag derived from the remark, matching the transport tag pattern
+            and unique within this plan. Empty when the candidate is not
+            importable.
+          example: "nl_01"
+        disposition:
+          type: string
+          enum:
+            - importable
+            - duplicate_in_document
+            - already_configured
+            - tag_conflict
+            - scheme_not_supported
+            - malformed
+        duplicate_of:
+          type: integer
+          description: >
+            For duplicate_in_document - the line of the occurrence that was
+            offered instead.
+
+    SubscriptionPreviewResponse:
+      type: object
+      required: [preview_id, document_kind, expires_in_seconds, candidates]
+      properties:
+        preview_id:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+          description: >
+            Opaque handle for apply. The links it refers to live only in
+            daemon memory and die with the preview.
+        document_kind:
+          type: string
+          enum:
+            - link_list
+            - base64_link_list
+            - json_document
+            - empty
+            - unrecognized
+            - too_large
+          description: >
+            How the body decoded. Only link_list and base64_link_list produce
+            candidates; json_document names a sing-box config document, which
+            is a different import contract and is not planned here.
+        expires_in_seconds:
+          type: integer
+          description: Seconds until the preview and its stored links are discarded.
+          example: 600
+        candidates:
+          type: array
+          items:
+            $ref: "#/components/schemas/SubscriptionPreviewCandidate"
+
+    SubscriptionApplySelection:
+      type: object
+      required: [line]
+      properties:
+        line:
+          type: integer
+          description: The candidate's line from the preview.
+        tag:
+          type: string
+          pattern: "^[a-z][a-z0-9_]{0,23}$"
+          description: >
+            Optional override of the suggested tag - the way a tag_conflict
+            candidate becomes importable, and the only field of a candidate an
+            operator may rewrite.
+
+    SubscriptionApplyRequest:
+      type: object
+      required: [preview_id, selections]
+      properties:
+        preview_id:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        selections:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/SubscriptionApplySelection"
+
+    SubscriptionApplyResult:
+      type: object
+      required: [line, outcome]
+      properties:
+        line:
+          type: integer
+        outcome:
+          type: string
+          enum: [created, already_imported, failed]
+          description: >
+            What happened to this entry. `already_imported` means an earlier
+            apply of the same preview already created it - a preview is a
+            one-shot import, so re-applying a line cannot duplicate the
+            transport it produced. It is deliberately not `failed`: nothing
+            went wrong and there is nothing for the operator to fix, and
+            presenting it as an error would teach them to distrust the
+            report.
+        tag:
+          type: string
+          description: The tag the transport was created with.
+        interface:
+          type: string
+          description: >
+            The derived kernel interface name, produced by the same rule the
+            manual creation dialog uses, so an imported transport is
+            indistinguishable from a hand-made one.
+        error:
+          type: string
+          description: >
+            Why this entry failed. Present only with `outcome: failed`, and
+            never contains the link - a transport manager error that echoes
+            the share link is replaced before it reaches here.
+
+    SubscriptionApplyResponse:
+      type: object
+      required: [results]
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/SubscriptionApplyResult"
+
     TransportConfigOperation:
       type: object
       required: [operation]
@@ -609,6 +1712,74 @@ components:
           enum: [created, updated, deleted]
         tag:
           type: string
+
+    TransportLinkedOutboundEnsure:
+      type: object
+      additionalProperties: false
+      required: [mode]
+      properties:
+        mode:
+          type: string
+          enum: [ensure]
+          description: >
+            Create the interface outbound in the same transaction as the
+            transport. Other modes are reserved for future API versions.
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: >
+            Optional human-readable alias for the linked outgoing route.
+            When omitted, the server reuses the transport alias when present.
+        strict_enforcement:
+          type: [boolean, "null"]
+          description: >
+            Optional per-route strict-enforcement override. Null or omission
+            leaves the global kill-switch policy in effect.
+
+    TransportConfigApplyRequest:
+      type: object
+      additionalProperties: false
+      required: [operation, transport, linked_outbound]
+      properties:
+        operation:
+          type: string
+          enum: [create]
+        transport:
+          $ref: "#/components/schemas/TransportSpec"
+        linked_outbound:
+          $ref: "#/components/schemas/TransportLinkedOutboundEnsure"
+
+    TransportConfigApplyResponse:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [applied]
+        message:
+          type: string
+          description: Human-readable transaction result.
+        saved:
+          type: boolean
+          description: Whether the durable configuration commit completed.
+        applied:
+          type: boolean
+          description: Whether the routing runtime accepted the committed config.
+        rolled_back:
+          type: boolean
+          description: Whether an apply failure was rolled back before the response.
+        transport_revision:
+          type: string
+          description: Committed transport-manager configuration revision.
+        config_revision:
+          type: string
+          description: SHA-256 revision of the committed keen-pbr configuration.
+        apply_started_ts:
+          type: integer
+          format: int64
+          description: Server-authoritative Unix timestamp when runtime apply started.
 
     # -------------------------------------------------------------------------
     # /api/config — configuration object schema
@@ -632,6 +1803,29 @@ components:
           enum: [auto, iptables, nftables]
           default: auto
           example: auto
+        ppe_deoffload_mode:
+          $ref: "#/components/schemas/PpeDeoffloadMode"
+          nullable: true
+          default: off
+          description: >
+            Selective per-flow hardware PPE de-offload policy. `off` removes
+            only the graph owned by keen-pbr. `auto` may install that graph
+            only after the live iptables backend, PPE target, connskip match,
+            active NFQUEUE path and validated strategy ports are all proven.
+            Omitting the field or setting it to `null` is fail-safe `off`
+            until the hardware acceptance matrix allows a different default.
+            This setting never writes `net.hwnat.ppe_enabled`.
+          example: off
+        ppe_deoffload_quic_enabled:
+          type: boolean
+          nullable: true
+          default: false
+          description: >
+            Whether automatic PPE de-offload may also cover QUIC. Version 1
+            is restricted to UDP/443; high UDP/WebRTC ports are never inferred
+            from this switch. Effective only when `ppe_deoffload_mode` is
+            `auto`. Omitting the field or setting it to `null` means `false`.
+          example: false
         firewall_verify_max_bytes:
           type: integer
           minimum: 0
@@ -645,12 +1839,97 @@ components:
             Whether firewall prefilter rules should bypass packets that already carry
             a fwmark. Defaults to `true` when omitted or set to `null`.
           example: true
+        ttl_bypass_enabled:
+          type: boolean
+          nullable: true
+          description: >
+            Whether keen-pbr keeps its owned `RETURN` first in the firmware's
+            TTL chain, so a packet nfqws2 already handled is not stripped of the
+            TTL its desync depends on. Defaults to `true` when omitted or set to
+            `null`.
+
+            On by default because every nfqws2 strategy this project ships uses
+            a TTL-dependent desync, so a router with `ip ttl-fix` enabled breaks
+            all of them at once; an opt-in switch would leave the fix off for
+            everyone who never learns it exists. This is an escape hatch, not a
+            feature flag.
+
+            Turning it off removes the rule rather than merely stopping future
+            installs: a rule left behind would keep working while the interface
+            says it is off.
+          example: true
+        clear_dynamic_sets_on_apply:
+          type: boolean
+          nullable: true
+          description: >
+            Whether a full config apply or runtime restart should clear dynamic
+            dnsmasq-managed firewall sets. Defaults to `true` when omitted or set
+            to `null`. Preserve-set reconciles never clear learned entries.
+          default: true
+          example: true
+        reconnect_unmarked_flows_on_routing_change:
+          type: boolean
+          nullable: true
+          description: >
+            After a successfully committed destination-routing change, terminate
+            only observed forwarded flows whose complete conntrack mark is zero and
+            whose destination is newly governed by the changed route. Applications
+            can then reconnect immediately through the new route. This never flushes
+            the conntrack table or removes foreign marks. Defaults to `true` when
+            omitted or set to `null`.
+          default: true
+          example: true
+        reconnect_owned_flows_on_routing_change_lists:
+          type: array
+          nullable: true
+          maxItems: 128
+          uniqueItems: true
+          description: >
+            List IDs for the stronger, still targeted reconnect policy. After
+            a successfully committed routing or list-content change, matching
+            forwarded flows are reconnected when they are either completely
+            unmarked or carry a mark owned by keen-pbr. Foreign-only marks,
+            unrelated destinations, and the global conntrack table are never
+            touched. Omitting the field enables packaged recommendations such
+            as the authoritative WhatsApp IP companion; an explicit empty
+            array disables all recommendations.
+          items:
+            type: string
+          example: [meta_whatsapp_ip]
+        meta_udp443_policy:
+          type: string
+          nullable: true
+          enum: [balanced, messages_first]
+          description: >
+            WhatsApp/Meta transport preference for the authoritative packaged
+            Meta/WhatsApp IP companion. `balanced` is the recommended default
+            and keeps UDP/443 available. `messages_first` is experimental and
+            rejects forwarded UDP/443 packets only when the companion is
+            selected by one unambiguous active broad route. Affected clients
+            may then fall back to TCP. This may improve initial message
+            delivery, but live Android testing also showed later WhatsApp
+            sessions stalling without sending message data; return to
+            `balanced` if messages remain at zero ticks. Call audio may take
+            10-20 seconds longer to connect. This policy does not block
+            UDP/3478, UDP/5349, or P2P/high-port media. It also affects
+            Instagram and other Meta traffic inside the authoritative
+            companion ranges. `messages_first` currently requires
+            `ipv6_enabled: false` because the packaged companion has no verified
+            authoritative IPv6 coverage; apply is rejected while IPv6 routing
+            is enabled. Omitting the field or setting it to `null` uses
+            `balanced`.
+          default: balanced
+          example: balanced
         ipv6_enabled:
           type: boolean
           nullable: true
           description: >
-            Whether keen-pbr should install IPv6 firewall sets/rules and emit IPv6
-            resolver set targets. Defaults to `true` when omitted or set to `null`.
+            Whether keen-pbr should install IPv6 routes/firewall rules and emit IPv6
+            resolver set targets. When disabled, managed dnsmasq also suppresses
+            AAAA, SVCB, and HTTPS answers so clients cannot use IPv6 hints from
+            service-binding records. This IPv4-only mode also disables automatic
+            HTTP/3 and ECH discovery; ordinary A-record resolution is unaffected.
+            Defaults to `true` when omitted or set to `null`.
             If enabled but the system lacks IPv6 support, keen-pbr logs an error and
             continues in IPv4-only mode.
           default: true
@@ -672,6 +1951,7 @@ components:
           example: 8388608
 
     ApiConfig:
+      title: ApiConfig
       type: object
       properties:
         enabled:
@@ -689,10 +1969,14 @@ components:
       properties:
         attempts:
           type: integer
+          minimum: 1
+          maximum: 1000
           default: 3
           example: 3
         interval_ms:
           type: integer
+          minimum: 0
+          maximum: 4294967295
           description: Delay between retry attempts in milliseconds.
           default: 1000
           example: 1000
@@ -702,21 +1986,29 @@ components:
       properties:
         failure_threshold:
           type: integer
+          minimum: 1
+          maximum: 2147483647
           description: Number of consecutive failures before opening the circuit.
           default: 5
           example: 5
         success_threshold:
           type: integer
+          minimum: 1
+          maximum: 4294967295
           description: Number of consecutive successes in half-open state to close the circuit.
           default: 2
           example: 2
         timeout_ms:
           type: integer
+          minimum: 0
+          maximum: 4294967295
           description: Time in milliseconds before the circuit transitions from open to half-open.
           default: 30000
           example: 30000
         half_open_max_requests:
           type: integer
+          minimum: 1
+          maximum: 4294967295
           description: Maximum number of probe requests allowed in half-open state.
           default: 1
           example: 1
@@ -727,6 +2019,8 @@ components:
       properties:
         weight:
           type: integer
+          minimum: 1
+          maximum: 4294967295
           description: Relative weight for selecting this group when multiple groups are healthy.
           default: 1
           example: 1
@@ -754,6 +2048,14 @@ components:
             Unique identifier for this outbound. Must match
             `^[a-z][a-z0-9_]*$` and be at most 24 characters.
           example: "vpn"
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: >
+            Optional human-readable alias shown by clients. Runtime references,
+            marks and routing tables continue to use the stable technical `tag`.
+          example: "Основной VPN"
         interface:
           type: string
           description: >
@@ -789,6 +2091,8 @@ components:
           example: "https://www.gstatic.com/generate_204"
         interval_ms:
           type: integer
+          minimum: 1
+          maximum: 4294967295
           description: >
             Interval between probes in milliseconds. Used with `urltest` outbound type.
           default: 180000
@@ -796,6 +2100,8 @@ components:
         probe_timeout_ms:
           type: integer
           nullable: true
+          minimum: 1
+          maximum: 4294967295
           description: >
             Timeout for each individual urltest probe attempt in milliseconds.
             Used with `urltest` outbound type. When omitted or null, the daemon
@@ -803,16 +2109,43 @@ components:
           example: 5000
         tolerance_ms:
           type: integer
+          minimum: 0
+          maximum: 4294967295
           description: >
             Latency tolerance in milliseconds; outbounds within this range of the
             best are considered equivalent. Used with `urltest` outbound type.
           default: 100
           example: 100
+        selection_mode:
+          type: string
+          enum: [latency, priority]
+          description: >
+            Selection policy used with `urltest` outbound type. `latency` keeps
+            the current route while it remains within the configured tolerance
+            of the fastest healthy candidate. `priority` always selects the
+            first healthy outbound in the highest-priority healthy group and
+            returns to it after recovery. When omitted, `latency` is used.
+          default: latency
+          example: "priority"
+        conntrack_on_switch:
+          $ref: "#/components/schemas/ConntrackOnSwitch"
+          default: preserve
+          description: >
+            URLTEST handling for already established flows when the selected
+            child changes. `preserve` keeps existing flows on their original
+            path while new flows use the new child. `delete` removes only
+            conntrack entries owned by this selector after the replacement
+            route is active. `delete_on_failure` removes the failed child's
+            entries during failover, but preserves established flows when a
+            healthy backup yields to a recovered preferred child. It is valid
+            only with `selection_mode: priority`. No mode performs a global
+            conntrack flush.
         outbound_groups:
           type: array
           description: >
             Ordered list of outbound groups. Required for `urltest` outbound type.
-            Groups are tried in order; within a group the outbound is selected by weight.
+            Groups are tried by ascending weight and then by declaration order.
+            Selection within a group follows `selection_mode`.
           items:
             $ref: "#/components/schemas/OutboundGroup"
         retry:
@@ -820,14 +2153,51 @@ components:
         circuit_breaker:
           $ref: "#/components/schemas/CircuitBreakerConfig"
 
+    ConntrackOnSwitch:
+      type: string
+      enum: [preserve, delete, delete_on_failure]
+
+    ListRefreshDetourMode:
+      type: string
+      enum: [inherit, override]
+      description: >
+        Selects which ordered outbound chain is used to download this remote
+        list. `inherit` uses the global chain from `list_refresh`.
+        `override` uses this list's `detour` and `fallback_detours` instead.
+        The field is valid only for URL-backed lists. `inherit` must not be
+        combined with per-list `detour` or `fallback_detours`; `override`
+        requires a non-empty `detour`.
+        For backward compatibility an omitted value behaves as `override`
+        when the list already has an explicit `detour`, and as `inherit`
+        otherwise.
+
     ListConfig:
       type: object
       description: >
         Defines a named list of domains and/or IP CIDRs used in routing and DNS rules.
         At least one of `url`, `domains`, `ip_cidrs`, or `file` must be provided.
         List names (the keys under `lists`) must match `^[a-z][a-z0-9_]*$`
-        and be at most 24 characters.
+        and be at most 24 characters. `display_name` is presentation-only:
+        rules, caches, sets, and API references always use the map key.
       properties:
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: >
+            Optional human-readable alias shown by clients. Unicode is allowed.
+            The value must contain a non-whitespace character and must not
+            contain ASCII control characters. It never replaces the list key
+            in routing or DNS references.
+          example: "Сервисы ИИ"
+        catalog_identity:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+          description: >
+            Internal immutable provenance identity for catalogue-created
+            lists. It is derived from the authoritative catalogue source and
+            preset ID, and is used to prevent duplicate installation. Manual
+            lists normally omit this field.
         url:
           type: string
           description: URL to a remote list file to download and cache.
@@ -855,13 +2225,28 @@ components:
             `0` means no timeout.
           default: 0
           example: 86400000
+        refresh_detour_mode:
+          $ref: "#/components/schemas/ListRefreshDetourMode"
         detour:
           type: string
           description: >
-            Optional outbound tag to use when downloading this list.
-            If set, download traffic is marked with the outbound's fwmark
-            and routed via its dedicated routing table.
-            If omitted, the system default routing table is used.
+            Primary outbound tag used when `refresh_detour_mode=override`.
+            Legacy configurations that set this field without a mode are
+            treated as per-list overrides. When neither a per-list override
+            nor a global chain is configured, the system default routing
+            table is used.
+        fallback_detours:
+          type: array
+          maxItems: 3
+          uniqueItems: true
+          description: >
+            Ordered fallback outbound tags used only when downloading through
+            `detour` fails. Every entry must reference a routable interface,
+            table, or urltest outbound and must differ from `detour`. Direct
+            routing is never added implicitly after an explicitly configured
+            detour chain fails.
+          items:
+            type: string
 
     DnsServer:
       type: object
@@ -874,6 +2259,14 @@ components:
             `^[a-z][a-z0-9_]*$`, be at most 24 characters, and be unique
             within `dns.servers`.
           example: "vpn-dns"
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: >
+            Optional human-readable alias. DNS rules and fallback references
+            continue to use the stable technical `tag`.
+          example: "Cloudflare через VPN"
         type:
           type: string
           description: DNS server source type.
@@ -897,6 +2290,22 @@ components:
       type: object
       required: [list, server]
       properties:
+        id:
+          type: string
+          pattern: "^[a-z][a-z0-9_]*$"
+          maxLength: 24
+          description: >
+            Optional stable technical identifier. New clients generate it
+            automatically; legacy rules without an id remain valid.
+          example: "dr_h4n8k2p6"
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: >
+            Optional human-readable alias shown by clients. It does not affect
+            matching or rule ordering.
+          example: "DNS для сервисов ИИ"
         enabled:
           type: boolean
           nullable: true
@@ -1003,6 +2412,22 @@ components:
       type: object
       required: [outbound]
       properties:
+        id:
+          type: string
+          pattern: "^[a-z][a-z0-9_]*$"
+          maxLength: 24
+          description: >
+            Optional stable technical identifier. New clients generate it
+            automatically; legacy rules without an id remain valid.
+          example: "rr_k7p2m4x9"
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: >
+            Optional human-readable alias shown by clients. It does not affect
+            matching or rule ordering.
+          example: "Сервисы ИИ через VPN"
         enabled:
           type: boolean
           nullable: true
@@ -1063,6 +2488,64 @@ components:
             (e.g. "!10.0.0.0/8" matches traffic NOT destined for 10.0.0.0/8).
           example: "10.0.0.0/8"
 
+    InternalVpnServer:
+      type: object
+      additionalProperties: false
+      required:
+        - interface
+        - process_clients
+      properties:
+        interface:
+          type: string
+          description: >
+            Last observed kernel interface name of a native VPN server whose
+            client traffic can explicitly participate in or bypass keen-pbr
+            processing. Legacy configurations use this value directly. When
+            ndms_id is present, keen-pbr resolves the current kernel name from
+            the stable NDMS identity and keeps this field only as the last
+            observed diagnostic value. It is never trusted to create an
+            unverified bypass; during a temporary inventory outage an exact
+            live match may only conservatively force process_clients=true.
+        ndms_id:
+          type: string
+          description: >
+            Stable NDMS interface identifier. Supported ingress servers are
+            WireGuard, AmneziaWG, OpenVPN, IKE, L2TP, SSTP and OpenConnect.
+            Non-WireGuard kinds require an exact live kernel-name match.
+            HTTP/HTTPS/SOCKS proxy records are never accepted as VPN ingress.
+            KeeneticOS versions that do not report a WireGuard server role
+            require an explicit saved user choice and a fail-closed structural
+            guard (non-global, no default gateway, non-host local subnet).
+        process_clients:
+          type: boolean
+          description: >
+            Whether traffic and DNS requests arriving from clients of this
+            native VPN server are processed by keen-pbr. False is an explicit
+            early bypass and takes precedence over inbound_interfaces.
+
+    InternalVpnService:
+      type: object
+      additionalProperties: false
+      required:
+        - service_id
+        - process_clients
+      properties:
+        service_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9._:-]+$"
+          description: >
+            Stable NDMS identity of an L2TP, IKEv1/IKEv2, SSTP or OpenConnect
+            server service.
+            Unlike interface-based servers, these services are resolved to
+            their current client address pools at runtime.
+        process_clients:
+          type: boolean
+          description: >
+            Whether traffic and DNS requests from the service client pool are
+            processed by keen-pbr. False installs an early source-pool bypass.
+
     RouteConfig:
       type: object
       properties:
@@ -1075,6 +2558,28 @@ components:
             ingress interfaces.
           items:
             type: string
+        internal_vpn_servers:
+          type: array
+          maxItems: 128
+          description: >
+            Per-interface participation overrides for native VPN servers.
+            If omitted, inbound_interfaces keeps its legacy behavior unchanged.
+            process_clients=true force-includes the interface when an explicit
+            inbound_interfaces allowlist is active. process_clients=false
+            bypasses both route classification and client DNS redirection.
+          items:
+            $ref: "#/components/schemas/InternalVpnServer"
+        internal_vpn_services:
+          type: array
+          maxItems: 32
+          description: >
+            Participation overrides for native L2TP, IKEv1/IKEv2, SSTP and
+            OpenConnect server services that have no stable Linux ingress
+            interface while idle.
+            The live source pools are resolved from a fresh, strictly parsed
+            NDMS inventory; user-supplied ranges are never trusted.
+          items:
+            $ref: "#/components/schemas/InternalVpnService"
         rules:
           type: array
           items:
@@ -1119,6 +2624,81 @@ components:
             Required when `enabled` is `true`. Validated even when `enabled` is `false`.
           example: "0 4 * * 0"
 
+    ListRefreshConfig:
+      type: object
+      description: >
+        Global route policy for downloading URL-backed lists. It is shared by
+        scheduled refreshes, manual refreshes, and refreshes triggered after
+        applying configuration.
+      properties:
+        detour:
+          type: string
+          description: >
+            Primary outbound used by URL-backed lists whose
+            `refresh_detour_mode` is `inherit`. If omitted together with
+            `fallback_detours`, inherited downloads use the system default
+            route.
+        fallback_detours:
+          type: array
+          maxItems: 3
+          uniqueItems: true
+          description: >
+            Ordered fallback outbounds for the global URL-list download
+            chain. Direct routing is never added implicitly after a
+            configured chain fails.
+          items:
+            type: string
+
+    PlainDnsTemplate:
+      type: object
+      required: [name, primary_ipv4]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: Human-readable name shown next to the built-in DNS templates.
+          example: "Office DNS"
+        primary_ipv4:
+          type: string
+          format: ipv4
+          minLength: 7
+          maxLength: 15
+          description: Primary plain DNS resolver IPv4 address.
+          example: "192.0.2.53"
+        secondary_ipv4:
+          type: string
+          format: ipv4
+          minLength: 7
+          maxLength: 15
+          description: Optional secondary plain DNS resolver IPv4 address.
+          example: "192.0.2.54"
+
+    UiPreferencesConfig:
+      type: object
+      description: >
+        Server-persisted presentation preferences. They are part of the normal
+        configuration so backup, restore, import, and export preserve them.
+      properties:
+        hidden_native_interface_ids:
+          type: array
+          maxItems: 128
+          uniqueItems: true
+          description: >
+            Native Keenetic tunnel interface identifiers hidden from ordinary
+            service inventory cards. Hiding is reversible and does not delete,
+            disable, or remove an interface from creation selectors.
+          items:
+            type: string
+            minLength: 1
+            maxLength: 128
+        plain_dns_templates:
+          type: array
+          maxItems: 32
+          description: User-defined plain IPv4 DNS templates.
+          items:
+            $ref: "#/components/schemas/PlainDnsTemplate"
+
     ConfigObject:
       type: object
       description: keen-pbr configuration file.
@@ -1146,6 +2726,10 @@ components:
           $ref: "#/components/schemas/IprouteConfig"
         lists_autoupdate:
           $ref: "#/components/schemas/ListsAutoupdateConfig"
+        list_refresh:
+          $ref: "#/components/schemas/ListRefreshConfig"
+        ui_preferences:
+          $ref: "#/components/schemas/UiPreferencesConfig"
       example:
         daemon:
           pid_file: "/var/run/keen-pbr.pid"
@@ -1153,6 +2737,7 @@ components:
           firewall_backend: auto
           firewall_verify_max_bytes: 262144
           skip_marked_packets: true
+          clear_dynamic_sets_on_apply: true
           ipv6_enabled: true
           strict_enforcement: true
           max_file_size_bytes: 8388608
@@ -1227,6 +2812,9 @@ components:
         lists_autoupdate:
           enabled: true
           cron: "0 4 * * 0"
+        list_refresh:
+          detour: "vpn"
+          fallback_detours: ["wan"]
         route:
           rules:
             - list: ["my-domains", "my-ips", "remote-list"]
@@ -1264,9 +2852,31 @@ components:
             "www.google.com").
           example: "google.com"
 
+    RoutingTestEvaluation:
+      type: string
+      enum: [matched, not_matched, insufficient_context]
+      description: >
+        Whether the target is known to match, known not to match, or cannot be
+        decided without packet fields that were not supplied to this test.
+
+    RoutingTestUnknownCondition:
+      type: string
+      enum:
+        - inbound_interface
+        - source_address
+        - protocol
+        - source_port
+        - destination_port
+        - dscp
+        - destination_address
+        - firewall_state
+        - firewall_set
+        - firewall_tool
+        - resolved_ip
+
     RoutingTestEntry:
       type: object
-      required: [ip, expected_outbound, actual_outbound, ok]
+      required: [ip, expected_outbound, actual_outbound, ok, evaluation, unknown_conditions]
       properties:
         ip:
           type: string
@@ -1279,34 +2889,53 @@ components:
         expected_outbound:
           type: string
           description: >
-            Outbound tag determined by scanning route rules against cached list
-            data. "(default)" when no rule matches.
+            Outbound tag determined from the active rules, cached list data,
+            and destination address. "(default)" when no rule matches and
+            "(unknown)" when packet context is required.
           example: "vpn"
         actual_outbound:
           type: string
           description: >
-            Outbound tag found in the live kernel firewall sets.
+            Outbound tag found from realized firewall rules and live set membership.
             "(default)" when the IP is not present in any set.
-            "(unknown)" when the firewall tool is unavailable.
+            "(unknown)" when the firewall tool, set state, or packet context is unavailable.
           example: "vpn"
         ok:
           type: boolean
           description: true when expected_outbound equals actual_outbound.
           example: true
+        evaluation:
+          $ref: "#/components/schemas/RoutingTestEvaluation"
+        unknown_conditions:
+          type: array
+          description: Packet or runtime fields required for a conclusive result.
+          items:
+            $ref: "#/components/schemas/RoutingTestUnknownCondition"
 
     RoutingTestRuleIpDiagnostic:
       type: object
-      required: [ip]
+      required: [ip, in_lists, evaluation, unknown_conditions]
       properties:
         ip:
           type: string
           description: Resolved IP represented by this matrix row.
+        in_lists:
+          type: boolean
+          description: Whether this IP or the queried domain matches a configured rule list.
+        list_match:
+          $ref: "#/components/schemas/RoutingTestListMatch"
         in_ipset:
           type: boolean
           nullable: true
           description: |
             Whether the IP exists in this rule's firewall set.
             null when firewall check is unavailable.
+        evaluation:
+          $ref: "#/components/schemas/RoutingTestEvaluation"
+        unknown_conditions:
+          type: array
+          items:
+            $ref: "#/components/schemas/RoutingTestUnknownCondition"
 
     RoutingTestRuleDiagnostic:
       type: object
@@ -1331,7 +2960,7 @@ components:
 
     RoutingTestResponse:
       type: object
-      required: [target, is_domain, resolved_ips, warnings, results, rule_diagnostics, no_matching_rule]
+      required: [target, is_domain, config_scope, unapplied_draft, resolved_ips, warnings, results, rule_diagnostics, no_matching_rule]
       properties:
         target:
           type: string
@@ -1341,6 +2970,13 @@ components:
           type: boolean
           description: true when the target was interpreted as a domain name.
           example: true
+        config_scope:
+          type: string
+          enum: [active]
+          description: Diagnostics always use the applied active configuration.
+        unapplied_draft:
+          type: boolean
+          description: true when a separate unapplied configuration draft exists.
         resolved_ips:
           type: array
           description: >
@@ -1377,9 +3013,30 @@ components:
     # Internal: cache metadata (not exposed via API paths)
     # -------------------------------------------------------------------------
 
+    CacheGeneration:
+      type: object
+      required: [filename, size, sha256]
+      properties:
+        filename:
+          type: string
+          description: Basename of an immutable cache body generation.
+        size:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Exact cache body size in bytes.
+        sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: Lowercase SHA-256 digest of the cache body.
+
     CacheMetadata:
       type: object
       properties:
+        current:
+          $ref: "#/components/schemas/CacheGeneration"
+        previous:
+          $ref: "#/components/schemas/CacheGeneration"
         etag:
           type: string
         last_modified:
@@ -1388,6 +3045,16 @@ components:
           type: string
         download_time:
           type: string
+        last_refresh_attempt:
+          type: string
+        last_refresh_error:
+          type: string
+        last_refresh_url:
+          type: string
+        last_refresh_detour:
+          type: string
+        srs_decoder_revision:
+          type: integer
         ips:
           type: integer
         cidrs:
@@ -1398,7 +3065,7 @@ components:
     HealthResponse:
       type: object
       required:
-        [version, build, status, os_type, os_version, build_variant, resolver_live_status, config_is_draft]
+        [version, build, status, runtime_state, runtime_state_reason, os_type, os_version, build_variant, resolver_live_status, config_is_draft]
       properties:
         version:
           type: string
@@ -1408,10 +3075,26 @@ components:
           type: string
           description: Daemon build string (git commit UTC timestamp).
           example: "20260424231043"
+        commit:
+          type: string
+          pattern: '^(unknown|[0-9a-f]{12,64}(-dirty)?)$'
+          description: >
+            Source commit used for this binary: 12 to 64 lowercase hexadecimal
+            characters, optionally suffixed with `-dirty`, or `unknown` when
+            provenance was unavailable. This field is additive and optional
+            for compatibility with older daemons.
+          example: "51126910d9bb"
         status:
           type: string
           enum: [running, stopped]
           example: "running"
+        runtime_state:
+          type: string
+          enum: [starting, running, restart_required, applying, stopped, broken, shutting_down]
+          description: Detailed lifecycle state of the routing runtime.
+        runtime_state_reason:
+          type: string
+          description: Reason for the most recent lifecycle transition.
         os_type:
           type: string
           description: Normalized host OS family used by the running daemon.
@@ -1474,6 +3157,47 @@ components:
             Whether a newer configuration has been staged in memory but not yet
             persisted and applied.
           example: false
+        lifecycle_operation:
+          $ref: "#/components/schemas/LifecycleOperation"
+
+    LifecycleOperation:
+      type: object
+      required: [id, type, status, started_at, stages]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [apply_config, start, stop, restart]
+        status:
+          type: string
+          enum: [running, succeeded, failed]
+        started_at:
+          type: integer
+          format: int64
+        finished_at:
+          type: integer
+          format: int64
+        error:
+          type: string
+        stages:
+          type: array
+          items:
+            $ref: "#/components/schemas/LifecycleOperationStage"
+
+    LifecycleOperationStage:
+      type: object
+      required: [id, title, status, detail]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        status:
+          type: string
+          enum: [pending, running, succeeded, failed, skipped]
+        detail:
+          type: string
 
     ResolverConfigSyncState:
       type: string
@@ -1567,6 +3291,7 @@ components:
             $ref: "#/components/schemas/RuntimeInterfaceState"
 
     RuntimeOutboundsResponse:
+      title: RuntimeOutboundsResponse
       type: object
       required: [outbounds]
       properties:
@@ -1585,6 +3310,142 @@ components:
       description: >
         - up: interface is administratively up
         - down: interface is not administratively up
+
+    RuntimeInterfaceUptimeSource:
+      type: string
+      enum: [firmware, observed]
+      description: >
+        Which confirmed up-transition the anchor was derived from.
+
+        - firmware: the KeeneticOS per-interface uptime counter. The firmware
+          owns it, so it survives a keen-pbr restart, a configuration apply and
+          a UI reload.
+        - observed: a down-to-up edge this daemon saw itself. Precise and
+          immediate, but it only covers transitions that happened while this
+          process was running.
+
+    RuntimeInterfaceTrafficPoint:
+      type: object
+      required: [age_ms, rx_bits_per_second, tx_bits_per_second]
+      properties:
+        age_ms:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Age relative to the newest retained point.
+        rx_bits_per_second:
+          type: integer
+          format: int64
+          minimum: 0
+        tx_bits_per_second:
+          type: integer
+          format: int64
+          minimum: 0
+
+    RuntimeInterfaceTraffic:
+      type: object
+      required: [rx_bytes, tx_bytes, history]
+      properties:
+        sampled_at_unix_ms:
+          type: integer
+          format: int64
+          minimum: 0
+          description: >
+            Unix timestamp of the newest traffic sample. Older daemons and
+            initial snapshots may omit it; clients then use the sampling
+            interval until the first compact traffic event arrives.
+        rx_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Kernel receive counter since this interface was created.
+        tx_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Kernel transmit counter since this interface was created.
+        rx_bits_per_second:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Current receive rate when at least two samples exist.
+        tx_bits_per_second:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Current transmit rate when at least two samples exist.
+        history:
+          type: array
+          maxItems: 120
+          description: >
+            Bounded in-memory series. It is never persisted to the router disk.
+          items:
+            $ref: "#/components/schemas/RuntimeInterfaceTrafficPoint"
+
+    RuntimeInterfaceTrafficSample:
+      type: object
+      required: [name, available, reset]
+      properties:
+        name:
+          type: string
+          description: Kernel interface name.
+        available:
+          type: boolean
+          description: Whether both kernel counters were readable.
+        reset:
+          type: boolean
+          description: >
+            Whether the kernel counters moved backwards because the interface
+            was recreated. Clients must start a new graph segment.
+        rx_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        tx_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        rx_bits_per_second:
+          type: integer
+          format: int64
+          minimum: 0
+        tx_bits_per_second:
+          type: integer
+          format: int64
+          minimum: 0
+        observed_at_unix_ms:
+          type: integer
+          format: int64
+          minimum: 0
+          description: >
+            Unix timestamp of the moment THIS interface's counters were read.
+            It is the only honest answer to "when was this measured": the batch
+            timestamp below describes when the round was dispatched, so an
+            interface whose own read failed or was skipped would otherwise look
+            exactly as fresh as one that succeeded. Absent when this round
+            produced no successful reading for the interface, and absent from
+            older daemons - clients then fall back to the batch timestamp and
+            must not present the result as per-interface freshness.
+          example: 1754812800000
+
+    RuntimeInterfaceTrafficUpdate:
+      type: object
+      required: [sampled_at_unix_ms, interfaces]
+      properties:
+        sampled_at_unix_ms:
+          type: integer
+          format: int64
+          minimum: 0
+          description: >
+            Unix timestamp of this compact sampling batch as a whole, i.e. when
+            the round was dispatched. Retained for older clients and as a
+            fallback. Clients that can read RuntimeInterfaceTrafficSample's
+            observed_at_unix_ms must prefer it: this value says nothing about
+            whether any individual interface was measured successfully.
+        interfaces:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeInterfaceTrafficSample"
 
     RuntimeInterfaceInventoryEntry:
       type: object
@@ -1620,6 +3481,23 @@ components:
             type: string
           description: Best-effort IPv6 addresses in CIDR form.
           example: ["fe80::1/64"]
+        link_up_since_unix_ms:
+          type: integer
+          format: int64
+          description: >
+            Unix timestamp of the confirmed link or tunnel up-transition this
+            interface has been up since. Absent when no authoritative
+            transition is known - clients must then render the uptime as
+            unknown and must never substitute daemon, routing-runtime or router
+            uptime, which are separate quantities that reset for unrelated
+            reasons. The value is an anchor rather than a duration precisely so
+            that a UI refresh, a configuration apply and a daemon restart
+            cannot move it.
+          example: 1754812800000
+        link_uptime_source:
+          $ref: "#/components/schemas/RuntimeInterfaceUptimeSource"
+        traffic:
+          $ref: "#/components/schemas/RuntimeInterfaceTraffic"
 
     RuntimeInterfaceInventoryResponse:
       type: object
@@ -1629,6 +3507,573 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/RuntimeInterfaceInventoryEntry"
+
+    RuntimeInventoryResponse:
+      type: object
+      required: [service, outbounds, interfaces]
+      properties:
+        service:
+          $ref: "#/components/schemas/HealthResponse"
+        outbounds:
+          $ref: "#/components/schemas/RuntimeOutboundsResponse"
+        interfaces:
+          $ref: "#/components/schemas/RuntimeInterfaceInventoryResponse"
+
+    PeriodicTaskOutcome:
+      type: string
+      enum: [success, noop, failure, skipped, abandoned]
+
+    PeriodicTaskMetricsEntry:
+      type: object
+      required:
+        - label
+        - runs
+        - success
+        - noop
+        - failure
+        - skipped
+        - abandoned
+        - in_flight
+        - total_duration_ms
+        - max_duration_ms
+      properties:
+        label:
+          type: string
+          maxLength: 64
+          description: Stable pre-registered task label.
+        runs:
+          type: integer
+          format: int64
+          minimum: 0
+        success:
+          type: integer
+          format: int64
+          minimum: 0
+        noop:
+          type: integer
+          format: int64
+          minimum: 0
+        failure:
+          type: integer
+          format: int64
+          minimum: 0
+        skipped:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Attempts skipped before becoming counted runs.
+        abandoned:
+          type: integer
+          format: int64
+          minimum: 0
+        in_flight:
+          type: integer
+          format: int64
+          minimum: 0
+        total_duration_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        max_duration_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        last_duration_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        last_started_at_unix_ms:
+          type: integer
+          format: int64
+        last_finished_at_unix_ms:
+          type: integer
+          format: int64
+        last_event_at_unix_ms:
+          type: integer
+          format: int64
+        last_outcome:
+          $ref: "#/components/schemas/PeriodicTaskOutcome"
+        last_error:
+          type: string
+          maxLength: 256
+
+    PeriodicTaskMetricsResponse:
+      type: object
+      required: [capacity, tracked, tasks]
+      properties:
+        capacity:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Fixed registry capacity.
+        tracked:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Number of pre-registered task labels.
+        tasks:
+          type: array
+          maxItems: 32
+          items:
+            $ref: "#/components/schemas/PeriodicTaskMetricsEntry"
+
+    NdmsTunnelKind:
+      type: string
+      enum:
+        - amnezia_wireguard
+        - wireguard
+        - openvpn
+        - ike
+        - l2tp
+        - sstp
+        - openconnect
+        - http_proxy
+        - https_proxy
+        - socks5_proxy
+
+    NdmsInterfaceRole:
+      type: string
+      enum:
+        - client
+        - server
+        - unknown
+
+    NdmsInterfaceCapabilities:
+      type: object
+      required: [can_edit, can_delete, can_hide, backup_required]
+      properties:
+        can_edit:
+          type: boolean
+        can_delete:
+          type: boolean
+        can_hide:
+          type: boolean
+        backup_required:
+          type: boolean
+
+    NdmsManagementBlocker:
+      type: string
+      enum:
+        - unsupported_kind
+        - unsupported_role
+        - role_unknown
+        - kernel_identity_unresolved
+        - typed_rci_unavailable
+        - automatic_backup_unavailable
+        - ownership_unknown
+        - optimistic_revision_unavailable
+
+    NdmsInterfaceManagementReadiness:
+      title: NdmsInterfaceManagementReadiness
+      type: object
+      required:
+        - candidate
+        - identity_stable
+        - observed_revision
+        - configuration_snapshot_available
+        - blockers
+      properties:
+        candidate:
+          type: boolean
+          description: >
+            True only for an allowlisted WG/AWG client that may enter the
+            future managed-interface workflow. It does not authorize mutation;
+            servers use a separate future workflow.
+        identity_stable:
+          type: boolean
+          description: >
+            True when both the logical NDMS identity and an observed kernel
+            interface resolve without heuristics outside the strict allowlist.
+        observed_revision:
+          type: string
+          description: >
+            Opaque digest of a strict non-secret allowlist from the read-only
+            NDMS inventory. It is groundwork for concurrency checks, not a
+            replacement for a full configuration revision.
+        configuration_snapshot_available:
+          type: boolean
+          enum: [false]
+          description: >
+            Remains false until a typed, restorable NDMS configuration snapshot
+            is implemented. The status inventory is deliberately not treated as
+            a backup.
+        blockers:
+          type: array
+          items:
+            $ref: "#/components/schemas/NdmsManagementBlocker"
+
+    NdmsTunnelInterface:
+      type: object
+      required:
+        - id
+        - firmware_interface_name
+        - label
+        - firmware_type
+        - kind
+        - role
+        - internal_vpn_server_candidate
+        - internal_vpn_server_role_confirmation_required
+        - owner
+        - capabilities
+        - management_readiness
+      properties:
+        id:
+          type: string
+        firmware_interface_name:
+          type: string
+          description: Logical interface identifier reported by KeeneticOS RCI.
+        kernel_name:
+          type: string
+          nullable: true
+          description: Resolved Linux interface name. Null or omitted when no safe runtime match exists.
+        label:
+          type: string
+        firmware_type:
+          type: string
+        kind:
+          $ref: "#/components/schemas/NdmsTunnelKind"
+        role:
+          $ref: "#/components/schemas/NdmsInterfaceRole"
+        internal_vpn_server_candidate:
+          type: boolean
+          description: >
+            True only when this fresh read-only NDMS record can safely be
+            offered as an internal VPN-server policy target. A reported server
+            role is authoritative. For role-less WireGuard/AmneziaWG records,
+            strict non-global, no-default-route and non-host-subnet guards must
+            all pass.
+        internal_vpn_server_role_confirmation_required:
+          type: boolean
+          description: >
+            True for a guarded WireGuard/AmneziaWG candidate whose firmware
+            does not report a server role. It is never enabled by inheritance;
+            the user must explicitly save the policy choice.
+        owner:
+          type: string
+          enum: [keenetic]
+        connected:
+          type: boolean
+        link:
+          type: boolean
+        capabilities:
+          $ref: "#/components/schemas/NdmsInterfaceCapabilities"
+        management_readiness:
+          $ref: "#/components/schemas/NdmsInterfaceManagementReadiness"
+
+    NdmsCatalogStatus:
+      type: string
+      enum: [fresh, stale, unavailable]
+
+    NdmsVpnServerKind:
+      type: string
+      enum: [l2tp, ikev1, ikev2, sstp, openconnect]
+
+    NdmsVpnServerService:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - kind
+        - label
+        - enabled
+        - source_cidrs
+        - inventory_revision
+      properties:
+        id:
+          type: string
+          description: Stable NDMS service or crypto-map identity.
+        kind:
+          $ref: "#/components/schemas/NdmsVpnServerKind"
+        label:
+          type: string
+        enabled:
+          type: boolean
+        source_cidrs:
+          type: array
+          maxItems: 128
+          items:
+            type: string
+          description: >
+            Canonical non-overlapping client source CIDRs derived from the
+            bounded NDMS address pool. Empty means the service cannot safely be
+            offered as a policy target.
+        bound_interface_id:
+          type: string
+          nullable: true
+          description: Logical NDMS interface to which the service is bound.
+        inventory_revision:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+          description: >
+            Digest of the strict non-secret fields used to build this row.
+
+    NdmsVpnServerServiceInventoryResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - available
+        - catalog_status
+        - read_only
+        - services
+      properties:
+        available:
+          type: boolean
+          description: >
+            True only when this response comes from a fresh authoritative NDMS
+            observation.
+        catalog_status:
+          $ref: "#/components/schemas/NdmsCatalogStatus"
+        read_only:
+          type: boolean
+          enum: [true]
+        services:
+          type: array
+          items:
+            $ref: "#/components/schemas/NdmsVpnServerService"
+
+    NdmsNativeImportTargetRange:
+      title: NdmsNativeImportTargetRange
+      type: object
+      required:
+        - prefix
+        - first_index
+        - last_index
+      properties:
+        prefix:
+          title: NdmsNativeImportTargetPrefix
+          type: string
+          enum: [Wireguard]
+        first_index:
+          type: integer
+          minimum: 0
+          maximum: 126
+        last_index:
+          type: integer
+          minimum: 0
+          maximum: 126
+
+    NdmsNativeImportReadiness:
+      title: NdmsNativeImportReadiness
+      type: object
+      required:
+        - preview_only
+        - apply_available
+        - operation
+        - request_name
+        - allocator_range
+        - eligible_returned_targets
+        - protected_targets
+        - journal_state
+        - reconcile_barrier_state
+        - blockers
+      properties:
+        preview_only:
+          type: boolean
+          enum: [true]
+        apply_available:
+          type: boolean
+          enum: [false]
+        operation:
+          type: string
+          pattern: ^interface\.wireguard\.import$
+          description: Exact stock KeeneticOS create-only RCI action.
+        request_name:
+          type: string
+          maxLength: 0
+          description: >
+            Must stay empty so the stock action allocates a new interface and
+            cannot target an existing interface supplied by the client.
+        allocator_range:
+          $ref: "#/components/schemas/NdmsNativeImportTargetRange"
+        eligible_returned_targets:
+          $ref: "#/components/schemas/NdmsNativeImportTargetRange"
+        protected_targets:
+          type: array
+          items:
+            $ref: "#/components/schemas/NdmsNativeImportTargetRange"
+        journal_state:
+          title: NdmsNativeImportJournalState
+          type: string
+          description: >
+            Redacted report-only boot observation of the native-import WAL.
+            This state never authorizes Apply or removes the independent
+            recovery_journal_not_integrated blocker. clean_never_activated is
+            clean only while every production writer/provider stays disabled.
+          enum:
+            - dormant
+            - clean_never_activated
+            - clean
+            - recovery_required
+            - unsafe
+            - unavailable
+        reconcile_barrier_state:
+          title: NdmsNativeImportReconcileBarrierState
+          type: string
+          enum: [dormant]
+        blockers:
+          type: array
+          items:
+            title: NdmsNativeImportBlocker
+            type: string
+            enum:
+              - writer_disabled
+              - allocator_range_unfenced
+              - recovery_journal_not_integrated
+              - reconcile_barrier_not_integrated
+
+    NdmsInterfaceInventoryResponse:
+      type: object
+      required:
+        - available
+        - catalog_status
+        - read_only
+        - mutation_mode
+        - required_guards
+        - native_import_readiness
+        - interfaces
+      properties:
+        available:
+          type: boolean
+          description: >
+            True only for a fresh authoritative NDMS observation. Stale
+            last-known-good rows can remain visible but cannot authorize a new
+            internal VPN-server choice.
+        catalog_status:
+          $ref: "#/components/schemas/NdmsCatalogStatus"
+        read_only:
+          type: boolean
+          enum: [true]
+        mutation_mode:
+          type: string
+          enum: [disabled]
+        required_guards:
+          type: array
+          items:
+            type: string
+            enum:
+              - typed_rci
+              - automatic_backup
+              - ownership_check
+              - optimistic_revision
+        native_import_readiness:
+          $ref: "#/components/schemas/NdmsNativeImportReadiness"
+        interfaces:
+          type: array
+          items:
+            $ref: "#/components/schemas/NdmsTunnelInterface"
+
+    ConnectionSort:
+      title: ConnectionSort
+      type: string
+      enum: [last_seen, first_seen, source, destination]
+
+    SortOrder:
+      title: SortOrder
+      type: string
+      enum: [asc, desc]
+
+    ConnectionQueryRequest:
+      title: ConnectionQueryRequest
+      type: object
+      properties:
+        cursor:
+          type: string
+          maxLength: 256
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 250
+          default: 100
+        active_only:
+          type: boolean
+          default: true
+        search:
+          type: string
+          maxLength: 128
+        state:
+          type: string
+          maxLength: 32
+        route:
+          type: string
+          maxLength: 64
+        device:
+          type: string
+          maxLength: 128
+        sort:
+          $ref: "#/components/schemas/ConnectionSort"
+        order:
+          $ref: "#/components/schemas/SortOrder"
+
+    ConnectionRecord:
+      title: ConnectionRecord
+      type: object
+      required:
+        - id
+        - protocol
+        - state
+        - source
+        - source_port
+        - destination
+        - destination_port
+        - route
+        - mark
+        - active
+        - device
+        - destination_domains
+        - first_seen
+        - last_seen
+      properties:
+        id:
+          type: string
+        protocol:
+          type: string
+        state:
+          type: string
+        source:
+          type: string
+        source_port:
+          type: integer
+        destination:
+          type: string
+        destination_port:
+          type: integer
+        route:
+          type: string
+        mark:
+          type: integer
+          format: int64
+        active:
+          type: boolean
+        device:
+          type: string
+        destination_domains:
+          type: array
+          items:
+            type: string
+        first_seen:
+          type: integer
+          format: int64
+        last_seen:
+          type: integer
+          format: int64
+
+    ConnectionPage:
+      title: ConnectionPage
+      type: object
+      required: [items, total, snapshot_at]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConnectionRecord"
+        total:
+          type: integer
+          format: int64
+        snapshot_at:
+          type: integer
+          format: int64
+        next_cursor:
+          type: string
 
     # -------------------------------------------------------------------------
     # /api/service/*
@@ -1663,8 +4108,27 @@ components:
           type: string
           description: >
             ISO-8601 timestamp of the last successful download or conditional
-            refresh attempt for a URL-backed list.
+            refresh attempt for the currently configured URL. A failed attempt
+            never replaces this timestamp.
           example: "2026-04-05T12:34:56Z"
+        last_attempt:
+          type: string
+          description: >
+            ISO-8601 timestamp of the most recent refresh attempt for the
+            currently configured URL, whether it succeeded or failed.
+          example: "2026-04-05T12:36:10Z"
+        last_error:
+          type: string
+          description: >
+            Error from the most recent refresh attempt for the currently
+            configured URL. Omitted after a successful attempt.
+          example: "Connection timed out after 10000 milliseconds"
+        last_detour:
+          type: string
+          description: >
+            Outbound tag used by the most recent refresh attempt. Omitted when
+            the system default route was used.
+          example: "vpn_backup"
 
     ListRefreshResponse:
       type: object
@@ -1708,7 +4172,7 @@ components:
 
     ConfigStateResponse:
       type: object
-      required: [config, is_draft]
+      required: [config, is_draft, revision]
       properties:
         config:
           $ref: "#/components/schemas/ConfigObject"
@@ -1718,6 +4182,12 @@ components:
             Whether the returned config is a staged in-memory draft rather than
             the currently persisted config.
           example: false
+        revision:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+          description: >
+            Stable revision of the returned visible configuration. Narrow
+            setup endpoints use it for compare-and-swap protection.
         list_refresh_state:
           type: object
           description: >
@@ -1744,6 +4214,218 @@ components:
             Present for `POST /api/config/save`: server-authoritative Unix
             timestamp (seconds) when apply started.
           example: 1712345680
+
+    RecommendedListSetupRequest:
+      type: object
+      required: [config, list_id, base_revision]
+      properties:
+        config:
+          $ref: "#/components/schemas/ConfigObject"
+        list_id:
+          type: string
+          minLength: 1
+          description: Technical ID of the list created by the simple dialog.
+        base_revision:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+          description: >
+            Revision returned by GET /api/config for the exact visible
+            configuration on which this candidate is based.
+
+    ListDeleteTarget:
+      type: object
+      additionalProperties: false
+      required: [list_id]
+      properties:
+        list_id:
+          type: string
+          minLength: 1
+          description: Technical ID of the list to delete.
+        replacement_list_id:
+          type: string
+          minLength: 1
+          description: >
+            Optional existing list technical ID that replaces every route and
+            DNS reference to list_id before list_id is deleted.
+
+    ListDeleteStageRequest:
+      type: object
+      additionalProperties: false
+      required: [base_revision, targets]
+      properties:
+        base_revision:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+          description: >
+            Revision returned by GET /api/config for the visible configuration
+            on which the delete confirmation was based.
+        targets:
+          type: array
+          minItems: 1
+          maxItems: 256
+          items:
+            $ref: "#/components/schemas/ListDeleteTarget"
+
+    ListDeleteStageSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - deleted_lists
+        - rebound_references
+        - removed_route_rules
+        - updated_route_rules
+        - removed_dns_rules
+        - updated_dns_rules
+      properties:
+        deleted_lists:
+          type: array
+          items:
+            type: string
+        rebound_references:
+          type: integer
+          format: int64
+          minimum: 0
+        removed_route_rules:
+          type: integer
+          format: int64
+          minimum: 0
+        updated_route_rules:
+          type: integer
+          format: int64
+          minimum: 0
+        removed_dns_rules:
+          type: integer
+          format: int64
+          minimum: 0
+        updated_dns_rules:
+          type: integer
+          format: int64
+          minimum: 0
+
+    ListDeleteStageResponse:
+      type: object
+      additionalProperties: false
+      required: [message, staged, summary]
+      properties:
+        message:
+          type: string
+        staged:
+          type: boolean
+        summary:
+          $ref: "#/components/schemas/ListDeleteStageSummary"
+
+    DependencyEntityKind:
+      title: DependencyEntityKind
+      type: string
+      enum: [list, outbound, dns_server]
+
+    DependencyAnalysisTargetRequest:
+      title: DependencyAnalysisTargetRequest
+      type: object
+      required: [kind, id]
+      properties:
+        kind:
+          $ref: "#/components/schemas/DependencyEntityKind"
+        id:
+          type: string
+
+    DependencyTarget:
+      title: DependencyTarget
+      type: object
+      required: [kind, id, cascaded]
+      properties:
+        kind:
+          $ref: "#/components/schemas/DependencyEntityKind"
+        id:
+          type: string
+        cascaded:
+          type: boolean
+          description: True when deletion follows from another requested target.
+
+    DependencyRelation:
+      title: DependencyRelation
+      type: string
+      enum:
+        - uses_list
+        - routes_to
+        - detours_via
+        - contains_member
+        - uses_dns_server
+        - fallback_to
+
+    DependencyConsequence:
+      title: DependencyConsequence
+      type: string
+      enum: [modify, delete, disconnect]
+
+    DependencyDependentKind:
+      title: DependencyDependentKind
+      type: string
+      enum: [routing_rule, dns_rule, dns_server, outbound_group, list, list_refresh, dns_fallback]
+
+    DependencyReference:
+      title: DependencyReference
+      type: object
+      required:
+        - target
+        - dependent_kind
+        - dependent_id
+        - relation
+        - consequence
+        - path
+      properties:
+        target:
+          $ref: "#/components/schemas/DependencyTarget"
+        dependent_kind:
+          $ref: "#/components/schemas/DependencyDependentKind"
+        dependent_id:
+          type: string
+        relation:
+          $ref: "#/components/schemas/DependencyRelation"
+        consequence:
+          $ref: "#/components/schemas/DependencyConsequence"
+        path:
+          type: string
+          description: Stable JSON-style path inside the configuration.
+        href:
+          type: string
+          description: Optional WebUI deep link for inspecting the dependent.
+
+    DependencyAnalysisRequest:
+      title: DependencyAnalysisRequest
+      type: object
+      required: [targets]
+      properties:
+        independent:
+          type: boolean
+          default: false
+          description: >
+            Analyze every target as an independent deletion. This is intended
+            for dependency badges on inventory pages; false analyzes the whole
+            target set as one batch mutation.
+        targets:
+          type: array
+          minItems: 1
+          maxItems: 256
+          items:
+            $ref: "#/components/schemas/DependencyAnalysisTargetRequest"
+
+    DependencyAnalysisResponse:
+      title: DependencyAnalysisResponse
+      type: object
+      required: [targets, references, safe_to_delete]
+      properties:
+        targets:
+          type: array
+          items:
+            $ref: "#/components/schemas/DependencyTarget"
+        references:
+          type: array
+          items:
+            $ref: "#/components/schemas/DependencyReference"
+        safe_to_delete:
+          type: boolean
+          description: True when no other configuration object is affected.
 
     ErrorResponse:
       type: object
@@ -1916,6 +4598,95 @@ components:
           type: string
           description: Human-readable detail. Omitted when empty.
 
+    PpeDeoffloadMode:
+      type: string
+      enum: [off, auto]
+
+    PpeDeoffloadCapability:
+      type: string
+      enum: [supported, unsupported, unknown]
+
+    PpeDeoffloadCounter:
+      type: object
+      properties:
+        packets:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Raw packet counter read from the verified owned rule.
+        bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Raw byte counter read from the verified owned rule.
+
+    PpeDeoffloadProtocolHealth:
+      title: PpeDeoffloadProtocolHealth
+      type: object
+      required: [desired_ports, applied_ports, active]
+      properties:
+        desired_ports:
+          type: array
+          items:
+            type: string
+          description: Ports derived from the validated active nfqws2 strategy.
+        applied_ports:
+          type: array
+          items:
+            type: string
+          description: Ports semantically verified in the live owned graph.
+        active:
+          type: boolean
+          description: Whether this protocol is verified active in the owned graph.
+        counters:
+          $ref: "#/components/schemas/PpeDeoffloadCounter"
+
+    PpeDeoffloadHealth:
+      type: object
+      required: [mode, capability, state, tcp, quic]
+      properties:
+        mode:
+          $ref: "#/components/schemas/PpeDeoffloadMode"
+          description: Configured desired mode; this alone never means active.
+        capability:
+          $ref: "#/components/schemas/PpeDeoffloadCapability"
+          description: Whether the complete live PPE contract was proven.
+        state:
+          title: PpeDeoffloadHealthState
+          type: string
+          enum: [off, inactive, admissible, active, degraded, unknown]
+          description: >
+            Reconciled runtime state. `admissible` means only that all
+            preconditions currently hold; it must never be presented as
+            `active`. `active` requires semantic verification of the live
+            owned graph.
+        reason:
+          type: string
+          description: Stable machine-readable reason for a non-active state.
+        detail:
+          type: string
+          description: Optional operator-facing diagnostic detail.
+        connskip_packets:
+          type: integer
+          minimum: 1
+          description: Per-flow packet window retained on the CPU, when known.
+        tcp:
+          $ref: "#/components/schemas/PpeDeoffloadProtocolHealth"
+        quic:
+          $ref: "#/components/schemas/PpeDeoffloadProtocolHealth"
+        prerouting:
+          $ref: "#/components/schemas/PpeDeoffloadCounter"
+        forward:
+          $ref: "#/components/schemas/PpeDeoffloadCounter"
+        last_reconcile_ts:
+          type: integer
+          format: int64
+          description: Unix timestamp of the last completed reconcile attempt.
+        observed_at:
+          type: integer
+          format: int64
+          description: Unix timestamp when the live graph and counters were observed.
+
     RoutingHealthResponse:
       type: object
       required: [overall, firewall_backend, firewall, firewall_rules, route_tables, policy_rules]
@@ -1933,6 +4704,97 @@ components:
           enum: [iptables, nftables]
           description: Active firewall backend.
           example: "nftables"
+        ppe_deoffload:
+          $ref: "#/components/schemas/PpeDeoffloadHealth"
+        ttl_bypass_state:
+          type: string
+          enum:
+            - chain_absent
+            - unknown
+            - unsupported
+            - active
+            - conflict
+            - missing
+            - disabled
+          description: >
+            State of the owned RETURN keen-pbr keeps first in the firmware's
+            TTL chain so a packet nfqws2 already handled is not stripped of the
+            TTL its desync depends on.
+
+            The values are deliberately distinct because they call for
+            different responses:
+
+            - chain_absent: the firmware chain is not there, so there is
+              nothing to bypass. Routine, no action.
+            - unknown: the chain could not be inspected - a held xtables lock,
+              a timeout. Says nothing about the chain; do not read it as "fine".
+            - unsupported: a kernel match this needs is not registered. We
+              deliberately write nothing rather than install an unverified rule.
+            - active: our rule is present exactly once and first.
+            - conflict: it drifted or was duplicated, i.e. something is
+              rewriting the chain underneath us. Repaired on the next apply,
+              but worth knowing about.
+            - missing: absent and installable; the next apply installs it.
+            - disabled: the operator turned it off. Distinct from `missing` and
+              `unsupported` on purpose: those say we cannot, this says we were
+              told not to, and an operator needs to tell an instruction apart
+              from an inability. Any rule of ours is removed when this is
+              reported - off means gone, not "stop installing".
+          example: "chain_absent"
+        ttl_bypass_detail:
+          type: string
+          description: >
+            Why the state is what it is, when the state alone is not enough.
+            Empty for the uninteresting states.
+        system_auth_state:
+          type: string
+          enum:
+            - usable
+            - endpoint_unproven
+            - loopback_not_accepted
+            - challenge_absent
+            - firmware_policy_unknown
+            - lockout_budget_unsafe
+          description: >
+            Whether keen-pbr may rely on the router's own authentication
+            instead of the password kept in auth.json.
+
+            Reported before anything is retired, because the risk is
+            asymmetric: keeping a local password one day too long is an
+            inconvenience, while deleting it before the system verifier is
+            proven leaves SSH as the owner's only way back into the panel.
+
+            - usable: every check passed. The switch would be safe to make;
+              this does not perform it.
+            - endpoint_unproven: no router-owned address was proven to serve
+              the Keenetic challenge.
+            - loopback_not_accepted: only loopback was available. The firmware
+              answers /auth with 403 there and 401 with a challenge on the LAN
+              address, so loopback can never verify anybody.
+            - challenge_absent: something answers but issues no realm and
+              challenge, i.e. an unrelated service on a stale port.
+            - firmware_policy_unknown: the firmware lockout policy could not be
+              read, so our own limiter cannot be proven to stay inside it.
+            - lockout_budget_unsafe: we would forward enough failures to trip
+              the firmware's lockout. Because keen-pbr reaches the firmware
+              from the router itself, that would lock the administrator out of
+              KeeneticOS rather than the person guessing.
+          example: "usable"
+        system_auth_detail:
+          type: string
+          description: >
+            Why the state is what it is, including the measured margin between
+            the failures we would forward and the firmware's threshold. Empty
+            when the state alone is enough.
+        system_auth_forwarded_failures_per_window:
+          type: integer
+          format: int64
+          minimum: 0
+          description: >
+            Worst case failed logins forwarded to the firmware inside its
+            observation window. Shown next to the threshold so an operator sees
+            the margin rather than only the verdict.
+          example: 4
         firewall:
           $ref: "#/components/schemas/FirewallChain"
         firewall_rules:

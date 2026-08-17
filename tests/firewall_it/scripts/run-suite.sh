@@ -14,9 +14,11 @@ declare -A dockerfiles=(
   [nftables]="tests/firewall_it/docker/Dockerfile.nftables"
 )
 
-for backend in iptables nftables; do
-  docker build -t "${images[$backend]}" -f "$repo_root/${dockerfiles[$backend]}" "$repo_root"
-done
+if [[ "${KEEN_PBR_FIREWALL_IT_SKIP_BUILD:-0}" != "1" ]]; then
+  for backend in iptables nftables; do
+    docker build -t "${images[$backend]}" -f "$repo_root/${dockerfiles[$backend]}" "$repo_root"
+  done
+fi
 
 run_case() {
   local container="$1"
@@ -25,6 +27,7 @@ run_case() {
   local setup_name="$4"
   shift 4
 
+  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
   docker exec "$container" /opt/keen-pbr/firewall-it/scripts/run-in-netns.sh \
     --backend "$backend" \
     --config "$fixtures_dir/$config_name" \
@@ -65,11 +68,24 @@ run_case_expect_failure() {
 for backend in iptables nftables; do
   container="keen-pbr-firewall-it-${backend}"
   docker rm -f "$container" >/dev/null 2>&1 || true
+  # --init gives the container a real reaper: the fixtures background a probe
+  # server whose parent shell exits before it does, so without pid 1 reaping
+  # orphans each case would leave a zombie behind.
   docker run -d --name "$container" \
     --privileged \
+    --init \
     "${images[$backend]}" >/dev/null
 
-  run_case "$container" "$backend" "firewall-smoke.json" "firewall-smoke.setup.sh"
+  if [[ "$backend" == "iptables" ]]; then
+    run_case "$container" "$backend" "firewall-smoke.json" "firewall-smoke.setup.sh" \
+      --exercise-iptables-convergence
+    run_case "$container" "$backend" "firewall-smoke.json" "firewall-smoke.setup.sh" \
+      --use-raw-prerouting \
+      --exercise-iptables-convergence
+  else
+    run_case "$container" "$backend" "firewall-smoke.json" "firewall-smoke.setup.sh" \
+      --repeat-preserve-apply
+  fi
 
   run_case "$container" "$backend" "urltest-reachable.json" "urltest-reachable.setup.sh" \
     --run-urltest-probes

@@ -1,28 +1,19 @@
 "use client"
 
 import type { ComponentProps } from "react"
-import {
-  LayoutGridIcon,
-  LogOutIcon,
-  ShieldIcon,
-  WaypointsIcon,
-} from "lucide-react"
+import { LayoutGridIcon, ShieldIcon, WaypointsIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
-import { AppBrandHeader } from "@/components/layout/app-brand-header"
+import { SidebarToggleButton } from "@/components/layout/sidebar-toggle-button"
+import { MobileMenuControls } from "@/components/layout/top-bar-controls"
 import { NavMain } from "@/components/nav-main"
-import {
-  Sidebar,
-  SidebarContent,
-  SidebarFooter,
-  SidebarHeader,
-} from "@/components/ui/sidebar"
+import { Sidebar, SidebarContent, SidebarFooter } from "@/components/ui/sidebar"
 import { useSidebar } from "@/components/ui/sidebar-context"
-import { Button } from "@/components/ui/button"
 
 export function AppSidebar(props: ComponentProps<typeof Sidebar>) {
-  const { isMobile, toggleSidebar } = useSidebar()
+  const { isMobile, state, toggleSidebar } = useSidebar()
   const { t } = useTranslation()
+  const collapsed = !isMobile && state === "collapsed"
 
   const data = {
     navMain: [
@@ -47,12 +38,11 @@ export function AppSidebar(props: ComponentProps<typeof Sidebar>) {
         icon: WaypointsIcon,
         items: [
           {
-            title: t("nav.items.outbounds"),
-            url: "/outbounds",
-          },
-          {
-            title: t("nav.items.transports"),
+            title: t("nav.items.routesAndTunnels"),
             url: "/transports",
+            // Редакторы остались по прежним адресам, и без этого пункт меню
+            // гас, как только человек открывал маршрут или туннель.
+            aliases: ["/outbounds"],
           },
           {
             title: "nfqws2",
@@ -82,8 +72,9 @@ export function AppSidebar(props: ComponentProps<typeof Sidebar>) {
             url: "/lists",
           },
           {
-            title: t("nav.items.routingRules"),
-            url: "/routing-rules",
+            title: t("nav.items.rules"),
+            url: "/rules",
+            aliases: ["/routing-rules", "/dns-rules"],
           },
         ],
       },
@@ -91,59 +82,33 @@ export function AppSidebar(props: ComponentProps<typeof Sidebar>) {
   }
 
   return (
-    <Sidebar collapsible="icon" {...props}>
-      <SidebarHeader
-        className={
-          isMobile
-            ? "h-16 bg-card px-4 py-2"
-            : "h-16 justify-center bg-card py-0 pr-4 pl-8 group-data-[collapsible=icon]:px-2"
-        }
-      >
-        <SidebarMenuHeader isMobile={isMobile} onMenuClick={toggleSidebar} />
-      </SidebarHeader>
+    <Sidebar className="keen-app-sidebar z-40" collapsible="icon" {...props}>
+      {/* Логотип на десктопе живёт в шапке, а не над колонкой меню: в
+          KeeneticOS шапка идёт во всю ширину окна, логотип стоит в ней слева
+          на x=32, а меню начинается уже под шапкой. */}
       {/* No horizontal padding: in KeeneticOS the selected row runs from the
           screen edge all the way to the hairline, and any padding here leaves
           it floating in the middle of the column. */}
-      <SidebarContent className="border-r px-0 py-0">
+      <SidebarContent className="keen-sidebar-divider px-0 py-0">
         <NavMain items={data.navMain} />
       </SidebarContent>
       {/* The footer is the button: padding here would leave a pale margin
           around the hover fill instead of letting it reach the edges. */}
-      <SidebarFooter
-        className={
-          isMobile
-            ? "border-t px-4 py-3"
-            : "border-t border-r bg-sidebar p-0 group-data-[collapsible=icon]:hidden"
-        }
-      >
-        <div>
-          <Button
-            className="h-12 w-full justify-start rounded-none bg-sidebar px-4 text-[14px] font-normal text-primary hover:bg-[#EDEDED] hover:text-primary"
-            onClick={async () => {
-              await fetch("/api/auth/logout", { method: "POST" })
-              window.location.assign("/")
-            }}
-            variant="ghost"
-          >
-            <LogOutIcon />
-            {t("auth.signOut")}
-          </Button>
-        </div>
-      </SidebarFooter>
+      {isMobile ? (
+        // Высоту не фиксируем: строки с подписями занимают четыре ряда, а не
+        // один ряд иконок.
+        <SidebarFooter className="keen-sidebar-toggle shrink-0 bg-sidebar p-0">
+          <MobileMenuControls />
+        </SidebarFooter>
+      ) : (
+        <SidebarFooter className="keen-sidebar-toggle h-16 shrink-0 bg-sidebar p-0">
+          <SidebarToggleButton
+            expanded={!collapsed}
+            label={collapsed ? t("brand.showMenu") : t("brand.hideMenu")}
+            onClick={toggleSidebar}
+          />
+        </SidebarFooter>
+      )}
     </Sidebar>
   )
-}
-
-function SidebarMenuHeader({
-  isMobile,
-  onMenuClick,
-}: {
-  isMobile: boolean
-  onMenuClick: () => void
-}) {
-  if (isMobile) {
-    return <AppBrandHeader onMenuClick={onMenuClick} />
-  }
-
-  return <AppBrandHeader />
 }

@@ -1,17 +1,149 @@
 #!/bin/sh
 
+RESCUE_STARTUP_GUARD=/opt/usr/lib/keen-pbr/rescue-startup-guard.sh
+[ ! -x /opt/etc/init.d/S00keen-pbr-rescue ] ||
+    RESCUE_STARTUP_GUARD=/opt/etc/init.d/S00keen-pbr-rescue
+
+recovery_state_present_or_unsafe() {
+    [ -L /opt/var/lib/keen-pbr/rescue ] ||
+    { [ -e /opt/var/lib/keen-pbr/rescue ] &&
+      [ ! -d /opt/var/lib/keen-pbr/rescue ]; } ||
+    [ -L /opt/var/lib/keen-pbr/recovery ] ||
+    { [ -e /opt/var/lib/keen-pbr/recovery ] &&
+      [ ! -d /opt/var/lib/keen-pbr/recovery ]; } ||
+    [ -L /opt/var/lib/keen-pbr/recovery/config-save ] ||
+    { [ -e /opt/var/lib/keen-pbr/recovery/config-save ] &&
+      [ ! -d /opt/var/lib/keen-pbr/recovery/config-save ]; } ||
+    [ -L /opt/var/lib/keen-pbr/recovery/backup-restore ] ||
+    { [ -e /opt/var/lib/keen-pbr/recovery/backup-restore ] &&
+      [ ! -d /opt/var/lib/keen-pbr/recovery/backup-restore ]; } ||
+    [ -e /opt/var/lib/keen-pbr/rescue/pending ] ||
+    [ -L /opt/var/lib/keen-pbr/rescue/pending ] ||
+    [ -e /opt/var/lib/keen-pbr/rescue/UNKNOWN ] ||
+    [ -L /opt/var/lib/keen-pbr/rescue/UNKNOWN ] ||
+    [ -e /opt/var/lib/keen-pbr/recovery/UNKNOWN ] ||
+    [ -L /opt/var/lib/keen-pbr/recovery/UNKNOWN ] ||
+    [ -e /opt/var/lib/keen-pbr/recovery/config-save/UNKNOWN ] ||
+    [ -L /opt/var/lib/keen-pbr/recovery/config-save/UNKNOWN ] ||
+    [ -e /opt/var/lib/keen-pbr/recovery/backup-restore/UNKNOWN ] ||
+    [ -L /opt/var/lib/keen-pbr/recovery/backup-restore/UNKNOWN ] ||
+    [ -e /opt/var/lib/keen-pbr/recovery/config-save/active.json ] ||
+    [ -L /opt/var/lib/keen-pbr/recovery/config-save/active.json ] ||
+    [ -e /opt/var/lib/keen-pbr/recovery/backup-restore/active.json ] ||
+    [ -L /opt/var/lib/keen-pbr/recovery/backup-restore/active.json ]
+}
+
+run_recovery_guard() {
+    action=$1
+    if [ -x "$RESCUE_STARTUP_GUARD" ]; then
+        "$RESCUE_STARTUP_GUARD" "$action"
+        return $?
+    fi
+    if recovery_state_present_or_unsafe; then
+        echo "keen-pbr rescue guard is unavailable; refusing service startup" >&2
+        return 1
+    fi
+    return 0
+}
+
 . /opt/etc/keen-pbr/defaults
 
 ENABLED=yes
 PROCS=$(basename "$KEEN_PBR")
 PIDFILE="/opt/var/run/keen-pbr.pid"
-ARGS="--config $CONFIG --pid-file $PIDFILE service"
+FASTNAT_STATE_FILE="/opt/var/run/keen-pbr.fastnat-state"
+FASTNAT_UNSAFE_STOP_FILE="/opt/var/run/keen-pbr.fastnat-unsafe-stop"
+STOPPING_RUNTIME_DIR="${KEEN_PBR_STOPPING_RUNTIME_DIR:-/var/run/keen-pbr}"
+STOPPING_MARKER="${KEEN_PBR_STOPPING_MARKER:-${STOPPING_RUNTIME_DIR}/stopping}"
+STOPPING_CONTROL_LEASE_DIR="${KEEN_PBR_STOPPING_CONTROL_LEASE_DIR:-${STOPPING_RUNTIME_DIR}/control-lease}"
+STOPPING_CONTROL_LEASE_OWNER="${STOPPING_CONTROL_LEASE_DIR}/owner"
+STOPPING_CONTROL_RECOVERY_GATE_DIR="${KEEN_PBR_STOPPING_CONTROL_RECOVERY_GATE_DIR:-${STOPPING_RUNTIME_DIR}/control-lease-recovery}"
+STOPPING_CONTROL_RECOVERY_GATE_OWNER="${STOPPING_CONTROL_RECOVERY_GATE_DIR}/owner"
+STOPPING_CONTROL_MAILBOX="${KEEN_PBR_STOPPING_CONTROL_MAILBOX:-${STOPPING_RUNTIME_DIR}/control-pending}"
+STOPPING_CONTROL_DRAIN_TOKEN="${KEEN_PBR_STOPPING_CONTROL_DRAIN_TOKEN:-${STOPPING_RUNTIME_DIR}/control-drain-token}"
+STOPPING_PROC_ROOT="${KEEN_PBR_PROC_ROOT:-/proc}"
+STOPPING_MARKER_MAGIC="keen-pbr-stopping-v3"
+STOPPING_CONTROL_LEASE_MAGIC="keen-pbr-control-lease-v1"
+STOPPING_CONTROL_RECOVERY_GATE_MAGIC="keen-pbr-control-recovery-v1"
+STOPPING_CONTROL_WORK_MAGIC="keen-pbr-control-work-v1"
+STOPPING_ADMISSION_PID=""
+STOPPING_ADMISSION_STARTTICKS=""
+STOPPING_ADMISSION_PHASE=""
+STOPPING_ADMISSION_CONTROLLER_PID=""
+STOPPING_ADMISSION_CONTROLLER_STARTTICKS=""
+STOPPING_CONTROL_LEASE_PID=""
+STOPPING_CONTROL_LEASE_STARTTICKS=""
+STOPPING_CONTROL_LEASE_ROLE=""
+STOPPING_CONTROL_RECOVERY_GATE_PID=""
+STOPPING_CONTROL_RECOVERY_GATE_STARTTICKS=""
+STOPPING_CONTROL_ACQUIRE_RESULT=1
+STOPPING_TRAILING_SIGNAL=""
+STOPPING_TRAILING_DNS=no
+STOPPING_TRAILING_HUP=no
+STOPPING_RECOVERED_SIGNAL=""
+STOPPING_RECOVERED_DNS=no
+STOPPING_RECOVERED_HUP=no
+STOPPING_RECOVERY_CLOSING_DIRS=""
+STOPPING_CONTROL_WORK_PATH=""
+STOPPING_CONTROL_WORK_PID=""
+STOPPING_CONTROL_WORK_STARTTICKS=""
+STOPPING_CONTROL_WORK_SIGNAL=""
+STOPPING_CONTROL_WORK_DNS=no
+STOPPING_CONTROL_WORK_HUP=no
+CONTROL_MAILBOX_WATCHDOG_ARMED=no
+STOPPING_CONTROL_DRAIN_OBSERVED_PID=""
+STOPPING_CONTROL_DRAIN_OBSERVED_STARTTICKS=""
+STOPPING_CONTROL_LEASE_FAIL_OPEN=no
+START_CONTROL_LEASE_HELD=no
+FASTNAT_PROC_ROOT="/proc/sys"
+ARGS="--config $CONFIG --pid-file $PIDFILE ${KEEN_PBR_ARGS:-} service"
 PREARGS=""
 POSTCMD=""
 DESC="keen-pbr"
 PATH=/opt/sbin:/opt/bin:/opt/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-IPSET_PROBE_SET="kpbr_probe_hash_net"
+IPSET_PROBE_SET="kpbr_probe_hash_net_$$"
+IPSET_UDP_PEER_PROBE_SET="kpbr_probe_udp_peer_$$"
+IPTABLES_UDP_PEER_PROBE_CHAIN="KpbrUdpProbe$$"
 IPSET_COMPONENTS_MESSAGE="ipset kernel modules are not available. Make sure that you followed the installation process and installed all required components: Netfilter Subsystem Kernel Modules and Xtables-addons Extension Package for Netfilter."
+IPTABLES_WAIT_MODE=""
+IP6TABLES_WAIT_MODE=""
+IPTABLES_BARE_WAIT_SECONDS="${IPTABLES_BARE_WAIT_SECONDS:-10}"
+KEENETIC_RCI_STARTUP_ATTEMPTS="${KEENETIC_RCI_STARTUP_ATTEMPTS:-15}"
+KEENETIC_RCI_PROBE_SECONDS="${KEENETIC_RCI_PROBE_SECONDS:-1}"
+META_XTABLES_RESTORE_FILE="${META_XTABLES_RESTORE_FILE:-/opt/var/run/keen-pbr.meta-udp443-restore.$$}"
+META_UDP443_OWNERSHIP_FILE="${META_UDP443_OWNERSHIP_FILE:-/opt/var/run/keen-pbr.meta-udp443-backends}"
+META_UDP443_OWNERSHIP_TMP="${META_UDP443_OWNERSHIP_TMP:-${META_UDP443_OWNERSHIP_FILE}.$$}"
+PPE_DEOFFLOAD_OWNERSHIP_FILE="${PPE_DEOFFLOAD_OWNERSHIP_FILE:-/opt/var/run/keen-pbr.ppe-backend}"
+case "$IPTABLES_BARE_WAIT_SECONDS" in
+    ''|*[!0-9]*|0) IPTABLES_BARE_WAIT_SECONDS=10 ;;
+esac
+case "$KEENETIC_RCI_STARTUP_ATTEMPTS" in
+    ''|*[!0-9]*)
+        KEENETIC_RCI_STARTUP_ATTEMPTS=15
+        ;;
+    *)
+        if [ "${#KEENETIC_RCI_STARTUP_ATTEMPTS}" -gt 9 ]; then
+            KEENETIC_RCI_STARTUP_ATTEMPTS=15
+        elif [ "$KEENETIC_RCI_STARTUP_ATTEMPTS" -lt 1 ] ||
+             [ "$KEENETIC_RCI_STARTUP_ATTEMPTS" -gt 15 ]; then
+            KEENETIC_RCI_STARTUP_ATTEMPTS=15
+        fi
+        ;;
+esac
+case "$KEENETIC_RCI_PROBE_SECONDS" in
+    ''|*[!0-9]*)
+        KEENETIC_RCI_PROBE_SECONDS=1
+        ;;
+    *)
+        if [ "${#KEENETIC_RCI_PROBE_SECONDS}" -gt 9 ]; then
+            KEENETIC_RCI_PROBE_SECONDS=1
+        elif [ "$KEENETIC_RCI_PROBE_SECONDS" -lt 1 ]; then
+            KEENETIC_RCI_PROBE_SECONDS=1
+        elif [ "$KEENETIC_RCI_PROBE_SECONDS" -gt 2 ]; then
+            KEENETIC_RCI_PROBE_SECONDS=2
+        fi
+        ;;
+esac
 
 log() {
     logger -s -t "keen-pbr" "$1"
@@ -19,6 +151,1112 @@ log() {
 
 log_error() {
     logger -s -t "keen-pbr" -p "user.err" "$1"
+}
+
+PORTABLE_STAT_HELPER=/opt/usr/lib/keen-pbr/portable-stat.sh
+KEEN_PBR_PORTABLE_STAT_LOADED=no
+if [ -f "$PORTABLE_STAT_HELPER" ] && [ ! -L "$PORTABLE_STAT_HELPER" ] &&
+   . "$PORTABLE_STAT_HELPER"; then
+    KEEN_PBR_PORTABLE_STAT_LOADED=yes
+fi
+
+path_owner_group_mode() {
+    [ "$KEEN_PBR_PORTABLE_STAT_LOADED" = yes ] || return 1
+    keen_pbr_stat_value '%u:%g:%a' "$1"
+}
+
+run_bounded_command() {
+    local limit="$1"
+    local command_pid
+    local watchdog_pid
+    local status
+
+    shift
+    "$@" &
+    command_pid=$!
+    (
+        elapsed=0
+        while [ "$elapsed" -lt "$limit" ]; do
+            sleep 1
+            kill -0 "$command_pid" >/dev/null 2>&1 || exit 0
+            elapsed=$((elapsed + 1))
+        done
+        kill -TERM "$command_pid" >/dev/null 2>&1 || exit 0
+        sleep 1
+        kill -KILL "$command_pid" >/dev/null 2>&1 || true
+    ) >/dev/null 2>&1 &
+    watchdog_pid=$!
+
+    if wait "$command_pid"; then
+        status=0
+    else
+        status=$?
+    fi
+    kill "$watchdog_pid" >/dev/null 2>&1 || true
+    wait "$watchdog_pid" 2>/dev/null || true
+    return "$status"
+}
+
+run_bounded_command_with_stdin() {
+    local limit="$1"
+    local input_file="$2"
+    local command_pid
+    local watchdog_pid
+    local status
+
+    shift 2
+    "$@" < "$input_file" &
+    command_pid=$!
+    (
+        elapsed=0
+        while [ "$elapsed" -lt "$limit" ]; do
+            sleep 1
+            kill -0 "$command_pid" >/dev/null 2>&1 || exit 0
+            elapsed=$((elapsed + 1))
+        done
+        kill -TERM "$command_pid" >/dev/null 2>&1 || exit 0
+        sleep 1
+        kill -KILL "$command_pid" >/dev/null 2>&1 || true
+    ) >/dev/null 2>&1 &
+    watchdog_pid=$!
+
+    if wait "$command_pid"; then
+        status=0
+    else
+        status=$?
+    fi
+    kill "$watchdog_pid" >/dev/null 2>&1 || true
+    wait "$watchdog_pid" 2>/dev/null || true
+    return "$status"
+}
+
+run_iptables_wait_probe() {
+    local limit="$1"
+
+    shift
+    if IPTABLES_WAIT_PROBE_OUTPUT=$(
+        run_bounded_command "$limit" "$@" 2>&1
+    ); then
+        IPTABLES_WAIT_PROBE_STATUS=0
+    else
+        IPTABLES_WAIT_PROBE_STATUS=$?
+    fi
+}
+
+iptables_wait_probe_is_lock_failure() {
+    local normalized
+
+    [ "$IPTABLES_WAIT_PROBE_STATUS" -eq 4 ] && return 0
+    normalized=$(printf '%s\n' "$IPTABLES_WAIT_PROBE_OUTPUT" |
+        tr '[:upper:]' '[:lower:]')
+    case "$normalized" in
+        *"xtables lock"*|*"holding the xtables lock"*|\
+        *"another app is currently holding"*) return 0 ;;
+    esac
+    return 1
+}
+
+iptables_wait_probe_is_table_unavailable() {
+    local normalized
+
+    normalized=$(printf '%s\n' "$IPTABLES_WAIT_PROBE_OUTPUT" |
+        tr '[:upper:]' '[:lower:]')
+    case "$normalized" in
+        *"table does not exist"*) return 0 ;;
+    esac
+    return 1
+}
+
+iptables_wait_value_is_unsupported() {
+    local attempted_value="$1"
+
+    printf '%s\n' "$IPTABLES_WAIT_PROBE_OUTPUT" |
+        grep -Eiq '(bad argument|invalid argument|invalid wait)[[:space:]]+[^[:alnum:]]*'"$attempted_value"'([^[:digit:]]|$)'
+}
+
+iptables_wait_option_is_unsupported() {
+    printf '%s\n' "$IPTABLES_WAIT_PROBE_OUTPUT" |
+        grep -Eiq -- '(-w|wait|option[[:space:]]+--[[:space:]]+[^[:alnum:]]*w([^[:alnum:]]|$))' ||
+        return 1
+    printf '%s\n' "$IPTABLES_WAIT_PROBE_OUTPUT" |
+        grep -Eiq '(unknown option|unrecognized option|invalid option|illegal option|not supported)'
+}
+
+detect_xtables_wait_mode() {
+    local tool="$1"
+    local cached_mode="$2"
+
+    XTABLES_WAIT_MODE_RESULT="$cached_mode"
+    case "$cached_mode" in
+        timeout|flag|none) return 0 ;;
+        error) return 1 ;;
+    esac
+
+    # Keenetic ships several generations of legacy iptables. Newer builds
+    # accept a numeric xtables lock timeout, some accept only the bare -w
+    # flag, and old builds do not know -w at all. Exit 4 or an xtables-lock
+    # diagnostic proves that the probed syntax was accepted even though the
+    # read-only command could not acquire the lock. Only an explicit syntax
+    # rejection may select a weaker form; timeouts and unrelated failures are
+    # operational errors and must never authorize unguarded mutations.
+    run_iptables_wait_probe "$((IPTABLES_BARE_WAIT_SECONDS + 2))" \
+        "$tool" -w 10 -S
+    if [ "$IPTABLES_WAIT_PROBE_STATUS" -eq 0 ] ||
+       iptables_wait_probe_is_lock_failure ||
+       iptables_wait_probe_is_table_unavailable; then
+        XTABLES_WAIT_MODE_RESULT=timeout
+        return 0
+    fi
+
+    if ! iptables_wait_value_is_unsupported 10; then
+        if iptables_wait_option_is_unsupported; then
+            XTABLES_WAIT_MODE_RESULT=none
+            return 0
+        fi
+        XTABLES_WAIT_MODE_RESULT=error
+        return 1
+    fi
+
+    run_iptables_wait_probe "$IPTABLES_BARE_WAIT_SECONDS" "$tool" -w -S
+    if [ "$IPTABLES_WAIT_PROBE_STATUS" -eq 0 ] ||
+       iptables_wait_probe_is_lock_failure ||
+       iptables_wait_probe_is_table_unavailable; then
+        XTABLES_WAIT_MODE_RESULT=flag
+        return 0
+    fi
+    if iptables_wait_option_is_unsupported; then
+        XTABLES_WAIT_MODE_RESULT=none
+        return 0
+    fi
+
+    XTABLES_WAIT_MODE_RESULT=error
+    return 1
+}
+
+detect_iptables_wait_mode() {
+    if detect_xtables_wait_mode iptables "$IPTABLES_WAIT_MODE"; then
+        IPTABLES_WAIT_MODE="$XTABLES_WAIT_MODE_RESULT"
+        return 0
+    fi
+    IPTABLES_WAIT_MODE=error
+    return 1
+}
+
+detect_ip6tables_wait_mode() {
+    if detect_xtables_wait_mode ip6tables "$IP6TABLES_WAIT_MODE"; then
+        IP6TABLES_WAIT_MODE="$XTABLES_WAIT_MODE_RESULT"
+        return 0
+    fi
+    IP6TABLES_WAIT_MODE=error
+    return 1
+}
+
+xtables_with_wait_mode() {
+    local tool="$1"
+    local mode="$2"
+
+    shift 2
+
+    case "$mode" in
+        timeout)
+            "$tool" -w 10 "$@"
+            ;;
+        flag)
+            run_bounded_command "$IPTABLES_BARE_WAIT_SECONDS" \
+                "$tool" -w "$@"
+            ;;
+        *)
+            "$tool" "$@"
+            ;;
+    esac
+}
+
+iptables_with_wait() {
+    detect_iptables_wait_mode || return 1
+    xtables_with_wait_mode iptables "$IPTABLES_WAIT_MODE" "$@"
+}
+
+ip6tables_with_wait() {
+    detect_ip6tables_wait_mode || return 1
+    xtables_with_wait_mode ip6tables "$IP6TABLES_WAIT_MODE" "$@"
+}
+
+meta_xtables_with_wait() {
+    local tool="$1"
+
+    shift
+    case "$tool" in
+        iptables) iptables_with_wait "$@" ;;
+        ip6tables) ip6tables_with_wait "$@" ;;
+        *) return 1 ;;
+    esac
+}
+
+meta_xtables_restore_transaction() {
+    local tool="$1"
+    local script="$2"
+    local restore_program
+    local error_file="${META_XTABLES_RESTORE_FILE}.err"
+    local attempt=0
+    local status=0
+    local normalized
+
+    restore_program="${tool}-restore"
+    command -v "$restore_program" >/dev/null 2>&1 || return 1
+    case "$tool" in iptables|ip6tables) ;; *) return 1 ;; esac
+
+    if ! (umask 077; printf '%s' "$script" > "$META_XTABLES_RESTORE_FILE"); then
+        rm -f "$META_XTABLES_RESTORE_FILE" 2>/dev/null || true
+        return 1
+    fi
+
+    # Keenetic 1.4.21 accepts bare -w in iptables but its paired restore tool
+    # does not implement -w at all. Keep the restore transaction independently
+    # portable: run plain --noflush under the watchdog and retry once only for
+    # an explicit pre-transaction xtables-lock diagnostic.
+    while [ "$attempt" -lt 2 ]; do
+        : > "$error_file" || {
+            status=1
+            break
+        }
+        if run_bounded_command_with_stdin 2 \
+            "$META_XTABLES_RESTORE_FILE" \
+            "$restore_program" --noflush 2>"$error_file"; then
+            status=0
+            break
+        else
+            status=$?
+        fi
+        normalized=$(tr '[:upper:]' '[:lower:]' < "$error_file")
+        case "$normalized" in
+            *"xtables lock"*|*"holding the xtables lock"*|\
+            *"another app is currently holding"*) ;;
+            *) break ;;
+        esac
+        attempt=$((attempt + 1))
+        [ "$attempt" -lt 2 ] || break
+        sleep 1
+    done
+    rm -f "$META_XTABLES_RESTORE_FILE" "$error_file" 2>/dev/null || status=1
+    return "$status"
+}
+
+meta_xtables_filter_is_unavailable() {
+    local normalized
+
+    normalized=$(printf '%s\n' "$META_XTABLES_COMMAND_OUTPUT" |
+        tr '[:upper:]' '[:lower:]')
+    case "$normalized" in
+        *"table does not exist"*) return 0 ;;
+    esac
+    return 1
+}
+
+meta_xtables_snapshot() {
+    local tool="$1"
+
+    META_XTABLES_COMMAND_OUTPUT=""
+    if META_XTABLES_COMMAND_OUTPUT=$(
+        meta_xtables_with_wait "$tool" -t filter -S 2>&1
+    ); then
+        META_XTABLES_SNAPSHOT="$META_XTABLES_COMMAND_OUTPUT"
+        return 0
+    fi
+    if meta_xtables_filter_is_unavailable; then
+        META_XTABLES_SNAPSHOT=""
+        return 0
+    fi
+    return 1
+}
+
+meta_xtables_snapshot_has_artifacts() {
+    printf '%s\n' "$META_XTABLES_SNAPSHOT" |
+        grep -Eq -- '(^-N (KeenPbrMeta443|KeenPbrMeta443_A|KeenPbrMeta443_B)$)|([[:space:]](-j|-g|--jump|--goto)[[:space:]]+(KeenPbrMeta443|KeenPbrMeta443_A|KeenPbrMeta443_B)([[:space:]]|$))'
+}
+
+meta_xtables_references_are_owned() {
+    printf '%s\n' "$META_XTABLES_SNAPSHOT" | awk '
+        $1 == "-A" {
+            origin = $2
+            for (i = 3; i < NF; ++i) {
+                if ($i != "-j" && $i != "-g" &&
+                    $i != "--jump" && $i != "--goto") {
+                    continue
+                }
+                target = $(i + 1)
+                target_owned =
+                    target == "KeenPbrMeta443" ||
+                    target == "KeenPbrMeta443_A" ||
+                    target == "KeenPbrMeta443_B"
+                if (!target_owned) {
+                    continue
+                }
+                origin_owned =
+                    origin == "KeenPbrMeta443" ||
+                    origin == "KeenPbrMeta443_A" ||
+                    origin == "KeenPbrMeta443_B"
+                if (origin_owned) {
+                    continue
+                }
+                if (origin == "FORWARD" && target == "KeenPbrMeta443" &&
+                    NF == 4 && $3 == "-j") {
+                    continue
+                }
+                exit 1
+            }
+        }
+    '
+}
+
+meta_xtables_chain_exists() {
+    printf '%s\n' "$META_XTABLES_SNAPSHOT" |
+        grep -F -x -q -- "-N $1"
+}
+
+load_meta_udp443_backend_ownership() {
+    local backend
+
+    META_UDP443_REQUIRED_BACKENDS=""
+    if [ -L "$META_UDP443_OWNERSHIP_FILE" ]; then
+        log_error "Meta UDP/443 backend marker is a symbolic link"
+        return 1
+    fi
+    if [ ! -e "$META_UDP443_OWNERSHIP_FILE" ]; then
+        return 0
+    fi
+    if [ ! -f "$META_UDP443_OWNERSHIP_FILE" ]; then
+        log_error "Meta UDP/443 backend marker is not a regular file"
+        return 1
+    fi
+
+    while IFS= read -r backend || [ -n "$backend" ]; do
+        case "$backend" in
+            iptables|ip6tables|nftables) ;;
+            *)
+                log_error "Meta UDP/443 backend marker is invalid"
+                return 1
+                ;;
+        esac
+        case " $META_UDP443_REQUIRED_BACKENDS " in
+            *" $backend "*) ;;
+            *) META_UDP443_REQUIRED_BACKENDS="$META_UDP443_REQUIRED_BACKENDS $backend" ;;
+        esac
+    done < "$META_UDP443_OWNERSHIP_FILE"
+
+    if [ -z "$META_UDP443_REQUIRED_BACKENDS" ]; then
+        log_error "Meta UDP/443 backend marker is empty"
+        return 1
+    fi
+    return 0
+}
+
+meta_udp443_backend_was_possible_owner() {
+    case " $META_UDP443_REQUIRED_BACKENDS " in
+        *" $1 "*) return 0 ;;
+    esac
+    return 1
+}
+
+verify_recorded_meta_udp443_backend_tools() {
+    local backend
+    local tool
+
+    for backend in $META_UDP443_REQUIRED_BACKENDS; do
+        case "$backend" in
+            iptables|ip6tables)
+                if ! command -v "$backend" >/dev/null 2>&1; then
+                    log_error "Previously possible Meta UDP/443 owner $backend is missing"
+                    return 1
+                fi
+                ;;
+            nftables)
+                if ! command -v nft >/dev/null 2>&1; then
+                    log_error "Previously possible Meta UDP/443 owner nft is missing"
+                    return 1
+                fi
+                ;;
+        esac
+    done
+    return 0
+}
+
+record_meta_udp443_possible_backends() {
+    local backends
+    local backend
+
+    # The daemon chooses its backend after rc.func starts it. Record every
+    # backend it could select before that publication boundary, merging any
+    # marker left by an earlier crash. This is deliberately conservative when
+    # both tools are installed and remains valid across daemon/API failure.
+    load_meta_udp443_backend_ownership || return 1
+    verify_recorded_meta_udp443_backend_tools || return 1
+    backends="$META_UDP443_REQUIRED_BACKENDS"
+    for backend in nftables iptables ip6tables; do
+        case "$backend" in
+            nftables) command -v nft >/dev/null 2>&1 || continue ;;
+            iptables) command -v iptables >/dev/null 2>&1 || continue ;;
+            ip6tables)
+                case " $backends " in
+                    *" iptables "*) ;;
+                    *) continue ;;
+                esac
+                command -v ip6tables >/dev/null 2>&1 || continue
+                ;;
+        esac
+        case " $backends " in
+            *" $backend "*) ;;
+            *) backends="$backends $backend" ;;
+        esac
+    done
+    if [ -z "$backends" ]; then
+        log_error "Cannot record a possible Meta UDP/443 firewall backend"
+        return 1
+    fi
+
+    rm -f "$META_UDP443_OWNERSHIP_TMP" 2>/dev/null || return 1
+    if ! (
+        umask 077
+        for backend in $backends; do
+            printf '%s\n' "$backend"
+        done > "$META_UDP443_OWNERSHIP_TMP"
+    ); then
+        rm -f "$META_UDP443_OWNERSHIP_TMP" 2>/dev/null || true
+        log_error "Cannot write the Meta UDP/443 backend marker"
+        return 1
+    fi
+    if ! mv -f "$META_UDP443_OWNERSHIP_TMP" \
+        "$META_UDP443_OWNERSHIP_FILE"; then
+        rm -f "$META_UDP443_OWNERSHIP_TMP" 2>/dev/null || true
+        log_error "Cannot publish the Meta UDP/443 backend marker"
+        return 1
+    fi
+    return 0
+}
+
+guard_meta_udp443_start_ownership() {
+    # An ordinary `start` is also the recovery path after an unclean daemon
+    # death. Never launch a new backend beside stale exact reject state from a
+    # previous backend. Conversely, an already-running daemon still owns its
+    # live chain, so only validate/refresh its marker without mutating rules.
+    if [ -n "$(pidof "$PROCS" 2>/dev/null || true)" ]; then
+        if record_meta_udp443_possible_backends; then
+            return 0
+        fi
+    elif cleanup_stale_tcp_rst_firewall &&
+         cleanup_stale_ppe_deoffload_firewall &&
+         cleanup_stale_meta_udp443_firewall &&
+         record_meta_udp443_possible_backends; then
+        return 0
+    fi
+    STOP_KEEN_PBR_SAFE=no
+    : > "$FASTNAT_UNSAFE_STOP_FILE" 2>/dev/null || true
+    log_error "keen-pbr start refused because stale firewall cleanup ownership could not be verified"
+    return 1
+}
+
+cleanup_meta_udp443_xtables_family() {
+    local tool="$1"
+    local hooks
+    local chain
+    local script
+
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        if meta_udp443_backend_was_possible_owner "$tool"; then
+            log_error "Required Meta UDP/443 cleanup tool $tool is missing"
+            return 1
+        fi
+        return 0
+    fi
+    if ! meta_xtables_snapshot "$tool"; then
+        log_error "Failed to inspect stale Meta UDP/443 artifacts with $tool"
+        return 1
+    fi
+    meta_xtables_snapshot_has_artifacts || return 0
+    if ! meta_xtables_references_are_owned; then
+        log_error "Refusing to remove Meta UDP/443 $tool chains referenced by foreign rules"
+        return 1
+    fi
+
+    hooks=$(printf '%s\n' "$META_XTABLES_SNAPSHOT" |
+        grep -F -x -c -- '-A FORWARD -j KeenPbrMeta443' || true)
+    script='*filter
+'
+    while [ "$hooks" -gt 0 ]; do
+        script="${script}-D FORWARD -j KeenPbrMeta443
+"
+        hooks=$((hooks - 1))
+    done
+
+    for chain in KeenPbrMeta443 KeenPbrMeta443_A KeenPbrMeta443_B; do
+        meta_xtables_chain_exists "$chain" || continue
+        script="${script}-F $chain
+-X $chain
+"
+    done
+    script="${script}COMMIT
+"
+
+    if ! meta_xtables_restore_transaction "$tool" "$script" \
+        >/dev/null 2>&1; then
+        log_error "Atomic Meta UDP/443 cleanup failed with ${tool}-restore"
+        return 1
+    fi
+
+    if ! meta_xtables_snapshot "$tool" ||
+       meta_xtables_snapshot_has_artifacts; then
+        log_error "Stale Meta UDP/443 $tool artifacts remained after cleanup"
+        return 1
+    fi
+    return 0
+}
+
+nft_meta_udp443_chain_state() {
+    local normalized
+
+    NFT_META_COMMAND_OUTPUT=""
+    if NFT_META_COMMAND_OUTPUT=$(
+        run_bounded_command "$IPTABLES_BARE_WAIT_SECONDS" \
+            nft list chain inet KeenPbrTable meta_udp_443 2>&1
+    ); then
+        NFT_META_CHAIN_STATE=present
+        return 0
+    fi
+
+    normalized=$(printf '%s\n' "$NFT_META_COMMAND_OUTPUT" |
+        tr '[:upper:]' '[:lower:]')
+    case "$normalized" in
+        *"could not process rule: no such file or directory"*|\
+        *"no such file or directory"*"list chain inet keenpbrtable meta_udp_443"*|\
+        *"chain inet keenpbrtable meta_udp_443"*"does not exist"*)
+            NFT_META_CHAIN_STATE=absent
+            return 0
+            ;;
+    esac
+    NFT_META_CHAIN_STATE=unknown
+    return 1
+}
+
+cleanup_meta_udp443_nft() {
+    if ! command -v nft >/dev/null 2>&1; then
+        if meta_udp443_backend_was_possible_owner nftables; then
+            log_error "Required Meta UDP/443 cleanup tool nft is missing"
+            return 1
+        fi
+        return 0
+    fi
+    if ! nft_meta_udp443_chain_state; then
+        log_error "Failed to inspect stale nft Meta UDP/443 artifacts"
+        return 1
+    fi
+    [ "$NFT_META_CHAIN_STATE" = present ] || return 0
+
+    if ! run_bounded_command "$IPTABLES_BARE_WAIT_SECONDS" \
+        nft delete chain inet KeenPbrTable meta_udp_443 >/dev/null 2>&1; then
+        log_error "Failed to remove stale nft Meta UDP/443 chain"
+        return 1
+    fi
+    if ! nft_meta_udp443_chain_state ||
+       [ "$NFT_META_CHAIN_STATE" != absent ]; then
+        log_error "Stale nft Meta UDP/443 chain remained after cleanup"
+        return 1
+    fi
+    return 0
+}
+
+cleanup_stale_meta_udp443_firewall() {
+    local failed=no
+
+    if ! load_meta_udp443_backend_ownership; then
+        failed=yes
+    fi
+    cleanup_meta_udp443_xtables_family iptables || failed=yes
+    cleanup_meta_udp443_xtables_family ip6tables || failed=yes
+    cleanup_meta_udp443_nft || failed=yes
+    if [ "$failed" = yes ]; then
+        STOP_KEEN_PBR_SAFE=no
+        : > "$FASTNAT_UNSAFE_STOP_FILE" 2>/dev/null || true
+        log_error "Stale Meta UDP/443 firewall cleanup could not be verified"
+        return 1
+    fi
+    if ! rm -f "$META_UDP443_OWNERSHIP_FILE" 2>/dev/null ||
+       [ -e "$META_UDP443_OWNERSHIP_FILE" ] ||
+       [ -L "$META_UDP443_OWNERSHIP_FILE" ]; then
+        STOP_KEEN_PBR_SAFE=no
+        : > "$FASTNAT_UNSAFE_STOP_FILE" 2>/dev/null || true
+        log_error "Verified Meta UDP/443 backend marker could not be cleared"
+        return 1
+    fi
+    return 0
+}
+
+tcp_rst_xtables_snapshot() {
+    TCP_RST_XTABLES_COMMAND_OUTPUT=""
+    if TCP_RST_XTABLES_COMMAND_OUTPUT=$(
+        iptables_with_wait -t filter -S 2>&1
+    ); then
+        TCP_RST_XTABLES_SNAPSHOT="$TCP_RST_XTABLES_COMMAND_OUTPUT"
+        return 0
+    fi
+    META_XTABLES_COMMAND_OUTPUT="$TCP_RST_XTABLES_COMMAND_OUTPUT"
+    if meta_xtables_filter_is_unavailable; then
+        TCP_RST_XTABLES_SNAPSHOT=""
+        return 0
+    fi
+    return 1
+}
+
+tcp_rst_xtables_snapshot_has_artifacts() {
+    printf '%s\n' "$TCP_RST_XTABLES_SNAPSHOT" |
+        grep -Eq -- '(^-N KeenPbrTcpRst$)|([[:space:]](-j|-g|--jump|--goto)[[:space:]]+KeenPbrTcpRst([[:space:]]|$))'
+}
+
+tcp_rst_xtables_references_are_owned() {
+    printf '%s\n' "$TCP_RST_XTABLES_SNAPSHOT" | awk '
+        $1 == "-A" {
+            origin = $2
+            for (i = 3; i < NF; ++i) {
+                if ($i != "-j" && $i != "-g" &&
+                    $i != "--jump" && $i != "--goto") {
+                    continue
+                }
+                if ($(i + 1) != "KeenPbrTcpRst") {
+                    continue
+                }
+                if (origin == "FORWARD" && NF == 4 && $3 == "-j") {
+                    continue
+                }
+                exit 1
+            }
+        }
+    '
+}
+
+tcp_rst_xtables_chain_exists() {
+    printf '%s\n' "$TCP_RST_XTABLES_SNAPSHOT" |
+        grep -F -x -q -- '-N KeenPbrTcpRst'
+}
+
+cleanup_stale_tcp_rst_firewall() {
+    local hooks
+    local script
+
+    # This chain is process-owned and has a short daemon-managed lifetime.
+    # Mutating it while the daemon is alive would race its expiry task, so this
+    # recovery helper is deliberately restricted to a verified stopped state.
+    if [ -n "$(pidof "$PROCS" 2>/dev/null || true)" ]; then
+        log_error "Refusing to remove KeenPbrTcpRst while keen-pbr is running"
+        return 1
+    fi
+
+    # KeenPbrTcpRst is IPv4-only and can only be published by the iptables
+    # backend. A system without the iptables tool cannot have acquired a new
+    # chain during this boot; keep nft-only installations startable.
+    command -v iptables >/dev/null 2>&1 || return 0
+    if ! tcp_rst_xtables_snapshot; then
+        STOP_KEEN_PBR_SAFE=no
+        : > "$FASTNAT_UNSAFE_STOP_FILE" 2>/dev/null || true
+        log_error "Failed to inspect stale KeenPbrTcpRst artifacts with iptables"
+        return 1
+    fi
+    tcp_rst_xtables_snapshot_has_artifacts || return 0
+    if ! tcp_rst_xtables_references_are_owned; then
+        STOP_KEEN_PBR_SAFE=no
+        : > "$FASTNAT_UNSAFE_STOP_FILE" 2>/dev/null || true
+        log_error "Refusing to remove KeenPbrTcpRst referenced by foreign rules"
+        return 1
+    fi
+
+    hooks=$(printf '%s\n' "$TCP_RST_XTABLES_SNAPSHOT" |
+        grep -F -x -c -- '-A FORWARD -j KeenPbrTcpRst' || true)
+    script='*filter
+'
+    while [ "$hooks" -gt 0 ]; do
+        script="${script}-D FORWARD -j KeenPbrTcpRst
+"
+        hooks=$((hooks - 1))
+    done
+    if tcp_rst_xtables_chain_exists; then
+        script="${script}-F KeenPbrTcpRst
+-X KeenPbrTcpRst
+"
+    fi
+    script="${script}COMMIT
+"
+
+    if ! meta_xtables_restore_transaction iptables "$script" \
+        >/dev/null 2>&1; then
+        STOP_KEEN_PBR_SAFE=no
+        : > "$FASTNAT_UNSAFE_STOP_FILE" 2>/dev/null || true
+        log_error "Atomic KeenPbrTcpRst cleanup failed with iptables-restore"
+        return 1
+    fi
+    if ! tcp_rst_xtables_snapshot ||
+       tcp_rst_xtables_snapshot_has_artifacts; then
+        STOP_KEEN_PBR_SAFE=no
+        : > "$FASTNAT_UNSAFE_STOP_FILE" 2>/dev/null || true
+        log_error "Stale KeenPbrTcpRst artifacts remained after cleanup"
+        return 1
+    fi
+    return 0
+}
+
+ppe_deoffload_load_ownership() {
+    local metadata
+    local marker_hex
+
+    PPE_DEOFFLOAD_RECORDED=no
+    if [ -L "$PPE_DEOFFLOAD_OWNERSHIP_FILE" ]; then
+        log_error "PPE de-offload backend marker is a symbolic link"
+        return 1
+    fi
+    if [ ! -e "$PPE_DEOFFLOAD_OWNERSHIP_FILE" ]; then
+        return 0
+    fi
+    if [ ! -f "$PPE_DEOFFLOAD_OWNERSHIP_FILE" ]; then
+        log_error "PPE de-offload backend marker is not a regular file"
+        return 1
+    fi
+    metadata=$(path_owner_group_mode "$PPE_DEOFFLOAD_OWNERSHIP_FILE") || {
+        log_error "PPE de-offload backend marker metadata is unavailable"
+        return 1
+    }
+    if [ "$metadata" != '0:0:600' ]; then
+        log_error "PPE de-offload backend marker ownership or mode is invalid"
+        return 1
+    fi
+    marker_hex=$(od -An -tx1 -v "$PPE_DEOFFLOAD_OWNERSHIP_FILE" \
+        2>/dev/null | tr -d '[:space:]') || {
+        log_error "PPE de-offload backend marker content is unreadable"
+        return 1
+    }
+    if [ "$marker_hex" != 69707461626c65730a ]; then
+        log_error "PPE de-offload backend marker is invalid"
+        return 1
+    fi
+    PPE_DEOFFLOAD_RECORDED=yes
+    return 0
+}
+
+ppe_deoffload_snapshot() {
+    PPE_DEOFFLOAD_COMMAND_OUTPUT=""
+    if PPE_DEOFFLOAD_COMMAND_OUTPUT=$(
+        iptables_with_wait -t mangle -S 2>&1
+    ); then
+        PPE_DEOFFLOAD_SNAPSHOT="$PPE_DEOFFLOAD_COMMAND_OUTPUT"
+        return 0
+    fi
+    META_XTABLES_COMMAND_OUTPUT="$PPE_DEOFFLOAD_COMMAND_OUTPUT"
+    if meta_xtables_filter_is_unavailable; then
+        PPE_DEOFFLOAD_SNAPSHOT=""
+        return 0
+    fi
+    return 1
+}
+
+ppe_deoffload_snapshot_has_artifacts() {
+    printf '%s\n' "$PPE_DEOFFLOAD_SNAPSHOT" |
+        grep -Eq -- '(^-N KeenPbrPpe4$)|([[:space:]](-j|--jump|-g|--goto)[[:space:]]+KeenPbrPpe4([[:space:]]|$))|(keen-pbr-sb:ppe:)'
+}
+
+# Validate the complete owned graph semantically before deleting anything.
+# Quotes around a comment are presentation-only in `iptables -S`; every other
+# selector, target and ownership tag remains exact.  A foreign reference or an
+# extra rule inside our named chain makes cleanup fail closed.
+ppe_deoffload_snapshot_is_owned() {
+    printf '%s\n' "$PPE_DEOFFLOAD_SNAPSHOT" | awk \
+        -v recorded="$PPE_DEOFFLOAD_RECORDED" '
+        function unquote(value) {
+            if (value ~ /^".*"$/) {
+                return substr(value, 2, length(value) - 2)
+            }
+            return value
+        }
+        function digits(value) {
+            return value != "" && value !~ /[^0-9]/
+        }
+        function numeric_port(value) {
+            return digits(value) && value + 0 >= 1 && value + 0 <= 65535 &&
+                value == sprintf("%d", value + 0)
+        }
+        function ports(value,   count,items,i,bounds,parts,low,high,last_high,slots) {
+            if (value == "" || value ~ /[^0-9,:]/) return 0
+            count = split(value, items, ",")
+            if (count < 1 || count > 15) return 0
+            last_high = 0
+            slots = 0
+            for (i = 1; i <= count; ++i) {
+                parts = split(items[i], bounds, ":")
+                if (parts == 1) {
+                    if (!numeric_port(bounds[1])) return 0
+                    low = bounds[1] + 0
+                    high = low
+                    slots++
+                } else if (parts == 2) {
+                    if (!numeric_port(bounds[1]) ||
+                        !numeric_port(bounds[2])) return 0
+                    low = bounds[1] + 0
+                    high = bounds[2] + 0
+                    if (low >= high) return 0
+                    slots += 2
+                } else {
+                    return 0
+                }
+                if (slots > 15) return 0
+                # Runtime canonicalization sorts and coalesces overlapping or
+                # adjacent selectors before publication. A non-canonical
+                # lookalike must not become lifecycle cleanup authority.
+                if (i > 1 && low <= last_high + 1) return 0
+                last_high = high
+            }
+            return 1
+        }
+        function parse_rule(   i,key,value) {
+            proto = ""; match_tcp = 0; match_udp = 0
+            match_multiport = 0; match_connskip = 0; match_comment = 0
+            dports = ""; dport = ""; skip = ""; comment = ""; target = ""
+            goto_target = 0
+            invalid = 0
+            for (i = 3; i <= NF; ++i) {
+                key = $i
+                if (key == "-p" || key == "--protocol") {
+                    if (++i > NF || proto != "") { invalid = 1; break }
+                    proto = $i
+                } else if (key == "-m" || key == "--match") {
+                    if (++i > NF) { invalid = 1; break }
+                    value = $i
+                    if (value == "tcp") match_tcp++
+                    else if (value == "udp") match_udp++
+                    else if (value == "multiport") match_multiport++
+                    else if (value == "connskip") match_connskip++
+                    else if (value == "comment") match_comment++
+                    else { invalid = 1; break }
+                } else if (key == "--dports") {
+                    if (++i > NF || dports != "") { invalid = 1; break }
+                    dports = $i
+                } else if (key == "--dport") {
+                    if (++i > NF || dport != "") { invalid = 1; break }
+                    dport = $i
+                } else if (key == "--connskip") {
+                    if (++i > NF || skip != "") { invalid = 1; break }
+                    skip = $i
+                } else if (key == "--comment") {
+                    if (++i > NF || comment != "") { invalid = 1; break }
+                    comment = unquote($i)
+                } else if (key == "-j" || key == "--jump") {
+                    if (++i > NF || target != "") { invalid = 1; break }
+                    target = $i
+                } else if (key == "-g" || key == "--goto") {
+                    if (++i > NF || target != "") { invalid = 1; break }
+                    target = $i
+                    goto_target = 1
+                } else {
+                    invalid = 1
+                    break
+                }
+            }
+        }
+        $1 == "-N" && $2 == "KeenPbrPpe4" {
+            chain_count++
+            next
+        }
+        $1 == "-A" {
+            origin = $2
+            # Inspect the raw rule as well as parsed tokens.  `iptables -S`
+            # keeps comments containing spaces quoted, so field-wise unquote
+            # cannot reliably see a reserved prefix in such a comment.
+            reserved_tag = index($0, "keen-pbr-sb:ppe:") > 0
+            parse_rule()
+            if (origin == "KeenPbrPpe4") {
+                chain_rules++
+                if (invalid || match_comment != 1) exit 1
+                if (comment == "keen-pbr-sb:ppe:return") {
+                    if (phase == 2 || goto_target || proto != "" ||
+                        match_tcp || match_udp ||
+                        match_multiport || match_connskip || dports != "" ||
+                        dport != "" || skip != "" || target != "RETURN") exit 1
+                    phase = 2
+                    return_rules++
+                    next
+                }
+                if (comment == "keen-pbr-sb:ppe:quic") {
+                    if (phase > 0 || goto_target || proto != "udp" ||
+                        match_udp != 1 ||
+                        match_multiport || match_connskip != 1 ||
+                        dports != "" || dport != "443" || skip != "30" ||
+                        target != "PPE") exit 1
+                    phase = 1
+                    quic_rules++
+                    next
+                }
+                prefix = "keen-pbr-sb:ppe:tcp:"
+                if (index(comment, prefix) == 1 &&
+                    digits(substr(comment, length(prefix) + 1))) {
+                    tcp_index_text = substr(comment, length(prefix) + 1)
+                    if ((tcp_index_text != "0" &&
+                         substr(tcp_index_text, 1, 1) == "0") ||
+                        tcp_index_text + 0 != tcp_rules ||
+                        tcp_index_text + 0 >= 16 || phase != 0 ||
+                        goto_target || proto != "tcp" || match_tcp > 1 ||
+                        match_multiport != 1 || match_connskip != 1 ||
+                        !ports(dports) || dport != "" || skip != "30" ||
+                        target != "PPE") exit 1
+                    tcp_rules++
+                    next
+                }
+                exit 1
+            }
+            if (target == "KeenPbrPpe4") {
+                if (invalid || goto_target || proto != "" || match_tcp || match_udp ||
+                    match_multiport || match_connskip || match_comment != 1 ||
+                    dports != "" || dport != "" || skip != "") exit 1
+                if (origin == "PREROUTING" &&
+                    comment == "keen-pbr-sb:ppe:prerouting") {
+                    prerouting_hooks++
+                    next
+                }
+                if (origin == "FORWARD" &&
+                    comment == "keen-pbr-sb:ppe:forward") {
+                    forward_hooks++
+                    next
+                }
+                exit 1
+            }
+            # No rule outside the exact owned graph may borrow the reserved
+            # tag namespace. Otherwise lifecycle cleanup could report success
+            # while a direct tagged -j PPE rule remained active.
+            if (reserved_tag) exit 1
+        }
+        END {
+            if (chain_count != 1) exit 1
+            if (chain_rules == 0) {
+                if (recorded != "yes" &&
+                    !(prerouting_hooks > 0 && forward_hooks > 0)) exit 1
+            } else if (chain_rules < 2 || return_rules != 1 || tcp_rules < 1 ||
+                       prerouting_hooks < 1 || forward_hooks < 1 ||
+                       quic_rules > 1) {
+                exit 1
+            }
+        }
+    '
+}
+
+ppe_deoffload_owned_hook_count() {
+    local chain="$1"
+    local tag="$2"
+
+    printf '%s\n' "$PPE_DEOFFLOAD_SNAPSHOT" | awk \
+        -v chain="$chain" -v tag="$tag" '
+        function unquote(value) {
+            if (value ~ /^".*"$/) return substr(value, 2, length(value) - 2)
+            return value
+        }
+        $1 == "-A" && $2 == chain {
+            comment = ""; target = ""; valid = 1
+            for (i = 3; i <= NF; ++i) {
+                if ($i == "-m" && $(i + 1) == "comment") { i++; continue }
+                if ($i == "--comment" && i < NF) {
+                    comment = unquote($(++i)); continue
+                }
+                if (($i == "-j" || $i == "--jump") && i < NF) {
+                    target = $(++i); continue
+                }
+                valid = 0
+            }
+            if (valid && comment == tag && target == "KeenPbrPpe4") count++
+        }
+        END { print count + 0 }
+    '
+}
+
+ppe_deoffload_owned_chain_delete_commands() {
+    printf '%s\n' "$PPE_DEOFFLOAD_SNAPSHOT" | awk '
+        $1 == "-A" && $2 == "KeenPbrPpe4" {
+            line = $0
+            sub(/^-A[[:space:]]+/, "-D ", line)
+            deletes[++count] = line
+        }
+        END {
+            # Reverse order also works for future rule shapes with positional
+            # dependencies. Never flush: a rule appended after the ownership
+            # snapshot must make -X/COMMIT fail and remain untouched.
+            for (i = count; i >= 1; --i) print deletes[i]
+        }
+    '
+}
+
+cleanup_stale_ppe_deoffload_firewall() {
+    local prerouting_hooks
+    local forward_hooks
+    local chain_deletes
+    local script
+
+    # The daemon is the only live PPE writer. Lifecycle recovery may inspect
+    # and remove its graph only after that writer is proven absent.
+    if [ -n "$(pidof "${PROCS:-keen-pbr}" 2>/dev/null || true)" ]; then
+        log_error "Refusing to remove KeenPbrPpe4 while keen-pbr is running"
+        return 1
+    fi
+    if ! ppe_deoffload_load_ownership; then
+        return 1
+    fi
+    if ! command -v iptables >/dev/null 2>&1; then
+        if [ "$PPE_DEOFFLOAD_RECORDED" = yes ]; then
+            log_error "Required PPE de-offload cleanup tool iptables is missing"
+            return 1
+        fi
+        return 0
+    fi
+    if ! ppe_deoffload_snapshot; then
+        log_error "Failed to inspect stale PPE de-offload artifacts"
+        return 1
+    fi
+    if ppe_deoffload_snapshot_has_artifacts; then
+        if ! ppe_deoffload_snapshot_is_owned; then
+            log_error "Refusing to remove ambiguous or foreign PPE de-offload artifacts"
+            return 1
+        fi
+        prerouting_hooks=$(ppe_deoffload_owned_hook_count \
+            PREROUTING keen-pbr-sb:ppe:prerouting) || return 1
+        forward_hooks=$(ppe_deoffload_owned_hook_count \
+            FORWARD keen-pbr-sb:ppe:forward) || return 1
+        chain_deletes=$(ppe_deoffload_owned_chain_delete_commands) || return 1
+        script='*mangle
+'
+        while [ "$prerouting_hooks" -gt 0 ]; do
+            script="${script}-D PREROUTING -m comment --comment keen-pbr-sb:ppe:prerouting -j KeenPbrPpe4
+"
+            prerouting_hooks=$((prerouting_hooks - 1))
+        done
+        while [ "$forward_hooks" -gt 0 ]; do
+            script="${script}-D FORWARD -m comment --comment keen-pbr-sb:ppe:forward -j KeenPbrPpe4
+"
+            forward_hooks=$((forward_hooks - 1))
+        done
+        if [ -n "$chain_deletes" ]; then
+            script="${script}${chain_deletes}
+"
+        fi
+        script="${script}-X KeenPbrPpe4
+COMMIT
+"
+        if ! meta_xtables_restore_transaction iptables "$script" \
+            >/dev/null 2>&1; then
+            log_error "Atomic PPE de-offload cleanup failed with iptables-restore"
+            return 1
+        fi
+        if ! ppe_deoffload_snapshot ||
+           ppe_deoffload_snapshot_has_artifacts; then
+            log_error "Stale PPE de-offload artifacts remained after cleanup"
+            return 1
+        fi
+    fi
+    if ! rm -f "$PPE_DEOFFLOAD_OWNERSHIP_FILE" 2>/dev/null ||
+       [ -e "$PPE_DEOFFLOAD_OWNERSHIP_FILE" ] ||
+       [ -L "$PPE_DEOFFLOAD_OWNERSHIP_FILE" ]; then
+        log_error "Verified PPE de-offload backend marker could not be cleared"
+        return 1
+    fi
+    return 0
 }
 
 is_module_loaded() {
@@ -72,23 +1310,68 @@ try_kernel_module_loaded() {
     insmod "$module_path" 2>/dev/null
 }
 
-ipset_hash_net_available() {
+ipset_base_type_available() {
     command -v ipset >/dev/null 2>&1 || return 1
 
-    if ipset create "$IPSET_PROBE_SET" hash:net family inet -exist >/dev/null 2>&1; then
+    ipset create "$IPSET_PROBE_SET" hash:net family inet -exist \
+        >/dev/null 2>&1 || {
         ipset destroy "$IPSET_PROBE_SET" >/dev/null 2>&1 || true
-        return 0
-    fi
-
+        return 1
+    }
     ipset destroy "$IPSET_PROBE_SET" >/dev/null 2>&1 || true
-    return 1
+    return 0
+}
+
+ipset_udp_peer_type_available() {
+    command -v ipset >/dev/null 2>&1 || return 1
+
+    ipset create "$IPSET_UDP_PEER_PROBE_SET" hash:ip,port,ip \
+        family inet timeout 90 -exist >/dev/null 2>&1 || {
+        ipset destroy "$IPSET_UDP_PEER_PROBE_SET" >/dev/null 2>&1 || true
+        return 1
+    }
+    ipset destroy "$IPSET_UDP_PEER_PROBE_SET" >/dev/null 2>&1 || true
+    return 0
+}
+
+iptables_udp_peer_match_available() {
+    local status=1
+
+    command -v iptables >/dev/null 2>&1 || return 1
+    command -v ipset >/dev/null 2>&1 || return 1
+    ipset create "$IPSET_UDP_PEER_PROBE_SET" hash:ip,port,ip \
+        family inet timeout 90 >/dev/null 2>&1 || return 1
+    if iptables_with_wait -t mangle -N "$IPTABLES_UDP_PEER_PROBE_CHAIN" \
+           >/dev/null 2>&1; then
+        if iptables_with_wait -t mangle \
+               -A "$IPTABLES_UDP_PEER_PROBE_CHAIN" \
+               -p udp -m set \
+               --match-set "$IPSET_UDP_PEER_PROBE_SET" src,dst,dst \
+               -j RETURN >/dev/null 2>&1; then
+            status=0
+        fi
+    fi
+    # A bounded -N may be killed after the kernel accepted the mutation but
+    # before userspace reported success. Always clean this PID-unique probe
+    # chain, including that deliberately ambiguous timeout path.
+    iptables_with_wait -t mangle \
+        -F "$IPTABLES_UDP_PEER_PROBE_CHAIN" >/dev/null 2>&1 || true
+    iptables_with_wait -t mangle \
+        -X "$IPTABLES_UDP_PEER_PROBE_CHAIN" >/dev/null 2>&1 || true
+    ipset destroy "$IPSET_UDP_PEER_PROBE_SET" >/dev/null 2>&1 || true
+    return "$status"
 }
 
 check_netfilter_addons_component() {
     local components
 
-    if ! components="$(wget -O - localhost:79/rci/show/version/ndw/components 2>/dev/null)"; then
-        log_error "Failed to fetch installed Keenetic components"
+    if ! components="$(
+        run_bounded_command "$KEENETIC_RCI_PROBE_SECONDS" \
+            wget -q -O - \
+            http://127.0.0.1:79/rci/show/version/ndw/components \
+            2>/dev/null
+    )"; then
+        log_error "Failed to fetch installed Keenetic components; component status is unavailable"
         return 0
     fi
 
@@ -103,22 +1386,51 @@ check_netfilter_addons_component() {
     esac
 }
 
-ensure_ipset_modules_loaded() {
-    if ipset_hash_net_available; then
-        try_kernel_module_loaded xt_set >/dev/null 2>&1 || true
-        return 0
-    fi
+wait_for_keenetic_rci() {
+    local attempt=1
 
-    try_kernel_module_loaded nfnetlink >/dev/null 2>&1 || true
-    try_kernel_module_loaded ip_set >/dev/null 2>&1 || true
-    try_kernel_module_loaded ip_set_hash_net >/dev/null 2>&1 || true
+    while [ "$attempt" -le "$KEENETIC_RCI_STARTUP_ATTEMPTS" ]; do
+        if run_bounded_command "$KEENETIC_RCI_PROBE_SECONDS" \
+               wget -q -O /dev/null \
+               http://127.0.0.1:79/rci/show/version 2>/dev/null; then
+            if [ "$attempt" -gt 1 ]; then
+                log "Keenetic RCI became available after $attempt attempts"
+            fi
+            return 0
+        fi
+
+        if [ "$attempt" -lt "$KEENETIC_RCI_STARTUP_ATTEMPTS" ]; then
+            log "Keenetic RCI is unavailable (attempt $attempt/$KEENETIC_RCI_STARTUP_ATTEMPTS); retrying in 1 second"
+            sleep 1
+        fi
+        attempt=$((attempt + 1))
+    done
+
+    log_error "Keenetic RCI is still unavailable after $KEENETIC_RCI_STARTUP_ATTEMPTS attempts; continuing startup"
+    return 0
+}
+
+ensure_ipset_modules_loaded() {
+    remove_daemon_arg --disable-udp-call-affinity-ipset
+
+    if ! ipset_base_type_available ||
+       ! ipset_udp_peer_type_available; then
+        try_kernel_module_loaded nfnetlink >/dev/null 2>&1 || true
+        try_kernel_module_loaded ip_set >/dev/null 2>&1 || true
+        try_kernel_module_loaded ip_set_hash_net >/dev/null 2>&1 || true
+        try_kernel_module_loaded ip_set_hash_ipportip >/dev/null 2>&1 || true
+    fi
     try_kernel_module_loaded xt_set >/dev/null 2>&1 || true
 
-    if ipset_hash_net_available; then
-        return 0
+    if ! ipset_base_type_available; then
+        log_error "$IPSET_COMPONENTS_MESSAGE Required probe failed: hash:net"
     fi
 
-    log_error "$IPSET_COMPONENTS_MESSAGE Required probe failed: ipset create $IPSET_PROBE_SET hash:net family inet -exist"
+    if ! ipset_udp_peer_type_available ||
+       ! iptables_udp_peer_match_available; then
+        add_daemon_arg --disable-udp-call-affinity-ipset
+        log "WARNING: the exact UDP tuple set/matcher is unavailable; WhatsApp call affinity is disabled for the iptables backend while normal list routing remains active"
+    fi
 }
 
 ensure_xt_multiport_loaded() {
@@ -133,27 +1445,1964 @@ ensure_xt_multiport_loaded() {
         "Failed to load xt_multiport from $module_path"
 }
 
+ensure_xt_dscp_loaded() {
+    local module_path
+
+    module_path="$(module_path_for xt_dscp)"
+
+    ensure_kernel_module_loaded \
+        xt_dscp \
+        "$module_path" \
+        "xt_dscp module not loaded and not found at $module_path" \
+        "Failed to load xt_dscp from $module_path"
+}
+
 check_runtime_dependencies() {
     check_netfilter_addons_component
     ensure_ipset_modules_loaded
     ensure_xt_multiport_loaded
+    ensure_xt_dscp_loaded
 }
 
-enable_hwnat() {
-    log "Enabling HW NAT..."
-    sysctl -w net.ipv4.netfilter.ip_conntrack_fastnat=1 2>/dev/null || true
-    sysctl -w net.netfilter.nf_conntrack_fastnat=1 2>/dev/null || true
+remove_daemon_arg() {
+    local target="$1"
+    local arg
+    local filtered=""
+
+    for arg in $ARGS; do
+        [ "$arg" = "$target" ] || filtered="$filtered $arg"
+    done
+    ARGS="$filtered"
+}
+
+add_daemon_arg() {
+    remove_daemon_arg "$1"
+    ARGS="$ARGS $1"
+}
+
+probe_raw_table() {
+    # Wait for concurrent NDMS/Entware xtables users instead of treating a
+    # transient lock as proof that raw PREROUTING is unavailable.
+    iptables_with_wait -t raw -S >/dev/null 2>&1
+}
+
+ensure_raw_table_available() {
+    local raw_module
+
+    RAW_PREROUTING_ERROR=""
+    if probe_raw_table; then
+        return 0
+    fi
+
+    raw_module="/lib/modules/$(uname -r)/iptable_raw.ko"
+    if [ ! -f "$raw_module" ]; then
+        RAW_PREROUTING_ERROR="$raw_module is unavailable"
+        return 1
+    fi
+    if ! insmod "$raw_module" 2>/dev/null &&
+       ! probe_raw_table; then
+        RAW_PREROUTING_ERROR="failed to load $raw_module"
+        return 1
+    fi
+    if ! probe_raw_table; then
+        RAW_PREROUTING_ERROR="the raw table probe failed"
+        return 1
+    fi
+}
+
+configure_raw_prerouting() {
+    local mode="${KEEN_PBR_RAW_PREROUTING:-auto}"
+
+    remove_daemon_arg --use-raw-prerouting
+    case "$mode" in
+        0|no|off|false|disabled)
+            log "raw PREROUTING disabled; using mangle PREROUTING"
+            return 0
+            ;;
+        1|yes|on|true|enabled)
+            if ! ensure_raw_table_available; then
+                log_error "raw PREROUTING was explicitly required: $RAW_PREROUTING_ERROR"
+                return 1
+            fi
+            add_daemon_arg --use-raw-prerouting
+            log "raw PREROUTING enabled by configuration"
+            return 0
+            ;;
+        auto)
+            if ensure_raw_table_available; then
+                add_daemon_arg --use-raw-prerouting
+                log "raw PREROUTING available; enabled automatically"
+            else
+                log "WARNING: raw PREROUTING unavailable ($RAW_PREROUTING_ERROR); using mangle PREROUTING"
+            fi
+            return 0
+            ;;
+        *)
+            log_error "Invalid KEEN_PBR_RAW_PREROUTING value: $mode (expected auto, on, or off)"
+            return 1
+            ;;
+    esac
+}
+
+read_fastnat_value() {
+    local path
+    local value
+    local found=no
+    local enabled=no
+
+    for path in \
+        "$FASTNAT_PROC_ROOT/net/netfilter/nf_conntrack_fastnat" \
+        "$FASTNAT_PROC_ROOT/net/ipv4/netfilter/ip_conntrack_fastnat"; do
+        [ -r "$path" ] || continue
+        value=""
+        # On Keenetic, BusyBox read may return failure for a sysctl pseudo-file
+        # even after assigning its complete value. Accept that assigned value
+        # and keep the strict 0/1 validation below.
+        if ! IFS= read -r value < "$path"; then
+            [ -n "$value" ] || continue
+        fi
+        case "$value" in
+            0) found=yes ;;
+            1) found=yes; enabled=yes ;;
+        esac
+    done
+    [ "$found" = yes ] || return 1
+    if [ "$enabled" = yes ]; then
+        printf '%s\n' 1
+    else
+        printf '%s\n' 0
+    fi
+}
+
+write_fastnat_value() {
+    local value="$1"
+    local observed
+    local written=1
+
+    sysctl -w "net.ipv4.netfilter.ip_conntrack_fastnat=$value" \
+        >/dev/null 2>&1 && written=0
+    sysctl -w "net.netfilter.nf_conntrack_fastnat=$value" \
+        >/dev/null 2>&1 && written=0
+    [ "$written" -eq 0 ] || return 1
+
+    # One alias may accept the write while another readable alias remains
+    # enabled. Verify the aggregate kernel state instead of treating a single
+    # successful sysctl invocation as proof that the invariant was restored.
+    observed="$(read_fastnat_value)" || return 1
+    [ "$observed" = "$value" ]
+}
+
+save_fastnat_snapshot() {
+    local value="$1"
+    local old_umask
+    local temporary
+
+    case "$value" in
+        0|1) ;;
+        *) return 1 ;;
+    esac
+
+    temporary="${FASTNAT_STATE_FILE}.$$"
+    old_umask="$(umask)"
+    umask 077
+    if ! printf '%s\n' "$value" > "$temporary" ||
+       ! mv -f "$temporary" "$FASTNAT_STATE_FILE"; then
+        umask "$old_umask"
+        rm -f "$temporary"
+        log_error "Cannot save the current FastNAT state"
+        return 1
+    fi
+    umask "$old_umask"
+}
+
+remember_fastnat_value() {
+    local quiet="${1:-no}"
+    local value
+
+    if [ -e "$FASTNAT_STATE_FILE" ]; then
+        read -r value < "$FASTNAT_STATE_FILE" || value=""
+        case "$value" in
+            0|1) return 0 ;;
+        esac
+        log_error "Saved FastNAT state is invalid: $FASTNAT_STATE_FILE"
+        return 1
+    fi
+
+    value="$(read_fastnat_value)" || {
+        # Older Keenetic kernels may not expose the FastNAT control at all.
+        # That is a supported capability difference, not a startup failure.
+        if [ "$quiet" != yes ]; then
+            log "FastNAT control is unavailable; leaving kernel NAT settings unchanged"
+        fi
+        return 2
+    }
+    save_fastnat_snapshot "$value"
+}
+
+ensure_fastnat_disabled() {
+    local value
+
+    # A firmware netfilter rebuild may turn FastNAT back on while keen-pbr is
+    # already running. If the startup snapshot is unexpectedly absent, the
+    # pre-service value is no longer knowable: remember disabled as the only
+    # fail-closed value instead of later restoring firmware-created drift.
+    if [ -e "$FASTNAT_STATE_FILE" ]; then
+        remember_fastnat_value yes || return 1
+        value="$(read_fastnat_value)" || return 0
+    else
+        value="$(read_fastnat_value)" || return 0
+        save_fastnat_snapshot 0 || return 1
+    fi
+    [ "$value" = 1 ] || return 0
+
+    if ! write_fastnat_value 0; then
+        log_error "Failed to keep FastNAT disabled after a netfilter rebuild"
+        return 1
+    fi
 }
 
 disable_hwnat() {
-    log "Disabling HW NAT..."
-    sysctl -w net.ipv4.netfilter.ip_conntrack_fastnat=0 2>/dev/null || true
-    sysctl -w net.netfilter.nf_conntrack_fastnat=0 2>/dev/null || true
+    local status
+
+    if remember_fastnat_value; then
+        status=0
+    else
+        status=$?
+    fi
+    case "$status" in
+        0) ;;
+        2) return 0 ;;
+        *) return 1 ;;
+    esac
+    log "Disabling FastNAT..."
+    if ! write_fastnat_value 0; then
+        log_error "Failed to disable FastNAT"
+        return 1
+    fi
 }
 
-signal_service() {
+restore_hwnat_if_safe() {
+    local value
+
+    [ -e "$FASTNAT_STATE_FILE" ] || return 0
+    if [ -e "$FASTNAT_UNSAFE_STOP_FILE" ]; then
+        log_error "FastNAT remains disabled after an unclean stop; start keen-pbr and stop it gracefully before restoring the saved state"
+        return 0
+    fi
+
+    read -r value < "$FASTNAT_STATE_FILE" || value=""
+    case "$value" in
+        0|1) ;;
+        *)
+            log_error "Saved FastNAT state is invalid: $FASTNAT_STATE_FILE"
+            return 1
+            ;;
+    esac
+
+    log "Restoring FastNAT to $value..."
+    if ! write_fastnat_value "$value"; then
+        log_error "Failed to restore FastNAT to $value"
+        return 1
+    fi
+    rm -f "$FASTNAT_STATE_FILE"
+}
+
+# Netfilter stop admission marker. Keep this block self-contained: the package
+# contract test sources it without executing rc.func.
+stopping_runtime_dir_is_protected() {
+    local metadata
+
+    [ -d "$STOPPING_RUNTIME_DIR" ] || return 1
+    [ ! -L "$STOPPING_RUNTIME_DIR" ] || return 1
+    metadata=$(path_owner_group_mode "$STOPPING_RUNTIME_DIR") ||
+        return 1
+    case "$metadata" in
+        0:0:700|0:0:750) return 0 ;;
+    esac
+    return 1
+}
+
+ensure_stopping_runtime_dir() {
+    if [ ! -e "$STOPPING_RUNTIME_DIR" ] &&
+       [ ! -L "$STOPPING_RUNTIME_DIR" ]; then
+        if ! (umask 077; mkdir "$STOPPING_RUNTIME_DIR"); then
+            log_error "Cannot create protected stop-admission directory $STOPPING_RUNTIME_DIR"
+            return 1
+        fi
+    fi
+    if ! stopping_runtime_dir_is_protected; then
+        log_error "Stop-admission directory $STOPPING_RUNTIME_DIR is not a root-owned 0700/0750 directory"
+        return 1
+    fi
+}
+
+stopping_process_startticks() {
+    local pid="$1"
+    local startticks
+
+    case "$pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ -r "$STOPPING_PROC_ROOT/$pid/stat" ] || return 1
+    startticks=$(awk '{ print $22; exit }' \
+        "$STOPPING_PROC_ROOT/$pid/stat" 2>/dev/null) || return 1
+    case "$startticks" in
+        ''|*[!0-9]*|0) return 1 ;;
+    esac
+    printf '%s\n' "$startticks"
+}
+
+control_lease_dir_is_protected() {
+    local lease_dir="$1"
+    local metadata
+
+    [ -d "$lease_dir" ] || return 1
+    [ ! -L "$lease_dir" ] || return 1
+    metadata=$(path_owner_group_mode "$lease_dir") ||
+        return 1
+    [ "$metadata" = "0:0:700" ]
+}
+
+stopping_stat_capability_available() {
+    path_owner_group_mode / >/dev/null 2>&1
+}
+
+read_control_lease_owner() {
+    local lease_dir="${1:-$STOPPING_CONTROL_LEASE_DIR}"
+    local owner_file="${lease_dir}/owner"
+    local metadata
+    local magic
+    local role
+    local pid
+    local startticks
+    local extra
+
+    STOPPING_CONTROL_OWNER_ROLE=""
+    STOPPING_CONTROL_OWNER_PID=""
+    STOPPING_CONTROL_OWNER_STARTTICKS=""
+    stopping_runtime_dir_is_protected || return 1
+    control_lease_dir_is_protected "$lease_dir" || return 1
+    [ -f "$owner_file" ] || return 1
+    [ ! -L "$owner_file" ] || return 1
+    metadata=$(path_owner_group_mode "$owner_file") ||
+        return 1
+    [ "$metadata" = "0:0:600" ] || return 1
+    IFS=' ' read -r magic role pid startticks extra < "$owner_file" ||
+        return 1
+    [ "$magic" = "$STOPPING_CONTROL_LEASE_MAGIC" ] || return 1
+    [ -z "$extra" ] || return 1
+    case "$role" in
+        start|stop|reload|reapply-dns|reapply-full|reapply-nat|drain) ;;
+        *) return 1 ;;
+    esac
+    case "$pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    case "$startticks" in
+        ''|*[!0-9]*|0) return 1 ;;
+    esac
+    STOPPING_CONTROL_OWNER_ROLE="$role"
+    STOPPING_CONTROL_OWNER_PID="$pid"
+    STOPPING_CONTROL_OWNER_STARTTICKS="$startticks"
+}
+
+control_lease_owner_is_live() {
+    local current_startticks
+
+    current_startticks=$(stopping_process_startticks \
+        "$STOPPING_CONTROL_OWNER_PID" 2>/dev/null || true)
+    [ -n "$current_startticks" ] &&
+        [ "$current_startticks" = "$STOPPING_CONTROL_OWNER_STARTTICKS" ]
+}
+
+control_lease_owned_by_self() {
+    read_control_lease_owner || return 1
+    [ -n "$STOPPING_CONTROL_LEASE_PID" ] || return 1
+    [ "$STOPPING_CONTROL_OWNER_PID" = "$STOPPING_CONTROL_LEASE_PID" ] ||
+        return 1
+    [ "$STOPPING_CONTROL_OWNER_STARTTICKS" = \
+        "$STOPPING_CONTROL_LEASE_STARTTICKS" ] || return 1
+    [ "$STOPPING_CONTROL_OWNER_ROLE" = "$STOPPING_CONTROL_LEASE_ROLE" ] ||
+        return 1
+    control_lease_owner_is_live
+}
+
+read_control_recovery_gate_owner() {
+    local owner_file="${STOPPING_CONTROL_RECOVERY_GATE_DIR}/owner"
+    local metadata
+    local magic
+    local pid
+    local startticks
+    local extra
+
+    STOPPING_CONTROL_RECOVERY_GATE_PID=""
+    STOPPING_CONTROL_RECOVERY_GATE_STARTTICKS=""
+    stopping_runtime_dir_is_protected || return 1
+    control_lease_dir_is_protected \
+        "$STOPPING_CONTROL_RECOVERY_GATE_DIR" || return 1
+    [ -f "$owner_file" ] || return 1
+    [ ! -L "$owner_file" ] || return 1
+    metadata=$(path_owner_group_mode "$owner_file") ||
+        return 1
+    [ "$metadata" = "0:0:600" ] || return 1
+    IFS=' ' read -r magic pid startticks extra < "$owner_file" ||
+        return 1
+    [ "$magic" = "$STOPPING_CONTROL_RECOVERY_GATE_MAGIC" ] || return 1
+    [ -z "$extra" ] || return 1
+    case "$pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    case "$startticks" in
+        ''|*[!0-9]*|0) return 1 ;;
+    esac
+    STOPPING_CONTROL_RECOVERY_GATE_PID="$pid"
+    STOPPING_CONTROL_RECOVERY_GATE_STARTTICKS="$startticks"
+}
+
+control_recovery_gate_owner_is_live() {
+    local current_startticks
+
+    current_startticks=$(stopping_process_startticks \
+        "$STOPPING_CONTROL_RECOVERY_GATE_PID" 2>/dev/null || true)
+    [ -n "$current_startticks" ] &&
+        [ "$current_startticks" = \
+            "$STOPPING_CONTROL_RECOVERY_GATE_STARTTICKS" ]
+}
+
+control_recovery_gate_owned_by_self() {
+    local expected_pid="${1:-$$}"
+    local expected_startticks="$2"
+
+    read_control_recovery_gate_owner || return 1
+    [ "$STOPPING_CONTROL_RECOVERY_GATE_PID" = "$expected_pid" ] ||
+        return 1
+    [ "$STOPPING_CONTROL_RECOVERY_GATE_STARTTICKS" = \
+        "$expected_startticks" ] || return 1
+    control_recovery_gate_owner_is_live
+}
+
+acquire_control_recovery_gate() {
+    local pid="$$"
+    local startticks="$1"
+    local owner_candidate
+
+    STOPPING_CONTROL_RECOVERY_GATE_PID=""
+    STOPPING_CONTROL_RECOVERY_GATE_STARTTICKS=""
+    owner_candidate="${STOPPING_RUNTIME_DIR}/.control-recovery-owner.$$"
+    rm -f "$owner_candidate"
+    if ! (umask 077; printf '%s %s %s\n' \
+        "$STOPPING_CONTROL_RECOVERY_GATE_MAGIC" "$pid" "$startticks" > \
+        "$owner_candidate"); then
+        rm -f "$owner_candidate"
+        log_error "Cannot write keen-pbr control recovery gate candidate"
+        return 1
+    fi
+
+    if ! (umask 077; mkdir "$STOPPING_CONTROL_RECOVERY_GATE_DIR" \
+        2>/dev/null); then
+        rm -f "$owner_candidate"
+        if read_control_recovery_gate_owner &&
+           control_recovery_gate_owner_is_live; then
+            return 2
+        fi
+        log_error "Keen-pbr control recovery gate is stale or unverifiable; reboot is required for safe tmpfs cleanup"
+        return 1
+    fi
+    if ! ln "$owner_candidate" "$STOPPING_CONTROL_RECOVERY_GATE_OWNER" \
+            2>/dev/null ||
+       ! control_recovery_gate_owned_by_self "$pid" "$startticks"; then
+        rm -f "$owner_candidate"
+        rm -f "$STOPPING_CONTROL_RECOVERY_GATE_OWNER" 2>/dev/null || true
+        rmdir "$STOPPING_CONTROL_RECOVERY_GATE_DIR" 2>/dev/null || true
+        log_error "Cannot publish or verify keen-pbr control recovery gate ownership"
+        return 1
+    fi
+    rm -f "$owner_candidate"
+    return 0
+}
+
+acquire_control_recovery_gate_bounded() {
+    local startticks="$1"
+    local context="$2"
+    local attempt=0
+    local status
+
+    while :; do
+        if acquire_control_recovery_gate "$startticks"; then
+            return 0
+        else
+            status=$?
+        fi
+        [ "$status" -eq 2 ] || return 1
+        attempt=$((attempt + 1))
+        if [ "$attempt" -ge 3 ]; then
+            log_error "Timed out waiting for the live keen-pbr control recovery gate during $context"
+            return 1
+        fi
+        sleep 1
+    done
+}
+
+release_control_recovery_gate() {
+    local expected_pid="$$"
+    local expected_startticks="$1"
+
+    if ! control_recovery_gate_owned_by_self \
+        "$expected_pid" "$expected_startticks"; then
+        log_error "Cannot release a keen-pbr control recovery gate owned by another generation"
+        return 1
+    fi
+    if ! rm -f "$STOPPING_CONTROL_RECOVERY_GATE_OWNER" ||
+       ! rmdir "$STOPPING_CONTROL_RECOVERY_GATE_DIR"; then
+        log_error "Cannot remove keen-pbr control recovery gate"
+        return 1
+    fi
+    STOPPING_CONTROL_RECOVERY_GATE_PID=""
+    STOPPING_CONTROL_RECOVERY_GATE_STARTTICKS=""
+    return 0
+}
+
+finish_control_lease_acquisition() {
+    local status="$1"
+    local gate_startticks="$2"
+
+    STOPPING_CONTROL_ACQUIRE_RESULT="$status"
+    if ! release_control_recovery_gate "$gate_startticks"; then
+        STOPPING_CONTROL_ACQUIRE_RESULT=1
+    fi
+    return 0
+}
+
+read_control_work_file() {
+    local work_file="$1"
+    local metadata
+    local magic
+    local role
+    local pid
+    local startticks
+    local signal
+    local dns
+    local hup
+    local extra
+
+    CONTROL_WORK_ROLE=""
+    CONTROL_WORK_PID=""
+    CONTROL_WORK_STARTTICKS=""
+    CONTROL_WORK_SIGNAL=""
+    CONTROL_WORK_DNS=no
+    CONTROL_WORK_HUP=no
+    stopping_runtime_dir_is_protected || return 1
+    [ -f "$work_file" ] || return 1
+    [ ! -L "$work_file" ] || return 1
+    metadata=$(path_owner_group_mode "$work_file") || return 1
+    [ "$metadata" = "0:0:600" ] || return 1
+    IFS=' ' read -r magic role pid startticks signal dns hup extra \
+        < "$work_file" || return 1
+    [ "$magic" = "$STOPPING_CONTROL_WORK_MAGIC" ] || return 1
+    [ -z "$extra" ] || return 1
+    case "$role" in
+        pending)
+            [ "$pid" = 0 ] && [ "$startticks" = 1 ] || return 1
+            ;;
+        work)
+            case "$pid" in ''|0|*[!0-9]*) return 1 ;; esac
+            case "$startticks" in ''|0|*[!0-9]*) return 1 ;; esac
+            ;;
+        *) return 1 ;;
+    esac
+    case "$signal" in
+        none) signal="" ;;
+        SIGUSR1|SIGUSR2) ;;
+        *) return 1 ;;
+    esac
+    case "$dns:$hup" in
+        yes:yes|yes:no|no:no) ;;
+        *) return 1 ;;
+    esac
+    CONTROL_WORK_ROLE="$role"
+    CONTROL_WORK_PID="$pid"
+    CONTROL_WORK_STARTTICKS="$startticks"
+    CONTROL_WORK_SIGNAL="$signal"
+    CONTROL_WORK_DNS="$dns"
+    CONTROL_WORK_HUP="$hup"
+    return 0
+}
+
+control_work_owner_is_live() {
+    local current_startticks
+
+    [ "$CONTROL_WORK_ROLE" = work ] || return 1
+    current_startticks=$(stopping_process_startticks \
+        "$CONTROL_WORK_PID" 2>/dev/null || true)
+    [ -n "$current_startticks" ] &&
+        [ "$current_startticks" = "$CONTROL_WORK_STARTTICKS" ]
+}
+
+write_control_work_candidate() {
+    local candidate="$1"
+    local role="$2"
+    local pid="$3"
+    local startticks="$4"
+    local signal="$5"
+    local dns="$6"
+    local hup="$7"
+    local encoded_signal="$signal"
+
+    [ -n "$encoded_signal" ] || encoded_signal=none
+    rm -f "$candidate"
+    if ! (umask 077; printf '%s %s %s %s %s %s %s\n' \
+        "$STOPPING_CONTROL_WORK_MAGIC" "$role" "$pid" "$startticks" \
+        "$encoded_signal" "$dns" "$hup" > "$candidate"); then
+        rm -f "$candidate"
+        return 1
+    fi
+    read_control_work_file "$candidate" || {
+        rm -f "$candidate"
+        return 1
+    }
+    if [ "$CONTROL_WORK_ROLE" != "$role" ] ||
+       [ "$CONTROL_WORK_PID" != "$pid" ] ||
+       [ "$CONTROL_WORK_STARTTICKS" != "$startticks" ] ||
+       [ "$CONTROL_WORK_SIGNAL" != "$signal" ] ||
+       [ "$CONTROL_WORK_DNS" != "$dns" ] ||
+       [ "$CONTROL_WORK_HUP" != "$hup" ]; then
+        rm -f "$candidate"
+        return 1
+    fi
+    return 0
+}
+
+merge_control_work_signal() {
+    local current="$1"
+    local incoming="$2"
+
+    CONTROL_WORK_MERGED_SIGNAL="$current"
+    case "$incoming" in
+        '') ;;
+        SIGUSR1) CONTROL_WORK_MERGED_SIGNAL=SIGUSR1 ;;
+        SIGUSR2)
+            [ "$current" = SIGUSR1 ] ||
+                CONTROL_WORK_MERGED_SIGNAL=SIGUSR2
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+publish_control_mailbox_work_under_gate() {
+    local signal="$1"
+    local dns="$2"
+    local hup="$3"
+    local gate_startticks="$4"
+    local candidate=""
+    local candidate_attempt=0
+    local merged_signal=""
+    local merged_dns=no
+    local merged_hup=no
+
+    control_recovery_gate_owned_by_self "$$" "$gate_startticks" ||
+        return 1
+    case "$signal" in ''|SIGUSR1|SIGUSR2) ;; *) return 1 ;; esac
+    case "$dns:$hup" in yes:yes|yes:no|no:no) ;; *) return 1 ;; esac
+
+    # Only the atomic mutating marker authorizes suppression. Pre-mutation stop
+    # admission keeps every event durable in this mailbox.
+    if stopping_marker_authorizes_runtime_suppression; then
+        return 0
+    fi
+    if [ -e "$STOPPING_CONTROL_MAILBOX" ] ||
+       [ -L "$STOPPING_CONTROL_MAILBOX" ]; then
+        read_control_work_file "$STOPPING_CONTROL_MAILBOX" || return 1
+        [ "$CONTROL_WORK_ROLE" = pending ] || return 1
+        merged_signal="$CONTROL_WORK_SIGNAL"
+        merged_dns="$CONTROL_WORK_DNS"
+        merged_hup="$CONTROL_WORK_HUP"
+    fi
+    merge_control_work_signal "$merged_signal" "$signal" || return 1
+    merged_signal="$CONTROL_WORK_MERGED_SIGNAL"
+    if [ "$dns" = yes ]; then
+        merged_dns=yes
+    fi
+    if [ "$hup" = yes ]; then
+        merged_dns=yes
+        merged_hup=yes
+    fi
+    if [ -z "$merged_signal" ] && [ "$merged_dns" = no ]; then
+        return 0
+    fi
+    # A failed rename must leave the complete new bundle in a namespace that a
+    # later controller scans. Generation+attempt suffixes avoid deleting a
+    # previous failed publication after PID reuse or another call in this shell.
+    while [ "$candidate_attempt" -lt 4 ]; do
+        candidate_attempt=$((candidate_attempt + 1))
+        candidate="${STOPPING_RUNTIME_DIR}/.control-work-pending.$$.${gate_startticks}.${candidate_attempt}"
+        if [ ! -e "$candidate" ] && [ ! -L "$candidate" ]; then
+            break
+        fi
+        candidate=""
+    done
+    [ -n "$candidate" ] || return 1
+    write_control_work_candidate "$candidate" pending 0 1 \
+        "$merged_signal" "$merged_dns" "$merged_hup" || return 1
+    if ! mv "$candidate" "$STOPPING_CONTROL_MAILBOX"; then
+        # Keep the verified candidate durable; orphan recovery coalesces it.
+        return 1
+    fi
+    return 0
+}
+
+publish_control_mailbox_work() {
+    local signal="$1"
+    local dns="$2"
+    local hup="$3"
+    local startticks
+    local result=0
+
+    startticks=$(stopping_process_startticks "$$") || return 1
+    acquire_control_recovery_gate_bounded \
+        "$startticks" "durable control mailbox publication" || return 1
+    publish_control_mailbox_work_under_gate \
+        "$signal" "$dns" "$hup" "$startticks" || result=1
+    release_control_recovery_gate "$startticks" || result=1
+    return "$result"
+}
+
+recover_orphaned_control_work_files_under_gate() {
+    local gate_startticks="$1"
+    local work_file
+    local work_prefix="${STOPPING_RUNTIME_DIR}/.control-work."
+    local pending_prefix="${STOPPING_RUNTIME_DIR}/.control-work-pending."
+    local work_suffix
+    local pending_pid
+    local pending_startticks
+    local pending_attempt
+    local pending_rest
+    local inspected=0
+    local inspect_limit=32
+    local recoverable=""
+    local recovered_signal=""
+    local recovered_dns=no
+    local recovered_hup=no
+
+    control_recovery_gate_owned_by_self "$$" "$gate_startticks" ||
+        return 1
+    for work_file in \
+        "${STOPPING_RUNTIME_DIR}"/.control-work.* \
+        "${STOPPING_RUNTIME_DIR}"/.control-work-pending.*; do
+        if [ ! -e "$work_file" ] && [ ! -L "$work_file" ]; then
+            continue
+        fi
+        inspected=$((inspected + 1))
+        [ "$inspected" -le "$inspect_limit" ] || return 1
+        case "$work_file" in
+            "$pending_prefix"*)
+                work_suffix=${work_file#"$pending_prefix"}
+                pending_pid=${work_suffix%%.*}
+                pending_rest=${work_suffix#*.}
+                [ "$pending_rest" != "$work_suffix" ] || return 1
+                pending_startticks=${pending_rest%%.*}
+                pending_attempt=${pending_rest#*.}
+                [ "$pending_attempt" != "$pending_rest" ] || return 1
+                case "$pending_pid" in ''|0|*[!0-9]*) return 1 ;; esac
+                case "$pending_startticks" in
+                    ''|0|*[!0-9]*) return 1 ;;
+                esac
+                case "$pending_attempt" in ''|0|*[!0-9]*) return 1 ;; esac
+                ;;
+            "$work_prefix"*)
+                work_suffix=${work_file#"$work_prefix"}
+                case "$work_suffix" in ''|*[!0-9]*) return 1 ;; esac
+                ;;
+            *) return 1 ;;
+        esac
+        read_control_work_file "$work_file" || return 1
+        if [ "$CONTROL_WORK_ROLE" = work ] && control_work_owner_is_live; then
+            continue
+        fi
+        merge_control_work_signal \
+            "$recovered_signal" "$CONTROL_WORK_SIGNAL" || return 1
+        recovered_signal="$CONTROL_WORK_MERGED_SIGNAL"
+        if [ "$CONTROL_WORK_DNS" = yes ]; then recovered_dns=yes; fi
+        if [ "$CONTROL_WORK_HUP" = yes ]; then
+            recovered_dns=yes
+            recovered_hup=yes
+        fi
+        recoverable="$recoverable $work_file"
+    done
+    publish_control_mailbox_work_under_gate \
+        "$recovered_signal" "$recovered_dns" "$recovered_hup" \
+        "$gate_startticks" || return 1
+    for work_file in $recoverable; do
+        if [ ! -e "$work_file" ] && [ ! -L "$work_file" ]; then
+            continue
+        fi
+        read_control_work_file "$work_file" || return 1
+        if [ "$CONTROL_WORK_ROLE" = work ] && control_work_owner_is_live; then
+            return 1
+        fi
+        rm -f "$work_file" || return 1
+    done
+    return 0
+}
+
+claim_control_mailbox_work() {
+    local startticks
+    local work_path
+    local candidate
+    local result=0
+
+    STOPPING_CONTROL_WORK_PATH=""
+    startticks=$(stopping_process_startticks "$$") || return 1
+    acquire_control_recovery_gate_bounded \
+        "$startticks" "durable control mailbox claim" || return 1
+    if ! recover_orphaned_control_work_files_under_gate "$startticks"; then
+        release_control_recovery_gate "$startticks" || true
+        return 1
+    fi
+    if [ ! -e "$STOPPING_CONTROL_MAILBOX" ] &&
+       [ ! -L "$STOPPING_CONTROL_MAILBOX" ]; then
+        release_control_recovery_gate "$startticks" || return 1
+        return 2
+    fi
+    read_control_work_file "$STOPPING_CONTROL_MAILBOX" || {
+        release_control_recovery_gate "$startticks" || true
+        return 1
+    }
+    [ "$CONTROL_WORK_ROLE" = pending ] || {
+        release_control_recovery_gate "$startticks" || true
+        return 1
+    }
+    work_path="${STOPPING_RUNTIME_DIR}/.control-work.$$"
+    candidate="${STOPPING_RUNTIME_DIR}/.control-work-owner.$$"
+    if [ -e "$work_path" ] || [ -L "$work_path" ] ||
+       ! mv "$STOPPING_CONTROL_MAILBOX" "$work_path"; then
+        release_control_recovery_gate "$startticks" || true
+        return 1
+    fi
+    if ! write_control_work_candidate "$candidate" work "$$" "$startticks" \
+        "$CONTROL_WORK_SIGNAL" "$CONTROL_WORK_DNS" "$CONTROL_WORK_HUP" ||
+       ! mv "$candidate" "$work_path"; then
+        rm -f "$candidate"
+        result=1
+    else
+        STOPPING_CONTROL_WORK_PATH="$work_path"
+        STOPPING_CONTROL_WORK_PID="$$"
+        STOPPING_CONTROL_WORK_STARTTICKS="$startticks"
+        STOPPING_CONTROL_WORK_SIGNAL="$CONTROL_WORK_SIGNAL"
+        STOPPING_CONTROL_WORK_DNS="$CONTROL_WORK_DNS"
+        STOPPING_CONTROL_WORK_HUP="$CONTROL_WORK_HUP"
+    fi
+    release_control_recovery_gate "$startticks" || result=1
+    return "$result"
+}
+
+finish_control_mailbox_work() {
+    local succeeded="$1"
+    local startticks="$STOPPING_CONTROL_WORK_STARTTICKS"
+    local result=0
+
+    [ -n "$STOPPING_CONTROL_WORK_PATH" ] || return 0
+    acquire_control_recovery_gate_bounded \
+        "$startticks" "durable control mailbox acknowledgement" || return 1
+    if ! read_control_work_file "$STOPPING_CONTROL_WORK_PATH" ||
+       [ "$CONTROL_WORK_ROLE" != work ] ||
+       [ "$CONTROL_WORK_PID" != "$STOPPING_CONTROL_WORK_PID" ] ||
+       [ "$CONTROL_WORK_STARTTICKS" != "$startticks" ]; then
+        result=1
+    elif [ "$succeeded" != yes ] &&
+         ! publish_control_mailbox_work_under_gate \
+             "$CONTROL_WORK_SIGNAL" "$CONTROL_WORK_DNS" \
+             "$CONTROL_WORK_HUP" "$startticks"; then
+        result=1
+    elif ! rm -f "$STOPPING_CONTROL_WORK_PATH"; then
+        result=1
+    fi
+    release_control_recovery_gate "$startticks" || result=1
+    if [ "$result" -eq 0 ]; then
+        STOPPING_CONTROL_WORK_PATH=""
+        STOPPING_CONTROL_WORK_PID=""
+        STOPPING_CONTROL_WORK_STARTTICKS=""
+        STOPPING_CONTROL_WORK_SIGNAL=""
+        STOPPING_CONTROL_WORK_DNS=no
+        STOPPING_CONTROL_WORK_HUP=no
+    fi
+    return "$result"
+}
+
+recover_stale_control_lease() {
+    local gate_startticks="$1"
+    local closing_dir
+
+    # The sibling gate is the compare-and-swap authority for the fixed lease
+    # pathname. Every creator takes it before mkdir, so after this exact
+    # generation is re-read no delayed recoverer can rename a replacement
+    # lease into quarantine (the ABA race).
+    control_recovery_gate_owned_by_self "$$" "$gate_startticks" ||
+        return 1
+    control_lease_dir_is_protected "$STOPPING_CONTROL_LEASE_DIR" ||
+        return 1
+    if read_control_lease_owner; then
+        control_lease_owner_is_live && return 2
+    else
+        # A crash between mkdir and owner publication leaves an empty owned
+        # lease directory. Anything else is ambiguous and must not be moved.
+        if [ -e "$STOPPING_CONTROL_LEASE_OWNER" ] ||
+           [ -L "$STOPPING_CONTROL_LEASE_OWNER" ]; then
+            return 1
+        fi
+    fi
+
+    closing_dir="${STOPPING_RUNTIME_DIR}/.control-lease-closing.$$"
+    if [ -e "$closing_dir" ] || [ -L "$closing_dir" ]; then
+        return 1
+    fi
+    # Move the exact stale fixed generation directly into the durable closing
+    # namespace. If this recoverer dies at any later instruction, the next
+    # controller preflights and recovers the same pending bits; no intent ever
+    # exists only in this shell's globals or in an unscanned .stale pathname.
+    if ! mv "$STOPPING_CONTROL_LEASE_DIR" "$closing_dir" 2>/dev/null; then
+        return 1
+    fi
+    # Do not extract anything yet. The caller re-preflights this durable
+    # source, creates/resolves a fixed target, publishes there first, and only
+    # then removes the closing.
+    return 0
+}
+
+control_lease_closing_has_only_known_entries() {
+    local closing_dir="$1"
+    local entry
+
+    # Keep preflight non-mutating even for an unexpected root-owned entry.
+    # The three glob forms cover ordinary and hidden names without depending
+    # on ls/find output parsing; unmatched patterns are ignored explicitly.
+    for entry in \
+        "$closing_dir"/* \
+        "$closing_dir"/.[!.]* \
+        "$closing_dir"/..?*; do
+        if [ ! -e "$entry" ] && [ ! -L "$entry" ]; then
+            continue
+        fi
+        case "$entry" in
+            "$closing_dir/owner"|"$closing_dir/pending-full"|\
+            "$closing_dir/pending-nat"|"$closing_dir/pending-dns"|\
+            "$closing_dir/pending-hup") ;;
+            *) return 1 ;;
+        esac
+    done
+    return 0
+}
+
+preflight_orphaned_control_lease_closings() {
+    local gate_startticks="$1"
+    local closing_dir
+    local closing_prefix="${STOPPING_RUNTIME_DIR}/.control-lease-closing."
+    local closing_suffix
+    local closing_role
+    local full_dir
+    local nat_dir
+    local dns_dir
+    local hup_dir
+    local inspected=0
+    local inspect_limit=32
+    local recoverable_dirs=""
+
+    control_recovery_gate_owned_by_self "$$" "$gate_startticks" ||
+        return 1
+    STOPPING_RECOVERY_CLOSING_DIRS=""
+    STOPPING_RECOVERED_SIGNAL=""
+    STOPPING_RECOVERED_DNS=no
+    STOPPING_RECOVERED_HUP=no
+    # Preflight the complete bounded set before deleting any intent. A later
+    # malformed or 33rd entry must not turn an already-removed pending-full
+    # directory into process-local state that disappears on this failure.
+    for closing_dir in \
+        "${STOPPING_RUNTIME_DIR}"/.control-lease-closing.*; do
+        if [ ! -e "$closing_dir" ] && [ ! -L "$closing_dir" ]; then
+            continue
+        fi
+        inspected=$((inspected + 1))
+        if [ "$inspected" -gt "$inspect_limit" ]; then
+            log_error "Too many orphaned keen-pbr control closings; reboot is required for bounded tmpfs cleanup"
+            return 1
+        fi
+        closing_suffix=${closing_dir#"$closing_prefix"}
+        case "$closing_suffix" in
+            ''|*[!0-9]*) return 1 ;;
+        esac
+        control_lease_dir_is_protected "$closing_dir" || return 1
+        control_lease_closing_has_only_known_entries "$closing_dir" ||
+            return 1
+        if ! read_control_lease_owner "$closing_dir"; then
+            if [ -e "${closing_dir}/owner" ] ||
+               [ -L "${closing_dir}/owner" ]; then
+                return 1
+            fi
+            if [ -e "${closing_dir}/pending-full" ] ||
+               [ -L "${closing_dir}/pending-full" ] ||
+               [ -e "${closing_dir}/pending-nat" ] ||
+               [ -L "${closing_dir}/pending-nat" ] ||
+               [ -e "${closing_dir}/pending-dns" ] ||
+               [ -L "${closing_dir}/pending-dns" ] ||
+               [ -e "${closing_dir}/pending-hup" ] ||
+               [ -L "${closing_dir}/pending-hup" ]; then
+                return 1
+            fi
+            recoverable_dirs="$recoverable_dirs $closing_dir"
+            continue
+        fi
+        control_lease_owner_is_live && continue
+        closing_role="$STOPPING_CONTROL_OWNER_ROLE"
+        full_dir="${closing_dir}/pending-full"
+        nat_dir="${closing_dir}/pending-nat"
+        dns_dir="${closing_dir}/pending-dns"
+        hup_dir="${closing_dir}/pending-hup"
+        if [ -e "$full_dir" ] || [ -L "$full_dir" ]; then
+            control_intent_dir_is_protected "$full_dir" || return 1
+        fi
+        if [ -e "$nat_dir" ] || [ -L "$nat_dir" ]; then
+            control_intent_dir_is_protected "$nat_dir" || return 1
+        fi
+        if [ -e "$dns_dir" ] || [ -L "$dns_dir" ]; then
+            control_intent_dir_is_protected "$dns_dir" || return 1
+        fi
+        if [ -e "$hup_dir" ] || [ -L "$hup_dir" ]; then
+            control_intent_dir_is_protected "$hup_dir" || return 1
+        fi
+        if [ "$closing_role" != stop ]; then
+            if [ -e "$full_dir" ] || [ -L "$full_dir" ]; then
+                STOPPING_RECOVERED_SIGNAL=SIGUSR1
+            elif [ -e "$nat_dir" ] || [ -L "$nat_dir" ]; then
+                [ "$STOPPING_RECOVERED_SIGNAL" = SIGUSR1 ] ||
+                    STOPPING_RECOVERED_SIGNAL=SIGUSR2
+            fi
+            if [ -e "$dns_dir" ] || [ -L "$dns_dir" ]; then
+                STOPPING_RECOVERED_DNS=yes
+            fi
+            if [ -e "$hup_dir" ] || [ -L "$hup_dir" ]; then
+                STOPPING_RECOVERED_DNS=yes
+                STOPPING_RECOVERED_HUP=yes
+            fi
+        fi
+        recoverable_dirs="$recoverable_dirs $closing_dir"
+    done
+
+    STOPPING_RECOVERY_CLOSING_DIRS="$recoverable_dirs"
+    return 0
+}
+
+remove_preflighted_control_lease_closings() {
+    local gate_startticks="$1"
+    local closing_dir
+    local full_dir
+    local nat_dir
+    local dns_dir
+    local hup_dir
+
+    control_recovery_gate_owned_by_self "$$" "$gate_startticks" ||
+        return 1
+    # The strongest bits have already been published idempotently into the
+    # exact fixed target. A crash or cleanup error from here can only cause a
+    # duplicate replay; it cannot erase the sole durable copy of an intent.
+    for closing_dir in $STOPPING_RECOVERY_CLOSING_DIRS; do
+        # A live releaser may have been observed in its exact rm-owner ->
+        # rmdir window and finish removing that empty closing after preflight.
+        # Gate serialization prevents a replacement generation at this path;
+        # absence is therefore already-completed cleanup, while any present
+        # replacement/type is still validated fail-closed below.
+        if [ ! -e "$closing_dir" ] && [ ! -L "$closing_dir" ]; then
+            continue
+        fi
+        control_lease_dir_is_protected "$closing_dir" || return 1
+        control_lease_closing_has_only_known_entries "$closing_dir" ||
+            return 1
+        if ! read_control_lease_owner "$closing_dir"; then
+            if [ -e "${closing_dir}/owner" ] ||
+               [ -L "${closing_dir}/owner" ] ||
+               [ -e "${closing_dir}/pending-full" ] ||
+               [ -L "${closing_dir}/pending-full" ] ||
+               [ -e "${closing_dir}/pending-nat" ] ||
+               [ -L "${closing_dir}/pending-nat" ] ||
+               [ -e "${closing_dir}/pending-dns" ] ||
+               [ -L "${closing_dir}/pending-dns" ] ||
+               [ -e "${closing_dir}/pending-hup" ] ||
+               [ -L "${closing_dir}/pending-hup" ]; then
+                return 1
+            fi
+            if ! rmdir "$closing_dir" 2>/dev/null &&
+               { [ -e "$closing_dir" ] || [ -L "$closing_dir" ]; }; then
+                return 1
+            fi
+            continue
+        fi
+        control_lease_owner_is_live && return 1
+        full_dir="${closing_dir}/pending-full"
+        nat_dir="${closing_dir}/pending-nat"
+        dns_dir="${closing_dir}/pending-dns"
+        hup_dir="${closing_dir}/pending-hup"
+        if [ -e "$full_dir" ] || [ -L "$full_dir" ]; then
+            control_intent_dir_is_protected "$full_dir" || return 1
+            rmdir "$full_dir" || return 1
+        fi
+        if [ -e "$nat_dir" ] || [ -L "$nat_dir" ]; then
+            control_intent_dir_is_protected "$nat_dir" || return 1
+            rmdir "$nat_dir" || return 1
+        fi
+        if [ -e "$dns_dir" ] || [ -L "$dns_dir" ]; then
+            control_intent_dir_is_protected "$dns_dir" || return 1
+            rmdir "$dns_dir" || return 1
+        fi
+        if [ -e "$hup_dir" ] || [ -L "$hup_dir" ]; then
+            control_intent_dir_is_protected "$hup_dir" || return 1
+            rmdir "$hup_dir" || return 1
+        fi
+        rm -f "${closing_dir}/owner" || return 1
+        rmdir "$closing_dir" || return 1
+    done
+    STOPPING_RECOVERY_CLOSING_DIRS=""
+    return 0
+}
+
+publish_recovered_control_intents_under_gate() {
+    local gate_startticks="$1"
+
+    control_recovery_gate_owned_by_self "$$" "$gate_startticks" ||
+        return 1
+    publish_control_mailbox_work_under_gate \
+        "$STOPPING_RECOVERED_SIGNAL" "$STOPPING_RECOVERED_DNS" \
+        "$STOPPING_RECOVERED_HUP" "$gate_startticks"
+}
+
+publish_then_remove_recovered_control_intents_under_gate() {
+    local gate_startticks="$1"
+
+    publish_recovered_control_intents_under_gate "$gate_startticks" ||
+        return 1
+    remove_preflighted_control_lease_closings "$gate_startticks" ||
+        return 1
+    STOPPING_RECOVERED_SIGNAL=""
+    STOPPING_RECOVERED_DNS=no
+    STOPPING_RECOVERED_HUP=no
+    STOPPING_RECOVERY_CLOSING_DIRS=""
+    return 0
+}
+
+acquire_control_lease() {
+    local role="$1"
+    local pid="$$"
+    local startticks
+    local owner_candidate
+    local attempt=0
+    local recover_status
+
+    STOPPING_CONTROL_LEASE_PID=""
+    STOPPING_CONTROL_LEASE_STARTTICKS=""
+    STOPPING_CONTROL_LEASE_ROLE=""
+    STOPPING_RECOVERED_SIGNAL=""
+    STOPPING_RECOVERED_DNS=no
+    STOPPING_RECOVERED_HUP=no
+    STOPPING_RECOVERY_CLOSING_DIRS=""
+    STOPPING_CONTROL_LEASE_FAIL_OPEN=no
+    case "$role" in
+        start|stop|reload|reapply-dns|reapply-full|reapply-nat|drain) ;;
+        *)
+            log_error "Cannot acquire keen-pbr control lease with role $role"
+            return 1
+            ;;
+    esac
+    if ! stopping_stat_capability_available; then
+        # Old BusyBox builds without the required ownership/mode formats must
+        # not let an unverifiable lease disable ordinary reapply/boot paths.
+        STOPPING_CONTROL_LEASE_FAIL_OPEN=yes
+        return 1
+    fi
+    ensure_stopping_runtime_dir || return 1
+    startticks=$(stopping_process_startticks "$pid") || {
+        log_error "Cannot acquire keen-pbr control lease: caller generation is unavailable"
+        return 1
+    }
+    owner_candidate="${STOPPING_RUNTIME_DIR}/.control-lease-owner.$$"
+    rm -f "$owner_candidate"
+    if ! (umask 077; printf '%s %s %s %s\n' \
+        "$STOPPING_CONTROL_LEASE_MAGIC" "$role" "$pid" "$startticks" > \
+        "$owner_candidate"); then
+        rm -f "$owner_candidate"
+        log_error "Cannot write keen-pbr control lease candidate"
+        return 1
+    fi
+
+    # Serialize the check/create/recover sequence itself. A live owner holds
+    # this gate only for local filesystem operations, so bounded contenders
+    # wait for publication and then either queue behind the new lease or take
+    # it. A stale/unverifiable gate is deliberately fail-closed until startup
+    # reboot cleanup; trying to recover that lock concurrently would recreate
+    # ABA.
+    if ! acquire_control_recovery_gate_bounded \
+        "$startticks" "control lease acquisition"; then
+        rm -f "$owner_candidate"
+        return 1
+    fi
+    if ! recover_orphaned_control_work_files_under_gate "$startticks" ||
+       ! preflight_orphaned_control_lease_closings "$startticks"; then
+        rm -f "$owner_candidate"
+        log_error "Cannot preflight orphaned keen-pbr control lease intent"
+        finish_control_lease_acquisition 1 "$startticks"
+        return "$STOPPING_CONTROL_ACQUIRE_RESULT"
+    fi
+    if ! publish_then_remove_recovered_control_intents_under_gate \
+        "$startticks"; then
+        rm -f "$owner_candidate"
+        log_error "Cannot publish orphaned keen-pbr control mailbox intent"
+        finish_control_lease_acquisition 1 "$startticks"
+        return "$STOPPING_CONTROL_ACQUIRE_RESULT"
+    fi
+
+    while [ "$attempt" -lt 3 ]; do
+        if (umask 077; mkdir "$STOPPING_CONTROL_LEASE_DIR" 2>/dev/null); then
+            if ln "$owner_candidate" "$STOPPING_CONTROL_LEASE_OWNER" \
+                2>/dev/null && read_control_lease_owner &&
+               [ "$STOPPING_CONTROL_OWNER_ROLE" = "$role" ] &&
+               [ "$STOPPING_CONTROL_OWNER_PID" = "$pid" ] &&
+               [ "$STOPPING_CONTROL_OWNER_STARTTICKS" = "$startticks" ]; then
+                rm -f "$owner_candidate"
+                STOPPING_CONTROL_LEASE_PID="$pid"
+                STOPPING_CONTROL_LEASE_STARTTICKS="$startticks"
+                STOPPING_CONTROL_LEASE_ROLE="$role"
+                finish_control_lease_acquisition 0 "$startticks"
+                return "$STOPPING_CONTROL_ACQUIRE_RESULT"
+            fi
+            rm -f "$owner_candidate"
+            log_error "Cannot publish or verify keen-pbr control lease ownership"
+            finish_control_lease_acquisition 1 "$startticks"
+            return "$STOPPING_CONTROL_ACQUIRE_RESULT"
+        fi
+
+        if read_control_lease_owner && control_lease_owner_is_live; then
+            rm -f "$owner_candidate"
+            finish_control_lease_acquisition 2 "$startticks"
+            return "$STOPPING_CONTROL_ACQUIRE_RESULT"
+        fi
+        recover_stale_control_lease "$startticks"
+        recover_status=$?
+        if [ "$recover_status" -eq 2 ]; then
+            rm -f "$owner_candidate"
+            finish_control_lease_acquisition 2 "$startticks"
+            return "$STOPPING_CONTROL_ACQUIRE_RESULT"
+        fi
+        if [ "$recover_status" -ne 0 ]; then
+            rm -f "$owner_candidate"
+            log_error "Cannot recover unverifiable keen-pbr control lease"
+            finish_control_lease_acquisition 1 "$startticks"
+            return "$STOPPING_CONTROL_ACQUIRE_RESULT"
+        fi
+        if ! preflight_orphaned_control_lease_closings "$startticks" ||
+           ! publish_then_remove_recovered_control_intents_under_gate \
+               "$startticks"; then
+            rm -f "$owner_candidate"
+            log_error "Cannot publish quarantined stale keen-pbr control lease"
+            finish_control_lease_acquisition 1 "$startticks"
+            return "$STOPPING_CONTROL_ACQUIRE_RESULT"
+        fi
+        attempt=$((attempt + 1))
+    done
+
+    rm -f "$owner_candidate"
+    log_error "Cannot acquire keen-pbr control lease after stale recovery"
+    finish_control_lease_acquisition 1 "$startticks"
+    return "$STOPPING_CONTROL_ACQUIRE_RESULT"
+}
+
+control_intent_dir_is_protected() {
+    local intent_dir="$1"
+    local metadata
+
+    [ -d "$intent_dir" ] || return 1
+    [ ! -L "$intent_dir" ] || return 1
+    metadata=$(path_owner_group_mode "$intent_dir") || return 1
+    [ "$metadata" = "0:0:700" ]
+}
+
+queue_control_lease_intent_under_gate() {
+    local intent="$1"
+    local gate_startticks="$2"
+
+    control_recovery_gate_owned_by_self "$$" "$gate_startticks" ||
+        return 1
+    case "$intent" in
+        SIGUSR1)
+            publish_control_mailbox_work_under_gate \
+                SIGUSR1 no no "$gate_startticks"
+            ;;
+        SIGUSR2)
+            publish_control_mailbox_work_under_gate \
+                SIGUSR2 no no "$gate_startticks"
+            ;;
+        DNS)
+            publish_control_mailbox_work_under_gate \
+                "" yes no "$gate_startticks"
+            ;;
+        HUP)
+            publish_control_mailbox_work_under_gate \
+                "" yes yes "$gate_startticks"
+            ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
+queue_control_lease_intent() {
+    local intent="$1"
+    local startticks
+    local result=0
+
+    startticks=$(stopping_process_startticks "$$") || return 1
+    if ! acquire_control_recovery_gate_bounded \
+        "$startticks" "control intent publication"; then
+        return 1
+    fi
+    if ! queue_control_lease_intent_under_gate "$intent" "$startticks"; then
+        result=1
+    fi
+    if ! release_control_recovery_gate "$startticks"; then
+        result=1
+    fi
+    return "$result"
+}
+
+queue_control_lease_work() {
+    local signal="$1"
+    local dns="$2"
+    local hup="$3"
+
+    case "$signal" in
+        ''|SIGUSR1|SIGUSR2) ;;
+        *) return 1 ;;
+    esac
+    case "$dns:$hup" in
+        yes:yes|yes:no|no:no) ;;
+        *) return 1 ;;
+    esac
+    publish_control_mailbox_work "$signal" "$dns" "$hup"
+}
+
+release_control_lease() {
+    local closing_dir
+    local full_dir
+    local nat_dir
+    local dns_dir
+    local hup_dir
+    local lease_role
+    local lease_pid
+    local lease_startticks
+    local legacy_signal=""
+    local legacy_dns=no
+    local legacy_hup=no
+    local mailbox_signal=""
+    local mailbox_dns=no
+    local mailbox_hup=no
+
+    STOPPING_TRAILING_SIGNAL=""
+    STOPPING_TRAILING_DNS=no
+    STOPPING_TRAILING_HUP=no
+    if [ -z "$STOPPING_CONTROL_LEASE_PID" ]; then
+        return 0
+    fi
+    lease_role="$STOPPING_CONTROL_LEASE_ROLE"
+    lease_pid="$STOPPING_CONTROL_LEASE_PID"
+    lease_startticks="$STOPPING_CONTROL_LEASE_STARTTICKS"
+    if ! acquire_control_recovery_gate_bounded \
+        "$lease_startticks" "control lease detach"; then
+        return 1
+    fi
+    if ! control_lease_owned_by_self; then
+        log_error "Cannot release a keen-pbr control lease owned by another generation"
+        release_control_recovery_gate "$lease_startticks" || true
+        return 1
+    fi
+    closing_dir="${STOPPING_RUNTIME_DIR}/.control-lease-closing.$$"
+    if [ -e "$closing_dir" ] || [ -L "$closing_dir" ]; then
+        log_error "Cannot detach keen-pbr control lease: closing path already exists"
+        release_control_recovery_gate "$lease_startticks" || true
+        return 1
+    fi
+
+    # Import any pre-mailbox lease bits left by an interrupted older process.
+    # The single mailbox file is published atomically before these directories
+    # are removed, so a crash can only replay a duplicate.
+    full_dir="${STOPPING_CONTROL_LEASE_DIR}/pending-full"
+    nat_dir="${STOPPING_CONTROL_LEASE_DIR}/pending-nat"
+    dns_dir="${STOPPING_CONTROL_LEASE_DIR}/pending-dns"
+    hup_dir="${STOPPING_CONTROL_LEASE_DIR}/pending-hup"
+    if [ -e "$full_dir" ] || [ -L "$full_dir" ]; then
+        control_intent_dir_is_protected "$full_dir" || {
+            release_control_recovery_gate "$lease_startticks" || true
+            return 1
+        }
+        legacy_signal=SIGUSR1
+    elif [ -e "$nat_dir" ] || [ -L "$nat_dir" ]; then
+        control_intent_dir_is_protected "$nat_dir" || {
+            release_control_recovery_gate "$lease_startticks" || true
+            return 1
+        }
+        legacy_signal=SIGUSR2
+    fi
+    if [ -e "$dns_dir" ] || [ -L "$dns_dir" ]; then
+        control_intent_dir_is_protected "$dns_dir" || {
+            release_control_recovery_gate "$lease_startticks" || true
+            return 1
+        }
+        legacy_dns=yes
+    fi
+    if [ -e "$hup_dir" ] || [ -L "$hup_dir" ]; then
+        control_intent_dir_is_protected "$hup_dir" || {
+            release_control_recovery_gate "$lease_startticks" || true
+            return 1
+        }
+        legacy_dns=yes
+        legacy_hup=yes
+    fi
+    publish_control_mailbox_work_under_gate \
+        "$legacy_signal" "$legacy_dns" "$legacy_hup" \
+        "$lease_startticks" || {
+        release_control_recovery_gate "$lease_startticks" || true
+        return 1
+    }
+    if [ -e "$full_dir" ] || [ -L "$full_dir" ]; then
+        rmdir "$full_dir" || {
+            release_control_recovery_gate "$lease_startticks" || true
+            return 1
+        }
+    fi
+    if [ -e "$nat_dir" ] || [ -L "$nat_dir" ]; then
+        control_intent_dir_is_protected "$nat_dir" && rmdir "$nat_dir" || {
+            release_control_recovery_gate "$lease_startticks" || true
+            return 1
+        }
+    fi
+    if [ -e "$dns_dir" ] || [ -L "$dns_dir" ]; then
+        rmdir "$dns_dir" || {
+            release_control_recovery_gate "$lease_startticks" || true
+            return 1
+        }
+    fi
+    if [ -e "$hup_dir" ] || [ -L "$hup_dir" ]; then
+        rmdir "$hup_dir" || {
+            release_control_recovery_gate "$lease_startticks" || true
+            return 1
+        }
+    fi
+
+    # Detach only after every legacy bit has a durable mailbox copy. New hook
+    # publications serialize on the same gate: either this owner snapshots
+    # them below, or their publisher observes no fixed owner and drains them.
+    if ! mv "$STOPPING_CONTROL_LEASE_DIR" "$closing_dir"; then
+        log_error "Cannot atomically detach the exact keen-pbr control lease"
+        release_control_recovery_gate "$lease_startticks" || true
+        return 1
+    fi
+    if [ -e "$STOPPING_CONTROL_MAILBOX" ] ||
+       [ -L "$STOPPING_CONTROL_MAILBOX" ]; then
+        if ! read_control_work_file "$STOPPING_CONTROL_MAILBOX" ||
+           [ "$CONTROL_WORK_ROLE" != pending ]; then
+            release_control_recovery_gate "$lease_startticks" || true
+            return 1
+        fi
+        mailbox_signal="$CONTROL_WORK_SIGNAL"
+        mailbox_dns="$CONTROL_WORK_DNS"
+        mailbox_hup="$CONTROL_WORK_HUP"
+    fi
+    if ! release_control_recovery_gate "$lease_startticks"; then
+        return 1
+    fi
+    if ! read_control_lease_owner "$closing_dir" ||
+       [ "$STOPPING_CONTROL_OWNER_ROLE" != "$lease_role" ] ||
+       [ "$STOPPING_CONTROL_OWNER_PID" != "$lease_pid" ] ||
+       [ "$STOPPING_CONTROL_OWNER_STARTTICKS" != \
+           "$lease_startticks" ]; then
+        log_error "Detached keen-pbr control lease changed ownership"
+        return 1
+    fi
+    if ! rm -f "${closing_dir}/owner"; then
+        log_error "Cannot remove detached keen-pbr control lease"
+        return 1
+    fi
+    if ! rmdir "$closing_dir" 2>/dev/null &&
+       { [ -e "$closing_dir" ] || [ -L "$closing_dir" ]; }; then
+        log_error "Cannot remove detached keen-pbr control lease"
+        return 1
+    fi
+
+    STOPPING_CONTROL_LEASE_PID=""
+    STOPPING_CONTROL_LEASE_STARTTICKS=""
+    STOPPING_CONTROL_LEASE_ROLE=""
+    STOPPING_TRAILING_SIGNAL="$mailbox_signal"
+    STOPPING_TRAILING_DNS="$mailbox_dns"
+    STOPPING_TRAILING_HUP="$mailbox_hup"
+    return 0
+}
+
+read_stopping_marker() {
+    local metadata
+    local magic
+    local phase
+    local pid
+    local startticks
+    local controller_pid
+    local controller_startticks
+    local extra
+
+    STOPPING_MARKER_PID=""
+    STOPPING_MARKER_STARTTICKS=""
+    STOPPING_MARKER_PHASE=""
+    STOPPING_MARKER_CONTROLLER_PID=""
+    STOPPING_MARKER_CONTROLLER_STARTTICKS=""
+    stopping_runtime_dir_is_protected || return 1
+    [ -f "$STOPPING_MARKER" ] || return 1
+    [ ! -L "$STOPPING_MARKER" ] || return 1
+    metadata=$(path_owner_group_mode "$STOPPING_MARKER") ||
+        return 1
+    [ "$metadata" = "0:0:600" ] || return 1
+    IFS=' ' read -r magic phase pid startticks controller_pid \
+        controller_startticks extra < "$STOPPING_MARKER" ||
+        return 1
+    [ "$magic" = "$STOPPING_MARKER_MAGIC" ] || return 1
+    [ -z "$extra" ] || return 1
+    case "$phase" in admitted|mutating) ;; *) return 1 ;; esac
+    case "$pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    case "$startticks" in
+        ''|*[!0-9]*|0) return 1 ;;
+    esac
+    case "$controller_pid" in
+        ''|0|*[!0-9]*) return 1 ;;
+    esac
+    case "$controller_startticks" in
+        ''|0|*[!0-9]*) return 1 ;;
+    esac
+    STOPPING_MARKER_PID="$pid"
+    STOPPING_MARKER_STARTTICKS="$startticks"
+    STOPPING_MARKER_PHASE="$phase"
+    STOPPING_MARKER_CONTROLLER_PID="$controller_pid"
+    STOPPING_MARKER_CONTROLLER_STARTTICKS="$controller_startticks"
+}
+
+remove_stopping_marker_if_exact() {
+    local expected_phase="$1"
+    local expected_pid="$2"
+    local expected_startticks="$3"
+    local expected_controller_pid="$4"
+    local expected_controller_startticks="$5"
+
+    read_stopping_marker || return 1
+    [ "$STOPPING_MARKER_PHASE" = "$expected_phase" ] || return 1
+    [ "$STOPPING_MARKER_PID" = "$expected_pid" ] || return 1
+    [ "$STOPPING_MARKER_STARTTICKS" = "$expected_startticks" ] || return 1
+    [ "$STOPPING_MARKER_CONTROLLER_PID" = "$expected_controller_pid" ] ||
+        return 1
+    [ "$STOPPING_MARKER_CONTROLLER_STARTTICKS" = \
+        "$expected_controller_startticks" ] || return 1
+    rm -f "$STOPPING_MARKER"
+}
+
+stopping_marker_daemon_generation_is_live() {
+    local pid
+    local startticks
+    local current_pid
+    local current_startticks
+
+    pid="$STOPPING_MARKER_PID"
+    startticks="$STOPPING_MARKER_STARTTICKS"
+    [ -s "$PIDFILE" ] || return 1
+    read -r current_pid < "$PIDFILE" || return 1
+    [ "$current_pid" = "$pid" ] || return 1
+    current_startticks=$(stopping_process_startticks "$pid") || return 1
+    [ "$current_startticks" = "$startticks" ] || return 1
+}
+
+stopping_marker_controller_generation_is_live() {
+    local controller_startticks
+
+    controller_startticks=$(stopping_process_startticks \
+        "$STOPPING_MARKER_CONTROLLER_PID") || return 1
+    [ "$controller_startticks" = \
+        "$STOPPING_MARKER_CONTROLLER_STARTTICKS" ]
+}
+
+stopping_marker_is_live_admission() {
+    read_stopping_marker || return 1
+    [ "$STOPPING_MARKER_PHASE" = admitted ] || return 1
+    stopping_marker_daemon_generation_is_live || return 1
+    stopping_marker_controller_generation_is_live
+}
+
+# Pre-mutation admission never drops work: hooks append to the durable mailbox
+# and the stop lease keeps them from signalling the daemon. Once the marker is
+# atomically promoted to mutating, an interrupted controller must fail closed
+# and teardown churn is suppressed. A live PID reuse still invalidates the
+# historical daemon generation.
+stopping_marker_authorizes_runtime_suppression() {
+    local current_startticks
+
+    read_stopping_marker || return 1
+    [ "$STOPPING_MARKER_PHASE" = mutating ] || return 1
+
+    current_startticks=$(stopping_process_startticks \
+        "$STOPPING_MARKER_PID" 2>/dev/null || true)
+    [ -z "$current_startticks" ] ||
+        [ "$current_startticks" = "$STOPPING_MARKER_STARTTICKS" ]
+}
+
+stopping_marker_is_exact_admission() {
+    read_stopping_marker || return 1
+    [ "$STOPPING_MARKER_PHASE" = "$STOPPING_ADMISSION_PHASE" ] || return 1
+    [ "$STOPPING_MARKER_PID" = "$STOPPING_ADMISSION_PID" ] || return 1
+    [ "$STOPPING_MARKER_STARTTICKS" = \
+        "$STOPPING_ADMISSION_STARTTICKS" ] || return 1
+    [ "$STOPPING_MARKER_CONTROLLER_PID" = \
+        "$STOPPING_ADMISSION_CONTROLLER_PID" ] || return 1
+    [ "$STOPPING_MARKER_CONTROLLER_STARTTICKS" = \
+        "$STOPPING_ADMISSION_CONTROLLER_STARTTICKS" ]
+}
+
+clear_stale_control_recovery_gate_for_start() {
+    local attempt=0
+
+    while [ "$attempt" -lt 3 ]; do
+        if [ ! -e "$STOPPING_CONTROL_RECOVERY_GATE_DIR" ] &&
+           [ ! -L "$STOPPING_CONTROL_RECOVERY_GATE_DIR" ]; then
+            return 0
+        fi
+        if read_control_recovery_gate_owner &&
+           control_recovery_gate_owner_is_live; then
+            # The acquisition path below performs the bounded wait. Do not
+            # interfere with the live controller's owner-unlink/rmdir window.
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        [ "$attempt" -lt 3 ] && sleep 1
+    done
+    if [ ! -e "$STOPPING_CONTROL_RECOVERY_GATE_DIR" ] &&
+       [ ! -L "$STOPPING_CONTROL_RECOVERY_GATE_DIR" ]; then
+        return 0
+    fi
+    # There is no POSIX/BusyBox compare-and-swap unlink for a fixed directory.
+    # Trying to repair this gate from another live init action can delete a
+    # replacement generation (ABA) or interfere with its final release. Keep
+    # it fail-closed; /var/run is tmpfs and a router reboot clears this
+    # millisecond-window crash residue without touching persistent config.
+    log_error "Keen-pbr control recovery gate is still present; reboot is required for safe tmpfs cleanup"
+    return 1
+}
+
+clear_stale_stopping_marker_for_start() {
+    local pid
+    local startticks
+    local phase
+    local controller_pid
+    local controller_startticks
+
+    if [ ! -e "$STOPPING_MARKER" ] && [ ! -L "$STOPPING_MARKER" ]; then
+        return 0
+    fi
+    # The admitted daemon may already be dead while its serialized stop owner
+    # is still cleaning DNS/firewall/FastNAT. That marker is active cleanup
+    # authority, not stale startup residue.
+    if read_control_lease_owner && control_lease_owner_is_live &&
+       [ "$STOPPING_CONTROL_OWNER_ROLE" = stop ]; then
+        log_error "Cannot start keen-pbr while serialized shutdown cleanup is active"
+        return 1
+    fi
+    # Malformed or unverifiable pre-v3 state cannot authorize suppression and
+    # is left untouched. A valid mutating marker is different: it is explicit
+    # crash authority for a partially torn-down runtime and must fail closed
+    # until a serialized stop completes cleanup (or tmpfs is reboot-cleared).
+    read_stopping_marker || return 0
+    pid="$STOPPING_MARKER_PID"
+    startticks="$STOPPING_MARKER_STARTTICKS"
+    phase="$STOPPING_MARKER_PHASE"
+    controller_pid="$STOPPING_MARKER_CONTROLLER_PID"
+    controller_startticks="$STOPPING_MARKER_CONTROLLER_STARTTICKS"
+    if [ "$phase" = mutating ]; then
+        log_error "Cannot start keen-pbr while an uncertain shutdown requires cleanup"
+        return 1
+    fi
+    if stopping_marker_is_live_admission; then
+        log_error "Cannot start keen-pbr while shutdown is active for PID $pid"
+        return 1
+    fi
+    if ! remove_stopping_marker_if_exact "$phase" "$pid" "$startticks" \
+        "$controller_pid" "$controller_startticks"; then
+        log_error "Stop-admission marker changed while stale state was being cleared"
+        return 1
+    fi
+    log "Cleared stale keen-pbr stop-admission marker for PID $pid"
+}
+
+adopt_mutating_stopping_marker() {
+    local controller_startticks="$1"
+    local expected_pid="$STOPPING_MARKER_PID"
+    local expected_startticks="$STOPPING_MARKER_STARTTICKS"
+    local expected_controller_pid="$STOPPING_MARKER_CONTROLLER_PID"
+    local expected_controller_startticks="$STOPPING_MARKER_CONTROLLER_STARTTICKS"
+    local temp_marker="${STOPPING_RUNTIME_DIR}/.stopping-adopt.$$"
+
+    [ "$STOPPING_MARKER_PHASE" = mutating ] || return 1
+    control_lease_owned_by_self || return 1
+    rm -f "$temp_marker"
+    if ! (umask 077; printf '%s %s %s %s %s %s\n' \
+        "$STOPPING_MARKER_MAGIC" mutating "$expected_pid" \
+        "$expected_startticks" "$$" "$controller_startticks" > \
+        "$temp_marker"); then
+        rm -f "$temp_marker"
+        return 1
+    fi
+    # The lease serializes lifecycle writers; the exact re-read prevents an
+    # unexpected marker generation from being overwritten during adoption.
+    if ! read_stopping_marker ||
+       [ "$STOPPING_MARKER_PHASE" != mutating ] ||
+       [ "$STOPPING_MARKER_PID" != "$expected_pid" ] ||
+       [ "$STOPPING_MARKER_STARTTICKS" != "$expected_startticks" ] ||
+       [ "$STOPPING_MARKER_CONTROLLER_PID" != \
+           "$expected_controller_pid" ] ||
+       [ "$STOPPING_MARKER_CONTROLLER_STARTTICKS" != \
+           "$expected_controller_startticks" ] ||
+       ! mv "$temp_marker" "$STOPPING_MARKER"; then
+        rm -f "$temp_marker"
+        return 1
+    fi
+    STOPPING_ADMISSION_PID="$expected_pid"
+    STOPPING_ADMISSION_STARTTICKS="$expected_startticks"
+    STOPPING_ADMISSION_PHASE=mutating
+    STOPPING_ADMISSION_CONTROLLER_PID="$$"
+    STOPPING_ADMISSION_CONTROLLER_STARTTICKS="$controller_startticks"
+    stopping_marker_is_exact_admission
+}
+
+begin_stopping_marker() {
+    local pid
+    local startticks
+    local current_startticks
+    local controller_startticks
+    local temp_marker
+    local attempt=0
+    local live_pids
+
+    STOPPING_ADMISSION_PID=""
+    STOPPING_ADMISSION_STARTTICKS=""
+    STOPPING_ADMISSION_PHASE=""
+    STOPPING_ADMISSION_CONTROLLER_PID=""
+    STOPPING_ADMISSION_CONTROLLER_STARTTICKS=""
+    if ! control_lease_owned_by_self; then
+        log_error "Cannot admit shutdown without owning the keen-pbr control lease"
+        return 1
+    fi
+    # The project pidof wrapper removes a stale PID file and still discovers a
+    # live daemon from /proc. This lets an interrupted mutating stop be adopted
+    # even when the killed daemon left its old PID file behind.
+    live_pids=$(pidof "$PROCS" 2>/dev/null || true)
+    controller_startticks=$(stopping_process_startticks "$$") || {
+        log_error "Cannot admit shutdown: stop controller generation is unavailable"
+        return 1
+    }
+    if [ ! -s "$PIDFILE" ]; then
+        if [ -n "$live_pids" ]; then
+            log_error "Cannot admit shutdown: a keen-pbr daemon is live but $PIDFILE is unavailable"
+            return 1
+        fi
+        if [ -e "$STOPPING_MARKER" ] || [ -L "$STOPPING_MARKER" ]; then
+            if ! read_stopping_marker; then
+                log_error "Cannot resume cleanup: existing stop-admission path is not an owned marker"
+                return 1
+            fi
+            current_startticks=$(stopping_process_startticks \
+                "$STOPPING_MARKER_PID" 2>/dev/null || true)
+            if [ -n "$current_startticks" ] &&
+               [ "$current_startticks" = \
+                   "$STOPPING_MARKER_STARTTICKS" ]; then
+                log_error "Cannot resume cleanup without a PID file while the admitted daemon generation is live"
+                return 1
+            fi
+            if [ "$STOPPING_MARKER_PHASE" = mutating ]; then
+                # A former stop removed the daemon/PID file but failed during
+                # exact cleanup. Retain its fail-closed marker until this
+                # serialized attempt completes successfully.
+                adopt_mutating_stopping_marker "$controller_startticks" || {
+                    log_error "Cannot adopt uncertain stop marker safely"
+                    return 1
+                }
+                log "Adopted uncertain stop marker for cleanup completion"
+            elif ! remove_stopping_marker_if_exact \
+                "$STOPPING_MARKER_PHASE" "$STOPPING_MARKER_PID" \
+                "$STOPPING_MARKER_STARTTICKS" \
+                "$STOPPING_MARKER_CONTROLLER_PID" \
+                "$STOPPING_MARKER_CONTROLLER_STARTTICKS"; then
+                log_error "Cannot clear dead pre-mutation stop admission safely"
+                return 1
+            else
+                log "Cleared dead pre-mutation stop admission"
+            fi
+        fi
+        return 0
+    fi
+    validate_service_pid "shutdown admission" || return 1
+    pid="$VALIDATED_SERVICE_PID"
+    startticks=$(stopping_process_startticks "$pid") || {
+        log_error "Cannot admit shutdown: process generation for keen-pbr PID $pid is unavailable"
+        return 1
+    }
+    ensure_stopping_runtime_dir || return 1
+    temp_marker="${STOPPING_RUNTIME_DIR}/.stopping.$$"
+
+    while [ "$attempt" -lt 2 ]; do
+        rm -f "$temp_marker"
+        if ! (umask 077; printf '%s %s %s %s %s %s\n' \
+            "$STOPPING_MARKER_MAGIC" admitted "$pid" "$startticks" \
+            "$$" "$controller_startticks" > "$temp_marker"); then
+            rm -f "$temp_marker"
+            log_error "Cannot write stop-admission marker candidate $temp_marker"
+            return 1
+        fi
+        if ln "$temp_marker" "$STOPPING_MARKER" 2>/dev/null; then
+            rm -f "$temp_marker"
+            STOPPING_ADMISSION_PID="$pid"
+            STOPPING_ADMISSION_STARTTICKS="$startticks"
+            STOPPING_ADMISSION_PHASE=admitted
+            STOPPING_ADMISSION_CONTROLLER_PID="$$"
+            STOPPING_ADMISSION_CONTROLLER_STARTTICKS="$controller_startticks"
+            return 0
+        fi
+        rm -f "$temp_marker"
+
+        if ! read_stopping_marker; then
+            log_error "Cannot publish stop-admission marker: existing path is not an owned marker"
+            return 1
+        fi
+        if [ "$STOPPING_MARKER_PID" = "$pid" ] &&
+           [ "$STOPPING_MARKER_STARTTICKS" = "$startticks" ]; then
+            current_startticks=$(stopping_process_startticks \
+                "$STOPPING_MARKER_CONTROLLER_PID" 2>/dev/null || true)
+            if [ -n "$current_startticks" ] &&
+               [ "$current_startticks" = \
+                   "$STOPPING_MARKER_CONTROLLER_STARTTICKS" ]; then
+                log_error "Cannot admit shutdown: another live stop controller owns keen-pbr PID $pid"
+                return 1
+            fi
+            if [ "$STOPPING_MARKER_PHASE" = mutating ]; then
+                adopt_mutating_stopping_marker "$controller_startticks" || {
+                    log_error "Cannot adopt interrupted mutating stop safely"
+                    return 1
+                }
+                log "Adopted interrupted mutating stop for PID $pid"
+                return 0
+            fi
+            if ! remove_stopping_marker_if_exact \
+                "$STOPPING_MARKER_PHASE" "$pid" "$startticks" \
+                "$STOPPING_MARKER_CONTROLLER_PID" \
+                "$STOPPING_MARKER_CONTROLLER_STARTTICKS"; then
+                log_error "Cannot replace dead stop-controller admission safely"
+                return 1
+            fi
+            attempt=$((attempt + 1))
+            continue
+        fi
+        if [ "$STOPPING_MARKER_PHASE" = mutating ]; then
+            log_error "Cannot admit shutdown while an earlier uncertain teardown requires cleanup"
+            return 1
+        fi
+        current_startticks=$(stopping_process_startticks \
+            "$STOPPING_MARKER_PID" 2>/dev/null || true)
+        if [ -n "$current_startticks" ] &&
+           [ "$current_startticks" = "$STOPPING_MARKER_STARTTICKS" ]; then
+            log_error "Cannot admit shutdown: another stop owns live keen-pbr PID $STOPPING_MARKER_PID"
+            return 1
+        fi
+        if ! remove_stopping_marker_if_exact \
+            "$STOPPING_MARKER_PHASE" "$STOPPING_MARKER_PID" \
+            "$STOPPING_MARKER_STARTTICKS" \
+            "$STOPPING_MARKER_CONTROLLER_PID" \
+            "$STOPPING_MARKER_CONTROLLER_STARTTICKS"; then
+            log_error "Cannot replace stale stop-admission marker safely"
+            return 1
+        fi
+        attempt=$((attempt + 1))
+    done
+
+    log_error "Cannot publish stop-admission marker after stale-state cleanup"
+    return 1
+}
+
+mark_stopping_mutation_started() {
+    local temp_marker
+
+    # Stopping an already absent daemon has no daemon generation to fence. The
+    # control lease still serializes its idempotent cleanup path.
+    [ -n "$STOPPING_ADMISSION_PID" ] || return 0
+    if [ "$STOPPING_ADMISSION_PHASE" = mutating ]; then
+        stopping_marker_is_exact_admission
+        return $?
+    fi
+    [ "$STOPPING_ADMISSION_PHASE" = admitted ] || return 1
+    control_lease_owned_by_self || return 1
+    stopping_marker_is_exact_admission || return 1
+    [ "$STOPPING_ADMISSION_CONTROLLER_PID" = "$$" ] || return 1
+    stopping_marker_controller_generation_is_live || return 1
+
+    temp_marker="${STOPPING_RUNTIME_DIR}/.stopping-mutating.$$"
+    rm -f "$temp_marker"
+    if ! (umask 077; printf '%s %s %s %s %s %s\n' \
+        "$STOPPING_MARKER_MAGIC" mutating \
+        "$STOPPING_ADMISSION_PID" "$STOPPING_ADMISSION_STARTTICKS" \
+        "$STOPPING_ADMISSION_CONTROLLER_PID" \
+        "$STOPPING_ADMISSION_CONTROLLER_STARTTICKS" > "$temp_marker"); then
+        rm -f "$temp_marker"
+        return 1
+    fi
+    # The control lease excludes another lifecycle writer. Re-read the exact
+    # admitted generation immediately before the same-filesystem atomic swap.
+    if ! control_lease_owned_by_self ||
+       ! stopping_marker_is_exact_admission; then
+        rm -f "$temp_marker"
+        return 1
+    fi
+    if ! mv "$temp_marker" "$STOPPING_MARKER"; then
+        rm -f "$temp_marker"
+        return 1
+    fi
+    # From the successful rename onward, any controller failure is an
+    # uncertain teardown and must retain this marker.
+    STOPPING_ADMISSION_PHASE=mutating
+    if ! stopping_marker_is_exact_admission; then
+        log_error "Cannot verify the mutating keen-pbr stop marker"
+        return 1
+    fi
+    return 0
+}
+
+finish_stopping_marker() {
+    if [ -z "$STOPPING_ADMISSION_PID" ]; then
+        return 0
+    fi
+    if ! remove_stopping_marker_if_exact \
+        "$STOPPING_ADMISSION_PHASE" "$STOPPING_ADMISSION_PID" \
+        "$STOPPING_ADMISSION_STARTTICKS" \
+        "$STOPPING_ADMISSION_CONTROLLER_PID" \
+        "$STOPPING_ADMISSION_CONTROLLER_STARTTICKS"; then
+        log_error "Cannot release the exact keen-pbr stop-admission marker"
+        return 1
+    fi
+    STOPPING_ADMISSION_PID=""
+    STOPPING_ADMISSION_STARTTICKS=""
+    STOPPING_ADMISSION_PHASE=""
+    STOPPING_ADMISSION_CONTROLLER_PID=""
+    STOPPING_ADMISSION_CONTROLLER_STARTTICKS=""
+}
+# End netfilter stop admission marker.
+
+validate_service_pid() {
     local signal="$1"
     local pid
+
+    VALIDATED_SERVICE_PID=""
 
     if [ ! -s "$PIDFILE" ]; then
         log_error "Cannot send $signal to keen-pbr: PID file $PIDFILE is missing or empty"
@@ -165,6 +3414,52 @@ signal_service() {
         log_error "Cannot send $signal to keen-pbr: PID file $PIDFILE does not contain a PID"
         return 1
     fi
+    if ! pid_is_keen_pbr "$pid"; then
+        log_error "Cannot send $signal: PID $pid from $PIDFILE is stale or is not keen-pbr"
+        return 1
+    fi
+
+    VALIDATED_SERVICE_PID="$pid"
+}
+
+wait_for_verified_service_start() {
+    local attempt=0
+    local pid
+    local limit=30
+
+    # Entware rc.func backgrounds the service before the daemon constructor
+    # acquires and writes its locked PID file. Treat that short publication
+    # window as startup-in-progress while the start lease is still held.
+    while [ "$attempt" -lt "$limit" ]; do
+        pid=""
+        if [ -s "$PIDFILE" ] &&
+           read -r pid < "$PIDFILE" &&
+           pid_is_keen_pbr "$pid"; then
+            VALIDATED_SERVICE_PID="$pid"
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        [ "$attempt" -lt "$limit" ] && sleep 1
+    done
+
+    validate_service_pid "verified start completion"
+}
+
+signal_service() {
+    local signal="$1"
+    local pid
+
+    validate_service_pid "$signal" || return 1
+    pid="$VALIDATED_SERVICE_PID"
+
+    case "$signal" in
+        SIGUSR1|SIGUSR2)
+            if stopping_marker_authorizes_runtime_suppression; then
+                log "Skipping $signal immediately before keen-pbr shutdown"
+                return 0
+            fi
+            ;;
+    esac
 
     if ! kill "-$signal" "$pid"; then
         log_error "Failed to send $signal to keen-pbr PID $pid from $PIDFILE"
@@ -176,16 +3471,870 @@ signal_service() {
     return 0
 }
 
+reapply_netfilter_runtime_without_lease() {
+    local signal="$1"
+
+    if stopping_marker_authorizes_runtime_suppression; then
+        log "Skipping $signal while keen-pbr shutdown is admitted"
+        return 0
+    fi
+    validate_service_pid "$signal" || return 1
+    ensure_fastnat_disabled || return 1
+    if stopping_marker_authorizes_runtime_suppression; then
+        log "Skipping $signal after keen-pbr shutdown admission"
+        return 0
+    fi
+    signal_service "$signal"
+}
+
+reapply_dns_runtime_without_lease() {
+    local request_hup="$1"
+
+    if stopping_marker_authorizes_runtime_suppression; then
+        log "Skipping DNS refresh while keen-pbr shutdown is mutating"
+        return 0
+    fi
+    validate_service_pid "DNS refresh" || return 1
+    reapply_dnsmasq_config || return 1
+    if stopping_marker_authorizes_runtime_suppression; then
+        log "Skipping HUP after keen-pbr shutdown became mutating"
+        return 0
+    fi
+    [ "$request_hup" != yes ] || signal_service HUP
+}
+
+control_mailbox_has_pending_work() {
+    [ -e "$STOPPING_CONTROL_MAILBOX" ] ||
+        [ -L "$STOPPING_CONTROL_MAILBOX" ] || return 1
+    read_control_work_file "$STOPPING_CONTROL_MAILBOX" || return 0
+    [ "$CONTROL_WORK_ROLE" = pending ]
+}
+
+control_runtime_has_replayable_work() {
+    local work_file
+
+    control_mailbox_has_pending_work && return 0
+    if [ -n "$STOPPING_CONTROL_WORK_PATH" ] &&
+       { [ -e "$STOPPING_CONTROL_WORK_PATH" ] ||
+         [ -L "$STOPPING_CONTROL_WORK_PATH" ]; }; then
+        return 0
+    fi
+    for work_file in \
+        "${STOPPING_RUNTIME_DIR}"/.control-work.* \
+        "${STOPPING_RUNTIME_DIR}"/.control-work-pending.*; do
+        if [ -e "$work_file" ] || [ -L "$work_file" ]; then
+            # A different exact live work owner is already the liveness
+            # authority. Do not create an endless one-second delayed chain
+            # while it is still able to acknowledge its own generation.
+            if read_control_work_file "$work_file" &&
+               [ "$CONTROL_WORK_ROLE" = work ] &&
+               control_work_owner_is_live; then
+                continue
+            fi
+            return 0
+        fi
+    done
+    return 1
+}
+
+control_runtime_has_any_durable_work() {
+    local work_file
+    local work_prefix="${STOPPING_RUNTIME_DIR}/.control-work."
+    local pending_prefix="${STOPPING_RUNTIME_DIR}/.control-work-pending."
+    local work_suffix
+    local pending_pid
+    local pending_startticks
+    local pending_attempt
+    local pending_rest
+    local expected_role
+    local inspected=0
+    local inspect_limit=32
+    local found=no
+
+    if [ -e "$STOPPING_CONTROL_MAILBOX" ] ||
+       [ -L "$STOPPING_CONTROL_MAILBOX" ]; then
+        read_control_work_file "$STOPPING_CONTROL_MAILBOX" || return 1
+        [ "$CONTROL_WORK_ROLE" = pending ] || return 1
+        found=yes
+    fi
+    # This is also the watchdog admission boundary. Preflight the complete
+    # bounded namespace instead of treating an arbitrary symlink/malformed file
+    # as a reason to launch one shell per second forever.
+    for work_file in \
+        "${STOPPING_RUNTIME_DIR}"/.control-work.* \
+        "${STOPPING_RUNTIME_DIR}"/.control-work-pending.*; do
+        if [ ! -e "$work_file" ] && [ ! -L "$work_file" ]; then
+            continue
+        fi
+        inspected=$((inspected + 1))
+        [ "$inspected" -le "$inspect_limit" ] || return 1
+        case "$work_file" in
+            "$pending_prefix"*)
+                work_suffix=${work_file#"$pending_prefix"}
+                pending_pid=${work_suffix%%.*}
+                pending_rest=${work_suffix#*.}
+                [ "$pending_rest" != "$work_suffix" ] || return 1
+                pending_startticks=${pending_rest%%.*}
+                pending_attempt=${pending_rest#*.}
+                [ "$pending_attempt" != "$pending_rest" ] || return 1
+                case "$pending_pid" in ''|0|*[!0-9]*) return 1 ;; esac
+                case "$pending_startticks" in
+                    ''|0|*[!0-9]*) return 1 ;;
+                esac
+                case "$pending_attempt" in
+                    ''|0|*[!0-9]*) return 1 ;;
+                esac
+                expected_role=pending
+                ;;
+            "$work_prefix"*)
+                work_suffix=${work_file#"$work_prefix"}
+                case "$work_suffix" in ''|*[!0-9]*) return 1 ;; esac
+                # claim_control_mailbox_work first renames the fixed pending
+                # file here, then atomically replaces its role with work. A
+                # write/mv failure can therefore leave one valid pending-role
+                # residue in this numeric namespace; orphan recovery accepts
+                # it, so the watchdog admission boundary must accept it too.
+                expected_role=work-or-pending
+                ;;
+            *) return 1 ;;
+        esac
+        read_control_work_file "$work_file" || return 1
+        case "$expected_role:$CONTROL_WORK_ROLE" in
+            pending:pending|work-or-pending:work|work-or-pending:pending) ;;
+            *) return 1 ;;
+        esac
+        found=yes
+    done
+    [ "$found" = yes ]
+}
+
+execute_claimed_control_mailbox_work() {
+    local result=0
+
+    if [ -n "$STOPPING_CONTROL_WORK_SIGNAL" ] &&
+       ! reapply_netfilter_runtime_without_lease \
+           "$STOPPING_CONTROL_WORK_SIGNAL"; then
+        result=1
+    fi
+    if [ "$STOPPING_CONTROL_WORK_DNS" = yes ] &&
+       ! reapply_dns_runtime_without_lease \
+           "$STOPPING_CONTROL_WORK_HUP"; then
+        result=1
+    fi
+    return "$result"
+}
+
+claim_control_drain_token() {
+    local startticks
+    local candidate="${STOPPING_RUNTIME_DIR}/.control-drain-token.$$"
+    local result=0
+
+    STOPPING_CONTROL_DRAIN_OBSERVED_PID=""
+    STOPPING_CONTROL_DRAIN_OBSERVED_STARTTICKS=""
+    startticks=$(stopping_process_startticks "$$") || return 1
+    acquire_control_recovery_gate_bounded \
+        "$startticks" "delayed mailbox drain token" || return 1
+    if [ -e "$STOPPING_CONTROL_DRAIN_TOKEN" ] ||
+       [ -L "$STOPPING_CONTROL_DRAIN_TOKEN" ]; then
+        if ! read_control_work_file "$STOPPING_CONTROL_DRAIN_TOKEN"; then
+            release_control_recovery_gate "$startticks" || true
+            return 1
+        fi
+        if control_work_owner_is_live; then
+            # Capture the exact generation while the recovery gate still
+            # serializes token replacement. A status=2 successor must not
+            # re-read the fixed pathname after its predecessor can release it.
+            STOPPING_CONTROL_DRAIN_OBSERVED_PID="$CONTROL_WORK_PID"
+            STOPPING_CONTROL_DRAIN_OBSERVED_STARTTICKS="$CONTROL_WORK_STARTTICKS"
+            release_control_recovery_gate "$startticks" || return 1
+            return 2
+        fi
+        rm -f "$STOPPING_CONTROL_DRAIN_TOKEN" || result=1
+    fi
+    if [ "$result" -eq 0 ]; then
+        write_control_work_candidate "$candidate" work "$$" "$startticks" \
+            "" no no || result=1
+    fi
+    if [ "$result" -eq 0 ] &&
+       ! mv "$candidate" "$STOPPING_CONTROL_DRAIN_TOKEN"; then
+        rm -f "$candidate"
+        result=1
+    fi
+    release_control_recovery_gate "$startticks" || result=1
+    return "$result"
+}
+
+release_control_drain_token() {
+    local startticks
+    local result=0
+
+    startticks=$(stopping_process_startticks "$$") || return 1
+    acquire_control_recovery_gate_bounded \
+        "$startticks" "delayed mailbox drain token release" || return 1
+    if ! read_control_work_file "$STOPPING_CONTROL_DRAIN_TOKEN" ||
+       [ "$CONTROL_WORK_ROLE" != work ] ||
+       [ "$CONTROL_WORK_PID" != "$$" ] ||
+       [ "$CONTROL_WORK_STARTTICKS" != "$startticks" ]; then
+        result=1
+    elif ! rm -f "$STOPPING_CONTROL_DRAIN_TOKEN"; then
+        result=1
+    fi
+    release_control_recovery_gate "$startticks" || result=1
+    return "$result"
+}
+
+arm_control_mailbox_watchdog() {
+    local predecessor_pid="${1:-}"
+    local predecessor_startticks="${2:-}"
+    local delay_seconds="${3:-1}"
+
+    case "$delay_seconds" in 1|2|4|8|16|32|60) ;; *) return 1 ;; esac
+
+    (
+        sleep "$delay_seconds"
+        KEEN_PBR_DELAYED_DRAIN=yes \
+        KEEN_PBR_WATCHDOG_DELAY_SECONDS="$delay_seconds" \
+        KEEN_PBR_WATCHDOG_PREDECESSOR_PID="$predecessor_pid" \
+        KEEN_PBR_WATCHDOG_PREDECESSOR_STARTTICKS="$predecessor_startticks" \
+            "$0" drain-pending-delayed \
+            >/dev/null 2>&1
+    ) &
+    CONTROL_MAILBOX_WATCHDOG_ARMED=yes
+    return 0
+}
+
+schedule_delayed_control_mailbox_drain() {
+    [ "${KEEN_PBR_DELAYED_DRAIN:-no}" != yes ] || return 0
+    arm_control_mailbox_watchdog "" "" 1
+}
+
+arm_control_mailbox_watchdog_successor() {
+    local predecessor_pid="$1"
+    local predecessor_startticks="$2"
+    local next_delay
+
+    case "${KEEN_PBR_WATCHDOG_DELAY_SECONDS:-1}" in
+        1) next_delay=2 ;;
+        2) next_delay=4 ;;
+        4) next_delay=8 ;;
+        8) next_delay=16 ;;
+        16) next_delay=32 ;;
+        32|60) next_delay=60 ;;
+        *) return 1 ;;
+    esac
+    arm_control_mailbox_watchdog \
+        "$predecessor_pid" "$predecessor_startticks" "$next_delay"
+}
+
+control_runtime_daemon_is_verified() {
+    local pid
+
+    [ -s "$PIDFILE" ] || return 1
+    read -r pid < "$PIDFILE" || return 1
+    pid_is_keen_pbr "$pid"
+}
+
+control_drain_token_owned_by_self() {
+    local startticks
+
+    startticks=$(stopping_process_startticks "$$") || return 1
+    read_control_work_file "$STOPPING_CONTROL_DRAIN_TOKEN" || return 1
+    [ "$CONTROL_WORK_ROLE" = work ] &&
+        [ "$CONTROL_WORK_PID" = "$$" ] &&
+        [ "$CONTROL_WORK_STARTTICKS" = "$startticks" ]
+}
+
+control_drain_token_matches_expected_predecessor() {
+    local expected_pid="${KEEN_PBR_WATCHDOG_PREDECESSOR_PID:-}"
+    local expected_startticks="${KEEN_PBR_WATCHDOG_PREDECESSOR_STARTTICKS:-}"
+
+    [ -n "$expected_pid" ] && [ -n "$expected_startticks" ] || return 1
+    [ "$STOPPING_CONTROL_DRAIN_OBSERVED_PID" = "$expected_pid" ] &&
+        [ "$STOPPING_CONTROL_DRAIN_OBSERVED_STARTTICKS" = \
+            "$expected_startticks" ]
+}
+
+arm_control_mailbox_watchdog_for_current_owner() {
+    local startticks
+
+    if [ "${KEEN_PBR_DELAYED_DRAIN:-no}" = yes ]; then
+        # A delayed controller must prove its exact token generation before it
+        # appoints a successor. Falling through to the guarded public scheduler
+        # would report success without arming anything.
+        control_drain_token_owned_by_self || return 1
+        startticks=$(stopping_process_startticks "$$") || return 1
+        arm_control_mailbox_watchdog_successor "$$" "$startticks"
+        return $?
+    fi
+    schedule_delayed_control_mailbox_drain
+}
+
+# One iterative controller claims a complete atomic mailbox generation. The
+# claim is acknowledged only after both netfilter and DNS work succeed; every
+# failure or process death leaves a replayable file. New arrivals use a fresh
+# mailbox and can never be erased by this generation's acknowledgement.
+drain_control_runtime() {
+    local initial_signal="$1"
+    local initial_dns="$2"
+    local initial_hup="$3"
+    local lease_status
+    local claim_status
+    local pass=0
+    local pass_limit=8
+    local work_succeeded
+    local acknowledgement_succeeded
+    local overall_result=0
+
+    CONTROL_MAILBOX_WATCHDOG_ARMED=no
+    if [ "${KEEN_PBR_DELAYED_DRAIN:-no}" = yes ]; then
+        # A delayed watchdog performs one apply attempt. Persistent runtime
+        # failures then advance through 2/4/8/16/32/60-second tokenized
+        # successors instead of repeating eight errors every second forever.
+        pass_limit=1
+    fi
+
+    case "$initial_signal" in ''|SIGUSR1|SIGUSR2) ;; *) return 1 ;; esac
+    case "$initial_dns:$initial_hup" in
+        yes:yes|yes:no|no:no) ;;
+        *) return 1 ;;
+    esac
+    if ! stopping_stat_capability_available; then
+        [ -z "$initial_signal" ] ||
+            reapply_netfilter_runtime_without_lease "$initial_signal" ||
+            overall_result=1
+        [ "$initial_dns" = no ] ||
+            reapply_dns_runtime_without_lease "$initial_hup" ||
+            overall_result=1
+        return "$overall_result"
+    fi
+    publish_control_mailbox_work \
+        "$initial_signal" "$initial_dns" "$initial_hup" || return 1
+    # An exact mutating marker is the uncertain-teardown boundary for every
+    # runtime mutation, including dnsmasq activation and HUP. Preserve the
+    # complete mailbox quietly for recovery and do not keep a watchdog chain.
+    stopping_marker_authorizes_runtime_suppression && return 0
+    # A failed/not-yet-started daemon cannot consume runtime refresh work. Keep
+    # the atomic bundle for the next verified start instead of performing eight
+    # doomed attempts and spawning a one-second delayed chain forever.
+    control_runtime_daemon_is_verified || return 0
+
+    # From this point the durable generation may be renamed away from the fixed
+    # mailbox and the controller may die at any instruction. Arm one delayed
+    # owner before that risky claim. A delayed owner names its exact token
+    # generation so its sole successor can keep watching until acknowledgement
+    # or recover the work after SIGKILL, without allowing unrelated contenders
+    # to fan out.
+    if control_runtime_has_any_durable_work; then
+        arm_control_mailbox_watchdog_for_current_owner || return 1
+    fi
+
+    while control_runtime_has_replayable_work &&
+          control_runtime_daemon_is_verified &&
+          [ "$pass" -lt "$pass_limit" ]; do
+        pass=$((pass + 1))
+        if acquire_control_lease drain; then
+            lease_status=0
+        else
+            lease_status=$?
+        fi
+        if [ "$lease_status" -eq 2 ]; then
+            # The already-armed tokenized owner covers both normal release and
+            # abrupt death of the busy generation.
+            return "$overall_result"
+        fi
+        if [ "$lease_status" -ne 0 ]; then
+            return 1
+        fi
+
+        # Stop promotion is serialized by this same lease. Once this check is
+        # clear, no stop can enter the mutating phase until this complete
+        # netfilter+DNS generation has executed or been durably retained.
+        if stopping_marker_authorizes_runtime_suppression; then
+            release_control_lease || return 1
+            return "$overall_result"
+        fi
+
+        if claim_control_mailbox_work; then
+            claim_status=0
+        else
+            claim_status=$?
+        fi
+        if [ "$claim_status" -eq 2 ]; then
+            release_control_lease || return 1
+            return "$overall_result"
+        fi
+        if [ "$claim_status" -ne 0 ]; then
+            release_control_lease || true
+            return 1
+        fi
+
+        work_succeeded=yes
+        if ! execute_claimed_control_mailbox_work; then
+            work_succeeded=no
+            overall_result=1
+        fi
+        acknowledgement_succeeded=yes
+        if ! finish_control_mailbox_work "$work_succeeded"; then
+            acknowledgement_succeeded=no
+            overall_result=1
+        fi
+        if ! release_control_lease; then
+            return 1
+        fi
+        # A failed acknowledgement leaves this exact work file durable. Do not
+        # spin through the remaining passes trying to claim a mailbox behind a
+        # still-live self-owned orphan; hand it to the delayed owner after exit.
+        [ "$acknowledgement_succeeded" = yes ] || break
+    done
+
+    if control_runtime_has_replayable_work; then
+        log "Deferring keen-pbr mailbox after $pass_limit bounded drain passes"
+    fi
+    return "$overall_result"
+}
+
+reapply_netfilter_runtime() {
+    drain_control_runtime "$1" no no
+}
+
+reapply_dns_runtime() {
+    drain_control_runtime "" yes "$1"
+}
+
+# Verify that a PID still belongs to keen-pbr. A live but reused stale PID must
+# never make rc.func signal an unrelated process.
+pid_is_keen_pbr() {
+    local pid="$1"
+    local executable
+    local cmdline
+
+    case "$pid" in
+        *[!0-9]*|'') return 1 ;;
+    esac
+    [ -r "/proc/$pid/cmdline" ] || return 1
+    cmdline="$(tr '\000' '\n' < "/proc/$pid/cmdline" 2>/dev/null)" || return 1
+    executable="$(printf '%s\n' "$cmdline" | head -n 1)"
+    [ "$(basename "$executable")" = "$PROCS" ] || return 1
+
+    # dnsmasq's conf-script briefly invokes the same binary with
+    # generate-resolver-config during activation. Matching only argv[0] makes
+    # rc.func report "already running" in that window and skip the real daemon
+    # start. The service subcommand uniquely identifies the long-lived daemon.
+    printf '%s\n' "$cmdline" | grep -Fxq 'service'
+}
+
+# rc.func calls pidof with PROCS. Prefer the daemon's locked PID file, but fall
+# back to the process table when an interrupted upgrade left the file missing.
+pidof() {
+    local pid
+    local found=1
+
+    [ "$1" = "$PROCS" ] || { command pidof "$@"; return $?; }
+    if [ -s "$PIDFILE" ]; then
+        pid=$(cat "$PIDFILE") || pid=""
+        if pid_is_keen_pbr "$pid"; then
+            printf '%s\n' "$pid"
+            return 0
+        fi
+        rm -f "$PIDFILE"
+    fi
+
+    # BusyBox pidof can briefly return a zombie after shutdown. Its cmdline is
+    # empty, so filter every fallback PID instead of making start believe that
+    # the old daemon is still usable.
+    for pid in $(command pidof "$PROCS" 2>/dev/null || true); do
+        if pid_is_keen_pbr "$pid"; then
+            printf '%s\n' "$pid"
+            found=0
+        fi
+    done
+    return "$found"
+}
+
+stop_keen_pbr() {
+    local mode="${1:-stop}"
+    local pids
+    local counter=0
+    local limit=45
+    local forced=no
+    local term_failed=no
+
+    STOP_KEEN_PBR_SAFE=no
+
+    printf ' Shutting down %s... ' "$DESC"
+    pids="$(pidof "$PROCS" 2>/dev/null || true)"
+    if [ -z "$pids" ]; then
+        if [ -e "$FASTNAT_STATE_FILE" ]; then
+            : > "$FASTNAT_UNSAFE_STOP_FILE"
+        fi
+        rm -f "$PIDFILE"
+        echo "             already stopped."
+        return 0
+    fi
+
+    if [ "$mode" = "kill" ]; then
+        forced=yes
+        : > "$FASTNAT_UNSAFE_STOP_FILE"
+        kill -KILL $pids 2>/dev/null || true
+    else
+        if ! kill -TERM $pids 2>/dev/null; then
+            # Process disappearance after a failed multi-PID TERM can make the
+            # service look stopped without proving that the daemon completed
+            # its shutdown handlers. Keep FastNAT disabled in that case.
+            term_failed=yes
+            : > "$FASTNAT_UNSAFE_STOP_FILE"
+            log_error "Failed to send TERM to every keen-pbr process; treating the stop as unclean"
+        fi
+    fi
+
+    while [ -n "$(pidof "$PROCS" 2>/dev/null || true)" ] &&
+          [ "$counter" -lt "$limit" ]; do
+        sleep 1
+        counter=$((counter + 1))
+    done
+
+    pids="$(pidof "$PROCS" 2>/dev/null || true)"
+    if [ -n "$pids" ] && [ "$mode" != "kill" ]; then
+        log_error "Graceful shutdown timed out after ${limit}s; forcing keen-pbr to stop"
+        forced=yes
+        : > "$FASTNAT_UNSAFE_STOP_FILE"
+        kill -KILL $pids 2>/dev/null || true
+        sleep 1
+    fi
+
+    if [ -n "$(pidof "$PROCS" 2>/dev/null || true)" ]; then
+        echo "             failed."
+        return 1
+    fi
+
+    # Do not race rc.func's immediate start after a restart. BusyBox pidof may
+    # still expose the terminated task until its parent reaps it, and rc.func
+    # would otherwise report "already running" without launching a new daemon.
+    counter=0
+    while [ -n "$(command pidof "$PROCS" 2>/dev/null || true)" ] &&
+          [ "$counter" -lt 5 ]; do
+        sleep 1
+        counter=$((counter + 1))
+    done
+
+    if [ "$forced" = no ] && [ "$term_failed" = no ]; then
+        rm -f "$FASTNAT_UNSAFE_STOP_FILE"
+        STOP_KEEN_PBR_SAFE=yes
+    fi
+    rm -f "$PIDFILE"
+    echo "             done."
+    return 0
+}
+
+begin_start_control_lease() {
+    local lease_status
+    local lease_attempt=0
+
+    START_CONTROL_LEASE_HELD=no
+    if ! stopping_stat_capability_available; then
+        # Ownership cannot be proved on older BusyBox builds. Keep the
+        # historical boot path available; marker reads and netfilter hooks
+        # independently fail open when the same metadata probe is absent.
+        STOPPING_CONTROL_LEASE_FAIL_OPEN=yes
+        log "Control-lease ownership checks are unavailable; continuing startup without lifecycle serialization"
+        return 0
+    fi
+    clear_stale_control_recovery_gate_for_start || return 1
+    while :; do
+        if acquire_control_lease start; then
+            lease_status=0
+        else
+            lease_status=$?
+        fi
+        [ "$lease_status" -eq 2 ] || break
+        case "$STOPPING_CONTROL_OWNER_ROLE" in
+            reload|reapply-dns|reapply-full|reapply-nat|drain)
+                lease_attempt=$((lease_attempt + 1))
+                if [ "$lease_attempt" -ge 15 ]; then
+                    log_error "Timed out waiting for the active keen-pbr refresh before startup"
+                    return 1
+                fi
+                sleep 1
+                ;;
+            *)
+                log_error "Cannot start keen-pbr while another lifecycle controller is active"
+                return 1
+                ;;
+        esac
+    done
+    if [ "$lease_status" -ne 0 ]; then
+        if [ "$STOPPING_CONTROL_LEASE_FAIL_OPEN" = yes ]; then
+            log "Control-lease ownership checks are unavailable; continuing startup without lifecycle serialization"
+            return 0
+        fi
+        return 1
+    fi
+    START_CONTROL_LEASE_HELD=yes
+    if ! control_lease_owned_by_self; then
+        finish_start_control_lease no || true
+        return 1
+    fi
+    return 0
+}
+
+preserve_control_work_for_recovery() {
+    local signal="$1"
+    local dns="$2"
+    local hup="$3"
+
+    # The mailbox update is a single atomic file replacement. No owner retry
+    # loop or process-local handoff is involved.
+    publish_control_mailbox_work "$signal" "$dns" "$hup"
+}
+
+finish_start_control_lease() {
+    local start_succeeded="$1"
+    local trailing_signal
+    local trailing_dns
+    local trailing_hup
+    local result=0
+
+    [ "$START_CONTROL_LEASE_HELD" = yes ] || return 0
+    if [ "$start_succeeded" = yes ] &&
+       ! wait_for_verified_service_start; then
+        start_succeeded=no
+        result=1
+    fi
+
+    if [ "$start_succeeded" = yes ]; then
+        if ! release_control_lease no; then
+            return 1
+        fi
+    else
+        # Do not throw a queued netfilter event at an absent or unverified
+        # daemon. The detached closing generation is explicitly made stale,
+        # so the next controller/start recovers the strongest pending intent.
+        if ! release_control_lease yes; then
+            return 1
+        fi
+    fi
+    START_CONTROL_LEASE_HELD=no
+    trailing_signal="$STOPPING_TRAILING_SIGNAL"
+    trailing_dns="$STOPPING_TRAILING_DNS"
+    trailing_hup="$STOPPING_TRAILING_HUP"
+
+    if [ "$start_succeeded" = yes ] &&
+       { [ -n "$trailing_signal" ] || [ "$trailing_dns" = yes ]; }; then
+        if validate_service_pid "start trailing refresh" &&
+           drain_control_runtime \
+               "$trailing_signal" "$trailing_dns" "$trailing_hup"; then
+            :
+        elif ! preserve_control_work_for_recovery \
+            "$trailing_signal" "$trailing_dns" "$trailing_hup"; then
+            log_error "Cannot preserve trailing keen-pbr refresh after start"
+            result=1
+        fi
+    fi
+    return "$result"
+}
+
 prepare_start() {
+    clear_stale_stopping_marker_for_start || return 1
+    wait_for_keenetic_rci
     check_runtime_dependencies
-    disable_hwnat
+    configure_raw_prerouting || return 1
+    disable_hwnat || return 1
 }
 
 prepare_stop() {
-    enable_hwnat
     if [ -x "$DNSMASQ_HELPER" ]; then
         "$DNSMASQ_HELPER" deactivate || true
     fi
+}
+
+discard_control_mailbox_after_successful_stop() {
+    local startticks
+    local result=0
+
+    # There is no daemon generation to fence when cleanup starts from an
+    # already stopped service; leave any mailbox untouched for normal recovery.
+    [ -n "$STOPPING_ADMISSION_PID" ] || return 0
+    [ "$STOPPING_ADMISSION_PHASE" = mutating ] || return 1
+    control_lease_owned_by_self || return 1
+    stopping_marker_is_exact_admission || return 1
+    startticks=$(stopping_process_startticks "$$") || return 1
+    acquire_control_recovery_gate_bounded \
+        "$startticks" "successful stop mailbox discard" || return 1
+    if ! control_lease_owned_by_self ||
+       ! stopping_marker_is_exact_admission ||
+       ! recover_orphaned_control_work_files_under_gate "$startticks"; then
+        result=1
+    elif [ -e "$STOPPING_CONTROL_MAILBOX" ] ||
+         [ -L "$STOPPING_CONTROL_MAILBOX" ]; then
+        if ! read_control_work_file "$STOPPING_CONTROL_MAILBOX" ||
+           [ "$CONTROL_WORK_ROLE" != pending ] ||
+           ! rm -f "$STOPPING_CONTROL_MAILBOX"; then
+            result=1
+        fi
+    fi
+    release_control_recovery_gate "$startticks" || result=1
+    return "$result"
+}
+
+stop_service_for_action() {
+    local mode="$1"
+    local final_stop="$2"
+    local result=0
+    local lease_status
+    local lease_attempt=0
+    local lease_released=no
+    local marker_admitted=no
+    local mutation_started=no
+
+    while :; do
+        if acquire_control_lease stop; then
+            lease_status=0
+        else
+            lease_status=$?
+        fi
+        [ "$lease_status" -eq 2 ] || break
+        if [ "$STOPPING_CONTROL_OWNER_ROLE" = stop ]; then
+            log_error "Cannot start a concurrent keen-pbr stop action"
+            return 1
+        fi
+        lease_attempt=$((lease_attempt + 1))
+        if [ "$lease_attempt" -ge 60 ]; then
+            log_error "Timed out waiting for the active keen-pbr start or refresh lease"
+            return 1
+        fi
+        sleep 1
+    done
+    [ "$lease_status" -eq 0 ] || return 1
+
+    if begin_stopping_marker; then
+        marker_admitted=yes
+    else
+        result=$?
+    fi
+
+    if [ "$result" -eq 0 ]; then
+        if ! control_lease_owned_by_self; then
+            log_error "Keen-pbr control lease changed before stop mutation"
+            result=1
+        elif ! mark_stopping_mutation_started; then
+            # A successful atomic promotion is already an uncertain teardown
+            # boundary even if its verification was interrupted.
+            [ "$STOPPING_ADMISSION_PHASE" != mutating ] || mutation_started=yes
+            result=1
+        else
+            # From this point onward a failure may have partially changed DNS,
+            # daemon, firewall, or FastNAT state, so retain the mutating marker.
+            mutation_started=yes
+            if ! prepare_stop; then
+                result=1
+            elif ! stop_keen_pbr "$mode"; then
+                result=1
+            elif ! cleanup_stale_tcp_rst_firewall; then
+                result=1
+            elif ! cleanup_stale_ppe_deoffload_firewall; then
+                result=1
+            elif ! cleanup_stale_meta_udp443_firewall; then
+                result=1
+            elif [ "$final_stop" = yes ] &&
+                 [ "${STOP_KEEN_PBR_SAFE:-no}" = yes ] &&
+                 ! restore_hwnat_if_safe; then
+                result=1
+            fi
+        fi
+    fi
+
+    if [ "$result" -eq 0 ]; then
+        # Work queued before mutation remains durable throughout teardown. It
+        # becomes irrelevant only after every stop/cleanup step has succeeded.
+        if ! discard_control_mailbox_after_successful_stop; then
+            result=1
+        elif ! release_control_lease; then
+            result=1
+        else
+            lease_released=yes
+            # Keep mutating suppression through lease detach. A contender that
+            # acquires in this tiny final window sees the fail-closed marker and
+            # cannot start or signal a stopped daemon.
+            if ! finish_stopping_marker; then
+                result=1
+            fi
+        fi
+    elif [ "$marker_admitted" = yes ] &&
+         [ "$mutation_started" = no ]; then
+        # Admission itself made no runtime change. Do not strand a marker that
+        # would falsely describe an uncertain teardown.
+        finish_stopping_marker || true
+    fi
+
+    # The marker records uncertain teardown; the lease only serializes active
+    # controllers and must be released before this helper exits normally.
+    if [ "$lease_released" = no ]; then
+        if ! release_control_lease; then
+            result=1
+        fi
+    fi
+    if [ "$result" -ne 0 ] && [ "$mutation_started" = no ]; then
+        # Admission never became authoritative (or was released before any
+        # mutation), so the still-running daemon must consume pre-marker work.
+        drain_control_runtime "" no no || result=1
+    fi
+    return "$result"
+}
+
+restore_fastnat_after_failed_start() {
+    [ "${FASTNAT_RESTORE_ON_START_FAILURE:-no}" = yes ] || return 0
+    if [ "${START_CONTROL_LEASE_HELD:-no}" != yes ] ||
+       [ "${STOPPING_CONTROL_LEASE_ROLE:-}" != start ] ||
+       ! control_lease_owned_by_self; then
+        # Another start may have created or inherited the shared snapshot after
+        # this action lost admission. Never restore or unlink that winner's
+        # state without the exact start PID/startticks lease generation.
+        FASTNAT_RESTORE_ON_START_FAILURE=no
+        log "Skipping failed-start FastNAT rollback without exact start-lease ownership"
+        return 0
+    fi
+    if [ -n "$(pidof "$PROCS" 2>/dev/null || true)" ]; then
+        # A second start may acquire the lease after a winner has already
+        # completed. Its own pre-rc.func failure must not re-enable FastNAT
+        # underneath that verified live daemon or consume the shared snapshot.
+        FASTNAT_RESTORE_ON_START_FAILURE=no
+        log "Skipping failed-start FastNAT rollback while keen-pbr is live"
+        return 0
+    fi
+    restore_hwnat_if_safe || true
+    FASTNAT_RESTORE_ON_START_FAILURE=no
+}
+
+establish_fastnat_start_rollback_authority() {
+    local policy="$1"
+
+    FASTNAT_RESTORE_ON_START_FAILURE=no
+    # Older BusyBox builds deliberately fail open without a provable lease.
+    # They may leave FastNAT disabled on failure, but must not mutate a snapshot
+    # that could belong to another start generation.
+    [ "${START_CONTROL_LEASE_HELD:-no}" = yes ] || return 0
+    [ "${STOPPING_CONTROL_LEASE_ROLE:-}" = start ] || return 1
+    control_lease_owned_by_self || return 1
+    case "$policy" in
+        if-absent)
+            [ -e "$FASTNAT_STATE_FILE" ] ||
+                FASTNAT_RESTORE_ON_START_FAILURE=yes
+            ;;
+        restart)
+            FASTNAT_RESTORE_ON_START_FAILURE=yes
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+exit_failed_start() {
+    local status="${1:-1}"
+
+    restore_fastnat_after_failed_start
+    if ! finish_start_control_lease no; then
+        status=1
+    fi
+    exit "$status"
 }
 
 reapply_dnsmasq_config() {
@@ -194,32 +4343,170 @@ reapply_dnsmasq_config() {
     fi
 }
 
-download_lists() {
-    "$KEEN_PBR" --config "$CONFIG" download || true
+# Mutual exclusion with package updates. Shared with S79 so the two cannot
+# drift; absent, the service keeps its previous behaviour rather than refusing
+# to start, because a missing file is not evidence of a competing update.
+#
+# Refusing on genuine contention is the point - starting mid-update is the
+# hazard this closes. A lock left by a crashed update does not brick the boot:
+# acquire already removes a stale record whose owning PID identity is gone.
+LIFECYCLE_LOCK_LIB=/opt/usr/lib/keen-pbr/lifecycle-lock.sh
+if [ -f "$LIFECYCLE_LOCK_LIB" ] && [ ! -L "$LIFECYCLE_LOCK_LIB" ]; then
+    . "$LIFECYCLE_LOCK_LIB"
+else
+    enter_lifecycle_lock() { return 0; }
+    release_lifecycle_lock() { return 0; }
+fi
+
+lifecycle_lock_or_fail() {
+    enter_lifecycle_lock && return 0
+    log_error "keen-pbr lifecycle is blocked by an in-flight update; try again once it finishes"
+    return 1
 }
 
+trap release_lifecycle_lock EXIT
+
 case "$1" in
+    drain-pending-delayed)
+        if claim_control_drain_token; then
+            delayed_token_status=0
+        else
+            delayed_token_status=$?
+        fi
+        if [ "$delayed_token_status" -eq 2 ]; then
+            # Only the successor armed by this exact live token generation may
+            # continue its capped backoff watch. Unrelated delayed contenders exit,
+            # so concurrent publishers cannot multiply the watchdog chain.
+            if control_drain_token_matches_expected_predecessor &&
+               control_runtime_daemon_is_verified &&
+               ! stopping_marker_authorizes_runtime_suppression &&
+               control_runtime_has_any_durable_work; then
+                arm_control_mailbox_watchdog_successor \
+                    "$KEEN_PBR_WATCHDOG_PREDECESSOR_PID" \
+                    "$KEEN_PBR_WATCHDOG_PREDECESSOR_STARTTICKS" || exit 1
+            fi
+            exit 0
+        fi
+        [ "$delayed_token_status" -eq 0 ] || exit 1
+        if drain_control_runtime "" no no; then
+            delayed_drain_status=0
+        else
+            delayed_drain_status=$?
+        fi
+        release_control_drain_token || delayed_drain_status=1
+        if control_runtime_has_any_durable_work &&
+           control_runtime_daemon_is_verified &&
+           ! stopping_marker_authorizes_runtime_suppression &&
+           [ "${CONTROL_MAILBOX_WATCHDOG_ARMED:-no}" != yes ]; then
+            # drain_control_runtime normally arms its successor before claim.
+            # This fallback covers an earlier bounded failure, after the token
+            # has been released, while retaining a single tokenized owner.
+            arm_control_mailbox_watchdog_successor "" "" ||
+                delayed_drain_status=1
+        fi
+        exit "$delayed_drain_status"
+        ;;
     reload)
-        reapply_dnsmasq_config || exit 1
-        signal_service HUP
+        # Take the shared reentrant lease before recovery. Any nested recovery
+        # action borrows the exported token; the short runtime control lease is
+        # still admitted only after the rescue guard reaches a known state.
+        lifecycle_lock_or_fail || exit 1
+        run_recovery_guard reload || exit 1
+        reapply_dns_runtime yes
         exit $?
         ;;
     reapply-firewall)
-        signal_service SIGUSR1
+        reapply_netfilter_runtime SIGUSR1
+        exit $?
+        ;;
+    reapply-nat)
+        reapply_netfilter_runtime SIGUSR2
         exit $?
         ;;
     reapply-dnsmasq-config)
-        reapply_dnsmasq_config
+        # See reload: recovery borrows this outer lease, while DNS runtime
+        # reconciliation retains its independent crash-safe control lease.
+        lifecycle_lock_or_fail || exit 1
+        run_recovery_guard reapply-dnsmasq-config || exit 1
+        reapply_dns_runtime no
         exit $?
         ;;
-    start|restart|restartall)
-        prepare_start
-        download_lists
-        POSTCMD="reapply_dnsmasq_config"
+    start)
+        lifecycle_lock_or_fail || exit_failed_start 1
+        # A state file left by an unclean process death is deliberately not
+        # restored if this start fails. Only state captured by this clean
+        # action is safe to roll back.
+        FASTNAT_RESTORE_ON_START_FAILURE=no
+        run_recovery_guard start || exit_failed_start $?
+        begin_start_control_lease || exit_failed_start $?
+        establish_fastnat_start_rollback_authority if-absent ||
+            exit_failed_start $?
+        prepare_start || exit_failed_start $?
+        reapply_dnsmasq_config || exit_failed_start $?
         ;;
-    stop|kill)
-        prepare_stop
+    restart|restartall)
+        lifecycle_lock_or_fail || exit 1
+        # Keep FastNAT disabled for the complete replacement. Enabling it
+        # between TERM and the next start can cache the retiring route while
+        # the firmware and daemon are rebuilding netfilter state.
+        stop_service_for_action stop no || exit 1
+        # Re-check only after the API writer is stopped. This closes the race
+        # where a save WAL could appear between an early preflight and stop.
+        FASTNAT_RESTORE_ON_START_FAILURE=no
+        run_recovery_guard "$1" || exit_failed_start $?
+        begin_start_control_lease || exit_failed_start $?
+        establish_fastnat_start_rollback_authority restart ||
+            exit_failed_start $?
+        prepare_start || exit_failed_start $?
+        reapply_dnsmasq_config || exit_failed_start $?
+        set -- start "$2"
+        ;;
+    stop)
+        lifecycle_lock_or_fail || exit 1
+        stop_service_for_action stop yes
+        exit $?
+        ;;
+    stop-for-upgrade)
+        # Reached from prerm, i.e. from inside opkg. Under a self-update the
+        # transaction already owns the lease and this borrows it; under a bare
+        # `opkg upgrade` nothing is held and this takes its own, so a manual
+        # upgrade is excluded from a concurrent one just the same.
+        lifecycle_lock_or_fail || exit 1
+        # Keep FastNAT disabled between the retiring daemon and the incoming
+        # package. The new postinst will start the replacement and retain the
+        # original snapshot for the next real, graceful stop.
+        stop_service_for_action stop no
+        exit $?
+        ;;
+    kill)
+        lifecycle_lock_or_fail || exit 1
+        stop_service_for_action kill yes
+        exit $?
         ;;
 esac
 
+FASTNAT_DISPATCH_ACTION="$1"
+if [ "$FASTNAT_DISPATCH_ACTION" = start ] &&
+   ! guard_meta_udp443_start_ownership; then
+    exit_failed_start 1
+fi
 . /opt/etc/init.d/rc.func
+status=$?
+if [ "$FASTNAT_DISPATCH_ACTION" = start ]; then
+    if [ "$status" -eq 0 ]; then
+        if ! finish_start_control_lease yes; then
+            status=1
+        fi
+    elif ! finish_start_control_lease no; then
+        status=1
+    fi
+fi
+if [ "$FASTNAT_DISPATCH_ACTION" = start ] && [ "$status" -ne 0 ]; then
+    # Once rc.func has attempted to spawn the daemon, a non-zero status does
+    # not prove that no routing/firewall state reached the kernel (OOM and a
+    # forced death during startup are indistinguishable here). Leave FastNAT
+    # disabled until a later verified start followed by a graceful stop.
+    : > "$FASTNAT_UNSAFE_STOP_FILE"
+    log_error "keen-pbr startup did not complete; FastNAT remains disabled until a verified graceful stop"
+fi
+exit "$status"

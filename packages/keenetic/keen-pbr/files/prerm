@@ -1,7 +1,18 @@
 #!/bin/sh
 
 echo "Stopping keen-pbr service..."
-/opt/etc/init.d/S80keen-pbr stop || true
+stop_action=stop
+if [ "${PKG_UPGRADE:-0}" = 1 ]; then
+    stop_action=stop-for-upgrade
+fi
+if ! /opt/etc/init.d/S80keen-pbr "$stop_action"; then
+    if pidof keen-pbr >/dev/null 2>&1; then
+        echo "Failed to stop keen-pbr; refusing to replace a running binary." >&2
+    else
+        echo "Failed to finish keen-pbr lifecycle cleanup; refusing package removal." >&2
+    fi
+    exit 1
+fi
 /opt/etc/init.d/S79transport-manager stop || true
 
 

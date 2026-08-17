@@ -33,6 +33,10 @@ weight: 6
     // По умолчанию: (показано ниже)
     "skip_marked_packets": true,
 
+    // Очищать динамические адреса, изученные dnsmasq, при полном применении.
+    // Reconcile с сохранением наборов их не очищает.
+    "clear_dynamic_sets_on_apply": true,
+
     // Глобальное поведение strict routing для outbounds типа interface.
     // По умолчанию: (показано ниже)
     "strict_enforcement": false,
@@ -243,10 +247,15 @@ weight: 6
       // URL удалённого списка.
       "url": "https://raw.githubusercontent.com/v2fly/domain-list-community/refs/heads/master/data/apple",
 
-      // Необязательный outbound, через который будет загружаться этот список.
+      // Переопределить глобальную цепочку list_refresh для этого списка.
+      "refresh_detour_mode": "override",
+
+      // Основное исходящее соединение для загрузки этого списка.
       // Поддерживаются routable-типы, такие как interface, table или urltest.
-      // По умолчанию: null (используется обычная системная маршрутизация)
       "detour": "auto_select",
+
+      // Необязательные резервы по порядку. Прямой маршрут после них не добавляется.
+      "fallback_detours": ["vpn", "wan"],
 
       // Сколько времени IP, разрешённые dnsmasq для этих доменов,
       // живут в динамическом наборе.
@@ -512,6 +521,13 @@ weight: 6
     // Обязательно, когда enabled=true.
     // Значение по умолчанию отсутствует.
     "cron": "0 4 * * 0"
+  },
+
+  // Глобальная упорядоченная цепочка для загрузки всех URL-списков.
+  // Одинаково применяется при ручном и плановом обновлении.
+  "list_refresh": {
+    "detour": "auto_select",
+    "fallback_detours": ["vpn", "wan"]
   }
 }
 ```
@@ -519,6 +535,6 @@ weight: 6
 ## Примечания
 
 - `dns.servers[].detour` поддерживает outbounds типов `interface`, `table` и `urltest`, но не `blackhole` и не `ignore`.
-- `lists[].detour` полезен, когда удалённый список нужно загружать через VPN или другой нестандартный маршрут.
+- URL-списки наследуют `list_refresh`, если `refresh_detour_mode` не равен `override`; старые списки с уже заданным `detour` остаются индивидуальными.
 - `route.rules[]` должен содержать хотя бы одно условие совпадения: `list`, `dscp`, `src_port`, `dest_port`, `src_addr` или `dest_addr`.
 - `dns.rules[].allow_domain_rebinding` в основном нужен для внутренних доменов, которые специально резолвятся в приватные IP-адреса.

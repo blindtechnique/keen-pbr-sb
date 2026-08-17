@@ -815,6 +815,12 @@
     "iconSlug": "cloudflare",
     "category": "cloud",
     "notice": "Список покрывает сайты и сервисы на инфраструктуре Cloudflare (CDN, reverse proxy, Workers). Выбирая его, вы буквально заворачиваете в правило огромную часть интернета — используйте осознанно.",
+    "warnings": [
+      {
+        "code": "broad_traffic_scope",
+        "requiresAcceptance": true
+      }
+    ],
     "origin": "",
     "engines": {
       "dns": {
@@ -911,6 +917,12 @@
     "name": "Cloudflare IPs",
     "iconSlug": "cloudflare",
     "category": "cloud",
+    "warnings": [
+      {
+        "code": "broad_traffic_scope",
+        "requiresAcceptance": true
+      }
+    ],
     "origin": "builtin",
     "engines": {
       "dns": {
@@ -3396,10 +3408,98 @@
     }
   },
   {
+    "id": "kartina-tv",
+    "name": "Kartina.TV",
+    "iconSlug": "lucide-tv",
+    "category": "media",
+    "notice": "Kartina.TV: официальный сайт, API, стриминговые домены и 9 собственных IPv4-сетей.",
+    "routingCompanions": [
+      {
+        "id": "kartina_tv_ip",
+        "name": "Kartina.TV IP",
+        "sourcePresetId": "kartina-tv-ip-source",
+        "include": "ip_cidrs",
+        "suppressDirectSelection": true
+      }
+    ],
+    "origin": "keen-pbr-sb",
+    "engines": {
+      "dns": {
+        "domains": [
+          "cdn-imaze.com",
+          "iptv-kartina.tv",
+          "kartina.stream",
+          "kartina.tv",
+          "kartina2.com",
+          "kartina2.tv",
+          "streamktv.com"
+        ]
+      }
+    }
+  },
+  {
+    "id": "kartina-tv-ip-source",
+    "name": "Kartina.TV IP (служебный источник)",
+    "iconSlug": "lucide-tv",
+    "category": "media",
+    "hidden": true,
+    "origin": "keen-pbr-sb",
+    "engines": {
+      "dns": {
+        "subnets": [
+          "93.180.240.0/24",
+          "93.180.241.0/24",
+          "93.180.242.0/24",
+          "93.180.243.0/24",
+          "93.180.247.0/24",
+          "185.146.248.0/24",
+          "185.146.249.0/24",
+          "185.146.250.0/24",
+          "185.146.251.0/24"
+        ]
+      }
+    }
+  },
+  {
     "id": "kinopub",
     "name": "Kino.pub",
     "iconSlug": "kinopub",
     "category": "media",
+    "notice": "Полный сервис, включая тяжёлые видеопотоки CDN. Если видео работает напрямую или через nfqws2, выберите «Kino.pub (без CDN)».",
+    "covers": [
+      "kinopub-core"
+    ],
+    "domainSupplements": [
+      "ahc.ovh",
+      "alador.space",
+      "api.ios-kp.store",
+      "api.service-kp.com",
+      "api.srvkp.com",
+      "cdn-service.space",
+      "firebaseremoteconfigrealtime.googleapis.com",
+      "gfw.ovh",
+      "gravatar.com",
+      "i0.wp.com",
+      "kino.pub",
+      "kino.watch",
+      "kinopub.online",
+      "kp-apps.xyz",
+      "kpapp.link",
+      "kpdl.cc",
+      "kpdl.link",
+      "m.boraboraboom.ru",
+      "media.service-kp.com",
+      "mos-gorsud.co",
+      "mos-gorsud.site",
+      "prod-lt-playstoregatewayadapter-pa.googleapis.com",
+      "proxykp.xyz",
+      "pushbr.com",
+      "smarttv.zeasn.tv",
+      "support-kp.com",
+      "themoviedb.org",
+      "tmdb.org",
+      "tsx.ovh"
+    ],
     "origin": "",
     "engines": {
       "dns": {
@@ -3425,6 +3525,49 @@
           }
         ],
         "action": "tunnel"
+      }
+    }
+  },
+  {
+    "id": "kinopub-core",
+    "name": "Kino.pub (без CDN)",
+    "iconSlug": "kinopub",
+    "category": "media",
+    "notice": "Сайт, авторизация, API, зеркала, постеры и служебные зависимости. Исключены только видеопотоки и тяжёлые видео-CDN; CDN постеров, метаданные и служебные API сохранены.",
+    "origin": "keen-pbr-sb",
+    "engines": {
+      "dns": {
+        "domains": [
+          "ahc.ovh",
+          "alador.space",
+          "api.ios-kp.store",
+          "api.service-kp.com",
+          "api.srvkp.com",
+          "cdn-service.space",
+          "firebaseremoteconfigrealtime.googleapis.com",
+          "gfw.ovh",
+          "gravatar.com",
+          "i0.wp.com",
+          "kino.pub",
+          "kino.watch",
+          "kinopub.online",
+          "kp-apps.xyz",
+          "kpapp.link",
+          "kpdl.cc",
+          "kpdl.link",
+          "m.boraboraboom.ru",
+          "media.service-kp.com",
+          "mos-gorsud.co",
+          "mos-gorsud.site",
+          "prod-lt-playstoregatewayadapter-pa.googleapis.com",
+          "proxykp.xyz",
+          "pushbr.com",
+          "smarttv.zeasn.tv",
+          "support-kp.com",
+          "themoviedb.org",
+          "tmdb.org",
+          "tsx.ovh"
+        ]
       }
     }
   },
@@ -4425,6 +4568,15 @@
       "threads",
       "whatsapp"
     ],
+    "routingCompanions": [
+      {
+        "id": "meta_whatsapp_ip",
+        "name": "Meta / WhatsApp IP",
+        "sourcePresetId": "whatsapp-ip-source",
+        "include": "ip_cidrs",
+        "suppressDirectSelection": true
+      }
+    ],
     "origin": "",
     "engines": {
       "singbox": {
@@ -4613,15 +4765,6 @@
         "domains": [
           "t.me",
           "telegram.org"
-        ],
-        "subnets": [
-          "91.105.192.0/23",
-          "91.108.4.0/22",
-          "91.108.8.0/21",
-          "91.108.16.0/21",
-          "91.108.56.0/22",
-          "149.154.160.0/20",
-          "185.76.151.0/24"
         ]
       },
       "singbox": {
@@ -4633,7 +4776,14 @@
         ],
         "action": "tunnel"
       }
-    }
+    },
+    "routingCompanions": [
+      {
+        "id": "telegram_ip",
+        "name": "Telegram IP",
+        "url": "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/sing-box/rule-set-geoip/geoip-telegram.srs"
+      }
+    ]
   },
   {
     "id": "threads",
@@ -4705,12 +4855,51 @@
         "domains": [
           "whatsapp.com",
           "whatsapp.net"
+        ]
+      },
+      "singbox": {
+        "ruleSets": [
+          {
+            "tag": "geosite-whatsapp",
+            "url": "https://repo.hoaxisr.ru/rulesets/srs/whatsapp.srs"
+          }
         ],
+        "action": "tunnel"
+      }
+    },
+    "routingCompanions": [
+      {
+        "id": "whatsapp_ip",
+        "name": "WhatsApp IP",
+        "sourcePresetId": "whatsapp-ip-source",
+        "include": "ip_cidrs",
+        "catalogIdentityId": "meta#routing-companion:meta_whatsapp_ip",
+        "suppressDirectSelection": true
+      }
+    ]
+  },
+  {
+    "id": "whatsapp-ip-source",
+    "name": "WhatsApp IP (служебный источник)",
+    "iconSlug": "whatsapp",
+    "category": "social",
+    "hidden": true,
+    "origin": "keen-pbr-sb",
+    "engines": {
+      "dns": {
         "subnets": [
           "31.13.24.0/21",
           "31.13.64.0/18",
           "45.64.40.0/22",
           "57.141.0.0/21",
+          "57.141.8.0/24",
+          "57.141.10.0/24",
+          "57.141.12.0/23",
+          "57.141.14.0/24",
+          "57.141.16.0/22",
+          "57.141.20.0/24",
+          "57.141.22.0/24",
+          "57.141.24.0/24",
           "57.144.0.0/14",
           "66.220.144.0/20",
           "69.63.176.0/20",
@@ -4730,15 +4919,6 @@
           "189.247.71.0/24",
           "204.15.20.0/22"
         ]
-      },
-      "singbox": {
-        "ruleSets": [
-          {
-            "tag": "geosite-whatsapp",
-            "url": "https://repo.hoaxisr.ru/rulesets/srs/whatsapp.srs"
-          }
-        ],
-        "action": "tunnel"
       }
     }
   },

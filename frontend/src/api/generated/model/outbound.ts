@@ -6,7 +6,9 @@
  * OpenAPI spec version: 3.0.0
  */
 import type { CircuitBreakerConfig } from './circuitBreakerConfig';
+import type { ConntrackOnSwitch } from './conntrackOnSwitch';
 import type { OutboundGroup } from './outboundGroup';
+import type { OutboundSelectionMode } from './outboundSelectionMode';
 import type { OutboundType } from './outboundType';
 import type { RetryConfig } from './retryConfig';
 
@@ -16,6 +18,13 @@ export interface Outbound {
   /** Unique identifier for this outbound. Must match `^[a-z][a-z0-9_]*$` and be at most 24 characters.
    */
   tag: string;
+  /**
+     * Optional human-readable alias shown by clients. Runtime references, marks and routing tables continue to use the stable technical `tag`.
+
+     * @minLength 1
+     * @maxLength 80
+     */
+  display_name?: string;
   /** Egress network interface name. Required for `interface` outbound type.
    */
   interface?: string;
@@ -34,16 +43,34 @@ export interface Outbound {
   /** Probe URL for latency measurements. Required for `urltest` outbound type.
    */
   url?: string;
-  /** Interval between probes in milliseconds. Used with `urltest` outbound type.
-   */
+  /**
+     * Interval between probes in milliseconds. Used with `urltest` outbound type.
+
+     * @minimum 1
+     * @maximum 4294967295
+     */
   interval_ms?: number;
-  /** Timeout for each individual urltest probe attempt in milliseconds. Used with `urltest` outbound type. When omitted or null, the daemon uses a default of `5000`.
-   */
+  /**
+     * Timeout for each individual urltest probe attempt in milliseconds. Used with `urltest` outbound type. When omitted or null, the daemon uses a default of `5000`.
+
+     * @minimum 1
+     * @maximum 4294967295
+     */
   probe_timeout_ms?: number | null;
-  /** Latency tolerance in milliseconds; outbounds within this range of the best are considered equivalent. Used with `urltest` outbound type.
-   */
+  /**
+     * Latency tolerance in milliseconds; outbounds within this range of the best are considered equivalent. Used with `urltest` outbound type.
+
+     * @minimum 0
+     * @maximum 4294967295
+     */
   tolerance_ms?: number;
-  /** Ordered list of outbound groups. Required for `urltest` outbound type. Groups are tried in order; within a group the outbound is selected by weight.
+  /** Selection policy used with `urltest` outbound type. `latency` keeps the current route while it remains within the configured tolerance of the fastest healthy candidate. `priority` always selects the first healthy outbound in the highest-priority healthy group and returns to it after recovery. When omitted, `latency` is used.
+   */
+  selection_mode?: OutboundSelectionMode;
+  /** URLTEST handling for already established flows when the selected child changes. `preserve` keeps existing flows on their original path while new flows use the new child. `delete` removes only conntrack entries owned by this selector after the replacement route is active. `delete_on_failure` removes the failed child's entries during failover, but preserves established flows when a healthy backup yields to a recovered preferred child. It is valid only with `selection_mode: priority`. No mode performs a global conntrack flush.
+   */
+  conntrack_on_switch?: ConntrackOnSwitch;
+  /** Ordered list of outbound groups. Required for `urltest` outbound type. Groups are tried by ascending weight and then by declaration order. Selection within a group follows `selection_mode`.
    */
   outbound_groups?: OutboundGroup[];
   retry?: RetryConfig;

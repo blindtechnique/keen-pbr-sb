@@ -1,0 +1,5 @@
+-N KeenPbrTable
+-A PREROUTING -j KeenPbrTable
+-A KeenPbrTable -m set --match-set keen_pbr_a dst -j MARK --set-xmark 0x100/0xff00
+-A KeenPbrTable -p tcp -m multiport --dports 80,443 -j MARK --set-xmark 0x200/0xff00
+-A KeenPbrTable -p udp -m udp --dport 443 -j RETURN

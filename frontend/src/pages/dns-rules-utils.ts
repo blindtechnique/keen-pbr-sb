@@ -1,7 +1,11 @@
 import type { ConfigObject } from "@/api/generated/model/configObject"
+import type { DnsRule } from "@/api/generated/model/dnsRule"
 import i18n from "@/i18n"
+import { makeTechnicalId } from "@/lib/technical-id"
 
 export type DnsRuleDraft = {
+  id: string
+  displayName: string
   enabled: boolean
   server: string
   lists: string[]
@@ -9,22 +13,49 @@ export type DnsRuleDraft = {
 }
 
 export type RuleErrors = {
+  id?: string
   server?: string
   lists?: string
   duplicate?: string
 }
 
-export function getRuleDraft(rule?: {
-  enabled?: boolean | null
-  server?: string
-  list?: string[]
-  allow_domain_rebinding?: boolean
-}): DnsRuleDraft {
+export function createDnsRuleDraft(
+  displayName = "",
+  existingIds: Iterable<string> = []
+): DnsRuleDraft {
   return {
+    id: makeTechnicalId(displayName, existingIds, { prefix: "dns_rule" }),
+    displayName,
+    enabled: true,
+    server: "",
+    lists: [],
+    allowDomainRebinding: false,
+  }
+}
+
+export function getRuleDraft(rule?: DnsRule): DnsRuleDraft {
+  return {
+    id: rule?.id ?? "",
+    displayName: rule?.display_name ?? "",
     enabled: rule?.enabled ?? true,
     server: rule?.server ?? "",
-    lists: rule?.list ?? [],
+    lists: [...(rule?.list ?? [])],
     allowDomainRebinding: rule?.allow_domain_rebinding ?? false,
+  }
+}
+
+export function normalizeDnsRuleDraft(rule: DnsRuleDraft): DnsRule {
+  const normalizedId = rule.id.trim()
+  const normalizedDisplayName = rule.displayName.trim()
+  return {
+    ...(normalizedId ? { id: normalizedId } : {}),
+    ...(normalizedDisplayName ? { display_name: normalizedDisplayName } : {}),
+    enabled: rule.enabled,
+    server: rule.server.trim(),
+    list: Array.from(
+      new Set(rule.lists.map((list) => list.trim()).filter(Boolean))
+    ).sort(),
+    allow_domain_rebinding: rule.allowDomainRebinding,
   }
 }
 
@@ -38,12 +69,7 @@ export function buildUpdatedConfigWithRules(
     dns: {
       ...config.dns,
       fallback,
-      rules: rules.map((rule) => ({
-        enabled: rule.enabled,
-        server: rule.server,
-        list: rule.lists,
-        allow_domain_rebinding: rule.allowDomainRebinding,
-      })),
+      rules: rules.map(normalizeDnsRuleDraft),
     },
   }
 }
@@ -68,8 +94,20 @@ export function validateRules(
   const serverTagSet = new Set(serverTags)
   const listOptionSet = new Set(listOptions)
   const seenRules = new Set<string>()
+  const seenIds = new Set<string>()
 
   for (const [index, rule] of rules.entries()) {
+    const normalizedId = rule.id.trim()
+    if (normalizedId) {
+      if (seenIds.has(normalizedId)) {
+        errors[index] = {
+          ...errors[index],
+          id: t("pages.dnsRuleUpsert.validation.duplicateId"),
+        }
+      }
+      seenIds.add(normalizedId)
+    }
+
     if (!rule.enabled) {
       continue
     }
@@ -102,7 +140,7 @@ export function validateRules(
     seenRules.add(dedupeKey)
 
     if (Object.keys(nextRuleErrors).length > 0) {
-      errors[index] = nextRuleErrors
+      errors[index] = { ...errors[index], ...nextRuleErrors }
     }
   }
 

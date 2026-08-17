@@ -13,6 +13,7 @@ import {
   BackupDialog,
   RestoreDialog,
 } from "@/components/settings/backup-dialogs"
+import { KeeneticStatus } from "@/components/shared/keenetic-status"
 import { getSoftwareUpdateDialogContent } from "@/components/settings/software-update-view"
 import { Button } from "@/components/ui/button"
 import {
@@ -37,6 +38,7 @@ import {
   downloadBackup,
 } from "@/lib/backup"
 import { formatDownloadTimestamp } from "@/lib/download"
+import { packageRollbackReasonKey } from "@/lib/package-rollback"
 
 type SoftwareUpdateStatus = {
   current: string
@@ -53,6 +55,11 @@ type SoftwareUpdateStatus = {
   percent?: number
   message?: string
   success?: boolean | null
+  package_rescue_ready?: boolean
+  package_rollback_available?: boolean
+  package_rollback_state?: string
+  check_error?: string
+  cached?: boolean
 }
 
 type SoftwareUpdateProgress = Pick<
@@ -70,7 +77,7 @@ export function BackupAndRestoreCard() {
       <Card size="sm">
         <CardHeader>
           <CardTitle>{t("pages.settings.backup.title")}</CardTitle>
-          <CardDescription>
+          <CardDescription className="max-w-[480px]">
             {t("pages.settings.backup.description")}
           </CardDescription>
         </CardHeader>
@@ -96,13 +103,14 @@ export function SoftwareUpdateCard() {
   const [status, setStatus] = useState<SoftwareUpdateStatus | null>(null)
   const [error, setError] = useState("")
   const [open, setOpen] = useState(false)
-  const [restoreOpen, setRestoreOpen] = useState(false)
   const [showResult, setShowResult] = useState(false)
   const [confirmInstall, setConfirmInstall] = useState(false)
+  const [confirmRollback, setConfirmRollback] = useState(false)
   const [checking, setChecking] = useState(false)
   const [starting, setStarting] = useState(false)
   const [downloadBackupBeforeUpdate, setDownloadBackupBeforeUpdate] =
     useState(true)
+  const rollbackUnavailableReason = useRollbackUnavailableReason(status)
   const logRef = useRef<HTMLPreElement>(null)
   const dialogContent = getSoftwareUpdateDialogContent(status, showResult)
   const showUpdateLog = dialogContent === "update-log"
@@ -111,16 +119,32 @@ export function SoftwareUpdateCard() {
     async (showFeedback = false) => {
       if (showFeedback) setChecking(true)
       try {
-        const response = await fetch("/api/system/update")
+        let response = await fetch(
+          showFeedback ? "/api/system/update/check" : "/api/system/update",
+          showFeedback ? { method: "POST" } : undefined
+        )
+        // Older sb.11 backends do not expose the explicit refresh endpoint.
+        // Keep frontend-only previews compatible until the next IPK is
+        // installed on the router.
+        if (
+          showFeedback &&
+          (response.status === 404 || response.status === 405)
+        ) {
+          response = await fetch("/api/system/update")
+        }
         const body = (await response.json().catch(() => ({}))) as Partial<
           SoftwareUpdateStatus & { error: string }
         >
         if (!response.ok)
           throw new Error(body.error ?? `HTTP ${response.status}`)
         setStatus(body as SoftwareUpdateStatus)
-        setError("")
+        setError(
+          body.check_error ? t("pages.settings.softwareUpdate.checkFailed") : ""
+        )
         if (showFeedback) {
-          if (body.available) {
+          if (body.check_error) {
+            toast.warning(t("pages.settings.softwareUpdate.cachedResult"))
+          } else if (body.available) {
             toast.success(
               t("pages.settings.softwareUpdate.availableToast", {
                 version: body.latest,
@@ -133,10 +157,26 @@ export function SoftwareUpdateCard() {
           }
         }
       } catch (refreshError) {
-        const message =
-          refreshError instanceof Error
-            ? refreshError.message
-            : t("pages.settings.softwareUpdate.checkFailed")
+        const detail = refreshError instanceof Error ? refreshError.message : ""
+        const message = t("pages.settings.softwareUpdate.checkFailed")
+        setStatus((previous) => {
+          if (previous) {
+            return { ...previous, check_error: detail || message }
+          }
+          return {
+            current: __APP_VERSION__ ? `v${__APP_VERSION__}` : "",
+            latest: "",
+            available: false,
+            current_ahead: false,
+            release_name: "",
+            release_notes: "",
+            release_url: "",
+            changelog_url: "",
+            running: false,
+            log: "",
+            check_error: detail || message,
+          }
+        })
         setError(message)
         if (showFeedback) toast.error(message, { richColors: true })
       } finally {
@@ -241,29 +281,76 @@ export function SoftwareUpdateCard() {
     }
   }
 
-  const openRollback = () => {
-    setOpen(false)
-    setRestoreOpen(true)
+  const startPackageRollback = async () => {
+    setConfirmRollback(false)
+    setShowResult(true)
+    setStarting(true)
+    setError("")
+    setStatus((previous) =>
+      previous
+        ? {
+            ...previous,
+            log: "",
+            message: t("pages.settings.softwareUpdate.rollbackStarting"),
+            percent: 0,
+            phase: "rollback",
+            success: null,
+          }
+        : previous
+    )
+    try {
+      const response = await fetch("/api/system/update/rollback", {
+        method: "POST",
+      })
+      const body = (await response.json().catch(() => ({}))) as {
+        error?: string
+      }
+      if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`)
+      setStatus((previous) =>
+        previous ? { ...previous, running: true } : previous
+      )
+      window.setTimeout(() => void refreshProgress(), 1200)
+    } catch (rollbackError) {
+      setStatus((previous) =>
+        previous
+          ? { ...previous, phase: "failed", running: false, success: false }
+          : previous
+      )
+      setError(
+        rollbackError instanceof Error
+          ? rollbackError.message
+          : t("pages.settings.softwareUpdate.rollbackFailed")
+      )
+    } finally {
+      setStarting(false)
+    }
   }
 
   return (
     <>
-      <Card
-        className={
-          status?.available
-            ? "border-success/60 bg-success/5 shadow-[0_0_0_1px_color-mix(in_srgb,var(--success)_18%,transparent)]"
-            : undefined
-        }
-        size="sm"
-      >
+      <Card size="sm">
         <CardHeader>
           <CardTitle>{t("pages.settings.softwareUpdate.title")}</CardTitle>
-          <CardDescription>
+          <CardDescription className="max-w-[480px]">
             {t("pages.settings.softwareUpdate.description")}
           </CardDescription>
         </CardHeader>
-        <CardContent className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <UpdateVersionSummary status={status} />
+        {/* Компактная колонка, как у остальных вкладок настроек: статус и
+            версии сверху, кнопки под ними, ничего не растянуто на всю
+            ширину карточки. */}
+        <CardContent className="flex max-w-[480px] flex-col gap-3">
+          <div className="flex min-w-0 flex-col items-start gap-2">
+            <KeeneticStatus tone={status?.available ? "success" : "neutral"}>
+              {status?.available
+                ? t("common.updateStatus.available")
+                : status?.check_error
+                  ? t("common.updateStatus.unavailable")
+                  : status
+                    ? t("common.updateStatus.current")
+                    : t("common.updateStatus.checking")}
+            </KeeneticStatus>
+            <UpdateVersionSummary status={status} />
+          </div>
           <div className="flex flex-wrap gap-2">
             <Button
               disabled={status?.running || starting || checking}
@@ -304,7 +391,7 @@ export function SoftwareUpdateCard() {
         open={open}
       >
         <DialogContent
-          className="overflow-hidden max-sm:top-auto max-sm:bottom-0 max-sm:left-0 max-sm:max-h-[calc(100dvh-0.75rem)] max-sm:max-w-none max-sm:translate-x-0 max-sm:translate-y-0 max-sm:rounded-b-none max-sm:border-x-0 max-sm:border-b-0 sm:max-w-3xl"
+          className="overflow-hidden max-sm:top-auto max-sm:bottom-0 max-sm:left-0 max-sm:max-h-[calc(100dvh-0.75rem)] max-sm:max-w-none max-sm:translate-x-0 max-sm:translate-y-0 max-sm:rounded-b-none max-sm:border-x-0 max-sm:border-b-0 sm:max-w-[640px]"
           showCloseButton={!status?.running && !starting}
         >
           <DialogHeader>
@@ -320,6 +407,7 @@ export function SoftwareUpdateCard() {
             <UpdateVersionSummary status={status} />
             {error ? <p className="text-sm text-destructive">{error}</p> : null}
             <UpdateStateMessage status={status} />
+            <RollbackAvailabilityNotice status={status} />
             {status && showUpdateLog ? (
               <UpdateProgress status={status} />
             ) : null}
@@ -353,7 +441,7 @@ export function SoftwareUpdateCard() {
                     onClick={() => setConfirmInstall(false)}
                     variant="outline"
                   >
-                    Отмена
+                    {t("pages.settings.softwareUpdate.cancel")}
                   </Button>
                   <Button onClick={() => void startUpdate()}>
                     {t("pages.settings.softwareUpdate.install")}
@@ -361,12 +449,48 @@ export function SoftwareUpdateCard() {
                 </div>
               </div>
             ) : null}
+            {confirmRollback ? (
+              <div className="space-y-3 rounded-md border border-destructive/40 bg-destructive/5 p-4">
+                <div>
+                  <p className="font-medium">
+                    {t("pages.settings.softwareUpdate.rollbackConfirmTitle")}
+                  </p>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {t("pages.settings.softwareUpdate.rollbackConfirmHint")}
+                  </p>
+                </div>
+                <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+                  <Button
+                    onClick={() => setConfirmRollback(false)}
+                    variant="outline"
+                  >
+                    {t("pages.settings.softwareUpdate.cancel")}
+                  </Button>
+                  <Button
+                    onClick={() => void startPackageRollback()}
+                    variant="destructive"
+                  >
+                    {t("pages.settings.softwareUpdate.rollbackConfirmAction")}
+                  </Button>
+                </div>
+              </div>
+            ) : null}
           </div>
 
           <DialogFooter className="max-sm:items-stretch">
-            <Button onClick={openRollback} variant="destructive">
+            <Button
+              disabled={
+                !status?.package_rollback_available ||
+                status.running ||
+                starting ||
+                confirmRollback
+              }
+              onClick={() => setConfirmRollback(true)}
+              title={rollbackUnavailableReason ?? undefined}
+              variant="destructive"
+            >
               <RotateCcwIcon />
-              Откат в один клик
+              {t("pages.settings.softwareUpdate.rollbackButton")}
             </Button>
             <label className="flex cursor-pointer items-center gap-3 rounded-md border bg-card px-3 py-2 text-sm sm:mr-auto">
               <Checkbox
@@ -375,7 +499,7 @@ export function SoftwareUpdateCard() {
                   setDownloadBackupBeforeUpdate(checked === true)
                 }
               />
-              Скачать бэкап перед установкой
+              {t("pages.settings.softwareUpdate.downloadBackupBefore")}
             </label>
             <Button
               disabled={
@@ -392,7 +516,6 @@ export function SoftwareUpdateCard() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <RestoreDialog onOpenChange={setRestoreOpen} open={restoreOpen} />
     </>
   )
 }
@@ -405,21 +528,63 @@ function UpdateVersionSummary({
   const { t } = useTranslation()
 
   return (
-    <div className="grid min-w-0 gap-x-6 gap-y-1 text-sm sm:grid-cols-2">
+    <div className="grid min-w-0 gap-y-1 text-sm">
       <div>
         <span className="text-muted-foreground">
           {t("pages.settings.softwareUpdate.current")}:{" "}
         </span>
-        <code>{status?.current ?? "—"}</code>
+        <code>
+          {status?.current || (__APP_VERSION__ ? `v${__APP_VERSION__}` : "—")}
+        </code>
       </div>
       <div>
         <span className="text-muted-foreground">
           {t("pages.settings.softwareUpdate.latest")}:{" "}
         </span>
-        <code>{status?.latest ?? "—"}</code>
+        <code>
+          {status?.latest ||
+            (status?.check_error
+              ? t("pages.settings.softwareUpdate.unavailableValue")
+              : "—")}
+        </code>
       </div>
     </div>
   )
+}
+
+// Why no rollback is possible, in the operator's language.
+//
+// Deliberately keyed off the backend's state rather than reworded from the
+// boolean: an unavailable rollback used to be explained as "appears after a
+// successful managed update", which is true only when nothing was ever saved
+// and misleading in every other case - a corrupted store told the operator to
+// wait for something that had already happened.
+//
+// An unrecognised state falls back to the bare statement. A newer backend must
+// never have its reason guessed at by an older page.
+function useRollbackUnavailableReason(status: SoftwareUpdateStatus | null) {
+  const { t } = useTranslation()
+
+  if (!status || status.package_rollback_available) return null
+  const key = packageRollbackReasonKey(status.package_rollback_state)
+  const headline = t("pages.settings.softwareUpdate.rollbackUnavailable")
+  if (!key) return headline
+  return `${headline} — ${t(`pages.settings.softwareUpdate.${key}`)}`
+}
+
+// Shown in the dialog body, not only on the disabled button. The point of the
+// slice is that the operator learns there is nothing to roll back to before
+// they start an update, and a tooltip on a disabled control is not something a
+// touch device can deliver.
+function RollbackAvailabilityNotice({
+  status,
+}: {
+  status: SoftwareUpdateStatus | null
+}) {
+  const reason = useRollbackUnavailableReason(status)
+
+  if (!reason || status?.running) return null
+  return <p className="text-sm text-muted-foreground">{reason}</p>
 }
 
 function UpdateStateMessage({
@@ -454,18 +619,21 @@ function UpdateStateMessage({
 }
 
 function UpdateProgress({ status }: { status: SoftwareUpdateStatus }) {
+  const { t } = useTranslation()
   const percent = Math.min(100, Math.max(0, status.percent ?? 0))
 
   return (
     <div className="space-y-2" aria-live="polite">
       <div className="flex items-center justify-between gap-4 text-sm">
-        <span>{status.message ?? "Выполняется обновление"}</span>
+        <span>
+          {status.message ?? t("pages.settings.softwareUpdate.inProgress")}
+        </span>
         <span className="shrink-0 text-muted-foreground tabular-nums">
           {percent}%
         </span>
       </div>
       <div
-        aria-label="Прогресс обновления"
+        aria-label={t("pages.settings.softwareUpdate.progressLabel")}
         aria-valuemax={100}
         aria-valuemin={0}
         aria-valuenow={percent}

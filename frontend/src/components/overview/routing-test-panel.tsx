@@ -3,14 +3,10 @@ import { useState } from "react"
 import { useTranslation } from "react-i18next"
 
 import { usePostRoutingTestMutation } from "@/api/mutations"
+import type { ConfigObject } from "@/api/generated/model"
 import { SectionCard } from "@/components/shared/section-card"
 import { Alert, AlertDescription } from "@/components/ui/alert"
-import {
-  Empty,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyTitle,
-} from "@/components/ui/empty"
+import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import {
   InputGroup,
   InputGroupAddon,
@@ -23,7 +19,13 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { RoutingDiagnosticsResult } from "./routing-diagnostics-result"
 import { sanitizeRoutingTarget } from "./sanitize-routing-target"
 
-export function RoutingTestPanel() {
+export function RoutingTestPanel({
+  lists,
+  outbounds,
+}: {
+  lists?: ConfigObject["lists"]
+  outbounds?: ConfigObject["outbounds"]
+}) {
   const { t } = useTranslation()
   const [testTarget, setTestTarget] = useState("")
   const [routingInputError, setRoutingInputError] = useState<string | null>(
@@ -121,18 +123,18 @@ export function RoutingTestPanel() {
       routingDiagnostics &&
       routingDiagnostics.results.length === 0 &&
       routingDiagnostics.rule_diagnostics.length === 0 ? (
-        <Empty className="border">
-          <EmptyHeader>
-            <EmptyTitle>{t("overview.routingTest.emptyTitle")}</EmptyTitle>
-            <EmptyDescription>
-              {t("overview.routingTest.emptyDescription")}
-            </EmptyDescription>
-          </EmptyHeader>
-        </Empty>
+        <ListPlaceholder
+          description={t("overview.routingTest.emptyDescription")}
+          title={t("overview.routingTest.emptyTitle")}
+        />
       ) : null}
 
       {routingDiagnostics ? (
-        <RoutingDiagnosticsResult diagnostics={routingDiagnostics} />
+        <RoutingDiagnosticsResult
+          diagnostics={routingDiagnostics}
+          lists={lists}
+          outbounds={outbounds}
+        />
       ) : null}
     </SectionCard>
   )

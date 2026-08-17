@@ -1,10 +1,12 @@
 import { Suspense, lazy } from "react"
-import { Redirect, Route, Switch } from "wouter"
+import { useTranslation } from "react-i18next"
+import { Redirect, Route, Switch, useSearch } from "wouter"
 
 import { AppShell } from "@/components/layout/app-shell"
 import { AuthGate } from "@/components/auth-gate"
+import { StepUpDialog } from "@/components/step-up-dialog"
 import { ScrollToTopOnRouteChange } from "@/components/layout/scroll-route"
-import { Skeleton } from "@/components/ui/skeleton"
+import { KeenSpinner } from "@/components/shared/keen-spinner"
 import { OverviewPage } from "@/pages/overview-page"
 
 /**
@@ -23,13 +25,21 @@ const ConnectionsPage = lazy(() =>
     default: m.ConnectionsPage,
   }))
 )
+const DnsRulesPage = lazy(() =>
+  import("@/pages/dns-rules-page").then((m) => ({ default: m.DnsRulesPage }))
+)
 const DnsRuleUpsertPage = lazy(() =>
   import("@/pages/dns-rule-upsert-page").then((m) => ({
     default: m.DnsRuleUpsertPage,
   }))
 )
-const DnsRulesPage = lazy(() =>
-  import("@/pages/dns-rules-page").then((m) => ({ default: m.DnsRulesPage }))
+const RulesPage = lazy(() =>
+  import("@/pages/rules-page").then((m) => ({ default: m.RulesPage }))
+)
+const RoutesAndTunnelsPage = lazy(() =>
+  import("@/pages/routes-and-tunnels-page").then((m) => ({
+    default: m.RoutesAndTunnelsPage,
+  }))
 )
 const DnsServerUpsertPage = lazy(() =>
   import("@/pages/dns-servers-upsert-page").then((m) => ({
@@ -46,10 +56,17 @@ const GeneralConfigPage = lazy(() =>
     default: m.GeneralConfigPage,
   }))
 )
-const BackupPage = lazy(() => import("@/pages/backup-page").then((m) => ({ default: m.BackupPage })))
-const RestorePage = lazy(() => import("@/pages/backup-page").then((m) => ({ default: m.RestorePage })))
+const SetupWizardPage = lazy(() => import("@/pages/setup-wizard-page"))
+const BackupPage = lazy(() =>
+  import("@/pages/backup-page").then((m) => ({ default: m.BackupPage }))
+)
+const RestorePage = lazy(() =>
+  import("@/pages/backup-page").then((m) => ({ default: m.RestorePage }))
+)
 const ListUpsertPage = lazy(() =>
-  import("@/pages/list-upsert-page").then((m) => ({ default: m.ListUpsertPage }))
+  import("@/pages/list-upsert-page").then((m) => ({
+    default: m.ListUpsertPage,
+  }))
 )
 const ListsPage = lazy(() =>
   import("@/pages/lists-page").then((m) => ({ default: m.ListsPage }))
@@ -62,37 +79,210 @@ const OutboundUpsertPage = lazy(() =>
     default: m.OutboundUpsertPage,
   }))
 )
-const OutboundsPage = lazy(() =>
-  import("@/pages/outbounds-page").then((m) => ({ default: m.OutboundsPage }))
-)
 const RoutingRuleUpsertPage = lazy(() =>
   import("@/pages/routing-rule-upsert-page").then((m) => ({
     default: m.RoutingRuleUpsertPage,
   }))
 )
-const RoutingRulesPage = lazy(() =>
-  import("@/pages/routing-rules-page").then((m) => ({
-    default: m.RoutingRulesPage,
+const TransportUpsertPage = lazy(() =>
+  import("@/pages/transport-upsert-page").then((m) => ({
+    default: m.TransportUpsertPage,
   }))
 )
-const TransportsPage = lazy(() =>
-  import("@/pages/transports-page").then((m) => ({ default: m.TransportsPage }))
-)
 
-/** Shown while a page chunk arrives; on a LAN this is a single frame. */
+/**
+ * Пока приезжает код страницы.
+ *
+ * Здесь стоял скелетон из трёх серых полос. Он отвечает на вопрос «что тут
+ * будет», а при переходе между страницами вопрос другой — «оно грузится или
+ * зависло». Конфигуратор на этот вопрос отвечает вращающимся индикатором,
+ * и это правильный ответ: полосы, которые просто лежат, от зависшей страницы
+ * не отличить.
+ */
 function PageFallback() {
+  const { t } = useTranslation()
+
   return (
-    <div className="space-y-3">
-      <Skeleton className="h-9 w-64" />
-      <Skeleton className="h-5 w-full max-w-xl" />
-      <Skeleton className="h-64 w-full" />
+    <div className="flex min-h-[50vh] flex-1 items-center justify-center">
+      <KeenSpinner label={t("common.loading")} />
     </div>
+  )
+}
+
+function useEditorPresentation() {
+  const search = useSearch()
+  return new URLSearchParams(search).get("view") === "page" ? "page" : "dialog"
+}
+
+function ListEditorRoute({
+  mode,
+  listId,
+}: {
+  mode: "create" | "edit"
+  listId?: string
+}) {
+  const presentation = useEditorPresentation()
+
+  if (presentation === "page") {
+    return <ListUpsertPage listId={listId} mode={mode} presentation="page" />
+  }
+
+  return (
+    <>
+      <ListsPage />
+      <ListUpsertPage listId={listId} mode={mode} presentation="dialog" />
+    </>
+  )
+}
+
+function DnsServerEditorRoute({
+  mode,
+  serverTag,
+}: {
+  mode: "create" | "edit"
+  serverTag?: string
+}) {
+  const presentation = useEditorPresentation()
+
+  if (presentation === "page") {
+    return (
+      <DnsServerUpsertPage
+        mode={mode}
+        presentation="page"
+        serverTag={serverTag}
+      />
+    )
+  }
+
+  return (
+    <>
+      <DnsServersPage />
+      <DnsServerUpsertPage
+        mode={mode}
+        presentation="dialog"
+        serverTag={serverTag}
+      />
+    </>
+  )
+}
+
+function RoutingRuleEditorRoute({
+  mode,
+  ruleId,
+}: {
+  mode: "create" | "edit"
+  ruleId?: string
+}) {
+  const presentation = useEditorPresentation()
+
+  if (presentation === "page") {
+    return (
+      <RoutingRuleUpsertPage mode={mode} presentation="page" ruleId={ruleId} />
+    )
+  }
+
+  return (
+    <>
+      <RulesPage />
+      <RoutingRuleUpsertPage
+        mode={mode}
+        presentation="dialog"
+        ruleId={ruleId}
+      />
+    </>
+  )
+}
+
+function DnsRuleEditorRoute({
+  mode,
+  ruleId,
+}: {
+  mode: "create" | "edit"
+  ruleId?: string
+}) {
+  const presentation = useEditorPresentation()
+
+  if (presentation === "page") {
+    return <DnsRuleUpsertPage mode={mode} presentation="page" ruleId={ruleId} />
+  }
+
+  return (
+    <>
+      <DnsRulesPage />
+      <DnsRuleUpsertPage mode={mode} presentation="dialog" ruleId={ruleId} />
+    </>
+  )
+}
+
+function OutboundEditorRoute({
+  mode,
+  outboundId,
+}: {
+  mode: "create" | "edit"
+  outboundId?: string
+}) {
+  const presentation = useEditorPresentation()
+
+  if (presentation === "page") {
+    return (
+      <OutboundUpsertPage
+        mode={mode}
+        outboundId={outboundId}
+        presentation="page"
+      />
+    )
+  }
+
+  return (
+    <>
+      <RoutesAndTunnelsPage initialTab="interfaces" />
+      <OutboundUpsertPage
+        mode={mode}
+        outboundId={outboundId}
+        presentation="dialog"
+      />
+    </>
+  )
+}
+
+function TransportEditorRoute({
+  mode,
+  transportTag,
+}: {
+  mode: "create" | "edit"
+  transportTag?: string
+}) {
+  const presentation = useEditorPresentation()
+
+  if (presentation === "page") {
+    return (
+      <TransportUpsertPage
+        mode={mode}
+        presentation="page"
+        transportTag={transportTag}
+      />
+    )
+  }
+
+  return (
+    <>
+      <RoutesAndTunnelsPage />
+      <TransportUpsertPage
+        mode={mode}
+        presentation="dialog"
+        transportTag={transportTag}
+      />
+    </>
   )
 }
 
 function App() {
   return (
     <AuthGate>
+      {/* Inside the gate, so it only exists once there is a session to step
+          up from, and above the pages, so no privileged screen has to mount
+          its own copy. */}
+      <StepUpDialog />
       <AppShell>
         <ScrollToTopOnRouteChange />
         <Suspense fallback={<PageFallback />}>
@@ -102,31 +292,54 @@ function App() {
             <Route component={BackupPage} path="/backup" />
             <Route component={RestorePage} path="/restore" />
             <Route path="/lists/create">
-              <ListUpsertPage mode="create" />
+              <ListEditorRoute mode="create" />
             </Route>
             <Route path="/lists/:listId/edit">
-              {(params) => <ListUpsertPage listId={params.listId} mode="edit" />}
+              {(params) => (
+                <ListEditorRoute listId={params.listId} mode="edit" />
+              )}
             </Route>
             <Route component={CatalogPage} path="/catalog" />
             <Route component={ListsPage} path="/lists" />
             <Route path="/outbounds/create">
-              <OutboundUpsertPage mode="create" />
+              <OutboundEditorRoute mode="create" />
             </Route>
             <Route path="/outbounds/:outboundId/edit">
               {(params) => (
-                <OutboundUpsertPage mode="edit" outboundId={params.outboundId} />
+                <OutboundEditorRoute
+                  mode="edit"
+                  outboundId={params.outboundId}
+                />
               )}
             </Route>
-            <Route component={OutboundsPage} path="/outbounds" />
-            <Route component={TransportsPage} path="/transports" />
+            <Route path="/outbounds">
+              <RoutesAndTunnelsPage initialTab="interfaces" />
+            </Route>
+            <Route path="/transports/create">
+              <TransportEditorRoute mode="create" />
+            </Route>
+            <Route path="/transports/:transportTag/edit">
+              {(params) => (
+                <TransportEditorRoute
+                  mode="edit"
+                  transportTag={decodeURIComponent(params.transportTag)}
+                />
+              )}
+            </Route>
+            <Route path="/transports">
+              <RoutesAndTunnelsPage />
+            </Route>
+            <Route path="/setup">
+              <SetupWizardPage />
+            </Route>
             <Route component={ConnectionsPage} path="/connections" />
             <Route component={NfqwsPage} path="/nfqws" />
             <Route path="/dns-servers/create">
-              <DnsServerUpsertPage mode="create" />
+              <DnsServerEditorRoute mode="create" />
             </Route>
             <Route path="/dns-servers/:serverTag/edit">
               {(params) => (
-                <DnsServerUpsertPage
+                <DnsServerEditorRoute
                   mode="edit"
                   serverTag={decodeURIComponent(params.serverTag)}
                 />
@@ -134,23 +347,39 @@ function App() {
             </Route>
             <Route component={DnsServersPage} path="/dns-servers" />
             <Route path="/dns-rules/create">
-              <DnsRuleUpsertPage mode="create" />
+              <DnsRuleEditorRoute mode="create" />
             </Route>
-            <Route path="/dns-rules/:ruleIndex/edit">
+            <Route path="/dns-rules/:ruleId/edit">
               {(params) => (
-                <DnsRuleUpsertPage mode="edit" ruleIndex={params.ruleIndex} />
+                <DnsRuleEditorRoute
+                  mode="edit"
+                  ruleId={decodeURIComponent(params.ruleId)}
+                />
               )}
             </Route>
-            <Route component={DnsRulesPage} path="/dns-rules" />
+            {/* Общий список DNS-правил остался по прямому адресу: сюда
+                ведёт честный блок из редактора списка, когда правило общее
+                для нескольких списков. В меню страницы больше нет. */}
+            <Route path="/dns-rules">
+              <DnsRulesPage />
+            </Route>
             <Route path="/routing-rules/create">
-              <RoutingRuleUpsertPage mode="create" />
+              <RoutingRuleEditorRoute mode="create" />
             </Route>
-            <Route path="/routing-rules/:ruleIndex/edit">
+            <Route path="/routing-rules/:ruleId/edit">
               {(params) => (
-                <RoutingRuleUpsertPage mode="edit" ruleIndex={params.ruleIndex} />
+                <RoutingRuleEditorRoute
+                  mode="edit"
+                  ruleId={decodeURIComponent(params.ruleId)}
+                />
               )}
             </Route>
-            <Route component={RoutingRulesPage} path="/routing-rules" />
+            <Route path="/routing-rules">
+              <RulesPage />
+            </Route>
+            <Route path="/rules">
+              <RulesPage />
+            </Route>
             <Route>
               <Redirect to="/" />
             </Route>

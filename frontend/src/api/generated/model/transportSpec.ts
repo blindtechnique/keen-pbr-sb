@@ -12,6 +12,13 @@ import type { VlessRealitySpec } from './vlessRealitySpec';
 export interface TransportSpec {
   /** @pattern ^[a-z][a-z0-9_]{0,23}$ */
   tag: string;
+  /**
+     * Optional human-readable alias of at most 80 Unicode code points. It must be valid UTF-8, contain a non-whitespace character, and contain no ASCII, C1, or bidirectional control characters. It never replaces the stable technical tag.
+
+     * @minLength 1
+     * @maxLength 80
+     */
+  display_name?: string;
   type: TransportSpecType;
   /** @pattern ^[A-Za-z0-9_.-]{1,15}$ */
   interface: string;

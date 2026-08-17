@@ -1,15 +1,36 @@
 #pragma once
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
 
 namespace keen_pbr3 {
 
+namespace detail {
+bool dns_response_is_truncated(const unsigned char* packet, std::size_t size);
+bool dns_response_matches_query(const unsigned char* packet,
+                                std::size_t size,
+                                std::uint16_t transaction_id,
+                                const std::string& domain);
+}
+
 struct ResolverConfigHashTxtValue {
     std::optional<std::int64_t> ts;
     std::string hash;
+};
+
+enum class ResolverRuntimeMode : uint8_t {
+    UNKNOWN,
+    ACTIVE,
+    FALLBACK,
+};
+
+struct ResolverStateTxtValue {
+    std::optional<std::int64_t> ts;
+    ResolverRuntimeMode mode{ResolverRuntimeMode::UNKNOWN};
+    std::string reason;
 };
 
 enum class ResolverConfigHashProbeStatus : uint8_t {
@@ -37,6 +58,9 @@ std::optional<std::string> query_dns_txt_record(const std::string& dns_server_ad
 std::string normalize_dns_txt_md5(const std::string& txt_payload);
 // Parse TXT payload variants like "<ts>|<hash>" and return timestamp/hash parts.
 ResolverConfigHashTxtValue parse_resolver_config_hash_txt(const std::string& txt_payload);
+// Parse the managed resolver marker: "<ts>|active|..." or
+// "<ts>|fallback|<reason>".
+ResolverStateTxtValue parse_resolver_state_txt(const std::string& txt_payload);
 // Validate whether the parsed payload contains a usable md5 hash.
 bool is_valid_resolver_config_hash_txt_value(const ResolverConfigHashTxtValue& value);
 // Query and classify the resolver config-hash TXT payload in one step.

@@ -5,7 +5,7 @@ weight: 5
 
 Most users can skip this page.
 
-These settings are for advanced setups and service-level tuning: `daemon`, `api`, `fwmark`, `iproute`, and `lists_autoupdate`.
+These settings are for advanced setups and service-level tuning: `daemon`, `api`, `fwmark`, `iproute`, `lists_autoupdate`, and `list_refresh`.
 
 ## daemon
 
@@ -16,6 +16,8 @@ Controls the PID file path, cache directory, and global routing behaviour.
 | `pid_file` | string | — | Path to write the PID file |
 | `cache_dir` | string | `/var/cache/keen-pbr` | Directory for cached list data |
 | `firewall_backend` | string | `"auto"` | Firewall backend selection: `auto`, `iptables`, or `nftables` |
+| `clear_dynamic_sets_on_apply` | boolean | `true` | Clear dnsmasq-managed dynamic sets during a full config apply or runtime restart. Preserve-set reconciles never clear them. |
+| `ipv6_enabled` | boolean | `true` | Install IPv6 routing/firewall state and emit IPv6 resolver targets. An explicit `false` enables strict IPv4-only DNS: dnsmasq filters AAAA plus SVCB/HTTPS records that may contain IPv6 hints. This also disables automatic HTTP/3 and ECH discovery; ordinary A-record resolution is unaffected. Omitting the field or setting it to `null` preserves IPv6. |
 | `strict_enforcement` | boolean | tunnel-aware | Default strict routing enforcement for interface outbounds. When enabled, an unreachable default route is installed if the outbound gateway/interface cannot be confirmed reachable. Since 3.0.7-sb.5 the built-in default is `true` for tunnel-style interface outbounds without a gateway (sing-box TUN, WireGuard/AmneziaWG) and `false` for gateway-based outbounds; an explicit value here or per-outbound always wins. |
 | `max_file_size_bytes` | integer | `8388608` (8 MiB) | Maximum allowed size in bytes for downloaded remote list content |
 | `firewall_verify_max_bytes` | integer | `262144` | Maximum stdout bytes captured per firewall verification command (`0` = unlimited) |
@@ -26,6 +28,8 @@ Controls the PID file path, cache directory, and global routing behaviour.
     "pid_file": "/var/run/keen-pbr.pid",
     "cache_dir": "/var/cache/keen-pbr",
     "firewall_backend": "auto",
+    "clear_dynamic_sets_on_apply": true,
+    "ipv6_enabled": true,
     "strict_enforcement": false,
     "max_file_size_bytes": 8388608,
     "firewall_verify_max_bytes": 262144
@@ -120,6 +124,27 @@ If the `lists_autoupdate` section is omitted, automatic refresh is disabled.
 The `cron` field uses the standard 5-field format: `minute hour day-of-month month day-of-week`. The example above runs weekly at 04:00 on Sunday.
 
 The `cron` field is validated even when `enabled` is `false`.
+
+## list_refresh
+
+Defines the ordered outbound chain used to download URL-backed lists. The same
+chain is used by scheduled refresh, the manual refresh action, and refreshes
+triggered after applying configuration.
+
+```json { filename="config.json" }
+{
+  "list_refresh": {
+    "detour": "primary_vpn",
+    "fallback_detours": ["backup_vpn", "wan"]
+  }
+}
+```
+
+Lists inherit this chain by default. A list with
+`"refresh_detour_mode": "override"` uses its own `detour` and
+`fallback_detours` instead. Legacy lists that already contain `detour` keep
+their old per-list behavior without a migration. If an explicit chain fails,
+keen-pbr does not silently retry through the system default route.
 
 You can also trigger a manual refresh at any time:
 - Send `SIGHUP` to the daemon process: `kill -HUP $(cat /var/run/keen-pbr.pid)`

@@ -16,7 +16,70 @@ is_yes() {
     case "$1" in y|Y|yes|YES|д|Д|да|ДА) return 0 ;; *) return 1 ;; esac
 }
 
+# Единственный способ звать Keenetic CLI из этого скрипта; тот же контракт, что
+# в install.sh и в src/util/ndmc.hpp.
+#
+# ndmc линкуется с библиотеками прошивки, а Entware держит собственную glibc в
+# /opt/lib. Унаследованный LD_LIBRARY_PATH заставляет загрузчик подсунуть ndmc
+# чужую libc, и он умирает до выполнения команды. Переменная чистится только
+# для дочернего процесса. Диагностику ndmc пишет в stdout, поэтому её нельзя
+# просто отправить в /dev/null вместе с обычным выводом.
+run_ndmc() {
+    ndmc_output="$(LD_LIBRARY_PATH= ndmc -c "$1" 2>&1)" && return 0
+    ndmc_status=$?
+    echo "Keenetic CLI не выполнил '$1':" >&2
+    printf '%s\n' "$ndmc_output" >&2
+    return "$ndmc_status"
+}
+
 [ "$(id -u)" = "0" ] || { echo "Запустите деинсталлятор от пользователя root" >&2; exit 1; }
+
+RESCUE_DIR=/opt/var/lib/keen-pbr/rescue
+RECOVERY_DIR=/opt/var/lib/keen-pbr/recovery
+LOCK_HELPER="$RESCUE_DIR/update-lock.sh"
+LOCK_TOKEN=
+LOCK_OWNED=0
+
+cleanup() {
+    status=$?
+    if [ "$LOCK_OWNED" -eq 1 ] && [ -x "$LOCK_HELPER" ]; then
+        "$LOCK_HELPER" release "$$" "$LOCK_TOKEN" >/dev/null 2>&1 || true
+    fi
+    trap - EXIT INT TERM
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+assert_recovery_state_is_clean() {
+    for state_path in \
+        "$RESCUE_DIR/pending" \
+        "$RESCUE_DIR/UNKNOWN" \
+        "$RECOVERY_DIR/UNKNOWN" \
+        "$RECOVERY_DIR/config-save/UNKNOWN" \
+        "$RECOVERY_DIR/backup-restore/UNKNOWN" \
+        "$RECOVERY_DIR/config-save/active.json" \
+        "$RECOVERY_DIR/backup-restore/active.json"; do
+        if [ -e "$state_path" ] || [ -L "$state_path" ]; then
+            echo "Удаление остановлено: обнаружена незавершённая операция восстановления." >&2
+            echo "Сначала перезапустите keen-pbr-sb и завершите или откатите операцию." >&2
+            return 1
+        fi
+    done
+    for state_dir in \
+        "$RESCUE_DIR" \
+        "$RECOVERY_DIR" \
+        "$RECOVERY_DIR/config-save" \
+        "$RECOVERY_DIR/backup-restore"; do
+        if [ -L "$state_dir" ] ||
+           { [ -e "$state_dir" ] && [ ! -d "$state_dir" ]; }; then
+            echo "Удаление остановлено: небезопасный тип каталога $state_dir" >&2
+            return 1
+        fi
+    done
+}
+
+assert_recovery_state_is_clean
 
 managed_sing_box=""
 if [ -f /opt/etc/keen-pbr/sing-box-managed.path ]; then
@@ -34,11 +97,30 @@ if /opt/bin/opkg status nfqws2-keenetic 2>/dev/null | grep -q '^Status:.* instal
 fi
 restore_dns=$(ask "Отключить Keenetic opkg dns-override и вернуть системный DNS-прокси? [y/N]:" "N")
 
+[ -x "$LOCK_HELPER" ] || {
+    echo "Удаление остановлено: отсутствует защищённый lock-helper." >&2
+    echo "Сначала переустановите текущую версию keen-pbr-sb." >&2
+    exit 1
+}
+if ! LOCK_TOKEN=$("$LOCK_HELPER" acquire "$$" uninstall); then
+    echo "Удаление остановлено: обновление, восстановление или другая операция уже выполняется." >&2
+    exit 1
+fi
+LOCK_OWNED=1
+
+# The user may spend an arbitrary amount of time answering prompts. Recheck
+# durable state after taking the shared lock so an update cannot race between
+# the initial preflight and opkg removal.
+assert_recovery_state_is_clean
+
 /opt/etc/init.d/S79transport-manager stop >/dev/null 2>&1 || true
 /opt/etc/init.d/S80keen-pbr stop >/dev/null 2>&1 || true
 
 for package in keen-pbr keen-pbr-headless; do
     if /opt/bin/opkg status "$package" >/dev/null 2>&1; then
+        # postrm deliberately preserves the durable guard for replacements.
+        # The official uninstaller releases its lock and removes those helpers
+        # itself only after every destructive step has completed.
         /opt/bin/opkg remove "$package"
     fi
 done
@@ -59,8 +141,14 @@ else
 fi
 
 if is_yes "$restore_dns"; then
-    ndmc -c "no opkg dns-override" >/dev/null
-    ndmc -c "system configuration save" >/dev/null
+    run_ndmc "no opkg dns-override"
+    run_ndmc "system configuration save"
 fi
+
+# Do not delete the only recovery barrier if an uncoordinated actor created
+# durable state while the package was being removed.
+assert_recovery_state_is_clean
+"$LOCK_HELPER" release-and-clean "$$" "$LOCK_TOKEN"
+LOCK_OWNED=0
 
 echo "keen-pbr-sb удалён. Сам Entware не изменён."

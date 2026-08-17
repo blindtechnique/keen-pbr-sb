@@ -5,9 +5,11 @@ weight: 2
 
 Lists are groups of sites or IP ranges that you want keen-pbr to match.
 
-The `lists` key is an object where each key is the list name and the value is the list configuration.
+The `lists` key is an object where each key is the stable technical ID of a list and the value is the list configuration.
 
-List names must match `^[a-z][a-z0-9_]*$` and be at most 24 characters.
+Technical IDs must match `^[a-z][a-z0-9_]*$` and be at most 24 characters. Routing and DNS rules always refer to this ID, so changing the human-readable name does not break those references.
+
+The optional `display_name` is used only for presentation in the web interface. It accepts Unicode, may contain up to 80 characters, and does not have to be unique. Configurations without `display_name` remain fully compatible and show the technical ID instead.
 
 Most users start with a simple domain list such as:
 
@@ -15,6 +17,7 @@ Most users start with a simple domain list such as:
 {
   "lists": {
     "my_sites": {
+      "display_name": "Everyday sites",
       "domains": ["google.com", "youtube.com"]
     }
   }
@@ -25,6 +28,7 @@ Most users start with a simple domain list such as:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
+| `display_name` | string | no | Human-readable name shown in the web interface. Unicode, up to 80 characters; duplicate names are allowed. |
 | `url` | string | no | URL to a remote list file to download and cache |
 | `domains` | array of string | no | Inline domain patterns (supports `*.` prefix wildcards) |
 | `ip_cidrs` | array of string | no | Inline IP addresses or CIDR ranges |
@@ -45,9 +49,15 @@ Each list is backed by static and dynamic IP sets.
 - If `ttl_ms` is set, those resolved IPs for domains expire automatically after that time.
 {{% /details %}}
 
-## List File Format
+## List file formats
 
-Whether loaded from `url` or `file`, keen-pbr expects one entry per line:
+A remote URL ending in `.srs` may contain a binary SRS rule set in format version 1-5. keen-pbr-sb decodes it in the built-in core, so sing-box does not have to be installed. A future unsupported format version is rejected until keen-pbr-sb is updated; the service deliberately does not run an external decompiler on an unknown format.
+
+Domain suffixes and IP/CIDR entries preserve their meaning. Exact SRS domains adopt the normal keen-pbr list semantics of matching both the domain and its subdomains. Regular expressions, keywords, inverted rules, and rules that depend on additional conditions are skipped. A partial import writes one summary warning to the log with the converted and skipped counts.
+
+Decompression is streamed and guarded by separate limits for the input file, decompressed data, trie, and final list. Cache metadata records the decoder revision, so a mapping change forces one fresh download and conversion. Conditional ETag requests are used only for the same URL when a local cache body exists.
+
+For a regular text `url` or local `file`, keen-pbr expects one entry per line:
 
 - IPv4 address: `93.184.216.34`
 - IPv4 CIDR: `10.0.0.0/8`

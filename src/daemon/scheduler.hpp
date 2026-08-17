@@ -3,6 +3,7 @@
 #include "../util/traced_mutex.hpp"
 
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <stdexcept>
 #include <string>
@@ -19,13 +20,39 @@ public:
 
 using TaskCallback = std::function<void()>;
 
+#ifdef KEEN_PBR3_TESTING
+struct SchedulerTestFdHooks {
+    std::function<void(
+        int,
+        std::function<void(std::uint32_t)>)> add_fd;
+    std::function<void(int)> remove_fd;
+};
+#endif
+
+// Small scheduling boundary used by runtime components that only need
+// repeating jobs. Keeping this interface narrower than Scheduler lets those
+// components be tested without constructing a complete Daemon/epoll loop.
+class RepeatingTaskScheduler {
+public:
+    virtual ~RepeatingTaskScheduler() = default;
+
+    virtual int schedule_repeating(std::chrono::milliseconds interval,
+                                   TaskCallback cb,
+                                   std::string label = "") = 0;
+    virtual void cancel(int task_id) = 0;
+};
+
 // Timerfd-based periodic task scheduler that integrates with the
 // Daemon epoll event loop via add_fd/remove_fd.
-class Scheduler {
+class Scheduler : public RepeatingTaskScheduler {
 public:
     // Takes a reference to the Daemon for fd registration.
     // Caller must ensure Daemon outlives this Scheduler.
     explicit Scheduler(Daemon& daemon);
+#ifdef KEEN_PBR3_TESTING
+    // Isolated timer-registration boundary for strong-guarantee fault tests.
+    explicit Scheduler(SchedulerTestFdHooks hooks);
+#endif
     ~Scheduler();
 
     // Non-copyable, non-movable
@@ -38,7 +65,7 @@ public:
     // The first invocation fires after `interval` elapses.
     int schedule_repeating(std::chrono::milliseconds interval,
                            TaskCallback cb,
-                           std::string label = "");
+                           std::string label = "") override;
 
     // Schedule a one-shot task. Returns a task ID for later cancellation.
     // The callback fires once after `delay` elapses.
@@ -47,13 +74,19 @@ public:
                          std::string label = "");
 
     // Cancel a previously scheduled task by ID.
-    void cancel(int task_id);
+    void cancel(int task_id) override;
 
     // Cancel all scheduled tasks.
     void cancel_all();
 
     // Number of active tasks.
     size_t size() const;
+
+#ifdef KEEN_PBR3_TESTING
+    void fail_next_entry_publication_for_testing();
+    void fail_next_post_registration_for_testing();
+    int last_created_fd_for_testing() const;
+#endif
 
 private:
     struct TimerEntry {
@@ -65,13 +98,29 @@ private:
     };
 
     int create_timerfd(std::chrono::milliseconds initial, std::chrono::milliseconds interval);
-    void on_timer(int timer_fd, uint32_t events);
-    void remove_entry(int timer_fd);
+    int schedule_timer(std::chrono::milliseconds initial,
+                       std::chrono::milliseconds interval,
+                       TaskCallback cb,
+                       bool repeating,
+                       std::string label);
+    void register_timer_fd(int fd);
+    void unregister_timer_fd(int fd) noexcept;
+    bool erase_timer_entry(int fd) noexcept;
+    void on_timer(int timer_fd, uint32_t events) noexcept;
+    void remove_entry(int timer_fd) noexcept;
 
-    Daemon& daemon_;
+    Daemon* daemon_{nullptr};
+#ifdef KEEN_PBR3_TESTING
+    SchedulerTestFdHooks test_fd_hooks_;
+#endif
     mutable TracedMutex entries_mutex_;
     std::vector<TimerEntry> entries_ GUARDED_BY(entries_mutex_);
     int next_id_ GUARDED_BY(entries_mutex_){1};
+#ifdef KEEN_PBR3_TESTING
+    bool fail_next_entry_publication_ GUARDED_BY(entries_mutex_){false};
+    bool fail_next_post_registration_ GUARDED_BY(entries_mutex_){false};
+    int last_created_fd_ GUARDED_BY(entries_mutex_){-1};
+#endif
 };
 
 } // namespace keen_pbr3

@@ -6,6 +6,7 @@
  * OpenAPI spec version: 3.0.0
  */
 import type { RoutingTestEntry } from './routingTestEntry';
+import type { RoutingTestResponseConfigScope } from './routingTestResponseConfigScope';
 import type { RoutingTestRuleDiagnostic } from './routingTestRuleDiagnostic';
 
 export interface RoutingTestResponse {
@@ -13,6 +14,10 @@ export interface RoutingTestResponse {
   target: string;
   /** true when the target was interpreted as a domain name. */
   is_domain: boolean;
+  /** Diagnostics always use the applied active configuration. */
+  config_scope: RoutingTestResponseConfigScope;
+  /** true when a separate unapplied configuration draft exists. */
+  unapplied_draft: boolean;
   /** IP addresses resolved from the domain via DNS. Empty array for IP targets.
    */
   resolved_ips: string[];

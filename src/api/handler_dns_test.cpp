@@ -4,8 +4,10 @@
 
 #include "../log/logger.hpp"
 
+#include <chrono>
 #include <httplib.h>
 #include <nlohmann/json.hpp>
+#include <utility>
 
 namespace keen_pbr3 {
 
@@ -25,16 +27,38 @@ std::string make_hello_payload() {
 } // namespace
 
 void register_dns_test_handler(ApiServer& server, ApiContext& ctx) {
+    server.on_auth_sessions_revoked(
+        [broadcaster = &ctx.dns_test_broadcaster] {
+            broadcaster->revoke_active_subscriptions();
+        });
     server.get_stream("/api/dns/test",
-                      [&ctx](const httplib::Request&, httplib::Response& res) {
+                      [&ctx, &server](const httplib::Request& req,
+                                      httplib::Response& res) {
+        auto authorization_is_current =
+            server.make_stream_authorization_probe(req);
         auto subscription = ctx.dns_test_broadcaster.subscribe();
+        if (!subscription) {
+            res.status = 503;
+            res.set_header("Retry-After", "5");
+            res.set_content(
+                R"({"error":"too many active DNS test streams"})",
+                "application/json");
+            return;
+        }
         Logger::instance().trace("sse_open", "path=/api/dns/test");
         res.set_header("Cache-Control", "no-cache");
         res.set_header("Connection", "keep-alive");
         res.set_header("X-Accel-Buffering", "no");
         res.set_chunked_content_provider(
             "text/event-stream",
-            [subscription, hello_sent = false](size_t, httplib::DataSink& sink) mutable -> bool {
+            [subscription,
+             authorization_is_current =
+                 std::move(authorization_is_current),
+             hello_sent = false](size_t, httplib::DataSink& sink) mutable -> bool {
+                if (!authorization_is_current()) {
+                    sink.done();
+                    return true;
+                }
                 if (!hello_sent) {
                     hello_sent = true;
                     const auto hello = make_sse_frame(make_hello_payload());
@@ -45,26 +69,33 @@ void register_dns_test_handler(ApiServer& server, ApiContext& ctx) {
                     return true;
                 }
 
-                std::string next_message;
-                {
-                    KPBR_UNIQUE_LOCK(lock, subscription->mutex);
-                    while (!subscription->closed && subscription->messages.empty()) {
-                        subscription->cv.wait(lock);
-                    }
-
-                    if (subscription->messages.empty()) {
+                auto result = wait_for_sse_subscription(
+                    subscription,
+                    std::chrono::seconds(15),
+                    std::chrono::seconds(1),
+                    [&sink] {
+                        return !sink.is_writable || sink.is_writable();
+                    },
+                    authorization_is_current);
+                switch (result.status) {
+                    case SseSubscriptionWaitStatus::CLOSED:
                         Logger::instance().trace("sse_done", "path=/api/dns/test");
                         sink.done();
                         return true;
+                    case SseSubscriptionWaitStatus::PEER_DISCONNECTED:
+                        return false;
+                    case SseSubscriptionWaitStatus::HEARTBEAT: {
+                        static constexpr char kHeartbeat[] = ": heartbeat\n\n";
+                        return sink.write(kHeartbeat, sizeof(kHeartbeat) - 1);
                     }
-
-                    next_message = std::move(subscription->messages.front());
-                    subscription->messages.pop_front();
+                    case SseSubscriptionWaitStatus::MESSAGE: {
+                        const auto frame = make_sse_frame(result.message);
+                        Logger::instance().trace(
+                            "sse_event", "path=/api/dns/test bytes={}", frame.size());
+                        return sink.write(frame.data(), frame.size());
+                    }
                 }
-
-                const auto frame = make_sse_frame(next_message);
-                Logger::instance().trace("sse_event", "path=/api/dns/test bytes={}", frame.size());
-                return sink.write(frame.data(), frame.size());
+                return false;
             },
             [&ctx, subscription](bool) {
                 Logger::instance().trace("sse_close", "path=/api/dns/test");

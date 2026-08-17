@@ -1,7 +1,15 @@
+import { readFileSync } from "node:fs"
+
 import { describe, expect, test } from "bun:test"
 
 import type { HealthResponse } from "../src/api/generated/model"
 import { getWarningBannerMode } from "../src/components/layout/warning-banner-state"
+import { retainLifecycleOperation } from "../src/components/layout/warning-banner-state"
+
+const warningBannerSource = readFileSync(
+  new URL("../src/components/layout/warning-banner.tsx", import.meta.url),
+  "utf8"
+)
 
 function health(overrides: Partial<HealthResponse>): HealthResponse {
   return {
@@ -55,5 +63,45 @@ describe("getWarningBannerMode", () => {
         105_000
       )
     ).toBe("dnsmasq-converging")
+  })
+
+  test("lifecycle progress overrides resolver warnings", () => {
+    expect(
+      getWarningBannerMode(
+        health({ resolver_config_sync_state: "stale" }),
+        120_000,
+        {
+          id: "lifecycle-1",
+          type: "restart",
+          status: "running",
+          started_at: 100,
+          stages: [],
+        }
+      )
+    ).toBe("lifecycle-running")
+  })
+
+  test("does not resurrect an already completed operation after reconnect", () => {
+    expect(
+      retainLifecycleOperation(null, {
+        id: "lifecycle-1",
+        type: "restart",
+        status: "succeeded",
+        started_at: 100,
+        finished_at: 101,
+        stages: [],
+      })
+    ).toBeNull()
+  })
+})
+
+describe("WarningBanner draft actions", () => {
+  test("offers guarded discard alongside apply for a pending draft", () => {
+    expect(warningBannerSource).toContain("useDiscardConfigMutation")
+    expect(warningBannerSource).toContain("state.hasDraftConfig")
+    expect(warningBannerSource).toContain("discardConfigMutation.mutate()")
+    expect(warningBannerSource).toContain('t("warning.actions.discard")')
+    expect(warningBannerSource).toContain("handleApplyAndReload")
+    expect(warningBannerSource).toContain("state.isActionDisabled")
   })
 })

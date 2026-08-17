@@ -37,8 +37,10 @@ function loadDnsRuleUtils() {
 
 describe("routing rule enabled helpers", () => {
   test("mobile and desktop selection use the same row id", () => {
-    expect(getRoutingRuleRowId(0)).toBe("0")
-    expect(getRoutingRuleRowId(12)).toBe("12")
+    expect(getRoutingRuleRowId({ id: "video", outbound: "vpn" }, 0)).toBe(
+      "id:video"
+    )
+    expect(getRoutingRuleRowId({ outbound: "vpn" }, 12)).toBe("index:12")
   })
 
   test("new route rule drafts default to enabled", () => {
@@ -118,6 +120,8 @@ describe("dns rule enabled helpers", () => {
         ["vpn_dns"],
         [
           {
+            id: "",
+            displayName: "",
             enabled: false,
             server: "vpn_dns",
             lists: ["ads"],
@@ -145,12 +149,16 @@ describe("dns rule enabled helpers", () => {
 
     const rules: DnsRuleDraft[] = [
       {
+        id: "dns_ads",
+        displayName: "DNS for ads",
         enabled: true,
         server: "vpn_dns",
         lists: ["ads"],
         allowDomainRebinding: false,
       },
       {
+        id: "dns_work",
+        displayName: "DNS for work",
         enabled: false,
         server: "wan_dns",
         lists: ["work"],
@@ -160,12 +168,16 @@ describe("dns rule enabled helpers", () => {
 
     expect(setDnsRuleEnabled(rules, 0, false)).toEqual([
       {
+        id: "dns_ads",
+        displayName: "DNS for ads",
         enabled: false,
         server: "vpn_dns",
         lists: ["ads"],
         allowDomainRebinding: false,
       },
       {
+        id: "dns_work",
+        displayName: "DNS for work",
         enabled: false,
         server: "wan_dns",
         lists: ["work"],
@@ -181,12 +193,16 @@ describe("dns rule enabled helpers", () => {
       validateRules(
         [
           {
+            id: "",
+            displayName: "",
             enabled: false,
             server: "",
             lists: [],
             allowDomainRebinding: false,
           },
           {
+            id: "dns_ads",
+            displayName: "DNS for ads",
             enabled: true,
             server: "vpn_dns",
             lists: ["ads"],
@@ -197,5 +213,23 @@ describe("dns rule enabled helpers", () => {
         ["ads"]
       )
     ).toEqual({})
+  })
+
+  test("DNS rule drafts preserve aliases and stable ids", async () => {
+    const { getRuleDraft, normalizeDnsRuleDraft } = await loadDnsRuleUtils()
+    const draft = getRuleDraft({
+      id: "dns_video",
+      display_name: "Видео через Cloudflare",
+      enabled: true,
+      list: ["video"],
+      server: "cloudflare",
+    })
+
+    expect(draft.id).toBe("dns_video")
+    expect(draft.displayName).toBe("Видео через Cloudflare")
+    expect(normalizeDnsRuleDraft(draft)).toMatchObject({
+      id: "dns_video",
+      display_name: "Видео через Cloudflare",
+    })
   })
 })

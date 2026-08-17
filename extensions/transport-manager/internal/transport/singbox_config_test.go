@@ -2,10 +2,42 @@ package transport
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestSingBoxLocalRuntimeReadinessChecksOnlyLocalState(t *testing.T) {
+	process, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &SingBox{
+		spec:    TransportSpec{Tag: "proxy", Interface: "vless1"},
+		cmd:     &exec.Cmd{Process: process},
+		state:   StateUp,
+		updated: time.Now().UTC(),
+		interfaceByName: func(name string) (*net.Interface, error) {
+			return &net.Interface{Name: name}, nil
+		},
+		runtimeRulesPresent: func(string) bool { return true },
+		healthEndpoint: RoutingHealthEndpoint{
+			URL: "http://127.0.0.1:1/external-health-must-not-be-used",
+		},
+	}
+	if !s.LocalRuntimeReady() {
+		t.Fatal("complete local runtime was not reported ready")
+	}
+	s.runtimeRulesPresent = func(string) bool { return false }
+	if s.LocalRuntimeReady() {
+		t.Fatal("missing local runtime rules were reported ready")
+	}
+}
 
 func TestSingBoxConfigUsesGVisorForPolicyRoutedTun(t *testing.T) {
 	s := &SingBox{spec: TransportSpec{
@@ -30,6 +62,29 @@ func TestSingBoxConfigUsesGVisorForPolicyRoutedTun(t *testing.T) {
 	}
 	if _, exists := tun["dns_mode"]; exists {
 		t.Fatal("dns_mode must not be generated: sing-box 1.13 rejects this TUN field")
+	}
+}
+
+func TestSingBoxConfigAddsLocalDomainResolverWithoutBootstrapDNS(t *testing.T) {
+	s := &SingBox{spec: TransportSpec{
+		Tag:          "proxy",
+		Type:         "sing-box",
+		Interface:    "vless1",
+		OutboundJSON: `{"type":"vless","server":"proxy.example","server_port":443,"uuid":"example"}`,
+	}}
+
+	config, err := s.buildConfig()
+	if err != nil {
+		t.Fatalf("build config: %v", err)
+	}
+	servers := config["dns"].(map[string]any)["servers"].([]any)
+	if len(servers) != 1 || servers[0].(map[string]any)["type"] != "local" ||
+		servers[0].(map[string]any)["tag"] != systemLocalDNSTag {
+		t.Fatalf("unexpected system resolver: %#v", servers)
+	}
+	resolver := config["route"].(map[string]any)["default_domain_resolver"].(map[string]any)
+	if resolver["server"] != systemLocalDNSTag || resolver["strategy"] != "prefer_ipv4" {
+		t.Fatalf("unexpected default domain resolver: %#v", resolver)
 	}
 }
 
@@ -173,5 +228,18 @@ func TestMatchesOwnedSingBoxCommand(t *testing.T) {
 	}
 	if matchesOwnedSingBoxCommand([]byte("/bin/sh\x00-c\x00/run/keen-pbr/proxy.json\x00"), owned) {
 		t.Fatal("non-sing-box process must not match")
+	}
+}
+
+func TestOwnedSingBoxConfigPathsIncludesEmptySharedRuntimeOnlyInSharedMode(t *testing.T) {
+	runtimeDir := filepath.Join("run", "keen-pbr")
+	isolated := ownedSingBoxConfigPaths(nil, runtimeDir, false)
+	if len(isolated) != 0 {
+		t.Fatalf("empty isolated mode unexpectedly owns configs: %#v", isolated)
+	}
+	shared := ownedSingBoxConfigPaths(nil, runtimeDir, true)
+	sharedPath := filepath.Join(runtimeDir, "shared.json")
+	if len(shared) != 1 || !shared[sharedPath] {
+		t.Fatalf("empty shared mode does not own its exact crash-recovery config: %#v", shared)
 	}
 }

@@ -1,6 +1,8 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
@@ -10,25 +12,55 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
+#include <type_traits>
+#include <utility>
 #include <vector>
+#include <sys/types.h>
 
 #include "../config/config.hpp"
+#include "../dns/keenetic_dns.hpp"
 #include "../dns/dns_txt_client.hpp"
 #include "config_store.hpp"
+#include "config_reload_coordinator.hpp"
+#include "keenetic_dns_refresh_coordinator.hpp"
 #include "../health/interface_probe.hpp"
+#include "pid_file.hpp"
 #include "../health/url_tester.hpp"
+#include "../keenetic/internal_vpn_ingress_resolver.hpp"
+#include "../keenetic/internal_vpn_runtime_target.hpp"
+#include "../keenetic/ndms_native_import_readiness.hpp"
+#include "../keenetic/ndms_native_import_wal_store.hpp"
+#include "../keenetic/ndms_native_ownership_store.hpp"
+#include "../lists/list_set_usage.hpp"
 #include "../routing/interface_monitor.hpp"
 #include "../routing/firewall_state.hpp"
 #include "../routing/netlink.hpp"
 #include "../routing/policy_rule.hpp"
 #include "../routing/route_table.hpp"
+#include "../runtime/lifecycle_operation.hpp"
+#include "../runtime/list_refresh_task.hpp"
+#include "../runtime/periodic_task_metrics.hpp"
+#include "../runtime/conntrack_manager.hpp"
+#include "../runtime/idle_stall_detector.hpp"
+#include "../runtime/udp_call_affinity.hpp"
+#include "../runtime/interface_traffic_cadence.hpp"
+#include "../runtime/interface_traffic_sampler.hpp"
+#include "../runtime/interface_uptime_anchor.hpp"
+#include "../runtime/runtime_state_machine.hpp"
+#include "../runtime/runtime_mutation_admission.hpp"
 #include "../firewall/firewall.hpp"
 #include "../util/blocking_executor.hpp"
+#include "../util/bounded_operation_admission.hpp"
+#include "../util/ipv6_support.hpp"
 #include "../util/traced_mutex.hpp"
 #include "list_service.hpp"
+#include "runtime_recovery_policy.hpp"
+#include "targeted_probe_admission.hpp"
 #include "runtime_state_store.hpp"
 #include "resolver_sync_state_machine.hpp"
+#include "resolver_stream_coordinator.hpp"
 #include "system_resolver_hook.hpp"
 
 namespace keen_pbr3 {
@@ -36,16 +68,60 @@ namespace keen_pbr3 {
 class Firewall;
 class Scheduler;
 class UrltestManager;
+struct UrltestSelectionChange;
 class DnsProbeServer;
 struct DnsProbeEvent;
+class ConntrackEventMonitor;
+class OwnedConntrackCleanupOperation;
+struct NdmsCatalogSnapshot;
+struct NdmsVpnServerServiceSnapshot;
+enum class ResolverType;
 
 #ifdef WITH_API
-enum class ConfigOperationState : uint8_t;
 class ApiServer;
 struct ApiContext;
 class SseBroadcaster;
+class StatusStream;
 struct ConfigApplyResult;
+struct TestRoutingResult;
 struct ListRefreshOperationResult;
+struct RemoteAccessRetryHint;
+
+struct InterfaceTrafficTargetPlan {
+    std::set<std::string> reported;
+    std::set<std::string> removed;
+};
+
+inline InterfaceTrafficTargetPlan plan_interface_traffic_targets(
+    const std::set<std::string>& active,
+    const std::set<std::string>& previously_sampled) {
+    InterfaceTrafficTargetPlan plan;
+    plan.reported = active;
+    plan.reported.insert(
+        previously_sampled.begin(), previously_sampled.end());
+    for (const auto& name : previously_sampled) {
+        if (active.find(name) == active.end()) {
+            plan.removed.insert(name);
+        }
+    }
+    return plan;
+}
+
+inline std::vector<std::string> interface_traffic_targets_from_config(
+    const Config& config) {
+    std::vector<std::string> interface_names;
+    if (!config.outbounds) {
+        return interface_names;
+    }
+    interface_names.reserve(config.outbounds->size());
+    for (const auto& outbound : *config.outbounds) {
+        if (outbound.type == OutboundType::INTERFACE &&
+            outbound.interface) {
+            interface_names.push_back(*outbound.interface);
+        }
+    }
+    return interface_names;
+}
 #endif
 
 class DaemonError : public std::runtime_error {
@@ -56,9 +132,107 @@ public:
 // Callback for file descriptor events
 using FdCallback = std::function<void(uint32_t events)>;
 
+// Prepare the complete replacement bookkeeping before EPOLL_CTL_ADD. The
+// registrar must throw only when no kernel registration was published. Once
+// it returns successfully, the only remaining operation is a statically
+// no-throw vector swap, so a live epoll fd can never lack bookkeeping.
+//
+// EPOLL_CTL_ADD success is also the ownership proof that no currently live
+// registration can own the same descriptor number; only then may the prepared
+// candidate discard a stale record left by a failed removal before fd reuse.
+// The caller must hold the registration-vector lock across this function.
+template <typename Entry, typename EpollAdd>
+void publish_fd_entry_after_successful_epoll_add(
+    std::vector<Entry>& entries,
+    Entry replacement,
+    EpollAdd&& epoll_add) {
+    static_assert(
+        std::is_nothrow_destructible_v<Entry>,
+        "fd bookkeeping destruction after publication must not throw");
+
+    // Copying callbacks and growing the vector can allocate. Perform all of
+    // that against an unpublished candidate, before the kernel can observe
+    // the new descriptor.
+    auto candidate = entries;
+    const int fd = replacement.fd;
+    candidate.erase(
+        std::remove_if(
+            candidate.begin(),
+            candidate.end(),
+            [fd](const Entry& entry) { return entry.fd == fd; }),
+        candidate.end());
+    candidate.push_back(std::move(replacement));
+
+    std::forward<EpollAdd>(epoll_add)();
+
+    static_assert(
+        noexcept(entries.swap(candidate)),
+        "fd bookkeeping publication must not throw after epoll add");
+    entries.swap(candidate);
+}
+
+namespace daemon_detail {
+
+struct ControlTaskAdmissionToken final {};
+using ControlTaskAdmissionHandle =
+    std::shared_ptr<const ControlTaskAdmissionToken>;
+
+// Publish only while the caller holds the control-queue mutex and the same
+// admission gate observed by shutdown is still open. A false return means
+// ownership never entered the queue; a push allocation failure propagates
+// with the vector unchanged.
+template <typename Entry>
+bool publish_control_task_if_admitted(
+    std::vector<Entry>& entries,
+    bool admission_open,
+    Entry task) {
+    if (!admission_open) {
+        return false;
+    }
+    entries.push_back(std::move(task));
+    return true;
+}
+
+// Linearizes a failed control-loop wake against the queue consumer. The
+// unique shared token prevents label/callback equality and allocator address
+// reuse from cancelling another task. The caller holds the queue mutex.
+template <typename Entry>
+bool erase_exact_control_task_if_still_queued(
+    std::vector<std::unique_ptr<Entry>>& entries,
+    const ControlTaskAdmissionHandle& token,
+    ControlTaskAdmissionHandle Entry::* token_member) noexcept {
+    using Owner = std::unique_ptr<Entry>;
+    static_assert(
+        std::is_nothrow_move_assignable_v<Owner> &&
+            std::is_nothrow_destructible_v<Owner>,
+        "exact control-task rollback must not throw");
+
+    const auto* identity = token.get();
+    auto found = entries.end();
+    for (auto current = entries.begin(); current != entries.end(); ++current) {
+        if (*current != nullptr &&
+            (((**current).*token_member).get() == identity)) {
+            found = current;
+            break;
+        }
+    }
+    if (found == entries.end()) {
+        return false;
+    }
+    entries.erase(found);
+    return true;
+}
+
+} // namespace daemon_detail
+
 // Options controlling daemon runtime behavior
 struct DaemonOptions {
     bool no_api{false};
+    bool use_raw_prerouting{false};
+    // The init script probes the optional three-dimensional ipset type. A
+    // missing legacy-kernel feature must disable only the iptables call
+    // overlay, never the ordinary list-routing service.
+    bool udp_call_affinity_ipset_available{true};
 };
 
 struct ListsRefreshExecutionResult {
@@ -66,10 +240,237 @@ struct ListsRefreshExecutionResult {
     bool reloaded{false};
 };
 
+struct RemoteListRefreshTaskStartResult {
+    bool accepted{false};
+    ListRefreshTaskSnapshot task;
+    std::string error;
+};
+
+enum class InternalVpnRuntimeResolutionState : std::uint8_t {
+    verified,
+    retained_verified_includes,
+    degraded,
+    authoritative_negative,
+};
+
+enum class NetfilterRefreshReason : std::uint8_t {
+    full = 1U << 0U,
+    nat_only = 1U << 1U,
+};
+
+struct InternalVpnRuntimeResolution {
+    std::vector<InternalVpnServer> effective_servers;
+    InternalVpnRuntimeResolutionState state{
+        InternalVpnRuntimeResolutionState::degraded};
+    std::vector<InternalVpnServer> verified_includes_for_lkg;
+    std::vector<std::string> retain_verified_include_ndms_ids;
+};
+
+struct InternalVpnServiceRuntimeResolution {
+    std::vector<InternalVpnRuntimeTarget> effective_targets;
+    InternalVpnRuntimeResolutionState state{
+        InternalVpnRuntimeResolutionState::degraded};
+    std::vector<InternalVpnRuntimeTarget> verified_includes_for_lkg;
+    std::vector<std::string> retain_verified_include_service_ids;
+};
+
 struct PreparedRuntimeInputs {
     Config config;
     OutboundMarkMap outbound_marks;
+    // Exact immutable Keenetic DNS view prepared before the serialized
+    // runtime commit. Firewall and resolver generation must consume this
+    // value rather than observing the mutable shared RCI cache themselves.
+    KeeneticDnsCacheView keenetic_dns;
+    InternalVpnRuntimeResolution internal_vpn_resolution;
+    InternalVpnServiceRuntimeResolution internal_vpn_service_resolution;
     bool remote_lists_refreshed{false};
+};
+
+struct MetaUdp443ActivationPlan {
+    std::uint32_t expected_fwmark{0U};
+    std::uint32_t owned_mask{0U};
+    // The current authoritative mark plus, during an in-process route-mark
+    // transition, the one previously committed messages-first mark. No other
+    // owned mark is eligible for destructive cleanup.
+    std::set<std::uint32_t> cleanup_owned_marks;
+    std::vector<std::string> destination_selectors;
+    bool ipv6_enabled{false};
+    bool allow_unmarked_cleanup{false};
+    std::vector<ConntrackExactForwardedFlow> exact_flows;
+};
+
+struct PendingMetaUdp443ActivationCleanup {
+    MetaUdp443ActivationPlan plan;
+    std::uint64_t runtime_generation{0U};
+    std::uint64_t cleanup_epoch{0U};
+    std::size_t attempt{0U};
+    std::uint64_t schedule_serial{0U};
+    bool worker_inflight{false};
+};
+
+struct PendingExactTcpResetCleanup {
+    FirewallExactTcpResetRule rule;
+    std::uint64_t runtime_generation{0U};
+    std::size_t attempt{0U};
+    std::uint64_t schedule_serial{0U};
+    int task_id{-1};
+};
+
+enum class RemoteListPreparationMode {
+    None,
+    MissingOrInvalid,
+    RefreshAll,
+};
+
+inline bool interface_event_requires_runtime_observation(
+    const InterfaceMonitor::Event& event) {
+    return event.observation_gap ||
+           event.administrative_state_changed ||
+           event.address_changed ||
+           event.topology_changed;
+}
+
+inline bool interface_event_affects_managed_runtime(
+    const Config& config,
+    const std::vector<InternalVpnServer>& effective_internal_vpn_servers,
+    const std::vector<InternalVpnRuntimeTarget>&
+        effective_internal_vpn_service_targets,
+    const std::string& interface_name) {
+    const auto outbounds =
+        config.outbounds.value_or(std::vector<Outbound>{});
+    const bool is_managed_outbound = std::any_of(
+        outbounds.begin(),
+        outbounds.end(),
+        [&interface_name](const Outbound& outbound) {
+            return outbound.type == OutboundType::INTERFACE &&
+                   outbound.interface.has_value() &&
+                   *outbound.interface == interface_name;
+        });
+    const auto configured_internal_servers = config.route.has_value()
+        ? config.route->internal_vpn_servers.value_or(
+              std::vector<InternalVpnServer>{})
+        : std::vector<InternalVpnServer>{};
+    const auto matches_interface =
+        [&interface_name](const InternalVpnServer& server) {
+            return server.interface == interface_name;
+        };
+    const bool is_internal_vpn_interface =
+        std::any_of(
+            configured_internal_servers.begin(),
+            configured_internal_servers.end(),
+            matches_interface) ||
+        std::any_of(
+            effective_internal_vpn_servers.begin(),
+            effective_internal_vpn_servers.end(),
+            matches_interface);
+    const bool service_inventory_configured =
+        config.route.has_value() &&
+        (!config.route->internal_vpn_services
+              .value_or(std::vector<InternalVpnService>{})
+              .empty() ||
+         (config.route->inbound_interfaces.has_value() &&
+          !config.route->inbound_interfaces->empty()));
+    const bool is_internal_vpn_service_interface =
+        std::any_of(
+            effective_internal_vpn_service_targets.begin(),
+             effective_internal_vpn_service_targets.end(),
+             [&interface_name](const auto& target) {
+                 const bool direct_ingress =
+                     std::find(
+                         target.verified_ingress_interfaces.begin(),
+                         target.verified_ingress_interfaces.end(),
+                         interface_name) !=
+                     target.verified_ingress_interfaces.end();
+                 const bool bridge_ingress =
+                     std::any_of(
+                         target.verified_bridge_ingress_interfaces.begin(),
+                         target.verified_bridge_ingress_interfaces.end(),
+                         [&interface_name](const auto& ingress) {
+                             return ingress.interface == interface_name ||
+                                    ingress.bridge_port == interface_name;
+                         });
+                 return direct_ingress || bridge_ingress;
+             }) ||
+        (service_inventory_configured &&
+         internal_vpn_service_interface_may_affect_ingress(
+             interface_name));
+    return is_managed_outbound ||
+           is_internal_vpn_interface ||
+           is_internal_vpn_service_interface;
+}
+
+inline bool interface_event_affects_managed_runtime(
+    const Config& config,
+    const std::vector<InternalVpnServer>& effective_internal_vpn_servers,
+    const std::string& interface_name) {
+    return interface_event_affects_managed_runtime(
+        config,
+        effective_internal_vpn_servers,
+        {},
+        interface_name);
+}
+
+inline bool interface_event_affects_managed_runtime(
+    const Config& config,
+    const std::string& interface_name) {
+    return interface_event_affects_managed_runtime(
+        config, {}, {}, interface_name);
+}
+
+inline bool config_has_stable_internal_vpn_server_policy(
+    const Config& config) {
+    const auto configured_internal_servers = config.route.has_value()
+        ? config.route->internal_vpn_servers.value_or(
+              std::vector<InternalVpnServer>{})
+        : std::vector<InternalVpnServer>{};
+    return std::any_of(
+        configured_internal_servers.begin(),
+        configured_internal_servers.end(),
+        [](const InternalVpnServer& server) {
+            return server.ndms_id.has_value();
+        });
+}
+
+inline bool config_requires_internal_vpn_service_inventory(
+    const Config& config) {
+    if (!config.route.has_value()) {
+        return false;
+    }
+    const auto services = config.route->internal_vpn_services.value_or(
+        std::vector<InternalVpnService>{});
+    if (!services.empty()) {
+        return true;
+    }
+    // With an explicit ingress allowlist, unconfigured native service pools
+    // inherit bypass. They must be observed to keep a shared Home/Bridge
+    // ingress from accidentally opting those clients into keen-pbr.
+    return config.route->inbound_interfaces.has_value() &&
+           !config.route->inbound_interfaces->empty();
+}
+
+inline bool config_has_native_vpn_catalog_policy(
+    const Config& config) {
+    return config_has_stable_internal_vpn_server_policy(config) ||
+           config_requires_internal_vpn_service_inventory(config);
+}
+
+inline bool internal_vpn_resolution_requires_catalog_refresh(
+    const Config& config,
+    InternalVpnRuntimeResolutionState state) {
+    return config_has_stable_internal_vpn_server_policy(config) &&
+           state != InternalVpnRuntimeResolutionState::verified;
+}
+
+struct ResolverGenerationSnapshot {
+    Config config;
+    KeeneticDnsCacheView keenetic_dns;
+    std::shared_ptr<const ListCacheGenerationSnapshot> list_cache_snapshot;
+    ResolverType resolver_type;
+    ResolverIpv6Policy ipv6_policy;
+    std::vector<std::string> trusted_dns_interfaces;
+    std::string expected_hash;
+    std::uint64_t generation{0};
+    std::uint64_t stream_epoch{0};
 };
 
 // Helper to get tag from any outbound variant
@@ -110,7 +511,8 @@ public:
     // Serialize execution of control operations in event loop.
     void enqueue_control_task(std::function<void()> task,
                               bool wait_for_completion = false,
-                              const std::string& label = "");
+                              const std::string& label = "",
+                              bool require_active_event_loop = false);
 
     // Backward-compatible alias for enqueue_control_task.
     void enqueue_control_command(std::function<void()> command,
@@ -123,7 +525,11 @@ public:
     // task only runs after the current event-loop iteration completes and all
     // caller locks have been released. Use this for callbacks that must not
     // run re-entrantly inside the current controller action.
-    void post_control_task(std::function<void()> task,
+    // Returns false only when deferred control commits are already disabled
+    // (startup rollback/shutdown) or the callback is empty. Callers which own
+    // single-flight state can therefore release it without relying on a
+    // completion callback that was never queued.
+    bool post_control_task(std::function<void()> task,
                            const std::string& label = "");
 
     // Run the daemon lifecycle: startup, event loop, shutdown.
@@ -141,65 +547,310 @@ private:
     void handle_signal();
     void setup_control_channel();
     void handle_control_commands();
+    void setup_ipc_control_socket();
+    void handle_ipc_control_socket();
+    struct RoutingTestSnapshot {
+        Config config;
+        std::vector<RuleState> realized_rules;
+        FirewallBackend firewall_backend{FirewallBackend::iptables};
+        bool unapplied_draft{false};
+    };
+    RoutingTestSnapshot capture_routing_test_snapshot();
+    void remove_ipc_control_socket() noexcept;
     void wake_control_loop();
+    bool cancel_control_task_if_still_queued(
+        const daemon_detail::ControlTaskAdmissionHandle& token) noexcept;
     bool is_event_loop_thread() const;
 
     // Signal handlers
     void handle_sigusr1();
-    void schedule_sigusr1_runtime_refresh();
+    void handle_sigusr2();
+    void schedule_netfilter_runtime_refresh(
+        NetfilterRefreshReason reason) noexcept;
+    void reconcile_pending_netfilter_runtime_refresh() noexcept;
+    void schedule_netfilter_runtime_refresh_noexcept(
+        NetfilterRefreshReason reason,
+        const char* failure_detail) noexcept;
+    void schedule_owned_snat_health_check();
+    void cancel_owned_snat_health_check();
+    void check_owned_snat_health();
+    void quiesce_runtime_mutations() noexcept;
     void handle_sighup();
+    void defer_sighup_reload(ConfigReloadClaim claim);
+    void complete_sighup_reload(ConfigReloadClaim claim,
+                                std::shared_ptr<RuntimeMutationAdmission::Lease>
+                                    mutation_lease,
+                                bool allow_coalesced_rerun) noexcept;
     void handle_interface_monitor_events(uint32_t events);
     void reconnect_interface_monitor();
     void register_interface_monitor_fd();
     void unregister_interface_monitor_fd();
     void schedule_interface_monitor_reconnect_retry();
-    void handle_interface_state_change(const std::string& interface_name, bool is_up);
-    bool is_interface_outbound_in_use(const std::string& interface_name) const;
-    void refresh_iproute_and_firewall_runtime();
+    void recover_internal_vpn_catalog_after_observation_gap();
+    void handle_interface_event(const InterfaceMonitor::Event& event);
+    bool refresh_iproute_and_firewall_runtime(
+        std::size_t retry_attempt = 0,
+        std::optional<InternalVpnRuntimeResolution>
+            prepared_internal_vpn_resolution = std::nullopt,
+        std::optional<InternalVpnServiceRuntimeResolution>
+            prepared_internal_vpn_service_resolution = std::nullopt,
+        bool schedule_catalog_refresh = true,
+        OwnedSnatRecovery snat_recovery = {});
+    void schedule_runtime_firewall_retry(std::size_t attempt,
+                                         std::uint64_t runtime_generation,
+                                         OwnedSnatRecovery snat_recovery);
+    void cancel_runtime_firewall_retry();
+    void schedule_resolver_reload_retry(std::size_t attempt,
+                                        std::uint64_t runtime_generation);
+    void start_resolver_reload_retry_attempt(
+        std::size_t attempt,
+        std::uint64_t runtime_generation);
+    void complete_resolver_reload_retry_attempt(
+        const ResolverStreamOperation& operation,
+        const ResolverStreamResult& result) noexcept;
+    bool acknowledge_verified_resolver_reload(
+        std::uint64_t runtime_generation);
+    void resume_deferred_keenetic_dns_refresh() noexcept;
+    void quiesce_resolver_stream_recovery() noexcept;
+    void cancel_resolver_reload_retry();
     void dispatch_event_fd(int fd, uint32_t events);
     void run_event_loop();
 
     // lifecycle and runtime apply
     void setup_static_routing();
-    void apply_firewall(FirewallApplyMode mode = FirewallApplyMode::Destructive);
-    void download_uncached_lists();
+    void reconcile_static_routing(RouteReconcileMode mode);
+    // Runtime callers must deliberately choose preserving or destructive
+    // semantics; an omitted mode is a compile-time error.
+    void apply_firewall(
+        FirewallApplyMode mode,
+        std::shared_ptr<const ListCacheGenerationSnapshot>
+            list_cache_snapshot = nullptr);
+    std::optional<MetaUdp443ActivationPlan>
+    prepare_meta_udp443_activation_or_throw(
+        const std::vector<RuleState>& candidate_rules,
+        const AppliedListContentState& candidate_list_content_state,
+        bool forwarded_scope_allows_unmarked_cleanup);
+    static bool fastnat_is_disabled_or_unavailable();
+    void cancel_meta_udp443_activation_cleanup() noexcept;
+    void dispatch_meta_udp443_activation_cleanup(
+        std::uint64_t expected_runtime_generation,
+        std::uint64_t cleanup_epoch,
+        std::size_t attempt,
+        std::uint64_t schedule_serial) noexcept;
+    void schedule_meta_udp443_activation_cleanup_retry(
+        const MetaUdp443ActivationPlan& plan,
+        std::uint64_t expected_runtime_generation,
+        std::uint64_t cleanup_epoch,
+        std::size_t attempt) noexcept;
+    void schedule_meta_udp443_activation_cleanup_retry(
+        MetaUdp443ActivationPlan&& plan,
+        std::uint64_t expected_runtime_generation,
+        std::uint64_t cleanup_epoch,
+        std::size_t attempt) noexcept;
+    void report_meta_udp443_degraded(const std::string& detail) noexcept;
+    void normalize_urltest_selections();
     void register_urltest_outbounds();
-    void handle_urltest_selection_change(const std::string& urltest_tag,
-                                         const std::string& new_child_tag);
-    void commit_urltest_probe_results(const std::string& urltest_tag,
+    bool handle_urltest_selection_change(
+        const UrltestSelectionChange& change,
+        std::uint64_t expected_runtime_generation);
+    void defer_urltest_switch_to_firewall_recovery(
+        const UrltestSelectionChange& change,
+        std::uint64_t runtime_generation,
+        std::string_view phase,
+        std::string_view detail) noexcept;
+    void release_urltest_firewall_recovery(
+        std::uint64_t runtime_generation) noexcept;
+    bool commit_urltest_probe_results(const std::string& urltest_tag,
                                       std::uint64_t probe_generation,
                                       std::map<std::string, URLTestResult> results,
                                       TraceId trace_id);
     void apply_config(Config config, bool refresh_remote_lists = true);
     void apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared);
+    void execute_committed_stale_flow_reconnect(
+        std::uint64_t committed_runtime_generation,
+        bool previous_runtime_active,
+        bool exact_forwarded_scope,
+        std::uint32_t owned_mask,
+        const ConntrackDestinationRetirementCoverage& normal_coverage,
+        const ConntrackDestinationRetirementCoverage& aggressive_coverage)
+        noexcept;
+    void reset_idle_stall_observer(bool schedule_if_eligible) noexcept;
+    void cancel_idle_stall_observer() noexcept;
+    void schedule_idle_stall_observer_after(
+        std::chrono::seconds delay) noexcept;
+    bool schedule_exact_tcp_reset_cleanup(
+        const FirewallExactTcpResetRule& rule,
+        std::uint64_t expected_runtime_generation,
+        std::size_t attempt) noexcept;
+    void run_exact_tcp_reset_cleanup(
+        std::uint64_t schedule_serial) noexcept;
+    void forget_exact_tcp_reset_cleanup(
+        const FirewallExactTcpResetRule& rule) noexcept;
+    void resume_exact_tcp_reset_cleanups() noexcept;
+    bool drain_exact_tcp_reset_cleanups_before_generation_change() noexcept;
+    void clear_exact_tcp_reset_cleanup_ownership() noexcept;
+    void run_idle_stall_observer() noexcept;
+    void commit_idle_stall_observation(
+        std::uint64_t expected_runtime_generation,
+        std::uint64_t expected_coverage_generation,
+        std::uint32_t owned_mask,
+        ConntrackFlowObservation observation,
+        std::vector<std::string> observed_local_interface_addresses,
+        std::vector<std::string> destination_selectors,
+        std::vector<std::string> whatsapp_destination_selectors,
+        std::vector<UdpCallAffinityTarget> call_affinity_targets,
+        std::set<std::uint32_t> trusted_whatsapp_marks,
+        bool preventive_whatsapp_authorized,
+        bool packaged_whatsapp_only_observation,
+        bool ipv6_enabled,
+        bool coverage_complete,
+        std::string failure_detail);
+    void dispatch_udp_call_affinity_mutations(
+        std::uint64_t expected_runtime_generation,
+        std::uint64_t expected_coverage_generation,
+        std::uint32_t owned_mask,
+        bool ipv6_enabled,
+        UdpCallAffinityDetector::TimePoint decision_deadline,
+        std::vector<UdpCallAffinityDecision> decisions);
     PreparedRuntimeInputs prepare_runtime_inputs(const Config& config,
-                                                bool refresh_remote_lists = true);
-    void apply_config_with_rollback(const Config& next_config, bool& rolled_back);
-    void reload_from_disk();
+                                                  RemoteListPreparationMode list_mode =
+                                                      RemoteListPreparationMode::RefreshAll);
+    KeeneticDnsCacheView prepare_keenetic_dns_view(
+        const Config& config,
+        bool allow_refresh,
+        bool force_refresh = false) const;
+    InternalVpnRuntimeResolution resolve_internal_vpn_servers_for_runtime(
+        const Config& config,
+        bool allow_catalog_refresh,
+        const std::vector<InternalVpnServer>& previous_effective = {});
+    InternalVpnRuntimeResolution resolve_internal_vpn_servers_for_runtime(
+        const Config& config,
+        const NdmsCatalogSnapshot& snapshot,
+        const std::vector<InternalVpnServer>& previous_effective = {});
+    std::vector<InternalVpnServer>
+    snapshot_internal_vpn_verified_includes_lkg() const;
+    void update_internal_vpn_verified_includes_lkg(
+        const InternalVpnRuntimeResolution& resolution) noexcept;
+    InternalVpnRuntimeResolution
+    prepare_internal_vpn_server_resolution_from_cache();
+    InternalVpnServiceRuntimeResolution
+    resolve_internal_vpn_services_for_runtime(
+        const Config& config,
+        bool allow_catalog_refresh,
+        const std::vector<InternalVpnRuntimeTarget>&
+            previous_verified_includes = {});
+    InternalVpnServiceRuntimeResolution
+    resolve_internal_vpn_services_for_runtime(
+        const Config& config,
+        const NdmsVpnServerServiceSnapshot& snapshot,
+        const std::vector<InternalVpnRuntimeTarget>&
+            previous_verified_includes = {});
+    std::vector<InternalVpnRuntimeTarget>
+    snapshot_internal_vpn_service_verified_includes_lkg() const;
+    void update_internal_vpn_service_verified_includes_lkg(
+        const InternalVpnServiceRuntimeResolution& resolution) noexcept;
+    InternalVpnServiceRuntimeResolution
+    prepare_internal_vpn_service_resolution_from_cache();
+    void schedule_internal_vpn_catalog_refresh();
+    void schedule_internal_vpn_catalog_refresh_if_needed(
+        InternalVpnRuntimeResolutionState interface_state,
+        InternalVpnRuntimeResolutionState service_state =
+            InternalVpnRuntimeResolutionState::verified);
+    void schedule_internal_vpn_catalog_refresh_retry(
+        std::uint64_t runtime_generation);
+    void cancel_internal_vpn_catalog_refresh_retry();
+    void apply_config_with_rollback(const Config& next_config,
+                                    bool& rolled_back,
+                                    bool refresh_remote_lists = true);
     void start_routing_runtime();
     void stop_routing_runtime();
     void restart_routing_runtime();
     bool routing_runtime_active() const;
-    void run_system_resolver_hook_reload();
+    OwnedConntrackCleanupSnapshot
+    snapshot_owned_conntrack_marks() const;
+    void warn_conntrack_unavailable_once();
+    ConntrackCleanupSummary cleanup_owned_conntrack_snapshot(
+        const OwnedConntrackCleanupSnapshot& snapshot,
+        const char* context,
+        bool allow_retry = true);
+    void cleanup_owned_conntrack_marks(const char* context);
+    void reconcile_native_vpn_direct_egress_conntrack(
+        const std::vector<FirewallSourceEgressSnatSelector>& selectors);
+    void schedule_owned_conntrack_cleanup_retry(
+        const OwnedConntrackCleanupSnapshot& snapshot,
+        std::vector<std::uint32_t> remaining_marks,
+        std::size_t no_progress_attempt = 0);
+    void arm_owned_conntrack_cleanup_retry_timer();
+    void arm_owned_conntrack_cleanup_completion_watchdog(
+        const std::shared_ptr<OwnedConntrackCleanupOperation>& operation);
+    void run_owned_conntrack_cleanup_retry();
+    void complete_owned_conntrack_cleanup_operation(
+        const std::shared_ptr<OwnedConntrackCleanupOperation>& operation);
+    std::optional<OwnedConntrackCleanupRetry>
+    take_active_owned_conntrack_cleanup_retry();
+    void cancel_owned_conntrack_cleanup_retry();
+    void complete_pending_snat_recovery_before_generation_change();
+    bool run_system_resolver_hook(std::string_view action,
+                                  bool manage_ipc_gate = true,
+                                  std::string_view attempt_id = {});
+    bool run_system_resolver_hook_stream(std::string_view action);
+    // Stream the already prepared resolver generation. Its list-cache lease
+    // pins every remote body until the worker and post-stream verification
+    // have completed, without holding a daemon lock across the IPC wait.
+    bool run_system_resolver_hook_stream_prepared(
+        std::string_view action,
+        bool rebuild_snapshot,
+        bool inactive_activation_authority = false);
+    bool run_system_resolver_hook_reload();
+    bool wait_for_resolver_stream_epoch(std::uint64_t expected_epoch,
+                                        std::chrono::milliseconds timeout);
     void schedule_lists_autoupdate();
     // Re-applies rules after a failed startup attempt, backing off each time.
-    void schedule_startup_firewall_retry(int attempt = 1);
+    void schedule_startup_firewall_retry(
+        int attempt = 1,
+        std::optional<std::uint64_t> runtime_generation = std::nullopt,
+        std::shared_ptr<const ListCacheGenerationSnapshot>
+            list_cache_snapshot = nullptr);
     // Periodic HTTP probe of every interface outbound.
     void schedule_interface_probe();
     // Weekly refresh of the ready-made list catalogue.
     void schedule_catalog_refresh();
     // Runs a probe round immediately, for the manual refresh button.
-    void probe_interfaces_now();
-    ListsRefreshExecutionResult execute_remote_list_refresh(
-        const std::set<std::string>* target_lists = nullptr);
-    void refresh_lists_and_maybe_reload();
-    void refresh_lists_and_maybe_reload_async();
-    void commit_lists_refresh_async_result(Config config_snapshot,
-                                           bool runtime_active_snapshot,
-                                           std::uint64_t generation,
-                                           std::optional<RemoteListsRefreshResult> refresh_result,
-                                           std::string error,
-                                           TraceId trace_id);
+    void probe_interfaces_now() noexcept;
+    // Starts an already-admitted single-flight round. Completion either
+    // launches the one coalesced trailing request or releases manual state.
+    void start_interface_probe_round() noexcept;
+    void start_interface_probe_round_impl(bool failure_retry_round);
+    void complete_interface_probe_round() noexcept;
+    // Probes exactly one outbound, for the per-row refresh button.
+    //
+    // Not a round, and deliberately not routed through the round path: that
+    // one calls retain_only(), which drops every target absent from the list
+    // it was given. Handing it a single target would wipe the health of every
+    // other outbound as a side effect of refreshing one row.
+    //
+    // Called only on the control loop: target discovery reads config_ and
+    // outbound_marks_. Returns false when the tag is unknown, already in
+    // flight, or the daemon could not take the work, so the caller can say so
+    // instead of showing a spinner for a probe that never started.
+    bool start_targeted_interface_probe(const std::string& tag) noexcept;
+    CacheCommitCallback make_guarded_cache_commit_callback();
+    void refresh_lists_and_maybe_reload_async(
+        std::string source = "autoupdate");
+    RemoteListRefreshTaskStartResult start_remote_list_refresh_task(
+        bool reload,
+        std::string source);
+    void commit_remote_list_refresh_task_result(
+        std::string task_id,
+        ListRefreshCancellationToken cancellation,
+        Config config_snapshot,
+        bool runtime_active_snapshot,
+        std::uint64_t generation,
+        bool reload,
+        std::optional<RemoteListsRefreshResult> refresh_result,
+        std::string error,
+        std::string source,
+        TraceId trace_id);
 
     // PID file management
     void write_pid_file();
@@ -208,24 +859,28 @@ private:
     // state publication and resolver sync
     void refresh_resolver_config_hash_actual_async();
     void maybe_schedule_resolver_config_hash_actual_refresh();
-    void schedule_resolver_config_hash_actual_retry();
     void schedule_keenetic_dns_refresh();
-    bool refresh_keenetic_dns_cache(bool force_refresh);
+    bool commit_keenetic_dns_refresh_result(
+        std::uint64_t generation,
+        const KeeneticDnsRefreshResult& result);
     void reset_resolver_actual_state();
     void commit_resolver_hash_probe_result(const std::string& resolver_addr,
                                            std::uint64_t generation,
                                            std::optional<ResolverConfigHashProbeResult> probe_result,
                                            std::optional<std::int64_t> probe_completed_ts,
-                                           TraceId trace_id);
+                                           TraceId trace_id,
+                                           std::shared_ptr<PeriodicTaskRunToken>
+                                               task_metrics);
 
 #ifdef WITH_API
     // API integration
     void setup_api();
-    void finish_config_operation();
-    void begin_config_operation_or_throw(ConfigOperationState state,
-                                         const char* reason,
-                                         bool require_runtime_running,
-                                         bool require_runtime_stopped);
+    TestRoutingResult run_api_routing_test(
+        const std::string& target);
+    RuntimeMutationAdmission::Lease acquire_runtime_mutation_or_throw(
+        std::string label,
+        bool require_runtime_running,
+        bool require_runtime_stopped);
     ConfigApplyResult apply_validated_config_via_control_task(
         Config config,
         std::string saved_config_json);
@@ -233,6 +888,31 @@ private:
                                                 const char* operation_name,
                                                 std::function<void()> task);
     ListRefreshOperationResult refresh_lists_via_api(std::optional<std::string> requested_name);
+    void setup_conntrack_events();
+    void handle_conntrack_events(uint32_t events);
+    void publish_conntrack_revision();
+    void teardown_conntrack_events();
+    void schedule_interface_traffic_sampling();
+    void sample_interface_traffic_now();
+    // Builds the interface inventory and, on the way, folds the firmware's
+    // per-interface uptime counter into the anchor store. Reached from HTTP
+    // workers and from the SSE reconcile, so it only ever peeks the NDMS
+    // catalog and never issues the loopback request itself.
+    api::RuntimeInterfaceInventoryResponse
+    build_runtime_interface_inventory_with_uptime();
+    void replace_interface_traffic_targets(
+        std::string source,
+        std::vector<std::string> interface_names);
+    void refresh_interface_traffic_config_targets(const Config& config);
+    void setup_remote_access_retry_bridge();
+    void reset_remote_access_retry_bridge() noexcept;
+    void schedule_remote_access_recovery_watchdog();
+    void cancel_remote_access_recovery_watchdog() noexcept;
+    void schedule_remote_access_retry(
+        const RemoteAccessRetryHint& hint);
+    void resume_unscheduled_remote_access_retry() noexcept;
+    void request_remote_access_reconcile_from_control(
+        std::string_view source) noexcept;
 #endif
 
     // DNS probe integration
@@ -250,23 +930,117 @@ private:
 
     // Recompute resolver_config_hash_ from current config/cache state
     void update_resolver_config_hash();
+    void commit_resolver_generation_snapshot(
+        ResolverGenerationSnapshot snapshot);
+    std::shared_ptr<const ListCacheGenerationSnapshot>
+    capture_relevant_list_cache_generation(const Config& config) const;
+    ResolverGenerationSnapshot make_resolver_generation_snapshot(
+        std::shared_ptr<const ListCacheGenerationSnapshot>
+            list_cache_snapshot = nullptr);
     // Schedule (or reschedule) the periodic refresh of resolver_config_hash_actual_.
     void schedule_resolver_config_hash_actual_refresh();
+    void schedule_resolver_config_hash_actual_after(
+        std::chrono::seconds delay,
+        const char* task_name);
     RuntimeStateSnapshot build_runtime_state_snapshot() const;
     void publish_runtime_state();
+    void transition_runtime_or_throw(RuntimeState next, const char* reason);
 
     // Lists autoupdate state
     int lists_autoupdate_task_id_{-1};
     // Periodic refresh task for cached Keenetic DNS server values.
     int keenetic_dns_refresh_task_id_{-1};
-    // Periodic refresh task for the actual resolver config hash / live status.
+    // Single timer for either the steady resolver poll or convergence retry.
     int resolver_config_hash_actual_task_id_{-1};
-    // Short-interval retry while resolver hash is converging after apply.
-    int resolver_config_hash_actual_retry_task_id_{-1};
-    // Debounced runtime refresh triggered by SIGUSR1.
-    int sigusr1_refresh_task_id_{-1};
+    // Exponential retry step for resolver convergence probes.
+    std::uint32_t resolver_config_hash_actual_retry_attempt_{0};
+    // One source-aware quiet window coalesces firmware mangle/full and
+    // nat-only events, capped by a hard batch deadline.
+    int netfilter_refresh_task_id_{-1};
+    std::uint8_t pending_netfilter_refresh_reasons_{0};
+    std::optional<std::chrono::steady_clock::time_point>
+        netfilter_refresh_batch_started_at_;
+    // Invalidates a callback before cancelling its timer. Scheduler::cancel()
+    // may remove the entry and still throw while unregistering its fd; an
+    // explicit serial keeps that half-completed cancellation from wedging or
+    // running a stale refresh later.
+    std::uint64_t netfilter_refresh_schedule_serial_{0U};
+    // Low-frequency fallback for firmware NAT rebuilds that do not invoke the
+    // netfilter hook. The callback runs on the control/event-loop thread.
+    int owned_snat_health_task_id_{-1};
+    // One bounded retry chain for races with NDMS firewall publication. The
+    // coordinator owns its timer slot and the latched owned-SNAT request.
+    RuntimeFirewallRetryCoordinator runtime_firewall_retry_;
+    // Best-effort targeted conntrack retirement can be incomplete under a
+    // short embedded-router command budget. Retain only exact owned marks and
+    // retry them on this runtime generation; never flush global conntrack.
+    int owned_conntrack_cleanup_retry_task_id_{-1};
+    std::optional<OwnedConntrackCleanupRetry>
+        pending_owned_conntrack_cleanup_retry_;
+    std::shared_ptr<OwnedConntrackCleanupOperation>
+        active_owned_conntrack_cleanup_operation_;
+    // Separate bounded repair chain for a resolver hook that failed after
+    // routing/firewall COMMIT. A firewall retry cannot repair dnsmasq. After
+    // the bounded boot-convergence window this same single owner continues at
+    // a quiet capped maintenance cadence until success or lifecycle change.
+    int resolver_reload_retry_task_id_{-1};
+    // Fences a callback which was already dequeued when its timer was
+    // cancelled. Such a stale callback must not clear or consume a newer
+    // generation's single timer slot.
+    std::uint64_t resolver_reload_retry_schedule_serial_{0};
+    // Retained before timer installation. If Scheduler cannot publish the
+    // timer, the independent 60-second runtime health owner consumes this
+    // exact generation/attempt instead of letting DNS recovery die silently.
+    bool resolver_reload_retry_pending_{false};
+    std::size_t resolver_reload_retry_pending_attempt_{0};
+    std::uint64_t resolver_reload_retry_pending_generation_{0};
+    // This chain's own record that its bounded retries were exhausted, kept
+    // apart from the shared runtime reason. The exhaustion path can publish
+    // kResolverReloadExhaustedRuntimeReason only when it finds the runtime
+    // still running; during a boot something else has usually broken it
+    // seconds earlier, and a recovery keyed only on that reason could then
+    // never fire. Cleared by a verified reload, never by another owner.
+    bool resolver_reload_latched_{false};
+    // A failed Keenetic DNS rollback must restore firewall before resolver
+    // bytes may advance. Unlike retry_pending(), this generation latch remains
+    // set after bounded firewall retries are exhausted and is released only by
+    // a verified successful firewall reconciliation or a new runtime generation.
+    ResolverAfterFirewallRecoveryGate resolver_after_firewall_gate_;
+    // A transient URLTEST candidate/rollback publication restores the old
+    // cursor immediately, then delegates the complete kernel proof to the
+    // central firewall reconciler. Until that generation succeeds, every
+    // affected selector remains blocked and receives one trailing probe.
+    UrltestAfterFirewallRecoveryGate urltest_after_firewall_gate_;
     // Retry task for interface monitor netlink reconnect after failure.
     int interface_monitor_reconnect_task_id_{-1};
+    // Bounded one-shot observer for a client reusing a long-idle forwarded
+    // flow which no longer receives replies. It is armed only for explicitly
+    // selected strong-reconnect lists and never performs a broad conntrack
+    // flush. All detector state belongs to the control/event-loop thread.
+    int idle_stall_observer_task_id_{-1};
+    IdleStallDetector idle_stall_detector_;
+    UdpCallAffinityDetector udp_call_affinity_detector_;
+    std::vector<std::string> idle_stall_destination_selectors_;
+    std::vector<std::string> udp_call_affinity_destination_selectors_;
+    std::optional<std::uint32_t> idle_stall_preventive_owned_mark_;
+    bool idle_stall_packaged_whatsapp_only_observation_{false};
+    std::atomic<bool> idle_stall_observer_enabled_{false};
+    std::atomic<bool> idle_stall_observer_inflight_{false};
+    // Pair publication and exact conntrack retirement execute on the bounded
+    // worker pool. Detector reservations remain control-loop owned while this
+    // single-flight mutation is outstanding.
+    std::atomic<bool> udp_call_affinity_mutation_inflight_{false};
+    // Serializes the worker's live pair/conntrack mutation with every
+    // firewall apply or cleanup lifecycle boundary. Generation fences decide
+    // whether queued work is still eligible after acquiring this barrier.
+    TracedMutex udp_call_affinity_mutation_mutex_;
+    std::atomic<std::uint64_t> idle_stall_coverage_generation_{1};
+    // Every published exact reset owns a generation- and rule-fenced timer.
+    // A transient removal failure is retried without allowing an older timer
+    // to retire a later window for the same five-tuple.
+    std::vector<PendingExactTcpResetCleanup>
+        pending_exact_tcp_reset_cleanups_;
+    std::uint64_t exact_tcp_reset_cleanup_schedule_serial_{0U};
 
     // Epoll state
     int epoll_fd_{-1};
@@ -274,7 +1048,7 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<std::thread::id> event_loop_thread_id_{};
     std::atomic<bool> event_loop_active_{false};
-    std::atomic<bool> accept_posted_control_tasks_{true};
+    std::atomic<bool> accept_posted_control_tasks_{false};
 
     struct FdEntry {
         int fd;
@@ -283,29 +1057,48 @@ private:
     mutable TracedMutex fd_entries_mutex_;
     std::vector<FdEntry> fd_entries_ GUARDED_BY(fd_entries_mutex_);
 
-    int pid_file_fd_{-1};
+    PidFile pid_file_;
     int control_fd_{-1};
+    int ipc_control_fd_{-1};
+    gid_t ipc_control_group_id_{static_cast<gid_t>(-1)};
+    std::string ipc_control_socket_path_;
     struct ControlTask {
         std::function<void()> callback;
         std::string label;
         TraceId trace_id{0};
+        daemon_detail::ControlTaskAdmissionHandle admission_token;
     };
+    using ControlTaskOwner = std::unique_ptr<ControlTask>;
     TracedMutex control_tasks_mutex_;
-    std::vector<ControlTask> control_tasks_ GUARDED_BY(control_tasks_mutex_);
-
-#ifdef WITH_API
-    TracedMutex config_op_mutex_;
-    std::condition_variable_any config_op_cv_;
-    std::atomic<ConfigOperationState> config_op_state_{static_cast<ConfigOperationState>(0)};
-#endif
+    std::vector<ControlTaskOwner> control_tasks_
+        GUARDED_BY(control_tasks_mutex_);
 
     // Snapshot stores
     ConfigStore config_store_;
     ListService list_service_;
+    // Report-only startup observation. The store is inventoried exactly once
+    // before NDMS/routing startup; API workers read only the redacted atomic
+    // summary and can never turn it into mutation authority.
+    NdmsNativeImportWalStore ndms_native_import_wal_store_;
+    // Sits beside the WAL store rather than inside it: an unknown name inside
+    // the WAL directory makes every inventory unsafe by design, so its
+    // neighbours must live elsewhere.
+    NdmsNativeOwnershipStore ndms_native_ownership_store_;
+    std::atomic<NdmsNativeImportJournalReadinessState>
+        ndms_native_import_journal_readiness_{
+            NdmsNativeImportJournalReadinessState::unavailable};
     RuntimeStateStore runtime_state_store_;
+    LifecycleOperationStore lifecycle_operation_store_;
+    LifecycleOperationCoordinator lifecycle_operations_{lifecycle_operation_store_};
+    ListRefreshTaskCoordinator list_refresh_tasks_;
+    RuntimeStateMachine runtime_state_machine_;
 
     // Event-loop-owned controller state
     Config config_;
+    // Event-loop-owned DNS snapshot committed with config_. The shared DNS
+    // cache is observational/prepare state only and may advance on a stale
+    // worker; active runtime consumers must never read it directly.
+    KeeneticDnsCacheView active_keenetic_dns_;
     std::string config_path_;
     DaemonOptions opts_;
 
@@ -317,30 +1110,170 @@ private:
     RouteTable route_table_;
     PolicyRuleManager policy_rules_;
     FirewallState firewall_state_;
+    // Effective content analyzed immediately before the current firewall
+    // generation was populated. This follows normalized list entries rather
+    // than URL/file metadata and retains only a bounded static selector set.
+    AppliedListContentState applied_list_content_state_;
+    ConntrackManager conntrack_manager_;
+    bool conntrack_unavailable_warning_emitted_{false};
+    std::atomic<std::uint64_t> meta_udp443_cleanup_epoch_{1U};
+    // Schedule serial whose worker could not hand completion back to the
+    // control loop. A scalar token (not a bool) prevents an old worker from
+    // clearing the in-flight state of a newer plan after apply/cancel.
+    std::atomic<std::uint64_t>
+        meta_udp443_cleanup_completion_admission_failed_serial_{0U};
+    int meta_udp443_cleanup_retry_task_id_{-1};
+    std::uint64_t meta_udp443_cleanup_schedule_serial_{0U};
+    std::optional<PendingMetaUdp443ActivationCleanup>
+        pending_meta_udp443_cleanup_;
+    std::optional<std::uint32_t> committed_meta_udp443_fwmark_;
+    std::uint32_t committed_meta_udp443_owned_mask_{0U};
     URLTester url_tester_;
     // Latency for every interface outbound, including native tunnels the
     // firmware owns and standalone outbounds urltest never looks at.
     InterfaceProbe interface_probe_;
     OutboundMarkMap outbound_marks_;
+    // Runtime-only mapping from stable NDMS identities to current kernel
+    // ingress names. Persisted configuration remains unchanged.
+    std::vector<InternalVpnServer> resolved_internal_vpn_servers_;
+    // API preparation runs outside the control loop. It may reuse only a
+    // thread-safe, previously verified, include-only stable binding. Exclusion
+    // bypasses and degraded/legacy observations are never stored here.
+    mutable TracedMutex internal_vpn_lkg_mutex_;
+    std::vector<InternalVpnServer>
+        internal_vpn_verified_includes_lkg_
+            GUARDED_BY(internal_vpn_lkg_mutex_);
+    std::vector<InternalVpnRuntimeTarget>
+        resolved_internal_vpn_service_targets_;
+    // Last source-scoped native VPN SNAT contract committed to the firewall.
+    // A contract change retires only flows from the changed source pools so
+    // old un-NATed conntrack entries cannot mask a successful repair.
+    std::vector<FirewallSourceEgressSnatSelector>
+        applied_native_vpn_direct_egress_snat_selectors_;
+    std::vector<InternalVpnRuntimeTarget>
+        internal_vpn_service_verified_includes_lkg_
+            GUARDED_BY(internal_vpn_lkg_mutex_);
+    // Registered before scheduler/executor members so their reverse-order
+    // destruction completes before this pull-only metrics registry is freed.
+    PeriodicTaskMetricsRegistry periodic_task_metrics_{
+        std::vector<std::string>{
+            "resolver-hash-refresh",
+            "keenetic-dns-refresh",
+            "owned-snat-health",
+            "interface-probe",
+            "interface-traffic-sample",
+        }};
     std::unique_ptr<Scheduler> scheduler_;
     std::unique_ptr<UrltestManager> urltest_manager_;
+    RuntimeIncidentLatch urltest_apply_incidents_{3};
+    // Event-loop-owned notification latches. Recovery itself is controlled by
+    // the existing generation-fenced retry state machines; these latches only
+    // prevent transient or repeated failures from flooding the WebUI bell.
+    RuntimeIncidentLatch runtime_firewall_incidents_{1};
+    RuntimeIncidentLatch meta_udp443_incidents_{1};
+    RuntimeIncidentLatch internal_vpn_catalog_incidents_{5};
+    RuntimeIncidentLatch resolver_reload_incidents_{1};
     BlockingExecutor blocking_executor_{2, 64};
+    // Resolver hooks can synchronously request a generated configuration.
+    // Keep command execution, streaming and TXT probes on independent queues.
+    BlockingExecutor resolver_hook_executor_{1, 16};
+    BlockingExecutor resolver_stream_executor_{1, 16};
+    BlockingExecutor resolver_io_executor_{1, 32};
+    // API and IPC share one bounded diagnostics pool. Admission counts work,
+    // not queue entries, so no more than two whole tests can exist at once.
+    BlockingExecutor routing_test_executor_{2, 2};
+    BoundedOperationAdmission routing_test_admission_{2};
     std::atomic<std::uint64_t> runtime_generation_{1};
-    std::atomic<bool> remote_list_refresh_inflight_{false};
+    KeeneticDnsRefreshCoordinator keenetic_dns_refresh_coordinator_;
+    std::atomic<bool> ipc_resolver_hook_inflight_{false};
+    TracedMutex resolver_stream_attempt_mutex_;
+    std::string active_resolver_stream_attempt_id_
+        GUARDED_BY(resolver_stream_attempt_mutex_);
+    std::shared_ptr<const ResolverGenerationSnapshot>
+        active_resolver_stream_generation_
+            GUARDED_BY(resolver_stream_attempt_mutex_);
+    // Non-null only for the exact committed stream that is activating a
+    // previously stopped runtime.  It is pointer-bound to the active attempt
+    // and cleared with that attempt's lifetime.
+    std::shared_ptr<const ResolverGenerationSnapshot>
+        inactive_resolver_activation_generation_
+            GUARDED_BY(resolver_stream_attempt_mutex_);
     std::atomic<bool> resolver_hash_refresh_inflight_{false};
-    // Multiple open pages can request the same manual probe at once. Keep at
-    // most one queued/running round so a weak router never forks duplicate
-    // health checks for a single click or refresh cycle.
-    std::atomic<bool> manual_probe_inflight_{false};
+    // Control-loop-owned coalescing bit. A changed periodic Keenetic DNS
+    // observation is retried once after an active resolver stream retires.
+    bool keenetic_dns_refresh_deferred_by_resolver_stream_{false};
+    // One authority admits every externally requested runtime mutation. API
+    // requests own move-only leases; asynchronous SIGHUP shares one lease
+    // until the reload coordinator chooses its single completion owner.
+    RuntimeMutationAdmission runtime_mutation_admission_;
+    ConfigReloadCoordinator sighup_reload_coordinator_;
+    CoalescedSingleFlightGate internal_vpn_catalog_refresh_gate_;
+    int internal_vpn_catalog_refresh_retry_task_id_{-1};
+    std::size_t internal_vpn_catalog_refresh_retry_attempt_{0};
+    std::atomic<std::uint64_t> resolver_stream_epoch_{0};
+    std::atomic<std::uint64_t> resolver_stream_completed_epoch_{0};
+    TracedMutex system_resolver_hook_mutex_;
+    // Legacy cache-publication serialization. Resolver/firewall consumers no
+    // longer hold the shared side while dnsmasq performs its IPC stream: each
+    // transaction owns an immutable CacheManager generation lease instead.
+    TracedSharedMutex resolver_cache_snapshot_mutex_;
+    // One immutable generation is shared with the stream worker. This avoids
+    // copying the full configuration (including large inline lists) once in
+    // the IPC handler and again into the worker closure.
+    std::shared_ptr<const ResolverGenerationSnapshot>
+        resolver_generation_snapshot_;
+    // Scheduled and manual requests share one worker round. Slow or dead
+    // tunnels may hold a probe for multiple seconds, so bound queued work to
+    // one coalesced trailing round and retain manual state through completion.
+    CoalescedManualSingleFlightGate interface_probe_gate_;
+    // Separate from the gate above on purpose: rounds coalesce because they
+    // all measure the same thing, targeted probes must not because they do
+    // not. See TargetedProbeAdmission.
+    TargetedProbeAdmission targeted_probe_admission_;
+    // Where the next periodic tick resumes its rotation, and whether the round
+    // about to launch is one. Control-loop owned, like the round itself. A
+    // manual refresh and a failure retry stay full rounds.
+    std::size_t interface_probe_cursor_{0};
+    bool interface_probe_round_rotates_{false};
+    OneTrailingFailureRetry interface_probe_failure_retry_;
 
 #ifdef WITH_API
     std::unique_ptr<ApiServer> api_server_;
     std::unique_ptr<ApiContext> api_ctx_;
     std::unique_ptr<SseBroadcaster> dns_test_broadcaster_;
+    std::unique_ptr<StatusStream> status_stream_;
+    std::unique_ptr<ConntrackEventMonitor> conntrack_event_monitor_;
+    InterfaceTrafficSampler interface_traffic_sampler_;
+    // Outlives every individual inventory build on purpose. An anchor rebuilt
+    // per request would restart the very uptime it is meant to report, so this
+    // is daemon-scoped state and not a local of the response builder.
+    InterfaceUptimeAnchorStore interface_uptime_anchors_;
+    // Touched only from sample_interface_traffic_now(), i.e. only from the
+    // scheduler thread - the same assumption the neighbouring
+    // traffic_sampled_interfaces_ and traffic_sampling_active_ already make.
+    InterfaceTrafficCadence interface_traffic_cadence_;
+    std::mutex interface_traffic_targets_mutex_;
+    std::map<std::string, std::set<std::string>>
+        interface_traffic_targets_by_source_;
+    std::set<std::string> traffic_sampled_interfaces_;
+    bool traffic_sampling_active_{false};
+    std::uint64_t conntrack_revision_{0};
+    int conntrack_publish_task_id_{-1};
+    int remote_access_retry_task_id_{-1};
+    // Service-lifetime fallback.  It is deliberately independent from the
+    // routing-runtime/SNAT health timer, which is canceled by Stop.
+    int remote_access_recovery_watchdog_task_id_{-1};
+    std::uint64_t remote_access_retry_schedule_serial_{0U};
+    std::atomic<std::uint64_t> remote_access_retry_bridge_epoch_{0U};
+    std::optional<std::uint64_t>
+        unscheduled_remote_access_retry_generation_;
 #endif
 
     std::unique_ptr<DnsProbeServer> dns_probe_server_;
     HookCommandExecutor hook_command_executor_;
+    // Declared after every field captured by its worker callbacks so reverse
+    // member destruction stops the coordinator before those dependencies.
+    ResolverStreamCoordinator resolver_stream_coordinator_;
     bool routing_runtime_active_{true};
 };
 

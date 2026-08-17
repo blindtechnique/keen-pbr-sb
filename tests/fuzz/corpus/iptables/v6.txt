@@ -1,0 +1,3 @@
+-N KeenPbrTable
+-A PREROUTING -j KeenPbrTable
+-A KeenPbrTable -m set --match-set keen_pbr_a6 dst -j MARK --set-xmark 0x100/0xff00

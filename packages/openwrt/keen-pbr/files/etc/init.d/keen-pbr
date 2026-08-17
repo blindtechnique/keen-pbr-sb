@@ -6,12 +6,14 @@ STOP=10
 
 if type extra_command >/dev/null 2>&1; then
     extra_command "reapply_firewall" " Send SIGUSR1 to the running service"
+    extra_command "reapply_nat" " Send SIGUSR2 to repair NAT state"
     extra_command "reapply_dnsmasq_config" " Regenerate keen-pbr dnsmasq config and restart dnsmasq"
     extra_command "sync_firewall_hook" " Ensure the fw4 include exists for keen-pbr"
     extra_command "remove_firewall_hook" " Remove the fw4 include for keen-pbr"
 else
-    EXTRA_COMMANDS="reapply_firewall reapply_dnsmasq_config sync_firewall_hook remove_firewall_hook"
+    EXTRA_COMMANDS="reapply_firewall reapply_nat reapply_dnsmasq_config sync_firewall_hook remove_firewall_hook"
     EXTRA_HELP="        reapply_firewall        Send SIGUSR1 to the running service
+        reapply_nat             Send SIGUSR2 to repair NAT state
         reapply_dnsmasq_config  Regenerate keen-pbr dnsmasq config and restart dnsmasq
         sync_firewall_hook      Ensure the fw4 include exists for keen-pbr
         remove_firewall_hook    Remove the fw4 include for keen-pbr"
@@ -22,6 +24,7 @@ CONFIG=/etc/keen-pbr/config.json
 HELPER=/usr/lib/keen-pbr/dnsmasq.sh
 UCI_HELPER=/usr/lib/keen-pbr/uci.sh
 PIDFILE=/var/run/keen-pbr.pid
+PROC_ROOT=${KEEN_PBR_PROC_ROOT:-/proc}
 
 script_name() {
     basename "${initscript:-$0}"
@@ -92,8 +95,6 @@ start_service() {
 
     mkdir -p /var/cache/keen-pbr
 
-    "$PROG" --config "$CONFIG" download || true
-
     if [ -x "$HELPER" ]; then
         "$HELPER" activate || return 1
     fi
@@ -113,17 +114,43 @@ stop_service() {
     fi
 }
 
-reload_service() {
+pid_is_keen_pbr_service() {
+    local pid="$1"
+    local executable
+    local cmdline
+
+    case "$pid" in
+        *[!0-9]*|'') return 1 ;;
+    esac
+    [ -r "$PROC_ROOT/$pid/cmdline" ] || return 1
+    cmdline="$(tr '\000' '\n' < "$PROC_ROOT/$pid/cmdline" 2>/dev/null)" ||
+        return 1
+    executable="$(printf '%s\n' "$cmdline" | head -n 1)"
+    [ "$(basename "$executable")" = "$(basename "$PROG")" ] || return 1
+    printf '%s\n' "$cmdline" | grep -qx 'service'
+}
+
+signal_service() {
+    local signal="$1"
+    local pid
+
     [ -s "$PIDFILE" ] || return 1
+    read -r pid < "$PIDFILE" || return 1
+    pid_is_keen_pbr_service "$pid" || return 1
+    kill "-$signal" "$pid"
+}
 
+reload_service() {
     reapply_dnsmasq_config || return 1
-
-    kill -HUP "$(cat "$PIDFILE")"
+    signal_service HUP
 }
 
 reapply_firewall() {
-    [ -s "$PIDFILE" ] || return 1
-    kill -SIGUSR1 "$(cat "$PIDFILE")"
+    signal_service SIGUSR1
+}
+
+reapply_nat() {
+    signal_service SIGUSR2
 }
 
 reapply_dnsmasq_config() {

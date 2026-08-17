@@ -42,6 +42,18 @@ public:
     void set_urltest_selection(const std::string& urltest_tag,
                                const std::string& child_tag);
 
+    // Replace all urltest selections atomically from the controller's point of
+    // view. Used when a new configuration is activated and when a failed
+    // selection switch is rolled back.
+    void set_urltest_selections(
+        std::map<std::string, std::string> selections);
+
+    // Exchange the complete selector cursor without allocation. The caller's
+    // map receives the previously published state and can be used for a
+    // transactional rollback.
+    void swap_urltest_selections(
+        std::map<std::string, std::string>& selections) noexcept;
+
     // Get current rule state
     const std::vector<RuleState>& get_rules() const;
 

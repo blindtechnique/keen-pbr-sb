@@ -1,41 +1,108 @@
 #include <cstdlib>
+#include <chrono>
+#include <cstdint>
+#include <ctime>
 #include <cstring>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <thread>
+#include <vector>
 
 #include <csignal>
 #include <cerrno>
 #include <unistd.h>
 
 #include <cpptrace/utils.hpp>
-#include <curl/curl.h>
 #include <keen-pbr/version.hpp>
 
-#include "cache/cache_manager.hpp"
+#include "cmd/recover_persistent_state.hpp"
+#include "cmd/status.hpp"
+#include "cmd/test_routing.hpp"
 #include "crash/crash_diagnostics.hpp"
 #include "log/file_sink.hpp"
 #ifdef WITH_API
 #include "api/handler_logs.hpp"
 #endif
 #include "config/config.hpp"
-#include "cmd/status.hpp"
-#include "cmd/test_routing.hpp"
 #include "daemon/daemon.hpp"
-#include "dns/dns_router.hpp"
-#include "dns/dnsmasq_gen.hpp"
-#include "util/ipv6_support.hpp"
-#include "lists/list_entry_visitor.hpp"
-#include "lists/list_streamer.hpp"
 #include "log/logger.hpp"
+#include "http/curl_runtime.hpp"
+#include "ipc/control_client.hpp"
+#include "ipc/resolver_fallback.hpp"
 #include "util/daemon_signals.hpp"
 
 #ifndef KEEN_PBR_DEFAULT_CONFIG_PATH
 #define KEEN_PBR_DEFAULT_CONFIG_PATH "/etc/keen-pbr/config.json"
 #endif
+#ifndef KEEN_PBR_CONTROL_SOCKET
+#define KEEN_PBR_CONTROL_SOCKET "/run/keen-pbr/control.sock"
+#endif
+#ifndef KEEN_PBR_RESOLVER_FALLBACK_CONFIG
+#define KEEN_PBR_RESOLVER_FALLBACK_CONFIG \
+    "/etc/keen-pbr/dnsmasq-fallback.conf"
+#endif
 
 namespace {
+
+constexpr auto kListRefreshStatusPollInterval =
+    std::chrono::milliseconds{250};
+
+bool list_refresh_task_is_terminal(std::string_view state) {
+    return state == "succeeded" || state == "failed" ||
+           state == "cancelled";
+}
+
+nlohmann::json wait_for_list_refresh_task(
+    nlohmann::json response) {
+    const auto result = response.value(
+        "result", nlohmann::json::object());
+    const auto task_id = result.value("task_id", "");
+    if (!response.value("ok", false) || task_id.empty()) {
+        // Backward compatibility with daemons which still return the final
+        // download result from the initial request.
+        return response;
+    }
+
+    std::uint64_t poll_sequence = 0;
+    std::string state = result.value("state", "queued");
+    while (!list_refresh_task_is_terminal(state)) {
+        std::this_thread::sleep_for(kListRefreshStatusPollInterval);
+        response = keen_pbr3::ipc::request_control(
+            KEEN_PBR_CONTROL_SOCKET,
+            {{"protocol_version",
+              keen_pbr3::ipc::kControlProtocolVersion},
+             {"request_id",
+              "cli-download-status-" +
+                  std::to_string(++poll_sequence)},
+             {"operation", "download-status"},
+             {"task_id", task_id}});
+        if (!response.value("ok", false)) {
+            return response;
+        }
+        state = response.value(
+            "result", nlohmann::json::object())
+                    .value("state", "failed");
+    }
+    return response;
+}
+
+bool list_refresh_response_succeeded(
+    const nlohmann::json& response) {
+    if (!response.value("ok", false)) return false;
+    const auto result = response.value(
+        "result", nlohmann::json::object());
+    const auto state = result.value("state", "");
+    if (state.empty()) {
+        return true;
+    }
+    return state == "succeeded" &&
+           result.value("failed_lists",
+                        std::vector<std::string>{})
+               .empty();
+}
 
 struct CliOptions {
     std::string config_path{KEEN_PBR_DEFAULT_CONFIG_PATH};
@@ -43,15 +110,21 @@ struct CliOptions {
     std::string log_file{KEEN_PBR_DEFAULT_LOG_FILE};
     std::string pid_file_override;
     bool no_api{false};
+    bool use_raw_prerouting{false};
+    bool udp_call_affinity_ipset_available{true};
     bool has_pid_file_override{false};
+    bool has_config_path_override{false};
     bool run_service{false};
     bool generate_resolver_config{false};
     std::string resolver_type;
     bool download_lists{false};
+    bool download_reload{false};
     bool resolver_config_hash{false};
     bool run_status{false};
     bool run_test_routing{false};
     std::string test_routing_target;
+    bool recover_persistent_state{false};
+    bool recovery_incompatible_option{false};
     bool show_help{false};
     bool show_version{false};
 };
@@ -65,6 +138,8 @@ void print_usage(const char* argv0) {
               << "  --log-file <path>  Write the log to a file as well (empty value disables)\n"
               << "  --pid-file <path>  Override daemon.pid_file when running the service command\n"
               << "  --no-api           Disable REST API at runtime\n"
+              << "  --use-raw-prerouting  Use raw PREROUTING for IPv4 forwarded traffic (iptables only)\n"
+              << "  --disable-udp-call-affinity-ipset  Disable the optional iptables WhatsApp call overlay\n"
               << "  --version          Show version and exit\n"
               << "  --help             Show this help and exit\n"
               << "\n"
@@ -72,9 +147,11 @@ void print_usage(const char* argv0) {
               << "  service                            Start the routing service (foreground)\n"
               << "  status                             Show routing/firewall status and exit\n"
               << "  download                           Download all configured lists to cache and exit\n"
+              << "    --reload                         Apply changed lists through the running daemon\n"
               << "  generate-resolver-config <res>     Print generated resolver config to stdout and exit\n"
-              << "                                     Resolvers: dnsmasq-ipset, dnsmasq-nftset\n"
+              << "                                     Resolvers: dnsmasq (auto), dnsmasq-ipset, dnsmasq-nftset\n"
               << "  resolver-config-hash               Print MD5 hash of domain-to-ipset mapping and exit\n"
+              << "  recover-persistent-state           Recover an interrupted persistent transaction and exit\n"
               << "  test-routing <ip-or-domain>        Test expected vs actual routing for an IP or domain\n";
 }
 
@@ -87,18 +164,21 @@ CliOptions parse_args(int argc, char* argv[]) {
                 std::exit(1);
             }
             opts.config_path = argv[++i];
+            opts.has_config_path_override = true;
         } else if (std::strcmp(argv[i], "--log-level") == 0) {
             if (i + 1 >= argc) {
                 std::cerr << "Error: --log-level requires an argument\n";
                 std::exit(1);
             }
             opts.log_level = argv[++i];
+            opts.recovery_incompatible_option = true;
         } else if (std::strcmp(argv[i], "--log-file") == 0) {
             if (i + 1 >= argc) {
                 std::cerr << "Error: --log-file requires an argument\n";
                 std::exit(1);
             }
             opts.log_file = argv[++i];
+            opts.recovery_incompatible_option = true;
         } else if (std::strcmp(argv[i], "--pid-file") == 0) {
             if (i + 1 >= argc) {
                 std::cerr << "Error: --pid-file requires an argument\n";
@@ -106,8 +186,18 @@ CliOptions parse_args(int argc, char* argv[]) {
             }
             opts.pid_file_override = argv[++i];
             opts.has_pid_file_override = true;
+            opts.recovery_incompatible_option = true;
         } else if (std::strcmp(argv[i], "--no-api") == 0) {
             opts.no_api = true;
+            opts.recovery_incompatible_option = true;
+        } else if (std::strcmp(argv[i], "--use-raw-prerouting") == 0) {
+            opts.use_raw_prerouting = true;
+            opts.recovery_incompatible_option = true;
+        } else if (std::strcmp(
+                       argv[i],
+                       "--disable-udp-call-affinity-ipset") == 0) {
+            opts.udp_call_affinity_ipset_available = false;
+            opts.recovery_incompatible_option = true;
         } else if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0) {
             opts.show_help = true;
         } else if (std::strcmp(argv[i], "--version") == 0 || std::strcmp(argv[i], "-v") == 0) {
@@ -126,8 +216,13 @@ CliOptions parse_args(int argc, char* argv[]) {
             opts.generate_resolver_config = true;
         } else if (std::strcmp(argv[i], "download") == 0) {
             opts.download_lists = true;
+        } else if (std::strcmp(argv[i], "--reload") == 0) {
+            opts.download_reload = true;
+            opts.recovery_incompatible_option = true;
         } else if (std::strcmp(argv[i], "resolver-config-hash") == 0) {
             opts.resolver_config_hash = true;
+        } else if (std::strcmp(argv[i], "recover-persistent-state") == 0) {
+            opts.recover_persistent_state = true;
         } else if (std::strcmp(argv[i], "test-routing") == 0) {
             if (i + 1 >= argc) {
                 std::cerr << "Error: test-routing requires an IP address or domain argument\n";
@@ -165,32 +260,55 @@ void set_signal_action(int signum, void (*handler)(int)) {
     }
 }
 
+std::string resolver_fallback_reason(const std::string& error) {
+    static constexpr std::string_view known[] = {
+        "runtime_starting",
+        "runtime_stopped",
+        "runtime_broken",
+        "runtime_shutting_down",
+        "stream_start_timeout",
+        "daemon_error",
+        "protocol_error",
+        "socket_unavailable",
+        "active_list_cache_mismatch",
+        "list_cache_missing",
+    };
+    for (const auto reason : known) {
+        if (error == reason) return std::string(reason);
+    }
+    if (error.find("unavailable") != std::string::npos) {
+        return "socket_unavailable";
+    }
+    if (error.find("timeout") != std::string::npos) {
+        return "connect_timeout";
+    }
+    return "protocol_error";
+}
+
 } // anonymous namespace
 
 int main(int argc, char* argv[]) {
     try {
         set_signal_action(SIGPIPE, SIG_IGN);
-        sigset_t startup_sigusr1_mask = keen_pbr3::sigusr1_signal_mask();
-        keen_pbr3::set_signal_mask_for_current_thread(SIG_BLOCK, startup_sigusr1_mask);
+        sigset_t startup_firewall_refresh_mask =
+            keen_pbr3::firewall_refresh_signal_mask();
+        keen_pbr3::set_signal_mask_for_current_thread(
+            SIG_BLOCK, startup_firewall_refresh_mask);
         keen_pbr3::crash_diagnostics::warm_up();
         keen_pbr3::crash_diagnostics::install_fatal_signal_handlers();
         cpptrace::register_terminate_handler();
 
-        struct CurlGuard {
-            CurlGuard() { curl_global_init(CURL_GLOBAL_DEFAULT); }
-            ~CurlGuard() { curl_global_cleanup(); }
-        };
-        CurlGuard curl_guard;
-
         CliOptions opts = parse_args(argc, argv);
         if (!opts.run_service) {
             set_signal_action(SIGUSR1, SIG_IGN);
-            keen_pbr3::set_signal_mask_for_current_thread(SIG_UNBLOCK, startup_sigusr1_mask);
+            set_signal_action(SIGUSR2, SIG_IGN);
+            keen_pbr3::set_signal_mask_for_current_thread(
+                SIG_UNBLOCK, startup_firewall_refresh_mask);
         }
 
         if (opts.show_version) {
-            std::cout << "keen-pbr " << KEEN_PBR3_VERSION_STRING << " (build "
-                      << KEEN_PBR3_VERSION_RELEASE << ")" << "\n";
+            std::cout << "keen-pbr " << KEEN_PBR3_VERSION_IDENTITY_STRING
+                      << '\n';
             return 0;
         }
 
@@ -199,9 +317,31 @@ int main(int argc, char* argv[]) {
             return 0;
         }
 
+        if (opts.recover_persistent_state) {
+            const bool combined_command =
+                opts.run_service || opts.run_status ||
+                opts.download_lists ||
+                opts.generate_resolver_config ||
+                opts.resolver_config_hash ||
+                opts.run_test_routing;
+            if (combined_command ||
+                opts.recovery_incompatible_option ||
+                opts.has_config_path_override) {
+                std::cerr
+                    << "recover-persistent-state: this offline command "
+                       "does not accept another command or --config\n";
+                return static_cast<int>(
+                    keen_pbr3::RecoverPersistentStateExitCode::blocked);
+            }
+            // This dispatch deliberately precedes logger/file-sink setup and
+            // any read or parse of the working configuration.
+            return keen_pbr3::run_recover_persistent_state_command();
+        }
+
         if (!opts.download_lists && !opts.generate_resolver_config &&
             !opts.resolver_config_hash && !opts.run_service && !opts.run_status &&
-            !opts.run_test_routing) {
+            !opts.run_test_routing &&
+            !opts.recover_persistent_state) {
             print_usage(argv[0]);
             return 0;
         }
@@ -210,14 +350,145 @@ int main(int argc, char* argv[]) {
         auto& logger = keen_pbr3::Logger::instance();
         logger.set_level(keen_pbr3::parse_log_level(opts.log_level));
 
+        if (opts.generate_resolver_config) {
+            if (opts.config_path != KEEN_PBR_DEFAULT_CONFIG_PATH) {
+                throw std::runtime_error(
+                    "--config is only supported with the service command");
+            }
+            if (opts.resolver_type != "dnsmasq" &&
+                opts.resolver_type != "dnsmasq-ipset" &&
+                opts.resolver_type != "dnsmasq-nftset") {
+                throw std::runtime_error(
+                    "Unknown resolver type: " + opts.resolver_type);
+            }
+            if (opts.resolver_type != "dnsmasq") {
+                std::cerr
+                    << "Warning: " << opts.resolver_type
+                    << " is deprecated; use dnsmasq to select the active "
+                       "daemon backend\n";
+            }
+            try {
+                nlohmann::json request{
+                    {"protocol_version",
+                     keen_pbr3::ipc::kControlProtocolVersion},
+                    {"request_id", "cli-generate-resolver-config"},
+                    {"operation", "generate-resolver-config"},
+                    {"resolver", opts.resolver_type},
+                };
+                if (const char* attempt_id =
+                        std::getenv("KEEN_PBR_RESOLVER_ATTEMPT_ID");
+                    attempt_id != nullptr &&
+                    keen_pbr3::is_valid_resolver_attempt_id(attempt_id)) {
+                    request["resolver_attempt_id"] = attempt_id;
+                }
+                keen_pbr3::ipc::stream_control(
+                    KEEN_PBR_CONTROL_SOCKET,
+                    request,
+                    std::cout,
+                    15000);
+                return 0;
+            } catch (const keen_pbr3::ipc::ControlStreamError& error) {
+                if (!error.active_bytes_streamed() &&
+                    keen_pbr3::ipc::emit_resolver_fallback(
+                        std::cout,
+                        KEEN_PBR_RESOLVER_FALLBACK_CONFIG,
+                        resolver_fallback_reason(error.what()),
+                        static_cast<std::int64_t>(std::time(nullptr)))) {
+                    return 0;
+                }
+                throw;
+            }
+        }
+
+        if (opts.run_status || opts.resolver_config_hash ||
+            opts.download_lists || opts.run_test_routing) {
+            if (opts.config_path != KEEN_PBR_DEFAULT_CONFIG_PATH) {
+                throw std::runtime_error(
+                    "--config is only supported with the service command");
+            }
+            const std::string operation =
+                opts.run_status
+                    ? "status"
+                    : (opts.resolver_config_hash
+                           ? "resolver-config-hash"
+                           : (opts.download_lists
+                                  ? "download"
+                                  : "test-routing"));
+            nlohmann::json request =
+                {{"protocol_version",
+                  keen_pbr3::ipc::kControlProtocolVersion},
+                 {"request_id", "cli-" + operation},
+                 {"operation", operation},
+                 {"reload", opts.download_reload},
+                 {"target", opts.test_routing_target}};
+            if (opts.download_lists) {
+                // Protocol v1 keeps the legacy terminal response unless the
+                // caller explicitly advertises support for task polling.
+                request["task_response"] = true;
+            }
+            auto response = keen_pbr3::ipc::request_control(
+                KEEN_PBR_CONTROL_SOCKET,
+                request,
+                5000,
+                opts.run_test_routing
+                    ? static_cast<int>(
+                          std::chrono::duration_cast<
+                              std::chrono::milliseconds>(
+                              keen_pbr3::kRoutingTestClientResponseTimeout)
+                              .count())
+                    : -1);
+            if (opts.download_lists) {
+                response = wait_for_list_refresh_task(
+                    std::move(response));
+            }
+            if (opts.run_status) {
+                if (response.value("ok", false)) {
+                    return keen_pbr3::run_status_command(response);
+                }
+                const auto& error =
+                    response.value("error", nlohmann::json::object());
+                std::cerr
+                    << "keen-pbr status: "
+                    << error.value("code", "daemon_error") << ": "
+                    << error.value("message", "status request failed")
+                    << '\n';
+                return 1;
+            } else if (opts.resolver_config_hash &&
+                       response.value("ok", false)) {
+                std::cout
+                    << response.at("result").value(
+                           "resolver_config_hash", "")
+                    << '\n';
+            } else if (opts.run_test_routing) {
+                if (!response.value("ok", false)) {
+                    const auto& error = response.value(
+                        "error", nlohmann::json::object());
+                    std::cerr
+                        << "keen-pbr test-routing: "
+                        << error.value("code", "daemon_error") << ": "
+                        << error.value(
+                               "message", "routing test failed")
+                        << '\n';
+                    return 1;
+                }
+                return keen_pbr3::run_test_routing_command(response);
+            } else {
+                std::cout << response.dump() << '\n';
+            }
+            return opts.download_lists
+                       ? (list_refresh_response_succeeded(response) ? 0 : 1)
+                       : (response.value("ok", false) ? 0 : 1);
+        }
+
+        keen_pbr3::CurlRuntime curl_runtime;
+
         // Only the long-running service keeps a log file: one-shot commands
         // are run by hand and would just churn the file with noise.
         if (opts.run_service && !opts.log_file.empty()) {
             std::string log_file_error;
             if (keen_pbr3::install_file_log_sink(opts.log_file, &log_file_error)) {
-                logger.info("keen-pbr {} (build {}) starting, log file: {}",
-                            KEEN_PBR3_VERSION_STRING,
-                            KEEN_PBR3_VERSION_RELEASE,
+                logger.info("keen-pbr {} starting, log file: {}",
+                            KEEN_PBR3_VERSION_IDENTITY_STRING,
                             opts.log_file);
 #ifdef WITH_API
                 // Preferences stored on the router win over the defaults, but
@@ -241,120 +512,15 @@ int main(int argc, char* argv[]) {
             config.daemon->pid_file = opts.pid_file_override;
         }
 
-        if (opts.run_status) {
-            return keen_pbr3::run_status_command(config, opts.config_path);
-        }
-
-        if (opts.run_test_routing) {
-            const auto cache_dir = config.daemon.value_or(keen_pbr3::DaemonConfig{})
-                                       .cache_dir.value_or("/var/cache/keen-pbr");
-            keen_pbr3::CacheManager cache(cache_dir, keen_pbr3::max_file_size_bytes(config));
-            return keen_pbr3::run_test_routing_command(config, cache, opts.test_routing_target);
-        }
-
-        // Handle download command: download all lists to cache, count entries, exit
-        if (opts.download_lists) {
-            const auto cache_dir = config.daemon.value_or(keen_pbr3::DaemonConfig{})
-                                       .cache_dir.value_or("/var/cache/keen-pbr");
-            keen_pbr3::CacheManager cache(cache_dir, keen_pbr3::max_file_size_bytes(config));
-            cache.ensure_dir();
-            for (const auto& [name, list_cfg] : config.lists.value_or(std::map<std::string, keen_pbr3::ListConfig>{})) {
-                if (!list_cfg.url.has_value()) {
-                    logger.info("[{}] Skipped (no URL)", name);
-                    continue;
-                }
-                try {
-                    const auto download_result = cache.download(name, list_cfg.url.value());
-                    if (download_result.failed()) {
-                        logger.error("[{}] Error refreshing {}: {}",
-                                     name,
-                                     list_cfg.url.value(),
-                                     download_result.error_message.empty()
-                                         ? std::string("unknown error")
-                                         : download_result.error_message);
-                    } else if (download_result.updated()) {
-                        // Count entries by streaming through EntryCounter
-                        keen_pbr3::ListStreamer streamer(cache);
-                        keen_pbr3::EntryCounter counter;
-                        streamer.stream_list(name, list_cfg, counter);
-                        // Update metadata with counts
-                        auto meta = cache.load_metadata(name);
-                        meta.ips = counter.ips();
-                        meta.cidrs = counter.cidrs();
-                        meta.domains = counter.domains();
-                        cache.save_metadata(name, meta);
-                        logger.info("[{}] Updated ({} entries)", name, counter.total());
-                    } else {
-                        logger.info("[{}] Not modified (304)", name);
-                    }
-                } catch (const std::exception& e) {
-                    logger.error("[{}] Error: {}", name, e.what());
-                }
-            }
-            return 0;
-        }
-
-        // Handle resolver-config-hash command: print MD5 of full generated directives, exit
-        if (opts.resolver_config_hash) {
-            const auto cache_dir = config.daemon.value_or(keen_pbr3::DaemonConfig{})
-                                       .cache_dir.value_or("/var/cache/keen-pbr");
-            keen_pbr3::CacheManager cache(cache_dir, keen_pbr3::max_file_size_bytes(config));
-            keen_pbr3::ListStreamer streamer(cache);
-            const auto dns_cfg = config.dns.value_or(keen_pbr3::DnsConfig{});
-            keen_pbr3::DnsServerRegistry dns_registry(dns_cfg);
-            const auto ipv6_decision = keen_pbr3::resolve_ipv6_support(config);
-            keen_pbr3::log_ipv6_support_decision_once(ipv6_decision);
-            const std::string hash = keen_pbr3::DnsmasqGenerator::compute_config_hash(
-                dns_registry,
-                streamer,
-                config.route.value_or(keen_pbr3::RouteConfig{}),
-                dns_cfg,
-                config.lists.value_or(std::map<std::string, keen_pbr3::ListConfig>{}),
-                KEEN_PBR3_VERSION_FULL_STRING,
-                ipv6_decision.enabled);
-            std::cout << hash << "\n";
-            return 0;
-        }
-
-        // Handle generate-resolver-config command: load lists, generate, print, exit
-        if (opts.generate_resolver_config) {
-            const auto cache_dir = config.daemon.value_or(keen_pbr3::DaemonConfig{})
-                                       .cache_dir.value_or("/var/cache/keen-pbr");
-            keen_pbr3::CacheManager cache(cache_dir, keen_pbr3::max_file_size_bytes(config));
-            cache.ensure_dir();
-            const auto lists_map = config.lists.value_or(std::map<std::string, keen_pbr3::ListConfig>{});
-            for (const auto& [name, list_cfg] : lists_map) {
-                if (!list_cfg.url.has_value()) {
-                    logger.verbose("[{}] Skipped (no URL)", name);
-                    continue;
-                }
-                if (!cache.has_cache(name)) {
-                    logger.warn("[{}] Skipped remote list download during generate-resolver-config (cache missing). Please run 'keen-pbr download'", name);
-                } else {
-                    logger.verbose("[{}] Using cached", name);
-                }
-            }
-            const auto route_cfg = config.route.value_or(keen_pbr3::RouteConfig{});
-            const auto dns_cfg   = config.dns.value_or(keen_pbr3::DnsConfig{});
-            const auto ipv6_decision = keen_pbr3::resolve_ipv6_support(config);
-            keen_pbr3::log_ipv6_support_decision_once(ipv6_decision);
-            keen_pbr3::ListStreamer list_streamer(cache);
-            keen_pbr3::DnsServerRegistry dns_registry(dns_cfg);
-            auto resolver_type = keen_pbr3::DnsmasqGenerator::parse_resolver_type(opts.resolver_type);
-            keen_pbr3::DnsmasqGenerator dnsmasq_gen(dns_registry, list_streamer,
-                                                     route_cfg, dns_cfg,
-                                                     lists_map, resolver_type,
-                                                     KEEN_PBR3_VERSION_FULL_STRING,
-                                                     ipv6_decision.enabled);
-            dnsmasq_gen.generate(std::cout);
-            return 0;
-        }
-
         // Construct Daemon with all subsystems and run
         if (opts.run_service) {
-            logger.info("keen-pbr {} starting...", KEEN_PBR3_VERSION_STRING);
+            logger.info("keen-pbr {} starting...",
+                        KEEN_PBR3_VERSION_IDENTITY_STRING);
             keen_pbr3::DaemonOptions daemon_opts;
             daemon_opts.no_api = opts.no_api;
+            daemon_opts.use_raw_prerouting = opts.use_raw_prerouting;
+            daemon_opts.udp_call_affinity_ipset_available =
+                opts.udp_call_affinity_ipset_available;
 
             // Block daemon-managed signals before constructing Daemon so any
             // worker threads spawned during member initialization inherit the mask.

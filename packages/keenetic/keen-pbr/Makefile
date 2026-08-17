@@ -26,6 +26,7 @@ KEEN_PBR_OBJCOPY ?= $(if $(TARGET_CROSS),$(TARGET_CROSS)objcopy,objcopy)
 KEEN_PBR_DEBUG_ARTIFACT_DIR ?= $(PKG_BUILD_DIR)/debug-artifacts/$(BUILD_VARIANT)
 KEEN_PBR_STAGED_BIN ?= $(PKG_INSTALL_DIR)/$(KEEN_PBR_STAGED_BINDIR)/keen-pbr
 KEEN_PBR_TRANSPORT_MANAGER_BIN ?=
+KEEN_PBR_COMMIT ?= unknown
 
 define KeenPbr/EmitDebugSymbol
 	@if [ -f "$(KEEN_PBR_STAGED_BIN)" ] && command -v "$(KEEN_PBR_OBJCOPY)" >/dev/null 2>&1; then \
@@ -59,9 +60,13 @@ endef
 
 CMAKE_OPTIONS += \
 	-DKEEN_PBR_RELEASE:STRING=$(KEEN_PBR_RELEASE) \
+	-DKEEN_PBR_COMMIT:STRING=$(KEEN_PBR_COMMIT) \
 	-DKEEN_PBR_DEFAULT_CONFIG_PATH:STRING=/opt/etc/keen-pbr/config.json \
+	-DKEEN_PBR_CONTROL_SOCKET:STRING=/opt/var/run/keen-pbr/control.sock \
+	-DKEEN_PBR_RESOLVER_FALLBACK_CONFIG:STRING=/opt/etc/keen-pbr/dnsmasq-fallback.conf \
 	-DKEEN_PBR_SYSTEM_RESOLVER_HOOK:STRING=/opt/usr/lib/keen-pbr/dnsmasq.sh \
 	-DKEEN_PBR_TARGET_OS:STRING=keenetic \
+	-DKEEN_PBR_USE_LIBUNWIND=OFF \
 	-DCMAKE_INSTALL_BINDIR:PATH=$(KEEN_PBR_CMAKE_INSTALL_BINDIR) \
 	-DUSE_KEENETIC_API=ON \
 	-DCMAKE_BUILD_TYPE=MinSizeRel
@@ -84,16 +89,18 @@ define Package/keen-pbr
   CATEGORY:=Network
   TITLE:=Keen Policy-Based Routing (full)
   VERSION:=$(PKG_VERSION)-$(PKG_RELEASE)
-  DEPENDS:=+dnsmasq +ipset +iptables +libatomic +libcurl +libnl-core +libnl-route +libstdcpp +zlib +libzstd
+  DEPENDS:=+conntrack +dnsmasq +ipset +iptables +libatomic +libcurl +libnl-core +libnl-route +libstdcpp +zlib +libzstd
   VARIANT:=full
 endef
 
 define Package/keen-pbr/description
   Policy-based routing daemon for OpenWRT and Keenetic routers with REST API and WebUI.
+  Built from source commit $(KEEN_PBR_COMMIT).
 endef
 
 define Package/keen-pbr/conffiles
 /opt/etc/keen-pbr/config.json
+/opt/etc/keen-pbr/defaults
 /opt/etc/keen-pbr/local.lst
 /opt/etc/keen-pbr/dnsmasq-fallback.conf
 /opt/etc/keen-pbr/transports.json
@@ -106,6 +113,8 @@ define Package/keen-pbr/install
 	$(INSTALL_DIR) $(1)/opt/usr/bin
 	$(INSTALL_DIR) $(1)/opt/usr/lib/keen-pbr
 	$(INSTALL_DIR) $(1)/opt/usr/share/keen-pbr/frontend
+	$(INSTALL_DIR) $(1)/opt/usr/share/keen-pbr/nfqws-blobs
+	$(INSTALL_DIR) $(1)/opt/usr/share/keen-pbr/nfqws-lua
 	$(INSTALL_DIR) $(1)/opt/usr/share/keen-pbr/nfqws-strategies
 	$(INSTALL_BIN) $(PKG_INSTALL_DIR)/$(KEEN_PBR_STAGED_BINDIR)/keen-pbr $(1)/opt/usr/bin/keen-pbr
 	@test -f "$(KEEN_PBR_TRANSPORT_MANAGER_BIN)" || (echo "Missing transport-manager binary: $(KEEN_PBR_TRANSPORT_MANAGER_BIN)"; false)
@@ -116,13 +125,23 @@ define Package/keen-pbr/install
 	$(INSTALL_CONF) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/etc/keen-pbr/dnsmasq-fallback.conf $(1)/opt/etc/keen-pbr/dnsmasq-fallback.conf
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq.sh $(1)/opt/usr/lib/keen-pbr/dnsmasq.sh
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/self-update.sh $(1)/opt/usr/lib/keen-pbr/self-update.sh
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-update.sh $(1)/opt/usr/lib/keen-pbr/rescue-update.sh
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-startup-guard.sh $(1)/opt/usr/lib/keen-pbr/rescue-startup-guard.sh
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/update-lock.sh $(1)/opt/usr/lib/keen-pbr/update-lock.sh
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/lifecycle-lock.sh $(1)/opt/usr/lib/keen-pbr/lifecycle-lock.sh
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/portable-stat.sh $(1)/opt/usr/lib/keen-pbr/portable-stat.sh
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/install-naive-component.sh $(1)/opt/usr/share/keen-pbr/install-naive-component.sh
+	$(INSTALL_DATA) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/catalog.json $(1)/opt/usr/share/keen-pbr/catalog.json
 	$(INSTALL_DATA) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq.conf.template $(1)/opt/usr/lib/keen-pbr/dnsmasq.conf.template
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/etc/ndm/netfilter.d/50-keen-pbr-routing.sh $(1)/opt/etc/ndm/netfilter.d/50-keen-pbr-routing.sh
 	$(CP) $(PKG_BUILD_DIR)/frontend/dist/. $(1)/opt/usr/share/keen-pbr/frontend/
 	chmod -R a=rX,u+w $(1)/opt/usr/share/keen-pbr/frontend
 	$(CP) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-strategies/. $(1)/opt/usr/share/keen-pbr/nfqws-strategies/
 	chmod -R a=rX,u+w $(1)/opt/usr/share/keen-pbr/nfqws-strategies
+	$(CP) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-blobs/. $(1)/opt/usr/share/keen-pbr/nfqws-blobs/
+	chmod -R a=rX,u+w $(1)/opt/usr/share/keen-pbr/nfqws-blobs
+	$(CP) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-lua/. $(1)/opt/usr/share/keen-pbr/nfqws-lua/
+	chmod -R a=rX,u+w $(1)/opt/usr/share/keen-pbr/nfqws-lua
 	$(INSTALL_CONF) $(KEEN_PBR_FULL_CONFIG) $(1)/opt/etc/keen-pbr/config.json
 	$(INSTALL_CONF) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/etc/keen-pbr/transports.example.json $(1)/opt/etc/keen-pbr/transports.json
 	$(INSTALL_CONF) $(PKG_BUILD_DIR)/packages/common/local.lst $(1)/opt/etc/keen-pbr/local.lst
@@ -150,16 +169,18 @@ define Package/keen-pbr-headless
   CATEGORY:=Network
   TITLE:=Keen Policy-Based Routing (headless)
   VERSION:=$(PKG_VERSION)-$(PKG_RELEASE)
-  DEPENDS:=+dnsmasq +ipset +iptables +libatomic +libcurl +libnl-core +libnl-route +libstdcpp +zlib +libzstd
+  DEPENDS:=+conntrack +dnsmasq +ipset +iptables +libatomic +libcurl +libnl-core +libnl-route +libstdcpp +zlib +libzstd
   VARIANT:=headless
 endef
 
 define Package/keen-pbr-headless/description
   Policy-based routing daemon for OpenWRT and Keenetic routers. REST API and WebUI are NOT included in the headless variant.
+  Built from source commit $(KEEN_PBR_COMMIT).
 endef
 
 define Package/keen-pbr-headless/conffiles
 /opt/etc/keen-pbr/config.json
+/opt/etc/keen-pbr/defaults
 /opt/etc/keen-pbr/local.lst
 /opt/etc/keen-pbr/dnsmasq-fallback.conf
 endef
@@ -175,6 +196,11 @@ define Package/keen-pbr-headless/install
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/etc/keen-pbr/defaults $(1)/opt/etc/keen-pbr/defaults
 	$(INSTALL_CONF) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/etc/keen-pbr/dnsmasq-fallback.conf $(1)/opt/etc/keen-pbr/dnsmasq-fallback.conf
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq.sh $(1)/opt/usr/lib/keen-pbr/dnsmasq.sh
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-update.sh $(1)/opt/usr/lib/keen-pbr/rescue-update.sh
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-startup-guard.sh $(1)/opt/usr/lib/keen-pbr/rescue-startup-guard.sh
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/update-lock.sh $(1)/opt/usr/lib/keen-pbr/update-lock.sh
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/lifecycle-lock.sh $(1)/opt/usr/lib/keen-pbr/lifecycle-lock.sh
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/portable-stat.sh $(1)/opt/usr/lib/keen-pbr/portable-stat.sh
 	$(INSTALL_DATA) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq.conf.template $(1)/opt/usr/lib/keen-pbr/dnsmasq.conf.template
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/etc/ndm/netfilter.d/50-keen-pbr-routing.sh $(1)/opt/etc/ndm/netfilter.d/50-keen-pbr-routing.sh
 	$(INSTALL_CONF) $(KEEN_PBR_HEADLESS_CONFIG) $(1)/opt/etc/keen-pbr/config.json

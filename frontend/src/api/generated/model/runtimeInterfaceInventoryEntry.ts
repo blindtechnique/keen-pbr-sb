@@ -6,6 +6,8 @@
  * OpenAPI spec version: 3.0.0
  */
 import type { RuntimeInterfaceInventoryStatus } from './runtimeInterfaceInventoryStatus';
+import type { RuntimeInterfaceTraffic } from './runtimeInterfaceTraffic';
+import type { RuntimeInterfaceUptimeSource } from './runtimeInterfaceUptimeSource';
 
 export interface RuntimeInterfaceInventoryEntry {
   /** System interface name. */
@@ -21,4 +23,9 @@ export interface RuntimeInterfaceInventoryEntry {
   ipv4_addresses?: string[];
   /** Best-effort IPv6 addresses in CIDR form. */
   ipv6_addresses?: string[];
+  /** Unix timestamp of the confirmed link or tunnel up-transition this interface has been up since. Absent when no authoritative transition is known - clients must then render the uptime as unknown and must never substitute daemon, routing-runtime or router uptime, which are separate quantities that reset for unrelated reasons. The value is an anchor rather than a duration precisely so that a UI refresh, a configuration apply and a daemon restart cannot move it.
+   */
+  link_up_since_unix_ms?: number;
+  link_uptime_source?: RuntimeInterfaceUptimeSource;
+  traffic?: RuntimeInterfaceTraffic;
 }

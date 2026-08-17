@@ -1,45 +1,239 @@
-import { LoaderCircleIcon } from "lucide-react"
+import { EyeIcon, EyeOffIcon, LoaderCircleIcon } from "lucide-react"
 import {
   type FormEvent,
+  type HTMLInputTypeAttribute,
   type ReactNode,
   useCallback,
   useEffect,
+  useRef,
   useState,
 } from "react"
 import { useTranslation } from "react-i18next"
 
 import logoUrl from "@/assets/logo.png"
-import { Alert, AlertDescription } from "@/components/ui/alert"
+import { useLanguage } from "@/components/language-provider"
 import { Button } from "@/components/ui/button"
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
+import {
+  authCredentialsMayBeCollected,
+  parseAuthStatus,
+  refreshCredentialTransportStatus,
+  type AuthStatus,
+} from "@/lib/auth-status"
+import {
+  AuthStatusContext,
+  TrustedLocalConnectionRevocationContext,
+} from "@/lib/auth-status-context"
+import { cn } from "@/lib/utils"
 
-type AuthStatus = { enabled: boolean; authenticated: boolean }
+const LANGUAGE_OPTIONS = [
+  { value: "ru", label: "Русский" },
+  { value: "en", label: "English" },
+] as const
+
+type AuthInputProps = {
+  autoComplete: string
+  error?: boolean
+  id: string
+  label: string
+  onChange: (value: string) => void
+  required?: boolean
+  type?: HTMLInputTypeAttribute
+  value: string
+}
+
+function AuthInput({
+  autoComplete,
+  error = false,
+  id,
+  label,
+  onChange,
+  required = false,
+  type = "text",
+  value,
+}: AuthInputProps) {
+  const { t } = useTranslation()
+  const [passwordVisible, setPasswordVisible] = useState(false)
+  const isPassword = type === "password"
+  const resolvedType = isPassword && passwordVisible ? "text" : type
+
+  return (
+    <div className="relative">
+      <Input
+        aria-invalid={error}
+        autoComplete={autoComplete}
+        className={cn(
+          "keen-auth-input peer h-12 rounded-[4px] bg-card px-3 pt-0.5 text-[15px] shadow-none transition-[border-color,box-shadow] placeholder:text-transparent hover:shadow-none focus-visible:ring-0 lg:h-10 lg:text-sm",
+          isPassword && "pr-11"
+        )}
+        id={id}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder=" "
+        required={required}
+        type={resolvedType}
+        value={value}
+      />
+      <label
+        className="pointer-events-none absolute top-0 left-2.5 z-10 -translate-y-1/2 bg-card px-1 text-xs leading-4 text-muted-foreground transition-[top,transform,font-size,color,padding,background-color] peer-placeholder-shown:top-1/2 peer-placeholder-shown:-translate-y-1/2 peer-placeholder-shown:bg-transparent peer-placeholder-shown:text-[15px] peer-focus:top-0 peer-focus:-translate-y-1/2 peer-focus:bg-card peer-focus:text-xs peer-focus:text-primary lg:peer-placeholder-shown:text-sm"
+        htmlFor={id}
+      >
+        {label}
+      </label>
+      {isPassword ? (
+        <button
+          aria-label={
+            passwordVisible ? t("auth.hidePassword") : t("auth.showPassword")
+          }
+          className="absolute top-1/2 right-2 grid size-9 -translate-y-1/2 place-items-center rounded-[4px] text-muted-foreground transition-colors outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+          onClick={() => setPasswordVisible((visible) => !visible)}
+          type="button"
+        >
+          {passwordVisible ? (
+            <EyeOffIcon className="size-4.5" />
+          ) : (
+            <EyeIcon className="size-4.5" />
+          )}
+        </button>
+      ) : null}
+    </div>
+  )
+}
+
+function AuthBrand({
+  inverted = false,
+  showLogo = false,
+}: {
+  readonly inverted?: boolean
+  readonly showLogo?: boolean
+}) {
+  return (
+    <header className="flex flex-col items-center text-center">
+      {showLogo ? (
+        <img
+          alt=""
+          aria-hidden="true"
+          className="mb-7 size-24 rounded-2xl object-contain"
+          src={logoUrl}
+        />
+      ) : null}
+      <div
+        aria-label="keen-pbr-sb"
+        className="mx-auto flex w-fit origin-center items-baseline leading-none"
+        role="img"
+        style={{ transform: "scaleX(1.18) scaleY(0.82)" }}
+      >
+        <span
+          className={cn(
+            "text-[28px] tracking-[0.07em] sm:text-[36px]",
+            inverted
+              ? "font-normal text-primary-foreground"
+              : "font-medium text-primary"
+          )}
+        >
+          KEEN-PBR
+        </span>
+        <span
+          className={cn(
+            "text-[28px] tracking-[0.07em] sm:text-[36px]",
+            inverted
+              ? "font-normal text-primary-foreground"
+              : "font-medium text-foreground"
+          )}
+        >
+          -SB
+        </span>
+      </div>
+    </header>
+  )
+}
+
+function AuthPage({ children }: { children: ReactNode }) {
+  const { t } = useTranslation()
+
+  return (
+    <main className="min-h-svh overflow-x-hidden bg-card lg:grid lg:grid-cols-2">
+      <section className="flex min-h-svh items-center justify-center px-5 py-8 sm:px-8">
+        <div className="w-full max-w-[382px]">
+          <div className="mb-10 lg:hidden">
+            <AuthBrand />
+          </div>
+          {children}
+        </div>
+      </section>
+      <aside className="relative hidden min-h-svh overflow-hidden bg-primary text-primary-foreground lg:block">
+        <div className="absolute top-[42%] right-0 left-0 -translate-y-1/2">
+          <AuthBrand inverted showLogo />
+        </div>
+        <div className="absolute right-0 bottom-[27%] left-0 px-8 text-center text-sm font-medium">
+          <a
+            className="text-inherit no-underline outline-none hover:text-inherit hover:no-underline focus-visible:ring-2 focus-visible:ring-primary-foreground"
+            href="https://github.com/blindtechnique/keen-pbr-sb"
+            rel="noreferrer"
+            target="_blank"
+          >
+            {t("auth.otherManagement")}
+          </a>
+        </div>
+      </aside>
+    </main>
+  )
+}
 
 export function AuthGate({ children }: { children: ReactNode }) {
   const { t } = useTranslation()
+  const { language, setLanguage } = useLanguage()
   const [status, setStatus] = useState<AuthStatus | null>(null)
   const [username, setUsername] = useState("admin")
   const [password, setPassword] = useState("")
   const [pending, setPending] = useState(false)
   const [error, setError] = useState("")
+  const [showCredentialsHelp, setShowCredentialsHelp] = useState(false)
+  const [statusUnavailable, setStatusUnavailable] = useState(false)
+  const hasTrustedStatus = useRef(false)
+
+  const revokeTrustedLocalConnection = useCallback(() => {
+    setPassword("")
+    setStatus((current) =>
+      current
+        ? {
+            ...current,
+            trustedLocalConnection: false,
+            trustedLocalConnectionGeneration: null,
+            trustedLocalConnectionValidUntilMs: 0,
+          }
+        : current
+    )
+  }, [])
 
   const refresh = useCallback(async () => {
     try {
       const response = await fetch("/api/auth/status", { cache: "no-store" })
       if (!response.ok) throw new Error(String(response.status))
-      setStatus((await response.json()) as AuthStatus)
+      const nextStatus = parseAuthStatus(await response.json())
+      if (!nextStatus) {
+        throw new Error("invalid auth status")
+      }
+      hasTrustedStatus.current = true
+      setStatusUnavailable(false)
+      setStatus(nextStatus)
     } catch {
-      setStatus({ enabled: false, authenticated: true })
+      // Keep the established page/session state for ordinary offline UX, but
+      // revoke the short-lived local-HTTP file capability immediately. A
+      // cached status response must never keep a secret-bearing picker alive
+      // after its no-store refresh failed.
+      revokeTrustedLocalConnection()
+      if (!hasTrustedStatus.current) {
+        setStatusUnavailable(true)
+      }
     }
-  }, [])
+  }, [revokeTrustedLocalConnection])
 
   useEffect(() => {
     void refresh()
@@ -47,8 +241,59 @@ export function AuthGate({ children }: { children: ReactNode }) {
     return () => window.clearInterval(timer)
   }, [refresh])
 
+  useEffect(() => {
+    if (
+      !status?.trustedLocalConnection ||
+      status.trustedLocalConnectionGeneration === null
+    ) {
+      return
+    }
+    const generation = status.trustedLocalConnectionGeneration
+    const delay = Math.max(
+      0,
+      status.trustedLocalConnectionValidUntilMs - Date.now()
+    )
+    const timer = window.setTimeout(() => {
+      setStatus((current) =>
+        current?.trustedLocalConnectionGeneration === generation
+          ? {
+              ...current,
+              trustedLocalConnection: false,
+              trustedLocalConnectionGeneration: null,
+              trustedLocalConnectionValidUntilMs: 0,
+            }
+          : current
+      )
+    }, delay)
+    return () => window.clearTimeout(timer)
+  }, [
+    status?.trustedLocalConnection,
+    status?.trustedLocalConnectionGeneration,
+    status?.trustedLocalConnectionValidUntilMs,
+  ])
+
+  useEffect(() => {
+    if (!authCredentialsMayBeCollected(status)) {
+      setPassword("")
+    }
+  }, [status])
+
   const submit = async (event: FormEvent) => {
     event.preventDefault()
+    if (!authCredentialsMayBeCollected(status)) {
+      setPassword("")
+      setError(t("auth.unavailable"))
+      return
+    }
+    if (status?.provider === "keenetic") {
+      const freshStatus = await refreshCredentialTransportStatus()
+      if (!freshStatus) {
+        revokeTrustedLocalConnection()
+        setError(t("auth.protectedTransportRequired"))
+        return
+      }
+      setStatus(freshStatus)
+    }
     setPending(true)
     setError("")
     try {
@@ -58,93 +303,252 @@ export function AuthGate({ children }: { children: ReactNode }) {
         body: JSON.stringify({ username, password }),
       })
       if (!response.ok) {
-        setError(t("auth.invalidCredentials"))
+        const body = await response.json().catch(() => null)
+        setPassword("")
+        const protectedTransportUnavailable =
+          response.status === 403 &&
+          body &&
+          typeof body === "object" &&
+          "error" in body &&
+          body.error === "protected_secret_transport_unavailable"
+        if (protectedTransportUnavailable) {
+          revokeTrustedLocalConnection()
+          setError(t("auth.protectedTransportRequired"))
+          setShowCredentialsHelp(false)
+          return
+        }
+        const endpointUnavailable =
+          response.status === 503 &&
+          body &&
+          typeof body === "object" &&
+          "error" in body &&
+          body.error === "auth_endpoint_unavailable"
+        setError(
+          endpointUnavailable
+            ? t("auth.unavailable")
+            : t("auth.invalidCredentials")
+        )
+        setShowCredentialsHelp(!endpointUnavailable)
         return
       }
       setPassword("")
       await refresh()
     } catch {
+      setPassword("")
       setError(t("auth.unavailable"))
     } finally {
       setPending(false)
     }
   }
 
-  if (!status) {
+  if (!status && !statusUnavailable) {
     return (
       <div className="grid min-h-screen place-items-center">
         <LoaderCircleIcon className="size-7 animate-spin text-muted-foreground" />
       </div>
     )
   }
-  if (!status.enabled || status.authenticated) return children
+  if (!status) {
+    return (
+      <AuthPage>
+        <section
+          aria-labelledby="auth-unavailable-title"
+          className="w-full rounded-[6px] px-1 py-8 text-center lg:min-h-[432px] lg:border lg:border-input lg:px-10 lg:py-10"
+        >
+          <h1
+            className="text-2xl font-semibold text-foreground sm:text-3xl"
+            id="auth-unavailable-title"
+          >
+            {t("auth.unavailableTitle")}
+          </h1>
+          <p className="mt-3 text-base text-muted-foreground">
+            {t("auth.unavailable")}
+          </p>
+          <Button
+            className="mt-7 h-14 w-full text-base shadow-none hover:shadow-none active:translate-y-0"
+            onClick={() => {
+              setStatusUnavailable(false)
+              void refresh()
+            }}
+            type="button"
+          >
+            {t("auth.retry")}
+          </Button>
+        </section>
+      </AuthPage>
+    )
+  }
+  if (!status.enabled && status.networkApiBlocked) {
+    return (
+      <AuthPage>
+        <section
+          aria-labelledby="auth-loopback-only-title"
+          className="w-full rounded-[6px] px-1 py-8 text-center lg:min-h-[432px] lg:border lg:border-input lg:px-10 lg:py-10"
+        >
+          <h1
+            className="text-2xl font-semibold text-foreground sm:text-3xl"
+            id="auth-loopback-only-title"
+          >
+            {t("auth.loopbackOnlyTitle")}
+          </h1>
+          <p className="mt-3 text-base text-muted-foreground">
+            {t("auth.loopbackOnlyDescription")}
+          </p>
+        </section>
+      </AuthPage>
+    )
+  }
+  if (!status.enabled || status.authenticated) {
+    return (
+      <TrustedLocalConnectionRevocationContext.Provider
+        value={revokeTrustedLocalConnection}
+      >
+        <AuthStatusContext.Provider value={status}>
+          {children}
+        </AuthStatusContext.Provider>
+      </TrustedLocalConnectionRevocationContext.Provider>
+    )
+  }
+
+  if (!authCredentialsMayBeCollected(status)) {
+    return (
+      <AuthPage>
+        <section
+          aria-labelledby="auth-protected-transport-title"
+          className="w-full rounded-[6px] px-1 py-8 text-center lg:min-h-[432px] lg:border lg:border-input lg:px-10 lg:py-10"
+        >
+          <h1
+            className="text-2xl font-semibold text-foreground sm:text-3xl"
+            id="auth-protected-transport-title"
+          >
+            {status.error || status.provider === null
+              ? t("auth.unavailableTitle")
+              : t("auth.protectedTransportTitle")}
+          </h1>
+          <p className="mt-3 text-base text-muted-foreground">
+            {status.error || status.provider === null
+              ? t("auth.unavailable")
+              : t("auth.protectedTransportRequired")}
+          </p>
+          <Button
+            className="mt-7 h-14 w-full text-base shadow-none hover:shadow-none active:translate-y-0"
+            onClick={() => void refresh()}
+            type="button"
+          >
+            {t("auth.retry")}
+          </Button>
+        </section>
+      </AuthPage>
+    )
+  }
 
   return (
-    <main className="grid min-h-screen bg-background lg:grid-cols-2">
-      <section className="relative hidden overflow-hidden bg-primary p-12 text-white lg:flex lg:flex-col lg:justify-between">
-        <div className="relative">
-          <div className="mb-5 size-20 overflow-hidden rounded-2xl border border-white/25 shadow-lg">
-            <img alt={t("brand.logoAlt")} className="size-full object-cover" src={logoUrl} />
-          </div>
-          <p className="text-sm font-semibold tracking-[0.18em] text-white/85 uppercase">
-            Keenetic / Netcraze
+    <AuthPage>
+      <form
+        aria-label={t("auth.title")}
+        className="w-full space-y-4 rounded-[6px] px-1 py-1 lg:min-h-[432px] lg:border lg:border-input lg:px-10 lg:py-10"
+        onSubmit={submit}
+      >
+        <h1 className="mx-auto mb-7 max-w-[250px] text-center text-[28px] leading-9 font-semibold text-foreground">
+          {t("auth.title")}
+        </h1>
+        <AuthInput
+          autoComplete="username"
+          error={Boolean(error)}
+          id="auth-username"
+          label={t("auth.username")}
+          onChange={(value) => {
+            setUsername(value)
+            setError("")
+          }}
+          required
+          value={username}
+        />
+        <AuthInput
+          autoComplete="current-password"
+          error={Boolean(error)}
+          id="auth-password"
+          label={t("auth.password")}
+          onChange={(value) => {
+            setPassword(value)
+            setError("")
+          }}
+          required
+          type="password"
+          value={password}
+        />
+        {error ? (
+          <p
+            aria-live="polite"
+            className="-mt-2 px-1 text-sm leading-5 text-destructive"
+            role="alert"
+          >
+            {error}
           </p>
-          <h1 className="mt-3 text-4xl font-semibold tracking-[-0.04em]">
-            keen-pbr-sb
-          </h1>
-          <p className="mt-4 max-w-md text-base leading-7 text-white/85">
-            {t("brand.tagline")}
-          </p>
+        ) : null}
+        <Button
+          className="h-12 w-full text-base shadow-none hover:shadow-none active:translate-y-0 lg:h-10 lg:text-sm"
+          disabled={pending}
+          type="submit"
+        >
+          {pending ? (
+            <>
+              <LoaderCircleIcon className="size-5 animate-spin" />
+              {t("auth.signingIn")}
+            </>
+          ) : (
+            t("auth.signIn")
+          )}
+        </Button>
+        <Select
+          items={LANGUAGE_OPTIONS}
+          onValueChange={(value) => value && setLanguage(value)}
+          value={language}
+        >
+          <SelectTrigger
+            aria-label={t("language.selectorAria")}
+            className="h-12 bg-card px-3 text-[15px] shadow-none hover:shadow-none lg:h-10 lg:text-sm"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent
+            align="start"
+            alignItemWithTrigger={false}
+            side="bottom"
+          >
+            {LANGUAGE_OPTIONS.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <div className="flex items-center justify-center gap-3 pt-0.5 text-sm">
+          <button
+            className="text-primary underline-offset-4 hover:underline"
+            onClick={() => setShowCredentialsHelp((visible) => !visible)}
+            type="button"
+          >
+            {t("auth.cannotSignIn")}
+          </button>
+          <span aria-hidden="true" className="text-primary">
+            |
+          </span>
+          <a
+            className="text-primary underline underline-offset-4"
+            href="https://github.com/blindtechnique/keen-pbr-sb/issues"
+            rel="noreferrer"
+            target="_blank"
+          >
+            {t("auth.supportCenter")}
+          </a>
         </div>
-        <p className="relative text-xs text-white/70">Entware · Local control</p>
-      </section>
-      <div className="grid place-items-center p-4 sm:p-8">
-      <Card className="w-full max-w-md">
-        <CardHeader>
-          <div className="mb-2 size-14 overflow-hidden rounded-xl border border-primary/25 shadow-sm">
-            <img alt={t("brand.logoAlt")} className="size-full object-cover" src={logoUrl} />
-          </div>
-          <CardTitle>{t("auth.title")}</CardTitle>
-          <CardDescription>{t("auth.description")}</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form className="space-y-4" onSubmit={submit}>
-            <div className="space-y-2">
-              <Label htmlFor="auth-username">{t("auth.username")}</Label>
-              <Input
-                autoComplete="username"
-                id="auth-username"
-                onChange={(event) => setUsername(event.target.value)}
-                required
-                value={username}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="auth-password">{t("auth.password")}</Label>
-              <Input
-                autoComplete="current-password"
-                id="auth-password"
-                onChange={(event) => setPassword(event.target.value)}
-                required
-                type="password"
-                value={password}
-              />
-            </div>
-            {error ? (
-              <Alert variant="destructive">
-                <AlertDescription>{error}</AlertDescription>
-              </Alert>
-            ) : null}
-            <Button className="w-full" disabled={pending} type="submit">
-              {pending ? t("auth.signingIn") : t("auth.signIn")}
-            </Button>
-            <p className="text-xs text-muted-foreground">
-              {t("auth.credentialsHint")}
-            </p>
-          </form>
-        </CardContent>
-      </Card>
-      </div>
-    </main>
+        {showCredentialsHelp ? (
+          <p className="px-1 pt-1 text-sm leading-6 text-muted-foreground">
+            {t("auth.credentialsHint")}
+          </p>
+        ) : null}
+      </form>
+    </AuthPage>
   )
 }

@@ -1,15 +1,14 @@
 #include "routing_state.hpp"
 
 #include "addr_spec.hpp"
+#include "../log/logger.hpp"
 #include "../routing/target.hpp"
 
+#include <algorithm>
 #include <arpa/inet.h>
-#include <cstring>
+#include <exception>
 #include <set>
-#include <sys/ioctl.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#include <net/if.h>
+#include <tuple>
 
 namespace keen_pbr3 {
 
@@ -82,42 +81,51 @@ bool strict_enforcement_enabled(const Config& cfg, const Outbound& ob) {
     return false;
 }
 
+std::set<uint32_t> desired_generated_route_tables(
+    const std::vector<RouteSpec>& desired_routes) {
+    std::set<uint32_t> tables;
+    for (const auto& route : desired_routes) {
+        if (route.protocol == KEEN_PBR_GENERATED_ROUTE_PROTOCOL) {
+            tables.insert(route.table);
+        }
+    }
+    return tables;
+}
+
+void adopt_committed_generated_state(
+    RouteTable& routes,
+    PolicyRuleManager& rules,
+    const std::vector<RouteSpec>& desired_routes,
+    const std::vector<RuleSpec>& desired_rules) noexcept {
+    routes.adopt_live_generated_desired(desired_routes);
+    try {
+        const auto live_tables = routes.live_generated_route_tables();
+        const auto desired_tables =
+            desired_generated_route_tables(desired_routes);
+        std::set<uint32_t> confirmed_tables;
+        for (const auto table : desired_tables) {
+            if (live_tables.count(table) != 0) {
+                confirmed_tables.insert(table);
+            }
+        }
+        rules.adopt_live_generated_desired(
+            desired_rules, confirmed_tables);
+    } catch (const std::exception& error) {
+        Logger::instance().warn(
+            "Could not confirm live generated route ownership after commit; "
+            "policy-rule adoption was skipped: {}",
+            error.what());
+    } catch (...) {
+        Logger::instance().warn(
+            "Could not confirm live generated route ownership after commit; "
+            "policy-rule adoption was skipped: unknown error");
+    }
+}
+
 bool parse_ip(const std::string& ip, int family, void* out) {
     return inet_pton(family, ip.c_str(), out) == 1;
 }
 
-int detect_ip_family(const std::string& ip) {
-    in_addr addr4{};
-    if (inet_pton(AF_INET, ip.c_str(), &addr4) == 1) {
-        return AF_INET;
-    }
-
-    in6_addr addr6{};
-    if (inet_pton(AF_INET6, ip.c_str(), &addr6) == 1) {
-        return AF_INET6;
-    }
-
-    throw ConfigError("Invalid IP address: " + ip);
-}
-
-bool is_interface_up(const std::string& iface) {
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) {
-        return false;
-    }
-
-    struct ifreq ifr {};
-    std::strncpy(ifr.ifr_name, iface.c_str(), IFNAMSIZ - 1);
-    ifr.ifr_name[IFNAMSIZ - 1] = '\0';
-
-    const int rc = ioctl(fd, SIOCGIFFLAGS, &ifr);
-    close(fd);
-    if (rc < 0) {
-        return false;
-    }
-
-    return (ifr.ifr_flags & IFF_UP) != 0;
-}
 
 bool ipv4_prefix_contains(const in_addr& network, const in_addr& candidate, int prefix_len) {
     if (prefix_len <= 0) return true;
@@ -391,6 +399,53 @@ static uint32_t safe_table_id(uint32_t table_start, uint32_t offset) {
 
 } // anonymous namespace
 
+std::vector<std::string> find_affected_urltests(
+    const std::vector<Outbound>& outbounds,
+    const std::vector<std::string>& changed_outbound_tags) {
+    std::set<std::string> affected_tags(changed_outbound_tags.begin(),
+                                        changed_outbound_tags.end());
+    std::set<std::string> affected_urltests;
+
+    bool discovered_parent = true;
+    while (discovered_parent) {
+        discovered_parent = false;
+        for (const auto& outbound : outbounds) {
+            if (outbound.type != OutboundType::URLTEST ||
+                affected_urltests.count(outbound.tag) > 0 ||
+                !outbound.outbound_groups.has_value()) {
+                continue;
+            }
+
+            bool contains_affected_child = false;
+            for (const auto& group : *outbound.outbound_groups) {
+                if (std::any_of(group.outbounds.begin(),
+                                group.outbounds.end(),
+                                [&affected_tags](const std::string& child_tag) {
+                                    return affected_tags.count(child_tag) > 0;
+                                })) {
+                    contains_affected_child = true;
+                    break;
+                }
+            }
+
+            if (contains_affected_child) {
+                affected_urltests.insert(outbound.tag);
+                affected_tags.insert(outbound.tag);
+                discovered_parent = true;
+            }
+        }
+    }
+
+    std::vector<std::string> result;
+    result.reserve(affected_urltests.size());
+    for (const auto& outbound : outbounds) {
+        if (affected_urltests.count(outbound.tag) > 0) {
+            result.push_back(outbound.tag);
+        }
+    }
+    return result;
+}
+
 void populate_routing_state(const Config& cfg,
                             const OutboundMarkMap& marks,
                             RouteTable& routes,
@@ -402,12 +457,30 @@ void populate_routing_state(const Config& cfg,
     const uint32_t table_start = static_cast<uint32_t>(
         cfg.iproute.value_or(IprouteConfig{}).table_start.value_or(150));
     const uint32_t fwmark_mask = fwmark_mask_value(cfg.fwmark.value_or(FwmarkConfig{}));
+    std::vector<RouteSpec> planned_routes;
+    std::vector<RuleSpec> planned_rules;
+    const auto prior_generated_route_tables =
+        routes.live_generated_route_tables();
 
     auto add_route_if_enabled = [&](const RouteSpec& route) {
         if (!ipv6_enabled && route.family == AF_INET6) {
-            return;
+            return false;
         }
-        routes.add(route);
+        planned_routes.push_back(route);
+        return true;
+    };
+
+    // Reachability is a point-in-time input to one routing transaction. Cache
+    // it per interface so a flapping link cannot produce a table assembled
+    // from mutually inconsistent checks of the same child.
+    std::map<std::string, bool> reachability_snapshot;
+    auto is_reachable = [&](const Outbound& outbound) {
+        const auto [it, inserted] =
+            reachability_snapshot.try_emplace(outbound.tag, true);
+        if (inserted && reachability_check) {
+            it->second = reachability_check(outbound);
+        }
+        return it->second;
     };
 
     uint32_t table_offset = 0;
@@ -420,7 +493,7 @@ void populate_routing_state(const Config& cfg,
             ++table_offset;
 
             const bool strict = strict_enforcement_enabled(cfg, ob);
-            const bool reachable = !reachability_check || reachability_check(ob);
+            const bool reachable = is_reachable(ob);
             if (reachable) {
                 for (const auto& route : make_default_routes(table_id, ob)) {
                     add_route_if_enabled(route);
@@ -443,7 +516,7 @@ void populate_routing_state(const Config& cfg,
             if (!ipv6_enabled) {
                 ip_rule.family = AF_INET;
             }
-            rules.add(ip_rule);
+            planned_rules.push_back(ip_rule);
         } else if (ob.type == OutboundType::TABLE) {
             auto mark_it = marks.find(ob.tag);
             if (mark_it == marks.end()) continue;
@@ -457,7 +530,7 @@ void populate_routing_state(const Config& cfg,
                 ip_rule.family = AF_INET;
             }
             ++table_offset;
-            rules.add(ip_rule);
+            planned_rules.push_back(ip_rule);
         } else if (ob.type == OutboundType::URLTEST) {
             auto mark_it = marks.find(ob.tag);
             if (mark_it == marks.end()) continue;
@@ -476,10 +549,12 @@ void populate_routing_state(const Config& cfg,
             if (selection_ready) {
                 const Outbound* selected =
                     resolve_selected_interface(outbounds, ob, urltest_selections);
-                if (selected &&
-                    (!reachability_check || reachability_check(*selected))) {
+                bool selected_primary_planned = false;
+                if (selected && is_reachable(*selected)) {
                     for (const auto& route : make_default_routes(table_id, *selected)) {
-                        add_route_if_enabled(route);
+                        if (add_route_if_enabled(route)) {
+                            selected_primary_planned = true;
+                        }
                     }
                     for (const auto& route : make_family_closure_routes(table_id, *selected)) {
                         add_route_if_enabled(route);
@@ -488,15 +563,39 @@ void populate_routing_state(const Config& cfg,
 
                 uint32_t metric = 1;
                 for (const Outbound* child : ordered_children) {
-                    if (reachability_check && !reachability_check(*child)) {
+                    // Do not duplicate a selected child whose metric-zero
+                    // primary route is already present. If no usable primary
+                    // route was emitted (for example an IPv6-only child while
+                    // IPv6 is disabled), process it as a fallback using the
+                    // same reachability snapshot.
+                    if (selected_primary_planned &&
+                        selected && child->tag == selected->tag) {
                         continue;
                     }
+                    if (!is_reachable(*child)) {
+                        continue;
+                    }
+
+                    bool usable_default_planned = false;
                     for (auto route : make_default_routes(table_id, *child)) {
                         route.metric = metric;
-                        add_route_if_enabled(route);
+                        if (add_route_if_enabled(route)) {
+                            usable_default_planned = true;
+                        }
                     }
-                    for (auto route : make_family_closure_routes(table_id, *child)) {
-                        route.metric = metric;
+
+                    // A child that cannot emit a route for any enabled family
+                    // must not consume a fallback priority.
+                    if (!usable_default_planned) {
+                        continue;
+                    }
+
+                    // Missing-family closures are terminal safety routes, not
+                    // peers of this child's usable default. Giving them the
+                    // fallback metric would make an early IPv4-only child
+                    // shadow a later IPv6-capable child (and vice versa).
+                    for (const auto& route :
+                         make_family_closure_routes(table_id, *child)) {
                         add_route_if_enabled(route);
                     }
                     ++metric;
@@ -517,52 +616,289 @@ void populate_routing_state(const Config& cfg,
             if (!ipv6_enabled) {
                 ip_rule.family = AF_INET;
             }
-            rules.add(ip_rule);
+            planned_rules.push_back(ip_rule);
         }
         // BLACKHOLE: no routing table, no ip rule
         // IGNORE: no routing needed
     }
+
+    // Do not expose a policy rule until every route it can select exists.
+    // If either phase fails, remove newly created routes and restore any
+    // protocol-186 route that was atomically replaced during this transaction.
+    try {
+        for (const auto& route : planned_routes) {
+            routes.add(route);
+        }
+        for (const auto& rule : planned_rules) {
+            rules.add(rule);
+        }
+    } catch (...) {
+        rules.clear();
+        routes.clear();
+        throw;
+    }
+
+    // The new route+rule generation is now complete. From this point stale
+    // restart debris is best-effort cleanup and must not roll back working
+    // forwarding. Exact protocol-marked state is adopted only at this commit
+    // boundary, never by generic clear().
+    routes.finalize_pending_replacements();
+    rules.remove_orphaned_generated(
+        planned_rules, prior_generated_route_tables);
+    routes.remove_obsolete(planned_routes);
+
+    adopt_committed_generated_state(
+        routes, rules, planned_routes, planned_rules);
+}
+
+void reconcile_kernel_routing_state(
+    RouteTable& routes,
+    PolicyRuleManager& rules,
+    const std::vector<RouteSpec>& desired_routes,
+    const std::vector<RuleSpec>& desired_rules,
+    RouteReconcileMode mode) {
+    const auto prior_generated_route_tables =
+        routes.live_generated_route_tables();
+    routes.add_missing(desired_routes, mode);
+    try {
+        rules.add_missing(desired_rules);
+    } catch (...) {
+        // A newly created route is inert until its policy rule exists and may
+        // remain for the bounded retry. Replacing an already active route is
+        // different: restore that last-known-good slot when the rule phase
+        // does not commit.
+        routes.rollback_pending_replacements();
+        throw;
+    }
+    routes.finalize_pending_replacements();
+    rules.remove_orphaned_generated(
+        desired_rules, prior_generated_route_tables);
+    rules.remove_obsolete(desired_rules);
+    routes.remove_obsolete(desired_routes);
+
+    adopt_committed_generated_state(
+        routes, rules, desired_routes, desired_rules);
 }
 
 bool is_interface_outbound_reachable(const Outbound& outbound, NetlinkManager& netlink) {
+    return is_interface_outbound_reachable(outbound, netlink.dump_routes_in_table(254));
+}
+
+bool is_interface_outbound_reachable(
+    const Outbound& outbound,
+    const std::vector<DumpedRoute>& main_table_routes) {
     if (outbound.type != OutboundType::INTERFACE) {
         return true;
     }
 
     const auto iface = outbound.interface.value_or("");
-    if (iface.empty() || if_nametoindex(iface.c_str()) == 0) {
+    if (netlink_detail::query_interface_admin_state(iface) !=
+        netlink_detail::InterfaceAdminState::Up) {
         return false;
     }
-    if (!is_interface_up(iface)) {
-        return false;
-    }
-
-    auto routes = netlink.dump_routes_in_table(254);
 
     if (outbound.gateway.has_value() &&
-        !interface_has_gateway_route(routes, iface, *outbound.gateway)) {
+        !interface_has_gateway_route(main_table_routes, iface, *outbound.gateway)) {
         return false;
     }
     if (outbound.gateway6.has_value() &&
-        !interface_has_gateway_route(routes, iface, *outbound.gateway6)) {
+        !interface_has_gateway_route(main_table_routes, iface, *outbound.gateway6)) {
         return false;
     }
 
     return true;
 }
 
-FirewallGlobalPrefilter build_firewall_global_prefilter(const Config& cfg) {
+FirewallGlobalPrefilter build_firewall_global_prefilter(
+    const Config& cfg,
+    const std::vector<InternalVpnServer>& internal_servers) {
+    return build_firewall_global_prefilter_for_runtime_targets(
+        cfg,
+        internal_vpn_interface_runtime_targets(internal_servers));
+}
+
+FirewallGlobalPrefilter build_firewall_global_prefilter_for_runtime_targets(
+    const Config& cfg,
+    const std::vector<InternalVpnRuntimeTarget>& internal_targets) {
     FirewallGlobalPrefilter prefilter;
     prefilter.skip_established_or_dnat = true;
     prefilter.skip_marked_packets = cfg.daemon.value_or(DaemonConfig{}).skip_marked_packets.value_or(true);
 
     const auto route_cfg = cfg.route.value_or(RouteConfig{});
-    if (route_cfg.inbound_interfaces.has_value()
-        && !route_cfg.inbound_interfaces->empty()) {
+    const bool legacy_inbound_is_restricted =
+        route_cfg.inbound_interfaces.has_value() &&
+        !route_cfg.inbound_interfaces->empty();
+    if (legacy_inbound_is_restricted) {
         prefilter.inbound_interfaces = *route_cfg.inbound_interfaces;
     }
 
+    std::set<std::string> bypass_interfaces;
+    std::set<std::string> include_sources_v4;
+    std::set<std::string> include_sources_v6;
+    std::set<std::pair<std::string, std::string>>
+        bypass_sources_v4;
+    std::set<std::pair<std::string, std::string>>
+        bypass_sources_v6;
+    std::set<std::tuple<std::string, std::string, std::string>>
+        bypass_bridge_sources_v4;
+    std::set<std::tuple<std::string, std::string, std::string>>
+        bypass_bridge_sources_v6;
+    std::set<std::pair<std::string, std::string>>
+        dns_redirect_bypass_sources_v4;
+    std::set<std::pair<std::string, std::string>>
+        dns_redirect_bypass_sources_v6;
+    std::set<std::pair<std::string, std::string>>
+        dns_redirect_local_destinations_v4;
+    std::set<std::pair<std::string, std::string>>
+        dns_redirect_local_destinations_v6;
+    for (const auto& target : internal_targets) {
+        if (target.match_kind == InternalVpnRuntimeMatchKind::interface &&
+            target.interface.has_value() &&
+            !target.process_clients) {
+            bypass_interfaces.insert(*target.interface);
+            continue;
+        }
+        if (target.match_kind != InternalVpnRuntimeMatchKind::source_pool) {
+            continue;
+        }
+        if (target.process_clients) {
+            include_sources_v4.insert(
+                target.source_cidrs_v4.begin(),
+                target.source_cidrs_v4.end());
+            include_sources_v6.insert(
+                target.source_cidrs_v6.begin(),
+                target.source_cidrs_v6.end());
+            for (const auto& interface :
+                 target.dns_redirect_bypass_ingress_v4) {
+                for (const auto& cidr : target.source_cidrs_v4) {
+                    dns_redirect_bypass_sources_v4.emplace(
+                        interface, cidr);
+                }
+            }
+            for (const auto& interface :
+                 target.dns_redirect_bypass_ingress_v6) {
+                for (const auto& cidr : target.source_cidrs_v6) {
+                    dns_redirect_bypass_sources_v6.emplace(
+                        interface, cidr);
+                }
+            }
+            for (const auto& interface :
+                 target.verified_ingress_interfaces) {
+                for (const auto& destination :
+                     target.dns_redirect_local_destinations_v4) {
+                    dns_redirect_local_destinations_v4.emplace(
+                        interface, destination);
+                }
+                for (const auto& destination :
+                     target.dns_redirect_local_destinations_v6) {
+                    dns_redirect_local_destinations_v6.emplace(
+                        interface, destination);
+                }
+            }
+        } else {
+            // A source pool alone is not ingress ownership proof. Bind every
+            // bypass to an exact, live server-owned interface. When no such
+            // interface is verified the target fails closed until Netlink
+            // reconciliation supplies one.
+            for (const auto& interface :
+                 target.verified_ingress_interfaces) {
+                for (const auto& cidr : target.source_cidrs_v4) {
+                    bypass_sources_v4.emplace(interface, cidr);
+                }
+                for (const auto& cidr : target.source_cidrs_v6) {
+                    bypass_sources_v6.emplace(interface, cidr);
+                }
+            }
+            for (const auto& ingress :
+                 target.verified_bridge_ingress_interfaces) {
+                for (const auto& cidr : target.source_cidrs_v4) {
+                    bypass_bridge_sources_v4.emplace(
+                        ingress.interface,
+                        ingress.bridge_port,
+                        cidr);
+                }
+                for (const auto& cidr : target.source_cidrs_v6) {
+                    bypass_bridge_sources_v6.emplace(
+                        ingress.interface,
+                        ingress.bridge_port,
+                        cidr);
+                }
+            }
+        }
+    }
+
+    prefilter.bypass_inbound_interfaces.assign(
+        bypass_interfaces.begin(), bypass_interfaces.end());
+    prefilter.include_source_cidrs_v4.assign(
+        include_sources_v4.begin(), include_sources_v4.end());
+    prefilter.include_source_cidrs_v6.assign(
+        include_sources_v6.begin(), include_sources_v6.end());
+    for (const auto& [interface, cidr] : bypass_sources_v4) {
+        prefilter.bypass_source_selectors_v4.push_back(
+            {interface, cidr});
+    }
+    for (const auto& [interface, cidr] : bypass_sources_v6) {
+        prefilter.bypass_source_selectors_v6.push_back(
+            {interface, cidr});
+    }
+    for (const auto& [interface, bridge_port, cidr] :
+         bypass_bridge_sources_v4) {
+        prefilter.bypass_bridge_source_selectors_v4.push_back(
+            {interface, bridge_port, cidr});
+    }
+    for (const auto& [interface, bridge_port, cidr] :
+         bypass_bridge_sources_v6) {
+        prefilter.bypass_bridge_source_selectors_v6.push_back(
+            {interface, bridge_port, cidr});
+    }
+    for (const auto& [interface, cidr] :
+         dns_redirect_bypass_sources_v4) {
+        prefilter.dns_redirect_bypass_source_selectors_v4.push_back(
+            {interface, cidr});
+    }
+    for (const auto& [interface, cidr] :
+         dns_redirect_bypass_sources_v6) {
+        prefilter.dns_redirect_bypass_source_selectors_v6.push_back(
+            {interface, cidr});
+    }
+    for (const auto& [interface, destination] :
+         dns_redirect_local_destinations_v4) {
+        prefilter.dns_redirect_local_destination_selectors_v4.push_back(
+            {interface, destination});
+    }
+    for (const auto& [interface, destination] :
+         dns_redirect_local_destinations_v6) {
+        prefilter.dns_redirect_local_destination_selectors_v6.push_back(
+            {interface, destination});
+    }
+
+    if (legacy_inbound_is_restricted) {
+        auto& inbound_interfaces = *prefilter.inbound_interfaces;
+        for (const auto& target : internal_targets) {
+            if (target.match_kind != InternalVpnRuntimeMatchKind::interface ||
+                !target.interface.has_value() ||
+                !target.process_clients ||
+                bypass_interfaces.find(*target.interface) !=
+                    bypass_interfaces.end() ||
+                std::find(
+                    inbound_interfaces.begin(),
+                    inbound_interfaces.end(),
+                    *target.interface) != inbound_interfaces.end()) {
+                continue;
+            }
+            inbound_interfaces.push_back(*target.interface);
+        }
+    }
+
     return prefilter;
+}
+
+FirewallGlobalPrefilter build_firewall_global_prefilter(const Config& cfg) {
+    const auto route_cfg = cfg.route.value_or(RouteConfig{});
+    return build_firewall_global_prefilter(
+        cfg,
+        route_cfg.internal_vpn_servers.value_or(
+            std::vector<InternalVpnServer>{}));
 }
 
 FirewallRuleCriteria build_firewall_rule_criteria(const RouteRule& rule) {

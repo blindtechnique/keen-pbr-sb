@@ -5,12 +5,20 @@
  * REST API for the keen-pbr policy-based routing daemon.
  * OpenAPI spec version: 3.0.0
  */
+import type { CacheGeneration } from './cacheGeneration';
 
 export interface CacheMetadata {
+  current?: CacheGeneration;
+  previous?: CacheGeneration;
   etag?: string;
   last_modified?: string;
   url?: string;
   download_time?: string;
+  last_refresh_attempt?: string;
+  last_refresh_error?: string;
+  last_refresh_url?: string;
+  last_refresh_detour?: string;
+  srs_decoder_revision?: number;
   ips?: number;
   cidrs?: number;
   domains?: number;

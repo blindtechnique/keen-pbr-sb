@@ -1,17 +1,25 @@
 #include "firewall_runtime.hpp"
+#include "../runtime/nfqws_runtime_contract.hpp"
+
+#include "../runtime/meta_udp_443_policy.hpp"
 
 #include "../config/routing_state.hpp"
 #include "../dns/dns_router.hpp"
 #include "../lists/list_entry_visitor.hpp"
 #include "../lists/list_set_usage.hpp"
 #include "../lists/list_streamer.hpp"
+#include "../runtime/udp_call_affinity.hpp"
 #include "../util/ipv6_support.hpp"
+#include "../util/network_routes.hpp"
 
 #include <arpa/inet.h>
 
+#include <algorithm>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -29,29 +37,220 @@ const Outbound* find_outbound_by_tag(const std::vector<Outbound>& outbounds,
     return nullptr;
 }
 
+bool needs_native_vpn_direct_egress_snat(std::string_view stable_id) {
+    constexpr std::string_view kSstpServiceId{
+        "ndms-service:sstp-server"};
+    constexpr std::string_view kOpenConnectServiceId{
+        "ndms-service:oc-server"};
+    constexpr std::string_view kL2tpServicePrefix{
+        "ndms-crypto-map:l2tp:"};
+    constexpr std::string_view kIkev1ServicePrefix{
+        "ndms-crypto-map:ikev1:"};
+
+    if (stable_id == kSstpServiceId ||
+        stable_id == kOpenConnectServiceId) {
+        return true;
+    }
+    const auto has_nonempty_suffix =
+        [stable_id](std::string_view prefix) {
+            return stable_id.size() > prefix.size() &&
+                   stable_id.compare(0, prefix.size(), prefix) == 0;
+        };
+    return has_nonempty_suffix(kL2tpServicePrefix) ||
+           has_nonempty_suffix(kIkev1ServicePrefix);
+}
+
 } // namespace
 
-std::vector<RuleState> apply_runtime_firewall(
+PpeDeoffloadDesired ppe_deoffload_desired_from_observation(
+    PpeDeoffloadMode mode,
+    bool quic_enabled,
+    const NfqwsPpeRuntimeContractObservation& observation) {
+    PpeDeoffloadDesired desired;
+    desired.mode = mode;
+    desired.quic_enabled = quic_enabled;
+    if (desired.mode == PpeDeoffloadMode::off) return desired;
+
+    desired.nfqueue_active = observation.available;
+    desired.strategy_ports_available = observation.available;
+    desired.runtime_contract_detail = observation.diagnostic;
+    if (!observation.available) return desired;
+
+    desired.nfqueue_number = observation.contract.queue_number;
+    for (const auto& range : observation.contract.tcp_ranges) {
+        desired.tcp_ports.push_back(
+            range.first == range.last
+                ? std::to_string(range.first)
+                : std::to_string(range.first) + ":" +
+                      std::to_string(range.last));
+    }
+    desired.quic_443_active = observation.contract.quic_udp_443;
+    return desired;
+}
+
+PpeDeoffloadDesired ppe_deoffload_desired_from_observation(
+    const Config& config,
+    const NfqwsPpeRuntimeContractObservation& observation) {
+    const auto daemon_config = config.daemon.value_or(DaemonConfig{});
+    return ppe_deoffload_desired_from_observation(
+        daemon_config.ppe_deoffload_mode.value_or(
+            api::PpeDeoffloadMode::OFF) == api::PpeDeoffloadMode::AUTO
+            ? PpeDeoffloadMode::automatic
+            : PpeDeoffloadMode::off,
+        daemon_config.ppe_deoffload_quic_enabled.value_or(false),
+        observation);
+}
+
+PpeDeoffloadDesired observe_ppe_deoffload_desired(
+    PpeDeoffloadMode mode,
+    bool quic_enabled) {
+    if (mode == PpeDeoffloadMode::off) {
+        return ppe_deoffload_desired_from_observation(
+            mode, quic_enabled, {});
+    }
+    return ppe_deoffload_desired_from_observation(
+        mode, quic_enabled, observe_nfqws_ppe_runtime_contract());
+}
+
+PpeDeoffloadDesired observe_ppe_deoffload_desired(const Config& config) {
+    const auto daemon_config = config.daemon.value_or(DaemonConfig{});
+    if (daemon_config.ppe_deoffload_mode.value_or(
+            api::PpeDeoffloadMode::OFF) != api::PpeDeoffloadMode::AUTO) {
+        // Preserve the explicit no-observation contract for mode=off.
+        return ppe_deoffload_desired_from_observation(config, {});
+    }
+    return ppe_deoffload_desired_from_observation(
+        config, observe_nfqws_ppe_runtime_contract());
+}
+
+std::vector<FirewallSourceEgressSnatSelector>
+select_native_vpn_direct_egress_snat_selectors(
+    const std::vector<InternalVpnRuntimeTarget>& internal_vpn_targets,
+    const std::vector<std::string>& wan_interfaces) {
+    std::vector<FirewallSourceEgressSnatSelector> result;
+    std::set<std::pair<std::string, std::string>> seen;
+    for (const auto& interface : wan_interfaces) {
+        if (interface.empty()) {
+            continue;
+        }
+        for (const auto& target : internal_vpn_targets) {
+            if (!needs_native_vpn_direct_egress_snat(
+                    target.stable_id)) {
+                continue;
+            }
+            // `process_clients` intentionally does not participate here:
+            // disabling policy routing must restore ordinary WAN reachability,
+            // not remove the source NAT required by the firmware VPN pool.
+            for (const auto& cidr : target.source_cidrs_v4) {
+                if (cidr.empty() ||
+                    !seen.emplace(interface, cidr).second) {
+                    continue;
+                }
+                result.push_back({interface, cidr});
+            }
+        }
+    }
+    return result;
+}
+
+std::vector<FirewallSourceEgressSnatSelector>
+select_native_vpn_direct_egress_snat_selectors(
+    const std::vector<InternalVpnRuntimeTarget>& internal_vpn_targets) {
+    return select_native_vpn_direct_egress_snat_selectors(
+        internal_vpn_targets, default_route_interfaces());
+}
+
+std::vector<std::string>
+changed_native_vpn_direct_egress_source_cidrs(
+    const std::vector<FirewallSourceEgressSnatSelector>& previous,
+    const std::vector<FirewallSourceEgressSnatSelector>& current) {
+    const std::set<FirewallSourceEgressSnatSelector> previous_set(
+        previous.begin(), previous.end());
+    const std::set<FirewallSourceEgressSnatSelector> current_set(
+        current.begin(), current.end());
+    std::set<std::string> changed_sources;
+
+    for (const auto& selector : previous_set) {
+        if (current_set.find(selector) == current_set.end() &&
+            !selector.cidr.empty()) {
+            changed_sources.insert(selector.cidr);
+        }
+    }
+    for (const auto& selector : current_set) {
+        if (previous_set.find(selector) == previous_set.end() &&
+            !selector.cidr.empty()) {
+            changed_sources.insert(selector.cidr);
+        }
+    }
+    return {changed_sources.begin(), changed_sources.end()};
+}
+
+StagedRuntimeFirewall stage_runtime_firewall(
     const Config& config,
     const OutboundMarkMap& outbound_marks,
     const std::map<std::string, std::string>& urltest_selections,
     const CacheManager& cache_manager,
     Firewall& firewall,
-    FirewallApplyMode mode) {
-    ListStreamer list_streamer(cache_manager);
+    FirewallApplyMode mode,
+    const std::vector<InternalVpnServer>*
+        effective_internal_vpn_servers,
+    const std::vector<InternalVpnRuntimeTarget>*
+        effective_internal_vpn_targets,
+    const std::vector<FirewallSourceEgressSnatSelector>*
+        native_vpn_direct_egress_snat_selectors,
+    bool udp_call_affinity_ipset_available,
+    const std::optional<KeeneticDnsSnapshot>& keenetic_dns_snapshot,
+    std::shared_ptr<const ListCacheGenerationSnapshot>
+        list_cache_snapshot) {
+    // Resolve and validate the complete DNS registry before preparing the
+    // backend transaction.  In particular, a Keenetic DNS server without a
+    // prepared snapshot must fail before any firewall state is touched.
+    std::optional<DnsServerRegistry> dns_registry;
+    if (config.dns.has_value()) {
+        dns_registry.emplace(
+            config.dns.value_or(DnsConfig{}), keenetic_dns_snapshot);
+    }
+
+    ListStreamer list_streamer = list_cache_snapshot
+        ? ListStreamer(cache_manager, std::move(list_cache_snapshot))
+        : ListStreamer(cache_manager);
     auto rule_states = build_fw_rule_states(config, outbound_marks, &urltest_selections);
     const RouteConfig route_config = config.route.value_or(RouteConfig{});
     const Ipv6SupportDecision ipv6_decision = resolve_ipv6_support(config);
     log_ipv6_support_decision_once(ipv6_decision);
     firewall.set_ipv6_enabled(ipv6_decision.enabled);
-    firewall.set_global_prefilter(build_firewall_global_prefilter(config));
-    firewall.set_fwmark_mask(fwmark_mask_value(config.fwmark.value_or(FwmarkConfig{})));
+    firewall.set_clear_dynamic_sets_on_apply(
+        config.daemon.value_or(DaemonConfig{}).clear_dynamic_sets_on_apply.value_or(true));
+    firewall.set_ttl_bypass_enabled(
+        config.daemon.value_or(DaemonConfig{}).ttl_bypass_enabled.value_or(true));
+    firewall.set_ppe_deoffload_desired(
+        observe_ppe_deoffload_desired(config));
+    auto prefilter = effective_internal_vpn_targets != nullptr
+        ? build_firewall_global_prefilter_for_runtime_targets(
+              config, *effective_internal_vpn_targets)
+        : (effective_internal_vpn_servers != nullptr
+               ? build_firewall_global_prefilter(
+                     config, *effective_internal_vpn_servers)
+               : build_firewall_global_prefilter(config));
+    prefilter.restore_conntrack_mark = true;
+    prefilter.conntrack_mark_mask =
+        fwmark_mask_value(config.fwmark.value_or(FwmarkConfig{}));
+    firewall.set_global_prefilter(std::move(prefilter));
+    firewall.set_fwmark_mask(
+        fwmark_mask_value(config.fwmark.value_or(FwmarkConfig{})));
+    firewall.prepare_apply(mode);
 
     const auto& all_outbounds = config.outbounds.value_or(std::vector<Outbound>{});
     static const std::map<std::string, ListConfig> empty_lists;
     const auto& lists_map = config.lists ? *config.lists : empty_lists;
     const auto& route_rules = route_config.rules.value_or(std::vector<RouteRule>{});
     std::map<std::string, ListSetUsage> list_usage_cache;
+    // Unlike list_usage_cache (the first planning pass), this map describes
+    // the bytes actually streamed into the pending kernel sets. Remote cache
+    // files may be atomically replaced between the two passes, so security
+    // policy must authorize family coverage only from this second view.
+    std::map<std::string, ListSetUsage> applied_list_usage;
+    AppliedListContentState candidate_list_content_state;
 
     for (size_t rule_idx = 0; rule_idx < route_rules.size(); ++rule_idx) {
         const auto& rule = route_rules[rule_idx];
@@ -99,13 +298,25 @@ std::vector<RuleState> apply_runtime_firewall(
                         analyze_list_set_usage(list_name, list_cfg, list_streamer)).first;
                 }
                 const auto& usage = usage_it->second;
+                ListSetUsage applied_usage = usage;
 
-                const std::string set4 = "kpbr4_" + list_name;
-                const std::string set6 = "kpbr6_" + list_name;
-                const std::string set4d = "kpbr4d_" + list_name;
-                const std::string set6d = "kpbr6d_" + list_name;
+                const std::string set4 = firewall.static_set_name(list_name, AF_INET);
+                const std::string set6 = firewall.static_set_name(list_name, AF_INET6);
+                const std::string set4d = firewall.dynamic_set_name(list_name, AF_INET);
+                const std::string set6d = firewall.dynamic_set_name(list_name, AF_INET6);
 
                 if (usage.has_static_entries) {
+                    // The list was inspected once to decide which kernel sets
+                    // are required. Track the content actually handed to the
+                    // set loaders during this second pass: a cache file may be
+                    // atomically replaced between the two reads, and cleanup
+                    // must never be based on the stale first observation.
+                    applied_usage.has_static_entries = false;
+                    applied_usage.has_domain_entries = false;
+                    applied_usage.has_static_ipv4_entries = false;
+                    applied_usage.has_static_ipv6_entries = false;
+                    applied_usage.static_destinations.clear();
+                    applied_usage.static_destinations_truncated = false;
                     firewall.create_ipset(set4, AF_INET, 0);
                     rule_state.set_names.push_back(set4);
                     if (ipv6_decision.enabled) {
@@ -119,9 +330,22 @@ std::vector<RuleState> apply_runtime_firewall(
                         : nullptr;
                     FunctionalVisitor splitter([&](EntryType type, std::string_view entry) {
                         if (type == EntryType::Domain) {
+                            applied_usage.has_domain_entries = true;
                             return;
                         }
+                        applied_usage.has_static_entries = true;
+                        if (applied_usage.static_destinations.size() <
+                            ListSetUsage::kMaxTrackedStaticDestinations) {
+                            applied_usage.static_destinations.emplace_back(entry);
+                        } else {
+                            applied_usage.static_destinations_truncated = true;
+                        }
                         const bool is_ipv6 = entry.find(':') != std::string_view::npos;
+                        if (is_ipv6) {
+                            applied_usage.has_static_ipv6_entries = true;
+                        } else {
+                            applied_usage.has_static_ipv4_entries = true;
+                        }
                         if (is_ipv6) {
                             if (loader6) {
                                 loader6->on_entry(type, entry);
@@ -136,6 +360,28 @@ std::vector<RuleState> apply_runtime_firewall(
                         loader6->finish();
                     }
                 }
+
+                std::sort(
+                    applied_usage.static_destinations.begin(),
+                    applied_usage.static_destinations.end());
+                applied_usage.static_destinations.erase(
+                    std::unique(
+                        applied_usage.static_destinations.begin(),
+                        applied_usage.static_destinations.end()),
+                    applied_usage.static_destinations.end());
+                candidate_list_content_state.static_destinations
+                    .insert_or_assign(
+                        list_name, applied_usage.static_destinations);
+                if (applied_usage.has_domain_entries) {
+                    candidate_list_content_state
+                        .domain_entry_lists.insert(list_name);
+                }
+                if (applied_usage.static_destinations_truncated) {
+                    candidate_list_content_state
+                        .truncated_static_destination_lists.insert(list_name);
+                }
+                applied_list_usage.insert_or_assign(
+                    list_name, applied_usage);
 
                 if (usage.has_domain_entries) {
                     firewall.create_ipset(set4d, AF_INET, usage.dynamic_timeout);
@@ -172,7 +418,6 @@ std::vector<RuleState> apply_runtime_firewall(
 
     if (config.dns.has_value()) {
         const auto& dns_servers = config.dns->servers.value_or(std::vector<DnsServer>{});
-        const DnsServerRegistry dns_registry(config.dns.value_or(DnsConfig{}));
         for (const auto& server : dns_servers) {
             if (!server.detour.has_value()) {
                 continue;
@@ -201,7 +446,7 @@ std::vector<RuleState> apply_runtime_firewall(
                 continue;
             }
 
-            const auto resolved_servers = dns_registry.get_servers(server.tag);
+            const auto resolved_servers = dns_registry->get_servers(server.tag);
             if (resolved_servers.empty()) {
                 throw FirewallError("DNS server tag not found during detour setup: " + server.tag);
             }
@@ -252,9 +497,143 @@ std::vector<RuleState> apply_runtime_firewall(
         }
         firewall.create_tunnel_snat_rules(tunnel_interfaces);
     }
+    if (native_vpn_direct_egress_snat_selectors != nullptr) {
+        firewall.create_source_egress_snat_rules(
+            *native_vpn_direct_egress_snat_selectors);
+    } else if (effective_internal_vpn_targets != nullptr) {
+        firewall.create_source_egress_snat_rules(
+            select_native_vpn_direct_egress_snat_selectors(
+                *effective_internal_vpn_targets));
+    }
 
-    firewall.apply(mode);
-    return rule_states;
+    const auto meta_udp_443_selection =
+        resolve_meta_udp_443_policy_selection(
+            config, rule_states, firewall.fwmark_mask());
+    if (meta_udp_443_selection.status ==
+        MetaUdp443PolicySelectionStatus::ambiguous) {
+        throw FirewallError(
+            "daemon.meta_udp443_policy=messages_first requires the "
+            "authoritative Meta/WhatsApp IP companion to resolve to one "
+            "unambiguous active broad route");
+    }
+    if (meta_udp_443_selection.active()) {
+        for (const auto& list_name : meta_udp_443_selection.list_names) {
+            const auto usage = applied_list_usage.find(list_name);
+            if (usage == applied_list_usage.end() ||
+                !usage->second.has_static_entries) {
+                throw FirewallError(
+                    "daemon.meta_udp443_policy=messages_first requires "
+                    "static IP coverage from the authoritative packaged "
+                    "Meta/WhatsApp companion list '" + list_name + "'");
+            }
+            if (!usage->second.has_static_ipv4_entries) {
+                throw FirewallError(
+                    "daemon.meta_udp443_policy=messages_first requires "
+                    "authoritative IPv4 coverage from the packaged "
+                    "Meta/WhatsApp companion list '" + list_name + "'");
+            }
+            if (ipv6_decision.enabled &&
+                !usage->second.has_static_ipv6_entries) {
+                throw FirewallError(
+                    "daemon.meta_udp443_policy=messages_first cannot be "
+                    "enabled while IPv6 is active because the packaged "
+                    "Meta/WhatsApp companion has no authoritative IPv6 "
+                    "coverage; use balanced mode or disable IPv6");
+            }
+
+            firewall.create_forward_udp_reject_rule(
+                meta_udp_443_selection.fwmark,
+                firewall.static_set_name(list_name, AF_INET),
+                443U);
+            if (ipv6_decision.enabled) {
+                firewall.create_forward_udp_reject_rule(
+                    meta_udp_443_selection.fwmark,
+                    firewall.static_set_name(list_name, AF_INET6),
+                    443U);
+            }
+        }
+    }
+
+    // User rules and generated DNS mark/drop rules retain priority. The empty
+    // runtime overlay is deliberately the final packet-classification rule,
+    // then populated with exact source+destination pairs only after a bounded
+    // active-call observation.
+    const bool call_affinity_backend_available =
+        firewall.backend() != FirewallBackend::iptables ||
+        udp_call_affinity_ipset_available;
+    const auto call_affinity_targets = call_affinity_backend_available
+        ? active_udp_call_affinity_targets(
+              whatsapp_call_affinity_list_names(config),
+              rule_states,
+              firewall.fwmark_mask())
+        : std::vector<UdpCallAffinityTarget>{};
+    for (const auto& target : call_affinity_targets) {
+        // The trusted packaged Meta/WhatsApp companion currently contains
+        // authoritative IPv4 ranges only. Do not publish an inert IPv6
+        // classifier until the catalog can authorize IPv6 signalling seeds.
+        const std::string set_name =
+            firewall.media_affinity_set_name(target.list_name, AF_INET);
+        firewall.create_udp_peer_set(
+            set_name, AF_INET, kUdpCallAffinityPairTimeoutSeconds);
+        FirewallRuleCriteria affinity;
+        affinity.src_udp_peer_set_name = set_name;
+        affinity.proto = L4Proto::Udp;
+        affinity.persist_conntrack_mark = false;
+        firewall.create_mark_rule(target.fwmark, affinity);
+    }
+
+    StagedRuntimeFirewall staged;
+    staged.rule_states = std::move(rule_states);
+    staged.list_content_state = std::move(candidate_list_content_state);
+    staged.mode = mode;
+    return staged;
+}
+
+void commit_runtime_firewall(Firewall& firewall,
+                             const StagedRuntimeFirewall& staged) {
+    firewall.apply(staged.mode);
+}
+
+std::vector<RuleState> apply_runtime_firewall(
+    const Config& config,
+    const OutboundMarkMap& outbound_marks,
+    const std::map<std::string, std::string>& urltest_selections,
+    const CacheManager& cache_manager,
+    Firewall& firewall,
+    FirewallApplyMode mode,
+    const std::vector<InternalVpnServer>*
+        effective_internal_vpn_servers,
+    const std::vector<InternalVpnRuntimeTarget>*
+        effective_internal_vpn_targets,
+    const std::vector<FirewallSourceEgressSnatSelector>*
+        native_vpn_direct_egress_snat_selectors,
+    AppliedListContentState* applied_list_content_state,
+    bool udp_call_affinity_ipset_available,
+    const std::optional<KeeneticDnsSnapshot>& keenetic_dns_snapshot,
+    std::shared_ptr<const ListCacheGenerationSnapshot>
+        list_cache_snapshot) {
+    auto staged = stage_runtime_firewall(
+        config,
+        outbound_marks,
+        urltest_selections,
+        cache_manager,
+        firewall,
+        mode,
+        effective_internal_vpn_servers,
+        effective_internal_vpn_targets,
+        native_vpn_direct_egress_snat_selectors,
+        udp_call_affinity_ipset_available,
+        keenetic_dns_snapshot,
+        std::move(list_cache_snapshot));
+    commit_runtime_firewall(firewall, staged);
+    // Published only after the commit, exactly as before: a transaction that
+    // never reached the kernel must not advertise the list content it was
+    // built from.
+    if (applied_list_content_state != nullptr) {
+        *applied_list_content_state =
+            std::move(staged.list_content_state);
+    }
+    return std::move(staged.rule_states);
 }
 
 } // namespace keen_pbr3

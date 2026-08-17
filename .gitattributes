@@ -1,10 +1,24 @@
 * text=auto
 
+/.gitattributes text eol=lf
+/build_scripts/*.known-issues text eol=lf
+
 *.sh text eol=lf
 *.py text eol=lf
 *.mk text eol=lf
 Makefile text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+/src/api/generated/api_types.hpp text eol=lf
+
+# The zapret2 semantic fixture is hash-pinned to exact upstream LF bytes.
+/tests/fixtures/zapret2-v1.0.3/** text eol=lf
 
 /packages/**/files/** text eol=lf
+# nfqws packet captures are opaque binary protocol fixtures.  The broader
+# package-files rule above must never normalize their embedded CRLF bytes.
+/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-blobs/*.bin -text -eol
+/packages/debian/*/debian/* text eol=lf
+
+# Preserve the vendored RapidXML snapshot byte-for-byte.
+third_party/rapidxml/** -whitespace

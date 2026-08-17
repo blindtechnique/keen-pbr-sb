@@ -102,7 +102,8 @@
     "name": "Meta (все сервисы)",
     "description": "Facebook, Instagram, Threads, WhatsApp — sing-box: geosite-meta.",
     "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-meta.srs",
-    "category": "social"
+    "category": "social",
+    "catalogPresetId": "meta"
   },
   {
     "id": "patreon",
@@ -137,7 +138,8 @@
     "name": "Telegram",
     "description": "",
     "url": "https://repo.hoaxisr.ru/rulesets/srs/telegram.srs",
-    "category": "social"
+    "category": "social",
+    "catalogPresetId": "telegram"
   },
   {
     "id": "threads",
@@ -158,7 +160,8 @@
     "name": "WhatsApp",
     "description": "",
     "url": "https://repo.hoaxisr.ru/rulesets/srs/whatsapp.srs",
-    "category": "social"
+    "category": "social",
+    "catalogPresetId": "whatsapp"
   },
   {
     "id": "x_twitter",
@@ -212,9 +215,10 @@
   {
     "id": "kino_pub",
     "name": "Kino.pub",
-    "description": "",
+    "description": "Полный список и вариант без тяжёлых видео-CDN доступны в каталоге.",
     "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-kinopub.srs",
-    "category": "media"
+    "category": "media",
+    "catalogPresetId": "kinopub"
   },
   {
     "id": "netflix",
@@ -534,7 +538,7 @@
   {
     "id": "list",
     "name": "Реклама и трекеры",
-    "description": "Блокирует рекламу и трекеры через action:reject — выбор outbound не требуется",
+    "description": "Блокирует рекламу и трекеры через action:reject — выбор маршрута не требуется",
     "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ads-all.srs",
     "category": "block"
   }

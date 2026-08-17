@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace keen_pbr3 {
 
@@ -27,5 +28,9 @@ std::optional<api::ResolverConfigSyncState> classify_resolver_config_sync_state(
     const std::optional<std::int64_t>& apply_started_ts,
     std::int64_t now_ts,
     bool hash_equal);
+
+bool resolver_reload_required(std::string_view expected_hash,
+                              std::string_view actual_hash,
+                              api::ResolverLiveStatus live_status);
 
 } // namespace keen_pbr3

@@ -8,19 +8,30 @@
 #include "../log/logger.hpp"
 #ifdef WITH_API
 #include "../api/sse_broadcaster.hpp"
+#include "../api/status_stream.hpp"
 #endif
 
 namespace keen_pbr3 {
 
 void Daemon::handle_dns_probe_query_event(const DnsProbeEvent& event) {
 #ifdef WITH_API
+    nlohmann::json payload = {
+        {"type", "DNS"},
+        {"domain", event.domain},
+        {"source_ip", event.source_ip},
+        {"ecs", event.ecs.has_value() ? nlohmann::json(*event.ecs) : nlohmann::json(nullptr)},
+    };
+
+    // The WebUI already owns one application-wide status EventSource.  Send
+    // interactive DNS probe events through it as well so each check does not
+    // consume another long-lived HTTP worker/subscription.
+    if (status_stream_) {
+        status_stream_->publish_dns_probe(payload);
+    }
+
+    // Keep the dedicated endpoint for CLI/API compatibility.  New WebUI
+    // builds no longer depend on it.
     if (dns_test_broadcaster_) {
-        nlohmann::json payload = {
-            {"type", "DNS"},
-            {"domain", event.domain},
-            {"source_ip", event.source_ip},
-            {"ecs", event.ecs.has_value() ? nlohmann::json(*event.ecs) : nlohmann::json(nullptr)},
-        };
         dns_test_broadcaster_->publish(payload.dump());
     }
 #else

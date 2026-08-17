@@ -18,7 +18,8 @@ which performs these steps for one fixture:
 1. Read the full JSON config file.
 2. Parse and validate it with the normal production config code.
 3. Allocate outbound fwmarks.
-4. Optionally run urltest probes when `--run-urltest-probes` is enabled.
+4. Optionally run urltest probes when `--run-urltest-probes` is enabled, and
+   fail the case if any urltest outbound selects no child.
 5. Populate real route tables and policy rules through `libnl`.
 6. Apply the real firewall backend through the normal runtime path.
 7. Verify live firewall chains, live firewall rules, route tables, and policy rules.
@@ -106,11 +107,30 @@ Purpose:
 - basic routing + firewall apply
 - real interface existence and admin-up checks via dummy links
 - verifies that a simple interface outbound and list-backed rule can be applied
+- on iptables, exercises the complete A/B convergence and ownership scenario
+  in both mangle and raw PREROUTING modes
 
 Topology:
 
 - `lan0` dummy link in the client namespace
 - `wan0` dummy link in the client namespace
+
+The iptables convergence scenario deliberately damages live state between
+preserve-set applies and verifies that the backend repairs it without touching
+foreign rules. It covers:
+
+- repeated A/B publication without duplicate hooks
+- missing dispatchers and invalid secondary dispatchers when a valid
+  forwarded-traffic generation remains authoritative
+- fail-closed handling for ambiguous dual-jump dispatchers when neither side
+  is a valid authority
+- a missing inactive generation and a completely missing owned scaffold
+- duplicate builtin hooks collapsing back to exactly one
+- failed `iptables-restore` and partially applied `ipset restore` leaving the
+  active dispatcher unchanged
+- exactly one raw conntrack-companion hook in raw PREROUTING mode
+- preservation of a foreign chain and a foreign mark rule, including explicit
+  keen-pbr cleanup
 
 ### `urltest-reachable`
 
@@ -286,6 +306,22 @@ For urltest cases, add:
 
 ```sh
 --run-urltest-probes
+```
+
+This flag asserts its own outcome: the config must contain at least one urltest
+outbound, and every urltest outbound must select a child. A probe that fails
+against every candidate makes the case red instead of being silently dropped.
+
+Because a probe gets exactly one attempt and no retry, a fixture that starts a
+probe target must hand the harness a readiness edge rather than a delay.
+`urltest_server.py --ready-fifo <path>` opens that FIFO for writing only after
+`bind()`/`listen()` have returned, so a fixture blocks on the read end and the
+probe cannot race the listening socket.
+
+To run the privileged iptables A/B convergence scenario, add:
+
+```sh
+--exercise-iptables-convergence
 ```
 
 ## Notes And Current Limitations

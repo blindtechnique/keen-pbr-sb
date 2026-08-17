@@ -2,6 +2,16 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 
+import {
+  subscribeDnsProbeEvents,
+  type DnsProbeEvent,
+} from "@/api/dns-probe-events"
+import {
+  acquireStatusEventKeepAliveLease,
+  getStatusEventConnectionState,
+  subscribeStatusEventConnectionState,
+} from "@/api/status-event-connection"
+
 export type DnsCheckStatus =
   | "idle"
   | "checking"
@@ -16,15 +26,6 @@ type DnsCheckState = {
   showWarning: boolean
 }
 
-type DnsCheckEvent =
-  | { type: "HELLO" }
-  | {
-      type: "DNS"
-      domain?: string | null
-      source_ip?: string | null
-      ecs?: string | null
-    }
-
 type UseDnsCheckReturn = {
   status: DnsCheckStatus
   checkState: DnsCheckState
@@ -35,11 +36,14 @@ type UseDnsCheckReturn = {
 export const DNS_CHECK_DOMAIN_SUFFIX = "check.keen.pbr"
 
 const browserCheckTimeoutMs = 5_000
+const sseConnectionTimeoutMs = 12_000
 const pcCheckTimeoutMs = 300_000
 const pcWarningTimeoutMs = 30_000
 
 export function useDnsCheck(): UseDnsCheckReturn {
-  const eventSourceRef = useRef<EventSource | null>(null)
+  const dnsSubscriptionRef = useRef<(() => void) | null>(null)
+  const connectionSubscriptionRef = useRef<(() => void) | null>(null)
+  const keepAliveLeaseRef = useRef<(() => void) | null>(null)
   const fetchControllerRef = useRef<AbortController | null>(null)
   const checkTimeoutRef = useRef<number | null>(null)
   const warningTimeoutRef = useRef<number | null>(null)
@@ -52,10 +56,12 @@ export function useDnsCheck(): UseDnsCheckReturn {
   })
 
   const cleanup = useCallback(() => {
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close()
-      eventSourceRef.current = null
-    }
+    dnsSubscriptionRef.current?.()
+    dnsSubscriptionRef.current = null
+    connectionSubscriptionRef.current?.()
+    connectionSubscriptionRef.current = null
+    keepAliveLeaseRef.current?.()
+    keepAliveLeaseRef.current = null
 
     if (fetchControllerRef.current) {
       fetchControllerRef.current.abort()
@@ -88,6 +94,7 @@ export function useDnsCheck(): UseDnsCheckReturn {
         showWarning: false,
       })
       setStatus("checking")
+      keepAliveLeaseRef.current = acquireStatusEventKeepAliveLease()
 
       if (!performBrowserRequest) {
         warningTimeoutRef.current = window.setTimeout(() => {
@@ -95,79 +102,85 @@ export function useDnsCheck(): UseDnsCheckReturn {
         }, pcWarningTimeoutMs)
       }
 
-      const eventSource = new EventSource("/api/dns/test")
-      eventSourceRef.current = eventSource
-
       let sseConnected = false
-
-      eventSource.onmessage = (event) => {
-        const payload = parseDnsCheckEvent(event.data)
-        if (!payload) {
-          return
-        }
-
-        if (payload.type === "HELLO") {
-          sseConnected = true
-
-          if (performBrowserRequest) {
-            fetchControllerRef.current = new AbortController()
-            fetch(`https://${domain}`, {
-              signal: fetchControllerRef.current.signal,
-              mode: "no-cors",
-            }).catch((error: unknown) => {
-              if (
-                error &&
-                typeof error === "object" &&
-                "name" in error &&
-                error.name === "AbortError"
-              ) {
-                return
-              }
-            })
-          }
-
-          return
-        }
-
-        if (payload.type !== "DNS" || payload.domain !== domain) {
-          return
-        }
-
+      const finishTimedOutCheck = () => {
         cleanup()
+
+        if (!sseConnected) {
+          setStatus("sse-fail")
+          return
+        }
+
+        if (performBrowserRequest) {
+          setStatus("browser-fail")
+          return
+        }
+
         setCheckState((current) => ({
           ...current,
           waiting: false,
-          showWarning: false,
+          showWarning: true,
         }))
-        setStatus(performBrowserRequest ? "success" : "pc-success")
       }
 
-      eventSource.onerror = () => {
-        // Let the timeout decide whether the connection or lookup failed.
-      }
+      dnsSubscriptionRef.current = subscribeDnsProbeEvents(
+        (payload: DnsProbeEvent) => {
+          if (payload.domain !== domain) return
 
-      checkTimeoutRef.current = window.setTimeout(
-        () => {
           cleanup()
-
-          if (!sseConnected) {
-            setStatus("sse-fail")
-            return
-          }
-
-          if (performBrowserRequest) {
-            setStatus("browser-fail")
-            return
-          }
-
           setCheckState((current) => ({
             ...current,
             waiting: false,
-            showWarning: true,
+            showWarning: false,
           }))
-        },
-        performBrowserRequest ? browserCheckTimeoutMs : pcCheckTimeoutMs
+          setStatus(performBrowserRequest ? "success" : "pc-success")
+        }
       )
+
+      const beginCheckWhenConnected = () => {
+        if (
+          sseConnected ||
+          getStatusEventConnectionState() !== "connected"
+        ) {
+          return
+        }
+
+        sseConnected = true
+        connectionSubscriptionRef.current?.()
+        connectionSubscriptionRef.current = null
+        if (checkTimeoutRef.current !== null) {
+          window.clearTimeout(checkTimeoutRef.current)
+        }
+        checkTimeoutRef.current = window.setTimeout(
+          finishTimedOutCheck,
+          performBrowserRequest ? browserCheckTimeoutMs : pcCheckTimeoutMs
+        )
+
+        if (performBrowserRequest) {
+          fetchControllerRef.current = new AbortController()
+          fetch(`https://${domain}`, {
+            signal: fetchControllerRef.current.signal,
+            mode: "no-cors",
+          }).catch((error: unknown) => {
+            if (
+              error &&
+              typeof error === "object" &&
+              "name" in error &&
+              error.name === "AbortError"
+            ) {
+              return
+            }
+          })
+        }
+      }
+
+      checkTimeoutRef.current = window.setTimeout(
+        finishTimedOutCheck,
+        sseConnectionTimeoutMs
+      )
+      connectionSubscriptionRef.current =
+        subscribeStatusEventConnectionState(beginCheckWhenConnected)
+      beginCheckWhenConnected()
     },
     [cleanup]
   )
@@ -187,21 +200,5 @@ export function useDnsCheck(): UseDnsCheckReturn {
     checkState,
     startCheck,
     reset,
-  }
-}
-
-function parseDnsCheckEvent(data: string): DnsCheckEvent | null {
-  if (!data.trim()) {
-    return null
-  }
-
-  try {
-    const parsed = JSON.parse(data) as DnsCheckEvent
-    if (!parsed || typeof parsed !== "object" || !("type" in parsed)) {
-      return null
-    }
-    return parsed
-  } catch {
-    return null
   }
 }

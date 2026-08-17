@@ -1,0 +1,1 @@
+{"outbounds": [{"tag": "wan", "type": "interface", "interface": "eth3"}], "route": {"rules": [{"id": 1, "outbound": "wan", "lists": ["a"]}]}, "lists": {"a": {"url": "https://example.invalid/list.txt"}}}

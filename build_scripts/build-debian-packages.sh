@@ -8,6 +8,7 @@ FRONTEND_DIST="${KEEN_PBR_FRONTEND_DIST:-$WORKSPACE/frontend/dist}"
 DEBIAN_VERSION="${DEBIAN_VERSION:-bookworm}"
 KEEN_PBR_VERSION="$(bash "$WORKSPACE/build_scripts/resolve-version.sh" version "$WORKSPACE")"
 KEEN_PBR_RELEASE="$(bash "$WORKSPACE/build_scripts/resolve-version.sh" release "$WORKSPACE")"
+KEEN_PBR_COMMIT="$(bash "$WORKSPACE/build_scripts/resolve-version.sh" commit "$WORKSPACE")"
 VERSION_RELEASE="${KEEN_PBR_VERSION}-${KEEN_PBR_RELEASE}"
 
 prepare_tree() {
@@ -42,6 +43,7 @@ prepare_tree headless "$HEADLESS_SRC"
     cd "$FULL_SRC"
     KEEN_PBR_FRONTEND_DIST="$FRONTEND_DIST" \
     KEEN_PBR_RELEASE_OVERRIDE="$KEEN_PBR_RELEASE" \
+    KEEN_PBR_COMMIT="$KEEN_PBR_COMMIT" \
     dpkg-buildpackage -b -us -uc
 )
 find "$BUILD_ROOT" -maxdepth 1 -type f -name 'keen-pbr_*_*.deb' -exec cp -t "$RELEASE_DIR" {} +
@@ -49,7 +51,9 @@ find "$BUILD_ROOT" -maxdepth 1 -type f -name 'keen-pbr-dbgsym_*_*.ddeb' -exec cp
 
 (
     cd "$HEADLESS_SRC"
-    KEEN_PBR_RELEASE_OVERRIDE="$KEEN_PBR_RELEASE" dpkg-buildpackage -b -us -uc
+    KEEN_PBR_RELEASE_OVERRIDE="$KEEN_PBR_RELEASE" \
+    KEEN_PBR_COMMIT="$KEEN_PBR_COMMIT" \
+    dpkg-buildpackage -b -us -uc
 )
 find "$BUILD_ROOT" -maxdepth 1 -type f -name 'keen-pbr-headless_*_*.deb' -exec cp -t "$RELEASE_DIR" {} +
 find "$BUILD_ROOT" -maxdepth 1 -type f -name 'keen-pbr-headless-dbgsym_*_*.ddeb' -exec cp -t "$RELEASE_DIR" {} +

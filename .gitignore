@@ -30,3 +30,13 @@ extensions/transport-manager/build/
 *.7z
 
 browser-extension/
+
+# Артефакты libFuzzer: воспроизводители аварий пишутся в текущий каталог.
+# Им место в отчёте и в регрессионном тесте, а не в истории репозитория.
+crash-*
+leak-*
+timeout-*
+oom-*
+
+# Generated at build time by the Keenetic package build.
+packages/keenetic/keen-pbr/version.mk

@@ -2,8 +2,15 @@ include version.mk
 
 VERSION_RESOLVER := $(abspath build_scripts/resolve-version.sh)
 KEEN_PBR_RELEASE := $(shell bash $(VERSION_RESOLVER) release "$(CURDIR)")
+override KEEN_PBR_COMMIT_RESOLVED := $(shell bash $(VERSION_RESOLVER) commit "$(CURDIR)")
+ifeq ($(strip $(KEEN_PBR_COMMIT_RESOLVED)),)
+  $(error Failed to resolve a valid KEEN_PBR_COMMIT)
+endif
+override KEEN_PBR_COMMIT := $(KEEN_PBR_COMMIT_RESOLVED)
 GCC_BUILD_DIR := cmake-build-gcc
 CLANG_BUILD_DIR := cmake-build-clang
+BUILD_JOBS ?= $(shell nproc)
+TEST_CMAKE_FLAGS ?=
 DIST_DIR := build/dist
 TRANSPORT_MANAGER_DIR := extensions/transport-manager
 TRANSPORT_MANAGER_DIST_DIR := $(DIST_DIR)/transport-manager
@@ -13,7 +20,7 @@ KEEN_PBR_VERSION_RELEASE := $(KEEN_PBR_VERSION)-$(KEEN_PBR_RELEASE)
 # Prefer an explicitly installed compiler when available; C++17 is required.
 GCC_CXX ?= $(shell command -v g++-13 2>/dev/null || command -v g++-12 2>/dev/null || command -v g++ 2>/dev/null || echo g++)
 CLANG_CXX ?= clang++
-COMMON_CMAKE_FLAGS := -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DKEEN_PBR_RELEASE=$(KEEN_PBR_RELEASE)
+COMMON_CMAKE_FLAGS := -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DKEEN_PBR_RELEASE=$(KEEN_PBR_RELEASE) -DKEEN_PBR_COMMIT:STRING=$(KEEN_PBR_COMMIT)
 GCC_CMAKE_FLAGS := -DCMAKE_CXX_COMPILER=$(GCC_CXX) $(COMMON_CMAKE_FLAGS)
 CLANG_CMAKE_FLAGS := -DCMAKE_CXX_COMPILER=$(CLANG_CXX) $(COMMON_CMAKE_FLAGS)
 CLANG_FEATURE_CMAKE_FLAGS := -DWITH_API=ON -DUSE_KEENETIC_API=ON
@@ -24,8 +31,11 @@ CLANG_FEATURE_CMAKE_FLAGS := -DWITH_API=ON -DUSE_KEENETIC_API=ON
         transport-manager-test transport-manager-build \
         test \
         firewall-it-images firewall-it \
-        clang-build clang-check clang-tidy \
-        generate \
+        clang-build clang-check clang-tidy clang-tidy-curated \
+        generate generate-check \
+        check-warnings check-shell check-openapi-parity check-nfqws-assets \
+        check-nfqws-rotator-lua \
+        sanitize fuzz \
         cross-setup cross-build cross-deploy \
         help
 
@@ -71,11 +81,77 @@ transport-manager-build: transport-manager-test ## Cross-compile transport manag
 generate: ## Regenerate src/api/generated/api_types.hpp from docs/openapi.yaml (requires Node.js)
 	bash build_scripts/generate_api_types.sh
 
+generate-check: ## Verify backend API types match docs/openapi.yaml without modifying tracked files
+	bash build_scripts/generate_api_types.sh --check
+
+# Roadmap: «-Werror только к современной native GCC/Clang CI-сборке. Entware
+# GCC 8.4 и cross-build не блокировать отличающимся набором предупреждений.»
+# Базовая линия пуста, см. build_scripts/warnings-baseline.md.
+check-warnings: ## Build with -Wall -Wextra -Werror (native compilers only)
+	cmake -S . -B build/cmake-werror -G Ninja -DCMAKE_BUILD_TYPE=Release \
+		-DWITH_API=ON -DUSE_KEENETIC_API=ON \
+		-DKEEN_PBR_EXTRA_WARNINGS=ON -DKEEN_PBR_WERROR=ON
+	cmake --build build/cmake-werror --parallel $(BUILD_JOBS) --target keen-pbr
+
+check-shell: ## Parse every shipped shell script with the target BusyBox and scan for bashisms
+	python3 -m unittest build_scripts.tests.test_mask_awk_for_shell_scan -v
+	bash build_scripts/check-shell-busybox.sh
+
+check-openapi-parity: ## Fail when a registered API route is missing from docs/openapi.yaml
+	python3 build_scripts/check-openapi-parity.py
+
+check-nfqws-assets: ## Verify nfqws2 preset/blob invariants and their exact-waiver contract
+	python3 build_scripts/check-nfqws-assets.py
+	python3 -m unittest build_scripts.tests.test_check_nfqws_assets -v
+
+check-nfqws-rotator-lua: ## Check telemetry and pinned zapret2 circular semantics
+	bash build_scripts/check-nfqws-rotator-lua.sh
+
+# Отдельный каталог сборки: санитайзеры не должны попасть в router/IPK binary.
+sanitize: ## Build and run the unit suite under AddressSanitizer + UndefinedBehaviorSanitizer
+	cmake -S . -B build/cmake-sanitize -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON \
+		-DWITH_API=ON -DUSE_KEENETIC_API=ON -DKEEN_PBR_SANITIZE=ON
+	cmake --build build/cmake-sanitize --parallel $(BUILD_JOBS) --target keen-pbr-tests
+	ASAN_OPTIONS=detect_leaks=1:print_stacktrace=1 \
+	UBSAN_OPTIONS=print_stacktrace=1 \
+		build/cmake-sanitize/tests/keen-pbr-tests
+
+# Узкие цели существуют ровно затем, чтобы инварианты оставались проверяемыми,
+# когда монолитная цель временно сломана чужой правкой. Но собирать их надо
+# всегда: пока их не собирал никто, две из них молча перестали компилироваться,
+# и 35 сценариев с 888 assertions не выполнялись.
+# То же повторилось 16.08 с keen-pbr-native-tunnel-import-tests: цели не было
+# в этом списке вовсе, она потеряла config_writer.cpp и не линковалась днями,
+# унеся с собой весь набор WAL store — его тесты не собираются больше никуда.
+# Инвариант: здесь обязана быть каждая цель из tests/CMakeLists.txt, кроме
+# keen-pbr-firewall-it (нужны Docker и netns, у неё свой `make firewall-it`).
+# Проверяется тестом build_scripts/tests/test_test_target_coverage.py.
+NARROW_TEST_TARGETS := \
+	keen-pbr-cache-generation-tests \
+	keen-pbr-native-tunnel-import-tests \
+	keen-pbr-runtime-mutation-admission-tests \
+	keen-pbr-rescue-tests \
+	keen-pbr-keenetic-dns-refresh-tests \
+	keen-pbr-resolver-stream-tests \
+	keen-pbr-backup-restore-journal-tests \
+	keen-pbr-maintenance-lock-tests \
+	keen-pbr-update-lock-protocol-tests
+
 test: ## Build and run unit tests (doctest)
-	cmake -S . -B $(GCC_BUILD_DIR) $(GCC_CMAKE_FLAGS) -DBUILD_TESTS=ON
-	cmake --build $(GCC_BUILD_DIR) --target keen-pbr-tests crash-diagnostics-smoke
+	sh -n install.sh
+	python3 -m unittest build_scripts.tests.test_build_identity -v
+	python3 -m unittest build_scripts.tests.test_test_target_coverage -v
+	cmake -S . -B $(GCC_BUILD_DIR) $(GCC_CMAKE_FLAGS) -DBUILD_TESTS=ON \
+		-DWITH_API=ON -DUSE_KEENETIC_API=ON $(TEST_CMAKE_FLAGS)
+	cmake --build $(GCC_BUILD_DIR) --parallel $(BUILD_JOBS) --target keen-pbr keen-pbr-tests crash-diagnostics-smoke $(NARROW_TEST_TARGETS)
+	@test "$$($(GCC_BUILD_DIR)/keen-pbr --version)" = \
+	  "keen-pbr $(KEEN_PBR_VERSION) (build $(KEEN_PBR_RELEASE), commit $(KEEN_PBR_COMMIT))"
 	$(GCC_BUILD_DIR)/tests/keen-pbr-tests
 	$(GCC_BUILD_DIR)/tests/crash-diagnostics-smoke
+	@for target in $(NARROW_TEST_TARGETS); do \
+		echo "== $$target =="; \
+		$(GCC_BUILD_DIR)/tests/$$target || exit 1; \
+	done
 
 firewall-it-images: ## Build the Docker images for firewall integration tests (also compiles the harness inside Docker)
 	docker build -t keen-pbr-firewall-it:iptables -f tests/firewall_it/docker/Dockerfile.iptables .
@@ -90,7 +166,7 @@ clang-build: ## Configure and compile with Clang in a host-only build dir
 
 clang-check: ## Compile with Clang thread-safety analysis enabled; never runs binaries
 	cmake -S . -B $(CLANG_BUILD_DIR) $(CLANG_CMAKE_FLAGS) $(CLANG_FEATURE_CMAKE_FLAGS) -DBUILD_TESTS=ON -DENABLE_THREAD_SAFETY_ANALYSIS=ON
-	cmake --build $(CLANG_BUILD_DIR) --target keen-pbr keen-pbr-tests thread-safety-smoke
+	cmake --build $(CLANG_BUILD_DIR) --parallel $(BUILD_JOBS) --target keen-pbr keen-pbr-tests thread-safety-smoke
 
 CLANGD_TIDY_ARGS ?=
 
@@ -98,8 +174,46 @@ clang-tidy: ## Run clangd-tidy against project-owned sources using the Clang com
 	cmake -S . -B $(CLANG_BUILD_DIR) $(CLANG_CMAKE_FLAGS) $(CLANG_FEATURE_CMAKE_FLAGS) -DBUILD_TESTS=ON -DENABLE_THREAD_SAFETY_ANALYSIS=ON
 	bash build_scripts/run-clangd-tidy.sh "$(abspath $(CLANG_BUILD_DIR))" $(CLANGD_TIDY_ARGS)
 
+# Короткий бюджет для PR. Длинный nightly-прогон с сохраняемым corpus — отдельно:
+# FUZZ_TIME=3600 make fuzz, а выросший corpus складывать вне репозитория.
+FUZZ_TIME ?= 120
+fuzz: ## Build and run the libFuzzer targets (requires Clang)
+	cmake -S . -B build/cmake-fuzz -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON \
+		-DKEEN_PBR_FUZZ=ON -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+	cmake --build build/cmake-fuzz --parallel $(BUILD_JOBS) --target \
+		keen-pbr-fuzz-srs keen-pbr-fuzz-config keen-pbr-fuzz-list \
+		keen-pbr-fuzz-iptables keen-pbr-fuzz-conntrack
+	python3 tests/fuzz/make-srs-corpus.py
+	python3 tests/fuzz/make-config-corpus.py
+	python3 tests/fuzz/make-list-corpus.py
+	python3 tests/fuzz/make-iptables-corpus.py
+	python3 tests/fuzz/make-conntrack-corpus.py
+	build/cmake-fuzz/tests/keen-pbr-fuzz-srs \
+		-max_total_time=$(FUZZ_TIME) -max_len=65536 -rss_limit_mb=2048 \
+		tests/fuzz/corpus/srs
+	build/cmake-fuzz/tests/keen-pbr-fuzz-config \
+		-max_total_time=$(FUZZ_TIME) -max_len=262144 -rss_limit_mb=2048 \
+		tests/fuzz/corpus/config
+	build/cmake-fuzz/tests/keen-pbr-fuzz-list \
+		-max_total_time=$(FUZZ_TIME) -max_len=65536 -rss_limit_mb=2048 \
+		tests/fuzz/corpus/list
+	build/cmake-fuzz/tests/keen-pbr-fuzz-iptables \
+		-max_total_time=$(FUZZ_TIME) -max_len=65536 -rss_limit_mb=2048 \
+		tests/fuzz/corpus/iptables
+	build/cmake-fuzz/tests/keen-pbr-fuzz-conntrack \
+		-max_total_time=$(FUZZ_TIME) -max_len=65536 -rss_limit_mb=2048 \
+		tests/fuzz/corpus/conntrack
+
+CLANG_TIDY_BUILD_DIR := build/cmake-clang-tidy
+clang-tidy-curated: ## Run clang-tidy over the highest-risk directories (see build_scripts/clang-tidy-baseline.md)
+	cmake -S . -B $(CLANG_TIDY_BUILD_DIR) -G Ninja -DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+		-DWITH_API=ON -DUSE_KEENETIC_API=ON -DBUILD_TESTS=ON \
+		-DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+	bash build_scripts/run-clang-tidy-curated.sh "$(abspath $(CLANG_TIDY_BUILD_DIR))"
+
 clean: ## Remove compiled artifacts
-	rm -rf $(GCC_BUILD_DIR) $(CLANG_BUILD_DIR) build/cmake-aarch64 build/cross-toolchain build/dist \
+	rm -rf $(GCC_BUILD_DIR) $(CLANG_BUILD_DIR) build/cmake-aarch64 build/cmake-sanitize build/cmake-fuzz build/cmake-clang-tidy build/cmake-werror build/cross-toolchain build/dist \
 	       build/debian-src-full build/debian-src-headless build/packages
 
 distclean: ## Remove all build artifacts including downloaded SDKs
@@ -141,10 +255,16 @@ $(CROSS_TOOLCHAIN_STAMP):
 cross-build: $(CROSS_TOOLCHAIN_STAMP) ## Cross-compile for aarch64_cortex-a53 directly (fast, no Docker)
 	STAGING_DIR=$(CROSS_STAGING_DIR) cmake -S . -B $(CROSS_BUILD_DIR) \
 		-DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-aarch64-openwrt.cmake \
+		-DKEEN_PBR_COMMIT:STRING=$(KEEN_PBR_COMMIT) \
 		-DCMAKE_BUILD_TYPE=MinSizeRel \
 		-DCMAKE_CXX_FLAGS_MINSIZEREL="-Os -DNDEBUG -g1" \
 		-DWITH_API=ON
-	STAGING_DIR=$(CROSS_STAGING_DIR) cmake --build $(CROSS_BUILD_DIR) -j$(shell nproc)
+	# BUILD_JOBS, like every other build target here, instead of a hardcoded
+	# nproc. A machine with many cores and modest RAM - 20 cores and 8 GB is
+	# enough - runs that many cc1plus processes straight into the OOM killer,
+	# and the failure reads as "Killed signal terminated program cc1plus"
+	# rather than as anything to do with memory.
+	STAGING_DIR=$(CROSS_STAGING_DIR) cmake --build $(CROSS_BUILD_DIR) --parallel $(BUILD_JOBS)
 	@mkdir -p $(DIST_DIR)
 	# Extract full debug symbols into a separate .debug file (stays on the host)
 	$(CROSS_OBJCOPY) --only-keep-debug $(CROSS_BUILD_DIR)/keen-pbr $(CROSS_DEBUG_BIN)

@@ -1,75 +1,71 @@
-import { useQuery } from "@tanstack/react-query"
+import { useInfiniteQuery } from "@tanstack/react-query"
 import { ChevronRightIcon } from "lucide-react"
-import { useMemo, useState } from "react"
+import { useDeferredValue, useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 
+import { queryConnections } from "@/api/generated/keen-api"
+import type { ConnectionRecord } from "@/api/generated/model/connectionRecord"
+import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { PageHeader } from "@/components/shared/page-header"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
 import { Label } from "@/components/ui/label"
 import { cn } from "@/lib/utils"
 
-type Connection = {
-  id: string
-  protocol: string
-  state: string
-  source: string
-  source_port: number
-  destination: string
-  destination_port: number
-  device: string
-  active: boolean
-  last_seen: number
-  destination_domains: string[]
-}
+import { formatLastSeen } from "./connections-utils"
 
 type DeviceGroup = {
   key: string
   name: string
   address: string
-  connections: Connection[]
+  connections: ConnectionRecord[]
   activeCount: number
   lastSeen: number
 }
-
 export function ConnectionsPage() {
   const { t } = useTranslation()
   const [filter, setFilter] = useState("")
+  const deferredFilter = useDeferredValue(filter.trim())
   const [activeOnly, setActiveOnly] = useState(true)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
-  const query = useQuery({
-    queryKey: ["connections", activeOnly ? "active" : "all"],
-    queryFn: async () => {
-      const response = await fetch(
-        activeOnly ? "/api/connections/active" : "/api/connections"
-      )
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      return response.json() as Promise<Connection[]>
+  const query = useInfiniteQuery({
+    queryKey: ["connections", activeOnly ? "active" : "all", deferredFilter],
+    initialPageParam: undefined as string | undefined,
+    queryFn: async ({ pageParam }) => {
+      const response = await queryConnections({
+        active_only: activeOnly,
+        cursor: pageParam,
+        limit: 100,
+        search: deferredFilter || undefined,
+        sort: "last_seen",
+        order: "desc",
+      })
+      if (response.status !== 200) {
+        throw new Error(response.data.error)
+      }
+      return response.data
     },
-    refetchInterval: 3_000,
+    getNextPageParam: (lastPage) => lastPage.next_cursor,
+    // Kernel conntrack events invalidate this query in real time. This slow
+    // fallback covers kernels where NETLINK_NETFILTER multicast is unavailable
+    // and reconnect windows in the browser's EventSource implementation.
+    refetchInterval: (currentQuery) =>
+      currentQuery.state.data?.pages.length === 1 ? 15_000 : false,
     refetchIntervalInBackground: false,
   })
 
+  const connections = useMemo(
+    () => query.data?.pages.flatMap((page) => page.items) ?? [],
+    [query.data]
+  )
   const groups = useMemo(() => {
-    const needle = filter.trim().toLowerCase()
-    const matching = (query.data ?? [])
-      .filter((item) => !activeOnly || item.active)
-      .filter(
-        (item) =>
-          !needle ||
-          `${item.source} ${item.destination} ${item.destination_domains.join(
-            " "
-          )} ${item.device} ${item.state} ${item.protocol}`
-            .toLowerCase()
-            .includes(needle)
-      )
-
     // One row per device, like the firmware does, so a busy host does not bury
     // everything else under hundreds of sessions.
     const byDevice = new Map<string, DeviceGroup>()
-    for (const item of matching) {
+    for (const item of connections) {
       const key = item.source
       const group = byDevice.get(key) ?? {
         key,
@@ -88,15 +84,15 @@ export function ConnectionsPage() {
     return [...byDevice.values()]
       .map((group) => ({
         ...group,
-        connections: group.connections.sort((a, b) => b.last_seen - a.last_seen),
+        connections: group.connections.sort(
+          (a, b) => b.last_seen - a.last_seen
+        ),
       }))
       .sort((a, b) => b.connections.length - a.connections.length)
-  }, [activeOnly, filter, query.data])
+  }, [connections])
 
-  const totalConnections = groups.reduce(
-    (sum, group) => sum + group.connections.length,
-    0
-  )
+  const totalConnections = query.data?.pages[0]?.total ?? connections.length
+  const snapshotAt = query.data?.pages[0]?.snapshot_at ?? 0
 
   const toggle = (key: string) => {
     setExpanded((current) => {
@@ -171,7 +167,12 @@ export function ConnectionsPage() {
               {isOpen ? (
                 <div className="space-y-1 pb-3 pl-7">
                   {group.connections.map((item) => (
-                    <SessionRow item={item} key={item.id} t={t} />
+                    <SessionRow
+                      item={item}
+                      key={item.id}
+                      snapshotAt={snapshotAt}
+                      t={t}
+                    />
                   ))}
                 </div>
               ) : null}
@@ -179,21 +180,40 @@ export function ConnectionsPage() {
           )
         })}
 
-        {groups.length === 0 ? (
-          <p className="py-6 text-center text-sm text-muted-foreground">
-            {t("connections.empty")}
-          </p>
+        {groups.length === 0 && !query.isLoading ? (
+          <ListPlaceholder
+            description={t("connections.empty")}
+            title={t("connections.emptyTitle")}
+          />
         ) : null}
       </div>
+
+      {query.hasNextPage ? (
+        <div className="flex justify-center">
+          <Button
+            disabled={query.isFetchingNextPage}
+            onClick={() => void query.fetchNextPage()}
+            variant="outline"
+          >
+            {query.isFetchingNextPage
+              ? t("connections.loadingMore")
+              : t("connections.loadMore", {
+                  loaded: connections.length,
+                  total: totalConnections,
+                })}
+          </Button>
+        </div>
+      ) : null}
     </div>
   )
 }
-
 function SessionRow({
   item,
+  snapshotAt,
   t,
 }: {
-  item: Connection
+  item: ConnectionRecord
+  snapshotAt: number
   t: (key: string, options?: Record<string, unknown>) => string
 }) {
   const [primaryDomain, ...otherDomains] = item.destination_domains
@@ -201,9 +221,7 @@ function SessionRow({
   return (
     <div className="connection-session-row grid grid-cols-1 gap-x-3 gap-y-0.5 py-1 text-sm sm:grid-cols-[minmax(0,1fr)_auto]">
       <div className="min-w-0">
-        {primaryDomain ? (
-          <div className="truncate">{primaryDomain}</div>
-        ) : null}
+        {primaryDomain ? <div className="truncate">{primaryDomain}</div> : null}
         <div className="truncate font-mono text-xs text-muted-foreground">
           {item.destination}:{item.destination_port}
         </div>
@@ -218,12 +236,12 @@ function SessionRow({
       </div>
       <div className="flex flex-wrap items-center gap-1.5 sm:justify-end">
         <span
-          className="text-xs tabular-nums text-muted-foreground"
+          className="text-xs text-muted-foreground tabular-nums"
           title={new Date(item.last_seen * 1000).toLocaleString()}
         >
           {item.active
             ? t("connections.age.live")
-            : formatLastSeen(item.last_seen, t)}
+            : formatLastSeen(item.last_seen, snapshotAt, t)}
         </span>
         <span className="text-xs text-muted-foreground">
           {item.protocol.toUpperCase()}
@@ -234,28 +252,4 @@ function SessionRow({
       </div>
     </div>
   )
-}
-
-/**
- * Only closed connections get an age. While one is live the age is always
- * "a moment ago" and says nothing, so the word "active" carries more.
- */
-function formatLastSeen(
-  lastSeen: number,
-  t: (key: string, options?: Record<string, unknown>) => string
-): string {
-  if (!lastSeen) {
-    return ""
-  }
-  const seconds = Math.max(0, Math.floor(Date.now() / 1000) - lastSeen)
-  if (seconds < 10) {
-    return t("connections.age.now")
-  }
-  if (seconds < 60) {
-    return t("connections.age.seconds", { count: seconds })
-  }
-  if (seconds < 3600) {
-    return t("connections.age.minutes", { count: Math.floor(seconds / 60) })
-  }
-  return t("connections.age.hours", { count: Math.floor(seconds / 3600) })
 }

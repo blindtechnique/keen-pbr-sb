@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { DownloadIcon, RotateCcwIcon, UploadIcon } from "lucide-react"
+import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
@@ -15,7 +16,6 @@ import {
 import {
   BACKUP_GROUPS,
   createBackup,
-  createDefaultBackupSelection,
   downloadBackup,
   getRollbackAvailability,
   readBackupFile,
@@ -26,13 +26,44 @@ import {
   type BackupSelection,
 } from "@/lib/backup"
 
-const GROUP_LABELS: Readonly<Record<BackupGroup, string>> = {
-  general: "Конфигурация общих настроек",
-  transports: "Транспорты",
-  outbounds: "Исходящие соединения",
-  dns: "Настройки DNS",
-  routing: "Списки и правила маршрутизации",
-  nfqws: "Конфигурация и списки nfqws2",
+/**
+ * Галочки бэкапа — по смыслу, а не по внутренним группам API.
+ *
+ * По новой концепции туннель и есть маршрут, а DNS-правила привязаны к
+ * спискам: раздельные галочки позволяли молча выгрузить половину пары —
+ * туннели без маршрутов или списки без их DNS. Одна галочка теперь включает
+ * обе группы API сразу; формат архива не меняется, старые копии
+ * восстанавливаются как раньше (решение владельца: копия должна быть
+ * целой, а не предупреждать о нецелой).
+ */
+const BACKUP_CHOICES = [
+  { key: "general", groups: ["general"] },
+  { key: "vpn", groups: ["transports", "outbounds"] },
+  { key: "listsDns", groups: ["routing", "dns"] },
+  { key: "nfqws_config", groups: ["nfqws_config"] },
+  { key: "nfqws_lists", groups: ["nfqws_lists"] },
+] as const satisfies readonly {
+  key: string
+  groups: readonly BackupGroup[]
+}[]
+
+type BackupChoiceKey = (typeof BACKUP_CHOICES)[number]["key"]
+
+const choiceLabelKey = (choice: BackupChoiceKey) =>
+  `pages.settings.backup.choices.${choice}` as const
+
+function toBackupSelection(
+  choices: Record<BackupChoiceKey, boolean>
+): BackupSelection {
+  const selection = Object.fromEntries(
+    BACKUP_GROUPS.map((group) => [group, false])
+  ) as BackupSelection
+  for (const choice of BACKUP_CHOICES) {
+    for (const group of choice.groups) {
+      selection[group] = choices[choice.key]
+    }
+  }
+  return selection
 }
 
 type ManagedDialogProps = {
@@ -41,13 +72,17 @@ type ManagedDialogProps = {
 }
 
 export function BackupDialog({ open, onOpenChange }: ManagedDialogProps) {
+  const { t } = useTranslation()
+
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
-      <DialogContent className="overflow-hidden max-sm:top-auto max-sm:bottom-0 max-sm:left-0 max-sm:max-h-[calc(100dvh-0.75rem)] max-sm:max-w-none max-sm:translate-x-0 max-sm:translate-y-0 max-sm:rounded-b-none max-sm:border-x-0 max-sm:border-b-0 sm:max-w-2xl">
+      <DialogContent className="overflow-hidden max-sm:top-auto max-sm:bottom-0 max-sm:left-0 max-sm:max-h-[calc(100dvh-0.75rem)] max-sm:max-w-none max-sm:translate-x-0 max-sm:translate-y-0 max-sm:rounded-b-none max-sm:border-x-0 max-sm:border-b-0 sm:max-w-[640px]">
         <DialogHeader>
-          <DialogTitle>Резервная копия</DialogTitle>
+          <DialogTitle>
+            {t("pages.settings.backup.dialog.backupTitle")}
+          </DialogTitle>
           <DialogDescription>
-            Выберите данные и скачайте единый файл конфигурации keen-pbr-sb.
+            {t("pages.settings.backup.dialog.backupDescription")}
           </DialogDescription>
         </DialogHeader>
         <div className="min-h-0 overflow-y-auto">
@@ -59,6 +94,7 @@ export function BackupDialog({ open, onOpenChange }: ManagedDialogProps) {
 }
 
 export function RestoreDialog({ open, onOpenChange }: ManagedDialogProps) {
+  const { t } = useTranslation()
   const [busy, setBusy] = useState(false)
 
   return (
@@ -70,14 +106,15 @@ export function RestoreDialog({ open, onOpenChange }: ManagedDialogProps) {
       open={open}
     >
       <DialogContent
-        className="overflow-hidden max-sm:top-auto max-sm:bottom-0 max-sm:left-0 max-sm:max-h-[calc(100dvh-0.75rem)] max-sm:max-w-none max-sm:translate-x-0 max-sm:translate-y-0 max-sm:rounded-b-none max-sm:border-x-0 max-sm:border-b-0 sm:max-w-2xl"
+        className="overflow-hidden max-sm:top-auto max-sm:bottom-0 max-sm:left-0 max-sm:max-h-[calc(100dvh-0.75rem)] max-sm:max-w-none max-sm:translate-x-0 max-sm:translate-y-0 max-sm:rounded-b-none max-sm:border-x-0 max-sm:border-b-0 sm:max-w-[640px]"
         showCloseButton={!busy}
       >
         <DialogHeader>
-          <DialogTitle>Восстановление</DialogTitle>
+          <DialogTitle>
+            {t("pages.settings.backup.dialog.restoreTitle")}
+          </DialogTitle>
           <DialogDescription>
-            Восстановите выбранные группы из файла или откатите последнее
-            изменение.
+            {t("pages.settings.backup.dialog.restoreDescription")}
           </DialogDescription>
         </DialogHeader>
         <div className="min-h-0 overflow-y-auto">
@@ -93,20 +130,26 @@ type BackupPanelProps = {
 }
 
 export function BackupPanel({ onComplete }: BackupPanelProps) {
-  const [groups, setGroups] = useState<BackupSelection>(
-    createDefaultBackupSelection
+  const { t } = useTranslation()
+  const [choices, setChoices] = useState<Record<BackupChoiceKey, boolean>>(
+    () =>
+      Object.fromEntries(
+        BACKUP_CHOICES.map((choice) => [choice.key, true])
+      ) as Record<BackupChoiceKey, boolean>
   )
   const [pending, setPending] = useState(false)
 
   const create = async () => {
     setPending(true)
     try {
-      downloadBackup(await createBackup(groups))
-      toast.success("Резервная копия создана")
+      downloadBackup(await createBackup(toBackupSelection(choices)))
+      toast.success(t("pages.settings.backup.created"))
       onComplete?.()
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Не удалось создать копию"
+        error instanceof Error
+          ? error.message
+          : t("pages.settings.backup.createFailed")
       )
     } finally {
       setPending(false)
@@ -116,35 +159,38 @@ export function BackupPanel({ onComplete }: BackupPanelProps) {
   return (
     <div className="space-y-5">
       <p className="text-sm text-muted-foreground">
-        Файл может содержать секреты транспортов. Храните его в безопасном
-        месте.
+        {t("pages.settings.backup.secretsWarning")}
       </p>
       <div className="grid gap-2 sm:grid-cols-2">
-        {BACKUP_GROUPS.map((group) => (
+        {BACKUP_CHOICES.map((choice) => (
           <label
             className="flex cursor-pointer items-center gap-3 rounded-md border p-3"
-            key={group}
+            key={choice.key}
           >
             <Checkbox
-              checked={groups[group]}
+              checked={choices[choice.key]}
               onCheckedChange={(checked) =>
-                setGroups((value) => ({
+                setChoices((value) => ({
                   ...value,
-                  [group]: checked === true,
+                  [choice.key]: checked === true,
                 }))
               }
             />
-            <span className="text-sm font-medium">{GROUP_LABELS[group]}</span>
+            <span className="text-sm font-medium">
+              {t(choiceLabelKey(choice.key))}
+            </span>
           </label>
         ))}
       </div>
       <div className="flex justify-end">
         <Button
-          disabled={pending || !Object.values(groups).some(Boolean)}
+          disabled={pending || !Object.values(choices).some(Boolean)}
           onClick={() => void create()}
         >
           <DownloadIcon />
-          {pending ? "Создание…" : "Создать и скачать"}
+          {pending
+            ? t("pages.settings.backup.createPending")
+            : t("pages.settings.backup.createButton")}
         </Button>
       </div>
     </div>
@@ -160,6 +206,7 @@ type PendingRestoreAction =
   | { kind: "rollback" }
 
 export function RestorePanel({ onBusyChange }: RestorePanelProps) {
+  const { t } = useTranslation()
   const inputRef = useRef<HTMLInputElement>(null)
   const [pending, setPending] = useState(false)
   const [rollbackAvailable, setRollbackAvailable] = useState(false)
@@ -192,7 +239,9 @@ export function RestorePanel({ onBusyChange }: RestorePanelProps) {
       })
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Не удалось прочитать копию"
+        error instanceof Error
+          ? error.message
+          : t("pages.settings.backup.readFailed")
       )
     } finally {
       if (inputRef.current) inputRef.current.value = ""
@@ -205,16 +254,18 @@ export function RestorePanel({ onBusyChange }: RestorePanelProps) {
     try {
       if (pendingAction.kind === "restore") {
         await restoreBackup(pendingAction.bundle)
-        toast.success("Конфигурация восстановлена")
+        toast.success(t("pages.settings.backup.restored"))
       } else {
         await rollbackBackup()
-        toast.success("Откат выполнен")
+        toast.success(t("pages.settings.backup.rolledBack"))
       }
       setPendingAction(null)
       await refreshRollback()
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Операция не выполнена"
+        error instanceof Error
+          ? error.message
+          : t("pages.settings.backup.actionFailed")
       )
     } finally {
       setPending(false)
@@ -224,21 +275,22 @@ export function RestorePanel({ onBusyChange }: RestorePanelProps) {
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
-        Конфигурация проверяется до записи и применяется только после успешной
-        валидации.
+        {t("pages.settings.backup.validationNote")}
       </p>
       {pendingAction ? (
         <div className="space-y-3 rounded-md border border-destructive/40 bg-destructive/5 p-4">
           <div>
             <p className="font-medium">
               {pendingAction.kind === "restore"
-                ? `Восстановить «${pendingAction.filename}»?`
-                : "Выполнить откат конфигурации?"}
+                ? t("pages.settings.backup.confirmRestore", {
+                    filename: pendingAction.filename,
+                  })
+                : t("pages.settings.backup.confirmRollback")}
             </p>
             <p className="mt-1 text-sm text-muted-foreground">
               {pendingAction.kind === "restore"
-                ? "Перед изменением автоматически будет создана rollback-копия."
-                : "Будет восстановлено состояние перед последним обновлением или восстановлением."}
+                ? t("pages.settings.backup.restoreHint")
+                : t("pages.settings.backup.rollbackHint")}
             </p>
           </div>
           <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
@@ -247,14 +299,16 @@ export function RestorePanel({ onBusyChange }: RestorePanelProps) {
               onClick={() => setPendingAction(null)}
               variant="outline"
             >
-              Отмена
+              {t("pages.settings.backup.cancel")}
             </Button>
             <Button
               disabled={pending}
               onClick={() => void confirmAction()}
               variant="destructive"
             >
-              {pending ? "Выполнение…" : "Подтвердить"}
+              {pending
+                ? t("pages.settings.backup.confirmPending")
+                : t("pages.settings.backup.confirm")}
             </Button>
           </div>
         </div>
@@ -266,11 +320,11 @@ export function RestorePanel({ onBusyChange }: RestorePanelProps) {
             variant="destructive"
           >
             <RotateCcwIcon />
-            Откат в один клик
+            {t("pages.settings.backup.rollbackButton")}
           </Button>
           <Button disabled={pending} onClick={() => inputRef.current?.click()}>
             <UploadIcon />
-            Выбрать файл копии
+            {t("pages.settings.backup.chooseFile")}
           </Button>
         </DialogFooter>
       )}

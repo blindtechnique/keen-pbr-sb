@@ -6,6 +6,10 @@ config=""
 mode="destructive"
 setup_script=""
 run_urltest="0"
+repeat_preserve_apply="0"
+drop_iptables_dispatchers_before_repeat="0"
+use_raw_prerouting="0"
+exercise_iptables_convergence="0"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -29,6 +33,22 @@ while [[ $# -gt 0 ]]; do
       run_urltest="1"
       shift
       ;;
+    --repeat-preserve-apply)
+      repeat_preserve_apply="1"
+      shift
+      ;;
+    --drop-iptables-dispatchers-before-repeat)
+      drop_iptables_dispatchers_before_repeat="1"
+      shift
+      ;;
+    --use-raw-prerouting)
+      use_raw_prerouting="1"
+      shift
+      ;;
+    --exercise-iptables-convergence)
+      exercise_iptables_convergence="1"
+      shift
+      ;;
     *)
       echo "unknown arg: $1" >&2
       exit 1
@@ -37,7 +57,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$backend" || -z "$config" ]]; then
-  echo "usage: run-in-netns.sh --backend <name> --config <path> [--mode <mode>] [--setup <path>] [--run-urltest-probes]" >&2
+  echo "usage: run-in-netns.sh --backend <name> --config <path> [--mode <mode>] [--setup <path>] [--run-urltest-probes] [--exercise-iptables-convergence]" >&2
   exit 1
 fi
 
@@ -76,6 +96,18 @@ cmd=(
 
 if [[ "$run_urltest" == "1" ]]; then
   cmd+=(--run-urltest-probes)
+fi
+if [[ "$repeat_preserve_apply" == "1" ]]; then
+  cmd+=(--repeat-preserve-apply)
+fi
+if [[ "$drop_iptables_dispatchers_before_repeat" == "1" ]]; then
+  cmd+=(--drop-iptables-dispatchers-before-repeat)
+fi
+if [[ "$use_raw_prerouting" == "1" ]]; then
+  cmd+=(--use-raw-prerouting)
+fi
+if [[ "$exercise_iptables_convergence" == "1" ]]; then
+  cmd+=(--exercise-iptables-convergence)
 fi
 
 "${cmd[@]}"

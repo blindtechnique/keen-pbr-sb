@@ -5,11 +5,19 @@
  * REST API for the keen-pbr policy-based routing daemon.
  * OpenAPI spec version: 3.0.0
  */
+import type { TransportPath } from './transportPath';
 import type { TransportStatusSecurity } from './transportStatusSecurity';
 import type { TransportStatusState } from './transportStatusState';
 
 export interface TransportStatus {
   tag: string;
+  /**
+     * Optional human-readable alias of at most 80 Unicode code points. It must be valid UTF-8, contain a non-whitespace character, and contain no ASCII, C1, or bidirectional control characters. The technical tag remains the stable identity.
+
+     * @minLength 1
+     * @maxLength 80
+     */
+  display_name?: string;
   type: string;
   interface: string;
   /** Proxy server hostname or IP, exposed without credentials for loop-prevention setup. */
@@ -22,7 +30,11 @@ export interface TransportStatus {
   security?: TransportStatusSecurity;
   /** Server name presented during the TLS handshake. */
   sni?: string;
-  /** Carrier inside the connection - tcp, ws, grpc, http. */
+  path?: TransportPath;
+  /**
+     * Legacy mixed carrier/framing field. New clients use path.
+     * @deprecated
+     */
   network?: string;
   state: TransportStatusState;
   pid?: number;

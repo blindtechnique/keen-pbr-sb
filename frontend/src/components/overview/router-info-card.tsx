@@ -1,9 +1,6 @@
-import type { ReactNode } from "react"
-
 import { useQuery } from "@tanstack/react-query"
 import { useTranslation } from "react-i18next"
 
-import { SectionCard } from "@/components/shared/section-card"
 import { Skeleton } from "@/components/ui/skeleton"
 
 type RouterInfo = {
@@ -39,7 +36,7 @@ type RouterInfo = {
  * read-only: the controls it used to share the card with now live in the
  * services card, so this stays a place to look rather than to click.
  */
-export function RouterInfoCard() {
+export function RouterInfoPanel() {
   const { t } = useTranslation()
 
   const query = useQuery<RouterInfo>({
@@ -56,11 +53,7 @@ export function RouterInfoCard() {
   const info = query.data
 
   return (
-    <SectionCard
-      className="h-full"
-      contentClassName="flex flex-1 flex-col"
-      title={t("overview.router.title")}
-    >
+    <div>
       {query.isLoading ? (
         <div className="space-y-2">
           <Skeleton className="h-6 w-2/3" />
@@ -78,100 +71,103 @@ export function RouterInfoCard() {
 
       {info?.available ? (
         <div className="space-y-3">
-          <div>
-            <div className="text-lg font-semibold leading-tight">
+          {/* Строка в две строки текста: справа архитектура и процессор,
+              имя роутера отцентрировано по вертикали относительно них
+              (замечание владельца — с items-baseline имя прилипало к
+              верхней строке). min-h резервирует две строки, даже когда
+              процессор не определился. */}
+          <div className="flex min-h-10 flex-wrap items-center justify-between gap-x-4 gap-y-1">
+            <div className="text-[16px] leading-6 font-medium">
               {[info.vendor, info.model].filter(Boolean).join(" ")}
             </div>
-            {info.hw_id ? (
-              <div className="text-xs text-muted-foreground">
-                {info.hw_id}
-                {info.region ? ` · ${info.region}` : null}
+            <div className="min-w-0 text-xs leading-5 text-muted-foreground sm:text-right">
+              <div>
+                {[info.hw_id, info.region, info.arch]
+                  .filter(Boolean)
+                  .join(" · ")}
               </div>
-            ) : null}
+              {info.cpu_model ? (
+                <div className="truncate">{info.cpu_model}</div>
+              ) : null}
+            </div>
           </div>
 
-          <dl className="space-y-1.5 text-xs">
-            <Row label={t("overview.router.cpu")}>
-              <span className="truncate">{describeCpu(info)}</span>
-            </Row>
-            <Row label={t("overview.router.memory")}>
+          <dl className="grid grid-cols-2 border-y border-border sm:grid-cols-4 xl:grid-cols-7">
+            <Metric label={t("overview.router.cpu")}>
+              {formatCpuSummary(info)}
+            </Metric>
+            <Metric label={t("overview.router.memory")}>
               {formatMemory(info, t)}
-            </Row>
+            </Metric>
             {typeof info.disk_used_percent === "number" ? (
-              <Row label={t("overview.router.disk")}>{formatDisk(info, t)}</Row>
-            ) : null}
-            {info.wan_address ? (
-              <Row label={t("overview.router.wan")}>
-                <span className="font-mono text-xs">{info.wan_address}</span>
-              </Row>
+              <Metric label={t("overview.router.disk")}>
+                {formatDisk(info, t)}
+              </Metric>
             ) : null}
             {typeof info.clients_total === "number" ? (
-              <Row label={t("overview.router.clients")}>
-                {t("overview.router.clientsValue", {
-                  active: info.clients_active ?? 0,
-                  total: info.clients_total,
-                })}
-              </Row>
+              <Metric label={t("overview.router.clients")}>
+                <span className="inline-flex items-center gap-2">
+                  <span
+                    aria-hidden="true"
+                    className="size-2 shrink-0 rounded-full bg-success"
+                  />
+                  {t("overview.router.clientsValue", {
+                    active: info.clients_active ?? 0,
+                    total: info.clients_total,
+                  })}
+                </span>
+              </Metric>
             ) : null}
             {info.firmware_title ? (
-              <Row label={t("overview.router.firmware")}>
+              <Metric label={t("overview.router.firmware")}>
                 {info.firmware_title}
-                {info.firmware_release ? (
-                  <span className="text-muted-foreground">
-                    {" "}
-                    ({info.firmware_release})
-                  </span>
-                ) : null}
-              </Row>
+              </Metric>
             ) : null}
             {typeof info.uptime_seconds === "number" ? (
-              <Row label={t("overview.router.uptime")}>
+              <Metric label={t("overview.router.uptime")}>
                 {formatUptime(info.uptime_seconds, t)}
-              </Row>
+              </Metric>
             ) : null}
             {info.load_average?.length === 3 ? (
-              <Row label={t("overview.router.loadAverage")}>
+              <Metric label={t("overview.router.loadAverage")}>
                 <span className="font-mono text-xs tabular-nums">
                   {info.load_average.map((v) => v.toFixed(2)).join("  ")}
                 </span>
-              </Row>
+              </Metric>
             ) : null}
           </dl>
         </div>
       ) : null}
-    </SectionCard>
-  )
-}
-
-function Row({
-  label,
-  children,
-}: {
-  label: string
-  children: ReactNode
-}) {
-  return (
-    <div className="flex items-baseline justify-between gap-3">
-      <dt className="shrink-0 text-muted-foreground">{label}</dt>
-      <dd className="min-w-0 text-right">{children}</dd>
     </div>
   )
 }
 
-function describeCpu(info: RouterInfo): string {
+function Metric({
+  label,
+  children,
+}: {
+  label: string
+  children: React.ReactNode
+}) {
+  return (
+    <div className="min-w-0 border-b border-border px-3 py-2.5 last:border-b-0 sm:border-r xl:border-b-0 xl:last:border-r-0 sm:[&:nth-child(4n)]:border-r-0 xl:[&:nth-child(4n)]:border-r">
+      <dt className="text-[12px] leading-5 text-muted-foreground">{label}</dt>
+      <dd className="truncate text-[13px] leading-5 font-medium text-foreground">
+        {children}
+      </dd>
+    </div>
+  )
+}
+
+function formatCpuSummary(info: RouterInfo): string {
   const parts: string[] = []
-  if (info.cpu_model) {
-    parts.push(info.cpu_model)
-  } else if (info.arch) {
-    parts.push(info.arch)
-  }
   if (typeof info.cpu_load_percent === "number") {
     parts.push(`${info.cpu_load_percent}%`)
   }
   if (typeof info.cpu_temperature_c === "number") {
     parts.push(`${info.cpu_temperature_c}°C`)
   }
-  return parts.join(" · ")
+  return parts.join(" · ") || info.arch || "—"
 }
 
 function formatMemory(
@@ -184,7 +180,7 @@ function formatMemory(
   if (typeof info.memory_used_mb !== "number") {
     return t("overview.router.memoryTotalOnly", { total: info.memory_total_mb })
   }
-  return t("overview.router.memoryValue", {
+  return t("overview.router.memoryValueCompact", {
     used: info.memory_used_mb,
     total: info.memory_total_mb,
     percent: info.memory_used_percent ?? 0,
@@ -195,9 +191,9 @@ function formatDisk(
   info: RouterInfo,
   t: (key: string, options?: Record<string, unknown>) => string
 ): string {
-  return t("overview.router.diskValue", {
-    used: info.disk_used_mb ?? 0,
-    total: info.disk_total_mb ?? 0,
+  return t("overview.router.diskValueCompact", {
+    used: formatCapacityMb(info.disk_used_mb ?? 0, t),
+    total: formatCapacityMb(info.disk_total_mb ?? 0, t),
     percent: info.disk_used_percent ?? 0,
   })
 }
@@ -209,5 +205,26 @@ function formatUptime(
   const days = Math.floor(seconds / 86400)
   const hours = Math.floor((seconds % 86400) / 3600)
   const minutes = Math.floor((seconds % 3600) / 60)
-  return t("overview.router.uptimeValue", { days, hours, minutes })
+  if (days > 0) {
+    return t("overview.router.uptimeValue", { days, hours, minutes })
+  }
+  if (hours > 0) {
+    return t("overview.router.uptimeHoursValue", { hours, minutes })
+  }
+  return t("overview.router.uptimeMinutesValue", { minutes })
+}
+
+function formatCapacityMb(
+  value: number,
+  t: (key: string, options?: Record<string, unknown>) => string
+): string {
+  if (value < 1024) {
+    return t("overview.router.capacityMb", { value: Math.round(value) })
+  }
+
+  return t("overview.router.capacityGb", {
+    value: new Intl.NumberFormat(undefined, {
+      maximumFractionDigits: 1,
+    }).format(value / 1024),
+  })
 }

@@ -1,3 +1,7 @@
 KEEN_PBR="/opt/usr/bin/keen-pbr"
 CONFIG="/opt/etc/keen-pbr/config.json"
 DNSMASQ_HELPER="/opt/usr/lib/keen-pbr/dnsmasq.sh"
+# Optional daemon arguments.
+KEEN_PBR_ARGS=""
+# auto: prefer raw when supported; on: require it; off: retain mangle.
+KEEN_PBR_RAW_PREROUTING="auto"

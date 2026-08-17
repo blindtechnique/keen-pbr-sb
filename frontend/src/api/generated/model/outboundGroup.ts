@@ -7,7 +7,11 @@
  */
 
 export interface OutboundGroup {
-  /** Relative weight for selecting this group when multiple groups are healthy. */
+  /**
+     * Relative weight for selecting this group when multiple groups are healthy.
+     * @minimum 1
+     * @maximum 4294967295
+     */
   weight?: number;
   /** Ordered list of outbound tags to try within this group. */
   outbounds: string[];

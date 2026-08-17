@@ -1,14 +1,68 @@
 #!/bin/sh
 
+umask 077
+
 DNSMASQ_CONF="/opt/etc/dnsmasq.conf"
 DNSMASQ_TEMPLATE="/opt/usr/lib/keen-pbr/dnsmasq.conf.template"
 DNSMASQ_BACKUP="/opt/etc/dnsmasq.conf.backup-pre-keen-pbr"
+METADATA_HELPER="/opt/usr/lib/keen-pbr/portable-stat.sh"
 
 echo "keen-pbr-headless installation"
 echo "--------------------------------"
 
+install_atomic_executable() {
+    atomic_source=$1
+    atomic_destination=$2
+    atomic_temporary="${atomic_destination}.tmp.$$"
+    rm -f "$atomic_temporary" || return 1
+    if cp "$atomic_source" "$atomic_temporary" &&
+       chmod 0755 "$atomic_temporary" &&
+       mv -f "$atomic_temporary" "$atomic_destination"; then
+        return 0
+    fi
+    rm -f "$atomic_temporary"
+    return 1
+}
 
 mkdir -p /opt/usr/lib/keen-pbr
+# Restore the early-boot guard first: an older postrm can remove it during a
+# same-version reinstall before this replacement package reaches postinst.
+if [ -x /opt/usr/lib/keen-pbr/rescue-startup-guard.sh ]; then
+    install_atomic_executable \
+        /opt/usr/lib/keen-pbr/rescue-startup-guard.sh \
+        /opt/etc/init.d/S00keen-pbr-rescue || exit 1
+    sync
+fi
+[ -f "$METADATA_HELPER" ] && [ ! -L "$METADATA_HELPER" ] || {
+    echo "Portable metadata helper is missing or unsafe" >&2
+    exit 1
+}
+. "$METADATA_HELPER" || exit 1
+
+[ ! -L /opt/var/lib/keen-pbr/rescue ] &&
+    { [ ! -e /opt/var/lib/keen-pbr/rescue ] ||
+      [ -d /opt/var/lib/keen-pbr/rescue ]; } || exit 1
+mkdir -p /opt/var/lib/keen-pbr/rescue
+rescue_owner="$(keen_pbr_stat_value '%u' /opt/var/lib/keen-pbr/rescue)" ||
+    exit 1
+[ "$rescue_owner" = "$(id -u)" ] || {
+    echo "Unsafe owner on /opt/var/lib/keen-pbr/rescue" >&2
+    exit 1
+}
+chmod 0700 /opt/var/lib/keen-pbr/rescue || exit 1
+for helper in portable-stat.sh rescue-update.sh update-lock.sh; do
+    source="/opt/usr/lib/keen-pbr/$helper"
+    [ -f "$source" ] && [ ! -L "$source" ] || continue
+    install_atomic_executable \
+        "$source" \
+        "/opt/var/lib/keen-pbr/rescue/$helper" || exit 1
+done
+if [ -x /opt/etc/init.d/S00keen-pbr-rescue ] &&
+   ! KEEN_PBR_PACKAGE_POSTINST=1 \
+     /opt/etc/init.d/S00keen-pbr-rescue start; then
+    echo "keen-pbr recovery is pending; refusing package postinst" >&2
+    exit 1
+fi
 
 answer=""
 if [ -f "$DNSMASQ_TEMPLATE" ]; then
@@ -53,7 +107,11 @@ case "$answer" in
 esac
 
 echo ""
-/opt/etc/init.d/S80keen-pbr start || echo "Failed to start keen-pbr service"
+if ! KEEN_PBR_PACKAGE_POSTINST=1 \
+     /opt/etc/init.d/S80keen-pbr start; then
+    echo "Failed to start keen-pbr service" >&2
+    exit 1
+fi
 echo ""
 
 echo "Installation complete!"

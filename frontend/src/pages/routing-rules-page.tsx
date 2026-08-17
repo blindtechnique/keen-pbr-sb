@@ -1,9 +1,10 @@
-import { Pencil, Plus, Trash2 } from "lucide-react"
-import { useMemo } from "react"
+import { Plus, Save, SparklesIcon } from "lucide-react"
+import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { useLocation } from "wouter"
 
 import type { ApiError } from "@/api/client"
+import type { ConfigObject } from "@/api/generated/model/configObject"
 import type { RouteRule } from "@/api/generated/model/routeRule"
 import {
   useConfigMutationPending,
@@ -12,11 +13,14 @@ import {
 import type { RuntimeOutboundState } from "@/api/generated/model"
 import { useGetConfig, useGetRuntimeOutbounds } from "@/api/queries"
 import { selectConfig } from "@/api/selectors"
+import { KeenPencilIcon, KeenTrashIcon } from "@/components/shared/keen-icons"
 import { ActionButtons } from "@/components/shared/action-buttons"
 import { BulkSelectionToolbar } from "@/components/shared/bulk-selection-toolbar"
 import { ConfigSaveErrorAlert } from "@/components/shared/config-save-error-alert"
 import { ConfigTransferButtons } from "@/components/shared/config-transfer-buttons"
 import { DataTable } from "@/components/shared/data-table"
+import { RuleConditionsCell } from "@/components/shared/rule-conditions-cell"
+import { TableSearch } from "@/components/shared/table-search"
 import { SortableCards } from "@/components/shared/sortable-cards"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { PageHeader } from "@/components/shared/page-header"
@@ -28,31 +32,81 @@ import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
 import { Checkbox } from "@/components/ui/checkbox"
+import { useSemanticEditSession } from "@/hooks/use-semantic-edit-session"
 import {
+  formatListReferenceLabels,
+  getListDisplayName,
+} from "@/lib/list-display"
+import { createOutboundDisplayNameMap } from "@/lib/outbound-display"
+import { getRuleEditHref } from "@/lib/rule-route"
+import { filterBySearchQuery, normalizeSearchQuery } from "@/lib/table-search"
+import { cn } from "@/lib/utils"
+import {
+  areRouteRulesSemanticallyEqual,
   getApiErrorMessage,
+  getRouteRulesSemanticKey,
+  getRouteRuleDerivedName,
+  getRouteRuleDisplayName,
   getRoutingRuleRowId,
+  isRouteRuleNameGenerated,
   reorderRules,
   setRouteRuleEnabled,
 } from "@/pages/routing-rules-utils"
 
-export function RoutingRulesPage() {
+export function RoutingRulesPage({
+  embedded = false,
+}: { embedded?: boolean } = {}) {
+  const configQuery = useGetConfig()
+  const loadedConfig = selectConfig(configQuery.data)
+  const baselineRules = loadedConfig?.route?.rules ?? []
+  const editorKey = loadedConfig
+    ? getRouteRulesSemanticKey(baselineRules)
+    : configQuery.isError
+      ? "error"
+      : "loading"
+
+  return (
+    <RoutingRulesEditor
+      configError={configQuery.isError}
+      configLoading={configQuery.isLoading}
+      embedded={embedded}
+      key={editorKey}
+      loadedConfig={loadedConfig}
+    />
+  )
+}
+
+function RoutingRulesEditor({
+  loadedConfig,
+  configLoading,
+  configError,
+  embedded,
+}: {
+  loadedConfig?: ConfigObject
+  configLoading: boolean
+  configError: boolean
+  embedded: boolean
+}) {
   const { t } = useTranslation()
   const [, navigate] = useLocation()
 
   const configMutationPending = useConfigMutationPending()
-  const configQuery = useGetConfig()
-  const loadedConfig = selectConfig(configQuery.data)
-  const routeRules = loadedConfig?.route?.rules ?? []
-  const ruleRowIds = routeRules.map((_rule, index) =>
-    getRoutingRuleRowId(index)
+  const baselineRules = loadedConfig?.route?.rules ?? []
+  const rulesSession = useSemanticEditSession(
+    baselineRules,
+    areRouteRulesSemanticallyEqual
   )
-  const ruleSelection = useRowSelection(ruleRowIds)
-  const runtimeOutboundsQuery = useGetRuntimeOutbounds({
-    query: {
-      refetchInterval: 10_000,
-      refetchIntervalInBackground: false,
-    },
-  })
+  const routeRules = rulesSession.value
+  const [search, setSearch] = useState("")
+  // Порядок правил — это их смысл, а перетаскивание работает по индексам
+  // полного списка. Пока фильтр активен, индексы отфильтрованной таблицы
+  // полному списку не соответствуют, поэтому перетаскивание выключается,
+  // а не «почти работает».
+  const searchActive = Boolean(normalizeSearchQuery(search))
+  const ruleSelection = useRowSelection(
+    routeRules.map((rule, index) => getRoutingRuleRowId(rule, index))
+  )
+  const runtimeOutboundsQuery = useGetRuntimeOutbounds()
   const runtimeOutbounds = useMemo(
     () =>
       runtimeOutboundsQuery.data?.status === 200
@@ -70,11 +124,29 @@ export function RoutingRulesPage() {
       ),
     [runtimeOutbounds]
   )
+  const outboundDisplayNames = useMemo(
+    () => createOutboundDisplayNameMap(loadedConfig?.outbounds ?? []),
+    [loadedConfig?.outbounds]
+  )
 
-  const tableRows = routeRules.map((rule: RouteRule, index: number) => {
+  const allRows = routeRules.map((rule: RouteRule, index: number) => {
     const runtimeState = runtimeOutboundByTag.get(rule.outbound)
-    return getRouteRuleRow(rule, index, t, runtimeState)
+    return getRouteRuleRow(
+      rule,
+      index,
+      t,
+      loadedConfig?.lists,
+      runtimeState,
+      outboundDisplayNames
+    )
   })
+  const tableRows = filterBySearchQuery(allRows, search, (row) => [
+    row.nameIsGenerated ? (row.derivedName ?? "") : row.displayName,
+    row.technicalId,
+    row.outbound,
+    ...row.conditions.map((condition) => condition.value),
+  ])
+  const ruleRowIds = tableRows.map((row) => row.id)
 
   const postConfigMutation = usePostConfigMutation({
     mutation: {
@@ -88,53 +160,58 @@ export function RoutingRulesPage() {
     },
   })
 
-  const persistRules = (
-    config: NonNullable<typeof loadedConfig>,
-    nextRules: RouteRule[],
-    options?: { clearSelection?: boolean }
-  ) => {
-    postConfigMutation.mutate(
-      {
-        data: {
-          ...config,
-          route: {
-            ...config.route,
-            rules: nextRules,
-          },
+  const stageRules = () => {
+    if (!loadedConfig || !rulesSession.isDirty) {
+      return
+    }
+
+    postConfigMutation.mutate({
+      data: {
+        ...loadedConfig,
+        route: {
+          ...loadedConfig.route,
+          rules: routeRules,
         },
       },
-      options?.clearSelection
-        ? {
-            onSuccess: () => {
-              ruleSelection.clear()
-            },
-          }
-        : undefined
+    })
+  }
+
+  const updateRules = (
+    update: RouteRule[] | ((currentRules: RouteRule[]) => RouteRule[]),
+    options?: { clearSelection?: boolean }
+  ) => {
+    rulesSession.setValue((currentRules) =>
+      typeof update === "function" ? update(currentRules) : update
     )
+    if (options?.clearSelection) {
+      ruleSelection.clear()
+    }
+  }
+
+  const cancelLocalChanges = () => {
+    rulesSession.reset()
+    ruleSelection.clear()
   }
 
   const handleReorder = (fromIndex: number, toIndex: number) => {
-    if (!loadedConfig) {
-      return
-    }
     if (fromIndex === toIndex || toIndex < 0 || toIndex >= routeRules.length) {
       return
     }
 
-    const nextRules = reorderRules(routeRules, fromIndex, toIndex)
-    persistRules(loadedConfig, nextRules)
+    updateRules(
+      (currentRules) => reorderRules(currentRules, fromIndex, toIndex),
+      { clearSelection: true }
+    )
   }
 
   const handleEnabledChange = (index: number, enabled: boolean) => {
-    if (!loadedConfig) {
-      return
-    }
-
-    persistRules(loadedConfig, setRouteRuleEnabled(routeRules, index, enabled))
+    updateRules((currentRules) =>
+      setRouteRuleEnabled(currentRules, index, enabled)
+    )
   }
 
   const handleBulkDelete = () => {
-    if (!loadedConfig || ruleSelection.selectedCount === 0) {
+    if (ruleSelection.selectedCount === 0) {
       return
     }
 
@@ -150,13 +227,13 @@ export function RoutingRulesPage() {
 
     const nextRules = routeRules.filter(
       (_rule, index) =>
-        !ruleSelection.selectedIds.has(getRoutingRuleRowId(index))
+        !ruleSelection.selectedIds.has(getRoutingRuleRowId(_rule, index))
     )
-    persistRules(loadedConfig, nextRules, { clearSelection: true })
+    updateRules(nextRules, { clearSelection: true })
   }
 
   const handleBulkSetEnabled = (enabled: boolean) => {
-    if (!loadedConfig || ruleSelection.selectedCount === 0) {
+    if (ruleSelection.selectedCount === 0) {
       return
     }
 
@@ -176,54 +253,108 @@ export function RoutingRulesPage() {
     }
 
     const nextRules = routeRules.map((rule, index) =>
-      ruleSelection.selectedIds.has(getRoutingRuleRowId(index))
+      ruleSelection.selectedIds.has(getRoutingRuleRowId(rule, index))
         ? { ...rule, enabled }
         : rule
     )
-    persistRules(loadedConfig, nextRules)
+    updateRules(nextRules)
   }
 
   return (
     <div className="space-y-3">
-      <PageHeader
-        description={t("pages.routingRules.description")}
-        title={t("pages.routingRules.title")}
-      />
-      <PageActionBar>
+      {embedded ? null : (
+        <PageHeader
+          description={t("pages.routingRules.description")}
+          title={t("pages.routingRules.title")}
+        />
+      )}
+      <PageActionBar
+        primary={
+          <Button
+            disabled={configMutationPending || rulesSession.isDirty}
+            onClick={() => navigate("/routing-rules/create")}
+          >
+            <Plus className="mr-1 h-4 w-4" />
+            {t("pages.routingRules.actions.addRule")}
+          </Button>
+        }
+        leading={
+          allRows.length > 0 ? (
+            <TableSearch
+              matchCount={tableRows.length}
+              onChange={(next) => {
+                setSearch(next)
+                ruleSelection.clear()
+              }}
+              placeholder={t("pages.routingRules.searchPlaceholder")}
+              totalCount={allRows.length}
+              value={search}
+            />
+          ) : null
+        }
+      >
         <ConfigTransferButtons
           config={loadedConfig}
-          disabled={configMutationPending}
+          disabled={configMutationPending || rulesSession.isDirty}
           kind="routing-rules"
           onImport={(nextConfig) =>
             postConfigMutation.mutate({ data: nextConfig })
           }
         />
-        <Button
-          disabled={configMutationPending}
-          onClick={() => navigate("/routing-rules/create")}
-        >
-          <Plus className="mr-1 h-4 w-4" />
-          {t("pages.routingRules.actions.addRule")}
-        </Button>
+
+        {rulesSession.isDirty ? (
+          <>
+            <Button
+              disabled={configMutationPending}
+              onClick={cancelLocalChanges}
+              variant="ghost"
+            >
+              {t("common.cancel")}
+            </Button>
+            <Button disabled={configMutationPending} onClick={stageRules}>
+              <Save className="mr-1 h-4 w-4" />
+              {postConfigMutation.isPending
+                ? t("common.saving")
+                : t("pages.routingRules.actions.saveChanges")}
+            </Button>
+          </>
+        ) : null}
       </PageActionBar>
 
       <ConfigSaveErrorAlert error={postConfigMutation.error} />
 
-      {configQuery.isLoading ? (
+      {configLoading ? (
         <TableSkeleton />
-      ) : configQuery.isError ? (
+      ) : configError ? (
         <ListPlaceholder
           description={t("common.loadErrorDescription")}
           title={t("common.unableToLoadData")}
           variant="error"
         />
-      ) : tableRows.length === 0 ? (
+      ) : allRows.length === 0 ? (
         <ListPlaceholder
+          action={
+            <Button onClick={() => navigate("/catalog")} variant="outline">
+              <SparklesIcon className="mr-1 h-4 w-4" />
+              {t("common.setupFromCatalog")}
+            </Button>
+          }
           description={t("pages.routingRules.empty.description")}
           title={t("pages.routingRules.empty.title")}
         />
       ) : (
         <div className="space-y-3">
+          {searchActive ? (
+            <p className="text-xs text-muted-foreground">
+              {t("pages.routingRules.reorderPausedBySearch")}
+            </p>
+          ) : null}
+          {tableRows.length === 0 ? (
+            <ListPlaceholder
+              description={t("common.tableSearch.empty")}
+              title={t("pages.routingRules.empty.title")}
+            />
+          ) : null}
           {/* The toolbar shares a fixed-height slot so selecting a rule does not
               push the whole table down. */}
           <div className="relative h-0">
@@ -257,19 +388,17 @@ export function RoutingRulesPage() {
                   size="sm"
                   variant="destructive"
                 >
-                  <Trash2 className="mr-1 h-4 w-4" />
+                  <KeenTrashIcon className="mr-1 h-4 w-4" />
                   {t("pages.routingRules.bulk.delete")}
                 </Button>
               </BulkSelectionToolbar>
             ) : null}
           </div>
-          {/* На телефоне таблица разворачивается в столбик подписей и
-              читается как каша, а строки не перетаскиваются: HTML5-drag
-              на сенсорных экранах не работает. Поэтому там своя раскладка
-              карточками и своё перетаскивание на pointer-событиях. */}
+          {/* На телефоне остаётся компактная карточная раскладка, но механизм
+              сортировки у неё тот же pointer-sortable, что у desktop-строк. */}
           <div className="md:hidden">
             <SortableCards
-              disabled={configMutationPending}
+              disabled={configMutationPending || searchActive}
               getKey={(row) => row.id}
               handleLabel={t("pages.routingRules.actions.reorder")}
               items={tableRows}
@@ -279,17 +408,30 @@ export function RoutingRulesPage() {
                   <div className="flex items-center gap-2">
                     <Checkbox
                       aria-label={t("common.selection.selectRow", {
-                        rowLabel: `${t("pages.routingRules.title")} #${row.order}`,
+                        rowLabel: row.displayName,
                       })}
                       checked={ruleSelection.selectedIds.has(row.id)}
                       disabled={configMutationPending}
                       onCheckedChange={() => ruleSelection.toggleOne(row.id)}
                     />
-                    <span className="text-sm font-medium">#{row.order}</span>
-                    <span className="truncate text-sm text-muted-foreground">
-                      → {row.outbound}
+                    {/* The rule name and the route shared one line and truncated
+                        equally, so a long route squeezed a short name down to
+                        nothing: "#3" rendered as "#.". The name owns the line
+                        now and the route sits underneath. */}
+                    <span
+                      className={cn(
+                        "min-w-0 flex-1 truncate text-sm font-medium",
+                        row.nameIsGenerated &&
+                          "font-normal text-muted-foreground",
+                        row.nameIsGenerated && !row.derivedName && "italic"
+                      )}
+                      title={row.technicalId}
+                    >
+                      {row.nameIsGenerated
+                        ? (row.derivedName ?? t("pages.routingRules.unnamed"))
+                        : row.displayName}
                     </span>
-                    <span className="ml-auto flex items-center gap-1">
+                    <span className="ml-auto flex shrink-0 items-center gap-1">
                       <Switch
                         aria-label={t(
                           row.enabled
@@ -305,17 +447,30 @@ export function RoutingRulesPage() {
                       <Button
                         aria-label={t("common.edit")}
                         className="size-8"
+                        disabled={configMutationPending || rulesSession.isDirty}
                         onClick={() =>
-                          navigate(`/routing-rules/${row.index}/edit`)
+                          navigate(
+                            getRuleEditHref(
+                              "routing-rules",
+                              routeRules[row.index],
+                              row.index
+                            )
+                          )
                         }
                         size="icon"
                         variant="ghost"
                       >
-                        <Pencil className="size-4" />
+                        <KeenPencilIcon className="size-4" />
                       </Button>
                     </span>
                   </div>
-                  <div className="flex flex-wrap gap-1">
+                  <div
+                    className="truncate pl-6 text-sm text-muted-foreground"
+                    title={row.outbound}
+                  >
+                    → {row.outbound}
+                  </div>
+                  <div className="flex flex-wrap gap-1 pl-6">
                     {row.conditions.map((condition) => (
                       <span
                         className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground"
@@ -332,21 +487,34 @@ export function RoutingRulesPage() {
 
           <div className="hidden md:block">
             <DataTable
+              columnClassNames={[
+                "w-[3.25rem] px-0.5",
+                "w-12 px-1 text-center",
+                "w-[18%]",
+                undefined,
+                "w-[20%]",
+                "w-[5.5rem] px-2",
+              ]}
+              fixedLayout
               headers={[
-                "",
-                t("pages.routingRules.headers.order"),
+                t("pages.routingRules.headers.enabled"),
+                t("pages.routingRules.headers.orderShort"),
+                t("pages.routingRules.headers.name"),
                 t("pages.routingRules.headers.criteria"),
                 t("pages.routingRules.headers.outbound"),
                 t("pages.routingRules.headers.actions"),
               ]}
               narrowColumns={[0, 1]}
               reorder={{
-                disabled: configMutationPending,
+                disabled: configMutationPending || searchActive,
                 handleLabel: t("pages.routingRules.actions.reorder"),
                 onReorder: handleReorder,
               }}
               rows={tableRows.map((row: ReturnType<typeof getRouteRuleRow>) => [
-                <div className="flex items-center" key={`${row.id}-enabled`}>
+                <div
+                  className="flex items-center justify-center"
+                  key={`${row.id}-enabled`}
+                >
                   <Switch
                     aria-label={t(
                       row.enabled
@@ -354,6 +522,7 @@ export function RoutingRulesPage() {
                         : "pages.routingRules.actions.enableRule"
                     )}
                     checked={row.enabled}
+                    className="after:-inset-x-2"
                     disabled={configMutationPending}
                     onCheckedChange={(checked) =>
                       handleEnabledChange(row.index, checked)
@@ -365,26 +534,40 @@ export function RoutingRulesPage() {
                     )}
                   />
                 </div>,
-                <span className="font-medium" key={`${row.id}-order`}>
+                <span
+                  className="font-medium tabular-nums"
+                  key={`${row.id}-order`}
+                >
                   #{row.order}
                 </span>,
-                <ul
-                  className="list-disc space-y-1 pl-5 text-sm"
-                  key={`${row.id}-conditions`}
+                <div
+                  className="min-w-0"
+                  key={`${row.id}-name`}
+                  title={row.technicalId}
                 >
-                  {row.conditions.map((condition) => (
-                    <li
-                      className="text-muted-foreground"
-                      key={`${row.id}-${condition.label}`}
-                    >
-                      <span className="font-medium text-foreground">
-                        {condition.label}:
-                      </span>{" "}
-                      {condition.value}
-                    </li>
-                  ))}
-                </ul>,
-                <div key={`${row.id}-outbound`}>
+                  <span
+                    className={cn(
+                      "block truncate font-medium",
+                      row.nameIsGenerated &&
+                        "font-normal text-muted-foreground",
+                      row.nameIsGenerated && !row.derivedName && "italic"
+                    )}
+                  >
+                    {row.nameIsGenerated
+                      ? (row.derivedName ?? t("pages.routingRules.unnamed"))
+                      : row.displayName}
+                  </span>
+                </div>,
+                // До двух однострочных условий и «Ещё N» — строки таблицы
+                // одной высоты, как в остальных таблицах; полный список — в
+                // редакторе и в подсказке ячейки.
+                <RuleConditionsCell
+                  className="min-h-11"
+                  conditions={row.conditions}
+                  key={`${row.id}-conditions`}
+                  maxRows={2}
+                />,
+                <div className="min-w-0" key={`${row.id}-outbound`}>
                   <RuntimeOutboundEntry
                     runtimeState={row.runtimeState}
                     title={row.outbound}
@@ -394,11 +577,17 @@ export function RoutingRulesPage() {
                 <ActionButtons
                   actions={[
                     {
-                      disabled: configMutationPending,
-                      icon: <Pencil className="h-4 w-4" />,
+                      disabled: configMutationPending || rulesSession.isDirty,
+                      icon: <KeenPencilIcon className="h-4 w-4" />,
                       label: t("common.edit"),
                       onClick: () =>
-                        navigate(`/routing-rules/${row.index}/edit`),
+                        navigate(
+                          getRuleEditHref(
+                            "routing-rules",
+                            routeRules[row.index],
+                            row.index
+                          )
+                        ),
                     },
                   ]}
                   key={`${row.id}-actions`}
@@ -413,7 +602,9 @@ export function RoutingRulesPage() {
                 selectAllLabel: t("common.selection.selectAll"),
                 getRowLabel: (rowId) =>
                   t("common.selection.selectRow", {
-                    rowLabel: `${t("pages.routingRules.title")} #${Number(rowId) + 1}`,
+                    rowLabel:
+                      tableRows.find((row) => row.id === rowId)?.displayName ??
+                      rowId,
                   }),
               }}
             />
@@ -428,12 +619,14 @@ function getRouteRuleRow(
   rule: RouteRule,
   index: number,
   t: (key: string) => string,
-  runtimeState?: RuntimeOutboundState
+  lists: ConfigObject["lists"],
+  runtimeState?: RuntimeOutboundState,
+  outboundDisplayNames: ReadonlyMap<string, string> = new Map()
 ) {
   const conditions = [
     {
       label: t("pages.routingRules.criteriaLabels.lists"),
-      value: (rule.list ?? []).join(", "),
+      value: formatListReferenceLabels(rule.list ?? [], lists),
     },
     {
       label: t("pages.routingRules.criteriaLabels.proto"),
@@ -469,13 +662,23 @@ function getRouteRuleRow(
       typeof condition.value === "string" && condition.value.trim().length > 0
   )
 
+  const nameIsGenerated = isRouteRuleNameGenerated(rule)
+
   return {
-    id: getRoutingRuleRowId(index),
+    id: getRoutingRuleRowId(rule, index),
+    technicalId: rule.id ?? "",
+    displayName: getRouteRuleDisplayName(rule, index),
+    nameIsGenerated,
+    derivedName: nameIsGenerated
+      ? getRouteRuleDerivedName(rule, (technicalId) =>
+          getListDisplayName(technicalId, lists)
+        )
+      : undefined,
     enabled: rule.enabled ?? true,
     index,
     order: index + 1,
     conditions,
-    outbound: rule.outbound,
+    outbound: outboundDisplayNames.get(rule.outbound) ?? rule.outbound,
     runtimeState,
   }
 }

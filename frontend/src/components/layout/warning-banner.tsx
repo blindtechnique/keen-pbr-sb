@@ -1,12 +1,16 @@
 import { useLayoutEffect, useRef } from "react"
-import { SaveIcon } from "lucide-react"
+import { RotateCcwIcon, SaveIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
+import { toast } from "sonner"
 
 import {
   useApplyConfigMutation,
+  useDiscardConfigMutation,
   usePostServiceActionMutation,
 } from "@/api/mutations"
+import type { ApiError } from "@/api/client"
 import { Button } from "@/components/ui/button"
+import { getApiErrorMessage } from "@/lib/api-errors"
 import { cn } from "@/lib/utils"
 import type {
   WarningBannerMode,
@@ -22,6 +26,13 @@ export function WarningBanner({
 }) {
   const { t } = useTranslation()
   const applyConfigMutation = useApplyConfigMutation()
+  const discardConfigMutation = useDiscardConfigMutation({
+    mutation: {
+      onError: (error) => {
+        toast.error(getApiErrorMessage(error as ApiError), { richColors: true })
+      },
+    },
+  })
   const restartServiceMutation = usePostServiceActionMutation("restart")
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -62,7 +73,9 @@ export function WarningBanner({
   }
 
   const isConverging = state.mode === "dnsmasq-converging"
-  const isError = state.mode === "dnsmasq-error"
+  const isLifecycle = state.mode.startsWith("lifecycle-")
+  const isError =
+    state.mode === "dnsmasq-error" || state.mode === "lifecycle-error"
   const handleApplyAndReload = () => {
     if (state.hasDraftConfig) {
       applyConfigMutation.mutate()
@@ -80,7 +93,7 @@ export function WarningBanner({
     <div
       ref={containerRef}
       className={cn(
-        "fixed inset-x-0 bottom-0 z-20 min-h-16 border-t md:left-(--sidebar-width)",
+        "fixed inset-x-0 bottom-0 z-20 min-h-16 border-t md:left-(--sidebar-offset)",
         "bg-card",
         isError
           ? "border-destructive/40"
@@ -101,20 +114,74 @@ export function WarningBanner({
             </p>
           </div>
 
-          {!isConverging ? (
-            <Button
-              disabled={state.isActionDisabled}
-              onClick={handleApplyAndReload}
-              size="sm"
-              className="shrink-0"
-            >
-              <SaveIcon className="mr-1 h-4 w-4" />
-              {state.actionPending
-                ? t("warning.actions.applyingAndRestarting")
-                : t("warning.actions.applyAndRestart")}
-            </Button>
-          ) : null}
+          <div className="flex shrink-0 gap-2">
+            {!isConverging && !isLifecycle && state.hasDraftConfig ? (
+              <Button
+                disabled={state.isActionDisabled}
+                onClick={() => discardConfigMutation.mutate()}
+                size="sm"
+                variant="outline"
+                className="shrink-0"
+              >
+                <RotateCcwIcon className="mr-1 h-4 w-4" />
+                {discardConfigMutation.isPending
+                  ? t("warning.actions.discarding")
+                  : t("warning.actions.discard")}
+              </Button>
+            ) : null}
+            {!isConverging && !isLifecycle ? (
+              <Button
+                disabled={state.isActionDisabled}
+                onClick={handleApplyAndReload}
+                size="sm"
+                className="shrink-0"
+              >
+                <SaveIcon className="mr-1 h-4 w-4" />
+                {state.actionPending
+                  ? t("warning.actions.applyingAndRestarting")
+                  : t("warning.actions.applyAndRestart")}
+              </Button>
+            ) : null}
+            {state.mode === "lifecycle-error" ? (
+              <Button
+                onClick={state.dismissFailure}
+                size="sm"
+                variant="outline"
+                className="shrink-0"
+              >
+                {t("lifecycle.dismiss")}
+              </Button>
+            ) : null}
+          </div>
         </div>
+
+        {isLifecycle && state.operationSteps.length > 0 ? (
+          <div className="flex flex-wrap gap-x-4 gap-y-1 text-[12px] leading-4">
+            {state.operationSteps.map((step) => (
+              <span
+                key={step.id}
+                className={cn(
+                  "inline-flex items-center gap-1.5",
+                  step.status === "failed"
+                    ? "text-destructive"
+                    : step.status === "succeeded"
+                      ? "text-success"
+                      : step.status === "running"
+                        ? "text-primary"
+                        : "text-muted-foreground"
+                )}
+              >
+                <span
+                  className={cn(
+                    "h-1.5 w-1.5 rounded-full bg-current",
+                    step.status === "running" && "animate-pulse"
+                  )}
+                />
+                {step.title}
+              </span>
+            ))}
+          </div>
+        ) : null}
 
         {isConverging ? (
           <div className="h-1.5 rounded bg-muted">
@@ -141,6 +208,12 @@ function getWarningBannerTitleKey(mode: WarningBannerMode) {
       return "warning.compact.dnsmasqRestarting"
     case "dnsmasq-error":
       return "warning.compact.dnsmasqUnavailable"
+    case "lifecycle-running":
+      return "lifecycle.running"
+    case "lifecycle-success":
+      return "lifecycle.success"
+    case "lifecycle-error":
+      return "lifecycle.error"
     case "hidden":
       return "warning.compact.keenRestartRequired"
   }
@@ -158,6 +231,12 @@ function getWarningBannerDescriptionKey(mode: WarningBannerMode) {
       return "warning.compact.dnsmasqRestartingDescription"
     case "dnsmasq-error":
       return "warning.compact.dnsmasqUnavailableDescription"
+    case "lifecycle-running":
+      return "lifecycle.runningDescription"
+    case "lifecycle-success":
+      return "lifecycle.successDescription"
+    case "lifecycle-error":
+      return "lifecycle.errorDescription"
     case "hidden":
       return "warning.compact.keenRestartRequiredDescription"
   }

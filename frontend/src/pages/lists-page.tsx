@@ -1,13 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query"
-import {
-  ArrowRight,
-  ExternalLink,
-  Pencil,
-  Plus,
-  RefreshCw,
-  Trash2,
-} from "lucide-react"
-import type { ReactNode } from "react"
+import { ExternalLink, Plus, RefreshCw } from "lucide-react"
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
@@ -16,10 +8,9 @@ import { useLocation } from "wouter"
 import type { ApiError } from "@/api/client"
 import type { ConfigObject } from "@/api/generated/model/configObject"
 import type { ConfigStateResponseListRefreshState } from "@/api/generated/model/configStateResponseListRefreshState"
-import type { DnsRule } from "@/api/generated/model/dnsRule"
-import type { RouteRule } from "@/api/generated/model/routeRule"
 import {
   useConfigMutationPending,
+  usePostListDeleteStageMutation,
   usePostConfigMutation,
   usePostListsRefreshMutation,
 } from "@/api/mutations"
@@ -28,33 +19,47 @@ import { useGetConfig } from "@/api/queries"
 import {
   selectConfig,
   selectConfigIsDraft,
+  selectConfigRevision,
   selectListRefreshState,
 } from "@/api/selectors"
+import { KeenPencilIcon, KeenTrashIcon } from "@/components/shared/keen-icons"
 import { ActionButtons } from "@/components/shared/action-buttons"
 import { BulkSelectionToolbar } from "@/components/shared/bulk-selection-toolbar"
 import { ConfigSaveErrorAlert } from "@/components/shared/config-save-error-alert"
 import { ConfigTransferButtons } from "@/components/shared/config-transfer-buttons"
 import { DataTable } from "@/components/shared/data-table"
+import { TableSearch } from "@/components/shared/table-search"
 import { DependencyList } from "@/components/shared/dependency-list"
-import {
-  DeleteImpactDialog,
-  type DeleteImpactItem,
-} from "@/components/shared/delete-impact-dialog"
+import { ExpandableText } from "@/components/shared/expandable-text"
+import { DeleteImpactDialog } from "@/components/shared/delete-impact-dialog"
+import { getListDeleteImpactItems } from "@/components/delete-impact/list-items"
+import { createDnsServerDisplayNameMap } from "@/lib/dns-display"
+import { getRuleEditHref } from "@/lib/rule-route"
+import type { Dependency } from "@/lib/dependencies"
+import { ListDeleteReplacementPicker } from "@/components/lists/list-delete-replacement-picker"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { PageHeader } from "@/components/shared/page-header"
 import { PageActionBar } from "@/components/shared/page-action-bar"
 import { StatsDisplay } from "@/components/shared/stats-display"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { useRowSelection } from "@/hooks/use-row-selection"
+import { filterBySearchQuery } from "@/lib/table-search"
+import { useTableSort } from "@/hooks/use-table-sort"
+import { useConfigDependencies } from "@/hooks/use-config-dependencies"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { getApiErrorMessage } from "@/lib/api-errors"
-import { dependenciesOfList } from "@/lib/dependencies"
+import { createOutboundDisplayNameMap } from "@/lib/outbound-display"
 import {
-  buildUpdatedConfigForListsDelete,
+  formatListReferenceLabels,
+  getListDisplayName,
+  getListReferenceLabel,
+} from "@/lib/list-display"
+import {
+  buildListDeleteTargets,
   getListDeleteImpact,
-  type ListDeleteImpact,
+  getListStatsState,
 } from "@/pages/lists-utils"
 
 type ListDraft = {
@@ -68,12 +73,17 @@ type ListDraft = {
 
 type ListTableRow = {
   id: string
+  displayName: string
+  technicalId?: string
   draft: ListDraft
   locationLabel: string
   locationIcon?: "external"
   lastUpdated?: string
+  lastAttempt?: string
+  lastError?: string
+  lastDetour?: string
   stats?: {
-    totalHosts: number
+    domains: number
     ipv4Subnets: number
     ipv6Subnets: number
   }
@@ -103,6 +113,7 @@ export function ListsPage() {
   const configMutationPending = useConfigMutationPending()
   const configQuery = useGetConfig()
   const loadedConfig = selectConfig(configQuery.data)
+  const configRevision = selectConfigRevision(configQuery.data)
   const isDraft = selectConfigIsDraft(configQuery.data)
   const listRefreshState = selectListRefreshState(configQuery.data)
   const [activeRefreshTarget, setActiveRefreshTarget] = useState<string | null>(
@@ -111,11 +122,12 @@ export function ListsPage() {
   const [bulkRefreshRunning, setBulkRefreshRunning] = useState(false)
   const [deleteRequest, setDeleteRequest] = useState<{
     ids: string[]
-    impact: ListDeleteImpact
     config: ConfigObject
+    baseRevision: string
     clearSelectionOnSuccess: boolean
   } | null>(null)
   const [deletePreview, setDeletePreview] = useState<typeof deleteRequest>(null)
+  const [replacementListId, setReplacementListId] = useState("")
   const visibleDeleteRequest = deleteRequest ?? deletePreview
 
   const listRefreshMutation = usePostListsRefreshMutation({
@@ -128,11 +140,18 @@ export function ListsPage() {
           toast.error(
             failedLists.length === 1
               ? t("pages.lists.messages.refreshFailedOne", {
-                  names: failedLists[0],
+                  names: getListReferenceLabel(
+                    failedLists[0],
+                    loadedConfig?.lists
+                  ),
                 })
               : t("pages.lists.messages.refreshFailedMany", {
                   count: failedLists.length,
-                  names: formatFailedListNamesForToast(failedLists, t),
+                  names: formatFailedListNamesForToast(
+                    failedLists,
+                    loadedConfig?.lists,
+                    t
+                  ),
                 }),
             { richColors: true }
           )
@@ -150,25 +169,95 @@ export function ListsPage() {
       },
       onSettled: () => {
         setActiveRefreshTarget(null)
+        void queryClient.invalidateQueries({ queryKey: queryKeys.config() })
       },
     },
   })
 
   const tableRows = useMemo(
-    () => getTableRowsFromListMap(loadedConfig?.lists, listRefreshState, t),
-    [loadedConfig?.lists, listRefreshState, t]
-  )
-  const dependenciesByList = useMemo(
     () =>
-      new Map(
-        tableRows.map((row) => [
-          row.id,
-          dependenciesOfList(loadedConfig, row.id),
-        ])
+      getTableRowsFromListMap(
+        loadedConfig?.lists,
+        listRefreshState,
+        createOutboundDisplayNameMap(loadedConfig?.outbounds ?? []),
+        t
       ),
-    [loadedConfig, tableRows]
+    [loadedConfig?.lists, loadedConfig?.outbounds, listRefreshState, t]
   )
-  const listRowIds = tableRows.map((row) => row.id)
+  const tableRowsById = useMemo(
+    () => new Map(tableRows.map((row) => [row.id, row])),
+    [tableRows]
+  )
+  const dependencyTargets = useMemo(
+    () => tableRows.map((row) => ({ kind: "list" as const, id: row.id })),
+    [tableRows]
+  )
+  const dependencyAnalysis = useConfigDependencies(
+    loadedConfig,
+    dependencyTargets
+  )
+  const dependenciesByList = useMemo(() => {
+    // «Правила DNS: правило → сервер» заменены на «DNS: сервер» (решение
+    // владельца): по новой концепции DNS назначается списку, а правило —
+    // деталь реализации. Сервер берётся из правил, покрывающих список;
+    // ссылка ведёт в редактор правила — для общего правила там видно всех.
+    const dnsServerNames = createDnsServerDisplayNameMap(
+      loadedConfig?.dns?.servers ?? []
+    )
+    const dnsChipsByList = new Map<string, Dependency[]>()
+    for (const [index, rule] of (loadedConfig?.dns?.rules ?? []).entries()) {
+      for (const listId of rule.list ?? []) {
+        const chips = dnsChipsByList.get(listId) ?? []
+        const label = dnsServerNames.get(rule.server) ?? rule.server
+        if (!chips.some((chip) => chip.label === label)) {
+          chips.push({
+            kind: "dns",
+            label,
+            href: getRuleEditHref("dns-rules", rule, index),
+          })
+        }
+        dnsChipsByList.set(listId, chips)
+      }
+    }
+    return new Map(
+      tableRows.map((row) => [
+        row.id,
+        [
+          ...(
+            dependencyAnalysis.dependenciesByTarget.get(`list:${row.id}`) ?? []
+          ).filter((dependency) => dependency.kind !== "dnsRule"),
+          ...(dnsChipsByList.get(row.id) ?? []),
+        ],
+      ])
+    )
+  }, [dependencyAnalysis.dependenciesByTarget, loadedConfig, tableRows])
+  const [search, setSearch] = useState("")
+  // Строки ищутся по имени, техническому идентификатору, источнику и по тому,
+  // где список используется: именно так его и вспоминают — «тот, что для
+  // телеграма» или «тот, что с githubusercontent».
+  const visibleRows = useMemo(
+    () =>
+      filterBySearchQuery(tableRows, search, (row) => [
+        row.displayName,
+        row.technicalId,
+        row.id,
+        row.locationLabel,
+        ...(dependenciesByList.get(row.id) ?? []).map(
+          (dependency) => dependency.label
+        ),
+      ]),
+    [tableRows, search, dependenciesByList]
+  )
+  // Колонки «Название» и «Источник» сортируются; «Записей» — составное поле
+  // вида «2 / 0 / 0», сравнивать его нечем, а «Где используется» и «Действия»
+  // сортировать бессмысленно.
+  const { sorted: sortedRows, sort } = useTableSort(visibleRows, [
+    { index: 0, get: (row) => row.displayName },
+    { index: 1, get: (row) => row.locationLabel },
+  ])
+  // Выделение живёт по видимым строкам: массовое действие не должно задеть
+  // то, что человек сейчас не видит.
+  const listRowIds = sortedRows.map((row) => row.id)
   const listSelection = useRowSelection(listRowIds)
   const hasRefreshableLists = tableRows.some((row) => row.canRefresh)
   const selectedRefreshableLists = tableRows.filter(
@@ -176,6 +265,18 @@ export function ListsPage() {
   )
   const refreshDisabled =
     listRefreshMutation.isPending || bulkRefreshRunning || configMutationPending
+
+  const deleteImpact = useMemo(
+    () =>
+      visibleDeleteRequest
+        ? getListDeleteImpact(
+            visibleDeleteRequest.config,
+            visibleDeleteRequest.ids,
+            replacementListId || undefined
+          )
+        : null,
+    [replacementListId, visibleDeleteRequest]
+  )
 
   const postConfigMutation = usePostConfigMutation({
     mutation: {
@@ -188,40 +289,92 @@ export function ListsPage() {
     },
   })
 
+  const deleteStageMutation = usePostListDeleteStageMutation({
+    mutation: {
+      onSuccess: async () => {
+        toast.success(t("pages.lists.deleteDialog.staged"))
+        if (deleteRequest?.clearSelectionOnSuccess) {
+          listSelection.clear()
+        }
+        setDeleteRequest(null)
+        setReplacementListId("")
+      },
+      onError: async (error) => {
+        if (error.status !== 409) {
+          toast.error(getApiErrorMessage(error), { richColors: true })
+          return
+        }
+
+        toast.warning(t("pages.lists.deleteDialog.revisionChanged"), {
+          richColors: true,
+        })
+        const latest = await configQuery.refetch()
+        const latestConfig = selectConfig(latest.data)
+        const latestRevision = selectConfigRevision(latest.data)
+        if (!latestConfig || !latestRevision) {
+          return
+        }
+
+        setDeleteRequest((current) => {
+          if (!current) {
+            return current
+          }
+          const remainingIds = current.ids.filter(
+            (listId) => latestConfig.lists?.[listId] !== undefined
+          )
+          if (remainingIds.length === 0) {
+            listSelection.clear()
+            return null
+          }
+          return {
+            ...current,
+            ids: remainingIds,
+            config: latestConfig,
+            baseRevision: latestRevision,
+          }
+        })
+        if (
+          replacementListId &&
+          latestConfig.lists?.[replacementListId] === undefined
+        ) {
+          setReplacementListId("")
+        }
+        deleteStageMutation.reset()
+      },
+    },
+  })
+
   const handleBulkDelete = () => {
-    if (!loadedConfig || listSelection.selectedCount === 0) {
+    if (!loadedConfig || !configRevision || listSelection.selectedCount === 0) {
       return
     }
 
     const listIds = [...listSelection.selectedIds]
     const request = {
       ids: listIds,
-      impact: getListDeleteImpact(loadedConfig, listIds),
       config: loadedConfig,
+      baseRevision: configRevision,
       clearSelectionOnSuccess: true,
     }
+    setReplacementListId("")
     setDeletePreview(request)
     setDeleteRequest(request)
   }
 
   const confirmDelete = () => {
-    if (!loadedConfig || !deleteRequest) {
+    if (!deleteRequest) {
       return
     }
 
-    postConfigMutation.mutate(
-      {
-        data: buildUpdatedConfigForListsDelete(loadedConfig, deleteRequest.ids),
+    deleteStageMutation.mutate({
+      data: {
+        base_revision: deleteRequest.baseRevision,
+        targets: buildListDeleteTargets(
+          deleteRequest.ids,
+          replacementListId || undefined
+        ),
       },
-      {
-        onSuccess: () => {
-          if (deleteRequest.clearSelectionOnSuccess) {
-            listSelection.clear()
-          }
-          setDeleteRequest(null)
-        },
-      }
-    )
+    })
   }
 
   const handleRefreshAll = () => {
@@ -272,7 +425,31 @@ export function ListsPage() {
         description={t("pages.lists.description")}
         title={t("pages.lists.title")}
       />
-      <PageActionBar>
+      <PageActionBar
+        primary={
+          <Button
+            disabled={configMutationPending}
+            onClick={() => navigate("/lists/create")}
+          >
+            <Plus className="mr-1 h-4 w-4" />
+            {t("pages.lists.actions.new")}
+          </Button>
+        }
+        leading={
+          tableRows.length > 0 ? (
+            <TableSearch
+              matchCount={visibleRows.length}
+              onChange={(next) => {
+                setSearch(next)
+                listSelection.clear()
+              }}
+              placeholder={t("pages.lists.searchPlaceholder")}
+              totalCount={tableRows.length}
+              value={search}
+            />
+          ) : null
+        }
+      >
         {hasRefreshableLists ? (
           <Button
             disabled={refreshDisabled}
@@ -295,13 +472,6 @@ export function ListsPage() {
             postConfigMutation.mutate({ data: nextConfig })
           }
         />
-        <Button
-          disabled={configMutationPending}
-          onClick={() => navigate("/lists/create")}
-        >
-          <Plus className="mr-1 h-4 w-4" />
-          {t("pages.lists.actions.new")}
-        </Button>
       </PageActionBar>
 
       <ConfigSaveErrorAlert error={postConfigMutation.error} />
@@ -321,62 +491,70 @@ export function ListsPage() {
         />
       ) : (
         <div className="space-y-3">
-          {listSelection.hasSelection ? (
-            <BulkSelectionToolbar
-              cancelLabel={t("common.cancel")}
-              countLabel={t("pages.lists.bulk.selected", {
-                count: listSelection.selectedCount,
-              })}
-              onCancel={() => {
-                listSelection.clear()
-              }}
-            >
-              <Button
-                className="md:hidden"
-                disabled={configMutationPending}
-                onClick={() => listSelection.setAllVisible(true)}
-                size="sm"
-                variant="outline"
+          {visibleRows.length === 0 ? (
+            <ListPlaceholder
+              description={t("common.tableSearch.empty")}
+              title={t("pages.lists.empty.title")}
+            />
+          ) : null}
+          <div className="relative h-0">
+            {listSelection.hasSelection ? (
+              <BulkSelectionToolbar
+                cancelLabel={t("common.cancel")}
+                countLabel={t("pages.lists.bulk.selected", {
+                  count: listSelection.selectedCount,
+                })}
+                onCancel={() => {
+                  listSelection.clear()
+                }}
               >
-                {t("common.selection.selectAllShort")}
-              </Button>
-              {hasRefreshableLists ? (
                 <Button
-                  disabled={
-                    refreshDisabled || selectedRefreshableLists.length === 0
-                  }
-                  onClick={() => void handleBulkRefreshSelected()}
+                  className="md:hidden"
+                  disabled={configMutationPending}
+                  onClick={() => listSelection.setAllVisible(true)}
                   size="sm"
                   variant="outline"
                 >
-                  <RefreshCw
-                    className={`mr-1 h-4 w-4 ${
-                      bulkRefreshRunning ? "animate-spin" : ""
-                    }`}
-                  />
-                  {t("pages.lists.bulk.refreshSelected")}
+                  {t("common.selection.selectAllShort")}
                 </Button>
-              ) : null}
-              <Button
-                disabled={configMutationPending}
-                onClick={handleBulkDelete}
-                size="sm"
-                variant="destructive"
-              >
-                <Trash2 className="mr-1 h-4 w-4" />
-                {t("pages.lists.bulk.deleteSelected")}
-              </Button>
-            </BulkSelectionToolbar>
-          ) : null}
+                {hasRefreshableLists ? (
+                  <Button
+                    disabled={
+                      refreshDisabled || selectedRefreshableLists.length === 0
+                    }
+                    onClick={() => void handleBulkRefreshSelected()}
+                    size="sm"
+                    variant="outline"
+                  >
+                    <RefreshCw
+                      className={`mr-1 h-4 w-4 ${
+                        bulkRefreshRunning ? "animate-spin" : ""
+                      }`}
+                    />
+                    {t("pages.lists.bulk.refreshSelected")}
+                  </Button>
+                ) : null}
+                <Button
+                  disabled={configMutationPending}
+                  onClick={handleBulkDelete}
+                  size="sm"
+                  variant="destructive"
+                >
+                  <KeenTrashIcon className="mr-1 h-4 w-4" />
+                  {t("pages.lists.bulk.deleteSelected")}
+                </Button>
+              </BulkSelectionToolbar>
+            ) : null}
+          </div>
           <div className="divide-y divide-border/70 border-b border-border/70 md:hidden">
-            {tableRows.map((list) => (
+            {sortedRows.map((list) => (
               <div
                 className="flex items-start gap-3 bg-card px-1 py-3"
                 key={list.id}
               >
                 <Checkbox
                   aria-label={t("common.selection.selectRow", {
-                    rowLabel: list.id,
+                    rowLabel: getListAccessibleLabel(list),
                   })}
                   checked={listSelection.selectedIds.has(list.id)}
                   className="mt-0.5 shrink-0"
@@ -386,12 +564,25 @@ export function ListsPage() {
                 <div className="min-w-0 flex-1 space-y-2">
                   <div className="flex min-w-0 items-start gap-2">
                     <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-medium">
-                        {list.draft.name}
+                      <p
+                        className="truncate text-sm font-medium"
+                        title={getListAccessibleLabel(list)}
+                      >
+                        {list.displayName}
                       </p>
-                      <p className="truncate text-xs text-muted-foreground">
+                      {/* Адрес остаётся обрезанным намеренно. Раскрывать его
+                          здесь я пробовал: на строку с неудачной загрузкой
+                          выходит две кнопки «Читать далее» подряд, и неясно,
+                          какая к чему. Полный адрес показывает экран
+                          редактирования, до которого один шаг — карандаш в этой
+                          же строке. `title` помогает мыши на узком окне. */}
+                      <p
+                        className="truncate text-xs text-muted-foreground"
+                        title={list.locationLabel}
+                      >
                         {list.locationLabel}
                       </p>
+                      <ListRefreshSummary list={list} t={t} />
                     </div>
                     <Badge size="xs" variant="outline">
                       {getListSourceLabel(list.draft, t)}
@@ -399,9 +590,9 @@ export function ListsPage() {
                   </div>
                   {list.stats ? (
                     <StatsDisplay
+                      domains={list.stats.domains}
                       ipv4Subnets={list.stats.ipv4Subnets}
                       ipv6Subnets={list.stats.ipv6Subnets}
-                      totalHosts={list.stats.totalHosts}
                     />
                   ) : null}
                   <DependencyList
@@ -438,7 +629,7 @@ export function ListsPage() {
                       variant="ghost"
                       aria-label={t("common.edit")}
                     >
-                      <Pencil />
+                      <KeenPencilIcon />
                     </Button>
                   </div>
                 </div>
@@ -454,10 +645,13 @@ export function ListsPage() {
                 t("pages.lists.headers.rules"),
                 t("pages.lists.headers.actions"),
               ]}
-              rows={tableRows.map((list) => [
+              rows={sortedRows.map((list) => [
                 <div className="space-y-1" key={`${list.id}-name`}>
-                  <div className="flex items-center gap-2 font-medium">
-                    {list.draft.name}
+                  <div
+                    className="flex items-center gap-2 font-medium"
+                    title={getListAccessibleLabel(list)}
+                  >
+                    {list.displayName}
                     {list.locationIcon === "external" ? (
                       <a
                         aria-label={list.locationLabel}
@@ -473,33 +667,40 @@ export function ListsPage() {
                   <div className="text-sm text-muted-foreground md:text-xs">
                     {list.locationLabel}
                   </div>
-                  {list.canRefresh ? (
-                    <div className="text-sm text-muted-foreground md:text-xs">
-                      {t("pages.lists.lastUpdated", {
-                        value: formatLastUpdatedLabel(
-                          list.lastUpdated,
-                          t("pages.lists.neverUpdated")
-                        ),
-                      })}
-                    </div>
-                  ) : null}
+                  <ListRefreshSummary list={list} t={t} />
                 </div>,
                 <Badge key={`${list.id}-type`} variant="outline">
                   {getListSourceLabel(list.draft, t)}
                 </Badge>,
-                list.stats ? (
+                // «0» и «не загружен» выглядели одинаково — прочерком. Свои
+                // записи панель считает сама, а что лежит в скачанном файле,
+                // она не знает: демон количество не отдаёт. Поэтому здесь не
+                // выдуманное число, а честное состояние загрузки.
+                getListStatsState(list) === "counted" && list.stats ? (
                   <StatsDisplay
+                    domains={list.stats.domains}
                     ipv4Subnets={list.stats.ipv4Subnets}
                     ipv6Subnets={list.stats.ipv6Subnets}
                     key={`${list.id}-stats`}
-                    totalHosts={list.stats.totalHosts}
                   />
-                ) : (
+                ) : getListStatsState(list) === "loaded" ? (
                   <span
                     className="text-sm text-muted-foreground"
-                    key={`${list.id}-stats-empty`}
+                    key={`${list.id}-stats-loaded`}
                   >
-                    {t("pages.lists.noStats")}
+                    {t("pages.lists.statsLoaded")}
+                  </span>
+                ) : (
+                  <span
+                    className="text-sm text-warning-foreground"
+                    key={`${list.id}-stats-empty`}
+                    title={
+                      list.lastError
+                        ? t("pages.lists.statsNotLoadedFailed")
+                        : undefined
+                    }
+                  >
+                    {t("pages.lists.statsNotLoaded")}
                   </span>
                 ),
                 <DependencyList
@@ -534,7 +735,7 @@ export function ListsPage() {
                       : []),
                     {
                       disabled: configMutationPending,
-                      icon: <Pencil className="h-4 w-4" />,
+                      icon: <KeenPencilIcon className="h-4 w-4" />,
                       label: t("common.edit"),
                       onClick: () => navigate(`/lists/${list.id}/edit`),
                     },
@@ -542,6 +743,7 @@ export function ListsPage() {
                   key={`${list.id}-actions`}
                 />,
               ])}
+              sort={sort}
               selection={{
                 rowIds: listRowIds,
                 selectedIds: listSelection.selectedIds,
@@ -550,7 +752,9 @@ export function ListsPage() {
                 onToggleAll: listSelection.setAllVisible,
                 selectAllLabel: t("common.selection.selectAll"),
                 getRowLabel: (rowId) =>
-                  t("common.selection.selectRow", { rowLabel: rowId }),
+                  t("common.selection.selectRow", {
+                    rowLabel: getListAccessibleLabel(tableRowsById.get(rowId)),
+                  }),
               }}
             />
           </div>
@@ -559,239 +763,56 @@ export function ListsPage() {
       <DeleteImpactDialog
         confirmLabel={t("pages.lists.deleteDialog.confirm")}
         description={t("pages.lists.deleteDialog.description", {
-          names: visibleDeleteRequest?.ids.join(", ") ?? "",
+          names: visibleDeleteRequest
+            ? formatListReferenceLabels(
+                visibleDeleteRequest.ids,
+                visibleDeleteRequest.config.lists
+              )
+            : "",
         })}
         impactItems={
-          visibleDeleteRequest
+          visibleDeleteRequest && deleteImpact
             ? getListDeleteImpactItems(
                 visibleDeleteRequest.config,
                 visibleDeleteRequest.ids,
-                visibleDeleteRequest.impact,
+                deleteImpact,
+                replacementListId || undefined,
                 t
               )
             : []
         }
-        isPending={postConfigMutation.isPending}
+        isPending={deleteStageMutation.isPending}
         onConfirm={confirmDelete}
         onOpenChange={(open) => {
-          if (!open && !postConfigMutation.isPending) {
+          if (!open && !deleteStageMutation.isPending) {
             setDeleteRequest(null)
+            setReplacementListId("")
           }
         }}
         open={deleteRequest !== null}
         title={t("pages.lists.deleteDialog.title")}
-      />
+      >
+        {visibleDeleteRequest ? (
+          <ListDeleteReplacementPicker
+            config={visibleDeleteRequest.config}
+            deletedIds={visibleDeleteRequest.ids}
+            onChange={setReplacementListId}
+            replacementListId={replacementListId}
+          />
+        ) : null}
+      </DeleteImpactDialog>
     </div>
   )
 }
 
-function getListDeleteImpactItems(
-  config: ConfigObject | undefined,
-  listIds: string[],
-  impact: ListDeleteImpact,
-  t: (key: string, options?: Record<string, unknown>) => string
-) {
-  const items: DeleteImpactItem[] = []
-  const deletedListIds = new Set(listIds)
-
-  for (const listId of listIds) {
-    items.push({
-      label: (
-        <>
-          {t("pages.lists.deleteDialog.items.listPrefix")}{" "}
-          <strong>{listId}</strong>{" "}
-          {t("pages.lists.deleteDialog.items.listSuffix")}
-        </>
-      ),
-    })
-  }
-
-  for (const index of impact.removedRouteRuleIndexes) {
-    const rule = config?.route?.rules?.[index]
-    items.push({
-      label: t("pages.lists.deleteDialog.items.routeRuleRemoved", {
-        number: index + 1,
-      }),
-      details: getRouteRuleDetails(rule, deletedListIds, true, t),
-    })
-  }
-
-  for (const index of impact.routeRuleIndexes) {
-    if (impact.removedRouteRuleIndexes.includes(index)) {
-      continue
-    }
-    const rule = config?.route?.rules?.[index]
-    items.push({
-      label: t("pages.lists.deleteDialog.items.routeRuleUpdated", {
-        number: index + 1,
-      }),
-      details: getRouteRuleDetails(rule, deletedListIds, false, t),
-    })
-  }
-
-  for (const index of impact.removedDnsRuleIndexes) {
-    const rule = config?.dns?.rules?.[index]
-    items.push({
-      label: t("pages.lists.deleteDialog.items.dnsRuleRemoved", {
-        number: index + 1,
-      }),
-      details: getDnsRuleDetails(rule, deletedListIds, true, t),
-    })
-  }
-
-  for (const index of impact.dnsRuleIndexes) {
-    if (impact.removedDnsRuleIndexes.includes(index)) {
-      continue
-    }
-    const rule = config?.dns?.rules?.[index]
-    items.push({
-      label: t("pages.lists.deleteDialog.items.dnsRuleUpdated", {
-        number: index + 1,
-      }),
-      details: getDnsRuleDetails(rule, deletedListIds, false, t),
-    })
-  }
-
-  return items
-}
-
-function getRouteRuleDetails(
-  rule: RouteRule | undefined,
-  deletedListIds: ReadonlySet<string>,
-  isRemoved: boolean,
-  t: (key: string, options?: Record<string, unknown>) => string
-) {
-  if (!rule) {
-    return []
-  }
-
-  const beforeLists = rule.list ?? []
-  const afterLists = beforeLists.filter((name) => !deletedListIds.has(name))
-  const details: ReactNode[] = []
-
-  if (beforeLists.length > 0) {
-    details.push(
-      formatDetail(
-        t("pages.routingRules.criteriaLabels.lists"),
-        isRemoved
-          ? formatListValue(beforeLists, t)
-          : formatTransition(beforeLists, afterLists, t)
-      )
-    )
-  }
-
-  appendOptionalDetail(
-    details,
-    t("pages.routingRules.criteriaLabels.proto"),
-    rule.proto
-  )
-  appendOptionalDetail(
-    details,
-    t("pages.routingRules.criteriaLabels.dscp"),
-    rule.dscp?.toString()
-  )
-  appendOptionalDetail(
-    details,
-    t("pages.routingRules.criteriaLabels.sourceIp"),
-    rule.src_addr
-  )
-  appendOptionalDetail(
-    details,
-    t("pages.routingRules.criteriaLabels.destinationIp"),
-    rule.dest_addr
-  )
-  appendOptionalDetail(
-    details,
-    t("pages.routingRules.criteriaLabels.sourcePort"),
-    rule.src_port
-  )
-  appendOptionalDetail(
-    details,
-    t("pages.routingRules.criteriaLabels.destinationPort"),
-    rule.dest_port
-  )
-
-  return details
-}
-
-function getDnsRuleDetails(
-  rule: DnsRule | undefined,
-  deletedListIds: ReadonlySet<string>,
-  isRemoved: boolean,
-  t: (key: string, options?: Record<string, unknown>) => string
-) {
-  if (!rule) {
-    return []
-  }
-
-  const afterLists = rule.list.filter((name) => !deletedListIds.has(name))
-
-  return [
-    formatDetail(
-      t("pages.dnsRules.criteriaLabels.lists"),
-      isRemoved
-        ? formatListValue(rule.list, t)
-        : formatTransition(rule.list, afterLists, t)
-    ),
-    formatDetail(t("pages.dnsRules.headers.serverTag"), rule.server),
-  ]
-}
-
-function appendOptionalDetail(
-  details: ReactNode[],
-  label: string,
-  value: string | undefined
-) {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    return
-  }
-
-  details.push(formatDetail(label, value))
-}
-
-function formatDetail(label: string, value: ReactNode) {
-  return (
-    <>
-      {label}: {value}
-    </>
-  )
-}
-
-function formatTransition(
-  before: string[],
-  after: string[],
-  t: (key: string, options?: Record<string, unknown>) => string
-) {
-  return (
-    <ChangeValue
-      after={formatListValue(after, t)}
-      before={formatListValue(before, t)}
-    />
-  )
-}
-
-function ChangeValue({ after, before }: { after: string; before: string }) {
-  return (
-    <span className="inline-flex min-w-0 items-center gap-1 leading-4">
-      <span className="min-w-0 truncate">{before}</span>
-      <ArrowRight className="mt-px size-3 shrink-0" />
-      <span className="min-w-0 truncate">{after}</span>
-    </span>
-  )
-}
-
-function formatListValue(
-  values: string[],
-  t: (key: string, options?: Record<string, unknown>) => string
-) {
-  return values.length > 0 ? values.join(", ") : t("common.noneShort")
-}
-
 function formatFailedListNamesForToast(
   names: string[],
+  lists: ConfigObject["lists"],
   t: ReturnType<typeof useTranslation>["t"]
 ) {
-  const visibleNames = names.slice(0, MAX_FAILED_LIST_NAMES_IN_TOAST)
+  const visibleNames = names
+    .slice(0, MAX_FAILED_LIST_NAMES_IN_TOAST)
+    .map((name) => getListReferenceLabel(name, lists))
   const hiddenCount = names.length - visibleNames.length
   const label = visibleNames.join(", ")
 
@@ -804,18 +825,31 @@ function formatFailedListNamesForToast(
   })}`
 }
 
+function getListAccessibleLabel(list: ListTableRow | undefined) {
+  if (!list) {
+    return ""
+  }
+  return list.technicalId
+    ? `${list.displayName} (${list.technicalId})`
+    : list.displayName
+}
+
 function getTableRowsFromListMap(
   lists: ConfigObject["lists"],
   listRefreshState: ConfigStateResponseListRefreshState,
+  outboundNames: ReadonlyMap<string, string>,
   t: (key: string) => string
 ): ListTableRow[] {
   return Object.entries(lists ?? {}).map(([name, listConfig]) => {
+    const displayName = getListDisplayName(name, lists)
     const domains = listConfig.domains ?? []
     const ipCidrs = listConfig.ip_cidrs ?? []
     const showInlineStats = !listConfig.url && !listConfig.file
 
     return {
       id: name,
+      displayName,
+      technicalId: displayName !== name ? name : undefined,
       draft: {
         name,
         ttlMs: String(listConfig.ttl_ms ?? 0),
@@ -828,9 +862,15 @@ function getTableRowsFromListMap(
         listConfig.url || listConfig.file || t("pages.lists.location.inline"),
       locationIcon: listConfig.url ? "external" : undefined,
       lastUpdated: listRefreshState[name]?.last_updated,
+      lastAttempt: listRefreshState[name]?.last_attempt,
+      lastError: listRefreshState[name]?.last_error,
+      lastDetour: listRefreshState[name]?.last_detour
+        ? (outboundNames.get(listRefreshState[name]?.last_detour ?? "") ??
+          listRefreshState[name]?.last_detour)
+        : undefined,
       stats: showInlineStats
         ? {
-            totalHosts: domains.length + ipCidrs.length,
+            domains: domains.length,
             ipv4Subnets: ipCidrs.filter((value) => value.includes(".")).length,
             ipv6Subnets: ipCidrs.filter((value) => value.includes(":")).length,
           }
@@ -838,6 +878,55 @@ function getTableRowsFromListMap(
       canRefresh: Boolean(listConfig.url),
     }
   })
+}
+
+function ListRefreshSummary({
+  list,
+  t,
+}: {
+  list: ListTableRow
+  t: ReturnType<typeof useTranslation>["t"]
+}) {
+  if (!list.canRefresh) {
+    return null
+  }
+
+  const successfulAt = formatLastUpdatedLabel(
+    list.lastUpdated,
+    t("pages.lists.neverUpdated")
+  )
+  const attemptedAt = formatLastUpdatedLabel(
+    list.lastAttempt,
+    t("pages.lists.neverUpdated")
+  )
+
+  return (
+    <div className="space-y-0.5 text-xs">
+      <div className="text-muted-foreground">
+        {t("pages.lists.lastUpdated", { value: successfulAt })}
+      </div>
+      {list.lastError ? (
+        // Ошибка демона содержит адрес и системное сообщение целиком: на
+        // телефоне это десять строк, после которых следующий список уезжает за
+        // экран. Две строки говорят, что обновление не прошло; подробности —
+        // по «Читать далее».
+        <ExpandableText
+          className="text-destructive"
+          lines={2}
+          text={t(
+            list.lastDetour
+              ? "pages.lists.lastRefreshFailedVia"
+              : "pages.lists.lastRefreshFailed",
+            {
+              value: attemptedAt,
+              detour: list.lastDetour,
+              message: list.lastError,
+            }
+          )}
+        />
+      ) : null}
+    </div>
+  )
 }
 
 function getListSourceLabel(draft: ListDraft, t: (key: string) => string) {
@@ -866,7 +955,11 @@ function formatLastUpdatedLabel(value: string | undefined, fallback: string) {
   }
 
   return new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
   }).format(parsedDate)
 }

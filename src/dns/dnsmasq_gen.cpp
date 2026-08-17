@@ -1,11 +1,12 @@
 #include "dnsmasq_gen.hpp"
-#include "keenetic_dns.hpp"
+#include "dnsmasq_access_policy.hpp"
 #include "../crypto/md5.hpp"
 #include "../log/logger.hpp"
 
 #include <chrono>
 #include <functional>
 #include <set>
+#include <stdexcept>
 
 namespace keen_pbr3 {
 
@@ -24,15 +25,6 @@ static constexpr const char* kNftSetMiddle = ",6#inet#KeenPbrTable#";
 static constexpr size_t kNftSetPrefixLen = sizeof("/4#inet#KeenPbrTable#") - 1;
 static constexpr size_t kNftSetMiddleLen = sizeof(",6#inet#KeenPbrTable#") - 1;
 
-bool dns_config_uses_keenetic_server(const DnsConfig& dns_config) {
-    for (const auto& server : dns_config.servers.value_or(std::vector<DnsServer>{})) {
-        if (server.type.value_or(api::DnsServerType::STATIC) == api::DnsServerType::KEENETIC) {
-            return true;
-        }
-    }
-    return false;
-}
-
 std::string keenetic_static_domain_pattern(const std::string& domain) {
     if (domain.size() > 2 && domain[0] == '*' && domain[1] == '.') {
         return "/" + domain.substr(2);
@@ -49,21 +41,37 @@ DnsmasqGenerator::DnsmasqGenerator(const DnsServerRegistry& dns_registry,
                                    const std::map<std::string, ListConfig>& lists,
                                    ResolverType resolver_type,
                                    std::string hash_version,
-                                   bool ipv6_enabled)
+                                   ResolverIpv6Policy ipv6_policy,
+                                   std::vector<std::string> trusted_interfaces)
     : dns_registry_(dns_registry),
       list_streamer_(list_streamer),
       route_config_(route_config),
       dns_config_(dns_config),
       lists_(lists),
-      keenetic_static_entries_(dns_config_uses_keenetic_server(dns_config)
-                                   ? get_keenetic_static_dns_entries()
+      keenetic_static_entries_(dns_registry.keenetic_snapshot()
+                                   ? dns_registry.keenetic_snapshot()->static_entries
                                    : std::vector<KeeneticStaticDnsEntry>{}),
-      keenetic_dns_upstreams_(dns_config_uses_keenetic_server(dns_config)
-                                  ? get_keenetic_dns_upstreams()
+      keenetic_dns_upstreams_(dns_registry.keenetic_snapshot()
+                                  ? dns_registry.keenetic_snapshot()->upstreams
                                   : std::vector<KeeneticDnsUpstreamEntry>{}),
       resolver_type_(resolver_type),
       hash_version_(std::move(hash_version)),
-      ipv6_enabled_(ipv6_enabled) {}
+      ipv6_policy_(ipv6_policy),
+      trusted_interfaces_(std::move(trusted_interfaces)) {
+    if (!std::all_of(
+            trusted_interfaces_.begin(),
+            trusted_interfaces_.end(),
+            is_safe_dnsmasq_interface_selector)) {
+        throw std::invalid_argument(
+            "Invalid dnsmasq trusted interface selector");
+    }
+    std::sort(
+        trusted_interfaces_.begin(), trusted_interfaces_.end());
+    trusted_interfaces_.erase(
+        std::unique(
+            trusted_interfaces_.begin(), trusted_interfaces_.end()),
+        trusted_interfaces_.end());
+}
 
 std::string DnsmasqGenerator::compute_config_hash() {
     crypto::detail::MD5State md5;
@@ -84,11 +92,13 @@ std::string DnsmasqGenerator::compute_config_hash(
     const DnsConfig& dns_config,
     const std::map<std::string, ListConfig>& lists,
     std::string hash_version,
-    bool ipv6_enabled)
+    ResolverIpv6Policy ipv6_policy,
+    std::vector<std::string> trusted_interfaces)
 {
     return DnsmasqGenerator(dns_registry, list_streamer, route_config,
                             dns_config, lists, ResolverType::DNSMASQ_IPSET,
-                            std::move(hash_version), ipv6_enabled)
+                            std::move(hash_version), ipv6_policy,
+                            std::move(trusted_interfaces))
            .compute_config_hash();
 }
 
@@ -97,14 +107,46 @@ void DnsmasqGenerator::generate_directives(
     const std::function<void(const std::string&)>& hash_record_callback) {
     if (hash_record_callback) {
         hash_record_callback("version|" + hash_version_);
-        hash_record_callback(std::string("ipv6-enabled|") + (ipv6_enabled_ ? "1" : "0"));
+        hash_record_callback(
+            std::string("ipv6-enabled|")
+            + (ipv6_policy_.targets_enabled ? "1" : "0"));
+        hash_record_callback(
+            std::string("filter-aaaa|")
+            + (ipv6_policy_.suppress_aaaa ? "1" : "0"));
+        if (ipv6_policy_.suppress_aaaa) {
+            // RR 64/65 filtering changes the effective resolver output and
+            // must therefore participate in the managed-config hash.
+            hash_record_callback("filter-rr|64,65");
+        }
+        for (const auto& interface : trusted_interfaces_) {
+            hash_record_callback(
+                "trusted-interface|" + interface);
+        }
     }
 
     if (out != nullptr) {
         const char* resolver_name = (resolver_type_ == ResolverType::DNSMASQ_IPSET)
             ? "dnsmasq-ipset" : "dnsmasq-nftset";
         *out << "# Generated by keen-pbr (" << resolver_name << ") - do not edit manually\n\n";
+        for (const auto& interface : trusted_interfaces_) {
+            *out << "interface=" << interface << "\n";
+        }
+        if (!trusted_interfaces_.empty()) {
+            *out << "\n";
+        }
         *out << "address=/use-application-dns.net/\n\n";
+        if (ipv6_policy_.suppress_aaaa) {
+            // When IPv6 routing is disabled, returning AAAA records gives
+            // clients an unusable first candidate. Browsers then wait for
+            // Happy Eyeballs fallback before trying the correctly routed A
+            // record. HTTPS/SVCB records can carry ipv6hint values which
+            // bypass an AAAA-only filter, so dnsmasq 2.92 must suppress RR
+            // types 64 and 65 as well. This deliberately disables service
+            // binding discovery such as HTTP/3 and ECH for this IPv4-only
+            // mode; ordinary A-record resolution remains available.
+            *out << "filter-AAAA\n";
+            *out << "filter-rr=64,65\n\n";
+        }
     }
 
     if (dns_config_.dns_test_server.has_value()) {
@@ -287,11 +329,11 @@ void DnsmasqGenerator::generate_directives(
                 ipset_batch.enabled = true;
                 ipset_batch.directive_name = "ipset";
                 ipset_batch.prefix_len = kIpsetPrefixLen;
-                ipset_batch.suffix_len = ipv6_enabled_
+                ipset_batch.suffix_len = ipv6_policy_.targets_enabled
                     ? 1 + set4.size() + 1 + set6.size()
                     : 1 + set4.size();
                 ipset_batch.emit_line =
-                    [set4, set6, ipv6_enabled = ipv6_enabled_](std::ostream& stream, const std::string& domain_path) {
+                    [set4, set6, ipv6_enabled = ipv6_policy_.targets_enabled](std::ostream& stream, const std::string& domain_path) {
                         stream << "ipset=" << domain_path << "/" << set4;
                         if (ipv6_enabled) {
                             stream << "," << set6;
@@ -302,11 +344,11 @@ void DnsmasqGenerator::generate_directives(
                 ipset_batch.enabled = true;
                 ipset_batch.directive_name = "nftset";
                 ipset_batch.prefix_len = kNftsetPrefixLen;
-                ipset_batch.suffix_len = ipv6_enabled_
+                ipset_batch.suffix_len = ipv6_policy_.targets_enabled
                     ? kNftSetPrefixLen + set4.size() + kNftSetMiddleLen + set6.size()
                     : kNftSetPrefixLen + set4.size();
                 ipset_batch.emit_line =
-                    [set4, set6, ipv6_enabled = ipv6_enabled_](std::ostream& stream, const std::string& domain_path) {
+                    [set4, set6, ipv6_enabled = ipv6_policy_.targets_enabled](std::ostream& stream, const std::string& domain_path) {
                         stream << "nftset=" << domain_path
                                << kNftSetPrefix << set4;
                         if (ipv6_enabled) {

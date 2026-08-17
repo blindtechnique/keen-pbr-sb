@@ -1,22 +1,82 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { useMemo, useState } from "react"
-import { CheckIcon, RefreshCw } from "lucide-react"
+import type { TFunction } from "i18next"
+import { useMemo, useRef, useState } from "react"
+import {
+  AlertTriangleIcon,
+  PlusIcon,
+  RefreshCw,
+  ShieldCheckIcon,
+} from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
+import { useLocation } from "wouter"
 
 import type { ApiError } from "@/api/client"
-import type { ConfigObject } from "@/api/generated/model/configObject"
-import type { ListConfig } from "@/api/generated/model/listConfig"
-import type { RouteRule } from "@/api/generated/model/routeRule"
-import { useConfigMutationPending, usePostConfigMutation } from "@/api/mutations"
+import type { ListRefreshState } from "@/api/generated/model/listRefreshState"
+import { useConfigMutationPending } from "@/api/mutations"
+import { queryKeys } from "@/api/query-keys"
 import { useGetConfig } from "@/api/queries"
-import { selectConfig } from "@/api/selectors"
+import { selectConfig, selectListRefreshState } from "@/api/selectors"
+import { BottomActionBar } from "@/components/shared/bottom-action-bar"
+import { ExpandableText } from "@/components/shared/expandable-text"
+import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { PageHeader } from "@/components/shared/page-header"
+import { TableSkeleton } from "@/components/shared/table-skeleton"
+import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import { Skeleton } from "@/components/ui/skeleton"
+import { useSectionTab } from "@/hooks/use-section-tab"
 import { getApiErrorMessage } from "@/lib/api-errors"
+import { formatCatalogRefreshTimestamp } from "@/lib/catalog-refresh-timestamp"
+import { createOutboundDisplayNameMap } from "@/lib/outbound-display"
 import { cn } from "@/lib/utils"
+import {
+  applyCatalogSelectionToggle,
+  canSelectCatalogPreset,
+  getCatalogPresetSourceSummary,
+  getCatalogRoutingCompanionSourceSummaries,
+  getCatalogSelectionMode,
+  isCatalogRoutableOutboundType,
+  matchesCatalogSearch,
+  resolveCatalogAncestorMap,
+  resolveCatalogInstallStates,
+  resolveSelectedCatalogRoutingCompanions,
+  type CatalogPreset,
+  type CatalogWarning,
+} from "@/pages/catalog-model"
+import {
+  applyCatalogSetup,
+  getCatalogSetupInstallState,
+  previewCatalogSetup,
+  type CatalogSetupPreview,
+} from "@/pages/catalog-setup-api"
+import { getCatalogSetupWarningMessage } from "@/pages/catalog-setup-warning"
+import {
+  createCatalogSetupIntent,
+  resolveCatalogDestination,
+  updateCatalogSetupRuleName,
+  updateCatalogSetupSelectionName,
+  type CatalogSetupIntent,
+} from "@/pages/catalog-setup-intent"
 
 /**
  * Ready-made lists borrowed from the awg-manager catalogue.
@@ -25,23 +85,10 @@ import { cn } from "@/lib/utils"
  * currently contains rather than a curated copy - the copy we kept by hand
  * went stale within days.
  */
-type Preset = {
-  id: string
-  name: string
-  category?: string
-  engines?: {
-    dns?: { domains?: string[] }
-    singbox?: {
-      action?: string
-      ruleSets?: { tag?: string; url?: string }[]
-    }
-  }
-}
-
 type CatalogResponse = {
   source?: string
   updated_at?: number
-  presets?: Preset[]
+  presets?: CatalogPreset[]
   url?: string
   detour?: string
   error?: string
@@ -58,14 +105,108 @@ const CATEGORY_ORDER = [
 ]
 
 const DIRECT = "__direct__"
+const EMPTY_PRESETS: readonly CatalogPreset[] = []
+
+function CatalogListRefreshSummary({
+  detour,
+  state,
+}: {
+  detour?: string
+  state?: ListRefreshState
+}) {
+  const { t } = useTranslation()
+  const successfulAt = formatRefreshTimestamp(
+    state?.last_updated,
+    t("pages.catalog.refreshState.neverSucceeded")
+  )
+  const attemptedAt = formatRefreshTimestamp(
+    state?.last_attempt,
+    t("pages.catalog.refreshState.neverAttempted")
+  )
+
+  // Когда последняя попытка и есть последнее успешное обновление, второй
+  // строкой повторялась та же дата — на телефоне это две строки из четырёх,
+  // не сообщающие ничего нового. Маршрут загрузки при этом нужен, поэтому он
+  // переезжает в строку успеха.
+  const attemptSaysSomethingNew =
+    Boolean(state?.last_error) || state?.last_attempt !== state?.last_updated
+
+  return (
+    <span className="mt-1 block space-y-0.5 text-xs">
+      <span className="block text-muted-foreground">
+        {t(
+          detour && !attemptSaysSomethingNew
+            ? "pages.catalog.refreshState.successVia"
+            : "pages.catalog.refreshState.success",
+          { date: successfulAt, detour }
+        )}
+      </span>
+      {attemptSaysSomethingNew ? (
+        <span className="block text-muted-foreground">
+          {t(
+            detour
+              ? "pages.catalog.refreshState.attemptVia"
+              : "pages.catalog.refreshState.attempt",
+            { date: attemptedAt, detour }
+          )}
+        </span>
+      ) : null}
+      {state?.last_error ? (
+        // Та же ошибка демона, что и в списках, и та же беда: в строке
+        // заготовки каталога она вытесняет всё остальное.
+        <ExpandableText
+          className="text-destructive"
+          lines={2}
+          text={t("pages.catalog.refreshState.error", {
+            message: state.last_error,
+          })}
+        />
+      ) : null}
+    </span>
+  )
+}
+
+function formatRefreshTimestamp(value: string | undefined, fallback: string) {
+  if (!value) {
+    return fallback
+  }
+
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) {
+    return value
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(parsed)
+}
+
+function catalogWarningMessage(warning: CatalogWarning, t: TFunction): string {
+  switch (warning.code) {
+    case "broad_traffic_scope":
+      return t("pages.catalog.risks.broadTrafficScope")
+    default:
+      return (
+        warning.message ??
+        t("pages.catalog.risks.unknown", { code: warning.code })
+      )
+  }
+}
 
 export function CatalogPage() {
-  const { t } = useTranslation()
+  const { i18n, t } = useTranslation()
+  const [, navigate] = useLocation()
   const queryClient = useQueryClient()
 
   const configQuery = useGetConfig()
   const config = selectConfig(configQuery.data)
-  const postConfigMutation = usePostConfigMutation()
+  const configuredLists = config?.lists
+  const listRefreshState = selectListRefreshState(configQuery.data)
   const configMutationPending = useConfigMutationPending()
 
   const catalogQuery = useQuery<CatalogResponse>({
@@ -77,23 +218,36 @@ export function CatalogPage() {
     },
   })
 
-  const [category, setCategory] = useState("all")
-  const [search, setSearch] = useState("")
+  const [search, setSearch] = useState(
+    () => new URLSearchParams(window.location.search).get("search") ?? ""
+  )
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [destination, setDestination] = useState("")
   const [sourceDetour, setSourceDetour] = useState<string | null>(null)
+  const [setupIntent, setSetupIntent] = useState<CatalogSetupIntent | null>(
+    null
+  )
+  const setupIntentRef = useRef<CatalogSetupIntent | null>(null)
+  const [setupPreview, setSetupPreview] = useState<CatalogSetupPreview | null>(
+    null
+  )
+  const [acceptWarnings, setAcceptWarnings] = useState(false)
 
   // Only outbounds that can actually carry traffic: urltest groups and
-  // interfaces both qualify, blackhole does not.
-  const outboundTags = useMemo(
-    () =>
-      (config?.outbounds ?? [])
-        .filter((outbound) => outbound.type !== "blackhole")
-        .map((outbound) => outbound.tag),
-    [config]
+  // interfaces/tables qualify. Ignore and blackhole are verdicts, not egress
+  // paths. The backend planner repeats this validation authoritatively.
+  const outboundTags = (config?.outbounds ?? [])
+    .filter((outbound) => isCatalogRoutableOutboundType(outbound.type))
+    .map((outbound) => outbound.tag)
+  const outboundDisplayNames = createOutboundDisplayNameMap(
+    config?.outbounds ?? []
   )
 
-  const effectiveDestination = destination || outboundTags[0] || ""
+  const effectiveDestination = resolveCatalogDestination(
+    destination,
+    outboundTags,
+    DIRECT
+  )
   const effectiveSourceDetour = sourceDetour ?? catalogQuery.data?.detour ?? ""
 
   const refreshMutation = useMutation({
@@ -120,100 +274,240 @@ export function CatalogPage() {
     onError: (error: Error) => toast.error(error.message, { richColors: true }),
   })
 
-  const presets = catalogQuery.data?.presets ?? []
-  const existingNames = new Set(Object.keys(config?.lists ?? {}))
+  const previewMutation = useMutation({
+    mutationFn: previewCatalogSetup,
+    onSuccess: (preview, requestedIntent) => {
+      if (
+        JSON.stringify(requestedIntent) !==
+        JSON.stringify(setupIntentRef.current)
+      ) {
+        return
+      }
+      setSetupPreview(preview)
+      setAcceptWarnings(false)
+    },
+    onError: (error: ApiError) =>
+      toast.error(getApiErrorMessage(error), { richColors: true }),
+  })
 
-  const visible = useMemo(() => {
-    const needle = search.trim().toLowerCase()
-    return presets.filter(
-      (preset) =>
-        (category === "all" || preset.category === category) &&
-        (needle === "" || preset.name.toLowerCase().includes(needle))
-    )
-  }, [presets, category, search])
+  const applyMutation = useMutation({
+    mutationFn: ({
+      intent,
+      preview,
+      acceptWarnings: accepted,
+    }: {
+      intent: CatalogSetupIntent
+      preview: CatalogSetupPreview
+      acceptWarnings: boolean
+    }) =>
+      applyCatalogSetup({
+        intent,
+        preview,
+        acceptWarnings: accepted,
+      }),
+    onSuccess: async () => {
+      setSelected(new Set())
+      setupIntentRef.current = null
+      setSetupIntent(null)
+      setSetupPreview(null)
+      setAcceptWarnings(false)
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.config() }),
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.healthService(),
+        }),
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.healthRouting(),
+        }),
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.runtimeOutbounds(),
+        }),
+        queryClient.invalidateQueries({ queryKey: ["catalog"] }),
+      ])
+      toast.success(t("pages.catalog.setup.applied"))
+    },
+    onError: (error: ApiError) => {
+      // A conflict means the authoritative config or catalogue changed after
+      // preview. Never retry with a stale candidate identity.
+      if (error.status === 409) {
+        setSetupPreview(null)
+        setAcceptWarnings(false)
+      }
+      toast.error(getApiErrorMessage(error), { richColors: true })
+    },
+  })
+
+  const presets = catalogQuery.data?.presets ?? EMPTY_PRESETS
+  const catalogUpdatedAt = formatCatalogRefreshTimestamp(
+    catalogQuery.data?.updated_at,
+    { locale: i18n.resolvedLanguage }
+  )
+  const displayPresets = useMemo(
+    () => presets.filter((preset) => !preset.hidden),
+    [presets]
+  )
+  const selectedMode = useMemo(
+    () => getCatalogSelectionMode(presets, selected),
+    [presets, selected]
+  )
+  // Обход графа пресетов считался в теле рендера — 1,6–2,0 мс на каждое
+  // нажатие в поиске, причём дешёвая фильтрация была мемоизирована, а дорогая
+  // работа нет. Обход зависит от каталога и от выбранного, а не от строки
+  // поиска, и пересчитывать его на каждую букву незачем.
+  // Правило preserve-manual-memoization здесь ошибается: оно не может
+  // доказать, что `selected` и `config.lists` не меняются на месте. Не
+  // меняются: applyCatalogSelectionToggle возвращает новый Set (catalog-model
+  // 209-223), а конфиг приходит из кэша запроса и только заменяется целиком.
+  // Компилятор React в сборке не включён, так что без этих useMemo обход графа
+  // считается на каждый рендер — замерено 1,6–2,0 мс на нажатие в поиске.
+  /* eslint-disable react-hooks/preserve-manual-memoization */
+  const installStateByPresetId = useMemo(
+    () => resolveCatalogInstallStates(presets, configuredLists),
+    [presets, configuredLists]
+  )
+  const selectedAncestorByPresetId = useMemo(
+    () => resolveCatalogAncestorMap(presets, selected),
+    [presets, selected]
+  )
+  /* eslint-enable react-hooks/preserve-manual-memoization */
+  const selectedCatalogWarnings = useMemo(
+    () =>
+      presets.flatMap((preset) => {
+        if (!selected.has(preset.id)) {
+          return []
+        }
+        return (preset.warnings ?? []).map((warning) => ({
+          key: `${preset.id}:${warning.code}`,
+          presetName: preset.name,
+          message: catalogWarningMessage(warning, t),
+          requiresAcceptance: warning.requiresAcceptance ?? false,
+        }))
+      }),
+    [presets, selected, t]
+  )
 
   const categories = useMemo(() => {
-    const present = new Set(presets.map((preset) => preset.category))
+    const present = new Set(displayPresets.map((preset) => preset.category))
     return CATEGORY_ORDER.filter((key) => present.has(key))
-  }, [presets])
+  }, [displayPresets])
+
+  const categoryTabs = useMemo<SectionTab<string>[]>(() => {
+    const counts = new Map<string, number>()
+    for (const preset of displayPresets) {
+      if (preset.category) {
+        counts.set(preset.category, (counts.get(preset.category) ?? 0) + 1)
+      }
+    }
+
+    return [
+      {
+        value: "all",
+        label: t("pages.catalog.categories.all"),
+        count: displayPresets.length,
+      },
+      ...categories.map((key) => ({
+        value: key,
+        label: t(`pages.catalog.categories.${key}`),
+        count: counts.get(key) ?? 0,
+      })),
+    ]
+  }, [categories, displayPresets, t])
+  const [category, setCategory] = useSectionTab(
+    categoryTabs.map((tab) => tab.value),
+    "all"
+  )
+
+  const visible = useMemo(() => {
+    return displayPresets.filter(
+      (preset) =>
+        (category === "all" || preset.category === category) &&
+        matchesCatalogSearch(preset, search)
+    )
+  }, [displayPresets, category, search])
 
   const toggle = (id: string) => {
-    setSelected((previous) => {
-      const next = new Set(previous)
-      if (next.has(id)) {
-        next.delete(id)
-      } else {
-        next.add(id)
-      }
-      return next
-    })
+    setSelected((previous) =>
+      applyCatalogSelectionToggle(presets, previous, id)
+    )
   }
 
-  const handleAdd = () => {
+  const openAddDialog = () => {
     if (!config || selected.size === 0) {
       return
     }
-
-    const nextConfig: ConfigObject = {
-      ...config,
-      lists: { ...(config.lists ?? {}) },
-      route: { ...(config.route ?? {}), rules: [...(config.route?.rules ?? [])] },
-    }
-
-    const added: string[] = []
-
-    for (const preset of presets) {
-      if (!selected.has(preset.id)) {
-        continue
-      }
-
-      const name = listNameFor(preset.id, nextConfig.lists ?? {})
-      const url = preset.engines?.singbox?.ruleSets?.[0]?.url
-      const domains = preset.engines?.dns?.domains
-
-      // A preset carries either a compiled rule set or a plain domain list;
-      // taking the URL when present keeps the entry small and updatable.
-      const entry: ListConfig = url
-        ? { url, ...(effectiveSourceDetour ? { detour: effectiveSourceDetour } : {}) }
-        : { domains: domains ?? [] }
-
-      if (!url && (!domains || domains.length === 0)) {
-        continue
-      }
-
-      nextConfig.lists![name] = entry
-      added.push(name)
-    }
-
-    if (added.length === 0) {
+    if (selectedMode === "mixed") {
+      toast.error(t("pages.catalog.mixedSelection"), { richColors: true })
       return
     }
 
-    if (effectiveDestination === DIRECT) {
-      // Nothing to route: a list with no rule simply stays unused, which is
-      // what "leave it on the direct connection" means here.
-    } else if (effectiveDestination) {
-      const rule: RouteRule = {
-        list: added,
-        outbound: effectiveDestination,
-      }
-      nextConfig.route!.rules = [...(nextConfig.route!.rules ?? []), rule]
+    const intent = createCatalogSetupIntent({
+      destination: effectiveDestination,
+      directDestination: DIRECT,
+      presets,
+      selectedIds: selected,
+      selectionMode: selectedMode,
+      sourceDetour: effectiveSourceDetour,
+      combinedDisplayName: t("pages.catalog.routeRuleName", {
+        count: selected.size,
+      }),
+    })
+    if (!intent) {
+      toast.error(t("pages.catalog.invalidSelection"), { richColors: true })
+      return
+    }
+    setupIntentRef.current = intent
+    setSetupIntent(intent)
+    setSetupPreview(null)
+    setAcceptWarnings(false)
+    previewMutation.mutate(intent)
+  }
+
+  const confirmAdd = () => {
+    if (!setupIntent || previewMutation.isPending || applyMutation.isPending) {
+      return
     }
 
-    postConfigMutation.mutate(
-      { data: nextConfig },
-      {
-        onSuccess: () => {
-          setSelected(new Set())
-          toast.success(t("pages.catalog.added", { count: added.length }))
-        },
-        onError: (error) =>
-          toast.error(getApiErrorMessage(error as ApiError), {
-            richColors: true,
-          }),
-      }
-    )
+    if (!setupPreview) {
+      previewMutation.mutate(setupIntent)
+      return
+    }
+
+    applyMutation.mutate({
+      intent: setupIntent,
+      preview: setupPreview,
+      acceptWarnings,
+    })
   }
+
+  const updateSetupIntent = (
+    update: (current: CatalogSetupIntent) => CatalogSetupIntent
+  ) => {
+    setSetupIntent((current) => {
+      const next = current ? update(current) : current
+      setupIntentRef.current = next
+      return next
+    })
+    setSetupPreview(null)
+    setAcceptWarnings(false)
+  }
+
+  const setupInstallState = setupPreview
+    ? getCatalogSetupInstallState(setupPreview)
+    : null
+  const setupCompanions = resolveSelectedCatalogRoutingCompanions(
+    presets,
+    new Set(
+      setupIntent?.selections.map((selection) => selection.preset_id) ?? []
+    )
+  )
+  const setupRouteRuleCount = setupPreview
+    ? (setupPreview.summary.route_rules?.length ??
+      (setupPreview.summary.route_rule ? 1 : 0))
+    : 0
+  const setupDnsRuleCount = setupPreview
+    ? (setupPreview.summary.dns_rules?.length ??
+      (setupPreview.summary.dns_rule ? 1 : 0))
+    : 0
 
   return (
     <div className="space-y-3">
@@ -222,7 +516,7 @@ export function CatalogPage() {
         title={t("pages.catalog.title")}
       />
 
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted px-3 py-2">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-y border-border px-3 py-2">
         <p className="text-[13px] text-muted-foreground">
           {t("pages.catalog.source")}{" "}
           <a
@@ -233,32 +527,45 @@ export function CatalogPage() {
           >
             hoaxisr/awg-manager
           </a>
-          {catalogQuery.data?.updated_at
+          {catalogUpdatedAt
             ? ` · ${t("pages.catalog.updatedAt", {
-                date: new Date(
-                  catalogQuery.data.updated_at * 1000
-                ).toLocaleDateString(),
+                date: catalogUpdatedAt,
               })}`
             : null}
-          {presets.length > 0
-            ? ` · ${t("pages.catalog.count", { count: presets.length })}`
+          {displayPresets.length > 0
+            ? ` · ${t("pages.catalog.count", {
+                count: displayPresets.length,
+              })}`
             : null}
         </p>
 
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[13px]">{t("pages.catalog.downloadVia")}</span>
-          <select
-            className="h-8 rounded-md border border-input bg-card px-2 text-[13px]"
-            onChange={(event) => setSourceDetour(event.target.value)}
+          <Select
+            items={[
+              { value: "", label: t("pages.catalog.directly") },
+              ...outboundTags.map((tag) => ({
+                value: tag,
+                label: outboundDisplayNames.get(tag) ?? tag,
+              })),
+            ]}
+            onValueChange={(value) => setSourceDetour(String(value ?? ""))}
             value={effectiveSourceDetour}
           >
-            <option value="">{t("pages.catalog.directly")}</option>
-            {outboundTags.map((tag) => (
-              <option key={tag} value={tag}>
-                {tag}
-              </option>
-            ))}
-          </select>
+            <SelectTrigger className="w-auto min-w-56" size="sm">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectItem value="">{t("pages.catalog.directly")}</SelectItem>
+                {outboundTags.map((tag) => (
+                  <SelectItem key={tag} value={tag}>
+                    {outboundDisplayNames.get(tag) ?? tag}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
           <Button
             disabled={refreshMutation.isPending}
             onClick={() => refreshMutation.mutate()}
@@ -276,21 +583,12 @@ export function CatalogPage() {
         </div>
       </div>
 
-      <div className="flex flex-wrap gap-1.5">
-        <CategoryChip
-          active={category === "all"}
-          label={t("pages.catalog.categories.all")}
-          onClick={() => setCategory("all")}
-        />
-        {categories.map((key) => (
-          <CategoryChip
-            active={category === key}
-            key={key}
-            label={t(`pages.catalog.categories.${key}`)}
-            onClick={() => setCategory(key)}
-          />
-        ))}
-      </div>
+      <SectionTabs
+        ariaLabel={t("pages.catalog.categoriesAriaLabel")}
+        onValueChange={setCategory}
+        tabs={categoryTabs}
+        value={category}
+      />
 
       <Input
         onChange={(event) => setSearch(event.target.value)}
@@ -298,148 +596,585 @@ export function CatalogPage() {
         value={search}
       />
 
-      {catalogQuery.isLoading ? (
-        <div className="space-y-2">
-          {[0, 1, 2, 3, 4].map((index) => (
-            <Skeleton className="h-10 w-full" key={index} />
-          ))}
-        </div>
-      ) : null}
+      {catalogQuery.isLoading ? <TableSkeleton /> : null}
 
       {!catalogQuery.isLoading && visible.length === 0 ? (
-        <p className="py-8 text-center text-sm text-muted-foreground">
-          {t("pages.catalog.empty")}
-        </p>
+        <ListPlaceholder
+          description={t("pages.catalog.empty")}
+          title={t("pages.catalog.emptyTitle")}
+        />
       ) : null}
 
       {/* Каталог прокручивается внутри себя: восемьдесят семь заготовок
           уводили нижнюю панель с выбором маршрута далеко за экран, и
-          чтобы нажать «Добавить», приходилось листать обратно. */}
-      <div className="max-h-[55vh] divide-y overflow-y-auto border-y">
+          чтобы нажать «Добавить», приходилось листать обратно.
+
+          На телефоне — нет: там это была прокрутка внутри прокрутки, полстраницы
+          высотой, и заготовка обрывалась на полуслове. Панель с «Добавить» и
+          так прибита к низу экрана, листать обратно не нужно. */}
+      <div className="divide-y border-y sm:max-h-[55vh] sm:overflow-y-auto">
         {visible.map((preset) => {
-          const url = preset.engines?.singbox?.ruleSets?.[0]?.url
-          const domains = preset.engines?.dns?.domains?.length ?? 0
+          const sourceSummary = getCatalogPresetSourceSummary(preset)
+          const companionSummaries = getCatalogRoutingCompanionSourceSummaries(
+            preset,
+            presets
+          )
           const blocks = preset.engines?.singbox?.action === "reject"
-          const already = existingNames.has(sanitize(preset.id))
+          const installState = installStateByPresetId.get(preset.id)
+          const installedListId = installState?.primaryListId
+          const installedList = installedListId
+            ? config?.lists?.[installedListId]
+            : undefined
+          const selectedAncestor = selectedAncestorByPresetId.get(preset.id)
+          const exactlyInstalled = installState?.kind === "installed"
+          const selectionUnavailable = !canSelectCatalogPreset(
+            installState,
+            selectedAncestor
+          )
+          const warningMessages = (preset.warnings ?? []).map((warning) =>
+            catalogWarningMessage(warning, t)
+          )
+          const refreshState = installedListId
+            ? listRefreshState[installedListId]
+            : undefined
+          const refreshDetour = refreshState?.last_detour
+            ? (outboundDisplayNames.get(refreshState.last_detour) ??
+              refreshState.last_detour)
+            : undefined
 
           return (
             <label
-              className="flex cursor-pointer items-center gap-3 px-3 py-2.5 text-sm hover:bg-secondary"
+              className={cn(
+                // По верхнему краю, а не по центру: у заготовки с описанием и
+                // временем обновления строка вырастает в блок, и галочка
+                // уезжала на его середину — глазом её приходилось искать.
+                "flex items-start gap-3 px-3 py-2.5 text-sm",
+                selectionUnavailable
+                  ? "cursor-not-allowed"
+                  : "cursor-pointer hover:bg-secondary"
+              )}
               key={preset.id}
             >
               <input
                 checked={selected.has(preset.id)}
-                className="size-4 accent-[var(--primary)]"
-                disabled={already}
+                className="mt-0.5 size-4 shrink-0 accent-[var(--primary)]"
+                disabled={selectionUnavailable}
                 onChange={() => toggle(preset.id)}
                 type="checkbox"
               />
-              <span className="min-w-0 flex-1 truncate">{preset.name}</span>
-              <span className="shrink-0 text-xs text-muted-foreground">
-                {url
-                  ? t("pages.catalog.ruleSet")
-                  : t("pages.catalog.domains", { count: domains })}
+              {/* На телефоне заготовка — это карточка: сначала название во всю
+                  ширину, под ним описание, и только потом мелким шрифтом «что
+                  внутри» и «куда пойдёт». Раньше все три части стояли в один
+                  ряд, и на «Все AI сервисы» оставалось полтора слова. На
+                  широком экране ряд остаётся прежним. */}
+              <span className="flex min-w-0 flex-1 flex-col gap-1.5 sm:flex-row sm:items-start sm:gap-3">
+                <span className="min-w-0 flex-1">
+                  <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
+                    <span className="min-w-0 break-words sm:truncate">
+                      {preset.name}
+                    </span>
+                    {exactlyInstalled ? (
+                      <span className="shrink-0 text-xs font-medium text-success">
+                        {t("pages.catalog.installed")}
+                      </span>
+                    ) : installState?.kind === "partial" ? (
+                      <span className="shrink-0 text-xs font-medium text-warning-foreground">
+                        {t("pages.catalog.partial")}
+                      </span>
+                    ) : installState?.kind === "covered" &&
+                      installState.coveredBy ? (
+                      <span className="shrink-0 text-xs font-medium text-primary">
+                        {t("pages.catalog.coveredByInstalled", {
+                          name: installState.coveredBy.name,
+                        })}
+                      </span>
+                    ) : selectedAncestor ? (
+                      <span className="shrink-0 text-xs font-medium text-primary">
+                        {t("pages.catalog.coveredBySelection", {
+                          name: selectedAncestor.name,
+                        })}
+                      </span>
+                    ) : null}
+                  </span>
+                  {preset.notice ? (
+                    <span className="mt-1 block text-xs text-muted-foreground">
+                      {preset.notice}
+                    </span>
+                  ) : null}
+                  {companionSummaries.length > 0 ? (
+                    <span className="mt-1 block space-y-0.5 text-xs font-medium text-primary">
+                      {companionSummaries.map((companion) => (
+                        <span className="block" key={companion.id}>
+                          {companion.cidrCount > 0
+                            ? t("pages.catalog.ipCompanionInline", {
+                                name: companion.name,
+                                count: companion.cidrCount,
+                              })
+                            : companion.urlBacked
+                              ? t("pages.catalog.ipCompanionRemote", {
+                                  name: companion.name,
+                                })
+                              : t("pages.catalog.ipCompanionGeneric", {
+                                  name: companion.name,
+                                })}
+                        </span>
+                      ))}
+                    </span>
+                  ) : null}
+                  {warningMessages.length > 0 ? (
+                    <span className="mt-1 flex items-start gap-1.5 text-xs text-warning-foreground">
+                      <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
+                      <span>{warningMessages.join(" ")}</span>
+                    </span>
+                  ) : null}
+                  {installedList?.url ? (
+                    <CatalogListRefreshSummary
+                      detour={refreshDetour}
+                      state={refreshState}
+                    />
+                  ) : null}
+                </span>
+                {/* «Что внутри» и «куда пойдёт» — одной строкой на телефоне.
+                    `sm:contents` убирает эту обёртку на широком экране, и обе
+                    подписи снова становятся отдельными колонками ряда. */}
+                <span className="flex flex-wrap items-center gap-1.5 sm:contents">
+                  <span className="flex shrink-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                    <span>
+                      {sourceSummary.urlBacked
+                        ? t("pages.catalog.ruleSet")
+                        : sourceSummary.domainCount > 0 &&
+                            sourceSummary.cidrCount > 0
+                          ? t("pages.catalog.domainsAndCidrs", {
+                              domains: sourceSummary.domainCount,
+                              cidrs: sourceSummary.cidrCount,
+                            })
+                          : sourceSummary.cidrCount > 0
+                            ? t("pages.catalog.cidrs", {
+                                count: sourceSummary.cidrCount,
+                              })
+                            : t("pages.catalog.domains", {
+                                count: sourceSummary.domainCount,
+                              })}
+                    </span>
+                    {sourceSummary.hasIpCompanion ? (
+                      <span
+                        className="rounded-sm bg-primary/10 px-1.5 py-0.5 font-medium text-primary"
+                        title={t("pages.catalog.ipCompanionHint", {
+                          count: sourceSummary.companionCount,
+                        })}
+                      >
+                        {t("pages.catalog.ipCompanionBadge")}
+                      </span>
+                    ) : null}
+                  </span>
+                  <span
+                    className={cn(
+                      "shrink-0 rounded-full px-2 py-0.5 text-xs",
+                      blocks
+                        ? "bg-destructive/10 text-destructive"
+                        : "bg-success/10 text-success"
+                    )}
+                  >
+                    {blocks
+                      ? t("pages.catalog.actionBlock")
+                      : t("pages.catalog.actionTunnel")}
+                  </span>
+                </span>
               </span>
-              {already ? (
-                <span className="flex shrink-0 items-center gap-1 text-xs text-success">
-                  <CheckIcon className="size-3.5" />
-                  {t("pages.catalog.alreadyAdded")}
-                </span>
-              ) : (
-                <span
-                  className={cn(
-                    "shrink-0 rounded-full px-2 py-0.5 text-xs",
-                    blocks
-                      ? "bg-destructive/10 text-destructive"
-                      : "bg-success/10 text-success"
-                  )}
-                >
-                  {blocks
-                    ? t("pages.catalog.actionBlock")
-                    : t("pages.catalog.actionTunnel")}
-                </span>
-              )}
             </label>
           )
         })}
       </div>
 
-      <div className="sticky bottom-0 z-10 flex flex-wrap items-center justify-between gap-3 border-t bg-card pt-3 pb-1">
+      {selectedCatalogWarnings.length > 0 ? (
+        <Alert variant="warning">
+          <AlertTriangleIcon className="size-4" />
+          <AlertTitle>{t("pages.catalog.risks.title")}</AlertTitle>
+          <AlertDescription>
+            <ul className="mt-1 space-y-1">
+              {selectedCatalogWarnings.map((notice) => (
+                <li key={notice.key}>
+                  <span className="font-medium">{notice.presetName}:</span>{" "}
+                  {notice.message}
+                  {notice.requiresAcceptance
+                    ? ` ${t("pages.catalog.risks.requiresAcceptance")}`
+                    : null}
+                </li>
+              ))}
+            </ul>
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
+      <BottomActionBar contentClassName="justify-between">
         <span className="text-[13px] text-muted-foreground">
           {t("pages.catalog.selected", { count: selected.size })}
         </span>
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-[13px]">{t("pages.catalog.routeTo")}</span>
-          <select
-            className="h-9 rounded-md border border-input bg-card px-2 text-[13px]"
-            onChange={(event) => setDestination(event.target.value)}
-            value={effectiveDestination}
-          >
-            {outboundTags.map((tag) => (
-              <option key={tag} value={tag}>
-                {tag}
-              </option>
-            ))}
-            <option value={DIRECT}>{t("pages.catalog.directly")}</option>
-          </select>
+          {selectedMode === "reject" ? (
+            <span className="text-[13px] text-destructive">
+              {t("pages.catalog.blockSelected")}
+            </span>
+          ) : (
+            <>
+              <span className="text-[13px]">{t("pages.catalog.routeTo")}</span>
+              <Select
+                items={[
+                  ...outboundTags.map((tag) => ({
+                    value: tag,
+                    label: outboundDisplayNames.get(tag) ?? tag,
+                  })),
+                  { value: DIRECT, label: t("pages.catalog.directly") },
+                ]}
+                onValueChange={(value) =>
+                  setDestination(String(value ?? DIRECT))
+                }
+                value={effectiveDestination}
+              >
+                <SelectTrigger className="w-auto min-w-56" size="sm">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    {outboundTags.map((tag) => (
+                      <SelectItem key={tag} value={tag}>
+                        {outboundDisplayNames.get(tag) ?? tag}
+                      </SelectItem>
+                    ))}
+                    <SelectItem value={DIRECT}>
+                      {t("pages.catalog.directly")}
+                    </SelectItem>
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+              {/* Пока туннеля нет, выбирать не из чего: остаётся «напрямую»,
+                  то есть ничего не настроить. Это и есть то место, где новичок
+                  застревает, — отсюда сразу ссылка на создание туннеля. */}
+              {outboundTags.length === 0 ? (
+                <Button
+                  onClick={() => navigate("/transports/create")}
+                  size="sm"
+                  variant="outline"
+                >
+                  <PlusIcon className="mr-1 h-4 w-4" />
+                  {t("pages.catalog.addTunnel")}
+                </Button>
+              ) : null}
+            </>
+          )}
+          {selectedMode === "mixed" ? (
+            <span className="max-w-80 text-[12px] text-destructive">
+              {t("pages.catalog.mixedSelectionShort")}
+            </span>
+          ) : null}
           <Button
-            disabled={selected.size === 0 || configMutationPending}
-            onClick={handleAdd}
+            disabled={
+              !config ||
+              selected.size === 0 ||
+              configMutationPending ||
+              previewMutation.isPending ||
+              applyMutation.isPending ||
+              selectedMode === "mixed"
+            }
+            onClick={openAddDialog}
           >
             {t("pages.catalog.add")}
           </Button>
         </div>
-      </div>
+      </BottomActionBar>
+
+      <Dialog
+        onOpenChange={(open) => {
+          if (!open && !previewMutation.isPending && !applyMutation.isPending) {
+            setupIntentRef.current = null
+            setSetupIntent(null)
+            setSetupPreview(null)
+            setAcceptWarnings(false)
+          }
+        }}
+        open={setupIntent !== null}
+      >
+        <DialogContent className="max-h-[calc(100dvh-0.75rem)] overflow-y-auto max-sm:top-auto max-sm:bottom-0 max-sm:left-0 max-sm:max-w-none max-sm:translate-x-0 max-sm:translate-y-0 max-sm:rounded-b-none max-sm:border-x-0 max-sm:border-b-0 sm:max-h-[90svh] sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle>{t("pages.catalog.naming.title")}</DialogTitle>
+            <DialogDescription>
+              {t("pages.catalog.naming.description")}
+            </DialogDescription>
+          </DialogHeader>
+          {setupIntent ? (
+            <div className="space-y-5">
+              <Alert>
+                <ShieldCheckIcon className="size-4" />
+                <AlertTitle>
+                  {t("pages.catalog.setup.batchPolicyTitle")}
+                </AlertTitle>
+                <AlertDescription>
+                  {t(
+                    setupIntent.mode === "outbound"
+                      ? "pages.catalog.setup.batchPolicyOutbound"
+                      : setupIntent.mode === "block"
+                        ? "pages.catalog.setup.batchPolicyBlock"
+                        : "pages.catalog.setup.batchPolicyDirect"
+                  )}
+                </AlertDescription>
+              </Alert>
+              <div className="space-y-3">
+                {setupIntent.selections.map((selection, index) => (
+                  <div className="space-y-1.5" key={selection.preset_id}>
+                    <Label htmlFor={`catalog-list-name-${index}`}>
+                      {t("pages.catalog.naming.listName")}
+                    </Label>
+                    <Input
+                      disabled={applyMutation.isPending}
+                      id={`catalog-list-name-${index}`}
+                      maxLength={80}
+                      onChange={(event) =>
+                        updateSetupIntent((current) =>
+                          updateCatalogSetupSelectionName(
+                            current,
+                            selection.preset_id,
+                            event.target.value
+                          )
+                        )
+                      }
+                      value={selection.display_name ?? ""}
+                    />
+                  </div>
+                ))}
+              </div>
+              {setupIntent.mode !== "none" ? (
+                <div className="space-y-1.5 border-t border-border pt-4">
+                  <Label htmlFor="catalog-route-rule-name">
+                    {t("pages.catalog.naming.routeRuleName")}
+                  </Label>
+                  <Input
+                    disabled={applyMutation.isPending}
+                    id="catalog-route-rule-name"
+                    maxLength={80}
+                    onChange={(event) =>
+                      updateSetupIntent((current) =>
+                        updateCatalogSetupRuleName(
+                          current,
+                          "route_display_name",
+                          event.target.value
+                        )
+                      )
+                    }
+                    value={setupIntent.route_display_name ?? ""}
+                  />
+                </div>
+              ) : null}
+              {setupIntent.mode === "outbound" &&
+              setupIntent.dns_mode !== "none" ? (
+                <div className="space-y-1.5">
+                  <Label htmlFor="catalog-dns-rule-name">
+                    {t("pages.catalog.naming.dnsRuleName")}
+                  </Label>
+                  <Input
+                    disabled={applyMutation.isPending}
+                    id="catalog-dns-rule-name"
+                    maxLength={80}
+                    onChange={(event) =>
+                      updateSetupIntent((current) =>
+                        updateCatalogSetupRuleName(
+                          current,
+                          "dns_display_name",
+                          event.target.value
+                        )
+                      )
+                    }
+                    value={setupIntent.dns_display_name ?? ""}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t("pages.catalog.setup.automaticDnsHint")}
+                  </p>
+                </div>
+              ) : null}
+
+              {previewMutation.isPending ? (
+                <div
+                  aria-live="polite"
+                  className="space-y-2 border-t border-border pt-4"
+                >
+                  <Skeleton className="h-5 w-48" />
+                  <Skeleton className="h-4 w-full" />
+                </div>
+              ) : null}
+
+              {setupPreview ? (
+                <div className="space-y-3 border-t border-border pt-4">
+                  <Alert>
+                    <ShieldCheckIcon className="size-4" />
+                    <AlertTitle>
+                      {t("pages.catalog.setup.previewReady")}
+                    </AlertTitle>
+                    <AlertDescription>
+                      {t("pages.catalog.setup.previewSummary", {
+                        lists: setupInstallState?.pending.length ?? 0,
+                        routes: setupRouteRuleCount,
+                        dnsRules: setupDnsRuleCount,
+                        route: setupPreview.summary.route_rule
+                          ? (outboundDisplayNames.get(
+                              setupPreview.summary.route_rule.outbound
+                            ) ?? setupPreview.summary.route_rule.outbound)
+                          : t("pages.catalog.setup.noRoute"),
+                        dns: setupPreview.summary.dns_rule?.server
+                          ? (setupPreview.summary.dns_server?.display_name ??
+                            config?.dns?.servers?.find(
+                              (server) =>
+                                server.tag ===
+                                setupPreview.summary.dns_rule?.server
+                            )?.display_name ??
+                            setupPreview.summary.dns_rule.server)
+                          : t("pages.catalog.setup.noDnsRule"),
+                      })}
+                    </AlertDescription>
+                  </Alert>
+
+                  <div className="overflow-hidden rounded-md border border-border">
+                    <div className="bg-secondary/45 px-3 py-2 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+                      {t("pages.catalog.setup.planTitle")}
+                    </div>
+                    <div className="divide-y divide-border">
+                      {setupPreview.summary.lists.map((list) => {
+                        const companion = setupCompanions.get(list.preset_id)
+                        const typeLabel = companion
+                          ? companion.cidrCount > 0
+                            ? t("pages.catalog.setup.ipListCidrs", {
+                                count: companion.cidrCount,
+                              })
+                            : t("pages.catalog.setup.ipListRemote")
+                          : list.has_inline_domains && list.has_inline_cidrs
+                            ? t("pages.catalog.setup.mixedList")
+                            : list.has_inline_cidrs
+                              ? t("pages.catalog.setup.ipList")
+                              : list.has_inline_domains
+                                ? t("pages.catalog.setup.domainList")
+                                : list.url_backed
+                                  ? t("pages.catalog.setup.remoteList")
+                                  : t("pages.catalog.setup.localList")
+                        return (
+                          <div
+                            className="flex min-w-0 items-center justify-between gap-3 px-3 py-2 text-sm"
+                            key={`${list.preset_id}:${list.technical_id}`}
+                          >
+                            <span className="min-w-0">
+                              <span className="block truncate font-medium">
+                                {list.display_name}
+                              </span>
+                              <span className="block text-xs text-muted-foreground">
+                                {typeLabel}
+                              </span>
+                            </span>
+                            <span
+                              className={cn(
+                                "shrink-0 text-xs font-medium",
+                                list.already_installed
+                                  ? "text-success"
+                                  : "text-primary"
+                              )}
+                            >
+                              {t(
+                                list.already_installed
+                                  ? "pages.catalog.setup.willReuse"
+                                  : "pages.catalog.setup.willAdd"
+                              )}
+                            </span>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+
+                  {setupInstallState &&
+                  setupInstallState.installed.length > 0 ? (
+                    <Alert>
+                      <ShieldCheckIcon className="size-4" />
+                      <AlertTitle>
+                        {t("pages.catalog.setup.alreadyInstalledTitle")}
+                      </AlertTitle>
+                      <AlertDescription>
+                        {t("pages.catalog.setup.alreadyInstalled", {
+                          lists: setupInstallState.installed
+                            .map((list) => list.display_name)
+                            .join(", "),
+                        })}
+                      </AlertDescription>
+                    </Alert>
+                  ) : null}
+
+                  {setupPreview.warnings.map((warning) => (
+                    <Alert
+                      key={`${warning.code}:${warning.path}`}
+                      variant="warning"
+                    >
+                      <AlertTriangleIcon className="size-4" />
+                      <AlertTitle>
+                        {t("pages.catalog.setup.warningTitle")}
+                      </AlertTitle>
+                      <AlertDescription>
+                        {getCatalogSetupWarningMessage(warning, t)}
+                      </AlertDescription>
+                    </Alert>
+                  ))}
+
+                  {setupPreview.requires_warning_acceptance ? (
+                    <label className="flex items-start gap-3 text-sm">
+                      <input
+                        checked={acceptWarnings}
+                        className="mt-0.5 size-4 accent-[var(--primary)]"
+                        onChange={(event) =>
+                          setAcceptWarnings(event.target.checked)
+                        }
+                        type="checkbox"
+                      />
+                      <span>{t("pages.catalog.setup.acceptWarnings")}</span>
+                    </label>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          <DialogFooter>
+            <Button
+              disabled={
+                configMutationPending ||
+                previewMutation.isPending ||
+                applyMutation.isPending
+              }
+              onClick={() => {
+                setupIntentRef.current = null
+                setSetupIntent(null)
+                setSetupPreview(null)
+                setAcceptWarnings(false)
+              }}
+              variant="outline"
+            >
+              {t("common.cancel")}
+            </Button>
+            <Button
+              disabled={
+                configMutationPending ||
+                previewMutation.isPending ||
+                applyMutation.isPending ||
+                Boolean(setupInstallState?.noChanges) ||
+                Boolean(
+                  setupPreview?.requires_warning_acceptance && !acceptWarnings
+                )
+              }
+              onClick={confirmAdd}
+            >
+              {applyMutation.isPending
+                ? t("pages.catalog.setup.applying")
+                : setupInstallState?.noChanges
+                  ? t("pages.catalog.setup.alreadyInstalledButton")
+                  : setupPreview
+                    ? t("pages.catalog.naming.confirm")
+                    : t("pages.catalog.setup.preview")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
-}
-
-function CategoryChip({
-  active,
-  label,
-  onClick,
-}: {
-  active: boolean
-  label: string
-  onClick: () => void
-}) {
-  return (
-    <button
-      className={cn(
-        "rounded-full border px-3 py-1 text-[13px]",
-        active
-          ? "border-primary bg-accent text-primary"
-          : "border-border text-foreground hover:bg-secondary"
-      )}
-      onClick={onClick}
-      type="button"
-    >
-      {label}
-    </button>
-  )
-}
-
-// List names are restricted to ^[a-z][a-z0-9_]*$ and 24 characters, which the
-// catalogue ids do not always satisfy.
-function sanitize(id: string): string {
-  const cleaned = id
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-  const prefixed = /^[a-z]/.test(cleaned) ? cleaned : `l_${cleaned}`
-  return prefixed.slice(0, 24)
-}
-
-function listNameFor(id: string, existing: Record<string, unknown>): string {
-  const base = sanitize(id)
-  if (!(base in existing)) {
-    return base
-  }
-  for (let suffix = 2; suffix < 100; suffix += 1) {
-    const candidate = `${base.slice(0, 21)}_${suffix}`
-    if (!(candidate in existing)) {
-      return candidate
-    }
-  }
-  return base
 }

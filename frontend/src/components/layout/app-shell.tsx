@@ -1,8 +1,10 @@
 import type { ReactNode } from "react"
 import { useLocation } from "wouter"
+import { useTranslation } from "react-i18next"
 
 import { AppSidebar } from "@/components/app-sidebar"
 import { AppBrandHeader } from "@/components/layout/app-brand-header"
+import { MobileAppHeader } from "@/components/layout/mobile-app-header"
 import { useWarningBannerState } from "@/components/layout/warning-banner-state"
 import { WarningBanner } from "@/components/layout/warning-banner"
 import { TopBarControls } from "@/components/layout/top-bar-controls"
@@ -13,6 +15,7 @@ import { cn } from "@/lib/utils"
 export function AppShell({ children }: { children: ReactNode }) {
   const warningBannerState = useWarningBannerState()
   const [location] = useLocation()
+  const { t } = useTranslation()
   // KeeneticOS tints only the dashboard, where cards sit on a grey canvas.
   // Every other section is a plain white page.
   const isOverview = location === "/"
@@ -24,7 +27,12 @@ export function AppShell({ children }: { children: ReactNode }) {
           there is no page-level scrollbar at all. */}
       <div
         className={cn(
-          "flex h-screen max-h-screen w-full max-w-full overflow-hidden",
+          // dvh, а не vh. 100vh на телефоне — это высота с убранной адресной
+          // строкой: пока она видна, оболочка выше экрана, и документ под ней
+          // прокручивается сам. Отсюда исчезающая шапка — резкий свайп уводил
+          // её вверх вместе со страницей, и вернуть можно было только свайпом
+          // вниз. dvh следит за реальной видимой высотой.
+          "flex h-dvh max-h-dvh w-full max-w-full flex-col overflow-hidden",
           isOverview ? "keen-canvas-overview" : "keen-canvas-page"
         )}
       >
@@ -32,37 +40,45 @@ export function AppShell({ children }: { children: ReactNode }) {
           className="sr-only z-50 rounded-md bg-background px-3 py-2 text-sm font-medium shadow focus:not-sr-only focus:fixed focus:top-3 focus:left-3"
           href="#main-content"
         >
-          Skip to content
+          {t("common.chrome.skipToContent")}
         </a>
-        <AppSidebar />
-        <SidebarInset className="relative flex h-screen max-h-screen max-w-full min-w-0 flex-col overflow-hidden bg-transparent">
-          <MobileSidebarHeader />
-          <DesktopSystemBar />
-          <main
-            aria-labelledby="page-title"
-            className="min-h-0 min-w-0 flex-1 overflow-y-auto"
-            id="main-content"
-          >
-            {/* No max-width: NDMS lets its panels use the whole window, and a
-                centred column left wide screens half empty. The bottom padding
-                leaves room for the fixed save bar. */}
-            <div
-              className={cn(
-                "min-w-0 px-4 pt-4 sm:px-6",
-                isOverview
-                  ? "lg:px-8 lg:pt-5"
-                  : "lg:pt-[33px] lg:pr-8 lg:pl-[41px]"
-              )}
-              style={{
-                paddingBottom:
-                  "calc(var(--warning-banner-height, 0px) + 1.25rem)",
-              }}
+        <DesktopSystemBar />
+        <div className="flex min-h-0 w-full max-w-full flex-1 overflow-hidden">
+          <AppSidebar />
+          <SidebarInset className="relative flex min-h-0 max-w-full min-w-0 flex-col overflow-hidden bg-transparent">
+            <MobileSidebarHeader />
+            <main
+              aria-labelledby="page-title"
+              // overscroll-contain: без него резкий флик, докрутивший до края,
+              // передаёт остаток прокрутки документу — и шапку опять уносит.
+              className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-gutter:stable]"
+              id="main-content"
             >
-              {children}
-            </div>
-          </main>
-          <WarningBanner state={warningBannerState} />
-        </SidebarInset>
+              {/* No max-width: NDMS lets its panels use the whole window, and a
+                centred column left wide screens half empty. The bottom padding
+                leaves room for the fixed save bar and, when rows are selected,
+                for the bulk action bar stacked above it. */}
+              <div
+                className={cn(
+                  "min-w-0 px-4 pt-4 sm:px-6",
+                  // Дашборд KeeneticOS, снято с живого конфигуратора: контейнер
+                  // начинается ровно от правого края меню и от низа шапки, а
+                  // отступ до карточек — 24px слева, справа и сверху
+                  // (`.dashboard { padding: 0 24px }` + `.ndw-drag-panel
+                  // { padding: 24px 0 0 }`). У нас было 32px по бокам и 20 сверху.
+                  isOverview ? "sm:pt-6" : "lg:pt-[33px] lg:pr-8 lg:pl-8"
+                )}
+                style={{
+                  paddingBottom:
+                    "calc(var(--warning-banner-height, 0px) + var(--bulk-toolbar-height, 0px) + 1.25rem)",
+                }}
+              >
+                {children}
+              </div>
+            </main>
+            <WarningBanner state={warningBannerState} />
+          </SidebarInset>
+        </div>
       </div>
     </SidebarProvider>
   )
@@ -70,35 +86,26 @@ export function AppShell({ children }: { children: ReactNode }) {
 
 function DesktopSystemBar() {
   return (
-    // NDMS: .header { height: 64px; padding: 0 32px } with the shadow cast by
-    // a sibling, clipped to show only underneath.
-    <div className="keen-header-shadow relative z-30 hidden h-16 shrink-0 items-center justify-between bg-card px-8 md:flex">
-      {/* The brand lives once, at the top of the left column above the menu.
-          The bar itself carries only the controls on the right. */}
-      <span />
+    // KeeneticOS: .layout__header — 0..ширина окна, высота 64px, padding 0 32px,
+    // белый фон, тень отбрасывается соседом и подрезана снизу. Логотип стоит в
+    // ней слева на x=32, а колонка меню начинается уже под шапкой; раньше
+    // логотип жил над меню, и шапка начиналась после колонки.
+    <div className="keen-header-shadow relative z-30 hidden h-16 w-full shrink-0 items-center justify-between bg-card px-8 md:flex">
+      <AppBrandHeader className="min-w-0" />
       <TopBarControls />
     </div>
   )
 }
 
 function MobileSidebarHeader() {
-  const { toggleSidebar } = useSidebar()
+  const { openMobile, toggleSidebar } = useSidebar()
 
   return (
-    // Fixed positioning keeps the system bar visible even if a page moves
-    // scrolling from the main container to the document. The wrapper reserves
-    // its height so page content never slips underneath it.
-    <div className="h-14 shrink-0 md:hidden">
-      <div className="keen-header-shadow fixed inset-x-0 top-0 z-40 bg-card">
-        <div className="flex h-14 items-center gap-2 px-4">
-          <AppBrandHeader
-            className="min-w-0 flex-1"
-            onMenuClick={toggleSidebar}
-            variant="topbar"
-          />
-          <TopBarControls />
-        </div>
-      </div>
+    // The page itself scrolls inside <main>, so this sibling never moves.
+    // Keeping it in normal layout avoids a fixed overlay covering the sticky
+    // action bar after mobile overscroll or history restoration.
+    <div className="relative z-40 flex h-16 shrink-0 md:hidden">
+      <MobileAppHeader menuOpen={openMobile} onMenuClick={toggleSidebar} />
     </div>
   )
 }

@@ -1,4 +1,5 @@
 #include "routing_verifier.hpp"
+#include "route_table.hpp"
 
 #include <netinet/in.h>
 #include <sstream>
@@ -26,10 +27,7 @@ bool route_type_matches(const RouteSpec& expected, const DumpedRoute& actual) {
 }
 
 bool route_metric_matches(const RouteSpec& expected, const DumpedRoute& actual) {
-    if (expected.metric == 0) {
-        return true;
-    }
-    return expected.metric == actual.metric;
+    return route_table_detail::route_metric_matches_live(expected, actual);
 }
 
 bool route_matches_expected(const RouteSpec& expected, const DumpedRoute& actual) {
@@ -156,8 +154,7 @@ RouteTableCheck RoutingVerifier::verify_route_table(const RouteSpec& expected,
     return result;
 }
 
-PolicyRuleCheck RoutingVerifier::verify_policy_rule(const RuleSpec& expected,
-                                                     const std::string& outbound_tag) {
+PolicyRuleCheck RoutingVerifier::verify_policy_rule(const RuleSpec& expected) {
     PolicyRuleCheck result;
     result.fwmark         = expected.fwmark;
     result.fwmask         = expected.fwmask;
@@ -169,7 +166,8 @@ PolicyRuleCheck RoutingVerifier::verify_policy_rule(const RuleSpec& expected,
 
         for (const auto& r : rules) {
             if (r.fwmark != expected.fwmark || r.fwmask != expected.fwmask ||
-                r.table  != expected.table) {
+                r.table  != expected.table ||
+                r.priority != expected.priority) {
                 continue;
             }
             if (r.family == AF_INET) {

@@ -1,21 +1,31 @@
 #ifdef WITH_API
 
 #include "handler_health_service.hpp"
+
+#include "../config/config_writer.hpp"
 #include "generated/api_types.hpp"
 #include "update_version.hpp"
 #include "handler_backup.hpp"
 #include "../http/http_client.hpp"
+#include "../log/logger.hpp"
+#include "../update/rescue_integrity.hpp"
+#include "../update/rollback_availability.hpp"
 
 #include <keen-pbr/version.hpp>
+#include <chrono>
 #include <cerrno>
 #include <csignal>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
+#include <sstream>
 #include <string>
+#include <thread>
+#include <utility>
 
 #include <unistd.h>
 
@@ -26,6 +36,29 @@ namespace {
 constexpr const char* kUpdatePidFile = "/opt/var/run/keen-pbr-self-update.pid";
 constexpr const char* kUpdateLogFile = "/opt/var/log/keen-pbr-self-update.log";
 constexpr const char* kUpdateStateFile = "/opt/var/run/keen-pbr-self-update.json";
+constexpr const char* kUpdateLockPid =
+    "/opt/var/run/keen-pbr-update.lock/pid";
+constexpr const char* kUpdateLockOwner =
+    "/opt/var/run/keen-pbr-update.lock/owner";
+constexpr const char* kUpdateLockReady =
+    "/opt/var/run/keen-pbr-update.lock/ready";
+constexpr const char* kUpdateLockStart =
+    "/opt/var/run/keen-pbr-update.lock/start";
+constexpr const char* kRescueHelper =
+    "/opt/var/lib/keen-pbr/rescue/rescue-update.sh";
+constexpr const char* kCurrentPackage =
+    "/opt/var/lib/keen-pbr/rescue/current.ipk";
+constexpr const char* kPreviousPackage =
+    "/opt/var/lib/keen-pbr/rescue/previous.ipk";
+constexpr const char* kPreviousPackageConfig =
+    "/opt/var/lib/keen-pbr/rescue/previous-config";
+constexpr const char* kPendingUpdate =
+    "/opt/var/lib/keen-pbr/rescue/pending";
+constexpr const char* kUnknownUpdate =
+    "/opt/var/lib/keen-pbr/rescue/UNKNOWN";
+constexpr const char* kReleaseCacheFile =
+    "/opt/var/cache/keen-pbr/software-release.json";
+constexpr auto kReleaseCacheTtl = std::chrono::hours(1);
 
 std::string read_file_tail(const std::filesystem::path& path,
                            std::streamoff limit) {
@@ -42,11 +75,76 @@ std::string read_file_tail(const std::filesystem::path& path,
             std::istreambuf_iterator<char>()};
 }
 
-std::optional<pid_t> read_update_pid() {
-    std::ifstream input(kUpdatePidFile);
+std::optional<pid_t> read_pid_file(const std::filesystem::path& path) {
+    std::ifstream input(path);
     long value = 0;
     if (!(input >> value) || value <= 1) return std::nullopt;
     return static_cast<pid_t>(value);
+}
+
+std::optional<std::string> process_start_time(pid_t pid) {
+    std::ifstream input(std::filesystem::path("/proc") /
+                        std::to_string(pid) / "stat");
+    std::string stat;
+    if (!std::getline(input, stat)) return std::nullopt;
+    const auto comm_end = stat.rfind(") ");
+    if (comm_end == std::string::npos) return std::nullopt;
+    std::istringstream fields(stat.substr(comm_end + 2));
+    std::string value;
+    // The substring begins at field 3; starttime is field 22.
+    for (int field = 3; field <= 22; ++field) {
+        if (!(fields >> value)) return std::nullopt;
+    }
+    return value;
+}
+
+std::optional<std::string> read_single_line(
+    const std::filesystem::path& path) {
+    std::ifstream input(path);
+    std::string value;
+    if (!std::getline(input, value) || value.empty()) return std::nullopt;
+    return value;
+}
+
+bool regular_nonempty_file(const std::filesystem::path& path) {
+    return rescue_integrity::regular_nonempty_file(path);
+}
+
+bool executable_nonempty_file(const std::filesystem::path& path) {
+    return regular_nonempty_file(path) &&
+           ::access(path.c_str(), X_OK) == 0;
+}
+
+bool recovery_marker_present(const std::filesystem::path& path) {
+    std::error_code ec;
+    const bool exists = std::filesystem::exists(path, ec);
+    // An unreadable rescue directory must never be interpreted as healthy.
+    return exists || static_cast<bool>(ec);
+}
+
+bool update_recovery_is_blocked() {
+    return recovery_marker_present(kPendingUpdate) ||
+           recovery_marker_present(kUnknownUpdate);
+}
+
+RescueStoreLayout rescue_store_layout() {
+    RescueStoreLayout layout;
+    layout.helper = kRescueHelper;
+    layout.previous_package = kPreviousPackage;
+    layout.previous_config = kPreviousPackageConfig;
+    layout.pending_marker = kPendingUpdate;
+    layout.unknown_marker = kUnknownUpdate;
+    return layout;
+}
+
+// One reading of the store, shared by the status report and the refusal.
+//
+// Two readings would be two answers: a rollback that the panel showed as
+// available can be refused with an unrelated reason, and the operator has no
+// way to tell which of the two was wrong.
+PackageRollbackState package_rollback_state() {
+    return classify_package_rollback(
+        observe_package_rollback(rescue_store_layout()));
 }
 
 bool is_update_process(pid_t pid) {
@@ -56,17 +154,59 @@ bool is_update_process(pid_t pid) {
         std::filesystem::path("/proc") / std::to_string(pid) / "cmdline",
         16 * 1024);
     return cmdline.find("keen-pbr/self-update.sh") != std::string::npos ||
-           cmdline.find("keen-pbr-self-update") != std::string::npos;
+           cmdline.find("keen-pbr-self-update") != std::string::npos ||
+           cmdline.find("rescue-update.sh") != std::string::npos ||
+           cmdline.find("keen-pbr-sb-update.") != std::string::npos ||
+           cmdline.find("/install.sh") != std::string::npos;
 }
 
 bool update_is_running() {
-    const auto pid = read_update_pid();
+    const auto pid = read_pid_file(kUpdatePidFile);
     if (pid && is_update_process(*pid)) return true;
 
     // A PID file is only a hint. Power loss, SIGKILL or PID reuse can leave it
     // behind, so remove it unless it points to this exact live helper.
     std::error_code ec;
     std::filesystem::remove(kUpdatePidFile, ec);
+
+    // The common mkdir lock also covers CLI installs and the small interval
+    // before the self-update helper has written its compatibility PID file.
+    // Trust a live owner only when the lock was fully published.
+    if (regular_nonempty_file(kUpdateLockReady)) {
+        std::optional<pid_t> lock_pid;
+        std::optional<std::string> expected_start;
+        if (regular_nonempty_file(kUpdateLockOwner)) {
+            std::ifstream owner(kUpdateLockOwner);
+            long pid_value = 0;
+            std::string start;
+            std::string token;
+            std::string extra;
+            if ((owner >> pid_value >> start >> token) &&
+                !(owner >> extra) && pid_value > 1 && !token.empty()) {
+                lock_pid = static_cast<pid_t>(pid_value);
+                expected_start = std::move(start);
+            }
+        } else if (regular_nonempty_file(kUpdateLockPid) &&
+                   regular_nonempty_file(kUpdateLockStart)) {
+            lock_pid = read_pid_file(kUpdateLockPid);
+            expected_start = read_single_line(kUpdateLockStart);
+        }
+        if (lock_pid && expected_start &&
+            (::kill(*lock_pid, 0) == 0 || errno == EPERM)) {
+            const auto actual_start = process_start_time(*lock_pid);
+            if (actual_start && *actual_start == *expected_start) return true;
+        }
+    }
+    return false;
+}
+
+bool wait_for_update_start() {
+    constexpr auto kPollInterval = std::chrono::milliseconds(50);
+    constexpr int kPollAttempts = 40;
+    for (int attempt = 0; attempt < kPollAttempts; ++attempt) {
+        if (update_is_running()) return true;
+        std::this_thread::sleep_for(kPollInterval);
+    }
     return false;
 }
 
@@ -82,7 +222,151 @@ nlohmann::json local_update_status() {
 
     status["running"] = update_is_running();
     status["log"] = read_file_tail(kUpdateLogFile, 24 * 1024);
+    const bool recovery_blocked = update_recovery_is_blocked();
+    status["package_recovery_pending"] =
+        recovery_marker_present(kPendingUpdate);
+    status["package_recovery_unknown"] =
+        recovery_marker_present(kUnknownUpdate);
+    status["package_rescue_ready"] =
+        !recovery_blocked && executable_nonempty_file(kRescueHelper) &&
+        rescue_integrity::verified_ipk_file(kCurrentPackage);
+    const auto rollback_state = package_rollback_state();
+    status["package_rollback_available"] =
+        package_rollback_is_available(rollback_state);
+    // The reason, not just the verdict. Reported before a rollback is started
+    // so an operator learns there is nothing to roll back to while it still
+    // changes what they do, instead of at the moment they need it.
+    status["package_rollback_state"] =
+        package_rollback_state_name(rollback_state);
     return status;
+}
+
+nlohmann::json read_release_cache() {
+    try {
+        std::ifstream input(kReleaseCacheFile, std::ios::binary);
+        if (!input) return nlohmann::json::object();
+        auto cache = nlohmann::json::parse(input);
+        return cache.is_object() ? cache : nlohmann::json::object();
+    } catch (const nlohmann::json::exception&) {
+        return nlohmann::json::object();
+    }
+}
+
+void write_release_cache(const nlohmann::json& release,
+                         std::int64_t cached_at) {
+    AtomicFileWriteOptions options;
+    options.create_parent_directories = true;
+    options.created_directory_mode = 0755;
+    options.default_file_mode = 0644;
+    options.file_mode = static_cast<mode_t>(0644);
+    try {
+        write_file_atomically(
+            kReleaseCacheFile,
+            nlohmann::json{{"cached_at", cached_at}, {"release", release}}
+                .dump(),
+            options);
+    } catch (const std::exception& error) {
+        // Release metadata can always be fetched again. Preserve the previous
+        // valid cache and keep update checks non-fatal.
+        Logger::instance().warn(
+            "Cannot persist software release cache atomically: {}",
+            error.what());
+    }
+}
+
+std::int64_t unix_time_now() {
+    return std::chrono::duration_cast<std::chrono::seconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+bool release_cache_is_fresh(const nlohmann::json& cache,
+                            std::int64_t now) {
+    if (!cache.contains("release") || !cache["release"].is_object())
+        return false;
+    const auto cached_at = cache.value("cached_at", std::int64_t{0});
+    const auto ttl = std::chrono::duration_cast<std::chrono::seconds>(
+                         kReleaseCacheTtl)
+                         .count();
+    return cached_at > 0 && now >= cached_at && now - cached_at < ttl;
+}
+
+nlohmann::json download_latest_release() {
+    HttpClient client;
+    client.set_timeout(std::chrono::seconds(15));
+    client.set_user_agent("keen-pbr-sb/" KEEN_PBR3_VERSION_STRING);
+    client.set_max_response_size(512U * 1024U);
+    return nlohmann::json::parse(client.download(
+        "https://api.github.com/repos/blindtechnique/keen-pbr-sb/releases/latest"));
+}
+
+std::string release_string(const nlohmann::json& release,
+                           const char* field) {
+    const auto value = release.find(field);
+    return value != release.end() && value->is_string()
+               ? value->get<std::string>()
+               : std::string{};
+}
+
+nlohmann::json software_update_status(bool force_remote_check) {
+    auto response = local_update_status();
+    const std::string current = std::string("v") +
+                                KEEN_PBR3_VERSION_STRING + "-sb." +
+                                KEEN_PBR3_VERSION_RELEASE_STRING;
+    const auto now = unix_time_now();
+    const auto cache = read_release_cache();
+    nlohmann::json release = nlohmann::json::object();
+    bool cached = false;
+    std::string check_error;
+
+    if (!force_remote_check && release_cache_is_fresh(cache, now)) {
+        release = cache["release"];
+        cached = true;
+    } else {
+        try {
+            release = download_latest_release();
+            write_release_cache(release, now);
+        } catch (const std::exception& error) {
+            check_error = error.what();
+            if (cache.contains("release") && cache["release"].is_object()) {
+                release = cache["release"];
+                cached = true;
+            }
+        }
+    }
+
+    const auto latest = release_string(release, "tag_name");
+    auto release_notes = release_string(release, "body");
+    constexpr std::size_t kReleaseNotesLimit = 64U * 1024U;
+    if (release_notes.size() > kReleaseNotesLimit) {
+        release_notes.resize(kReleaseNotesLimit);
+        release_notes += "\n\n…";
+    }
+    const auto release_url = release_string(release, "html_url");
+    const auto release_name = release_string(release, "name");
+    const auto changelog_url =
+        safe_github_tag(latest)
+            ? std::string(
+                  "https://github.com/blindtechnique/keen-pbr-sb/blob/") +
+                  latest + "/CHANGELOG.md"
+            : std::string{};
+
+    response.update(
+        nlohmann::json{{"current", current},
+                       {"latest", latest},
+                       {"available",
+                        !latest.empty() &&
+                            is_newer_fork_version(latest, current)},
+                       {"current_ahead",
+                        !latest.empty() &&
+                            is_newer_fork_version(current, latest)},
+                       {"release_name", release_name},
+                       {"release_notes", release_notes},
+                       {"release_url", release_url},
+                       {"changelog_url", changelog_url},
+                       {"cached", cached},
+                       {"check_error", check_error}});
+    return response;
 }
 
 std::mutex& update_start_mutex() {
@@ -95,59 +379,17 @@ std::mutex& update_start_mutex() {
 void register_health_service_handler(ApiServer& server, ApiContext& ctx) {
     // GET /api/health/service - daemon version/status + resolver/config summary
     server.get("/api/health/service", [&ctx]() -> std::string {
-        const auto service_health = ctx.get_service_health();
-        api::HealthResponse resp;
-        resp.version = KEEN_PBR3_VERSION_STRING;
-        resp.build = KEEN_PBR3_VERSION_RELEASE_STRING;
-        resp.status = service_health.status;
-        resp.os_type = service_health.os_type;
-        resp.os_version = service_health.os_version;
-        resp.build_variant = service_health.build_variant;
-        resp.resolver_config_hash = service_health.resolver_config_hash;
-        resp.resolver_config_hash_actual = service_health.resolver_config_hash_actual;
-        resp.resolver_config_hash_actual_ts = service_health.resolver_config_hash_actual_ts;
-        resp.resolver_live_status = service_health.resolver_live_status;
-        resp.resolver_config_probe_status = service_health.resolver_config_probe_status;
-        resp.resolver_last_probe_ts = service_health.resolver_last_probe_ts;
-        resp.apply_started_ts = service_health.apply_started_ts;
-        resp.resolver_config_sync_state = service_health.resolver_config_sync_state;
-
-        nlohmann::json response = resp;
-        response["config_is_draft"] = service_health.config_is_draft;
-        return response.dump();
+        return nlohmann::json(
+                   build_health_response(ctx.get_service_health()))
+            .dump();
     });
 
     server.get("/api/system/update", []() -> std::string {
-        HttpClient client;
-        client.set_timeout(std::chrono::seconds(15));
-        client.set_max_response_size(512U * 1024U);
-        const auto release = nlohmann::json::parse(client.download(
-            "https://api.github.com/repos/blindtechnique/keen-pbr-sb/releases/latest"));
-        const auto latest = release.value("tag_name", std::string{});
-        const std::string current = std::string("v") + KEEN_PBR3_VERSION_STRING +
-                                    "-sb." + KEEN_PBR3_VERSION_RELEASE_STRING;
-        auto release_notes = release.value("body", std::string{});
-        constexpr std::size_t kReleaseNotesLimit = 64U * 1024U;
-        if (release_notes.size() > kReleaseNotesLimit) {
-            release_notes.resize(kReleaseNotesLimit);
-            release_notes += "\n\n…";
-        }
-        const auto release_url = release.value("html_url", std::string{});
-        const auto release_name = release.value("name", std::string{});
-        const auto changelog_url = safe_github_tag(latest)
-            ? std::string("https://github.com/blindtechnique/keen-pbr-sb/blob/") +
-                  latest + "/CHANGELOG.md"
-            : std::string{};
-        auto response = local_update_status();
-        response.update(nlohmann::json{{"current", current},
-                                       {"latest", latest},
-                                       {"available", is_newer_fork_version(latest, current)},
-                                       {"current_ahead", is_newer_fork_version(current, latest)},
-                                       {"release_name", release_name},
-                                       {"release_notes", release_notes},
-                                       {"release_url", release_url},
-                                       {"changelog_url", changelog_url}});
-        return response.dump();
+        return software_update_status(false).dump();
+    });
+
+    server.post("/api/system/update/check", []() -> std::string {
+        return software_update_status(true).dump();
     });
 
     // Local-only endpoint for cheap progress polling. Unlike the release check
@@ -161,15 +403,45 @@ void register_health_service_handler(ApiServer& server, ApiContext& ctx) {
         const std::lock_guard lock(update_start_mutex());
         const std::filesystem::path helper =
             "/opt/usr/lib/keen-pbr/self-update.sh";
-        std::error_code ec;
-        if (!std::filesystem::is_regular_file(helper, ec))
+        if (!executable_nonempty_file(helper))
             throw ApiError("self-update helper is not installed", 409);
         if (update_is_running())
-            throw ApiError("keen-pbr-sb update is already running", 409);
+            throw ApiError(
+                "keen-pbr-sb update or rollback is already running", 409);
+        if (update_recovery_is_blocked())
+            throw ApiError(
+                "package recovery is pending or has unknown state; run rescue recovery before starting another update",
+                409);
         create_full_rollback_backup(ctx);
         const int status = std::system(
             "/opt/usr/lib/keen-pbr/self-update.sh >/dev/null 2>&1 &");
-        if (status != 0) throw ApiError("failed to start keen-pbr-sb update", 500);
+        if (status != 0 || !wait_for_update_start())
+            throw ApiError("failed to start keen-pbr-sb update", 500);
+        return R"({"ok":true,"started":true})";
+    });
+
+    server.post("/api/system/update/rollback", [&ctx]() -> std::string {
+        const std::lock_guard lock(update_start_mutex());
+        if (update_is_running())
+            throw ApiError("keen-pbr-sb update or rollback is already running", 409);
+        // Same classification the status endpoint reports, so the refusal an
+        // operator gets here always names the reason they were already shown.
+        const auto rollback_state = package_rollback_state();
+        if (!package_rollback_is_available(rollback_state))
+            throw ApiError(package_rollback_state_message(rollback_state), 409);
+        if (std::system(
+                "/opt/var/lib/keen-pbr/rescue/rescue-update.sh "
+                "can-rollback-previous >/dev/null 2>&1") != 0) {
+            throw ApiError(
+                "previous IPK snapshot is incomplete or corrupted", 409);
+        }
+
+        create_full_rollback_backup(ctx);
+        const int status = std::system(
+            "/opt/var/lib/keen-pbr/rescue/rescue-update.sh "
+            "rollback-previous >/dev/null 2>&1 &");
+        if (status != 0 || !wait_for_update_start())
+            throw ApiError("failed to start keen-pbr-sb package rollback", 500);
         return R"({"ok":true,"started":true})";
     });
 }

@@ -13,7 +13,9 @@
 #include <fstream>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace keen_pbr3;
@@ -24,6 +26,17 @@ struct KeeneticDnsTestStateGuard {
     KeeneticDnsTestStateGuard() { reset_keenetic_dns_test_state(); }
     ~KeeneticDnsTestStateGuard() { reset_keenetic_dns_test_state(); }
 };
+
+KeeneticDnsSnapshot prepare_keenetic_dns_snapshot(std::string response) {
+    set_keenetic_dns_fetcher_for_tests(
+        [response = std::move(response)]() { return response; });
+    const KeeneticDnsRefreshResult result =
+        refresh_keenetic_dns_address_cache(true);
+    if (!result.snapshot) {
+        throw std::runtime_error("failed to prepare Keenetic DNS snapshot");
+    }
+    return *result.snapshot;
+}
 
 } // namespace
 
@@ -144,11 +157,12 @@ static std::vector<std::string> split_domains_from_ipset_line(const std::string&
 }
 
 static std::string make_domain_with_len(size_t target_len, const std::string& seed) {
-    std::string domain = seed + ".";
-    if (domain.size() < target_len) {
-        domain += std::string(target_len - domain.size(), 'a');
-    } else if (domain.size() > target_len) {
-        domain.resize(target_len);
+    std::string domain = seed;
+    while (domain.size() < target_len) {
+        const size_t remaining = target_len - domain.size();
+        const size_t label_len = std::min<size_t>(63, remaining - 1);
+        domain.push_back('.');
+        domain.append(label_len, 'a');
     }
     return domain;
 }
@@ -453,8 +467,7 @@ TEST_CASE("generate-resolver-config omits dns probe server directive when disabl
 
 TEST_CASE("generate-resolver-config includes keenetic static dns entries") {
     KeeneticDnsTestStateGuard guard;
-    set_keenetic_dns_fetcher_for_tests([]() {
-        return std::string(R"({
+    const KeeneticDnsSnapshot snapshot = prepare_keenetic_dns_snapshot(R"({
           "proxy-status": [
             {
               "proxy-name": "System",
@@ -462,7 +475,6 @@ TEST_CASE("generate-resolver-config includes keenetic static dns entries") {
             }
           ]
         })");
-    });
 
     CacheManager cache("/nonexistent/cache");
     ListStreamer streamer(cache);
@@ -478,7 +490,7 @@ TEST_CASE("generate-resolver-config includes keenetic static dns entries") {
     auto route_cfg = make_route_cfg("mylist");
     auto lists = std::map<std::string, ListConfig>{{"mylist", make_list_cfg({"example.com"})}};
 
-    DnsServerRegistry reg(dns_cfg);
+    DnsServerRegistry reg(dns_cfg, snapshot);
     DnsmasqGenerator gen(reg, streamer, route_cfg, dns_cfg, lists);
     const std::string output = run_generate(gen);
 
@@ -490,8 +502,7 @@ TEST_CASE("generate-resolver-config includes keenetic static dns entries") {
 
 TEST_CASE("generate-resolver-config includes all keenetic fallback servers in selected order") {
     KeeneticDnsTestStateGuard guard;
-    set_keenetic_dns_fetcher_for_tests([]() {
-        return std::string(R"({
+    const KeeneticDnsSnapshot snapshot = prepare_keenetic_dns_snapshot(R"({
           "proxy-status": [
             {
               "proxy-name": "System",
@@ -499,7 +510,6 @@ TEST_CASE("generate-resolver-config includes all keenetic fallback servers in se
             }
           ]
         })");
-    });
 
     CacheManager cache("/nonexistent/cache");
     ListStreamer streamer(cache);
@@ -515,7 +525,7 @@ TEST_CASE("generate-resolver-config includes all keenetic fallback servers in se
     auto route_cfg = make_route_cfg("mylist");
     auto lists = std::map<std::string, ListConfig>{{"mylist", make_list_cfg({"example.com"})}};
 
-    DnsServerRegistry reg(dns_cfg);
+    DnsServerRegistry reg(dns_cfg, snapshot);
     DnsmasqGenerator gen(reg, streamer, route_cfg, dns_cfg, lists);
     const std::string output = run_generate(gen);
 
@@ -532,8 +542,7 @@ TEST_CASE("generate-resolver-config includes all keenetic fallback servers in se
 
 TEST_CASE("generate-resolver-config includes all keenetic dns rule servers") {
     KeeneticDnsTestStateGuard guard;
-    set_keenetic_dns_fetcher_for_tests([]() {
-        return std::string(R"({
+    const KeeneticDnsSnapshot snapshot = prepare_keenetic_dns_snapshot(R"({
           "proxy-status": [
             {
               "proxy-name": "System",
@@ -541,7 +550,6 @@ TEST_CASE("generate-resolver-config includes all keenetic dns rule servers") {
             }
           ]
         })");
-    });
 
     CacheManager cache("/nonexistent/cache");
     ListStreamer streamer(cache);
@@ -562,13 +570,62 @@ TEST_CASE("generate-resolver-config includes all keenetic dns rule servers") {
     auto route_cfg = make_route_cfg("mylist");
     auto lists = std::map<std::string, ListConfig>{{"mylist", make_list_cfg({"example.com"})}};
 
-    DnsServerRegistry reg(dns_cfg);
+    DnsServerRegistry reg(dns_cfg, snapshot);
     DnsmasqGenerator gen(reg, streamer, route_cfg, dns_cfg, lists);
     const std::string output = run_generate(gen);
 
     CHECK(output.find("server=/example.com/127.0.0.1#40500\n") != std::string::npos);
     CHECK(output.find("server=/example.com/127.0.0.1#40508\n") != std::string::npos);
     CHECK(output.find("server=/example.com/198.51.100.10\n") == std::string::npos);
+}
+
+TEST_CASE("keenetic dns registry requires a prepared snapshot and performs no hidden fetch") {
+    KeeneticDnsTestStateGuard guard;
+
+    DnsServer keenetic_server;
+    keenetic_server.tag = "keenetic";
+    keenetic_server.type = api::DnsServerType::KEENETIC;
+
+    DnsConfig dns_cfg;
+    dns_cfg.servers = std::vector<DnsServer>{keenetic_server};
+    dns_cfg.fallback = std::vector<std::string>{"keenetic"};
+
+    CHECK_THROWS_AS((void)DnsServerRegistry(dns_cfg), DnsError);
+
+    const KeeneticDnsSnapshot snapshot =
+        extract_keenetic_dns_snapshot_from_rci(R"({
+          "proxy-status": [
+            {
+              "proxy-name": "System",
+              "proxy-config": "dns_server = 127.0.0.1:40508 . # https://resolver.example/dns-query@dnsm\nstatic_a = pinned.example 192.0.2.10 1\n"
+            }
+          ]
+        })");
+
+    int fetch_count = 0;
+    set_keenetic_dns_fetcher_for_tests([&fetch_count]() -> std::string {
+        ++fetch_count;
+        throw KeeneticDnsError("unexpected hidden RCI fetch");
+    });
+
+    DnsServerRegistry reg(dns_cfg, snapshot);
+    CHECK(fetch_count == 0);
+    REQUIRE(reg.keenetic_snapshot().has_value());
+    CHECK(reg.keenetic_snapshot()->addresses ==
+          std::vector<std::string>{"127.0.0.1:40508"});
+
+    CacheManager cache("/nonexistent/cache");
+    ListStreamer streamer(cache);
+    auto route_cfg = make_route_cfg("mylist");
+    auto lists = std::map<std::string, ListConfig>{
+        {"mylist", make_list_cfg({"example.com"})}};
+    DnsmasqGenerator gen(reg, streamer, route_cfg, dns_cfg, lists);
+    const std::string output = run_generate(gen);
+
+    CHECK(fetch_count == 0);
+    CHECK(output.find("server=127.0.0.1#40508\n") != std::string::npos);
+    CHECK(output.find("address=/pinned.example/192.0.2.10\n") !=
+          std::string::npos);
 }
 
 TEST_CASE("generate-resolver-config includes rebind-domain-ok directives for dns rules with allow_domain_rebinding enabled") {
@@ -686,6 +743,64 @@ TEST_CASE("hash changes when domain list content changes") {
     CHECK(hash1 != hash2);
 }
 
+TEST_CASE("trusted VPN interfaces are emitted canonically and hashed") {
+    CacheManager cache("/nonexistent/cache");
+    ListStreamer streamer1(cache);
+    ListStreamer streamer2(cache);
+
+    const std::string list_name = "mylist";
+    auto route_cfg = make_route_cfg(list_name);
+    auto dns_cfg = make_empty_dns_cfg();
+    auto lists = std::map<std::string, ListConfig>{
+        {list_name, make_list_cfg({"example.com"})}};
+    DnsServerRegistry reg1(dns_cfg);
+    DnsServerRegistry reg2(dns_cfg);
+
+    DnsmasqGenerator baseline(
+        reg1, streamer1, route_cfg, dns_cfg, lists);
+    DnsmasqGenerator trusted(
+        reg2,
+        streamer2,
+        route_cfg,
+        dns_cfg,
+        lists,
+        ResolverType::DNSMASQ_IPSET,
+        KEEN_PBR3_VERSION_FULL_STRING,
+        {},
+        {"xfrms1", "br*", "br*"});
+
+    const auto output = run_generate(trusted);
+    CHECK(
+        output.find("interface=br*\ninterface=xfrms1\n\n") !=
+        std::string::npos);
+    CHECK(
+        baseline.compute_config_hash() !=
+        trusted.compute_config_hash());
+}
+
+TEST_CASE("trusted VPN interface selectors reject config injection") {
+    CacheManager cache("/nonexistent/cache");
+    ListStreamer streamer(cache);
+    const auto route_cfg = make_route_cfg("mylist");
+    const auto dns_cfg = make_empty_dns_cfg();
+    const auto lists = std::map<std::string, ListConfig>{
+        {"mylist", make_list_cfg({"example.com"})}};
+    DnsServerRegistry registry(dns_cfg);
+
+    CHECK_THROWS_AS(
+        DnsmasqGenerator(
+            registry,
+            streamer,
+            route_cfg,
+            dns_cfg,
+            lists,
+            ResolverType::DNSMASQ_IPSET,
+            KEEN_PBR3_VERSION_FULL_STRING,
+            {},
+            {"br0\ninterface=eth3"}),
+        std::invalid_argument);
+}
+
 
 TEST_CASE("hash is identical for ipset and nftset output modes") {
     CacheManager cache("/nonexistent/cache");
@@ -746,9 +861,11 @@ TEST_CASE("generate output omits IPv6 dnsmasq targets when IPv6 is disabled") {
     DnsmasqGenerator ipset_gen(reg1, streamer1, route_cfg, dns_cfg, lists,
                                ResolverType::DNSMASQ_IPSET,
                                KEEN_PBR3_VERSION_FULL_STRING,
-                               false);
+                               ResolverIpv6Policy::explicitly_disabled());
     const std::string ipset_output = run_generate(ipset_gen);
 
+    CHECK(ipset_output.find("filter-AAAA\nfilter-rr=64,65\n\n")
+          != std::string::npos);
     CHECK(ipset_output.find("ipset=/example.com/kpbr4d_mylist\n") != std::string::npos);
     CHECK(ipset_output.find("kpbr6d_mylist") == std::string::npos);
 
@@ -756,11 +873,76 @@ TEST_CASE("generate output omits IPv6 dnsmasq targets when IPv6 is disabled") {
     DnsmasqGenerator nftset_gen(reg2, streamer2, route_cfg, dns_cfg, lists,
                                 ResolverType::DNSMASQ_NFTSET,
                                 KEEN_PBR3_VERSION_FULL_STRING,
-                                false);
+                                ResolverIpv6Policy::explicitly_disabled());
     const std::string nftset_output = run_generate(nftset_gen);
 
+    CHECK(nftset_output.find("filter-AAAA\nfilter-rr=64,65\n\n")
+          != std::string::npos);
     CHECK(nftset_output.find("nftset=/example.com/4#inet#KeenPbrTable#kpbr4d_mylist\n") != std::string::npos);
     CHECK(nftset_output.find("kpbr6d_mylist") == std::string::npos);
+}
+
+TEST_CASE("generate output keeps AAAA answers when IPv6 is enabled") {
+    CacheManager cache("/nonexistent/cache");
+    ListStreamer streamer(cache);
+
+    const std::string list_name = "mylist";
+    auto route_cfg = make_route_cfg(list_name);
+    auto dns_cfg = make_empty_dns_cfg();
+    auto lists = std::map<std::string, ListConfig>{
+        {list_name, make_list_cfg({"example.com"})}};
+
+    DnsServerRegistry registry(dns_cfg);
+    DnsmasqGenerator generator(
+        registry, streamer, route_cfg, dns_cfg, lists,
+        ResolverType::DNSMASQ_IPSET,
+        KEEN_PBR3_VERSION_FULL_STRING,
+        ResolverIpv6Policy::supported());
+
+    const std::string output = run_generate(generator);
+    CHECK(output.find("filter-AAAA") == std::string::npos);
+    CHECK(output.find("filter-rr=64,65") == std::string::npos);
+}
+
+TEST_CASE("unsupported effective IPv6 omits IPv6 targets without suppressing AAAA") {
+    CacheManager cache("/nonexistent/cache");
+    ListStreamer streamer(cache);
+
+    const std::string list_name = "mylist";
+    auto route_cfg = make_route_cfg(list_name);
+    auto dns_cfg = make_empty_dns_cfg();
+    auto lists = std::map<std::string, ListConfig>{
+        {list_name, make_list_cfg({"example.com"})}};
+
+    DnsServerRegistry registry(dns_cfg);
+    DnsmasqGenerator generator(
+        registry, streamer, route_cfg, dns_cfg, lists,
+        ResolverType::DNSMASQ_IPSET,
+        KEEN_PBR3_VERSION_FULL_STRING,
+        ResolverIpv6Policy::unsupported());
+
+    const std::string output = run_generate(generator);
+    CHECK(output.find("filter-AAAA") == std::string::npos);
+    CHECK(output.find("filter-rr=64,65") == std::string::npos);
+    CHECK(output.find("ipset=/example.com/kpbr4d_mylist\n")
+          != std::string::npos);
+    CHECK(output.find("kpbr6d_mylist") == std::string::npos);
+}
+
+TEST_CASE("resolver IPv6 policy filters AAAA only for explicit user disable") {
+    const ResolverIpv6Policy configured_off = resolver_ipv6_policy(
+        {false, Ipv6SupportDecision::Reason::DisabledByConfig});
+    const ResolverIpv6Policy unsupported = resolver_ipv6_policy(
+        {false, Ipv6SupportDecision::Reason::UnsupportedBySystem});
+    const ResolverIpv6Policy enabled = resolver_ipv6_policy(
+        {true, Ipv6SupportDecision::Reason::Enabled});
+
+    CHECK_FALSE(configured_off.targets_enabled);
+    CHECK(configured_off.suppress_aaaa);
+    CHECK_FALSE(unsupported.targets_enabled);
+    CHECK_FALSE(unsupported.suppress_aaaa);
+    CHECK(enabled.targets_enabled);
+    CHECK_FALSE(enabled.suppress_aaaa);
 }
 
 TEST_CASE("hash changes when IPv6 dnsmasq targets are disabled") {
@@ -777,13 +959,45 @@ TEST_CASE("hash changes when IPv6 dnsmasq targets are disabled") {
     DnsServerRegistry reg2(dns_cfg);
 
     const std::string hash_ipv6 = DnsmasqGenerator::compute_config_hash(
-        reg1, streamer1, route_cfg, dns_cfg, lists, KEEN_PBR3_VERSION_FULL_STRING, true);
+        reg1, streamer1, route_cfg, dns_cfg, lists,
+        KEEN_PBR3_VERSION_FULL_STRING,
+        ResolverIpv6Policy::supported());
     const std::string hash_ipv4_only = DnsmasqGenerator::compute_config_hash(
-        reg2, streamer2, route_cfg, dns_cfg, lists, KEEN_PBR3_VERSION_FULL_STRING, false);
+        reg2, streamer2, route_cfg, dns_cfg, lists,
+        KEEN_PBR3_VERSION_FULL_STRING,
+        ResolverIpv6Policy::unsupported());
 
     CHECK(!hash_ipv6.empty());
     CHECK(!hash_ipv4_only.empty());
     CHECK(hash_ipv6 != hash_ipv4_only);
+}
+
+TEST_CASE("hash changes when explicit IPv6 disable toggles AAAA filtering") {
+    CacheManager cache("/nonexistent/cache");
+    ListStreamer streamer1(cache);
+    ListStreamer streamer2(cache);
+
+    const std::string list_name = "mylist";
+    auto route_cfg = make_route_cfg(list_name);
+    auto dns_cfg = make_empty_dns_cfg();
+    auto lists = std::map<std::string, ListConfig>{
+        {list_name, make_list_cfg({"example.com"})}};
+
+    DnsServerRegistry reg1(dns_cfg);
+    DnsServerRegistry reg2(dns_cfg);
+
+    const std::string unsupported_hash =
+        DnsmasqGenerator::compute_config_hash(
+            reg1, streamer1, route_cfg, dns_cfg, lists,
+            KEEN_PBR3_VERSION_FULL_STRING,
+            ResolverIpv6Policy::unsupported());
+    const std::string user_disabled_hash =
+        DnsmasqGenerator::compute_config_hash(
+            reg2, streamer2, route_cfg, dns_cfg, lists,
+            KEEN_PBR3_VERSION_FULL_STRING,
+            ResolverIpv6Policy::explicitly_disabled());
+
+    CHECK(unsupported_hash != user_disabled_hash);
 }
 
 TEST_CASE("hash changes when allow_domain_rebinding changes") {
@@ -838,7 +1052,7 @@ TEST_CASE("hash changes when dns probe server changes") {
     CHECK(gen2.compute_config_hash() != gen3.compute_config_hash());
 }
 
-TEST_CASE("hash changes when keenetic static dns entries change") {
+TEST_CASE("keenetic registry and generator stay pinned when the global cache changes") {
     KeeneticDnsTestStateGuard guard;
     CacheManager cache("/nonexistent/cache");
     ListStreamer streamer1(cache);
@@ -855,8 +1069,7 @@ TEST_CASE("hash changes when keenetic static dns entries change") {
     auto route_cfg = make_route_cfg("mylist");
     auto lists = std::map<std::string, ListConfig>{{"mylist", make_list_cfg({"example.com"})}};
 
-    set_keenetic_dns_fetcher_for_tests([]() {
-        return std::string(R"({
+    const KeeneticDnsSnapshot first_snapshot = prepare_keenetic_dns_snapshot(R"({
           "proxy-status": [
             {
               "proxy-name": "System",
@@ -864,13 +1077,12 @@ TEST_CASE("hash changes when keenetic static dns entries change") {
             }
           ]
         })");
-    });
-    DnsServerRegistry reg1(dns_cfg);
+    DnsServerRegistry reg1(dns_cfg, first_snapshot);
     DnsmasqGenerator gen1(reg1, streamer1, route_cfg, dns_cfg, lists);
+    const std::string first_output = run_generate(gen1);
+    const std::string first_hash = gen1.compute_config_hash();
 
-    reset_keenetic_dns_test_state();
-    set_keenetic_dns_fetcher_for_tests([]() {
-        return std::string(R"({
+    const KeeneticDnsSnapshot second_snapshot = prepare_keenetic_dns_snapshot(R"({
           "proxy-status": [
             {
               "proxy-name": "System",
@@ -878,11 +1090,17 @@ TEST_CASE("hash changes when keenetic static dns entries change") {
             }
           ]
         })");
-    });
-    DnsServerRegistry reg2(dns_cfg);
+    DnsServerRegistry reg2(dns_cfg, second_snapshot);
     DnsmasqGenerator gen2(reg2, streamer2, route_cfg, dns_cfg, lists);
 
+    CHECK(run_generate(gen1) == first_output);
+    CHECK(gen1.compute_config_hash() == first_hash);
+    REQUIRE(reg1.keenetic_snapshot().has_value());
+    CHECK(reg1.keenetic_snapshot()->static_entries.size() == 1);
     CHECK(gen1.compute_config_hash() != gen2.compute_config_hash());
+    CHECK(run_generate(gen2).find(
+              "address=/my.keenetic.net/2001:db8::125\n") !=
+          std::string::npos);
 }
 
 TEST_CASE("hash changes when hash version changes") {
@@ -970,11 +1188,11 @@ TEST_CASE("generate-resolver-config keeps 1000 short domains within batch and li
     CHECK(emitted_domains == expected_domains);
 }
 
-TEST_CASE("generate-resolver-config edge lengths 200..255 split rows safely and keep all domains") {
+TEST_CASE("generate-resolver-config edge lengths 200..253 split rows safely and keep all domains") {
     CacheManager cache("/nonexistent/cache");
     const std::string list_name(80, 'l');
 
-    for (size_t variable_len = 200; variable_len <= 255; ++variable_len) {
+    for (size_t variable_len = 200; variable_len <= 253; ++variable_len) {
         CAPTURE(variable_len);
 
         ListStreamer streamer(cache);

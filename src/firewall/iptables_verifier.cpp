@@ -9,6 +9,8 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <stdexcept>
+#include <string_view>
 
 namespace keen_pbr3 {
 
@@ -63,11 +65,6 @@ std::vector<L4Proto> expand_l4_protos_for_iptables(
         return {L4Proto::Tcp, L4Proto::Udp};
     }
     return {criteria.proto};
-}
-
-std::string normalize_iptables_port_spec(const std::string& spec) {
-    if (spec.empty()) return {};
-    return parse_port_spec(spec).to_iptables_string();
 }
 
 std::string normalize_addr_value(const std::string& addr) {
@@ -151,10 +148,18 @@ std::string criteria_summary(const FirewallRuleCriteria& criteria) {
 }
 
 std::optional<bool> ipv6_from_set_name(const std::string& set_name) {
-    if (set_name.rfind("kpbr6_", 0) == 0 || set_name.rfind("kpbr6d_", 0) == 0) {
+    if (set_name.rfind("kpbr6_", 0) == 0 ||
+        set_name.rfind("kpbr6s_", 0) == 0 ||
+        set_name.rfind("kpbr6S_", 0) == 0 ||
+        set_name.rfind("kpbr6d_", 0) == 0 ||
+        set_name.rfind("kpbr6m_", 0) == 0) {
         return true;
     }
-    if (set_name.rfind("kpbr4_", 0) == 0 || set_name.rfind("kpbr4d_", 0) == 0) {
+    if (set_name.rfind("kpbr4_", 0) == 0 ||
+        set_name.rfind("kpbr4s_", 0) == 0 ||
+        set_name.rfind("kpbr4S_", 0) == 0 ||
+        set_name.rfind("kpbr4d_", 0) == 0 ||
+        set_name.rfind("kpbr4m_", 0) == 0) {
         return false;
     }
     return std::nullopt;
@@ -167,6 +172,24 @@ struct ExpectedIptablesRule {
     uint32_t fwmark{0};
     FirewallRuleCriteria criteria;
 };
+
+bool set_name_matches(const std::string& expected,
+                      const std::string& actual) {
+    if (expected == actual) return true;
+
+    const auto matches_generation = [&](const char* logical_prefix,
+                                        const char* generation_a_prefix,
+                                        const char* generation_b_prefix) {
+        const std::string logical(logical_prefix);
+        if (expected.rfind(logical, 0) != 0) return false;
+        const auto suffix = expected.substr(logical.size());
+        return actual == std::string(generation_a_prefix) + suffix ||
+               actual == std::string(generation_b_prefix) + suffix;
+    };
+
+    return matches_generation("kpbr4_", "kpbr4s_", "kpbr4S_") ||
+           matches_generation("kpbr6_", "kpbr6s_", "kpbr6S_");
+}
 
 std::vector<ExpectedIptablesRule> expand_expected_rule_states(
     const std::vector<RuleState>& expected) {
@@ -246,21 +269,41 @@ bool rule_matches(const ParsedIptablesRule& actual,
                   const ExpectedIptablesRule& expected,
                   uint32_t expected_fwmark_mask) {
     return actual.ipv6 == expected.ipv6 &&
-           actual.set_name == expected.set_name &&
+           set_name_matches(expected.set_name, actual.set_name) &&
            action_matches(actual, expected, expected_fwmark_mask) &&
            criteria_equal(actual.criteria, expected.criteria);
 }
 
+// `PortSpec::operator=` throws `std::invalid_argument` for an unknown token,
+// while this parser consumes output that may also contain rules owned by other
+// packages. A malformed foreign rule must not abort inspection of the whole
+// table, but it must not be allowed to match an expected rule after silently
+// losing its port criteria either.
+//
+// Найдено фаззингом `keen-pbr-fuzz-iptables` на токене '80,443j'.
+bool assign_port_spec(PortSpec& target, std::string_view token) {
+    try {
+        target = token;
+        return true;
+    } catch (const std::invalid_argument&) {
+        return false;
+    }
+}
+
 ParsedIptablesState parse_iptables_s_for_family(const std::string& output,
-                                                bool ipv6) {
+                                                bool ipv6,
+                                                const std::string& chain_name) {
     ParsedIptablesState state;
 
-    static constexpr const char* CHAIN_NAME = "KeenPbrTable";
-    const std::string chain_decl = std::string("-N ") + CHAIN_NAME;
+    const std::string chain_decl = std::string("-N ") + chain_name;
     const std::string prerouting_jump =
-        std::string("-A PREROUTING -j ") + CHAIN_NAME;
+        std::string("-A PREROUTING -j ") + chain_name;
     const std::string chain_rule_prefix =
-        std::string("-A ") + CHAIN_NAME + " ";
+        std::string("-A ") + chain_name + " ";
+    const std::string generation_a_rule_prefix =
+        std::string("-A ") + chain_name + "_A ";
+    const std::string generation_b_rule_prefix =
+        std::string("-A ") + chain_name + "_B ";
 
     std::istringstream stream(output);
     std::string line;
@@ -274,7 +317,9 @@ ParsedIptablesState parse_iptables_s_for_family(const std::string& output,
             state.has_prerouting_jump = true;
             continue;
         }
-        if (line.rfind(chain_rule_prefix, 0) != 0) {
+        if (line.rfind(chain_rule_prefix, 0) != 0 &&
+            line.rfind(generation_a_rule_prefix, 0) != 0 &&
+            line.rfind(generation_b_rule_prefix, 0) != 0) {
             continue;
         }
 
@@ -283,6 +328,7 @@ ParsedIptablesState parse_iptables_s_for_family(const std::string& output,
 
         const auto tokens = split_ws(line);
         bool negate_next = false;
+        bool valid_rule = true;
 
         for (size_t i = 0; i < tokens.size(); ++i) {
             const auto& tok = tokens[i];
@@ -321,16 +367,30 @@ ParsedIptablesState parse_iptables_s_for_family(const std::string& output,
                 negate_next = false;
                 continue;
             }
-            if ((tok == "--sport" || tok == "--sports") && i + 1 < tokens.size()) {
-                rule.criteria.src_port = tokens[i + 1];
-                rule.criteria.negate_src_port = negate_next;
+            if (tok == "--sport" || tok == "--sports") {
+                if (i + 1 >= tokens.size()) {
+                    valid_rule = false;
+                    break;
+                }
+                if (assign_port_spec(rule.criteria.src_port, tokens[i + 1])) {
+                    rule.criteria.negate_src_port = negate_next;
+                } else {
+                    valid_rule = false;
+                }
                 ++i;
                 negate_next = false;
                 continue;
             }
-            if ((tok == "--dport" || tok == "--dports") && i + 1 < tokens.size()) {
-                rule.criteria.dst_port = tokens[i + 1];
-                rule.criteria.negate_dst_port = negate_next;
+            if (tok == "--dport" || tok == "--dports") {
+                if (i + 1 >= tokens.size()) {
+                    valid_rule = false;
+                    break;
+                }
+                if (assign_port_spec(rule.criteria.dst_port, tokens[i + 1])) {
+                    rule.criteria.negate_dst_port = negate_next;
+                } else {
+                    valid_rule = false;
+                }
                 ++i;
                 negate_next = false;
                 continue;
@@ -375,7 +435,7 @@ ParsedIptablesState parse_iptables_s_for_family(const std::string& output,
             negate_next = false;
         }
 
-        if (!rule.is_mark && !rule.is_drop && !rule.is_pass) {
+        if (!valid_rule || (!rule.is_mark && !rule.is_drop && !rule.is_pass)) {
             continue;
         }
         if (rule.set_name.empty() && rule.criteria.empty()) {
@@ -391,45 +451,76 @@ ParsedIptablesState parse_iptables_s_for_family(const std::string& output,
 } // namespace
 
 ParsedIptablesState parse_iptables_s(const std::string& output) {
-    return parse_iptables_s_for_family(output, false);
+    return parse_iptables_s_for_family(output, false, "KeenPbrTable");
 }
 
-IptablesFirewallVerifier::IptablesFirewallVerifier(CommandRunner runner)
-    : runner_(std::move(runner)) {}
+IptablesFirewallVerifier::IptablesFirewallVerifier(
+    CommandRunner runner,
+    bool use_raw_prerouting)
+    : runner_(std::move(runner))
+    , use_raw_prerouting_(use_raw_prerouting) {}
 
 const IptablesFirewallVerifier::CachedState& IptablesFirewallVerifier::get_state() const {
     if (!cached_state_.has_value()) {
         CachedState state;
 
-        auto read_state = [this](const std::vector<std::string>& chain_args,
-                                 const std::vector<std::string>& prerouting_args,
+        auto read_table = [this](const std::string& command,
+                                 const std::string& table,
+                                 const std::string& chain,
                                  bool ipv6) {
             std::string combined;
 
-            const auto chain_result = runner_(chain_args);
+            const auto chain_result =
+                runner_({command, "-t", table, "-S", chain});
             if (chain_result.exit_code == 0) {
                 combined += chain_result.stdout_output;
                 if (!combined.empty() && combined.back() != '\n') {
                     combined.push_back('\n');
                 }
+
+                // Newer iptables applies keep a stable dispatcher and publish
+                // rules in one of two generation chains. Query only the active
+                // child so diagnostics do not mistake the inactive generation
+                // for live state.
+                std::istringstream chain_lines(chain_result.stdout_output);
+                std::string line;
+                const std::string jump_prefix =
+                    std::string("-A ") + chain + " -j ";
+                while (std::getline(chain_lines, line)) {
+                    if (line.rfind(jump_prefix, 0) != 0) {
+                        continue;
+                    }
+                    const std::string child = line.substr(jump_prefix.size());
+                    if (child != chain + "_A" &&
+                        child != chain + "_B") {
+                        continue;
+                    }
+                    const auto child_result =
+                        runner_({command, "-t", table, "-S", child});
+                    if (child_result.exit_code == 0) {
+                        combined += child_result.stdout_output;
+                        if (!combined.empty() && combined.back() != '\n') {
+                            combined.push_back('\n');
+                        }
+                    }
+                    break;
+                }
             }
 
-            const auto prerouting_result = runner_(prerouting_args);
+            const auto prerouting_result =
+                runner_({command, "-t", table, "-S", "PREROUTING"});
             if (prerouting_result.exit_code == 0) {
                 combined += prerouting_result.stdout_output;
             }
 
-            return parse_iptables_s_for_family(combined, ipv6);
+            return parse_iptables_s_for_family(combined, ipv6, chain);
         };
 
-        state.v4 = read_state(
-            {"iptables", "-t", "mangle", "-S", CHAIN_NAME},
-            {"iptables", "-t", "mangle", "-S", "PREROUTING"},
-            false);
-        state.v6 = read_state(
-            {"ip6tables", "-t", "mangle", "-S", CHAIN_NAME},
-            {"ip6tables", "-t", "mangle", "-S", "PREROUTING"},
-            true);
+        state.v4 = use_raw_prerouting_
+            ? read_table("iptables", "raw", RAW_CHAIN_NAME, false)
+            : read_table("iptables", "mangle", CHAIN_NAME, false);
+        state.v6 = read_table(
+            "ip6tables", "mangle", CHAIN_NAME, true);
         cached_state_ = std::move(state);
     }
     return *cached_state_;
@@ -444,11 +535,15 @@ FirewallChainCheck IptablesFirewallVerifier::verify_chain() {
         v4.has_prerouting_jump || v6.has_prerouting_jump;
 
     if (!result.chain_present) {
-        result.detail = keen_pbr3::format(
-            "{} chain not found in iptables or ip6tables mangle table", CHAIN_NAME);
+        result.detail = use_raw_prerouting_
+            ? "KeenPbrRaw chain not found in iptables raw table or "
+              "KeenPbrTable in ip6tables mangle table"
+            : "KeenPbrTable chain not found in iptables or ip6tables "
+              "mangle table";
     } else if (!result.prerouting_hook_present) {
         result.detail = keen_pbr3::format(
-            "{} chain exists but PREROUTING jump not found", CHAIN_NAME);
+            "{} chain exists but PREROUTING jump not found",
+            use_raw_prerouting_ ? RAW_CHAIN_NAME : CHAIN_NAME);
     } else {
         result.detail = "ok";
     }
@@ -501,14 +596,16 @@ std::vector<FirewallRuleCheck> IptablesFirewallVerifier::verify_rules(
                                                static_cast<size_t>(&actual - actual_rules.data());
                                            return !used[index] &&
                                                   actual.ipv6 == exp.ipv6 &&
-                                                  actual.set_name == exp.set_name &&
+                                                  set_name_matches(exp.set_name,
+                                                                   actual.set_name) &&
                                                   criteria_equal(actual.criteria, exp.criteria);
                                        });
 
         if (same_shape == actual_rules.end()) {
             check.status = CheckStatus::missing;
             check.detail = keen_pbr3::format(
-                "rule not found in iptables mangle table (family={} criteria={})",
+                "rule not found in iptables {} table (family={} criteria={})",
+                use_raw_prerouting_ && !exp.ipv6 ? "raw" : "mangle",
                 exp.ipv6 ? "ipv6" : "ipv4",
                 criteria_summary(exp.criteria));
             checks.push_back(std::move(check));
@@ -555,8 +652,11 @@ std::vector<FirewallRuleCheck> IptablesFirewallVerifier::verify_rules(
     return checks;
 }
 
-std::unique_ptr<FirewallVerifier> create_iptables_verifier(CommandRunner runner) {
-    return std::make_unique<IptablesFirewallVerifier>(std::move(runner));
+std::unique_ptr<FirewallVerifier> create_iptables_verifier(
+    CommandRunner runner,
+    bool use_raw_prerouting) {
+    return std::make_unique<IptablesFirewallVerifier>(
+        std::move(runner), use_raw_prerouting);
 }
 
 } // namespace keen_pbr3

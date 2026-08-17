@@ -43,6 +43,8 @@ using DaemonConfig         = api::Daemon;
 using ApiConfig            = api::ApiConfig;
 using Outbound             = api::OutboundElement;
 using OutboundType         = api::OutboundType;  // enum: INTERFACE, TABLE, BLACKHOLE, IGNORE, URLTEST
+using UrltestSelectionMode = api::SelectionMode; // enum: LATENCY, PRIORITY
+using ConntrackOnSwitch    = api::ConntrackOnSwitch;
 using OutboundGroup        = api::OutboundGroupElement;
 using RetryConfig          = api::Retry;
 using CircuitBreakerConfig = api::CircuitBreakerConfig;
@@ -52,10 +54,16 @@ using DnsTestServer        = api::DnsTestServer;
 using DnsRule              = api::DnsRuleElement;
 using DnsConfig            = api::Dns;
 using RouteRule            = api::RouteRuleElement;
+using InternalVpnServer    = api::InternalVpnServerElement;
+using InternalVpnService   = api::InternalVpnServiceElement;
 using RouteConfig          = api::Route;
 using FwmarkConfig         = api::Fwmark;
 using IprouteConfig        = api::Iproute;
 using ListsAutoupdateConfig = api::ListsAutoupdate;
+using ListRefreshConfig     = api::ListRefresh;
+using ListRefreshDetourMode = api::RefreshDetourMode;
+using PlainDnsTemplate      = api::PlainDnsTemplateElement;
+using UiPreferencesConfig   = api::UiPreferences;
 // Note: DnsRule.list (not .lists) and RouteRule.list (not .lists) match JSON keys.
 
 constexpr std::size_t kDefaultMaxFileSizeBytes = std::size_t{8} * 1024U * 1024U; // 8 MiB
@@ -67,6 +75,17 @@ inline const std::vector<std::string>& route_rule_lists(const RouteRule& rule) {
 
 inline bool route_rule_enabled(const RouteRule& rule) {
     return rule.enabled.value_or(true);
+}
+
+// Keep this predicate aligned with validate_route_rule_specs(). Protocol is a
+// modifier for a real match condition, not a standalone condition by itself.
+inline bool route_rule_has_non_list_match_condition(
+    const RouteRule& rule) {
+    return rule.dscp.has_value() ||
+           rule.src_port.has_value() ||
+           rule.dest_port.has_value() ||
+           rule.src_addr.has_value() ||
+           rule.dest_addr.has_value();
 }
 
 inline bool dns_rule_enabled(const DnsRule& rule) {
@@ -81,13 +100,25 @@ Config parse_and_validate_config(const std::string& json_str);
 size_t max_file_size_bytes(const Config& config);
 FirewallBackendPreference firewall_backend_preference(const Config& config);
 
+// Resolves the URL-list download policy without rewriting legacy configs.
+// An omitted mode keeps an existing per-list detour as an override and
+// otherwise inherits the global list_refresh chain.
+ListRefreshDetourMode effective_list_refresh_detour_mode(
+    const ListConfig& list_config);
+std::vector<std::string> configured_list_refresh_detours(
+    const ListRefreshConfig& refresh_config);
+std::vector<std::string> effective_list_refresh_detours(
+    const Config& config,
+    const ListConfig& list_config);
+
 // --- Fwmark allocation ---
 
-// Maps outbound tag to its assigned fwmark value
+// Maps every routable outbound tag, including urltest selectors, to its
+// assigned fwmark value. Blackhole and ignore outbounds do not consume marks.
 using OutboundMarkMap = std::map<std::string, uint32_t>;
 
-// Validates fwmark.mask and assigns sequential fwmarks to interface and table
-// outbounds. Blackhole, ignore, and urltest outbounds do NOT get marks.
+// Validates fwmark.mask and assigns sequential fwmarks to interface, table,
+// and urltest outbounds. Blackhole and ignore outbounds do not get marks.
 // Throws ConfigError if mask is invalid or too many outbounds for the mark space.
 OutboundMarkMap allocate_outbound_marks(const FwmarkConfig& fwmark_cfg,
                                          const std::vector<Outbound>& outbounds);

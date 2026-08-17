@@ -3,11 +3,15 @@ package api
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
 
+	configpkg "github.com/infaprim/mykeenpbr/internal/config"
 	"github.com/infaprim/mykeenpbr/internal/transport"
 )
 
@@ -22,6 +26,7 @@ type TransportRuntime interface {
 	Status(context.Context, string) (transport.Status, error)
 	Up(context.Context, string) error
 	Down(context.Context, string) error
+	Restart(context.Context, string) error
 }
 
 type TransportAdmin interface {
@@ -33,6 +38,48 @@ type TransportAdmin interface {
 
 type TransportConfigExporter interface {
 	ExportSpecs() []transport.TransportSpec
+}
+
+type TransportConfigRevisionProvider interface {
+	Revision() string
+}
+
+type TransportConfigStateProvider interface {
+	State() ([]transport.TransportSpec, string)
+}
+
+type ConditionalTransportAdmin interface {
+	CreateIfRevision(
+		context.Context,
+		transport.TransportSpec,
+		string,
+	) (revision string, matched bool, err error)
+	UpdateIfRevision(
+		context.Context,
+		string,
+		transport.TransportSpec,
+		string,
+	) (revision string, matched bool, err error)
+}
+
+type TransportConfigValidator interface {
+	ValidateCreateAtRevision(
+		transport.TransportSpec,
+		string,
+	) (revision string, matched bool, err error)
+	ValidateUpdateAtRevision(
+		string,
+		transport.TransportSpec,
+		string,
+	) (revision string, matched bool, err error)
+}
+
+type TransportRuntimeSettingsAdmin interface {
+	Settings() configpkg.RuntimeSettings
+	SetSingBoxProcessMode(
+		context.Context,
+		configpkg.SingBoxProcessMode,
+	) (configpkg.RuntimeSettings, error)
 }
 
 func New(manager TransportRuntime, key string, admins ...TransportAdmin) http.Handler {
@@ -47,11 +94,55 @@ func New(manager TransportRuntime, key string, admins ...TransportAdmin) http.Ha
 	mux.HandleFunc("GET /v1/transports/{tag}", a.status)
 	mux.HandleFunc("POST /v1/transports/{tag}/{action}", a.action)
 	mux.HandleFunc("GET /v1/config/transports", a.listConfig)
+	mux.HandleFunc("GET /v1/config/transports/state", a.configState)
 	mux.HandleFunc("GET /v1/config/transports/export", a.exportConfig)
+	mux.HandleFunc("POST /v1/config/transports/validate", a.validateCreateConfig)
+	mux.HandleFunc("PUT /v1/config/transports/{tag}/validate", a.validateUpdateConfig)
 	mux.HandleFunc("POST /v1/config/transports", a.createConfig)
 	mux.HandleFunc("PUT /v1/config/transports/{tag}", a.updateConfig)
 	mux.HandleFunc("DELETE /v1/config/transports/{tag}", a.deleteConfig)
+	mux.HandleFunc("GET /v1/config/settings", a.getSettings)
+	mux.HandleFunc("PUT /v1/config/settings", a.updateSettings)
 	return a.auth(mux)
+}
+
+func (a *API) getSettings(w http.ResponseWriter, _ *http.Request) {
+	admin, ok := a.admin.(TransportRuntimeSettingsAdmin)
+	if !ok {
+		write(w, http.StatusServiceUnavailable, map[string]string{"error": "transport settings unavailable"})
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	write(w, http.StatusOK, admin.Settings())
+}
+
+func (a *API) updateSettings(w http.ResponseWriter, r *http.Request) {
+	admin, ok := a.admin.(TransportRuntimeSettingsAdmin)
+	if !ok {
+		write(w, http.StatusServiceUnavailable, map[string]string{"error": "transport settings unavailable"})
+		return
+	}
+	var request struct {
+		SingBoxProcessMode configpkg.SingBoxProcessMode `json:"sing_box_process_mode"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		write(w, http.StatusBadRequest, map[string]string{"error": "invalid transport settings JSON"})
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		write(w, http.StatusBadRequest, map[string]string{"error": "invalid transport settings JSON"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	settings, err := admin.SetSingBoxProcessMode(ctx, request.SingBoxProcessMode)
+	if err != nil {
+		write(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	write(w, http.StatusOK, settings)
 }
 
 func (a *API) exportConfig(w http.ResponseWriter, _ *http.Request) {
@@ -72,21 +163,59 @@ func (a *API) listConfig(w http.ResponseWriter, _ *http.Request) {
 	write(w, http.StatusOK, a.admin.Specs())
 }
 
+func (a *API) configState(w http.ResponseWriter, _ *http.Request) {
+	provider, ok := a.admin.(TransportConfigStateProvider)
+	if !ok {
+		write(w, http.StatusServiceUnavailable, map[string]string{"error": "transport config state unavailable"})
+		return
+	}
+	specs, revision := provider.State()
+	w.Header().Set("Cache-Control", "no-store")
+	setRevisionHeader(w, revision)
+	write(w, http.StatusOK, map[string]any{
+		"revision":   revision,
+		"transports": specs,
+	})
+}
+
 func (a *API) createConfig(w http.ResponseWriter, r *http.Request) {
 	if a.admin == nil {
 		write(w, http.StatusServiceUnavailable, map[string]string{"error": "transport admin unavailable"})
 		return
 	}
-	var spec transport.TransportSpec
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&spec); err != nil {
+	spec, err := decodeTransportSpec(w, r)
+	if err != nil {
 		write(w, http.StatusBadRequest, map[string]string{"error": "invalid transport JSON"})
+		return
+	}
+	expectedRevision, conditional, err := parseIfMatch(r)
+	if err != nil {
+		write(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if conditional {
+		admin, ok := a.admin.(ConditionalTransportAdmin)
+		if !ok {
+			write(w, http.StatusServiceUnavailable, map[string]string{"error": "conditional transport admin unavailable"})
+			return
+		}
+		revision, matched, err := admin.CreateIfRevision(r.Context(), spec, expectedRevision)
+		if !matched {
+			writePreconditionFailed(w, revision)
+			return
+		}
+		if err != nil {
+			writeRevisionError(w, http.StatusBadRequest, revision, err)
+			return
+		}
+		writeRevisionResult(w, http.StatusCreated, "created", spec.Tag, revision)
 		return
 	}
 	if err := a.admin.Create(r.Context(), spec); err != nil {
 		write(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	write(w, http.StatusCreated, map[string]string{"status": "created", "tag": spec.Tag})
+	writeRevisionResult(w, http.StatusCreated, "created", spec.Tag, a.currentRevision())
 }
 
 func (a *API) updateConfig(w http.ResponseWriter, r *http.Request) {
@@ -94,16 +223,131 @@ func (a *API) updateConfig(w http.ResponseWriter, r *http.Request) {
 		write(w, http.StatusServiceUnavailable, map[string]string{"error": "transport admin unavailable"})
 		return
 	}
-	var spec transport.TransportSpec
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&spec); err != nil {
+	spec, err := decodeTransportSpec(w, r)
+	if err != nil {
 		write(w, http.StatusBadRequest, map[string]string{"error": "invalid transport JSON"})
+		return
+	}
+	expectedRevision, conditional, err := parseIfMatch(r)
+	if err != nil {
+		write(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if conditional {
+		admin, ok := a.admin.(ConditionalTransportAdmin)
+		if !ok {
+			write(w, http.StatusServiceUnavailable, map[string]string{"error": "conditional transport admin unavailable"})
+			return
+		}
+		revision, matched, err := admin.UpdateIfRevision(
+			r.Context(),
+			r.PathValue("tag"),
+			spec,
+			expectedRevision,
+		)
+		if !matched {
+			writePreconditionFailed(w, revision)
+			return
+		}
+		if err != nil {
+			writeRevisionError(w, http.StatusBadRequest, revision, err)
+			return
+		}
+		writeRevisionResult(w, http.StatusOK, "updated", spec.Tag, revision)
 		return
 	}
 	if err := a.admin.Update(r.Context(), r.PathValue("tag"), spec); err != nil {
 		write(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	write(w, http.StatusOK, map[string]string{"status": "updated", "tag": spec.Tag})
+	writeRevisionResult(w, http.StatusOK, "updated", spec.Tag, a.currentRevision())
+}
+
+func (a *API) validateCreateConfig(w http.ResponseWriter, r *http.Request) {
+	if a.admin == nil {
+		write(w, http.StatusServiceUnavailable, map[string]string{"error": "transport admin unavailable"})
+		return
+	}
+	validator, ok := a.admin.(TransportConfigValidator)
+	if !ok {
+		write(w, http.StatusServiceUnavailable, map[string]string{"error": "transport validation unavailable"})
+		return
+	}
+	spec, err := decodeTransportSpec(w, r)
+	if err != nil {
+		write(w, http.StatusBadRequest, map[string]string{"error": "invalid transport JSON"})
+		return
+	}
+	expectedRevision, _, err := parseIfMatch(r)
+	if err != nil {
+		write(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	revision, matched, err := validator.ValidateCreateAtRevision(spec, expectedRevision)
+	if !matched {
+		writePreconditionFailed(w, revision)
+		return
+	}
+	if err != nil {
+		writeRevisionError(w, http.StatusBadRequest, revision, err)
+		return
+	}
+	writeValidationResult(w, spec.Tag, revision)
+}
+
+func (a *API) validateUpdateConfig(w http.ResponseWriter, r *http.Request) {
+	if a.admin == nil {
+		write(w, http.StatusServiceUnavailable, map[string]string{"error": "transport admin unavailable"})
+		return
+	}
+	validator, ok := a.admin.(TransportConfigValidator)
+	if !ok {
+		write(w, http.StatusServiceUnavailable, map[string]string{"error": "transport validation unavailable"})
+		return
+	}
+	spec, err := decodeTransportSpec(w, r)
+	if err != nil {
+		write(w, http.StatusBadRequest, map[string]string{"error": "invalid transport JSON"})
+		return
+	}
+	expectedRevision, _, err := parseIfMatch(r)
+	if err != nil {
+		write(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	revision, matched, err := validator.ValidateUpdateAtRevision(
+		r.PathValue("tag"),
+		spec,
+		expectedRevision,
+	)
+	if !matched {
+		writePreconditionFailed(w, revision)
+		return
+	}
+	if err != nil {
+		writeRevisionError(w, http.StatusBadRequest, revision, err)
+		return
+	}
+	writeValidationResult(w, spec.Tag, revision)
+}
+
+func decodeTransportSpec(w http.ResponseWriter, r *http.Request) (transport.TransportSpec, error) {
+	var spec transport.TransportSpec
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&spec); err != nil {
+		return transport.TransportSpec{}, err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return transport.TransportSpec{}, errors.New("multiple JSON values")
+		}
+		return transport.TransportSpec{}, err
+	}
+	if err := transport.ValidateDisplayName(spec.DisplayName); err != nil {
+		return transport.TransportSpec{}, err
+	}
+	return spec, nil
 }
 
 func (a *API) deleteConfig(w http.ResponseWriter, r *http.Request) {
@@ -116,6 +360,75 @@ func (a *API) deleteConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	write(w, http.StatusOK, map[string]string{"status": "deleted", "tag": r.PathValue("tag")})
+}
+
+func parseIfMatch(r *http.Request) (string, bool, error) {
+	raw := strings.TrimSpace(r.Header.Get("If-Match"))
+	if raw == "" {
+		return "", false, nil
+	}
+	revision := raw
+	if len(raw) == 66 && raw[0] == '"' && raw[len(raw)-1] == '"' {
+		revision = raw[1 : len(raw)-1]
+	} else if len(raw) != 64 {
+		return "", false, errors.New("If-Match must contain one 64-character config revision")
+	}
+	if revision != strings.ToLower(revision) {
+		return "", false, errors.New("If-Match config revision must use lowercase hexadecimal")
+	}
+	if _, err := hex.DecodeString(revision); err != nil {
+		return "", false, errors.New("If-Match config revision must use lowercase hexadecimal")
+	}
+	return revision, true, nil
+}
+
+func setRevisionHeader(w http.ResponseWriter, revision string) {
+	if revision != "" {
+		w.Header().Set("ETag", `"`+revision+`"`)
+	}
+}
+
+func (a *API) currentRevision() string {
+	if provider, ok := a.admin.(TransportConfigRevisionProvider); ok {
+		return provider.Revision()
+	}
+	return ""
+}
+
+func writeRevisionResult(w http.ResponseWriter, status int, result, tag, revision string) {
+	setRevisionHeader(w, revision)
+	response := map[string]string{"status": result, "tag": tag}
+	if revision != "" {
+		response["config_revision"] = revision
+	}
+	write(w, status, response)
+}
+
+func writeValidationResult(w http.ResponseWriter, tag, revision string) {
+	setRevisionHeader(w, revision)
+	response := map[string]string{"status": "valid", "tag": tag}
+	if revision != "" {
+		response["config_revision"] = revision
+	}
+	write(w, http.StatusOK, response)
+}
+
+func writePreconditionFailed(w http.ResponseWriter, revision string) {
+	setRevisionHeader(w, revision)
+	response := map[string]string{"error": "transport config revision changed"}
+	if revision != "" {
+		response["config_revision"] = revision
+	}
+	write(w, http.StatusPreconditionFailed, response)
+}
+
+func writeRevisionError(w http.ResponseWriter, status int, revision string, err error) {
+	setRevisionHeader(w, revision)
+	response := map[string]string{"error": err.Error()}
+	if revision != "" {
+		response["config_revision"] = revision
+	}
+	write(w, status, response)
 }
 
 func (a *API) auth(next http.Handler) http.Handler {
@@ -134,10 +447,16 @@ func (a *API) auth(next http.Handler) http.Handler {
 }
 
 func (a *API) health(w http.ResponseWriter, _ *http.Request) {
-	write(w, http.StatusOK, map[string]string{"status": "ok"})
+	response := map[string]string{"status": "ok"}
+	if provider, ok := a.admin.(TransportConfigRevisionProvider); ok {
+		response["config_revision"] = provider.Revision()
+	}
+	write(w, http.StatusOK, response)
 }
 func (a *API) list(w http.ResponseWriter, r *http.Request) {
-	write(w, http.StatusOK, a.manager.Statuses(r.Context()))
+	statuses := a.manager.Statuses(r.Context())
+	a.decorateStatuses(statuses)
+	write(w, http.StatusOK, statuses)
 }
 func (a *API) status(w http.ResponseWriter, r *http.Request) {
 	status, err := a.manager.Status(r.Context(), r.PathValue("tag"))
@@ -145,7 +464,22 @@ func (a *API) status(w http.ResponseWriter, r *http.Request) {
 		write(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
 	}
-	write(w, http.StatusOK, status)
+	statuses := []transport.Status{status}
+	a.decorateStatuses(statuses)
+	write(w, http.StatusOK, statuses[0])
+}
+
+func (a *API) decorateStatuses(statuses []transport.Status) {
+	if a.admin == nil {
+		return
+	}
+	displayNameByTag := make(map[string]string)
+	for _, spec := range a.admin.Specs() {
+		displayNameByTag[spec.Tag] = spec.DisplayName
+	}
+	for index := range statuses {
+		statuses[index].DisplayName = displayNameByTag[statuses[index].Tag]
+	}
 }
 func (a *API) action(w http.ResponseWriter, r *http.Request) {
 	var err error
@@ -162,10 +496,7 @@ func (a *API) action(w http.ResponseWriter, r *http.Request) {
 	case "down":
 		err = a.manager.Down(ctx, r.PathValue("tag"))
 	case "restart":
-		err = a.manager.Down(ctx, r.PathValue("tag"))
-		if err == nil {
-			err = a.manager.Up(ctx, r.PathValue("tag"))
-		}
+		err = a.manager.Restart(ctx, r.PathValue("tag"))
 	default:
 		write(w, http.StatusNotFound, map[string]string{"error": "unknown action"})
 		return

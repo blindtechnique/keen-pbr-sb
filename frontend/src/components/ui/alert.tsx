@@ -3,8 +3,14 @@ import { cva, type VariantProps } from "class-variance-authority"
 
 import { cn } from "@/lib/utils"
 
+// `minmax(0,1fr)`, а не `1fr`. Минимальный размер grid-колонки по умолчанию —
+// `auto`, то есть ширина самого длинного неразрывного содержимого. Одна команда
+// установки с длинным URL внутри уведомления делала так всю карточку шире
+// экрана телефона: рамка уезжала за правый край, а текст не прокручивался, а
+// обрезался. Явный нулевой минимум разрешает колонке сжиматься, а длинное
+// содержимое дальше разбирается своими правилами переноса.
 const alertVariants = cva(
-  "group/alert relative grid w-full gap-0.5 rounded-lg border px-2.5 py-2 text-left text-sm backdrop-blur-md has-data-[slot=alert-action]:relative has-data-[slot=alert-action]:pr-18 has-[>svg]:grid-cols-[auto_1fr] has-[>svg]:gap-x-2 *:[svg]:row-span-2 *:[svg]:translate-y-0.5 *:[svg]:text-current *:[svg:not([class*='size-'])]:size-4",
+  "group/alert relative grid w-full grid-cols-[minmax(0,1fr)] gap-0.5 rounded-lg border px-2.5 py-2 text-left text-sm backdrop-blur-md has-data-[slot=alert-action]:relative has-data-[slot=alert-action]:pr-18 has-[>svg]:grid-cols-[auto_minmax(0,1fr)] has-[>svg]:gap-x-2 *:[svg]:row-span-2 *:[svg]:translate-y-0.5 *:[svg]:text-current *:[svg:not([class*='size-'])]:size-4",
   {
     variants: {
       variant: {

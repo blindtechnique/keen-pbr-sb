@@ -8,9 +8,11 @@
 #include "../src/util/traced_mutex.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <future>
 #include <mutex>
 #include <pthread.h>
 #include <string>
@@ -96,14 +98,105 @@ TEST_CASE("blocking executor emits queue and completion trace events") {
     CHECK(capture.wait_for_contains("event=executor_end"));
 }
 
-TEST_CASE("blocking executor rejects new tasks after shutdown") {
-    BlockingExecutor executor(1, 4);
-    executor.shutdown();
+TEST_CASE("blocking executor shutdown drains queued tasks before joining") {
+    BlockingExecutor executor(1, 1);
+    std::atomic<int> first_runs{0};
+    std::atomic<int> queued_runs{0};
+    std::promise<void> first_started_promise;
+    auto first_started = first_started_promise.get_future();
+    std::promise<void> release_first_promise;
+    auto release_first = release_first_promise.get_future().share();
+
+    auto first = executor.submit("held-task", [&]() {
+        ++first_runs;
+        first_started_promise.set_value();
+        release_first.wait();
+    });
+    first_started.wait();
+
+    auto queued = executor.submit("queued-task", [&]() {
+        ++queued_runs;
+    });
+
+    std::promise<void> shutdown_started_promise;
+    auto shutdown_started = shutdown_started_promise.get_future();
+    std::promise<void> shutdown_complete_promise;
+    auto shutdown_complete = shutdown_complete_promise.get_future();
+    std::thread shutdown_thread([&]() {
+        shutdown_started_promise.set_value();
+        executor.shutdown();
+        shutdown_complete_promise.set_value();
+    });
+
+    shutdown_started.wait();
+    CHECK(shutdown_complete.wait_for(std::chrono::milliseconds(25)) ==
+          std::future_status::timeout);
+    CHECK(queued_runs.load() == 0);
+
+    release_first_promise.set_value();
+    shutdown_thread.join();
+
+    CHECK(shutdown_complete.wait_for(std::chrono::milliseconds(0)) ==
+          std::future_status::ready);
+    CHECK_NOTHROW(first.get());
+    CHECK_NOTHROW(queued.get());
+    CHECK(first_runs.load() == 1);
+    CHECK(queued_runs.load() == 1);
 
     CHECK_FALSE(executor.try_post("late-task", []() {}));
 
     auto future = executor.submit("late-submit", []() { return 7; });
     CHECK_THROWS(future.get());
+}
+
+TEST_CASE("blocking executor service shutdown cancels queued tasks and joins active work") {
+    BlockingExecutor executor(1, 2);
+    std::atomic<int> active_runs{0};
+    std::atomic<int> queued_runs{0};
+    std::promise<void> active_started_promise;
+    auto active_started = active_started_promise.get_future();
+    std::promise<void> release_active_promise;
+    auto release_active = release_active_promise.get_future().share();
+
+    auto active = executor.submit("active-service-task", [&]() {
+        ++active_runs;
+        active_started_promise.set_value();
+        release_active.wait();
+    });
+    active_started.wait();
+
+    auto queued_before_quiesce = executor.submit("queued-before-quiesce", [&]() {
+        ++queued_runs;
+    });
+    executor.cancel_pending();
+    CHECK(queued_runs.load() == 0);
+    CHECK_THROWS(queued_before_quiesce.get());
+
+    // The pool remains live during coordinator quiescence. Final shutdown
+    // must also discard any later task which no worker has claimed.
+    auto queued_at_shutdown = executor.submit("queued-at-shutdown", [&]() {
+        ++queued_runs;
+    });
+
+    std::promise<void> shutdown_complete_promise;
+    auto shutdown_complete = shutdown_complete_promise.get_future();
+    std::thread shutdown_thread([&]() {
+        executor.cancel_pending_and_shutdown();
+        shutdown_complete_promise.set_value();
+    });
+
+    CHECK(shutdown_complete.wait_for(std::chrono::milliseconds(25)) ==
+          std::future_status::timeout);
+    CHECK(queued_runs.load() == 0);
+    CHECK_THROWS(queued_at_shutdown.get());
+
+    release_active_promise.set_value();
+    shutdown_thread.join();
+
+    CHECK_NOTHROW(active.get());
+    CHECK(active_runs.load() == 1);
+    CHECK(queued_runs.load() == 0);
+    CHECK_FALSE(executor.try_post("late-service-task", []() {}));
 }
 
 TEST_CASE("blocking executor workers inherit daemon-managed signal mask") {
@@ -114,6 +207,7 @@ TEST_CASE("blocking executor workers inherit daemon-managed signal mask") {
         return is_signal_blocked_for_current_thread(SIGTERM)
             && is_signal_blocked_for_current_thread(SIGINT)
             && is_signal_blocked_for_current_thread(SIGUSR1)
+            && is_signal_blocked_for_current_thread(SIGUSR2)
             && is_signal_blocked_for_current_thread(SIGHUP);
     });
 
@@ -146,7 +240,7 @@ TEST_CASE("blocking executor workers use explicit urltest-safe stack size") {
     CHECK(stack_size <= expected_stack_size * 2);
 }
 
-TEST_CASE("traced mutex logs lock lifecycle and supports condition_variable_any") {
+TEST_CASE("traced mutex omits uncontended locks and supports condition_variable_any") {
     LoggerCapture capture;
     TracedMutex mutex;
     std::condition_variable_any cv;
@@ -170,9 +264,9 @@ TEST_CASE("traced mutex logs lock lifecycle and supports condition_variable_any"
 
     notifier.join();
 
-    CHECK(capture.contains("event=lock_wait_start"));
-    CHECK(capture.contains("event=lock_acquired"));
-    CHECK(capture.contains("event=lock_released"));
+    CHECK_FALSE(capture.contains("event=lock_wait_start"));
+    CHECK_FALSE(capture.contains("event=lock_acquired"));
+    CHECK_FALSE(capture.contains("event=lock_released"));
 }
 
 TEST_CASE("traced mutex logs waiting during contention") {
@@ -190,6 +284,8 @@ TEST_CASE("traced mutex logs waiting during contention") {
 
     waiter.join();
     CHECK(capture.contains("event=lock_waiting"));
+    CHECK(capture.contains("event=lock_acquired_slow"));
+    CHECK(capture.contains("event=lock_held_slow"));
 }
 
 TEST_CASE("safe_exec capture emits trace events") {

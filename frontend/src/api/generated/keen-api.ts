@@ -25,22 +25,43 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  CatalogSetupApplyRequest,
+  CatalogSetupApplyResponse,
+  CatalogSetupPreviewRequest,
+  CatalogSetupPreviewResponse,
   ConfigObject,
   ConfigStateResponse,
   ConfigUpdateResponse,
+  ConnectionPage,
+  ConnectionQueryRequest,
+  DependencyAnalysisRequest,
+  DependencyAnalysisResponse,
   ErrorResponse,
   HealthResponse,
+  ListDeleteStageRequest,
+  ListDeleteStageResponse,
   ListRefreshRequest,
   ListRefreshResponse,
+  NdmsInterfaceInventoryResponse,
+  NdmsVpnServerServiceInventoryResponse,
+  PeriodicTaskMetricsResponse,
+  RecommendedListSetupRequest,
   ReloadResponse,
   RoutingHealthErrorResponse,
   RoutingHealthResponse,
   RoutingTestRequest,
   RoutingTestResponse,
   RuntimeInterfaceInventoryResponse,
+  RuntimeInventoryResponse,
   RuntimeOutboundsResponse,
+  SubscriptionApplyRequest,
+  SubscriptionApplyResponse,
+  SubscriptionPreviewRequest,
+  SubscriptionPreviewResponse,
   TransportActionRequest,
   TransportActionResponse,
+  TransportConfigApplyRequest,
+  TransportConfigApplyResponse,
   TransportConfigOperation,
   TransportConfigResponse,
   TransportSpec,
@@ -739,6 +760,292 @@ export const usePostConfig = <TError = ErrorResponse,
     }
 
 /**
+ * Validates and stages a simple list candidate only when the selected list has one dedicated route rule and one dedicated DNS rule whose DNS server uses the same routable outbound. Advanced editors continue to use `/api/config`.
+
+ * @summary Stage a recommended beginner list setup
+ */
+export type postRecommendedListSetupResponse200 = {
+  data: ConfigUpdateResponse
+  status: 200
+}
+
+export type postRecommendedListSetupResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postRecommendedListSetupResponse409 = {
+  data: ErrorResponse
+  status: 409
+}
+
+export type postRecommendedListSetupResponseSuccess = (postRecommendedListSetupResponse200) & {
+  headers: Headers;
+};
+export type postRecommendedListSetupResponseError = (postRecommendedListSetupResponse400 | postRecommendedListSetupResponse409) & {
+  headers: Headers;
+};
+
+export type postRecommendedListSetupResponse = (postRecommendedListSetupResponseSuccess | postRecommendedListSetupResponseError)
+
+export const getPostRecommendedListSetupUrl = () => {
+
+
+
+
+  return `/api/setup/list/stage`
+}
+
+export const postRecommendedListSetup = async (recommendedListSetupRequest: RecommendedListSetupRequest, options?: RequestInit): Promise<postRecommendedListSetupResponse> => {
+
+  return apiFetch<postRecommendedListSetupResponse>(getPostRecommendedListSetupUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      recommendedListSetupRequest,)
+  }
+);}
+
+
+
+
+export const getPostRecommendedListSetupMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postRecommendedListSetup>>, TError,{data: RecommendedListSetupRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postRecommendedListSetup>>, TError,{data: RecommendedListSetupRequest}, TContext> => {
+
+const mutationKey = ['postRecommendedListSetup'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postRecommendedListSetup>>, {data: RecommendedListSetupRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postRecommendedListSetup(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostRecommendedListSetupMutationResult = NonNullable<Awaited<ReturnType<typeof postRecommendedListSetup>>>
+    export type PostRecommendedListSetupMutationBody = RecommendedListSetupRequest
+    export type PostRecommendedListSetupMutationError = ErrorResponse
+
+    /**
+ * @summary Stage a recommended beginner list setup
+ */
+export const usePostRecommendedListSetup = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postRecommendedListSetup>>, TError,{data: RecommendedListSetupRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postRecommendedListSetup>>,
+        TError,
+        {data: RecommendedListSetupRequest},
+        TContext
+      > => {
+      return useMutation(getPostRecommendedListSetupMutationOptions(options), queryClient);
+    }
+
+/**
+ * Builds the mutation from the server's visible configuration, rewrites route and DNS dependencies, validates the complete candidate, and stages it in memory only when base_revision still matches. A target without replacement_list_id is removed from dependent rules; route or DNS rules left without a valid match condition are deleted. This endpoint never saves, applies, or restarts the routing runtime.
+
+ * @summary Safely stage list deletion or replacement
+ */
+export type postListDeleteStageResponse200 = {
+  data: ListDeleteStageResponse
+  status: 200
+}
+
+export type postListDeleteStageResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postListDeleteStageResponse409 = {
+  data: ErrorResponse
+  status: 409
+}
+
+export type postListDeleteStageResponseSuccess = (postListDeleteStageResponse200) & {
+  headers: Headers;
+};
+export type postListDeleteStageResponseError = (postListDeleteStageResponse400 | postListDeleteStageResponse409) & {
+  headers: Headers;
+};
+
+export type postListDeleteStageResponse = (postListDeleteStageResponseSuccess | postListDeleteStageResponseError)
+
+export const getPostListDeleteStageUrl = () => {
+
+
+
+
+  return `/api/setup/lists/delete/stage`
+}
+
+export const postListDeleteStage = async (listDeleteStageRequest: ListDeleteStageRequest, options?: RequestInit): Promise<postListDeleteStageResponse> => {
+
+  return apiFetch<postListDeleteStageResponse>(getPostListDeleteStageUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      listDeleteStageRequest,)
+  }
+);}
+
+
+
+
+export const getPostListDeleteStageMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postListDeleteStage>>, TError,{data: ListDeleteStageRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postListDeleteStage>>, TError,{data: ListDeleteStageRequest}, TContext> => {
+
+const mutationKey = ['postListDeleteStage'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postListDeleteStage>>, {data: ListDeleteStageRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postListDeleteStage(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostListDeleteStageMutationResult = NonNullable<Awaited<ReturnType<typeof postListDeleteStage>>>
+    export type PostListDeleteStageMutationBody = ListDeleteStageRequest
+    export type PostListDeleteStageMutationError = ErrorResponse
+
+    /**
+ * @summary Safely stage list deletion or replacement
+ */
+export const usePostListDeleteStage = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postListDeleteStage>>, TError,{data: ListDeleteStageRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postListDeleteStage>>,
+        TError,
+        {data: ListDeleteStageRequest},
+        TContext
+      > => {
+      return useMutation(getPostListDeleteStageMutationOptions(options), queryClient);
+    }
+
+/**
+ * Computes references and cascade effects from the daemon's visible configuration. The result is authoritative for previews; callers still submit the actual configuration mutation separately.
+
+ * @summary Analyze configuration dependencies before a mutation
+ */
+export type analyzeConfigDependenciesResponse200 = {
+  data: DependencyAnalysisResponse
+  status: 200
+}
+
+export type analyzeConfigDependenciesResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type analyzeConfigDependenciesResponseSuccess = (analyzeConfigDependenciesResponse200) & {
+  headers: Headers;
+};
+export type analyzeConfigDependenciesResponseError = (analyzeConfigDependenciesResponse400) & {
+  headers: Headers;
+};
+
+export type analyzeConfigDependenciesResponse = (analyzeConfigDependenciesResponseSuccess | analyzeConfigDependenciesResponseError)
+
+export const getAnalyzeConfigDependenciesUrl = () => {
+
+
+
+
+  return `/api/config/dependencies`
+}
+
+export const analyzeConfigDependencies = async (dependencyAnalysisRequest: DependencyAnalysisRequest, options?: RequestInit): Promise<analyzeConfigDependenciesResponse> => {
+
+  return apiFetch<analyzeConfigDependenciesResponse>(getAnalyzeConfigDependenciesUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      dependencyAnalysisRequest,)
+  }
+);}
+
+
+
+
+export const getAnalyzeConfigDependenciesMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof analyzeConfigDependencies>>, TError,{data: DependencyAnalysisRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof analyzeConfigDependencies>>, TError,{data: DependencyAnalysisRequest}, TContext> => {
+
+const mutationKey = ['analyzeConfigDependencies'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof analyzeConfigDependencies>>, {data: DependencyAnalysisRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  analyzeConfigDependencies(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type AnalyzeConfigDependenciesMutationResult = NonNullable<Awaited<ReturnType<typeof analyzeConfigDependencies>>>
+    export type AnalyzeConfigDependenciesMutationBody = DependencyAnalysisRequest
+    export type AnalyzeConfigDependenciesMutationError = ErrorResponse
+
+    /**
+ * @summary Analyze configuration dependencies before a mutation
+ */
+export const useAnalyzeConfigDependencies = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof analyzeConfigDependencies>>, TError,{data: DependencyAnalysisRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof analyzeConfigDependencies>>,
+        TError,
+        {data: DependencyAnalysisRequest},
+        TContext
+      > => {
+      return useMutation(getAnalyzeConfigDependenciesMutationOptions(options), queryClient);
+    }
+
+/**
  * Persists the currently staged in-memory config to disk and then applies it to the routing runtime.
 
  * @summary Apply staged config
@@ -832,6 +1139,102 @@ export const usePostConfigSave = <TError = ErrorResponse,
         TContext
       > => {
       return useMutation(getPostConfigSaveMutationOptions(options), queryClient);
+    }
+
+/**
+ * Drops the staged in-memory draft and returns the visible configuration to the persisted one. Nothing is written to disk and the routing runtime is not touched. This is the counterpart to `POST /api/config/save`: several endpoints — backup restore, catalog setup, linked-transport creation, reload and list refresh — refuse to run while a draft is staged, and this is the exit that does not apply the draft. Takes no body: staging already replaces an existing draft without a compare-and-swap, so discarding does not require one either.
+
+ * @summary Discard the staged config draft
+ */
+export type postConfigDiscardResponse200 = {
+  data: ConfigUpdateResponse
+  status: 200
+}
+
+export type postConfigDiscardResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postConfigDiscardResponse500 = {
+  data: ErrorResponse
+  status: 500
+}
+
+export type postConfigDiscardResponseSuccess = (postConfigDiscardResponse200) & {
+  headers: Headers;
+};
+export type postConfigDiscardResponseError = (postConfigDiscardResponse400 | postConfigDiscardResponse500) & {
+  headers: Headers;
+};
+
+export type postConfigDiscardResponse = (postConfigDiscardResponseSuccess | postConfigDiscardResponseError)
+
+export const getPostConfigDiscardUrl = () => {
+
+
+
+
+  return `/api/config/discard`
+}
+
+export const postConfigDiscard = async ( options?: RequestInit): Promise<postConfigDiscardResponse> => {
+
+  return apiFetch<postConfigDiscardResponse>(getPostConfigDiscardUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+export const getPostConfigDiscardMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postConfigDiscard>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postConfigDiscard>>, TError,void, TContext> => {
+
+const mutationKey = ['postConfigDiscard'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postConfigDiscard>>, void> = () => {
+
+
+          return  postConfigDiscard(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostConfigDiscardMutationResult = NonNullable<Awaited<ReturnType<typeof postConfigDiscard>>>
+
+    export type PostConfigDiscardMutationError = ErrorResponse
+
+    /**
+ * @summary Discard the staged config draft
+ */
+export const usePostConfigDiscard = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postConfigDiscard>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postConfigDiscard>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getPostConfigDiscardMutationOptions(options), queryClient);
     }
 
 /**
@@ -1273,7 +1676,669 @@ export function useGetRuntimeInterfaces<TData = Awaited<ReturnType<typeof getRun
 
 
 /**
- * Streams DNS query names observed by the built-in `dns.test_server` listener as Server-Sent Events. Each connection receives `HELLO` first, then one event per queried DNS name.
+ * Returns one coherent WebUI snapshot assembled from the existing service, outbound, and kernel-interface runtime providers. The component endpoints remain available for narrow consumers; this endpoint is the canonical bootstrap payload for clients that need the complete runtime picture.
+
+ * @summary Unified live runtime inventory
+ */
+export type getRuntimeInventoryResponse200 = {
+  data: RuntimeInventoryResponse
+  status: 200
+}
+
+export type getRuntimeInventoryResponseSuccess = (getRuntimeInventoryResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getRuntimeInventoryResponse = (getRuntimeInventoryResponseSuccess)
+
+export const getGetRuntimeInventoryUrl = () => {
+
+
+
+
+  return `/api/runtime/inventory`
+}
+
+export const getRuntimeInventory = async ( options?: RequestInit): Promise<getRuntimeInventoryResponse> => {
+
+  return apiFetch<getRuntimeInventoryResponse>(getGetRuntimeInventoryUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetRuntimeInventoryQueryKey = () => {
+    return [
+    `/api/runtime/inventory`
+    ] as const;
+    }
+
+
+export const getGetRuntimeInventoryQueryOptions = <TData = Awaited<ReturnType<typeof getRuntimeInventory>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRuntimeInventory>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetRuntimeInventoryQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getRuntimeInventory>>> = ({ signal }) => getRuntimeInventory({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getRuntimeInventory>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetRuntimeInventoryQueryResult = NonNullable<Awaited<ReturnType<typeof getRuntimeInventory>>>
+export type GetRuntimeInventoryQueryError = unknown
+
+
+export function useGetRuntimeInventory<TData = Awaited<ReturnType<typeof getRuntimeInventory>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRuntimeInventory>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getRuntimeInventory>>,
+          TError,
+          Awaited<ReturnType<typeof getRuntimeInventory>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetRuntimeInventory<TData = Awaited<ReturnType<typeof getRuntimeInventory>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRuntimeInventory>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getRuntimeInventory>>,
+          TError,
+          Awaited<ReturnType<typeof getRuntimeInventory>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetRuntimeInventory<TData = Awaited<ReturnType<typeof getRuntimeInventory>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRuntimeInventory>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Unified live runtime inventory
+ */
+
+export function useGetRuntimeInventory<TData = Awaited<ReturnType<typeof getRuntimeInventory>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRuntimeInventory>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetRuntimeInventoryQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * Returns a bounded, pull-only snapshot of pre-registered periodic task counters. Reading this endpoint does not subscribe the client to the runtime status stream and the counters are deliberately excluded from health and runtime-inventory payloads.
+
+ * @summary Periodic background task diagnostics
+ */
+export type getDiagnosticTasksResponse200 = {
+  data: PeriodicTaskMetricsResponse
+  status: 200
+}
+
+export type getDiagnosticTasksResponseSuccess = (getDiagnosticTasksResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getDiagnosticTasksResponse = (getDiagnosticTasksResponseSuccess)
+
+export const getGetDiagnosticTasksUrl = () => {
+
+
+
+
+  return `/api/diagnostics/tasks`
+}
+
+export const getDiagnosticTasks = async ( options?: RequestInit): Promise<getDiagnosticTasksResponse> => {
+
+  return apiFetch<getDiagnosticTasksResponse>(getGetDiagnosticTasksUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetDiagnosticTasksQueryKey = () => {
+    return [
+    `/api/diagnostics/tasks`
+    ] as const;
+    }
+
+
+export const getGetDiagnosticTasksQueryOptions = <TData = Awaited<ReturnType<typeof getDiagnosticTasks>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getDiagnosticTasks>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetDiagnosticTasksQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getDiagnosticTasks>>> = ({ signal }) => getDiagnosticTasks({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getDiagnosticTasks>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetDiagnosticTasksQueryResult = NonNullable<Awaited<ReturnType<typeof getDiagnosticTasks>>>
+export type GetDiagnosticTasksQueryError = unknown
+
+
+export function useGetDiagnosticTasks<TData = Awaited<ReturnType<typeof getDiagnosticTasks>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getDiagnosticTasks>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getDiagnosticTasks>>,
+          TError,
+          Awaited<ReturnType<typeof getDiagnosticTasks>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetDiagnosticTasks<TData = Awaited<ReturnType<typeof getDiagnosticTasks>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getDiagnosticTasks>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getDiagnosticTasks>>,
+          TError,
+          Awaited<ReturnType<typeof getDiagnosticTasks>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetDiagnosticTasks<TData = Awaited<ReturnType<typeof getDiagnosticTasks>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getDiagnosticTasks>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Periodic background task diagnostics
+ */
+
+export function useGetDiagnosticTasks<TData = Awaited<ReturnType<typeof getDiagnosticTasks>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getDiagnosticTasks>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetDiagnosticTasksQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * Creates a short-lived immutable snapshot on the first request and returns an opaque cursor for following pages. Filtering and sorting are performed on the router so the WebUI does not download the complete bounded conntrack history.
+
+ * @summary Query a stable page of observed connections
+ */
+export type queryConnectionsResponse200 = {
+  data: ConnectionPage
+  status: 200
+}
+
+export type queryConnectionsResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type queryConnectionsResponse409 = {
+  data: ErrorResponse
+  status: 409
+}
+
+export type queryConnectionsResponseSuccess = (queryConnectionsResponse200) & {
+  headers: Headers;
+};
+export type queryConnectionsResponseError = (queryConnectionsResponse400 | queryConnectionsResponse409) & {
+  headers: Headers;
+};
+
+export type queryConnectionsResponse = (queryConnectionsResponseSuccess | queryConnectionsResponseError)
+
+export const getQueryConnectionsUrl = () => {
+
+
+
+
+  return `/api/connections/query`
+}
+
+export const queryConnections = async (connectionQueryRequest: ConnectionQueryRequest, options?: RequestInit): Promise<queryConnectionsResponse> => {
+
+  return apiFetch<queryConnectionsResponse>(getQueryConnectionsUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      connectionQueryRequest,)
+  }
+);}
+
+
+
+
+export const getQueryConnectionsMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof queryConnections>>, TError,{data: ConnectionQueryRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof queryConnections>>, TError,{data: ConnectionQueryRequest}, TContext> => {
+
+const mutationKey = ['queryConnections'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof queryConnections>>, {data: ConnectionQueryRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  queryConnections(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type QueryConnectionsMutationResult = NonNullable<Awaited<ReturnType<typeof queryConnections>>>
+    export type QueryConnectionsMutationBody = ConnectionQueryRequest
+    export type QueryConnectionsMutationError = ErrorResponse
+
+    /**
+ * @summary Query a stable page of observed connections
+ */
+export const useQueryConnections = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof queryConnections>>, TError,{data: ConnectionQueryRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof queryConnections>>,
+        TError,
+        {data: ConnectionQueryRequest},
+        TContext
+      > => {
+      return useMutation(getQueryConnectionsMutationOptions(options), queryClient);
+    }
+
+/**
+ * Returns a strictly filtered, read-only inventory from NDMS RCI. Bridges, switch ports, VLANs and Wi-Fi interfaces are excluded. Mutation remains disabled until typed RCI commands, ownership checks, optimistic revision checks and an automatic backup are all available.
+
+ * @summary List native Keenetic tunnel and proxy interfaces
+ */
+export type getNdmsInterfaceInventoryResponse200 = {
+  data: NdmsInterfaceInventoryResponse
+  status: 200
+}
+
+export type getNdmsInterfaceInventoryResponseSuccess = (getNdmsInterfaceInventoryResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getNdmsInterfaceInventoryResponse = (getNdmsInterfaceInventoryResponseSuccess)
+
+export const getGetNdmsInterfaceInventoryUrl = () => {
+
+
+
+
+  return `/api/system/ndms/interfaces`
+}
+
+export const getNdmsInterfaceInventory = async ( options?: RequestInit): Promise<getNdmsInterfaceInventoryResponse> => {
+
+  return apiFetch<getNdmsInterfaceInventoryResponse>(getGetNdmsInterfaceInventoryUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetNdmsInterfaceInventoryQueryKey = () => {
+    return [
+    `/api/system/ndms/interfaces`
+    ] as const;
+    }
+
+
+export const getGetNdmsInterfaceInventoryQueryOptions = <TData = Awaited<ReturnType<typeof getNdmsInterfaceInventory>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNdmsInterfaceInventory>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetNdmsInterfaceInventoryQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getNdmsInterfaceInventory>>> = ({ signal }) => getNdmsInterfaceInventory({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getNdmsInterfaceInventory>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetNdmsInterfaceInventoryQueryResult = NonNullable<Awaited<ReturnType<typeof getNdmsInterfaceInventory>>>
+export type GetNdmsInterfaceInventoryQueryError = unknown
+
+
+export function useGetNdmsInterfaceInventory<TData = Awaited<ReturnType<typeof getNdmsInterfaceInventory>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNdmsInterfaceInventory>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getNdmsInterfaceInventory>>,
+          TError,
+          Awaited<ReturnType<typeof getNdmsInterfaceInventory>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetNdmsInterfaceInventory<TData = Awaited<ReturnType<typeof getNdmsInterfaceInventory>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNdmsInterfaceInventory>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getNdmsInterfaceInventory>>,
+          TError,
+          Awaited<ReturnType<typeof getNdmsInterfaceInventory>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetNdmsInterfaceInventory<TData = Awaited<ReturnType<typeof getNdmsInterfaceInventory>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNdmsInterfaceInventory>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary List native Keenetic tunnel and proxy interfaces
+ */
+
+export function useGetNdmsInterfaceInventory<TData = Awaited<ReturnType<typeof getNdmsInterfaceInventory>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNdmsInterfaceInventory>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetNdmsInterfaceInventoryQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * Returns a strictly parsed, read-only inventory of enabled or configured L2TP, IKEv1/IKEv2, SSTP and OpenConnect server services. These services do not have a stable Linux ingress interface while idle, so their client traffic is identified by the address pools reported by NDMS. Secrets and credentials from the running configuration are never returned.
+
+ * @summary List native Keenetic VPN server services
+ */
+export type getNdmsVpnServerServicesResponse200 = {
+  data: NdmsVpnServerServiceInventoryResponse
+  status: 200
+}
+
+export type getNdmsVpnServerServicesResponseSuccess = (getNdmsVpnServerServicesResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getNdmsVpnServerServicesResponse = (getNdmsVpnServerServicesResponseSuccess)
+
+export const getGetNdmsVpnServerServicesUrl = () => {
+
+
+
+
+  return `/api/system/ndms/vpn-server-services`
+}
+
+export const getNdmsVpnServerServices = async ( options?: RequestInit): Promise<getNdmsVpnServerServicesResponse> => {
+
+  return apiFetch<getNdmsVpnServerServicesResponse>(getGetNdmsVpnServerServicesUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetNdmsVpnServerServicesQueryKey = () => {
+    return [
+    `/api/system/ndms/vpn-server-services`
+    ] as const;
+    }
+
+
+export const getGetNdmsVpnServerServicesQueryOptions = <TData = Awaited<ReturnType<typeof getNdmsVpnServerServices>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNdmsVpnServerServices>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetNdmsVpnServerServicesQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getNdmsVpnServerServices>>> = ({ signal }) => getNdmsVpnServerServices({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getNdmsVpnServerServices>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetNdmsVpnServerServicesQueryResult = NonNullable<Awaited<ReturnType<typeof getNdmsVpnServerServices>>>
+export type GetNdmsVpnServerServicesQueryError = unknown
+
+
+export function useGetNdmsVpnServerServices<TData = Awaited<ReturnType<typeof getNdmsVpnServerServices>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNdmsVpnServerServices>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getNdmsVpnServerServices>>,
+          TError,
+          Awaited<ReturnType<typeof getNdmsVpnServerServices>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetNdmsVpnServerServices<TData = Awaited<ReturnType<typeof getNdmsVpnServerServices>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNdmsVpnServerServices>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getNdmsVpnServerServices>>,
+          TError,
+          Awaited<ReturnType<typeof getNdmsVpnServerServices>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetNdmsVpnServerServices<TData = Awaited<ReturnType<typeof getNdmsVpnServerServices>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNdmsVpnServerServices>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary List native Keenetic VPN server services
+ */
+
+export function useGetNdmsVpnServerServices<TData = Awaited<ReturnType<typeof getNdmsVpnServerServices>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNdmsVpnServerServices>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetNdmsVpnServerServicesQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * Streams named Server-Sent Events for service health, runtime outbounds, system interfaces, interactive DNS probes, and conntrack change notifications. Every connection receives a runtime snapshot first, followed by the current conntrack event-source state when available. Later events contain the complete dataset that changed or a revision which invalidates connection pages. Heartbeat comments are sent every 15 seconds; reconnecting starts with fresh state and no event replay is performed. DNS probe notifications use the `dns_probe` event name and are not included in the initial snapshot.
+
+ * @summary Stream live WebUI status
+ */
+export type getStatusEventsResponse200 = {
+  data: string
+  status: 200
+}
+
+export type getStatusEventsResponseSuccess = (getStatusEventsResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getStatusEventsResponse = (getStatusEventsResponseSuccess)
+
+export const getGetStatusEventsUrl = () => {
+
+
+
+
+  return `/api/status/events`
+}
+
+export const getStatusEvents = async ( options?: RequestInit): Promise<getStatusEventsResponse> => {
+
+  return apiFetch<getStatusEventsResponse>(getGetStatusEventsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetStatusEventsQueryKey = () => {
+    return [
+    `/api/status/events`
+    ] as const;
+    }
+
+
+export const getGetStatusEventsQueryOptions = <TData = Awaited<ReturnType<typeof getStatusEvents>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getStatusEvents>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetStatusEventsQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getStatusEvents>>> = ({ signal }) => getStatusEvents({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getStatusEvents>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetStatusEventsQueryResult = NonNullable<Awaited<ReturnType<typeof getStatusEvents>>>
+export type GetStatusEventsQueryError = unknown
+
+
+export function useGetStatusEvents<TData = Awaited<ReturnType<typeof getStatusEvents>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getStatusEvents>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getStatusEvents>>,
+          TError,
+          Awaited<ReturnType<typeof getStatusEvents>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetStatusEvents<TData = Awaited<ReturnType<typeof getStatusEvents>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getStatusEvents>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getStatusEvents>>,
+          TError,
+          Awaited<ReturnType<typeof getStatusEvents>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetStatusEvents<TData = Awaited<ReturnType<typeof getStatusEvents>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getStatusEvents>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Stream live WebUI status
+ */
+
+export function useGetStatusEvents<TData = Awaited<ReturnType<typeof getStatusEvents>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getStatusEvents>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetStatusEventsQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * Streams DNS query names observed by the built-in `dns.test_server` listener as Server-Sent Events. Each connection receives `HELLO` first, then one event per queried DNS name. This compatibility stream remains available to API clients; the WebUI consumes the same probe notifications from `/api/status/events` to avoid opening a second long-lived HTTP connection for every check.
 
  * @summary Stream DNS test queries
  */
@@ -1814,6 +2879,118 @@ export const usePostTransportConfig = <TError = ErrorResponse,
     }
 
 /**
+ * Creates one managed transport and the interface outbound that exposes it to keen-pbr as a single durable transaction. The server derives the outbound tag and interface from the transport, rejects an existing configuration draft or ownership collision, and rolls both resources back when either runtime cannot be committed. This endpoint currently supports creation with `linked_outbound.mode=ensure` only.
+
+ * @summary Atomically create a transport and its linked outgoing route
+ */
+export type postTransportConfigApplyResponse200 = {
+  data: TransportConfigApplyResponse
+  status: 200
+}
+
+export type postTransportConfigApplyResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postTransportConfigApplyResponse409 = {
+  data: ErrorResponse
+  status: 409
+}
+
+export type postTransportConfigApplyResponse500 = {
+  data: ErrorResponse
+  status: 500
+}
+
+export type postTransportConfigApplyResponse502 = {
+  data: ErrorResponse
+  status: 502
+}
+
+export type postTransportConfigApplyResponse503 = {
+  data: ErrorResponse
+  status: 503
+}
+
+export type postTransportConfigApplyResponseSuccess = (postTransportConfigApplyResponse200) & {
+  headers: Headers;
+};
+export type postTransportConfigApplyResponseError = (postTransportConfigApplyResponse400 | postTransportConfigApplyResponse409 | postTransportConfigApplyResponse500 | postTransportConfigApplyResponse502 | postTransportConfigApplyResponse503) & {
+  headers: Headers;
+};
+
+export type postTransportConfigApplyResponse = (postTransportConfigApplyResponseSuccess | postTransportConfigApplyResponseError)
+
+export const getPostTransportConfigApplyUrl = () => {
+
+
+
+
+  return `/api/transports/config/apply`
+}
+
+export const postTransportConfigApply = async (transportConfigApplyRequest: TransportConfigApplyRequest, options?: RequestInit): Promise<postTransportConfigApplyResponse> => {
+
+  return apiFetch<postTransportConfigApplyResponse>(getPostTransportConfigApplyUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      transportConfigApplyRequest,)
+  }
+);}
+
+
+
+
+export const getPostTransportConfigApplyMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postTransportConfigApply>>, TError,{data: TransportConfigApplyRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postTransportConfigApply>>, TError,{data: TransportConfigApplyRequest}, TContext> => {
+
+const mutationKey = ['postTransportConfigApply'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postTransportConfigApply>>, {data: TransportConfigApplyRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postTransportConfigApply(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostTransportConfigApplyMutationResult = NonNullable<Awaited<ReturnType<typeof postTransportConfigApply>>>
+    export type PostTransportConfigApplyMutationBody = TransportConfigApplyRequest
+    export type PostTransportConfigApplyMutationError = ErrorResponse
+
+    /**
+ * @summary Atomically create a transport and its linked outgoing route
+ */
+export const usePostTransportConfigApply = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postTransportConfigApply>>, TError,{data: TransportConfigApplyRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postTransportConfigApply>>,
+        TError,
+        {data: TransportConfigApplyRequest},
+        TContext
+      > => {
+      return useMutation(getPostTransportConfigApplyMutationOptions(options), queryClient);
+    }
+
+/**
  * Returns all configured transports including connection credentials. Unlike the regular editor endpoint, this response is not redacted and must only be used for an explicit authenticated backup export.
 
  * @summary Export complete transport configuration
@@ -1932,4 +3109,417 @@ export function useGetTransportConfigExport<TData = Awaited<ReturnType<typeof ge
 
 
 
+
+/**
+ * Validates the URL, fetches the body with the subscription destination policy applied to every address actually connected to (redirects included), decodes it, and returns an import plan: deduplicated candidates with derived tags and named conflicts against the transports that already exist. Nothing is created and nothing is stored on disk. The raw share links never leave the daemon - they carry credentials - so the response holds a preview identifier the apply call references instead. A preview expires after ten minutes and after a daemon restart.
+
+ * @summary Fetch a sing-box subscription and plan its import
+ */
+export type postSubscriptionPreviewResponse200 = {
+  data: SubscriptionPreviewResponse
+  status: 200
+}
+
+export type postSubscriptionPreviewResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postSubscriptionPreviewResponse502 = {
+  data: ErrorResponse
+  status: 502
+}
+
+export type postSubscriptionPreviewResponse503 = {
+  data: ErrorResponse
+  status: 503
+}
+
+export type postSubscriptionPreviewResponseSuccess = (postSubscriptionPreviewResponse200) & {
+  headers: Headers;
+};
+export type postSubscriptionPreviewResponseError = (postSubscriptionPreviewResponse400 | postSubscriptionPreviewResponse502 | postSubscriptionPreviewResponse503) & {
+  headers: Headers;
+};
+
+export type postSubscriptionPreviewResponse = (postSubscriptionPreviewResponseSuccess | postSubscriptionPreviewResponseError)
+
+export const getPostSubscriptionPreviewUrl = () => {
+
+
+
+
+  return `/api/subscriptions/preview`
+}
+
+export const postSubscriptionPreview = async (subscriptionPreviewRequest: SubscriptionPreviewRequest, options?: RequestInit): Promise<postSubscriptionPreviewResponse> => {
+
+  return apiFetch<postSubscriptionPreviewResponse>(getPostSubscriptionPreviewUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      subscriptionPreviewRequest,)
+  }
+);}
+
+
+
+
+export const getPostSubscriptionPreviewMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSubscriptionPreview>>, TError,{data: SubscriptionPreviewRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postSubscriptionPreview>>, TError,{data: SubscriptionPreviewRequest}, TContext> => {
+
+const mutationKey = ['postSubscriptionPreview'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postSubscriptionPreview>>, {data: SubscriptionPreviewRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postSubscriptionPreview(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostSubscriptionPreviewMutationResult = NonNullable<Awaited<ReturnType<typeof postSubscriptionPreview>>>
+    export type PostSubscriptionPreviewMutationBody = SubscriptionPreviewRequest
+    export type PostSubscriptionPreviewMutationError = ErrorResponse
+
+    /**
+ * @summary Fetch a sing-box subscription and plan its import
+ */
+export const usePostSubscriptionPreview = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSubscriptionPreview>>, TError,{data: SubscriptionPreviewRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postSubscriptionPreview>>,
+        TError,
+        {data: SubscriptionPreviewRequest},
+        TContext
+      > => {
+      return useMutation(getPostSubscriptionPreviewMutationOptions(options), queryClient);
+    }
+
+/**
+ * Creates one managed sing-box transport per selected candidate of an earlier preview, through the same transport-manager create pipeline as manual creation - there is no separate import writer. Entries are created independently and the response reports each outcome; a failed entry does not roll back the ones already created, and a successfully created entry is marked consumed so re-applying the same preview cannot duplicate it.
+
+ * @summary Create transports from selected subscription entries
+ */
+export type postSubscriptionApplyResponse200 = {
+  data: SubscriptionApplyResponse
+  status: 200
+}
+
+export type postSubscriptionApplyResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postSubscriptionApplyResponse410 = {
+  data: ErrorResponse
+  status: 410
+}
+
+export type postSubscriptionApplyResponse503 = {
+  data: ErrorResponse
+  status: 503
+}
+
+export type postSubscriptionApplyResponseSuccess = (postSubscriptionApplyResponse200) & {
+  headers: Headers;
+};
+export type postSubscriptionApplyResponseError = (postSubscriptionApplyResponse400 | postSubscriptionApplyResponse410 | postSubscriptionApplyResponse503) & {
+  headers: Headers;
+};
+
+export type postSubscriptionApplyResponse = (postSubscriptionApplyResponseSuccess | postSubscriptionApplyResponseError)
+
+export const getPostSubscriptionApplyUrl = () => {
+
+
+
+
+  return `/api/subscriptions/apply`
+}
+
+export const postSubscriptionApply = async (subscriptionApplyRequest: SubscriptionApplyRequest, options?: RequestInit): Promise<postSubscriptionApplyResponse> => {
+
+  return apiFetch<postSubscriptionApplyResponse>(getPostSubscriptionApplyUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      subscriptionApplyRequest,)
+  }
+);}
+
+
+
+
+export const getPostSubscriptionApplyMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSubscriptionApply>>, TError,{data: SubscriptionApplyRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postSubscriptionApply>>, TError,{data: SubscriptionApplyRequest}, TContext> => {
+
+const mutationKey = ['postSubscriptionApply'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postSubscriptionApply>>, {data: SubscriptionApplyRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postSubscriptionApply(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostSubscriptionApplyMutationResult = NonNullable<Awaited<ReturnType<typeof postSubscriptionApply>>>
+    export type PostSubscriptionApplyMutationBody = SubscriptionApplyRequest
+    export type PostSubscriptionApplyMutationError = ErrorResponse
+
+    /**
+ * @summary Create transports from selected subscription entries
+ */
+export const usePostSubscriptionApply = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSubscriptionApply>>, TError,{data: SubscriptionApplyRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postSubscriptionApply>>,
+        TError,
+        {data: SubscriptionApplyRequest},
+        TContext
+      > => {
+      return useMutation(getPostSubscriptionApplyMutationOptions(options), queryClient);
+    }
+
+/**
+ * Builds and validates a deterministic candidate from the server-owned catalogue snapshot and the current active configuration. No durable or runtime state is changed. Existing configuration drafts are rejected so the preview cannot silently include unrelated edits.
+
+ * @summary Preview an authoritative catalogue quick setup
+ */
+export type postCatalogSetupPreviewResponse200 = {
+  data: CatalogSetupPreviewResponse
+  status: 200
+}
+
+export type postCatalogSetupPreviewResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postCatalogSetupPreviewResponse409 = {
+  data: ErrorResponse
+  status: 409
+}
+
+export type postCatalogSetupPreviewResponse503 = {
+  data: ErrorResponse
+  status: 503
+}
+
+export type postCatalogSetupPreviewResponseSuccess = (postCatalogSetupPreviewResponse200) & {
+  headers: Headers;
+};
+export type postCatalogSetupPreviewResponseError = (postCatalogSetupPreviewResponse400 | postCatalogSetupPreviewResponse409 | postCatalogSetupPreviewResponse503) & {
+  headers: Headers;
+};
+
+export type postCatalogSetupPreviewResponse = (postCatalogSetupPreviewResponseSuccess | postCatalogSetupPreviewResponseError)
+
+export const getPostCatalogSetupPreviewUrl = () => {
+
+
+
+
+  return `/api/setup/catalog/preview`
+}
+
+export const postCatalogSetupPreview = async (catalogSetupPreviewRequest: CatalogSetupPreviewRequest, options?: RequestInit): Promise<postCatalogSetupPreviewResponse> => {
+
+  return apiFetch<postCatalogSetupPreviewResponse>(getPostCatalogSetupPreviewUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      catalogSetupPreviewRequest,)
+  }
+);}
+
+
+
+
+export const getPostCatalogSetupPreviewMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postCatalogSetupPreview>>, TError,{data: CatalogSetupPreviewRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postCatalogSetupPreview>>, TError,{data: CatalogSetupPreviewRequest}, TContext> => {
+
+const mutationKey = ['postCatalogSetupPreview'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postCatalogSetupPreview>>, {data: CatalogSetupPreviewRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postCatalogSetupPreview(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostCatalogSetupPreviewMutationResult = NonNullable<Awaited<ReturnType<typeof postCatalogSetupPreview>>>
+    export type PostCatalogSetupPreviewMutationBody = CatalogSetupPreviewRequest
+    export type PostCatalogSetupPreviewMutationError = ErrorResponse
+
+    /**
+ * @summary Preview an authoritative catalogue quick setup
+ */
+export const usePostCatalogSetupPreview = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postCatalogSetupPreview>>, TError,{data: CatalogSetupPreviewRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postCatalogSetupPreview>>,
+        TError,
+        {data: CatalogSetupPreviewRequest},
+        TContext
+      > => {
+      return useMutation(getPostCatalogSetupPreviewMutationOptions(options), queryClient);
+    }
+
+/**
+ * Rebuilds the candidate from the current server-owned catalogue, checks all preview revisions and warnings, then saves and applies it through the shared configuration WAL and runtime coordinator. Ordinary config staging is serialized with this operation.
+
+ * @summary Atomically commit an authoritative catalogue quick setup
+ */
+export type postCatalogSetupApplyResponse200 = {
+  data: CatalogSetupApplyResponse
+  status: 200
+}
+
+export type postCatalogSetupApplyResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postCatalogSetupApplyResponse409 = {
+  data: ErrorResponse
+  status: 409
+}
+
+export type postCatalogSetupApplyResponse500 = {
+  data: ErrorResponse
+  status: 500
+}
+
+export type postCatalogSetupApplyResponse503 = {
+  data: ErrorResponse
+  status: 503
+}
+
+export type postCatalogSetupApplyResponseSuccess = (postCatalogSetupApplyResponse200) & {
+  headers: Headers;
+};
+export type postCatalogSetupApplyResponseError = (postCatalogSetupApplyResponse400 | postCatalogSetupApplyResponse409 | postCatalogSetupApplyResponse500 | postCatalogSetupApplyResponse503) & {
+  headers: Headers;
+};
+
+export type postCatalogSetupApplyResponse = (postCatalogSetupApplyResponseSuccess | postCatalogSetupApplyResponseError)
+
+export const getPostCatalogSetupApplyUrl = () => {
+
+
+
+
+  return `/api/setup/catalog/apply`
+}
+
+export const postCatalogSetupApply = async (catalogSetupApplyRequest: CatalogSetupApplyRequest, options?: RequestInit): Promise<postCatalogSetupApplyResponse> => {
+
+  return apiFetch<postCatalogSetupApplyResponse>(getPostCatalogSetupApplyUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      catalogSetupApplyRequest,)
+  }
+);}
+
+
+
+
+export const getPostCatalogSetupApplyMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postCatalogSetupApply>>, TError,{data: CatalogSetupApplyRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postCatalogSetupApply>>, TError,{data: CatalogSetupApplyRequest}, TContext> => {
+
+const mutationKey = ['postCatalogSetupApply'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postCatalogSetupApply>>, {data: CatalogSetupApplyRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postCatalogSetupApply(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostCatalogSetupApplyMutationResult = NonNullable<Awaited<ReturnType<typeof postCatalogSetupApply>>>
+    export type PostCatalogSetupApplyMutationBody = CatalogSetupApplyRequest
+    export type PostCatalogSetupApplyMutationError = ErrorResponse
+
+    /**
+ * @summary Atomically commit an authoritative catalogue quick setup
+ */
+export const usePostCatalogSetupApply = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postCatalogSetupApply>>, TError,{data: CatalogSetupApplyRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postCatalogSetupApply>>,
+        TError,
+        {data: CatalogSetupApplyRequest},
+        TContext
+      > => {
+      return useMutation(getPostCatalogSetupApplyMutationOptions(options), queryClient);
+    }
 

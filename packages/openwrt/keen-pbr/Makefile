@@ -25,6 +25,7 @@ KEEN_PBR_STAGED_BINDIR ?= usr/$(KEEN_PBR_CMAKE_INSTALL_BINDIR)
 KEEN_PBR_OBJCOPY ?= $(if $(TARGET_CROSS),$(TARGET_CROSS)objcopy,objcopy)
 KEEN_PBR_DEBUG_ARTIFACT_DIR ?= $(BUILD_DIR)/debug-artifacts/$(PKG_NAME)$(if $(BUILD_VARIANT),-$(BUILD_VARIANT))/$(BUILD_VARIANT)
 KEEN_PBR_STAGED_BIN ?= $(PKG_INSTALL_DIR)/$(KEEN_PBR_STAGED_BINDIR)/keen-pbr
+KEEN_PBR_COMMIT ?= unknown
 
 define KeenPbr/EmitDebugSymbol
 	@if [ -f "$(KEEN_PBR_STAGED_BIN)" ] && command -v "$(KEEN_PBR_OBJCOPY)" >/dev/null 2>&1; then \
@@ -43,6 +44,7 @@ define Build/Prepare
 	rm -rf $(PKG_BUILD_DIR)
 	mkdir -p $(PKG_BUILD_DIR)
 	rsync -a --delete \
+		--exclude='.git' \
 		--exclude='frontend/node_modules' \
 		--exclude='frontend/dist' \
 		$(KEEN_PBR_SRC)/ $(PKG_BUILD_DIR)/
@@ -53,10 +55,20 @@ ifneq ($(BUILD_VARIANT),headless)
 endif
 endef
 
+ifeq ($(CONFIG_x86_64)$(CONFIG_aarch64)$(CONFIG_arm),)
+  KEEN_PBR_ENABLE_LIBUNWIND:=OFF
+else
+  KEEN_PBR_ENABLE_LIBUNWIND:=$(if $(CONFIG_PACKAGE_libunwind),ON,OFF)
+endif
+
 CMAKE_OPTIONS += \
+	-DKEEN_PBR_COMMIT:STRING=$(KEEN_PBR_COMMIT) \
 	-DKEEN_PBR_DEFAULT_CONFIG_PATH:STRING=/etc/keen-pbr/config.json \
+	-DKEEN_PBR_RESOLVER_FALLBACK_CONFIG:STRING=/etc/keen-pbr/dnsmasq-fallback.conf \
+	-DKEEN_PBR_CONTROL_SOCKET:STRING=/var/run/dnsmasq/keen-pbr/control.sock \
 	-DKEEN_PBR_TARGET_OS:STRING=openwrt \
 	-DCMAKE_INSTALL_BINDIR:PATH=$(KEEN_PBR_CMAKE_INSTALL_BINDIR) \
+	-DKEEN_PBR_USE_LIBUNWIND=$(KEEN_PBR_ENABLE_LIBUNWIND) \
 	-DCMAKE_BUILD_TYPE=MinSizeRel
 
 ifneq ($(BUILD_VARIANT),headless)
@@ -77,12 +89,13 @@ define Package/keen-pbr
   CATEGORY:=Network
   TITLE:=Keen Policy-Based Routing (full)
   VERSION:=$(if $(CONFIG_USE_APK),$(PKG_VERSION)-r$(PKG_RELEASE),$(PKG_VERSION)-$(PKG_RELEASE))
-  DEPENDS:=+dnsmasq-full +libatomic +libcurl +libnl-core +libnl-route +libstdcpp +zlib +libzstd
+  DEPENDS:=+conntrack +dnsmasq-full +libatomic +libcurl +libnl-core +libnl-route +libstdcpp +(x86_64||aarch64||arm):libunwind +zlib +libzstd
   VARIANT:=full
 endef
 
 define Package/keen-pbr/description
   Policy-based routing daemon for OpenWRT and Keenetic routers with REST API and WebUI
+  Built from source commit $(KEEN_PBR_COMMIT).
 endef
 
 define Package/keen-pbr/conffiles
@@ -129,12 +142,13 @@ define Package/keen-pbr-headless
   CATEGORY:=Network
   TITLE:=Keen Policy-Based Routing (headless)
   VERSION:=$(if $(CONFIG_USE_APK),$(PKG_VERSION)-r$(PKG_RELEASE),$(PKG_VERSION)-$(PKG_RELEASE))
-  DEPENDS:=+dnsmasq-full +libatomic +libcurl +libnl-core +libnl-route +libstdcpp +zlib +libzstd
+  DEPENDS:=+conntrack +dnsmasq-full +libatomic +libcurl +libnl-core +libnl-route +libstdcpp +(x86_64||aarch64||arm):libunwind +zlib +libzstd
   VARIANT:=headless
 endef
 
 define Package/keen-pbr-headless/description
   Policy-based routing daemon for OpenWRT and Keenetic routers. REST API and WebUI are NOT included in the headless variant.
+  Built from source commit $(KEEN_PBR_COMMIT).
 endef
 
 define Package/keen-pbr-headless/conffiles

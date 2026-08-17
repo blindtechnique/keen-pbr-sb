@@ -7,14 +7,18 @@
 #include <arpa/inet.h>
 #include <arpa/nameser.h>
 #include <cctype>
+#include <cerrno>
+#include <climits>
 #include <cstdint>
 #include <cstring>
 #include <netinet/in.h>
 #include <resolv.h>
 #include <sys/socket.h>
+#include <strings.h>
 #include <sys/time.h>
 #include <thread>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 #include "dns_server.hpp"
@@ -22,9 +26,209 @@
 
 namespace keen_pbr3 {
 
+bool detail::dns_response_is_truncated(const unsigned char* packet, std::size_t size) {
+    // DNS flags are the network-order bytes at offsets 2-3; TC is bit 9.
+    return packet != nullptr && size >= NS_HFIXEDSZ && (packet[2] & 0x02U) != 0;
+}
+
+bool detail::dns_response_matches_query(const unsigned char* packet,
+                                        std::size_t size,
+                                        std::uint16_t transaction_id,
+                                        const std::string& domain) {
+    if (packet == nullptr || size < NS_HFIXEDSZ || size > static_cast<std::size_t>(INT_MAX)) {
+        return false;
+    }
+    const std::uint16_t response_id =
+        static_cast<std::uint16_t>((static_cast<std::uint16_t>(packet[0]) << 8U) | packet[1]);
+    if (response_id != transaction_id || (packet[2] & 0x80U) == 0 ||
+        (packet[2] & 0x78U) != 0 || (packet[3] & 0x0fU) != 0) {
+        return false;
+    }
+
+    ns_msg handle {};
+    if (ns_initparse(packet, static_cast<int>(size), &handle) < 0 ||
+        ns_msg_count(handle, ns_s_qd) != 1) {
+        return false;
+    }
+    ns_rr question {};
+    if (ns_parserr(&handle, ns_s_qd, 0, &question) < 0 ||
+        ns_rr_type(question) != ns_t_txt || ns_rr_class(question) != ns_c_in) {
+        return false;
+    }
+    std::string expected = domain;
+    if (!expected.empty() && expected.back() == '.') expected.pop_back();
+    std::string actual = ns_rr_name(question);
+    if (!actual.empty() && actual.back() == '.') actual.pop_back();
+    return strcasecmp(actual.c_str(), expected.c_str()) == 0;
+}
+
 namespace {
 
 constexpr const char* kDnsTxtAnswerNotFound = "DNS TXT answer not found";
+constexpr std::size_t kMaxDnsTcpResponseSize = 16U * 1024U;
+
+using DnsQueryDeadline = std::chrono::steady_clock::time_point;
+
+bool configure_socket_deadline(int socket_fd,
+                               DnsQueryDeadline deadline,
+                               std::string* error_out) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+        if (error_out) *error_out = "DNS TXT query timed out";
+        return false;
+    }
+
+    auto remaining =
+        std::chrono::duration_cast<std::chrono::microseconds>(deadline - now);
+    if (remaining.count() <= 0) {
+        remaining = std::chrono::microseconds(1);
+    }
+
+    timeval socket_timeout {};
+    socket_timeout.tv_sec = static_cast<time_t>(remaining.count() / 1000000);
+    socket_timeout.tv_usec =
+        static_cast<decltype(socket_timeout.tv_usec)>(remaining.count() % 1000000);
+    if (setsockopt(socket_fd,
+                   SOL_SOCKET,
+                   SO_SNDTIMEO,
+                   &socket_timeout,
+                   sizeof(socket_timeout)) != 0 ||
+        setsockopt(socket_fd,
+                   SOL_SOCKET,
+                   SO_RCVTIMEO,
+                   &socket_timeout,
+                   sizeof(socket_timeout)) != 0) {
+        if (error_out) *error_out = "Failed to configure DNS socket timeout";
+        return false;
+    }
+    return true;
+}
+
+bool send_all_before_deadline(int socket_fd,
+                              const unsigned char* data,
+                              std::size_t size,
+                              DnsQueryDeadline deadline,
+                              std::string* error_out) {
+    std::size_t sent_total = 0;
+    while (sent_total < size) {
+        if (!configure_socket_deadline(socket_fd, deadline, error_out)) {
+            return false;
+        }
+        const ssize_t sent =
+            send(socket_fd, data + sent_total, size - sent_total, MSG_NOSIGNAL);
+        if (sent > 0) {
+            sent_total += static_cast<std::size_t>(sent);
+            continue;
+        }
+        if (sent < 0 && errno == EINTR) {
+            continue;
+        }
+        if (error_out) *error_out = "Failed to send DNS TXT query over TCP";
+        return false;
+    }
+    return true;
+}
+
+bool receive_all_before_deadline(int socket_fd,
+                                 unsigned char* data,
+                                 std::size_t size,
+                                 DnsQueryDeadline deadline,
+                                 std::string* error_out) {
+    std::size_t received_total = 0;
+    while (received_total < size) {
+        if (!configure_socket_deadline(socket_fd, deadline, error_out)) {
+            return false;
+        }
+        const ssize_t received =
+            recv(socket_fd, data + received_total, size - received_total, 0);
+        if (received > 0) {
+            received_total += static_cast<std::size_t>(received);
+            continue;
+        }
+        if (received < 0 && errno == EINTR) {
+            continue;
+        }
+        if (error_out) *error_out = received == 0
+            ? "DNS TCP connection closed before the complete response"
+            : "Failed to receive DNS TXT response over TCP";
+        return false;
+    }
+    return true;
+}
+
+std::optional<std::vector<unsigned char>> query_dns_over_tcp(
+    const sockaddr_in& resolver_addr,
+    const unsigned char* query,
+    std::size_t query_size,
+    DnsQueryDeadline deadline,
+    std::string* error_out) {
+    if (query == nullptr || query_size == 0 || query_size > UINT16_MAX) {
+        if (error_out) *error_out = "DNS TXT query is too large for TCP framing";
+        return std::nullopt;
+    }
+
+    const int socket_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (socket_fd < 0) {
+        if (error_out) *error_out = "Failed to create DNS TCP socket";
+        return std::nullopt;
+    }
+    const auto close_socket = [socket_fd]() { close(socket_fd); };
+
+    if (!configure_socket_deadline(socket_fd, deadline, error_out)) {
+        close_socket();
+        return std::nullopt;
+    }
+    if (connect(socket_fd,
+                reinterpret_cast<const sockaddr*>(&resolver_addr),
+                sizeof(resolver_addr)) != 0) {
+        if (error_out) *error_out = "Failed to connect DNS TCP socket";
+        close_socket();
+        return std::nullopt;
+    }
+
+    const auto query_size_u16 = static_cast<std::uint16_t>(query_size);
+    const std::array<unsigned char, 2> query_prefix {
+        static_cast<unsigned char>((query_size_u16 >> 8U) & 0xffU),
+        static_cast<unsigned char>(query_size_u16 & 0xffU),
+    };
+    if (!send_all_before_deadline(
+            socket_fd, query_prefix.data(), query_prefix.size(), deadline, error_out) ||
+        !send_all_before_deadline(socket_fd, query, query_size, deadline, error_out)) {
+        close_socket();
+        return std::nullopt;
+    }
+
+    std::array<unsigned char, 2> response_prefix {};
+    if (!receive_all_before_deadline(
+            socket_fd, response_prefix.data(), response_prefix.size(), deadline, error_out)) {
+        close_socket();
+        return std::nullopt;
+    }
+
+    const std::size_t response_size =
+        (static_cast<std::size_t>(response_prefix[0]) << 8U) |
+        static_cast<std::size_t>(response_prefix[1]);
+    if (response_size == 0) {
+        if (error_out) *error_out = "DNS TCP response has an empty frame";
+        close_socket();
+        return std::nullopt;
+    }
+    if (response_size > kMaxDnsTcpResponseSize) {
+        if (error_out) *error_out = "DNS TCP response exceeds the size limit";
+        close_socket();
+        return std::nullopt;
+    }
+
+    std::vector<unsigned char> response(response_size);
+    if (!receive_all_before_deadline(
+            socket_fd, response.data(), response.size(), deadline, error_out)) {
+        close_socket();
+        return std::nullopt;
+    }
+
+    close_socket();
+    return response;
+}
 
 bool is_hex_char(char c) {
     return std::isxdigit(static_cast<unsigned char>(c)) != 0;
@@ -156,6 +360,8 @@ std::optional<std::string> query_dns_txt_record(const std::string& dns_server_ad
                                                 std::chrono::milliseconds timeout,
                                                 std::string* error_out) {
     const auto started_at = std::chrono::steady_clock::now();
+    const auto timeout_ms = std::chrono::milliseconds(std::max<int64_t>(1, timeout.count()));
+    const auto deadline = started_at + timeout_ms;
     Logger::instance().trace("dns_txt_query_start",
                              "resolver={} domain={} timeout_ms={}",
                              dns_server_address,
@@ -238,22 +444,15 @@ std::optional<std::string> query_dns_txt_record(const std::string& dns_server_ad
     }
     const auto close_socket = [socket_fd]() { close(socket_fd); };
 
-    const auto timeout_ms = std::max<int64_t>(1, timeout.count());
-    timeval socket_timeout {};
-    socket_timeout.tv_sec = static_cast<time_t>(timeout_ms / 1000);
-    socket_timeout.tv_usec = static_cast<decltype(socket_timeout.tv_usec)>((timeout_ms % 1000) * 1000);
+    if (connect(socket_fd,
+                reinterpret_cast<const sockaddr*>(&resolver_addr),
+                sizeof(resolver_addr)) != 0) {
+        if (error_out) *error_out = "Failed to connect DNS socket";
+        close_socket();
+        return std::nullopt;
+    }
 
-    if (setsockopt(socket_fd,
-                   SOL_SOCKET,
-                   SO_SNDTIMEO,
-                   &socket_timeout,
-                   sizeof(socket_timeout)) != 0 ||
-        setsockopt(socket_fd,
-                   SOL_SOCKET,
-                   SO_RCVTIMEO,
-                   &socket_timeout,
-                   sizeof(socket_timeout)) != 0) {
-        if (error_out) *error_out = "Failed to configure DNS socket timeout";
+    if (!configure_socket_deadline(socket_fd, deadline, error_out)) {
         Logger::instance().trace("dns_txt_query_error",
                                  "resolver={} domain={} duration_ms={} error=setsockopt_failed",
                                  dns_server_address,
@@ -265,12 +464,7 @@ std::optional<std::string> query_dns_txt_record(const std::string& dns_server_ad
     }
 
     std::array<unsigned char, NS_PACKETSZ * 8> response {};
-    const ssize_t sent = sendto(socket_fd,
-                                query.data(),
-                                static_cast<size_t>(query_len),
-                                0,
-                                reinterpret_cast<const sockaddr*>(&resolver_addr),
-                                sizeof(resolver_addr));
+    const ssize_t sent = send(socket_fd, query.data(), static_cast<size_t>(query_len), 0);
     if (sent != static_cast<ssize_t>(query_len)) {
         if (error_out) *error_out = "Failed to send DNS TXT query";
         Logger::instance().trace("dns_txt_query_error",
@@ -283,12 +477,7 @@ std::optional<std::string> query_dns_txt_record(const std::string& dns_server_ad
         return std::nullopt;
     }
 
-    const ssize_t response_len = recvfrom(socket_fd,
-                                          response.data(),
-                                          response.size(),
-                                          0,
-                                          nullptr,
-                                          nullptr);
+    const ssize_t response_len = recv(socket_fd, response.data(), response.size(), 0);
     if (response_len <= 0) {
         if (error_out) *error_out = "DNS TXT query failed";
         Logger::instance().trace("dns_txt_query_error",
@@ -301,30 +490,74 @@ std::optional<std::string> query_dns_txt_record(const std::string& dns_server_ad
         return std::nullopt;
     }
 
-    if (response_len >= NS_HFIXEDSZ) {
-        const auto* response_header = reinterpret_cast<const HEADER*>(response.data());
-        if (response_header->tc != 0) {
-            if (error_out) *error_out = "DNS TXT response truncated; TCP fallback is not implemented";
-            Logger::instance().trace("dns_txt_query_error",
-                                     "resolver={} domain={} duration_ms={} error=truncated_response",
-                                     dns_server_address,
-                                     domain,
-                                     std::chrono::duration_cast<std::chrono::milliseconds>(
-                                         std::chrono::steady_clock::now() - started_at).count());
-            close_socket();
+    const std::uint16_t query_id = static_cast<std::uint16_t>(
+        (static_cast<std::uint16_t>(query[0]) << 8U) | query[1]);
+    if (!detail::dns_response_matches_query(response.data(),
+                                            static_cast<std::size_t>(response_len),
+                                            query_id,
+                                            domain)) {
+        if (error_out) *error_out = "DNS TXT response did not match query";
+        close_socket();
+        return std::nullopt;
+    }
+
+    const bool udp_response_truncated =
+        detail::dns_response_is_truncated(response.data(),
+                                          static_cast<std::size_t>(response_len));
+    close_socket();
+
+    const unsigned char* final_response = response.data();
+    std::size_t final_response_size = static_cast<std::size_t>(response_len);
+    std::vector<unsigned char> tcp_response;
+    bool used_tcp = false;
+
+    if (udp_response_truncated) {
+        Logger::instance().trace("dns_txt_tcp_fallback_start",
+                                 "resolver={} domain={} udp_bytes={}",
+                                 dns_server_address,
+                                 domain,
+                                 response_len);
+        auto fallback = query_dns_over_tcp(resolver_addr,
+                                           query.data(),
+                                           static_cast<std::size_t>(query_len),
+                                           deadline,
+                                           error_out);
+        if (!fallback.has_value()) {
+            Logger::instance().trace(
+                "dns_txt_query_error",
+                "resolver={} domain={} duration_ms={} error=tcp_fallback_failed",
+                dns_server_address,
+                domain,
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - started_at).count());
+            return std::nullopt;
+        }
+        tcp_response = std::move(*fallback);
+        final_response = tcp_response.data();
+        final_response_size = tcp_response.size();
+        used_tcp = true;
+
+        if (detail::dns_response_is_truncated(final_response, final_response_size)) {
+            if (error_out) *error_out = "DNS TXT response remained truncated over TCP";
+            return std::nullopt;
+        }
+        if (!detail::dns_response_matches_query(
+                final_response, final_response_size, query_id, domain)) {
+            if (error_out) *error_out = "DNS TCP response did not match query";
             return std::nullopt;
         }
     }
 
-    close_socket();
-    auto result = parse_first_txt_answer(response.data(), static_cast<int>(response_len), error_out);
+    auto result = parse_first_txt_answer(
+        final_response, static_cast<int>(final_response_size), error_out);
     Logger::instance().trace(result.has_value() ? "dns_txt_query_end" : "dns_txt_query_error",
-                             "resolver={} domain={} duration_ms={} bytes={} success={}",
+                             "resolver={} domain={} duration_ms={} bytes={} transport={} success={}",
                              dns_server_address,
                              domain,
                              std::chrono::duration_cast<std::chrono::milliseconds>(
                                  std::chrono::steady_clock::now() - started_at).count(),
-                             response_len,
+                             final_response_size,
+                             used_tcp ? "tcp" : "udp",
                              result.has_value() ? "true" : "false");
     return result;
 }
@@ -404,6 +637,49 @@ ResolverConfigHashTxtValue parse_resolver_config_hash_txt(const std::string& txt
     return value;
 }
 
+ResolverStateTxtValue parse_resolver_state_txt(const std::string& txt_payload) {
+    ResolverStateTxtValue value;
+    const std::string normalized = strip_balanced_quotes(txt_payload);
+
+    const size_t timestamp_delimiter = normalized.find('|');
+    if (timestamp_delimiter == std::string::npos) {
+        return value;
+    }
+    const size_t mode_delimiter =
+        normalized.find('|', timestamp_delimiter + 1);
+
+    const std::string ts_part =
+        trim_copy(normalized.substr(0, timestamp_delimiter));
+    const std::string mode_part = trim_copy(normalized.substr(
+        timestamp_delimiter + 1,
+        mode_delimiter == std::string::npos
+            ? std::string::npos
+            : mode_delimiter - timestamp_delimiter - 1));
+
+    if (!ts_part.empty() &&
+        std::all_of(ts_part.begin(), ts_part.end(), [](unsigned char c) {
+            return std::isdigit(c) != 0;
+        })) {
+        try {
+            value.ts = std::stoll(ts_part);
+        } catch (...) {
+            value.ts = std::nullopt;
+        }
+    }
+
+    if (mode_part == "active") {
+        value.mode = ResolverRuntimeMode::ACTIVE;
+    } else if (mode_part == "fallback") {
+        value.mode = ResolverRuntimeMode::FALLBACK;
+    }
+
+    if (mode_delimiter != std::string::npos) {
+        value.reason = trim_copy(normalized.substr(mode_delimiter + 1));
+    }
+
+    return value;
+}
+
 bool is_valid_resolver_config_hash_txt_value(const ResolverConfigHashTxtValue& value) {
     if (value.hash.size() != 32) {
         return false;
@@ -462,11 +738,19 @@ ResolverConfigHashProbeResult query_resolver_config_hash_txt(
     int attempts,
     std::chrono::milliseconds retry_delay) {
     ResolverConfigHashProbeResult result;
+    std::optional<ResolverConfigHashProbeResult> last_negative_response;
 
     for (int attempt = 1; attempt <= std::max(1, attempts); ++attempt) {
         result = query_resolver_config_hash_txt_once(dns_server_address, domain, timeout);
         if (!is_transient_probe_status(result.status)) {
             return result;
+        }
+        // A syntactically valid DNS response without a usable TXT record is
+        // stronger evidence than a later dropped datagram. Keep retrying in
+        // case dnsmasq is mid-reload, but do not replace the valid negative
+        // response with QUERY_FAILED merely because a retry timed out.
+        if (result.status == ResolverConfigHashProbeStatus::NO_USABLE_TXT) {
+            last_negative_response = result;
         }
         if (attempt < attempts) {
             Logger::instance().trace("resolver_hash_probe_retry",
@@ -478,7 +762,7 @@ ResolverConfigHashProbeResult query_resolver_config_hash_txt(
         }
     }
 
-    return result;
+    return last_negative_response.value_or(result);
 }
 
 } // namespace keen_pbr3

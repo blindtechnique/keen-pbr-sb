@@ -1,31 +1,45 @@
 import type { ReactNode } from "react"
 
+import { ExpandableText } from "@/components/shared/expandable-text"
+import { useDocumentTitle } from "@/hooks/use-document-title"
+
 export function PageHeader({
   title,
   description,
   actions,
+  documentTitle,
 }: {
-  title: string
+  title: ReactNode
   description: string
   actions?: ReactNode
+  // Pages whose heading is not a plain string pass the tab text explicitly.
+  documentTitle?: string
 }) {
+  useDocumentTitle(
+    documentTitle ?? (typeof title === "string" ? title : undefined)
+  )
+
   return (
-    <header className="mb-2 flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+    <header className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
       <div className="min-w-0">
-        {/* NDMS sets page titles in 28px Roboto Bold and gives the description
-            its own 72px band in plain black - not the small grey subtitle we
-            had, which read as a caption rather than as part of the page. */}
         <h1
-          className="text-balance text-[28px] leading-[36px] font-bold text-foreground"
+          className="text-[28px] leading-[36px] font-bold text-balance text-foreground"
           id="page-title"
         >
           {title}
         </h1>
-        <div className="flex min-h-[72px] items-start">
-          <p className="mt-2 max-w-[110ch] text-pretty text-[14px] leading-[22px] text-foreground">
-            {description}
-          </p>
-        </div>
+        {/* Ритм страницы KeeneticOS, снятый с живого конфигуратора: блок
+            заголовка, 8px, описание, 24px, вкладки. Здесь `mb-3` плюс `space-y-3`
+            страницы и дают эти 24px. */}
+        <ExpandableText
+          className="mt-2 mb-3 md:hidden"
+          lines={2}
+          text={description}
+          textClassName="max-w-[110ch] text-[14px] leading-[24px] text-pretty text-foreground"
+        />
+        <p className="mt-2 mb-3 hidden max-w-[110ch] text-[14px] leading-[24px] text-pretty text-foreground md:block">
+          {description}
+        </p>
       </div>
       {actions ? <div className="md:mt-2 md:shrink-0">{actions}</div> : null}
     </header>

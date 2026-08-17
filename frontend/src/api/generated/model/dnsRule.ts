@@ -7,6 +7,20 @@
  */
 
 export interface DnsRule {
+  /**
+     * Optional stable technical identifier. New clients generate it automatically; legacy rules without an id remain valid.
+
+     * @maxLength 24
+     * @pattern ^[a-z][a-z0-9_]*$
+     */
+  id?: string;
+  /**
+     * Optional human-readable alias shown by clients. It does not affect matching or rule ordering.
+
+     * @minLength 1
+     * @maxLength 80
+     */
+  display_name?: string;
   /** Whether this DNS rule is active. `false` disables the rule. `true`, omitted, or `null` all mean the rule is active.
    */
   enabled?: boolean | null;

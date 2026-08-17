@@ -21,19 +21,52 @@ func main() {
 	configPath := flag.String("config", "/opt/etc/keen-pbr/transports.json", "manager configuration file")
 	flag.Parse()
 
-	cfg, err := config.Load(*configPath)
+	cfg, configRevision, err := config.LoadWithRevision(*configPath)
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
 
 	manager := transport.NewManager()
 	supervisor := transport.NewSupervisor(manager)
-	if err := transport.CleanupOrphanProcesses(cfg.Transports, cfg.RuntimeDir); err != nil {
+	if err := transport.CleanupOrphanProcessesForMode(
+		cfg.Transports,
+		cfg.RuntimeDir,
+		cfg.SingBoxProcessMode == config.SingBoxProcessModeShared,
+	); err != nil {
 		log.Fatalf("clean up orphan sing-box processes: %v", err)
 	}
-	transport.CleanupForwardingRules(cfg.Transports)
+	if err := transport.CleanupForwardingRules(cfg.Transports); err != nil {
+		// A bounded runtime reconcile will retry after startup. Do not leave
+		// transports unavailable only because NDMS held the xtables lock here.
+		log.Printf("clean up stale forwarding rules: %v", err)
+	}
+	var sharedGroup *transport.SharedSingBoxGroup
+	if cfg.SingBoxProcessMode == config.SingBoxProcessModeShared {
+		sharedGroup, err = transport.NewSharedSingBoxGroup(
+			cfg.Transports,
+			cfg.SingBoxBinary,
+			cfg.RuntimeDir,
+			cfg.HealthEndpoint(),
+		)
+		if err != nil {
+			log.Fatalf("create shared sing-box runtime: %v", err)
+		}
+		if err := manager.SetSharedGroup(sharedGroup); err != nil {
+			log.Fatalf("register shared sing-box runtime: %v", err)
+		}
+	}
 	for _, item := range cfg.Transports {
-		managed, err := transport.NewFromSpec(item, cfg.SingBoxBinary, cfg.RuntimeDir, cfg.HealthEndpoint())
+		var managed transport.Transport
+		if sharedGroup != nil && (item.Type == "sing-box" || item.Type == "sing-box-vless-reality") {
+			managed, err = sharedGroup.Member(item.Tag)
+		} else {
+			managed, err = transport.NewFromSpec(
+				item,
+				cfg.SingBoxBinary,
+				cfg.RuntimeDir,
+				cfg.HealthEndpoint(),
+			)
+		}
 		if err != nil {
 			log.Fatalf("transport %q: %v", item.Tag, err)
 		}
@@ -43,7 +76,13 @@ func main() {
 		supervisor.Register(item)
 	}
 
-	admin := config.NewAdmin(*configPath, cfg, manager, supervisor)
+	admin := config.NewAdminWithRevision(
+		*configPath,
+		cfg,
+		configRevision,
+		manager,
+		supervisor,
+	)
 	handler := api.New(supervisor, cfg.APIKey, admin)
 	server := &http.Server{
 		Addr:              cfg.Listen,

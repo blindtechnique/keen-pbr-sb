@@ -5,46 +5,64 @@
 #include "handler_lists_refresh.hpp"
 #include "handler_reload.hpp"
 #include "handler_config.hpp"
+#include "handler_dependency_analysis.hpp"
 #include "handler_health_routing.hpp"
 #include "handler_runtime_interfaces.hpp"
 #include "handler_runtime_outbounds.hpp"
+#include "handler_runtime_inventory.hpp"
+#include "handler_diagnostic_tasks.hpp"
 #include "handler_test_routing.hpp"
 #include "handler_transports.hpp"
+#include "handler_subscriptions.hpp"
 #include "handler_dns_test.hpp"
 #include "handler_connections.hpp"
 #include "handler_nfqws.hpp"
 #include "handler_logs.hpp"
 #include "handler_router_info.hpp"
 #include "handler_catalog.hpp"
+#include "handler_catalog_setup.hpp"
 #include "handler_geo.hpp"
 #include "handler_naive.hpp"
 #include "handler_ndms_names.hpp"
 #include "handler_remote_access.hpp"
 #include "handler_backup.hpp"
+#include "handler_status_events.hpp"
 
 namespace keen_pbr3 {
 
 void register_api_handlers(ApiServer& server, ApiContext& ctx) {
+    // The system-auth verdict is the web server's own, not the daemon's.
+    // Wiring it here rather than in ApiContext's initializer keeps that
+    // struct's positional aggregate initialization untouched.
+    ctx.get_system_auth_health_fn = [&server]() {
+        return server.system_auth_health();
+    };
     register_health_service_handler(server, ctx);
     register_reload_handler(server, ctx);
     register_lists_refresh_handler(server, ctx);
     register_config_handler(server, ctx);
+    register_dependency_analysis_handler(server, ctx);
     register_health_routing_handler(server, ctx);
     register_runtime_interfaces_handler(server, ctx);
     register_runtime_outbounds_handler(server, ctx);
+    register_runtime_inventory_handler(server, ctx);
+    register_diagnostic_tasks_handler(server, ctx);
     register_test_routing_handler(server, ctx);
     register_transports_handler(server, ctx);
+    register_subscriptions_handler(server, ctx);
     register_dns_test_handler(server, ctx);
     register_connections_handler(server, ctx);
     register_nfqws_handler(server, ctx);
-    register_logs_handler(server, ctx);
+    register_logs_handler(server);
     register_router_info_handler(server, ctx);
     register_catalog_handler(server, ctx);
+    register_catalog_setup_handler(server, ctx);
     register_geo_handler(server, ctx);
     register_naive_component_handler(server, ctx);
     register_ndms_names_handler(server, ctx);
     register_remote_access_handler(server, ctx);
     register_backup_handler(server, ctx);
+    register_status_events_handler(server, ctx);
 }
 
 } // namespace keen_pbr3

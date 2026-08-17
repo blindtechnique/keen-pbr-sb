@@ -1,12 +1,14 @@
 import { Autocomplete } from "@base-ui/react/autocomplete"
-import { ChevronsUpDown, ListPlus, Plus, Trash2 } from "lucide-react"
+import { KeenTrashIcon } from "@/components/shared/keen-icons"
+import { ChevronsUpDown, ListPlus, Plus } from "lucide-react"
 import type { ReactNode } from "react"
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 
 import type { RuntimeInterfaceInventoryEntry } from "@/api/generated/model"
 import { FieldError } from "@/components/shared/field"
-import { useInterfaceNames } from "@/hooks/use-interface-names"
+import { useInterfaceDisplayNames } from "@/hooks/use-interface-display-names"
+import { kernelInterfaceKind } from "@/lib/kernel-interface-kind"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -61,13 +63,14 @@ export function InterfacePicker({
   className,
 }: InterfacePickerProps) {
   const { t } = useTranslation()
+  const { names } = useInterfaceDisplayNames()
   const [isFocused, setIsFocused] = useState(false)
   const trimmedValue = value.trim()
   const selectedInterface = findInterface(interfaces, value)
   const hasExactInterface = Boolean(selectedInterface)
   const filteredInterfaces = useMemo(
-    () => filterInterfaces(interfaces, value),
-    [interfaces, value]
+    () => filterInterfaces(interfaces, value, names),
+    [interfaces, names, value]
   )
   const pickerItems = useMemo<InterfacePickerItem[]>(() => {
     if (!allowCustomOption || !trimmedValue || hasExactInterface) {
@@ -143,7 +146,12 @@ export function InterfacePicker({
         {shouldRenderPopup ? (
           <Autocomplete.Portal>
             <Autocomplete.Positioner className="z-50" sideOffset={4}>
-              <Autocomplete.Popup className="max-h-60 w-[var(--anchor-width)] min-w-72 overflow-hidden rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-md outline-hidden">
+              {/* Тень как у обычного select. Была `shadow-md` — заметно слабее,
+                  и белый список поверх белой формы читался не как слой над
+                  ней: он полностью закрывает соседние «Шлюз (IPv4)» и «Шлюз
+                  (IPv6)», а их подписи торчат снизу, и это выглядит как
+                  обрезанная форма, а не как раскрытый список. */}
+              <Autocomplete.Popup className="max-h-60 w-[var(--anchor-width)] min-w-72 overflow-hidden rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-xl outline-hidden">
                 {pickerItems.length > 0 ? (
                   <Autocomplete.List className="max-h-56 overflow-y-auto">
                     {(item: InterfacePickerItem, index) => (
@@ -206,6 +214,7 @@ type InterfaceMultiSelectListProps = {
   placeholderTitle?: string
   placeholderDescription?: string
   error?: string | null
+  flat?: boolean
 }
 
 export function InterfaceMultiSelectList({
@@ -218,6 +227,7 @@ export function InterfaceMultiSelectList({
   placeholderTitle,
   placeholderDescription,
   error,
+  flat = false,
 }: InterfaceMultiSelectListProps) {
   const { t } = useTranslation()
   const [pickerValue, setPickerValue] = useState("")
@@ -246,8 +256,13 @@ export function InterfaceMultiSelectList({
     <div className="space-y-2" data-field-name={name}>
       <div
         className={cn(
-          "space-y-3 rounded-xl border p-3",
-          error ? "border-destructive" : "border-border"
+          "space-y-3",
+          flat
+            ? error
+              ? "border-l-2 border-destructive pl-3"
+              : null
+            : "rounded-xl border p-3",
+          !flat && (error ? "border-destructive" : "border-border")
         )}
       >
         {value.length ? (
@@ -362,7 +377,7 @@ function SelectedInterfaceRow({
         type="button"
         variant="ghost"
       >
-        <Trash2 className="h-4 w-4" />
+        <KeenTrashIcon className="h-4 w-4" />
       </Button>
     </div>
   )
@@ -386,9 +401,13 @@ export function InterfaceRowContent({
   showAddressesInline?: boolean
 }) {
   const { t } = useTranslation()
-  const { labelFor } = useInterfaceNames()
+  const { labelFor } = useInterfaceDisplayNames()
   const label = labelFor(name)
   const hasFirmwareLabel = label !== name
+  // Когда прошивка не дала человеческого имени, единственный источник смысла —
+  // само имя ядра: br0 — мост, apcli0 — приём чужого Wi-Fi. Говорим ровно то,
+  // что имя доказывает; неизвестное имя остаётся без описания.
+  const kindKey = hasFirmwareLabel ? undefined : kernelInterfaceKind(name)
   const addresses = interfaceEntry ? getInterfaceAddresses(interfaceEntry) : []
   const className = cn(
     "flex min-h-5 min-w-0 flex-wrap items-center gap-2",
@@ -406,6 +425,11 @@ export function InterfaceRowContent({
       {hasFirmwareLabel ? (
         <span className="truncate font-mono text-xs text-muted-foreground">
           {name}
+        </span>
+      ) : null}
+      {kindKey ? (
+        <span className="truncate text-xs text-muted-foreground">
+          {t(`common.interfacePicker.kinds.${kindKey}`)}
         </span>
       ) : null}
       {protocol ? (
@@ -461,43 +485,79 @@ export function InterfaceRowContent({
 
 export function OutboundInterfaceLabel({
   tag,
+  label,
   interfaceName,
   runtimeInterface,
   t,
 }: {
   tag: string
+  /**
+   * Имя туннеля вместо технического тега маршрута: раз туннель=маршрут,
+   * в выборе участников группы человек ищет туннель по имени, а не по
+   * тегу вроде `vpn_main`. Техническое имя интерфейса остаётся рядом
+   * приглушённым.
+   */
+  label?: string
   interfaceName?: string
   runtimeInterface?: RuntimeInterfaceInventoryEntry
   t: (key: string, options?: Record<string, unknown>) => string
 }) {
   const ipv4 = runtimeInterface?.ipv4_addresses?.[0]
-  const ipv6 = runtimeInterface?.ipv6_addresses?.[0]
+  // fe80:: — link-local, он есть у любого интерфейса и ни о чём не говорит,
+  // а занимает пол строки. Показывается только глобальный IPv6.
+  const ipv6 = runtimeInterface?.ipv6_addresses?.find(
+    (address) => !isLinkLocalIpv6(address)
+  )
+  const primary = label?.trim() || tag
+  const technical = interfaceName ?? (primary === tag ? undefined : tag)
 
   return (
-    <div className="flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap">
-      <span className="shrink-0 text-sm font-medium text-foreground">
-        {tag}
+    /* Имя — главное в строке и не сжимается (владелец: «имя должно быть
+       намного приоритетнее ipv6»). Всё, что не помещается рядом с ним,
+       переносится на следующую строку целиком, а не обрезается: nowrap с
+       clip прятал плашки за краем экрана телефона. */
+    <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+      <span
+        className="max-w-[min(24rem,100%)] shrink-0 truncate text-sm font-medium text-foreground"
+        title={primary}
+      >
+        {primary}
       </span>
+      {technical ? (
+        <span className="shrink-0 text-xs text-muted-foreground">
+          ({technical})
+        </span>
+      ) : null}
       {interfaceName ? (
-        <>
-          <span className="shrink-0 text-sm font-medium text-foreground">
-            ({interfaceName})
+        runtimeInterface ? (
+          <>
+            <InterfaceStatusBadge status={runtimeInterface.status} />
+            {ipv4 ? (
+              <AddressPreviewChip
+                address={ipv4}
+                className="max-w-full shrink-0"
+              />
+            ) : null}
+            {ipv6 ? (
+              <AddressPreviewChip
+                address={ipv6}
+                className="max-w-full shrink-0"
+              />
+            ) : null}
+          </>
+        ) : (
+          <span className="text-xs text-muted-foreground">
+            {t("common.interfacePicker.notExists")}
           </span>
-          {runtimeInterface ? (
-            <>
-              <InterfaceStatusBadge status={runtimeInterface.status} />
-              {ipv4 ? <AddressPreviewChip address={ipv4} /> : null}
-              {ipv6 ? <AddressPreviewChip address={ipv6} /> : null}
-            </>
-          ) : (
-            <span className="text-xs text-muted-foreground">
-              {t("common.interfacePicker.notExists")}
-            </span>
-          )}
-        </>
+        )
       ) : null}
     </div>
   )
+}
+
+/** fe80::/10 — link-local диапазон fe80…febf. */
+function isLinkLocalIpv6(address: string): boolean {
+  return /^fe[89ab]/i.test(address.trim())
 }
 
 function InterfaceStatusBadge({
@@ -513,43 +573,6 @@ function InterfaceStatusBadge({
         ? t("pages.settings.general.inboundInterfacesStatusUp")
         : t("pages.settings.general.inboundInterfacesStatusDown")}
     </Badge>
-  )
-}
-
-export function InterfaceAddressDetails({
-  interfaceEntry,
-  compact = false,
-}: {
-  interfaceEntry: RuntimeInterfaceInventoryEntry
-  compact?: boolean
-}) {
-  const addresses = getInterfaceAddresses(interfaceEntry)
-
-  if (!addresses.length) {
-    return null
-  }
-
-  return (
-    <div
-      className={cn(
-        "flex flex-wrap gap-1",
-        compact
-          ? "text-xs"
-          : "rounded-lg border border-border bg-muted/30 p-2 text-xs"
-      )}
-    >
-      {addresses.map((address) => (
-        <code
-          className={cn(
-            "rounded-md px-1.5 py-0.5 text-muted-foreground",
-            compact ? "bg-muted" : "bg-background"
-          )}
-          key={address}
-        >
-          {address}
-        </code>
-      ))}
-    </div>
   )
 }
 
@@ -588,9 +611,20 @@ function AddressPreview({
   )
 }
 
-function AddressPreviewChip({ address }: { address: string }) {
+function AddressPreviewChip({
+  address,
+  className,
+}: {
+  address: string
+  className?: string
+}) {
   return (
-    <code className="truncate rounded bg-muted px-1.5 py-0.5">{address}</code>
+    <code
+      className={cn("truncate rounded bg-muted px-1.5 py-0.5", className)}
+      title={address}
+    >
+      {address}
+    </code>
   )
 }
 
@@ -616,7 +650,8 @@ function isVirtualInterface(
 
 function filterInterfaces(
   interfaces: RuntimeInterfaceInventoryEntry[],
-  query: string
+  query: string,
+  names: Record<string, { label: string; type?: string }>
 ) {
   const normalizedQuery = query.trim().toLowerCase()
   if (!normalizedQuery) {
@@ -624,7 +659,14 @@ function filterInterfaces(
   }
 
   return interfaces.filter((item) =>
-    [item.name, ...(item.ipv4_addresses ?? []), ...(item.ipv6_addresses ?? [])]
+    [
+      item.name,
+      names[item.name]?.label,
+      names[item.name]?.type,
+      ...(item.ipv4_addresses ?? []),
+      ...(item.ipv6_addresses ?? []),
+    ]
+      .filter(Boolean)
       .join(" ")
       .toLowerCase()
       .includes(normalizedQuery)

@@ -1,0 +1,1 @@
+tcp      6 431999 ESTABLISHED src=192.0.2.10 dst=198.51.100.5 sport=

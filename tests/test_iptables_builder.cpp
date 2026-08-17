@@ -5,14 +5,23 @@
 #include "../src/firewall/ipset_restore_pipe.hpp"
 #include "../src/firewall/iptables.hpp"
 #include "../src/lists/list_entry_visitor.hpp"
+#include "../src/util/last_command_failure.hpp"
 
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <sstream>
 #include <iomanip>
+#include <iterator>
+#include <optional>
 #include <string>
 #include <set>
 #include <array>
 #include <algorithm>
+#include <stdexcept>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <vector>
 
 namespace keen_pbr3 {
@@ -27,11 +36,189 @@ L4Proto parse_test_proto(const std::string& proto) {
   throw std::invalid_argument("unexpected proto in test: " + proto);
 }
 
+class IptablesTestEnvironment {
+public:
+  explicit IptablesTestEnvironment(std::string name)
+      : name_(std::move(name)) {
+    if (const char* value = std::getenv(name_.c_str())) {
+      previous_ = value;
+    }
+  }
+  ~IptablesTestEnvironment() {
+    if (previous_) {
+      setenv(name_.c_str(), previous_->c_str(), 1);
+    } else {
+      unsetenv(name_.c_str());
+    }
+  }
+  void set(const std::string& value) {
+    if (setenv(name_.c_str(), value.c_str(), 1) != 0) {
+      throw std::runtime_error("setenv failed");
+    }
+  }
+private:
+  std::string name_;
+  std::optional<std::string> previous_;
+};
+
+class IptablesTestTempDir {
+public:
+  IptablesTestTempDir() {
+    char path_template[] = "/tmp/keen-pbr-iptables-XXXXXX";
+    const char* created = mkdtemp(path_template);
+    if (created == nullptr) {
+      throw std::runtime_error("mkdtemp failed");
+    }
+    path_ = created;
+  }
+  ~IptablesTestTempDir() {
+    std::error_code error;
+    std::filesystem::remove_all(path_, error);
+  }
+  const std::filesystem::path& path() const { return path_; }
+private:
+  std::filesystem::path path_;
+};
+
+class IptablesFailurePathGuard {
+public:
+  explicit IptablesFailurePathGuard(const std::filesystem::path& path) {
+    set_last_command_failure_path_for_testing(path.string());
+  }
+  ~IptablesFailurePathGuard() {
+    set_last_command_failure_path_for_testing(std::nullopt);
+  }
+};
+
+void write_iptables_test_executable(
+    const std::filesystem::path& path,
+    const std::string& content) {
+  std::ofstream output(path);
+  output << content;
+  output.close();
+  if (!output || chmod(path.c_str(), 0700) != 0) {
+    throw std::runtime_error("failed to create test executable");
+  }
+}
+
+std::string read_iptables_test_file(const std::filesystem::path& path) {
+  std::ifstream input(path);
+  return {std::istreambuf_iterator<char>(input),
+          std::istreambuf_iterator<char>()};
+}
+
+void use_iptables_test_path(
+    IptablesTestEnvironment& guard,
+    const std::filesystem::path& directory) {
+  const char* current = std::getenv("PATH");
+  guard.set(directory.string() + ":" + (current == nullptr ? "" : current));
+}
+
+void write_meta_udp443_test_tools(
+    const std::filesystem::path& directory) {
+  const std::string inspector =
+      "#!/bin/sh\n"
+      "state=$(cat \"$KPBR_META_STATE\" 2>/dev/null)\n"
+      "[ \"$*\" = '-t filter -S' ] || exit 0\n"
+      "case \"$state\" in\n"
+      "  missing|'') exit 0 ;;\n"
+      "  unknown) echo 'bad argument' >&2; exit 2 ;;\n"
+      "  conditional)\n"
+      "    printf '%s\\n' '-N KeenPbrMeta443' "
+      "'-N KeenPbrMeta443_A' '-N KeenPbrMeta443_B' "
+      "'-A FORWARD -p tcp -j KeenPbrMeta443' "
+      "'-A KeenPbrMeta443 -j KeenPbrMeta443_A' ;;\n"
+      "  *)\n"
+      "    generation=A\n"
+      "    case \"$state\" in B*) generation=B ;; esac\n"
+      "    active=KeenPbrMeta443_$generation\n"
+      "    printf '%s\\n' '-N KeenPbrMeta443' "
+      "'-N KeenPbrMeta443_A' '-N KeenPbrMeta443_B'\n"
+      "    [ \"$state\" = A-reordered ] && "
+      "echo '-A FORWARD -j ACCEPT'\n"
+      "    echo '-A FORWARD -j KeenPbrMeta443'\n"
+      "    [ \"$state\" = A-duplicate ] && "
+      "echo '-A FORWARD -j KeenPbrMeta443'\n"
+      "    [ \"$state\" = direct-B ] && "
+      "echo '-A FORWARD -p udp -g KeenPbrMeta443_B'\n"
+      "    [ \"$state\" = direct-A ] && "
+      "echo '-A FORWARD -p udp -g KeenPbrMeta443_A'\n"
+      "    echo \"-A KeenPbrMeta443 -j $active\"\n"
+      "    if [ \"$state\" = wrong-rule ]; then\n"
+      "      echo \"-A $active -p tcp --dport 443 -j REJECT\"\n"
+      "    elif [ \"$state\" = B-keenetic-1.4.21 ]; then\n"
+      // Exact managed-rule serialization captured from Keenetic iptables
+      // v1.4.21 after publishing the messages-first B generation.
+      "      echo '-A KeenPbrMeta443_B -p udp -m mark --mark "
+      "0x30000/0xff0000 -m udp --dport 443 -m set --match-set "
+      "kpbr4S_meta_whatsapp_ip dst -j REJECT --reject-with "
+      "icmp-port-unreachable'\n"
+      "    else\n"
+      // Match the real iptables 1.4.x `-S` serialization: protocol options
+      // precede extension matches and the implicit UDP matcher is explicit.
+      "      echo \"-A $active -p udp -m mark --mark 0x70000/0xff0000 "
+      "-m udp --dport 443 -m set --match-set "
+      "kpbr4s_meta_whatsapp_ip dst -j REJECT --reject-with "
+      "icmp-port-unreachable\"\n"
+      "      [ \"$state\" = duplicate-rule ] && "
+      "echo \"-A $active -p udp -m mark --mark 0x70000/0xff0000 "
+      "-m udp --dport 443 -m set --match-set "
+      "kpbr4s_meta_whatsapp_ip dst -j REJECT --reject-with "
+      "icmp-port-unreachable\"\n"
+      "    fi ;;\n"
+      "esac\n"
+      "exit 0\n";
+  write_iptables_test_executable(directory / "iptables", inspector);
+  write_iptables_test_executable(directory / "ip6tables", inspector);
+
+  const std::string restore =
+      "#!/bin/sh\n"
+      "if [ \"$1\" = -w ] && [ \"$2\" = 0 ]; then exit 0; fi\n"
+      "cat > \"$KPBR_META_LAST_SCRIPT\"\n"
+      "{ echo '=== transaction ==='; "
+      "cat \"$KPBR_META_LAST_SCRIPT\"; } >> \"$KPBR_META_SCRIPTS\"\n"
+      "if [ \"$KPBR_META_FAIL_STAGE\" = 1 ] && "
+      "grep -q '^-F KeenPbrMeta443_B$' \"$KPBR_META_LAST_SCRIPT\"; then\n"
+      "  echo 'stage failed at line 3' >&2\n"
+      "  exit 2\n"
+      "fi\n"
+      "if [ \"$KPBR_META_FAIL_DISABLE\" = 1 ] && "
+      "grep -q '^-X KeenPbrMeta443_A$' \"$KPBR_META_LAST_SCRIPT\"; then\n"
+      "  echo 'disable failed at line 3' >&2\n"
+      "  exit 2\n"
+      "fi\n"
+      "if grep -q '^-X KeenPbrMeta443_A$' "
+      "\"$KPBR_META_LAST_SCRIPT\"; then\n"
+      "  echo missing > \"$KPBR_META_STATE\"\n"
+      "elif grep -q '^-A KeenPbrMeta443 -j KeenPbrMeta443_B$' "
+      "\"$KPBR_META_LAST_SCRIPT\"; then\n"
+      "  echo \"${KPBR_META_PUBLISH_STATE:-B}\" > \"$KPBR_META_STATE\"\n"
+      "elif grep -q '^-A KeenPbrMeta443 -j KeenPbrMeta443_A$' "
+      "\"$KPBR_META_LAST_SCRIPT\"; then\n"
+      "  echo \"${KPBR_META_PUBLISH_STATE:-A}\" > \"$KPBR_META_STATE\"\n"
+      "fi\n"
+      "exit 0\n";
+  write_iptables_test_executable(directory / "iptables-restore", restore);
+  write_iptables_test_executable(directory / "ip6tables-restore", restore);
+}
+
 } // namespace
+
+TEST_CASE("raw prerouting selection does not perform a racy constructor probe") {
+  // The Keenetic init script capability-gates raw PREROUTING before launching
+  // the daemon. Repeating `iptables -t raw -S` here used to turn a transient
+  // xtables lock during firmware startup into a fatal daemon startup failure.
+  // The real transactional restore remains the authoritative capability check
+  // and its failure is handled by the daemon's scheduled firewall retry.
+  IptablesFirewall firewall(/*use_raw_prerouting=*/true);
+  CHECK(firewall.uses_raw_prerouting());
+}
 
 // Friend class with test access to IptablesFirewall private methods.
 class IptablesBuilderTest {
 public:
+  using State = IptablesFirewall::LiveGenerationState;
+
   // Public mirror of PendingRule for use in test functions.
   struct RuleDesc {
     std::string set_name;
@@ -44,12 +231,83 @@ public:
 
   static std::string build_ipset_create_line(const std::string &name,
                                              const std::string &family_str,
-                                             uint32_t timeout) {
+                                             uint32_t timeout,
+                                             bool source_udp_peer = false) {
     IptablesFirewall::PendingSet ps;
     ps.name = name;
     ps.family_str = family_str;
     ps.timeout = timeout;
+    ps.source_udp_peer = source_udp_peer;
     return IptablesFirewall::build_ipset_create_line(ps);
+  }
+
+  static std::string build_forward_udp_reject_script(
+      bool ipv6,
+      uint32_t fwmark,
+      uint32_t fwmark_mask,
+      const std::string& set_name,
+      std::uint16_t destination_port) {
+    IptablesFirewall fw;
+    fw.set_fwmark_mask(fwmark_mask);
+    fw.create_ipset(set_name, ipv6 ? AF_INET6 : AF_INET);
+    fw.create_forward_udp_reject_rule(
+        fwmark, set_name, destination_port);
+    return IptablesFirewall::build_forward_udp_reject_script(
+        ipv6,
+        ipv6 ? "KeenPbrMeta443_B" : "KeenPbrMeta443_A",
+        fw.pending_forward_udp_rejects_);
+  }
+
+  static std::string build_exact_tcp_reset_rule_line(
+      const FirewallExactTcpResetRule& rule) {
+    return IptablesFirewall::build_exact_tcp_reset_rule_line(rule);
+  }
+
+  static std::string build_exact_tcp_reset_script(
+      bool chain_exists,
+      std::size_t hook_count,
+      const std::vector<FirewallExactTcpResetRule>& rules) {
+    return IptablesFirewall::build_exact_tcp_reset_script(
+        chain_exists, hook_count, rules);
+  }
+
+  static bool exact_tcp_reset_rules_match(
+      const std::string& rendered_rules,
+      const std::vector<FirewallExactTcpResetRule>& expected_rules) {
+    return IptablesFirewall::exact_tcp_reset_rules_match(
+        rendered_rules, expected_rules);
+  }
+
+  static bool is_dynamic_set_name(const std::string& name) {
+    return IptablesFirewall::is_dynamic_set_name(name);
+  }
+
+  static bool dynamic_set_schema_compatible(
+      const std::string& xml,
+      const std::string& name,
+      const std::string& family,
+      uint32_t timeout) {
+    IptablesFirewall::PendingSet expected;
+    expected.name = name;
+    expected.family_str = family;
+    expected.timeout = timeout;
+    return IptablesFirewall::dynamic_set_schema_compatible(xml, expected);
+  }
+
+  static bool classifier_rules_present(
+      const std::string& rules,
+      const std::string& set_name,
+      const std::vector<std::string>& expected_rules) {
+    return IptablesFirewall::classifier_rules_present(
+        rules, set_name, expected_rules);
+  }
+
+  static bool raw_conntrack_bypass_precedes_save(
+      const std::string& rules,
+      const std::string& set_name,
+      const std::string& expected_rule) {
+    return IptablesFirewall::raw_conntrack_bypass_precedes_save(
+        rules, set_name, expected_rule);
   }
 
   static std::string build_ipt_script(bool ipv6,
@@ -108,9 +366,14 @@ public:
                                                const std::string &dst_port,
                                                bool negate_src = false,
                                                bool negate_dst = false) {
-    return IptablesFirewall::build_proto_port_fragment(
+    const auto fragments = IptablesFirewall::build_proto_port_fragments(
         parse_test_proto(proto), PortSpec(src_port), PortSpec(dst_port),
         negate_src, negate_dst);
+    if (fragments.size() != 1) {
+      throw std::invalid_argument(
+          "Port specification requires multiple iptables rules");
+    }
+    return fragments.front();
   }
 
   static std::string build_output_mark_script(
@@ -126,9 +389,53 @@ public:
       const FirewallGlobalPrefilter &prefilter,
       bool dns_redirect = true,
       bool router_origin_snat = false,
-      const std::vector<std::string> &snat_interfaces = {}) {
+      const std::vector<std::string> &snat_interfaces = {},
+      bool ipv6 = false,
+      uint32_t fwmark_mask = 0xFFFFFFFFu,
+      const std::vector<FirewallSourceEgressSnatSelector>
+          &source_egress_snat_selectors = {},
+      const std::map<std::string, std::pair<int, uint32_t>>
+          &udp_peer_sets = {}) {
     return IptablesFirewall::build_dns_nat_script(
-        prefilter, dns_redirect, router_origin_snat, snat_interfaces);
+        prefilter,
+        dns_redirect,
+        router_origin_snat,
+        snat_interfaces,
+        ipv6,
+        fwmark_mask,
+        source_egress_snat_selectors,
+        udp_peer_sets);
+  }
+
+  static OwnedSnatState inspect_owned_snat_state(
+      bool expected = false,
+      const std::vector<std::string>& expected_interfaces = {},
+      uint32_t expected_fwmark_mask = 0xFFFFFFFFu,
+      const std::vector<FirewallSourceEgressSnatSelector>
+          &expected_source_egress_selectors = {}) {
+    return IptablesFirewall::inspect_owned_snat_state(
+        "iptables",
+        expected,
+        expected_interfaces,
+        expected_source_egress_selectors,
+        expected_fwmark_mask);
+  }
+
+  static OwnedSnatState combine_owned_snat_states(
+      OwnedSnatState ipv4,
+      OwnedSnatState ipv6) {
+    return IptablesFirewall::combine_owned_snat_states(ipv4, ipv6);
+  }
+
+  static OwnedSnatState inspect_owned_snat_families(
+      bool ipv4_expected,
+      bool ipv6_expected,
+      bool ipv6_managed) {
+    IptablesFirewall fw;
+    fw.last_applied_snat_v4_expected_ = ipv4_expected;
+    fw.last_applied_snat_v6_expected_ = ipv6_expected;
+    fw.last_applied_snat_v6_managed_ = ipv6_managed;
+    return fw.inspect_owned_snat_state();
   }
 
   static std::size_t tunnel_snat_interface_count(
@@ -136,6 +443,21 @@ public:
     IptablesFirewall fw;
     fw.create_tunnel_snat_rules(interfaces);
     return fw.snat_interfaces_.size();
+  }
+
+  static std::vector<FirewallSourceEgressSnatSelector>
+  source_egress_snat_selectors(
+      const std::vector<FirewallSourceEgressSnatSelector> &selectors) {
+    IptablesFirewall fw;
+    fw.create_source_egress_snat_rules(selectors);
+    return fw.source_egress_snat_selectors_;
+  }
+
+  static bool source_egress_snat_requested(
+      const std::vector<FirewallSourceEgressSnatSelector> &selectors) {
+    IptablesFirewall fw;
+    fw.create_source_egress_snat_rules(selectors);
+    return fw.router_origin_snat_requested_;
   }
 
   static std::string build_output_mark_script_with_snat(
@@ -146,6 +468,339 @@ public:
     fw.create_output_mark_rule(fwmark, criteria);
     return IptablesFirewall::build_ipt_script(false, fw.pending_rules_, {});
   }
+
+  static std::string build_generation_script(
+      bool replace_active,
+      const FirewallGlobalPrefilter &prefilter = {}) {
+    IptablesFirewall fw;
+    FirewallRuleCriteria output_criteria;
+    output_criteria.proto = L4Proto::Udp;
+    output_criteria.dst_port = "53";
+    fw.create_output_mark_rule(0x10000, output_criteria);
+    return IptablesFirewall::build_generation_ipt_script(
+        false, "KeenPbrTable_A", "KeenPbrOutput_A",
+        replace_active, fw.pending_rules_, prefilter);
+  }
+
+  static std::pair<std::string, std::string> build_raw_generation_scripts(
+      bool replace_active,
+      const FirewallGlobalPrefilter &prefilter = {}) {
+    IptablesFirewall fw;
+    FirewallRuleCriteria route_criteria;
+    route_criteria.dst_set_name = "kpbr4s_test";
+    fw.create_mark_rule(0x10000, route_criteria);
+    FirewallRuleCriteria output_criteria;
+    output_criteria.proto = L4Proto::Udp;
+    output_criteria.dst_port = "53";
+    fw.create_output_mark_rule(0x20000, output_criteria);
+    return {
+        IptablesFirewall::build_raw_prerouting_script(
+            "KeenPbrRaw_A", replace_active, fw.pending_rules_, prefilter),
+        IptablesFirewall::build_output_generation_script(
+            "KeenPbrOutput_A", replace_active, fw.pending_rules_, prefilter),
+    };
+  }
+
+  static std::string build_raw_conntrack_script(
+      bool replace_active,
+      const FirewallGlobalPrefilter& prefilter = {},
+      bool include_transient_udp_peer = false) {
+    IptablesFirewall fw;
+    if (include_transient_udp_peer) {
+      FirewallRuleCriteria criteria;
+      criteria.src_udp_peer_set_name = "kpbr4m_meta_whatsapp_ip";
+      criteria.proto = L4Proto::Udp;
+      criteria.persist_conntrack_mark = false;
+      fw.create_mark_rule(0x00070000U, criteria);
+    }
+    return IptablesFirewall::build_raw_conntrack_script(
+        replace_active, prefilter, fw.pending_rules_);
+  }
+
+  static std::pair<std::string, std::string> generation_set_names() {
+    IptablesFirewall fw;
+    fw.prepare_apply(FirewallApplyMode::Destructive);
+    const std::string first = fw.static_set_name("abcdefghijklmnopqrstuvwx", AF_INET);
+    fw.target_v4_generation_ = FirewallSetGeneration::B;
+    const std::string second = fw.static_set_name("abcdefghijklmnopqrstuvwx", AF_INET);
+    return {first, second};
+  }
+
+  static State parse_live_generation(
+      const std::string& rules,
+      const std::string& dispatcher,
+      const std::string& generation_a,
+      const std::string& generation_b) {
+    return IptablesFirewall::parse_live_generation(
+        rules, dispatcher, generation_a, generation_b);
+  }
+
+  static FirewallSetGeneration target_generation_for_states(
+      State primary,
+      State secondary) {
+    return IptablesFirewall::target_generation_for_states(primary, secondary);
+  }
+
+  static std::size_t count_exact_jump(
+      const std::string& rules,
+      const std::string& source,
+      const std::string& target) {
+    return IptablesFirewall::count_exact_jump(rules, source, target);
+  }
+
+  static void publish_dispatcher(
+      bool ipv6,
+      bool output,
+      FirewallSetGeneration generation) {
+    IptablesFirewall fw;
+    fw.publish_dispatcher(ipv6, output, generation);
+  }
+
+  static State inspect_dispatcher(
+      const char* command,
+      const char* table,
+      const std::string& dispatcher,
+      const std::string& generation_a,
+      const std::string& generation_b) {
+    IptablesFirewall fw;
+    return fw.inspect_dispatcher(
+        command, table, dispatcher, generation_a, generation_b);
+  }
+
+  static void reconcile_hook(
+      const char* command,
+      const char* table,
+      const char* builtin_chain,
+      const char* target_chain) {
+    IptablesFirewall::reconcile_hook(
+        command, table, builtin_chain, target_chain);
+  }
+
+  static void verify_applied_generation(
+      FirewallSetGeneration generation,
+      bool use_raw_prerouting = false) {
+    IptablesFirewall fw(use_raw_prerouting);
+    fw.verify_applied_generation(false, generation);
+  }
+
+  static State inspect_forward_reject_generation(bool ipv6 = false) {
+    IptablesFirewall fw;
+    return fw.inspect_forward_reject_generation(ipv6);
+  }
+
+  static FirewallSetGeneration
+  select_forward_reject_target_generation(bool ipv6 = false) {
+    IptablesFirewall fw;
+    return fw.select_forward_reject_target_generation(ipv6);
+  }
+
+  static void publish_forward_reject_dispatcher(
+      FirewallSetGeneration generation,
+      bool ipv6 = false) {
+    IptablesFirewall fw;
+    fw.publish_forward_reject_dispatcher(ipv6, generation);
+  }
+
+  static std::pair<bool, std::uint64_t>
+  observe_forward_reject_publication_boundary(
+      FirewallSetGeneration generation,
+      bool ipv6 = false) {
+    IptablesFirewall fw;
+    const auto before = fw.meta_udp443_publication_epoch();
+    bool failed = false;
+    try {
+      fw.publish_forward_reject_dispatcher(ipv6, generation);
+    } catch (const FirewallError&) {
+      failed = true;
+    }
+    return {
+        failed,
+        fw.meta_udp443_publication_epoch() - before};
+  }
+
+  static void stage_then_publish_forward_reject(
+      FirewallSetGeneration generation,
+      bool ipv6 = false) {
+    IptablesFirewall fw;
+    fw.set_fwmark_mask(0x00FF0000U);
+    fw.create_ipset(
+        ipv6 ? "kpbr6s_meta_whatsapp_ip" :
+               "kpbr4s_meta_whatsapp_ip",
+        ipv6 ? AF_INET6 : AF_INET);
+    fw.create_forward_udp_reject_rule(
+        0x00070000U,
+        ipv6 ? "kpbr6s_meta_whatsapp_ip" :
+               "kpbr4s_meta_whatsapp_ip",
+        443U);
+    fw.stage_forward_reject_generation(ipv6, generation);
+    fw.publish_forward_reject_dispatcher(ipv6, generation);
+  }
+
+  static void verify_forward_reject_generation(
+      FirewallSetGeneration generation,
+      bool ipv6 = false) {
+    IptablesFirewall fw;
+    fw.set_fwmark_mask(0x00FF0000U);
+    fw.create_ipset(
+        ipv6 ? "kpbr6s_meta_whatsapp_ip" :
+               "kpbr4s_meta_whatsapp_ip",
+        ipv6 ? AF_INET6 : AF_INET);
+    fw.create_forward_udp_reject_rule(
+        0x00070000U,
+        ipv6 ? "kpbr6s_meta_whatsapp_ip" :
+               "kpbr4s_meta_whatsapp_ip",
+        443U);
+    fw.verify_forward_reject_generation(ipv6, generation);
+  }
+
+  static OwnedForwardUdpRejectState inspect_forward_reject_state(
+      bool expected,
+      FirewallSetGeneration generation = FirewallSetGeneration::A) {
+    IptablesFirewall fw;
+    fw.set_ipv6_enabled(false);
+    fw.set_fwmark_mask(0x00FF0000U);
+    fw.last_applied_forward_reject_v4_expected_ = expected;
+    fw.last_applied_forward_reject_v4_generation_ = generation;
+    if (expected) {
+      fw.create_ipset("kpbr4s_meta_whatsapp_ip", AF_INET);
+      fw.create_forward_udp_reject_rule(
+          0x00070000U, "kpbr4s_meta_whatsapp_ip", 443U);
+      fw.last_applied_forward_udp_rejects_ =
+          fw.pending_forward_udp_rejects_;
+    }
+    return fw.inspect_forward_udp_reject_state();
+  }
+
+  static void disable_forward_reject_scaffold(bool ipv6 = false) {
+    IptablesFirewall fw;
+    fw.disable_forward_reject_scaffold(ipv6);
+  }
+
+  static bool cleanup_forward_reject_failure_is_loud() {
+    IptablesFirewall fw;
+    fw.forward_reject_v4_created_ = true;
+    try {
+      fw.cleanup_rules_impl();
+    } catch (const FirewallError&) {
+      return true;
+    }
+    return false;
+  }
+
+  static std::pair<bool, bool>
+  publish_verify_failure_then_cleanup() {
+    IptablesFirewall fw;
+    fw.set_ipv6_enabled(false);
+    fw.set_fwmark_mask(0x00FF0000U);
+    fw.create_ipset("kpbr4s_meta_whatsapp_ip", AF_INET);
+    fw.create_forward_udp_reject_rule(
+        0x00070000U, "kpbr4s_meta_whatsapp_ip", 443U);
+    try {
+      fw.publish_and_verify_forward_reject_generation(
+          /*ipv6=*/false, FirewallSetGeneration::A);
+    } catch (const FirewallError&) {
+      const bool owned_after_publish = fw.forward_reject_v4_created_;
+      fw.cleanup_rules_impl();
+      return {true, owned_after_publish};
+    }
+    return {false, fw.forward_reject_v4_created_};
+  }
+
+  static std::pair<OwnedForwardUdpRejectState,
+                   OwnedForwardUdpRejectState>
+  exercise_keenetic_meta_policy_lifecycle() {
+    IptablesFirewall fw;
+    fw.set_ipv6_enabled(false);
+    fw.set_fwmark_mask(0x00FF0000U);
+    fw.create_ipset("kpbr4S_meta_whatsapp_ip", AF_INET);
+    fw.create_forward_udp_reject_rule(
+        0x00030000U, "kpbr4S_meta_whatsapp_ip", 443U);
+
+    fw.stage_forward_reject_generation(
+        /*ipv6=*/false, FirewallSetGeneration::B);
+    fw.publish_and_verify_forward_reject_generation(
+        /*ipv6=*/false, FirewallSetGeneration::B);
+
+    // Mirror the ownership snapshot committed by apply() after verification.
+    fw.last_applied_forward_reject_v4_expected_ = true;
+    fw.last_applied_forward_reject_v4_generation_ =
+        FirewallSetGeneration::B;
+    fw.last_applied_forward_udp_rejects_ =
+        fw.pending_forward_udp_rejects_;
+    const auto enabled = fw.inspect_forward_udp_reject_state();
+
+    fw.disable_forward_reject_scaffold(/*ipv6=*/false);
+    fw.forward_reject_v4_created_ = false;
+    fw.last_applied_forward_reject_v4_expected_ = false;
+    fw.last_applied_forward_udp_rejects_.clear();
+    const auto balanced = fw.inspect_forward_udp_reject_state();
+    return {enabled, balanced};
+  }
+
+  static void apply_preserve_with_existing_nat_and_raw_hook_failure() {
+    IptablesFirewall fw(/*use_raw_prerouting=*/true);
+    fw.set_ipv6_enabled(false);
+    fw.apply_prepared_ = true;
+    fw.target_v4_generation_ = FirewallSetGeneration::B;
+    fw.dns_nat_v4_created_ = true;
+    fw.router_origin_snat_requested_ = true;
+    fw.snat_interfaces_ = {"nwg2"};
+    fw.apply(FirewallApplyMode::PreserveSets);
+  }
+
+  static std::string build_nat_validation_script(
+      const std::string& nat_script) {
+    return IptablesFirewall::build_nat_validation_script(nat_script);
+  }
+
+  static OwnedSnatState apply_preserve_nat_for_test() {
+    IptablesFirewall fw;
+    fw.set_ipv6_enabled(false);
+    fw.dns_nat_v4_created_ = true;
+    fw.dns_redirect_requested_ = true;
+    fw.router_origin_snat_requested_ = true;
+    fw.snat_interfaces_ = {"nwg2"};
+    fw.apply_nat_rules(
+        /*effective_ipv6=*/false,
+        FirewallApplyMode::PreserveSets);
+    return fw.inspect_owned_snat_state();
+  }
+
+  static void apply_preserve_ipv6_nat_for_test() {
+    IptablesFirewall fw;
+    fw.dns_redirect_requested_ = true;
+    fw.apply_nat_rules(
+        /*effective_ipv6=*/true,
+        FirewallApplyMode::PreserveSets);
+  }
+
+  static bool apply_preserve_nat_cleans_untracked_ipv6_for_test() {
+    IptablesFirewall fw;
+    fw.dns_redirect_requested_ = true;
+    fw.apply_nat_rules(
+        /*effective_ipv6=*/false,
+        FirewallApplyMode::PreserveSets);
+    return fw.dns_nat_v6_created_;
+  }
+
+  static void apply_preserve_without_nat_for_test() {
+    IptablesFirewall fw;
+    fw.apply_nat_rules(
+        /*effective_ipv6=*/false,
+        FirewallApplyMode::PreserveSets);
+  }
+
+  static std::pair<bool, bool>
+  cleanup_nat_failure_retains_ownership_for_test() {
+    IptablesFirewall fw;
+    fw.dns_nat_v4_created_ = true;
+    try {
+      fw.cleanup_nat_rules_impl();
+    } catch (const TransientFirewallError&) {
+      return {true, fw.dns_nat_v4_created_};
+    }
+    return {false, fw.dns_nat_v4_created_};
+  }
 };
 
 } // namespace keen_pbr3
@@ -153,6 +808,1686 @@ public:
 using namespace keen_pbr3;
 using T = IptablesBuilderTest;
 using Rule = IptablesBuilderTest::RuleDesc;
+
+TEST_CASE("exact TCP reset builder is tuple-scoped ACK-guarded and hook-first") {
+  const FirewallExactTcpResetRule first{
+      "192.168.1.44", "31.13.72.53", 49152U, 443U, 0x00070000U};
+  const FirewallExactTcpResetRule second{
+      "192.168.1.45", "157.240.241.60", 49153U, 443U, 0x00030000U};
+
+  CHECK(T::build_exact_tcp_reset_rule_line(first) ==
+        "-A KeenPbrTcpRst -s 192.168.1.44 -d 31.13.72.53 "
+        "-p tcp -m tcp --sport 49152 --dport 443 "
+        "-m mark --mark 0x70000/0xffffffff "
+        "--tcp-flags SYN,RST,ACK ACK "
+        "-j REJECT --reject-with tcp-reset\n");
+
+  const auto script = T::build_exact_tcp_reset_script(
+      /*chain_exists=*/true,
+      /*hook_count=*/2U,
+      {first, second});
+  CHECK(script.find("-F KeenPbrTcpRst\n") != std::string::npos);
+  CHECK(script.find(
+            "-A KeenPbrTcpRst -s 192.168.1.44 -d 31.13.72.53") !=
+        std::string::npos);
+  CHECK(script.find(
+            "-A KeenPbrTcpRst -s 192.168.1.45 -d 157.240.241.60") !=
+        std::string::npos);
+  CHECK(script.find(
+            "-D FORWARD -j KeenPbrTcpRst\n"
+            "-D FORWARD -j KeenPbrTcpRst\n"
+            "-I FORWARD 1 -j KeenPbrTcpRst\n") != std::string::npos);
+  CHECK(script.find("--ctstate") == std::string::npos);
+
+  CHECK(T::build_exact_tcp_reset_script(
+            /*chain_exists=*/true,
+            /*hook_count=*/1U,
+            {}) ==
+        "*filter\n"
+        "-F KeenPbrTcpRst\n"
+        "-D FORWARD -j KeenPbrTcpRst\n"
+        "-X KeenPbrTcpRst\n"
+        "COMMIT\n");
+
+  const std::string keenetic_rendered =
+      "-N KeenPbrTcpRst\n"
+      "-A FORWARD -j KeenPbrTcpRst\n"
+      "-A KeenPbrTcpRst -s 192.168.1.44/32 -d 31.13.72.53/32 "
+      "-p tcp -m tcp --sport 49152 --dport 443 "
+      "-m mark --mark 0x70000/0xffffffff "
+      "--tcp-flags 0x16 0x10 -j REJECT --reject-with tcp-reset\n"
+      "-A KeenPbrTcpRst -s 192.168.1.45/32 "
+      "-d 157.240.241.60/32 -p tcp -m tcp --sport 49153 "
+      "--dport 443 -m mark --mark 0x30000/0xffffffff "
+      "--tcp-flags SYN,RST,ACK ACK -j REJECT "
+      "--reject-with tcp-reset\n";
+  CHECK(T::exact_tcp_reset_rules_match(
+      keenetic_rendered, {first, second}));
+
+  auto keenetic_maskless = keenetic_rendered;
+  for (const std::string full_mask :
+       {"0x70000/0xffffffff", "0x30000/0xffffffff"}) {
+    const auto full_mask_at = keenetic_maskless.find(full_mask);
+    REQUIRE(full_mask_at != std::string::npos);
+    keenetic_maskless.erase(
+        full_mask_at + full_mask.find('/'),
+        std::string{"/0xffffffff"}.size());
+  }
+  CHECK(T::exact_tcp_reset_rules_match(
+      keenetic_maskless, {first, second}));
+
+  auto mixed_mark_rendering = keenetic_rendered;
+  const auto first_full_mask =
+      mixed_mark_rendering.find("0x70000/0xffffffff");
+  REQUIRE(first_full_mask != std::string::npos);
+  mixed_mark_rendering.erase(
+      first_full_mask + std::string{"0x70000"}.size(),
+      std::string{"/0xffffffff"}.size());
+  CHECK(T::exact_tcp_reset_rules_match(
+      mixed_mark_rendering, {first, second}));
+
+  auto wrong_mark = keenetic_rendered;
+  const auto mark = wrong_mark.find("0x70000/0xffffffff");
+  REQUIRE(mark != std::string::npos);
+  wrong_mark.replace(mark, std::string{"0x70000"}.size(), "0x60000");
+  CHECK_FALSE(T::exact_tcp_reset_rules_match(
+      wrong_mark, {first, second}));
+
+  auto partial_mask = keenetic_rendered;
+  const auto full_mask = partial_mask.find("0x70000/0xffffffff");
+  REQUIRE(full_mask != std::string::npos);
+  partial_mask.replace(
+      full_mask, std::string{"0x70000/0xffffffff"}.size(),
+      "0x70000/0xff0000");
+  CHECK_FALSE(T::exact_tcp_reset_rules_match(
+      partial_mask, {first, second}));
+
+  auto broadened = keenetic_rendered;
+  const auto destination = broadened.find("-d 31.13.72.53/32 ");
+  REQUIRE(destination != std::string::npos);
+  broadened.erase(
+      destination, std::string{"-d 31.13.72.53/32 "}.size());
+  CHECK_FALSE(T::exact_tcp_reset_rules_match(
+      broadened, {first, second}));
+}
+
+TEST_CASE("Meta UDP 443 iptables rule has exact narrow transport scope") {
+  const auto script = T::build_forward_udp_reject_script(
+      /*ipv6=*/false,
+      0x00070000U,
+      0x00FF0000U,
+      "kpbr4s_meta_whatsapp_ip",
+      443U);
+  CHECK(script.find(
+            "-m mark --mark 0x70000/0xff0000 -p udp --dport 443 "
+            "-m set --match-set kpbr4s_meta_whatsapp_ip dst -j REJECT") !=
+        std::string::npos);
+  CHECK(script.find("-p tcp") == std::string::npos);
+  CHECK(script.find("--dport 3478") == std::string::npos);
+  CHECK(script.find("--dport 5349") == std::string::npos);
+}
+
+TEST_CASE("Meta UDP 443 iptables publishes independent A B generations") {
+  IptablesTestTempDir temp;
+  write_meta_udp443_test_tools(temp.path());
+  const auto state = temp.path() / "state";
+  const auto scripts = temp.path() / "scripts";
+  const auto last_script = temp.path() / "last-script";
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment state_env("KPBR_META_STATE");
+  IptablesTestEnvironment scripts_env("KPBR_META_SCRIPTS");
+  IptablesTestEnvironment last_env("KPBR_META_LAST_SCRIPT");
+  IptablesTestEnvironment fail_stage("KPBR_META_FAIL_STAGE");
+  IptablesTestEnvironment fail_disable("KPBR_META_FAIL_DISABLE");
+  use_iptables_test_path(path, temp.path());
+  state_env.set(state.string());
+  scripts_env.set(scripts.string());
+  last_env.set(last_script.string());
+  fail_stage.set("0");
+  fail_disable.set("0");
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+  testing::reset_restore_wait_option_probe_for_test();
+
+  {
+    std::ofstream out(state);
+    out << "missing";
+  }
+  CHECK(T::select_forward_reject_target_generation() ==
+        FirewallSetGeneration::A);
+  CHECK_NOTHROW(T::publish_forward_reject_dispatcher(
+      FirewallSetGeneration::A));
+  CHECK_NOTHROW(T::verify_forward_reject_generation(
+      FirewallSetGeneration::A));
+  CHECK(T::inspect_forward_reject_state(
+            /*expected=*/true,
+            FirewallSetGeneration::A) ==
+        OwnedForwardUdpRejectState::healthy);
+  auto transactions = read_iptables_test_file(scripts);
+  CHECK(transactions.find("-I FORWARD 1 -j KeenPbrMeta443") !=
+        std::string::npos);
+
+  CHECK(T::select_forward_reject_target_generation() ==
+        FirewallSetGeneration::B);
+  CHECK_NOTHROW(T::publish_forward_reject_dispatcher(
+      FirewallSetGeneration::B));
+  CHECK_NOTHROW(T::verify_forward_reject_generation(
+      FirewallSetGeneration::B));
+  CHECK(T::inspect_forward_reject_state(
+            /*expected=*/true,
+            FirewallSetGeneration::B) ==
+        OwnedForwardUdpRejectState::healthy);
+  transactions = read_iptables_test_file(scripts);
+  CHECK(transactions.find(
+            "-A KeenPbrMeta443 -j KeenPbrMeta443_B") !=
+        std::string::npos);
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE(
+    "Meta UDP 443 publication epoch changes only at the restore boundary") {
+  IptablesTestTempDir temp;
+  write_meta_udp443_test_tools(temp.path());
+  const auto state = temp.path() / "state";
+  const auto scripts = temp.path() / "scripts";
+  const auto last_script = temp.path() / "last-script";
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment state_env("KPBR_META_STATE");
+  IptablesTestEnvironment scripts_env("KPBR_META_SCRIPTS");
+  IptablesTestEnvironment last_env("KPBR_META_LAST_SCRIPT");
+  IptablesTestEnvironment fail_stage("KPBR_META_FAIL_STAGE");
+  IptablesTestEnvironment fail_disable("KPBR_META_FAIL_DISABLE");
+  use_iptables_test_path(path, temp.path());
+  state_env.set(state.string());
+  scripts_env.set(scripts.string());
+  last_env.set(last_script.string());
+  fail_stage.set("0");
+  fail_disable.set("0");
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+  testing::reset_restore_wait_option_probe_for_test();
+
+  {
+    std::ofstream out(state);
+    // The unexpected foreign reference is rejected by read-only preflight.
+    out << "conditional";
+  }
+  const auto [preflight_failed, preflight_epoch_delta] =
+      T::observe_forward_reject_publication_boundary(
+          FirewallSetGeneration::B);
+  CHECK(preflight_failed);
+  CHECK(preflight_epoch_delta == 0U);
+
+  {
+    std::ofstream out(state);
+    out << "missing";
+  }
+  const auto [publication_failed, publication_epoch_delta] =
+      T::observe_forward_reject_publication_boundary(
+          FirewallSetGeneration::A);
+  CHECK_FALSE(publication_failed);
+  CHECK(publication_epoch_delta == 1U);
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE(
+    "Meta UDP 443 accepts Keenetic 1.4.21 save form and removes balanced policy") {
+  IptablesTestTempDir temp;
+  write_meta_udp443_test_tools(temp.path());
+  const auto state = temp.path() / "state";
+  const auto scripts = temp.path() / "scripts";
+  const auto last_script = temp.path() / "last-script";
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment state_env("KPBR_META_STATE");
+  IptablesTestEnvironment scripts_env("KPBR_META_SCRIPTS");
+  IptablesTestEnvironment last_env("KPBR_META_LAST_SCRIPT");
+  IptablesTestEnvironment publish_state("KPBR_META_PUBLISH_STATE");
+  IptablesTestEnvironment fail_stage("KPBR_META_FAIL_STAGE");
+  IptablesTestEnvironment fail_disable("KPBR_META_FAIL_DISABLE");
+  use_iptables_test_path(path, temp.path());
+  state_env.set(state.string());
+  scripts_env.set(scripts.string());
+  last_env.set(last_script.string());
+  publish_state.set("B-keenetic-1.4.21");
+  fail_stage.set("0");
+  fail_disable.set("0");
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+  {
+    std::ofstream out(state);
+    // The live failure switched from the previously active A slot to B.
+    out << "A";
+  }
+  testing::reset_restore_wait_option_probe_for_test();
+
+  const auto [enabled, balanced] =
+      T::exercise_keenetic_meta_policy_lifecycle();
+  CHECK(enabled == OwnedForwardUdpRejectState::healthy);
+  CHECK(balanced == OwnedForwardUdpRejectState::healthy);
+  CHECK(read_iptables_test_file(state).find("missing") !=
+        std::string::npos);
+
+  const auto transactions = read_iptables_test_file(scripts);
+  CHECK(transactions.find(
+            "-A KeenPbrMeta443_B -m mark --mark 0x30000/0xff0000 "
+            "-p udp --dport 443 -m set --match-set "
+            "kpbr4S_meta_whatsapp_ip dst -j REJECT") !=
+        std::string::npos);
+  CHECK(transactions.find("-I FORWARD 1 -j KeenPbrMeta443") !=
+        std::string::npos);
+  CHECK(transactions.find("-D FORWARD -j KeenPbrMeta443") !=
+        std::string::npos);
+  CHECK(transactions.find("-X KeenPbrMeta443_B") !=
+        std::string::npos);
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("Meta UDP 443 iptables publication repairs exact hook order") {
+  IptablesTestTempDir temp;
+  write_meta_udp443_test_tools(temp.path());
+  const auto state = temp.path() / "state";
+  const auto scripts = temp.path() / "scripts";
+  const auto last_script = temp.path() / "last-script";
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment state_env("KPBR_META_STATE");
+  IptablesTestEnvironment scripts_env("KPBR_META_SCRIPTS");
+  IptablesTestEnvironment last_env("KPBR_META_LAST_SCRIPT");
+  IptablesTestEnvironment fail_stage("KPBR_META_FAIL_STAGE");
+  IptablesTestEnvironment fail_disable("KPBR_META_FAIL_DISABLE");
+  use_iptables_test_path(path, temp.path());
+  state_env.set(state.string());
+  scripts_env.set(scripts.string());
+  last_env.set(last_script.string());
+  fail_stage.set("0");
+  fail_disable.set("0");
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+  testing::reset_restore_wait_option_probe_for_test();
+
+  for (const auto* drift : {"A-duplicate", "A-reordered"}) {
+    {
+      std::ofstream out(state);
+      out << drift;
+    }
+    CHECK_NOTHROW(T::publish_forward_reject_dispatcher(
+        FirewallSetGeneration::B));
+    CHECK_NOTHROW(T::verify_forward_reject_generation(
+        FirewallSetGeneration::B));
+  }
+  const auto transactions = read_iptables_test_file(scripts);
+  CHECK(transactions.find(
+            "-D FORWARD -j KeenPbrMeta443\n"
+            "-D FORWARD -j KeenPbrMeta443\n") !=
+        std::string::npos);
+  CHECK(transactions.find("-I FORWARD 1 -j KeenPbrMeta443") !=
+        std::string::npos);
+
+  {
+    std::ofstream out(state);
+    out << "conditional";
+  }
+  const auto before = read_iptables_test_file(scripts);
+  CHECK_THROWS_AS(
+      T::publish_forward_reject_dispatcher(FirewallSetGeneration::B),
+      TransientFirewallError);
+  CHECK(read_iptables_test_file(scripts) == before);
+
+  {
+    std::ofstream out(state);
+    out << "direct-A";
+  }
+  CHECK_THROWS_AS(
+      T::publish_forward_reject_dispatcher(FirewallSetGeneration::B),
+      TransientFirewallError);
+  CHECK(read_iptables_test_file(scripts) == before);
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("Meta UDP 443 failed staging preserves the active generation") {
+  IptablesTestTempDir temp;
+  write_meta_udp443_test_tools(temp.path());
+  const auto state = temp.path() / "state";
+  const auto scripts = temp.path() / "scripts";
+  const auto last_script = temp.path() / "last-script";
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment state_env("KPBR_META_STATE");
+  IptablesTestEnvironment scripts_env("KPBR_META_SCRIPTS");
+  IptablesTestEnvironment last_env("KPBR_META_LAST_SCRIPT");
+  IptablesTestEnvironment fail_stage("KPBR_META_FAIL_STAGE");
+  IptablesTestEnvironment fail_disable("KPBR_META_FAIL_DISABLE");
+  use_iptables_test_path(path, temp.path());
+  state_env.set(state.string());
+  scripts_env.set(scripts.string());
+  last_env.set(last_script.string());
+  fail_stage.set("1");
+  fail_disable.set("0");
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+  {
+    std::ofstream out(state);
+    out << "A";
+  }
+  testing::reset_restore_wait_option_probe_for_test();
+
+  CHECK_THROWS_AS(
+      T::stage_then_publish_forward_reject(FirewallSetGeneration::B),
+      FirewallError);
+  CHECK(read_iptables_test_file(state).find('A') != std::string::npos);
+  CHECK(read_iptables_test_file(scripts).find(
+            "-A KeenPbrMeta443 -j KeenPbrMeta443_B") ==
+        std::string::npos);
+
+  fail_stage.set("0");
+  {
+    std::ofstream out(state);
+    out << "direct-B";
+  }
+  const auto before_direct_reference =
+      read_iptables_test_file(scripts);
+  CHECK_THROWS_AS(
+      T::stage_then_publish_forward_reject(FirewallSetGeneration::B),
+      TransientFirewallError);
+  CHECK(read_iptables_test_file(scripts) == before_direct_reference);
+  CHECK(read_iptables_test_file(state).find("direct-B") !=
+        std::string::npos);
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("Meta UDP 443 balanced disable is atomic and cleanup fails loudly") {
+  IptablesTestTempDir temp;
+  write_meta_udp443_test_tools(temp.path());
+  const auto state = temp.path() / "state";
+  const auto scripts = temp.path() / "scripts";
+  const auto last_script = temp.path() / "last-script";
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment state_env("KPBR_META_STATE");
+  IptablesTestEnvironment scripts_env("KPBR_META_SCRIPTS");
+  IptablesTestEnvironment last_env("KPBR_META_LAST_SCRIPT");
+  IptablesTestEnvironment fail_stage("KPBR_META_FAIL_STAGE");
+  IptablesTestEnvironment fail_disable("KPBR_META_FAIL_DISABLE");
+  use_iptables_test_path(path, temp.path());
+  state_env.set(state.string());
+  scripts_env.set(scripts.string());
+  last_env.set(last_script.string());
+  fail_stage.set("0");
+  fail_disable.set("0");
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+  testing::reset_restore_wait_option_probe_for_test();
+
+  {
+    std::ofstream out(state);
+    out << "A-duplicate";
+  }
+  CHECK_NOTHROW(T::disable_forward_reject_scaffold());
+  CHECK(T::inspect_forward_reject_state(/*expected=*/false) ==
+        OwnedForwardUdpRejectState::healthy);
+  const auto disabled_transactions = read_iptables_test_file(scripts);
+  CHECK(disabled_transactions.find(
+            "-D FORWARD -j KeenPbrMeta443\n"
+            "-D FORWARD -j KeenPbrMeta443\n") !=
+        std::string::npos);
+  CHECK(disabled_transactions.find("-X KeenPbrMeta443_A") !=
+        std::string::npos);
+  const auto before_already_balanced =
+      read_iptables_test_file(scripts);
+  CHECK_NOTHROW(T::disable_forward_reject_scaffold());
+  CHECK(read_iptables_test_file(scripts) == before_already_balanced);
+
+  {
+    std::ofstream out(state);
+    out << "A";
+  }
+  fail_disable.set("1");
+  CHECK(T::cleanup_forward_reject_failure_is_loud());
+  CHECK(read_iptables_test_file(state).find('A') != std::string::npos);
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("Meta UDP 443 iptables inspector distinguishes drift and errors") {
+  IptablesTestTempDir temp;
+  write_meta_udp443_test_tools(temp.path());
+  const auto state = temp.path() / "state";
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment state_env("KPBR_META_STATE");
+  use_iptables_test_path(path, temp.path());
+  state_env.set(state.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  const auto set_state = [&state](const char* value) {
+    std::ofstream out(state);
+    out << value;
+  };
+  set_state("missing");
+  CHECK(T::inspect_forward_reject_state(/*expected=*/true) ==
+        OwnedForwardUdpRejectState::missing);
+  CHECK(T::inspect_forward_reject_state(/*expected=*/false) ==
+        OwnedForwardUdpRejectState::healthy);
+  set_state("A-reordered");
+  CHECK(T::inspect_forward_reject_state(/*expected=*/true) ==
+        OwnedForwardUdpRejectState::stale);
+  set_state("direct-A");
+  CHECK(T::inspect_forward_reject_state(/*expected=*/true) ==
+        OwnedForwardUdpRejectState::stale);
+  set_state("wrong-rule");
+  CHECK(T::inspect_forward_reject_state(/*expected=*/true) ==
+        OwnedForwardUdpRejectState::stale);
+  set_state("duplicate-rule");
+  CHECK(T::inspect_forward_reject_state(/*expected=*/true) ==
+        OwnedForwardUdpRejectState::stale);
+  set_state("A");
+  CHECK(T::inspect_forward_reject_state(/*expected=*/false) ==
+        OwnedForwardUdpRejectState::stale);
+  set_state("unknown");
+  CHECK(T::inspect_forward_reject_state(/*expected=*/true) ==
+        OwnedForwardUdpRejectState::unknown);
+}
+
+TEST_CASE(
+    "Meta UDP 443 published ownership survives verification failure for cleanup") {
+  IptablesTestTempDir temp;
+  write_meta_udp443_test_tools(temp.path());
+  const auto state = temp.path() / "state";
+  const auto scripts = temp.path() / "scripts";
+  const auto last_script = temp.path() / "last-script";
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment state_env("KPBR_META_STATE");
+  IptablesTestEnvironment scripts_env("KPBR_META_SCRIPTS");
+  IptablesTestEnvironment last_env("KPBR_META_LAST_SCRIPT");
+  IptablesTestEnvironment publish_state("KPBR_META_PUBLISH_STATE");
+  IptablesTestEnvironment fail_stage("KPBR_META_FAIL_STAGE");
+  IptablesTestEnvironment fail_disable("KPBR_META_FAIL_DISABLE");
+  use_iptables_test_path(path, temp.path());
+  state_env.set(state.string());
+  scripts_env.set(scripts.string());
+  last_env.set(last_script.string());
+  publish_state.set("wrong-rule");
+  fail_stage.set("0");
+  fail_disable.set("0");
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+  {
+    std::ofstream out(state);
+    out << "missing";
+  }
+  testing::reset_restore_wait_option_probe_for_test();
+
+  const auto [verification_failed, owned_after_publish] =
+      T::publish_verify_failure_then_cleanup();
+  CHECK(verification_failed);
+  CHECK(owned_after_publish);
+  CHECK(read_iptables_test_file(state).find("missing") !=
+        std::string::npos);
+  CHECK(read_iptables_test_file(scripts).find(
+            "-X KeenPbrMeta443_A") != std::string::npos);
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("preserve apply keeps existing NAT when raw companion hook fails") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "iptables-calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "printf '%s\\n' \"$*\" >> \"$KPBR_IPTABLES_CALLS\"\n"
+      "case \"$*\" in\n"
+      "  '-t raw -S')\n"
+      "    printf '%s\\n' '-N KeenPbrRaw' '-A KeenPbrRaw -j KeenPbrRaw_A'\n"
+      "    ;;\n"
+      "  '-t mangle -S')\n"
+      "    printf '%s\\n' '-N KeenPbrOutput' "
+      "'-A KeenPbrOutput -j KeenPbrOutput_A'\n"
+      "    ;;\n"
+      "  '-t raw -S PREROUTING')\n"
+      "    printf '%s\\n' '-A PREROUTING -j KeenPbrRaw'\n"
+      "    ;;\n"
+      "  '-t mangle -S OUTPUT')\n"
+      "    printf '%s\\n' '-A OUTPUT -j KeenPbrOutput'\n"
+      "    ;;\n"
+      "  '-t mangle -S PREROUTING')\n"
+      "    echo 'invalid argument' >&2\n"
+      "    exit 2\n"
+      "    ;;\n"
+      "esac\n"
+      "exit 0\n");
+  write_iptables_test_executable(
+      temp.path() / "iptables-restore",
+      "#!/bin/sh\n"
+      "if [ \"$1\" = -w ] && [ \"$2\" = 0 ]; then exit 0; fi\n"
+      "/bin/cat >/dev/null\n"
+      "exit 0\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_IPTABLES_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK_THROWS_AS(
+      T::apply_preserve_with_existing_nat_and_raw_hook_failure(),
+      FirewallError);
+  const std::string command_log = read_iptables_test_file(calls);
+  CHECK(command_log.find("-t mangle -S PREROUTING") != std::string::npos);
+  CHECK(command_log.find("-t nat ") == std::string::npos);
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("NAT legacy preflight uses deterministic unhooked validation chains") {
+  const std::string active = T::build_dns_nat_script(
+      {}, /*dns_redirect=*/true, /*router_origin_snat=*/true, {"nwg2"});
+  const std::string validation = T::build_nat_validation_script(active);
+
+  CHECK(validation.find(":KeenPbrDnsValidate - [0:0]\n") !=
+        std::string::npos);
+  CHECK(validation.find(":KeenPbrSnatValidate - [0:0]\n") !=
+        std::string::npos);
+  CHECK(validation.find(
+            "-A KeenPbrDnsValidate -p udp --dport 53 "
+            "-j REDIRECT --to-ports 53\n") != std::string::npos);
+  CHECK(validation.find(
+            "-A KeenPbrSnatValidate -o nwg2 -m mark ! "
+            "--mark 0x0/0xffffffff -j MASQUERADE\n") !=
+        std::string::npos);
+  CHECK(validation.find("-F KeenPbrDnsValidate\n") != std::string::npos);
+  CHECK(validation.find("-F KeenPbrSnatValidate\n") != std::string::npos);
+  CHECK(validation.find("-A PREROUTING -j") == std::string::npos);
+  CHECK(validation.find("-A POSTROUTING -j") == std::string::npos);
+  CHECK(validation.find("KeenPbrDnsRdr") == std::string::npos);
+  CHECK(validation.find("KeenPbrSnat\n") == std::string::npos);
+}
+
+TEST_CASE("failed exact NAT preflight does not clean up active NAT") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "iptables-calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "printf '%s\\n' \"$*\" >> \"$KPBR_IPTABLES_CALLS\"\n"
+      "exit 0\n");
+  write_iptables_test_executable(
+      temp.path() / "iptables-restore",
+      "#!/bin/sh\n"
+      "[ \"$1\" = --test ] && [ \"$#\" -eq 1 ] && exit 0\n"
+      "[ \"$1\" = -w ] && [ \"$2\" = 0 ] && exit 0\n"
+      "/bin/cat >/dev/null\n"
+      "echo 'iptables-restore: line 4 failed' >&2\n"
+      "exit 1\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_IPTABLES_CALLS");
+  path.set(temp.path().string());
+  calls_env.set(calls.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK_THROWS_AS(T::apply_preserve_nat_for_test(), FirewallError);
+  CHECK(read_iptables_test_file(calls).empty());
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("failed NAT commit keeps previously hooked active NAT") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "iptables-calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "printf '%s\\n' \"$*\" >> \"$KPBR_IPTABLES_CALLS\"\n"
+      "exit 0\n");
+  write_iptables_test_executable(
+      temp.path() / "iptables-restore",
+      "#!/bin/sh\n"
+      "[ \"$1\" = --test ] && [ \"$#\" -eq 1 ] && exit 0\n"
+      "[ \"$1\" = -w ] && [ \"$2\" = 0 ] && exit 0\n"
+      "/bin/cat >/dev/null\n"
+      "case \" $* \" in\n"
+      "  *' --test '*) exit 0 ;;\n"
+      "esac\n"
+      "echo 'iptables-restore: line 4 failed' >&2\n"
+      "exit 1\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_IPTABLES_CALLS");
+  path.set(temp.path().string());
+  calls_env.set(calls.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK_THROWS_AS(T::apply_preserve_nat_for_test(), FirewallError);
+  // The new restore transaction failed before hook reconciliation. No
+  // iptables -D/-F/-X cleanup touched the previously working NAT chains.
+  CHECK(read_iptables_test_file(calls).empty());
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("failed legacy NAT preflight only cleans validation chains") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "iptables-calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "printf '%s\\n' \"$*\" >> \"$KPBR_IPTABLES_CALLS\"\n"
+      "exit 0\n");
+  write_iptables_test_executable(
+      temp.path() / "iptables-restore",
+      "#!/bin/sh\n"
+      "[ \"$1\" = --test ] && "
+      "{ echo \"unrecognized option '--test'\" >&2; exit 1; }\n"
+      "[ \"$1\" = -w ] && exit 1\n"
+      "/bin/cat >/dev/null\n"
+      "echo 'iptables-restore: line 4 failed' >&2\n"
+      "exit 1\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_IPTABLES_CALLS");
+  path.set(temp.path().string());
+  calls_env.set(calls.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK_THROWS_AS(T::apply_preserve_nat_for_test(), FirewallError);
+  const std::string command_log = read_iptables_test_file(calls);
+  CHECK(command_log.find("KeenPbrDnsValidate") != std::string::npos);
+  CHECK(command_log.find("KeenPbrSnatValidate") != std::string::npos);
+  CHECK(command_log.find("KeenPbrDnsRdr") == std::string::npos);
+  CHECK(command_log.find("-F KeenPbrSnat\n") == std::string::npos);
+  CHECK(command_log.find("-X KeenPbrSnat\n") == std::string::npos);
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("transient IPv6 nat inspection is not downgraded to unsupported") {
+  IptablesTestTempDir temp;
+  write_iptables_test_executable(
+      temp.path() / "ip6tables",
+      "#!/bin/sh\n"
+      "echo 'xtables lock is temporarily unavailable' >&2\n"
+      "exit 4\n");
+  IptablesTestEnvironment path("PATH");
+  use_iptables_test_path(path, temp.path());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  CHECK_THROWS_AS(
+      T::apply_preserve_ipv6_nat_for_test(),
+      TransientFirewallError);
+}
+
+TEST_CASE("partial IPv6 NAT hook reconciliation is surfaced") {
+  IptablesTestTempDir temp;
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "case \"$*\" in\n"
+      "  '-t nat -S PREROUTING')\n"
+      "    echo '-A PREROUTING -j KeenPbrDnsRdr'\n"
+      "    ;;\n"
+      "  '-t nat -S KeenPbrSnat')\n"
+      "    echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "    exit 1\n"
+      "    ;;\n"
+      "esac\n"
+      "exit 0\n");
+  write_iptables_test_executable(
+      temp.path() / "ip6tables",
+      "#!/bin/sh\n"
+      "# The table exists, but the PREROUTING hook never becomes visible\n"
+      "# after a nominally successful mutation.\n"
+      "exit 0\n");
+  for (const auto* name : {"iptables-restore", "ip6tables-restore"}) {
+    write_iptables_test_executable(
+        temp.path() / name,
+        "#!/bin/sh\n"
+        "/bin/cat >/dev/null\n"
+        "exit 0\n");
+  }
+  IptablesTestEnvironment path("PATH");
+  use_iptables_test_path(path, temp.path());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK_THROWS_AS(
+      T::apply_preserve_ipv6_nat_for_test(),
+      TransientFirewallError);
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("fresh daemon removes retained IPv6 NAT when disabled") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "ip6tables-calls";
+  const auto removed = temp.path() / "ipv6-dns-hook-removed";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "case \"$*\" in\n"
+      "  '-t nat -S PREROUTING')\n"
+      "    echo '-A PREROUTING -j KeenPbrDnsRdr'\n"
+      "    ;;\n"
+      "  '-t nat -S KeenPbrSnat')\n"
+      "    echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "    exit 1\n"
+      "    ;;\n"
+      "esac\n"
+      "exit 0\n");
+  write_iptables_test_executable(
+      temp.path() / "ip6tables",
+      "#!/bin/sh\n"
+      "printf '%s\\n' \"$*\" >> \"$KPBR_IP6TABLES_CALLS\"\n"
+      "case \"$*\" in\n"
+      "  '-t nat -S PREROUTING')\n"
+      "    [ -f \"$KPBR_IP6_HOOK_REMOVED\" ] || "
+      "echo '-A PREROUTING -j KeenPbrDnsRdr'\n"
+      "    ;;\n"
+      "  '-t nat -D PREROUTING -j KeenPbrDnsRdr')\n"
+      "    : > \"$KPBR_IP6_HOOK_REMOVED\"\n"
+      "    ;;\n"
+      "  '-t nat -S POSTROUTING')\n"
+      "    ;;\n"
+      "  '-t nat -S KeenPbrDnsRdr'|'-t nat -S KeenPbrSnat')\n"
+      "    echo 'ip6tables: No chain/target/match by that name.' >&2\n"
+      "    exit 1\n"
+      "    ;;\n"
+      "esac\n"
+      "exit 0\n");
+  write_iptables_test_executable(
+      temp.path() / "iptables-restore",
+      "#!/bin/sh\n"
+      "/bin/cat >/dev/null\n"
+      "exit 0\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_IP6TABLES_CALLS");
+  IptablesTestEnvironment removed_env("KPBR_IP6_HOOK_REMOVED");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+  removed_env.set(removed.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK_FALSE(T::apply_preserve_nat_cleans_untracked_ipv6_for_test());
+  const std::string command_log = read_iptables_test_file(calls);
+  CHECK(command_log.find(
+            "-t nat -D PREROUTING -j KeenPbrDnsRdr") !=
+        std::string::npos);
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("failed live NAT removal retains ownership for retry") {
+  IptablesTestTempDir temp;
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "echo 'xtables lock is temporarily unavailable' >&2\n"
+      "exit 4\n");
+  IptablesTestEnvironment path("PATH");
+  use_iptables_test_path(path, temp.path());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  const auto [caught_transient, still_owned] =
+      T::cleanup_nat_failure_retains_ownership_for_test();
+  CHECK(caught_transient);
+  CHECK(still_owned);
+}
+
+TEST_CASE("fresh daemon removes untracked IPv4 and IPv6 NAT when disabled") {
+  IptablesTestTempDir temp;
+  const auto v4_calls = temp.path() / "v4-calls";
+  const auto v6_calls = temp.path() / "v6-calls";
+  const auto v4_removed = temp.path() / "v4-removed";
+  const auto v6_removed = temp.path() / "v6-removed";
+  const std::string script =
+      "#!/bin/sh\n"
+      "case \"$0\" in\n"
+      "  *ip6tables) calls=\"$KPBR_V6_CALLS\"; "
+      "removed=\"$KPBR_V6_REMOVED\" ;;\n"
+      "  *) calls=\"$KPBR_V4_CALLS\"; removed=\"$KPBR_V4_REMOVED\" ;;\n"
+      "esac\n"
+      "printf '%s\\n' \"$*\" >> \"$calls\"\n"
+      "case \"$*\" in\n"
+      "  '-t nat -S PREROUTING')\n"
+      "    [ -f \"$removed\" ] || "
+      "echo '-A PREROUTING -j KeenPbrDnsRdr'\n"
+      "    ;;\n"
+      "  '-t nat -D PREROUTING -j KeenPbrDnsRdr')\n"
+      "    : > \"$removed\"\n"
+      "    ;;\n"
+      "  '-t nat -S POSTROUTING')\n"
+      "    ;;\n"
+      "  '-t nat -S KeenPbrDnsRdr'|'-t nat -S KeenPbrSnat')\n"
+      "    echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "    exit 1\n"
+      "    ;;\n"
+      "esac\n"
+      "exit 0\n";
+  write_iptables_test_executable(temp.path() / "iptables", script);
+  write_iptables_test_executable(temp.path() / "ip6tables", script);
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment v4_calls_env("KPBR_V4_CALLS");
+  IptablesTestEnvironment v6_calls_env("KPBR_V6_CALLS");
+  IptablesTestEnvironment v4_removed_env("KPBR_V4_REMOVED");
+  IptablesTestEnvironment v6_removed_env("KPBR_V6_REMOVED");
+  use_iptables_test_path(path, temp.path());
+  v4_calls_env.set(v4_calls.string());
+  v6_calls_env.set(v6_calls.string());
+  v4_removed_env.set(v4_removed.string());
+  v6_removed_env.set(v6_removed.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  CHECK_NOTHROW(T::apply_preserve_without_nat_for_test());
+  CHECK(read_iptables_test_file(v4_calls).find(
+            "-t nat -D PREROUTING -j KeenPbrDnsRdr") !=
+        std::string::npos);
+  CHECK(read_iptables_test_file(v6_calls).find(
+            "-t nat -D PREROUTING -j KeenPbrDnsRdr") !=
+        std::string::npos);
+}
+
+TEST_CASE("IPv4 NAT apply succeeds when ip6tables is absent") {
+  IptablesTestTempDir temp;
+  const auto restore_calls = temp.path() / "restore-calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "case \"$*\" in\n"
+      "  '-t nat -S PREROUTING')\n"
+      "    echo '-A PREROUTING -j KeenPbrDnsRdr'\n"
+      "    ;;\n"
+      "  '-t nat -S POSTROUTING')\n"
+      "    echo '-A POSTROUTING -j KeenPbrSnat'\n"
+      "    ;;\n"
+  "  '-t nat -S KeenPbrSnat')\n"
+      "    printf '%s\\n' "
+      "'-N KeenPbrSnat' "
+      "'-A KeenPbrSnat -m mark --mark "
+      "0x1000000/0x1000000 -j MASQUERADE' "
+      "'-A KeenPbrSnat -o nwg2 -m mark ! "
+      "--mark 0x0/0xffffffff -j MASQUERADE'\n"
+      "    ;;\n"
+      "esac\n"
+      "exit 0\n");
+  write_iptables_test_executable(
+      temp.path() / "iptables-restore",
+      "#!/bin/sh\n"
+      "printf x >> \"$KPBR_V4_RESTORE_CALLS\"\n"
+      "/bin/cat >/dev/null\n"
+      "exit 0\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_V4_RESTORE_CALLS");
+  // Deliberately exclude the host PATH so the execvp probe observes the same
+  // missing-ip6tables exit 127 as an IPv4-only Entware installation.
+  path.set(temp.path().string());
+  calls_env.set(restore_calls.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK(T::apply_preserve_nat_for_test() == OwnedSnatState::healthy);
+  CHECK_FALSE(read_iptables_test_file(restore_calls).empty());
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("preserve apply restores an externally removed SNAT chain and hook") {
+  IptablesTestTempDir temp;
+  const auto dns_hook = temp.path() / "dns-hook";
+  const auto snat_hook = temp.path() / "snat-hook";
+  const auto snat_chain = temp.path() / "snat-chain";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "case \"$*\" in\n"
+      "  '-t nat -S PREROUTING')\n"
+      "    [ -f \"$KPBR_DNS_HOOK\" ] && "
+      "echo '-A PREROUTING -j KeenPbrDnsRdr'\n"
+      "    ;;\n"
+      "  '-t nat -A PREROUTING -j KeenPbrDnsRdr')\n"
+      "    : > \"$KPBR_DNS_HOOK\"\n"
+      "    ;;\n"
+      "  '-t nat -S POSTROUTING')\n"
+      "    [ -f \"$KPBR_SNAT_HOOK\" ] && "
+      "echo '-A POSTROUTING -j KeenPbrSnat'\n"
+      "    ;;\n"
+      "  '-t nat -A POSTROUTING -j KeenPbrSnat')\n"
+      "    : > \"$KPBR_SNAT_HOOK\"\n"
+      "    ;;\n"
+      "  '-t nat -S KeenPbrSnat')\n"
+      "    if [ -f \"$KPBR_SNAT_CHAIN\" ]; then\n"
+      "      printf '%s\\n' "
+      "'-N KeenPbrSnat' "
+      "'-A KeenPbrSnat -m mark --mark "
+      "0x1000000/0x1000000 -j MASQUERADE' "
+      "'-A KeenPbrSnat -o nwg2 -m mark ! "
+      "--mark 0x0/0xffffffff -j MASQUERADE'\n"
+      "    else\n"
+      "      echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "      exit 1\n"
+      "    fi\n"
+      "    ;;\n"
+      "esac\n"
+      "exit 0\n");
+  write_iptables_test_executable(
+      temp.path() / "iptables-restore",
+      "#!/bin/sh\n"
+      "payload=\"$KPBR_SNAT_CHAIN.payload\"\n"
+      "/bin/cat > \"$payload\"\n"
+      "if /bin/grep -q '^:KeenPbrSnat ' \"$payload\"; then\n"
+      "  : > \"$KPBR_SNAT_CHAIN\"\n"
+      "fi\n"
+      "exit 0\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment dns_hook_env("KPBR_DNS_HOOK");
+  IptablesTestEnvironment snat_hook_env("KPBR_SNAT_HOOK");
+  IptablesTestEnvironment snat_chain_env("KPBR_SNAT_CHAIN");
+  path.set(temp.path().string());
+  dns_hook_env.set(dns_hook.string());
+  snat_hook_env.set(snat_hook.string());
+  snat_chain_env.set(snat_chain.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true,
+            /*expected_interfaces=*/{"nwg2"}) ==
+        OwnedSnatState::missing);
+  CHECK(T::apply_preserve_nat_for_test() == OwnedSnatState::healthy);
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true,
+            /*expected_interfaces=*/{"nwg2"}) ==
+        OwnedSnatState::healthy);
+  CHECK(std::filesystem::exists(snat_chain));
+  CHECK(std::filesystem::exists(snat_hook));
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("NAT cleanup succeeds when ip6tables is absent") {
+  IptablesTestTempDir temp;
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "case \"$*\" in\n"
+      "  '-t nat -S KeenPbrDnsRdr'|'-t nat -S KeenPbrSnat')\n"
+      "    echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "    exit 1\n"
+      "    ;;\n"
+      "esac\n"
+      "exit 0\n");
+  IptablesTestEnvironment path("PATH");
+  path.set(temp.path().string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  CHECK_NOTHROW(T::apply_preserve_without_nat_for_test());
+}
+
+TEST_CASE("transient restore test probe is not cached as unsupported") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables-restore",
+      "#!/bin/sh\n"
+      "printf x >> \"$KPBR_TEST_PROBE_CALLS\"\n"
+      "/bin/cat >/dev/null\n"
+      "echo 'xtables lock is temporarily unavailable' >&2\n"
+      "exit 4\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_TEST_PROBE_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK_THROWS_AS(
+      testing::restore_test_option_supported_for_test("iptables-restore"),
+      TransientFirewallError);
+  CHECK_THROWS_AS(
+      testing::restore_test_option_supported_for_test("iptables-restore"),
+      TransientFirewallError);
+  CHECK(read_iptables_test_file(calls) == "xx");
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("explicit unsupported restore test option is cached") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables-restore",
+      "#!/bin/sh\n"
+      "printf x >> \"$KPBR_TEST_PROBE_CALLS\"\n"
+      "/bin/cat >/dev/null\n"
+      "echo \"unrecognized option '--test'\" >&2\n"
+      "exit 2\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_TEST_PROBE_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK_FALSE(
+      testing::restore_test_option_supported_for_test("iptables-restore"));
+  CHECK_FALSE(
+      testing::restore_test_option_supported_for_test("iptables-restore"));
+  CHECK(read_iptables_test_file(calls) == "x");
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("xtables kernel matcher inventory requires an exact registration") {
+  IptablesTestTempDir temp;
+  const auto inventory = temp.path() / "ip_tables_matches";
+  const auto modprobe_calls = temp.path() / "modprobe-calls";
+  write_iptables_test_executable(
+      temp.path() / "modprobe",
+      "#!/bin/sh\n"
+      "printf x >> \"$KPBR_TEST_MODPROBE_CALLS\"\n"
+      "exit 0\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_TEST_MODPROBE_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(modprobe_calls.string());
+  {
+    std::ofstream output(inventory);
+    output << "mark\nphysdev_extra\nconntrack\n";
+  }
+
+  CHECK_FALSE(testing::xtables_match_registered_for_test(
+      inventory.string(), "physdev"));
+  CHECK_FALSE(testing::xtables_match_registered_for_test(
+      (temp.path() / "missing").string(), "physdev"));
+
+  FirewallGlobalPrefilter bridged_sstp;
+  bridged_sstp.bypass_bridge_source_selectors_v4 = {
+      {"br0", "sstp-br-link", "172.16.1.0/24"}};
+  CHECK_THROWS_WITH_AS(
+      testing::iptables_effective_prefilter_for_test(
+          bridged_sstp,
+          /*effective_ipv6=*/false,
+          inventory.string(),
+          (temp.path() / "ip6_tables_matches").string()),
+      "Cannot exclude clients of a bridged SSTP server: this firmware "
+      "kernel does not provide the iptables physdev matcher. The previous "
+      "firewall ruleset was kept unchanged.",
+      FirewallError);
+  CHECK_FALSE(std::filesystem::exists(modprobe_calls));
+
+  FirewallGlobalPrefilter direct_sstp;
+  direct_sstp.bypass_source_selectors_v4 = {
+      {"sstp0", "172.16.1.0/24"}};
+  CHECK_NOTHROW(testing::iptables_effective_prefilter_for_test(
+      direct_sstp,
+      /*effective_ipv6=*/false,
+      (temp.path() / "missing").string(),
+      (temp.path() / "ip6_tables_matches").string()));
+  CHECK_FALSE(std::filesystem::exists(modprobe_calls));
+
+  {
+    std::ofstream output(inventory, std::ios::app);
+    output << "physdev\n";
+  }
+  CHECK(testing::xtables_match_registered_for_test(
+      inventory.string(), "physdev"));
+  const auto effective =
+      testing::iptables_effective_prefilter_for_test(
+          bridged_sstp,
+          /*effective_ipv6=*/false,
+          inventory.string(),
+          (temp.path() / "ip6_tables_matches").string());
+  REQUIRE(effective.bypass_bridge_source_selectors_v4.size() == 1U);
+  CHECK(
+      effective.bypass_bridge_source_selectors_v4.front().interface ==
+      "br0");
+  CHECK(
+      effective.bypass_bridge_source_selectors_v4.front().bridge_port ==
+      "sstp-br-link");
+  CHECK(
+      effective.bypass_bridge_source_selectors_v4.front().cidr ==
+      "172.16.1.0/24");
+}
+
+TEST_CASE("iptables restore wait capability cache is independent per tool") {
+  IptablesTestTempDir temp;
+  const auto v4_calls = temp.path() / "v4-calls";
+  const auto v6_calls = temp.path() / "v6-calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables-restore",
+      "#!/bin/sh\nprintf x >> \"$KPBR_V4_CALLS\"\nexit 0\n");
+  write_iptables_test_executable(
+      temp.path() / "ip6tables-restore",
+      "#!/bin/sh\nprintf x >> \"$KPBR_V6_CALLS\"\nexit 1\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment v4("KPBR_V4_CALLS");
+  IptablesTestEnvironment v6("KPBR_V6_CALLS");
+  use_iptables_test_path(path, temp.path());
+  v4.set(v4_calls.string());
+  v6.set(v6_calls.string());
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK(testing::restore_wait_option_supported_for_test("iptables-restore"));
+  CHECK_FALSE(testing::restore_wait_option_supported_for_test("ip6tables-restore"));
+  CHECK(testing::restore_wait_option_supported_for_test("iptables-restore"));
+  CHECK_FALSE(testing::restore_wait_option_supported_for_test("ip6tables-restore"));
+  CHECK(read_iptables_test_file(v4_calls) == "x");
+  CHECK(read_iptables_test_file(v6_calls) == "x");
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("legacy iptables restore retries a transient COMMIT race") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables-restore",
+      "#!/bin/sh\n"
+      "if [ \"$1\" = -w ]; then exit 1; fi\n"
+      "count=0\n"
+      "[ -f \"$KPBR_RESTORE_CALLS\" ] && count=$(/bin/cat \"$KPBR_RESTORE_CALLS\")\n"
+      "count=$((count + 1))\n"
+      "printf '%s\\n' \"$count\" > \"$KPBR_RESTORE_CALLS\"\n"
+      "/bin/cat >/dev/null\n"
+      "if [ \"$count\" -lt 3 ]; then\n"
+      "  echo 'iptables-restore: line 5 failed' >&2\n"
+      "  exit 1\n"
+      "fi\n"
+      "exit 0\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_RESTORE_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK_NOTHROW(T::publish_dispatcher(
+      false, false, FirewallSetGeneration::A));
+  CHECK(read_iptables_test_file(calls) == "3\n");
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("wait-capable iptables restore also retries a transient COMMIT race") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables-restore",
+      "#!/bin/sh\n"
+      "if [ \"$1\" = -w ] && [ \"$2\" = 0 ]; then exit 0; fi\n"
+      "[ \"$1\" = -w ] && [ \"$2\" = 10 ] || exit 64\n"
+      "count=0\n"
+      "[ -f \"$KPBR_RESTORE_CALLS\" ] && count=$(/bin/cat \"$KPBR_RESTORE_CALLS\")\n"
+      "count=$((count + 1))\n"
+      "printf '%s\\n' \"$count\" > \"$KPBR_RESTORE_CALLS\"\n"
+      "/bin/cat >/dev/null\n"
+      "if [ \"$count\" -eq 1 ]; then\n"
+      "  echo 'iptables-restore: line 5 failed' >&2\n"
+      "  exit 1\n"
+      "fi\n"
+      "exit 0\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_RESTORE_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK_NOTHROW(T::publish_dispatcher(
+      false, false, FirewallSetGeneration::A));
+  CHECK(read_iptables_test_file(calls) == "2\n");
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("wait-capable restore hands an exhausted lock wait to outer recovery") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables-restore",
+      "#!/bin/sh\n"
+      "if [ \"$1\" = -w ] && [ \"$2\" = 0 ]; then exit 0; fi\n"
+      "[ \"$1\" = -w ] && [ \"$2\" = 10 ] || exit 64\n"
+      "count=0\n"
+      "[ -f \"$KPBR_RESTORE_CALLS\" ] && count=$(/bin/cat \"$KPBR_RESTORE_CALLS\")\n"
+      "count=$((count + 1))\n"
+      "printf '%s\\n' \"$count\" > \"$KPBR_RESTORE_CALLS\"\n"
+      "/bin/cat >/dev/null\n"
+      "exit 4\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_RESTORE_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK_THROWS_AS(
+      T::publish_dispatcher(false, false, FirewallSetGeneration::A),
+      TransientFirewallError);
+  CHECK(read_iptables_test_file(calls) == "1\n");
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("exhausted COMMIT retries remain typed as transient") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables-restore",
+      "#!/bin/sh\n"
+      "if [ \"$1\" = -w ]; then exit 1; fi\n"
+      "count=0\n"
+      "[ -f \"$KPBR_RESTORE_CALLS\" ] && count=$(/bin/cat \"$KPBR_RESTORE_CALLS\")\n"
+      "count=$((count + 1))\n"
+      "printf '%s\\n' \"$count\" > \"$KPBR_RESTORE_CALLS\"\n"
+      "/bin/cat >/dev/null\n"
+      "echo 'iptables-restore: line 5 failed' >&2\n"
+      "exit 1\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_RESTORE_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK_THROWS_AS(
+      T::publish_dispatcher(false, false, FirewallSetGeneration::A),
+      TransientFirewallError);
+  CHECK(read_iptables_test_file(calls) == "5\n");
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("legacy iptables restore does not retry a permanent rule error") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables-restore",
+      "#!/bin/sh\n"
+      "if [ \"$1\" = -w ]; then exit 1; fi\n"
+      "count=0\n"
+      "[ -f \"$KPBR_RESTORE_CALLS\" ] && count=$(/bin/cat \"$KPBR_RESTORE_CALLS\")\n"
+      "count=$((count + 1))\n"
+      "printf '%s\\n' \"$count\" > \"$KPBR_RESTORE_CALLS\"\n"
+      "/bin/cat >/dev/null\n"
+      "echo 'iptables-restore: line 4 failed' >&2\n"
+      "exit 1\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_RESTORE_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK_THROWS_AS(
+      T::publish_dispatcher(false, false, FirewallSetGeneration::A),
+      FirewallError);
+  CHECK(read_iptables_test_file(calls) == "1\n");
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("dispatcher inspection retries a transient snapshot failure") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "count=0\n"
+      "[ -f \"$KPBR_INSPECT_CALLS\" ] && count=$(/bin/cat \"$KPBR_INSPECT_CALLS\")\n"
+      "count=$((count + 1))\n"
+      "printf '%s\\n' \"$count\" > \"$KPBR_INSPECT_CALLS\"\n"
+      "[ \"$count\" -eq 1 ] && exit 4\n"
+      "echo '-A KeenPbrTable -j KeenPbrTable_A'\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_INSPECT_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+
+  CHECK(T::inspect_dispatcher(
+            "iptables",
+            "mangle",
+            "KeenPbrTable",
+            "KeenPbrTable_A",
+            "KeenPbrTable_B") == T::State::A);
+  CHECK(read_iptables_test_file(calls) == "2\n");
+}
+
+TEST_CASE("iptables restore exit four is retried as a transient resource race") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables-restore",
+      "#!/bin/sh\n"
+      "if [ \"$1\" = -w ]; then exit 1; fi\n"
+      "count=0\n"
+      "[ -f \"$KPBR_RESTORE_CALLS\" ] && count=$(/bin/cat \"$KPBR_RESTORE_CALLS\")\n"
+      "count=$((count + 1))\n"
+      "printf '%s\\n' \"$count\" > \"$KPBR_RESTORE_CALLS\"\n"
+      "/bin/cat >/dev/null\n"
+      "exit 4\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_RESTORE_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK_THROWS_AS(
+      T::publish_dispatcher(false, false, FirewallSetGeneration::A),
+      TransientFirewallError);
+  CHECK(read_iptables_test_file(calls) == "5\n");
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("hook reconciliation re-reads after a transient inspection") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "count=0\n"
+      "[ -f \"$KPBR_HOOK_CALLS\" ] && count=$(/bin/cat \"$KPBR_HOOK_CALLS\")\n"
+      "count=$((count + 1))\n"
+      "printf '%s\\n' \"$count\" > \"$KPBR_HOOK_CALLS\"\n"
+      "[ \"$count\" -eq 1 ] && exit 4\n"
+      "echo '-A OUTPUT -j KeenPbrOutput'\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_HOOK_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+
+  CHECK_NOTHROW(T::reconcile_hook(
+      "iptables", "mangle", "OUTPUT", "KeenPbrOutput"));
+  CHECK(read_iptables_test_file(calls) == "2\n");
+}
+
+TEST_CASE("hook reconciliation verifies state after an ambiguous mutation") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  const auto arguments = temp.path() / "arguments";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "printf '%s\\n' \"$*\" >> \"$KPBR_HOOK_ARGUMENTS\"\n"
+      "count=0\n"
+      "[ -f \"$KPBR_HOOK_CALLS\" ] && count=$(/bin/cat \"$KPBR_HOOK_CALLS\")\n"
+      "count=$((count + 1))\n"
+      "printf '%s\\n' \"$count\" > \"$KPBR_HOOK_CALLS\"\n"
+      "[ \"$count\" -eq 1 ] && exit 0\n"
+      "[ \"$count\" -eq 2 ] && exit 1\n"
+      "echo '-A OUTPUT -j KeenPbrOutput'\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_HOOK_CALLS");
+  IptablesTestEnvironment arguments_env("KPBR_HOOK_ARGUMENTS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+  arguments_env.set(arguments.string());
+
+  CHECK_NOTHROW(T::reconcile_hook(
+      "iptables", "mangle", "OUTPUT", "KeenPbrOutput"));
+  CHECK(read_iptables_test_file(calls) == "3\n");
+  CHECK(read_iptables_test_file(arguments) ==
+        "-t mangle -S OUTPUT\n"
+        "-t mangle -A OUTPUT -j KeenPbrOutput\n"
+        "-t mangle -S OUTPUT\n");
+}
+
+TEST_CASE("vanished hook target is a transient publication race") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "printf '%s\\n' \"$*\" >> \"$KPBR_HOOK_CALLS\"\n"
+      "case \"$*\" in\n"
+      "  '-t mangle -S PREROUTING') exit 0 ;;\n"
+      "  '-t mangle -A PREROUTING -j KeenPbrTable')\n"
+      "    echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "    exit 2\n"
+      "    ;;\n"
+      "esac\n"
+      "exit 0\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_HOOK_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  CHECK_THROWS_AS(
+      T::reconcile_hook(
+          "iptables", "mangle", "PREROUTING", "KeenPbrTable"),
+      TransientFirewallError);
+  CHECK(read_iptables_test_file(calls) ==
+        "-t mangle -S PREROUTING\n"
+        "-t mangle -A PREROUTING -j KeenPbrTable\n");
+}
+
+TEST_CASE("legacy Keenetic iptables reports vanished hook target as transient") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "printf '%s\\n' \"$*\" >> \"$KPBR_HOOK_CALLS\"\n"
+      "case \"$*\" in\n"
+      "  '-t mangle -S PREROUTING') exit 0 ;;\n"
+      "  '-t mangle -A PREROUTING -j KeenPbrTable')\n"
+      "    printf 'iptables v1.4.21: Couldn\\047t load target "
+      "\\140KeenPbrTable\\047:No such file or directory\\n' >&2\n"
+      "    exit 2\n"
+      "    ;;\n"
+      "esac\n"
+      "exit 0\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_HOOK_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  CHECK_THROWS_AS(
+      T::reconcile_hook(
+          "iptables", "mangle", "PREROUTING", "KeenPbrTable"),
+      TransientFirewallError);
+  CHECK(read_iptables_test_file(calls) ==
+        "-t mangle -S PREROUTING\n"
+        "-t mangle -A PREROUTING -j KeenPbrTable\n");
+}
+
+TEST_CASE("vanished duplicate hook target is a transient publication race") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "printf '%s\\n' \"$*\" >> \"$KPBR_HOOK_CALLS\"\n"
+      "case \"$*\" in\n"
+      "  '-t mangle -S OUTPUT')\n"
+      "    echo '-A OUTPUT -j KeenPbrOutput'\n"
+      "    echo '-A OUTPUT -j KeenPbrOutput'\n"
+      "    exit 0\n"
+      "    ;;\n"
+      "  '-t mangle -D OUTPUT -j KeenPbrOutput')\n"
+      "    echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "    exit 2\n"
+      "    ;;\n"
+      "esac\n"
+      "exit 0\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_HOOK_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  CHECK_THROWS_AS(
+      T::reconcile_hook(
+          "iptables", "mangle", "OUTPUT", "KeenPbrOutput"),
+      TransientFirewallError);
+  CHECK(read_iptables_test_file(calls) ==
+        "-t mangle -S OUTPUT\n"
+        "-t mangle -D OUTPUT -j KeenPbrOutput\n");
+}
+
+TEST_CASE("hook reconciliation surfaces permanent command failures immediately") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "printf x >> \"$KPBR_HOOK_CALLS\"\n"
+      "exit 2\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_HOOK_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  CHECK_THROWS_AS(
+      T::reconcile_hook(
+          "iptables", "mangle", "OUTPUT", "KeenPbrOutput"),
+      FirewallError);
+  CHECK(read_iptables_test_file(calls) == "x");
+}
+
+TEST_CASE("generation verification retries a coherent publication mismatch") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "count=0\n"
+      "[ -f \"$KPBR_VERIFY_CALLS\" ] && count=$(/bin/cat \"$KPBR_VERIFY_CALLS\")\n"
+      "count=$((count + 1))\n"
+      "printf '%s\\n' \"$count\" > \"$KPBR_VERIFY_CALLS\"\n"
+      "generation=B\n"
+      "[ \"$count\" -gt 2 ] && generation=A\n"
+      "echo \"-A KeenPbrTable -j KeenPbrTable_${generation}\"\n"
+      "echo '-A PREROUTING -j KeenPbrTable'\n"
+      "echo \"-A KeenPbrOutput -j KeenPbrOutput_${generation}\"\n"
+      "echo '-A OUTPUT -j KeenPbrOutput'\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_VERIFY_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+
+  CHECK_NOTHROW(T::verify_applied_generation(
+      FirewallSetGeneration::A));
+  CHECK(read_iptables_test_file(calls) == "4\n");
+}
+
+TEST_CASE("persistent generation verification mismatch stays transient") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "printf x >> \"$KPBR_VERIFY_CALLS\"\n"
+      "echo '-A KeenPbrTable -j KeenPbrTable_B'\n"
+      "echo '-A PREROUTING -j KeenPbrTable'\n"
+      "echo '-A KeenPbrOutput -j KeenPbrOutput_B'\n"
+      "echo '-A OUTPUT -j KeenPbrOutput'\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_VERIFY_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+
+  CHECK_THROWS_AS(
+      T::verify_applied_generation(FirewallSetGeneration::A),
+      TransientFirewallError);
+  CHECK(read_iptables_test_file(calls).size() == 10);
+}
+
+TEST_CASE("generation ipset names alternate and stay within the kernel limit") {
+  const auto [first, second] = T::generation_set_names();
+  CHECK(first == "kpbr4s_abcdefghijklmnopqrstuvwx");
+  CHECK(second == "kpbr4S_abcdefghijklmnopqrstuvwx");
+  CHECK(first.size() == 31);
+  CHECK(second.size() == 31);
+}
+
+TEST_CASE("live dispatcher parser distinguishes A B missing and invalid") {
+  using State = T::State;
+  CHECK(T::parse_live_generation(
+            "-A KeenPbrRaw -j KeenPbrRaw_A\n",
+            "KeenPbrRaw", "KeenPbrRaw_A", "KeenPbrRaw_B") == State::A);
+  CHECK(T::parse_live_generation(
+            "-A KeenPbrRaw -j KeenPbrRaw_B\n",
+            "KeenPbrRaw", "KeenPbrRaw_A", "KeenPbrRaw_B") == State::B);
+  CHECK(T::parse_live_generation(
+            "-N KeenPbrRaw\n",
+            "KeenPbrRaw", "KeenPbrRaw_A", "KeenPbrRaw_B") ==
+        State::Missing);
+  CHECK(T::parse_live_generation(
+            "-A KeenPbrRaw -j KeenPbrRaw_A\n"
+            "-A KeenPbrRaw -j KeenPbrRaw_A\n",
+            "KeenPbrRaw", "KeenPbrRaw_A", "KeenPbrRaw_B") ==
+        State::Invalid);
+  CHECK(T::parse_live_generation(
+            "-A KeenPbrRaw -j foreign\n",
+            "KeenPbrRaw", "KeenPbrRaw_A", "KeenPbrRaw_B") ==
+        State::Invalid);
+}
+
+TEST_CASE("target generation stages opposite a valid authoritative dispatcher") {
+  using State = T::State;
+  CHECK(T::target_generation_for_states(State::A, State::A) ==
+        FirewallSetGeneration::B);
+  CHECK(T::target_generation_for_states(State::B, State::B) ==
+        FirewallSetGeneration::A);
+  CHECK(T::target_generation_for_states(State::A, State::Missing) ==
+        FirewallSetGeneration::B);
+  CHECK(T::target_generation_for_states(State::Missing, State::A) ==
+        FirewallSetGeneration::B);
+  CHECK(T::target_generation_for_states(State::Missing, State::B) ==
+        FirewallSetGeneration::A);
+  // A valid counterpart is authoritative even when the other dispatcher is
+  // malformed. select_target_generation() first synchronizes the damaged
+  // dispatcher to this generation, then stages the opposite slot.
+  CHECK(T::target_generation_for_states(State::Invalid, State::A) ==
+        FirewallSetGeneration::B);
+  CHECK(T::target_generation_for_states(State::B, State::Invalid) ==
+        FirewallSetGeneration::A);
+}
+
+TEST_CASE("two missing dispatchers safely bootstrap slot A") {
+  using State = T::State;
+  CHECK(T::target_generation_for_states(
+            State::Missing, State::Missing) ==
+        FirewallSetGeneration::A);
+}
+
+TEST_CASE("target generation fails closed without an authoritative dispatcher") {
+  using State = T::State;
+  CHECK_THROWS_AS(
+      T::target_generation_for_states(
+          State::Invalid, State::Missing),
+      FirewallError);
+  CHECK_THROWS_AS(
+      T::target_generation_for_states(
+          State::Missing, State::Invalid),
+      FirewallError);
+  CHECK_THROWS_AS(
+      T::target_generation_for_states(
+          State::Invalid, State::Invalid),
+      FirewallError);
+}
+
+TEST_CASE("hook counter only accepts exact unconditional jumps") {
+  const std::string rules =
+      "-A PREROUTING -j KeenPbrRaw\n"
+      "-A PREROUTING -i br0 -j KeenPbrRaw\n"
+      "-A PREROUTING -j KeenPbrRawExtra\n"
+      "-A PREROUTING -j KeenPbrRaw\n";
+  CHECK(T::count_exact_jump(rules, "PREROUTING", "KeenPbrRaw") == 2);
+}
+
+TEST_CASE("generation script dispatches prerouting and output independently") {
+  const auto first = T::build_generation_script(false);
+  CHECK(first.find("-A KeenPbrTable -j KeenPbrTable_A") != std::string::npos);
+  CHECK(first.find("-A KeenPbrOutput -j KeenPbrOutput_A") != std::string::npos);
+  CHECK(first.find("-A KeenPbrOutput_A -p udp --dport 53") != std::string::npos);
+  CHECK(first.find("-A PREROUTING -j KeenPbrTable") == std::string::npos);
+  CHECK(first.find("-A OUTPUT -j KeenPbrOutput") == std::string::npos);
+
+  const auto replacement = T::build_generation_script(true);
+  CHECK(replacement.find("-F KeenPbrTable") != std::string::npos);
+  CHECK(replacement.find("-F KeenPbrOutput") != std::string::npos);
+  CHECK(replacement.find("-A KeenPbrTable -j KeenPbrTable_A") != std::string::npos);
+  CHECK(replacement.find("-A KeenPbrOutput -j KeenPbrOutput_A") != std::string::npos);
+  CHECK(replacement.find("-A PREROUTING -j KeenPbrTable") == std::string::npos);
+  CHECK(replacement.find("-R KeenPbrTable") == std::string::npos);
+}
+
+TEST_CASE("raw prerouting is isolated and omits unavailable conntrack matching") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.skip_established_or_dnat = true;
+  prefilter.skip_marked_packets = true;
+  const auto [raw, output] =
+      T::build_raw_generation_scripts(false, prefilter);
+
+  CHECK(raw.find("*raw\n") != std::string::npos);
+  CHECK(raw.find("-A PREROUTING -j KeenPbrRaw") == std::string::npos);
+  CHECK(raw.find("-A KeenPbrRaw -j KeenPbrRaw_A") != std::string::npos);
+  CHECK(raw.find("--match-set kpbr4s_test dst") != std::string::npos);
+  CHECK(raw.find("-m conntrack") == std::string::npos);
+  CHECK(raw.find("--ctstate") == std::string::npos);
+  CHECK(raw.find("KeenPbrOutput") == std::string::npos);
+
+  CHECK(output.find("*mangle\n") != std::string::npos);
+  CHECK(output.find("-A OUTPUT -j KeenPbrOutput") == std::string::npos);
+  CHECK(output.find("-A KeenPbrOutput_A -p udp --dport 53") !=
+        std::string::npos);
+  CHECK(output.find("KeenPbrRaw") == std::string::npos);
+}
 
 namespace {
 
@@ -244,6 +2579,24 @@ TEST_CASE("IpsetRestoreVisitor: CIDR entry") {
   CHECK(v.count() == 1);
 }
 
+TEST_CASE("IpsetRestoreVisitor: IPv4 zero prefix expands for hash:net") {
+  std::ostringstream buf;
+  IpsetRestoreVisitor v(buf, "myset");
+  v.on_entry(EntryType::Cidr, "0.0.0.0/0");
+  CHECK(buf.str() == "add myset 0.0.0.0/1 -exist\n"
+                     "add myset 128.0.0.0/1 -exist\n");
+  CHECK(v.count() == 2);
+}
+
+TEST_CASE("IpsetRestoreVisitor: IPv6 zero prefix expands for hash:net") {
+  std::ostringstream buf;
+  IpsetRestoreVisitor v(buf, "myset");
+  v.on_entry(EntryType::Cidr, "::/0");
+  CHECK(buf.str() == "add myset ::/1 -exist\n"
+                     "add myset 8000::/1 -exist\n");
+  CHECK(v.count() == 2);
+}
+
 TEST_CASE("IpsetRestoreVisitor: Domain entry is ignored") {
   std::ostringstream buf;
   IpsetRestoreVisitor v(buf, "myset");
@@ -278,6 +2631,179 @@ TEST_CASE("build_ipset_create_line: IPv4 with timeout 60") {
 TEST_CASE("build_ipset_create_line: IPv6 without timeout") {
   auto line = T::build_ipset_create_line("myset", "inet6", 0);
   CHECK(line == "create myset hash:net family inet6 -exist\n");
+}
+
+TEST_CASE("UDP peer ipset is exact and expiring") {
+  auto line = T::build_ipset_create_line(
+      "kpbr4m_meta_whatsapp_ip", "inet", 90, true);
+  CHECK(line ==
+        "create kpbr4m_meta_whatsapp_ip hash:ip,port,ip family inet timeout 90 -exist\n");
+}
+
+TEST_CASE("UDP peer mark is exact and does not persist conntrack state") {
+  FirewallRuleCriteria criteria;
+  criteria.src_udp_peer_set_name = "kpbr4m_meta_whatsapp_ip";
+  criteria.proto = L4Proto::Udp;
+  criteria.persist_conntrack_mark = false;
+  FirewallGlobalPrefilter prefilter;
+  prefilter.restore_conntrack_mark = true;
+  prefilter.conntrack_mark_mask = 0x00FF0000U;
+
+  const auto script = T::build_ipt_script_for_rule(
+      false,
+      T::RuleDesc::Mark,
+      0x00070000U,
+      criteria,
+      /*list_backed=*/false,
+      0x00FF0000U,
+      prefilter);
+  CHECK(script.find(
+      "--match-set kpbr4m_meta_whatsapp_ip src,dst,dst") !=
+      std::string::npos);
+  CHECK(script.find("-p udp") != std::string::npos);
+  CHECK(script.find("--set-xmark 0x70000/0xff0000") !=
+        std::string::npos);
+  CHECK(script.find("CONNMARK --save-mark") == std::string::npos);
+}
+
+TEST_CASE(
+    "UDP peer classifier verification accepts canonical iptables -S order") {
+  const std::string set_name = "kpbr4m_meta_whatsapp_ip";
+  const std::vector<std::string> expected{
+      "-A KeenPbrTable_A -m set --match-set " + set_name +
+          " src,dst,dst -p udp -j MARK --set-xmark 0x70000/0xff0000",
+      "-A KeenPbrTable_A -m set --match-set " + set_name +
+          " src,dst,dst -p udp -j RETURN",
+  };
+  const std::string live =
+      "-N KeenPbrTable_A\n"
+      "-A KeenPbrTable_A -p udp -m set --match-set " + set_name +
+      " src,dst,dst -j MARK --set-xmark 0x70000/0xff0000\n"
+      "-A KeenPbrTable_A -p udp -m set --match-set " + set_name +
+      " src,dst,dst -j RETURN\n";
+
+  CHECK(T::classifier_rules_present(live, set_name, expected));
+}
+
+TEST_CASE("UDP peer classifier rejects duplicate or altered authority") {
+  const std::string set_name = "kpbr4m_meta_whatsapp_ip";
+  const std::vector<std::string> expected{
+      "-A KeenPbrTable_A -m set --match-set " + set_name +
+          " src,dst,dst -p udp -j MARK --set-xmark 0x70000/0xff0000",
+      "-A KeenPbrTable_A -m set --match-set " + set_name +
+          " src,dst,dst -p udp -j RETURN",
+  };
+  const std::string live =
+      "-A KeenPbrTable_A -p udp -m set --match-set " + set_name +
+      " src,dst,dst -j MARK --set-xmark 0x70000/0xff0000\n"
+      "-A KeenPbrTable_A -p udp -m set --match-set " + set_name +
+      " src,dst,dst -j RETURN\n";
+
+  SUBCASE("exact duplicate") {
+    CHECK_FALSE(T::classifier_rules_present(
+        live + "-A KeenPbrTable_A -p udp -m set --match-set " + set_name +
+            " src,dst,dst -j RETURN\n",
+        set_name,
+        expected));
+  }
+  SUBCASE("different mark") {
+    CHECK_FALSE(T::classifier_rules_present(
+        live + "-A KeenPbrTable_A -p udp -m set --match-set " + set_name +
+            " src,dst,dst -j MARK --set-xmark 0x80000/0xff0000\n",
+        set_name,
+        expected));
+  }
+  SUBCASE("different dimensions") {
+    CHECK_FALSE(T::classifier_rules_present(
+        live + "-A KeenPbrTable_A -p udp -m set --match-set " + set_name +
+            " src,dst -j RETURN\n",
+        set_name,
+        expected));
+  }
+}
+
+TEST_CASE(
+    "RAW UDP peer proof requires exact bypass before conntrack save") {
+  const std::string set_name = "kpbr4m_meta_whatsapp_ip";
+  const std::string expected =
+      "-A KeenPbrRawCt -p udp -m set --match-set " + set_name +
+      " src,dst,dst -j RETURN";
+  const std::string bypass =
+      "-A KeenPbrRawCt -m set --match-set " + set_name +
+      " src,dst,dst -p udp -j RETURN\n";
+  const std::string save =
+      "-A KeenPbrRawCt -m conntrack --ctdir ORIGINAL "
+      "-m mark ! --mark 0/0xff0000 -j CONNMARK --save-mark "
+      "--nfmask 0xff0000 --ctmask 0xff0000\n";
+
+  CHECK(T::raw_conntrack_bypass_precedes_save(
+      bypass + save, set_name, expected));
+  CHECK_FALSE(T::raw_conntrack_bypass_precedes_save(
+      save + bypass, set_name, expected));
+  CHECK_FALSE(T::raw_conntrack_bypass_precedes_save(
+      save, set_name, expected));
+  CHECK_FALSE(T::raw_conntrack_bypass_precedes_save(
+      bypass +
+          "-A KeenPbrRawCt -p udp -m set --match-set " + set_name +
+          " src,dst -j RETURN\n" + save,
+      set_name,
+      expected));
+}
+
+TEST_CASE("ipset reconcile: only dnsmasq names are dynamic") {
+  CHECK(T::is_dynamic_set_name("kpbr4d_domains"));
+  CHECK(T::is_dynamic_set_name("kpbr6d_domains"));
+  CHECK_FALSE(T::is_dynamic_set_name("kpbr4_static"));
+  CHECK_FALSE(T::is_dynamic_set_name("foreign_kpbr4d_domains"));
+}
+
+TEST_CASE("ipset reconcile: dynamic schema accepts terse ipset XML") {
+  CHECK(T::dynamic_set_schema_compatible(
+      R"(<?xml version="1.0" encoding="utf-8"?>
+<ipsets>
+  <ipset name="kpbr4d_domains">
+    <type>hash:net</type>
+    <revision>7</revision>
+    <header>
+      <family>inet</family>
+      <hashsize>1024</hashsize>
+      <maxelem>65536</maxelem>
+      <timeout>300</timeout>
+      <references>1</references>
+    </header>
+  </ipset>
+</ipsets>)",
+      "kpbr4d_domains", "inet", 300));
+  CHECK(T::dynamic_set_schema_compatible(
+      R"(<ipsets><ipset name="kpbr6d_domains"><type>hash:net</type><header><family>inet6</family></header></ipset></ipsets>)",
+      "kpbr6d_domains", "inet6", 0));
+}
+
+TEST_CASE("ipset reconcile: dynamic schema rejects incompatible live sets") {
+  CHECK_FALSE(T::dynamic_set_schema_compatible(
+      R"(<ipsets><ipset name="kpbr4d_domains"><type>hash:ip</type><header><family>inet</family><timeout>300</timeout></header></ipset></ipsets>)",
+      "kpbr4d_domains", "inet", 300));
+  CHECK_FALSE(T::dynamic_set_schema_compatible(
+      R"(<ipsets><ipset name="kpbr4d_domains"><type>hash:net</type><header><family>inet6</family><timeout>300</timeout></header></ipset></ipsets>)",
+      "kpbr4d_domains", "inet", 300));
+  CHECK_FALSE(T::dynamic_set_schema_compatible(
+      R"(<ipsets><ipset name="kpbr4d_domains"><type>hash:net</type><header><family>inet</family><timeout>60</timeout></header></ipset></ipsets>)",
+      "kpbr4d_domains", "inet", 300));
+}
+
+TEST_CASE("ipset reconcile: dynamic schema rejects malformed or ambiguous XML") {
+  CHECK_FALSE(T::dynamic_set_schema_compatible(
+      R"(<ipsets><ipset name="kpbr4d_domains"><type>hash:net</type><header><family>inet</family></ipset></ipsets>)",
+      "kpbr4d_domains", "inet", 0));
+  CHECK_FALSE(T::dynamic_set_schema_compatible(
+      R"(<ipsets><ipset name="kpbr4d_domains"><type>hash:net</type><type>hash:ip</type><header><family>inet</family></header></ipset></ipsets>)",
+      "kpbr4d_domains", "inet", 0));
+  CHECK_FALSE(T::dynamic_set_schema_compatible(
+      R"(<ipsets><ipset name="kpbr4d_domains"><type>hash:net</type><header><family>inet</family><timeout>-1</timeout></header></ipset></ipsets>)",
+      "kpbr4d_domains", "inet", 0));
+  CHECK_FALSE(T::dynamic_set_schema_compatible(
+      R"(<ipsets><ipset name="kpbr4d_domains"><type>hash:net</type><header><family>inet</family></header></ipset><ipset name="foreign"><type>hash:net</type><header><family>inet</family></header></ipset></ipsets>)",
+      "kpbr4d_domains", "inet", 0));
 }
 
 // =============================================================================
@@ -384,7 +2910,10 @@ TEST_CASE("build_dns_nat_script: REDIRECT rules cover udp and tcp per inbound in
   FirewallGlobalPrefilter prefilter;
   prefilter.inbound_interfaces = std::vector<std::string>{"br0"};
   auto s = T::build_dns_nat_script(prefilter);
-  CHECK(s.find("*nat\n:KeenPbrDnsRdr - [0:0]\n-A PREROUTING -j KeenPbrDnsRdr\n") != std::string::npos);
+  CHECK(s.find(
+            "*nat\n:KeenPbrDnsRdr - [0:0]\n-F KeenPbrDnsRdr\n") !=
+        std::string::npos);
+  CHECK(s.find("-A PREROUTING -j KeenPbrDnsRdr\n") == std::string::npos);
   CHECK(s.find("-A KeenPbrDnsRdr -i br0 -p udp --dport 53 -j REDIRECT --to-ports 53\n") != std::string::npos);
   CHECK(s.find("-A KeenPbrDnsRdr -i br0 -p tcp --dport 53 -j REDIRECT --to-ports 53\n") != std::string::npos);
   CHECK(s.substr(s.size() - 7) == "COMMIT\n");
@@ -396,10 +2925,286 @@ TEST_CASE("build_dns_nat_script: no inbound interfaces redirects from any interf
   CHECK(s.find("-i ") == std::string::npos);
 }
 
+TEST_CASE("build_dns_nat_script: exact UDP peer 53 bypass precedes DNS redirect") {
+  const std::map<std::string, std::pair<int, uint32_t>> peer_sets{
+      {"kpbr4_call_peer", {AF_INET, 90U}},
+      {"kpbr6_call_peer", {AF_INET6, 90U}}};
+  const auto v4 = T::build_dns_nat_script(
+      {}, true, false, {}, false, 0xFFFFFFFFu, {}, peer_sets);
+  const auto bypass = v4.find(
+      "-A KeenPbrDnsRdr -p udp --dport 53 -m set --match-set "
+      "kpbr4_call_peer src,dst,dst -j RETURN\n");
+  const auto redirect = v4.find(
+      "-A KeenPbrDnsRdr -p udp --dport 53 -j REDIRECT --to-ports 53\n");
+  REQUIRE(bypass != std::string::npos);
+  REQUIRE(redirect != std::string::npos);
+  CHECK(bypass < redirect);
+  CHECK(v4.find("kpbr6_call_peer") == std::string::npos);
+  CHECK(v4.find("-p tcp --dport 53 -m set") == std::string::npos);
+}
+
+TEST_CASE("build_dns_nat_script: internal VPN bypass precedes every DNS redirect") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.bypass_inbound_interfaces = {"nwg0", "nwg1"};
+  const auto s = T::build_dns_nat_script(prefilter);
+
+  const auto first_bypass =
+      s.find("-A KeenPbrDnsRdr -i nwg0 -j RETURN\n");
+  const auto second_bypass =
+      s.find("-A KeenPbrDnsRdr -i nwg1 -j RETURN\n");
+  const auto udp_redirect =
+      s.find("-A KeenPbrDnsRdr -p udp --dport 53 -j REDIRECT --to-ports 53\n");
+  const auto tcp_redirect =
+      s.find("-A KeenPbrDnsRdr -p tcp --dport 53 -j REDIRECT --to-ports 53\n");
+
+  REQUIRE(first_bypass != std::string::npos);
+  REQUIRE(second_bypass != std::string::npos);
+  REQUIRE(udp_redirect != std::string::npos);
+  REQUIRE(tcp_redirect != std::string::npos);
+  CHECK(first_bypass < udp_redirect);
+  CHECK(second_bypass < udp_redirect);
+  CHECK(first_bypass < tcp_redirect);
+  CHECK(second_bypass < tcp_redirect);
+}
+
+TEST_CASE("build_dns_nat_script: service source pools extend and bypass DNS scope") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.inbound_interfaces =
+      std::vector<std::string>{"br0"};
+  prefilter.include_source_cidrs_v4 = {"172.20.8.0/23"};
+  prefilter.bypass_source_selectors_v4 = {
+      {"br0", "172.16.1.0/24"}};
+
+  const auto s = T::build_dns_nat_script(prefilter);
+  const auto bypass =
+      s.find(
+          "-A KeenPbrDnsRdr -i br0 -s 172.16.1.0/24 -j RETURN\n");
+  const auto included =
+      s.find("-A KeenPbrDnsRdr -s 172.20.8.0/23 -p udp --dport 53 -j REDIRECT --to-ports 53\n");
+  REQUIRE(bypass != std::string::npos);
+  REQUIRE(included != std::string::npos);
+  CHECK(bypass < included);
+  CHECK(s.find("-A KeenPbrDnsRdr -i br0 -p udp") !=
+        std::string::npos);
+
+  const auto ipv6 = T::build_dns_nat_script(
+      prefilter,
+      /*dns_redirect=*/true,
+      /*router_origin_snat=*/false,
+      {},
+      /*ipv6=*/true);
+  CHECK(ipv6.find("172.20.8.0/23") == std::string::npos);
+  CHECK(ipv6.find("172.16.1.0/24") == std::string::npos);
+}
+
+TEST_CASE(
+    "iptables addressless IKE bypass affects DNS redirect but not routing") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.dns_redirect_bypass_source_selectors_v4 = {
+      {"xfrms1", "172.20.8.0/23"}};
+
+  const auto dns = T::build_dns_nat_script(prefilter);
+  const auto dns_bypass = dns.find(
+      "-A KeenPbrDnsRdr -i xfrms1 -s 172.20.8.0/23 -j RETURN\n");
+  const auto dns_redirect = dns.find(
+      "-A KeenPbrDnsRdr -p udp --dport 53 -j REDIRECT "
+      "--to-ports 53\n");
+  REQUIRE(dns_bypass != std::string::npos);
+  REQUIRE(dns_redirect != std::string::npos);
+  CHECK(dns_bypass < dns_redirect);
+
+  const auto routing = T::build_ipt_script(
+      false,
+      {mark_rule("kpbr4_local", false, 0x10000)},
+      prefilter);
+  CHECK(routing.find("xfrms1") == std::string::npos);
+  CHECK(routing.find("172.20.8.0/23") == std::string::npos);
+  CHECK(routing.find("kpbr4_local") != std::string::npos);
+}
+
+TEST_CASE(
+    "iptables OpenConnect keeps only verified local DNS destinations before "
+    "the global redirect") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.dns_redirect_local_destination_selectors_v4 = {
+      {"oc7", "192.168.77.1/32"}};
+  prefilter.dns_redirect_local_destination_selectors_v6 = {
+      {"oc8", "2001:db8:77::1/128"}};
+
+  const auto dns = T::build_dns_nat_script(prefilter);
+  const auto udp_bypass = dns.find(
+      "-A KeenPbrDnsRdr -i oc7 -d 192.168.77.1/32 "
+      "-p udp --dport 53 -j RETURN\n");
+  const auto tcp_bypass = dns.find(
+      "-A KeenPbrDnsRdr -i oc7 -d 192.168.77.1/32 "
+      "-p tcp --dport 53 -j RETURN\n");
+  const auto udp_redirect = dns.find(
+      "-A KeenPbrDnsRdr -p udp --dport 53 -j REDIRECT "
+      "--to-ports 53\n");
+  const auto tcp_redirect = dns.find(
+      "-A KeenPbrDnsRdr -p tcp --dport 53 -j REDIRECT "
+      "--to-ports 53\n");
+  REQUIRE(udp_bypass != std::string::npos);
+  REQUIRE(tcp_bypass != std::string::npos);
+  REQUIRE(udp_redirect != std::string::npos);
+  REQUIRE(tcp_redirect != std::string::npos);
+  CHECK(udp_bypass < udp_redirect);
+  CHECK(tcp_bypass < tcp_redirect);
+  CHECK(dns.find("2001:db8:77::1") == std::string::npos);
+  // Only the confirmed local router address is exempt. DNS to any external
+  // destination on oc7 still reaches the global redirect below it.
+  CHECK(dns.find("-A KeenPbrDnsRdr -i oc7 -j RETURN") ==
+        std::string::npos);
+
+  const auto dns_v6 = T::build_dns_nat_script(
+      prefilter,
+      /*dns_redirect=*/true,
+      /*router_origin_snat=*/false,
+      {},
+      /*ipv6=*/true);
+  CHECK(dns_v6.find(
+      "-A KeenPbrDnsRdr -i oc8 -d 2001:db8:77::1/128 "
+      "-p udp --dport 53 -j RETURN\n") != std::string::npos);
+  CHECK(dns_v6.find("192.168.77.1") == std::string::npos);
+}
+
+TEST_CASE("iptables policy rules classify verified service source pools") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.inbound_interfaces =
+      std::vector<std::string>{"br0"};
+  prefilter.include_source_cidrs_v4 = {"172.20.8.0/23"};
+  prefilter.bypass_source_selectors_v4 = {
+      {"xfrms1", "172.16.1.0/24"}};
+  prefilter.restore_conntrack_mark = true;
+  prefilter.conntrack_mark_mask = 0x00ff0000;
+
+  const auto s = T::build_ipt_script(
+      false,
+      {mark_rule("kpbr4_local", false, 0x10000)},
+      prefilter);
+
+  const auto bypass =
+      s.find(
+          "-A KeenPbrTable -i xfrms1 -s 172.16.1.0/24 -j RETURN\n");
+  const auto restore = s.find("CONNMARK --restore-mark");
+  REQUIRE(bypass != std::string::npos);
+  REQUIRE(restore != std::string::npos);
+  CHECK(bypass < restore);
+  CHECK(s.find("-A KeenPbrTable ! -i br0 -j RETURN") ==
+        std::string::npos);
+  CHECK(s.find(
+            "-A KeenPbrTable -m set --match-set kpbr4_local dst -i br0") !=
+        std::string::npos);
+  CHECK(s.find(
+            "-A KeenPbrTable -m set --match-set kpbr4_local dst -s 172.20.8.0/23") !=
+        std::string::npos);
+  CHECK(s.find(
+            "-A KeenPbrTable -m set --match-set kpbr4_local dst -j MARK") ==
+        std::string::npos);
+}
+
+TEST_CASE("iptables pooled VPN bypass fails closed without exact ingress") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.bypass_source_selectors_v4 = {
+      {"", "172.16.1.0/24"}};
+
+  const auto routing = T::build_ipt_script(
+      false,
+      {mark_rule("kpbr4_local", false, 0x10000)},
+      prefilter);
+  const auto dns = T::build_dns_nat_script(prefilter);
+  CHECK(
+      routing.find("-s 172.16.1.0/24 -j RETURN") ==
+      std::string::npos);
+  CHECK(
+      dns.find("-s 172.16.1.0/24 -j RETURN") ==
+      std::string::npos);
+}
+
+TEST_CASE(
+    "iptables bridged SSTP bypass always matches L3 bridge and physdev port") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.bypass_bridge_source_selectors_v4 = {
+      {"br1", "sstp-br-link", "172.16.1.0/24"}};
+  prefilter.bypass_bridge_source_selectors_v6 = {
+      {"br1", "sstp-br-link", "2001:db8:16::/64"}};
+
+  const auto exact_rule = std::string{
+      "-i br1 -m physdev --physdev-in sstp-br-link "
+      "-s 172.16.1.0/24 -j RETURN\n"};
+  const auto weak_rule = std::string{
+      "-i br1 -s 172.16.1.0/24 -j RETURN\n"};
+
+  const auto routing = T::build_ipt_script(
+      false,
+      {mark_rule("kpbr4_local", false, 0x10000)},
+      prefilter);
+  CHECK(
+      routing.find("-A KeenPbrTable " + exact_rule) !=
+      std::string::npos);
+  CHECK(routing.find("-A KeenPbrTable " + weak_rule) ==
+        std::string::npos);
+
+  const auto raw =
+      T::build_raw_generation_scripts(false, prefilter).first;
+  CHECK(
+      raw.find("-A KeenPbrRaw_A " + exact_rule) !=
+      std::string::npos);
+  CHECK(raw.find("-A KeenPbrRaw_A " + weak_rule) ==
+        std::string::npos);
+
+  const auto dns = T::build_dns_nat_script(prefilter);
+  const auto exact_dns =
+      dns.find("-A KeenPbrDnsRdr " + exact_rule);
+  const auto redirect =
+      dns.find("-A KeenPbrDnsRdr -p udp --dport 53 "
+               "-j REDIRECT --to-ports 53\n");
+  REQUIRE(exact_dns != std::string::npos);
+  REQUIRE(redirect != std::string::npos);
+  CHECK(exact_dns < redirect);
+  CHECK(dns.find("-A KeenPbrDnsRdr " + weak_rule) ==
+        std::string::npos);
+
+  const auto exact_rule_v6 = std::string{
+      "-i br1 -m physdev --physdev-in sstp-br-link "
+      "-s 2001:db8:16::/64 -j RETURN\n"};
+  const auto weak_rule_v6 = std::string{
+      "-i br1 -s 2001:db8:16::/64 -j RETURN\n"};
+  const auto routing_v6 = T::build_ipt_script(
+      true,
+      {mark_rule("kpbr6_local", true, 0x10000)},
+      prefilter);
+  CHECK(
+      routing_v6.find("-A KeenPbrTable " + exact_rule_v6) !=
+      std::string::npos);
+  CHECK(routing_v6.find("-A KeenPbrTable " + weak_rule_v6) ==
+        std::string::npos);
+
+  const auto dns_v6 = T::build_dns_nat_script(
+      prefilter,
+      /*dns_redirect=*/true,
+      /*router_origin_snat=*/false,
+      {},
+      /*ipv6=*/true);
+  const auto exact_dns_v6 =
+      dns_v6.find("-A KeenPbrDnsRdr " + exact_rule_v6);
+  const auto redirect_v6 =
+      dns_v6.find("-A KeenPbrDnsRdr -p udp --dport 53 "
+                  "-j REDIRECT --to-ports 53\n");
+  REQUIRE(exact_dns_v6 != std::string::npos);
+  REQUIRE(redirect_v6 != std::string::npos);
+  CHECK(exact_dns_v6 < redirect_v6);
+  CHECK(dns_v6.find("-A KeenPbrDnsRdr " + weak_rule_v6) ==
+        std::string::npos);
+}
+
 TEST_CASE("build_dns_nat_script: router-origin traffic is masqueraded") {
   auto s = T::build_dns_nat_script({}, /*dns_redirect=*/false,
                                    /*router_origin_snat=*/true);
-  CHECK(s.find(":KeenPbrSnat - [0:0]\n-A POSTROUTING -j KeenPbrSnat\n") != std::string::npos);
+  CHECK(s.find(
+            ":KeenPbrSnat - [0:0]\n-F KeenPbrSnat\n") !=
+        std::string::npos);
+  CHECK(s.find("-A POSTROUTING -j KeenPbrSnat\n") == std::string::npos);
   CHECK(s.find("-A KeenPbrSnat -m mark --mark 0x1000000/0x1000000 -j MASQUERADE\n") != std::string::npos);
   CHECK(s.find("KeenPbrDnsRdr") == std::string::npos);
 }
@@ -409,14 +3214,339 @@ TEST_CASE("build_dns_nat_script: tunnel interfaces masquerade forwarded traffic"
   // masquerades for these interfaces, so keen-pbr has to do it itself.
   auto s = T::build_dns_nat_script({}, /*dns_redirect=*/false,
                                    /*router_origin_snat=*/true,
-                                   {"nwg2", "mooo_vless"});
-  CHECK(s.find("-A KeenPbrSnat -o nwg2 -j MASQUERADE\n") != std::string::npos);
-  CHECK(s.find("-A KeenPbrSnat -o mooo_vless -j MASQUERADE\n") !=
+                                   {"nwg2", "mooo_vless"},
+                                   /*ipv6=*/false,
+                                   /*fwmark_mask=*/0x00FF0000u);
+  CHECK(s.find(
+            "-A KeenPbrSnat -o nwg2 -m mark ! "
+            "--mark 0x0/0xff0000 -j MASQUERADE\n") != std::string::npos);
+  CHECK(s.find(
+            "-A KeenPbrSnat -o mooo_vless -m mark ! "
+            "--mark 0x0/0xff0000 -j MASQUERADE\n") !=
+        std::string::npos);
+  CHECK(s.find("-A KeenPbrSnat -o nwg2 -j MASQUERADE\n") ==
         std::string::npos);
 }
 
 TEST_CASE("create_tunnel_snat_rules: deduplicates interfaces") {
   CHECK(T::tunnel_snat_interface_count({"nwg2", "nwg2", "nwg3"}) == 2);
+}
+
+TEST_CASE("source-egress SNAT matches an authoritative pool and egress") {
+  const std::vector<FirewallSourceEgressSnatSelector> selectors{
+      {"eth3", "172.16.1.0/24"},
+      {"eth4", "fd00:16:1::/64"},
+  };
+
+  const auto ipv4 = T::build_dns_nat_script(
+      {},
+      /*dns_redirect=*/false,
+      /*router_origin_snat=*/true,
+      {},
+      /*ipv6=*/false,
+      /*fwmark_mask=*/0x00FF0000u,
+      selectors);
+  CHECK(ipv4.find(
+            "-A KeenPbrSnat -s 172.16.1.0/24 -o eth3 "
+            "-j MASQUERADE\n") != std::string::npos);
+  CHECK(ipv4.find("fd00:16:1::/64") == std::string::npos);
+  CHECK(ipv4.find(
+            "-s 172.16.1.0/24 -o eth3 -m mark") == std::string::npos);
+
+  const auto ipv6 = T::build_dns_nat_script(
+      {},
+      /*dns_redirect=*/false,
+      /*router_origin_snat=*/true,
+      {},
+      /*ipv6=*/true,
+      /*fwmark_mask=*/0x00FF0000u,
+      selectors);
+  CHECK(ipv6.find(
+            "-A KeenPbrSnat -s fd00:16:1::/64 -o eth4 "
+            "-j MASQUERADE\n") != std::string::npos);
+  CHECK(ipv6.find("172.16.1.0/24") == std::string::npos);
+}
+
+TEST_CASE("source-egress SNAT selectors are filtered sorted and deduplicated") {
+  const auto selectors = T::source_egress_snat_selectors({
+      {"eth4", "172.16.2.0/24"},
+      {"", "172.16.9.0/24"},
+      {"eth3", ""},
+      {"eth3", "172.16.1.0/24"},
+      {"eth4", "172.16.2.0/24"},
+  });
+  REQUIRE(selectors.size() == 2);
+  CHECK((selectors[0] ==
+         FirewallSourceEgressSnatSelector{"eth3", "172.16.1.0/24"}));
+  CHECK((selectors[1] ==
+         FirewallSourceEgressSnatSelector{"eth4", "172.16.2.0/24"}));
+  CHECK(T::source_egress_snat_requested(
+      {{"eth3", "172.16.1.0/24"}}));
+  CHECK_FALSE(T::source_egress_snat_requested(
+      {{"", "172.16.1.0/24"}, {"eth3", ""}}));
+}
+
+TEST_CASE("owned SNAT inspection distinguishes healthy missing and unknown") {
+  IptablesTestTempDir temp;
+  const auto mode = temp.path() / "snat-state";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "case \"$(cat \"$KPBR_SNAT_STATE\" 2>/dev/null)\" in\n"
+      "  healthy)\n"
+      "    case \"$*\" in\n"
+      "      '-t nat -S POSTROUTING')\n"
+      "        echo '-A POSTROUTING -j KeenPbrSnat' ;;\n"
+      "      '-t nat -S KeenPbrSnat')\n"
+      "        printf '%s\\n' '-N KeenPbrSnat' "
+      "'-A KeenPbrSnat -m mark --mark "
+      "0x1000000/0x1000000 -j MASQUERADE' ;;\n"
+      "    esac\n"
+      "    exit 0\n"
+      "    ;;\n"
+      "  interface)\n"
+      "    case \"$*\" in\n"
+      "      '-t nat -S POSTROUTING')\n"
+      "        echo '-A POSTROUTING -j KeenPbrSnat' ;;\n"
+      "      '-t nat -S KeenPbrSnat')\n"
+      "        printf '%s\\n' '-N KeenPbrSnat' "
+      "'-A KeenPbrSnat -m mark --mark "
+      "0x1000000/0x1000000 -j MASQUERADE' "
+      "'-A KeenPbrSnat -o nwg2 -m mark ! "
+      "--mark 0x0/0xff0000 -j MASQUERADE' ;;\n"
+      "    esac\n"
+      "    exit 0\n"
+      "    ;;\n"
+      "  source-egress)\n"
+      "    case \"$*\" in\n"
+      "      '-t nat -S POSTROUTING')\n"
+      "        echo '-A POSTROUTING -j KeenPbrSnat' ;;\n"
+      "      '-t nat -S KeenPbrSnat')\n"
+      "        printf '%s\\n' '-N KeenPbrSnat' "
+      "'-A KeenPbrSnat -m mark --mark "
+      "0x1000000/0x1000000 -j MASQUERADE' "
+      "'-A KeenPbrSnat -s 172.16.1.0/24 -o eth3 "
+      "-j MASQUERADE' ;;\n"
+      "    esac\n"
+      "    exit 0\n"
+      "    ;;\n"
+      "  interfaces-reversed)\n"
+      "    case \"$*\" in\n"
+      "      '-t nat -S POSTROUTING')\n"
+      "        echo '-A POSTROUTING -j KeenPbrSnat' ;;\n"
+      "      '-t nat -S KeenPbrSnat')\n"
+      "        printf '%s\\n' '-N KeenPbrSnat' "
+      "'-A KeenPbrSnat -m mark --mark "
+      "0x1000000/0x1000000 -j MASQUERADE' "
+      "'-A KeenPbrSnat -o nwg3 -m mark ! "
+      "--mark 0x0/0xff0000 -j MASQUERADE' "
+      "'-A KeenPbrSnat -o nwg2 -m mark ! "
+      "--mark 0x0/0xff0000 -j MASQUERADE' ;;\n"
+      "    esac\n"
+      "    exit 0\n"
+      "    ;;\n"
+      "  empty)\n"
+      "    case \"$*\" in\n"
+      "      '-t nat -S POSTROUTING')\n"
+      "        echo '-A POSTROUTING -j KeenPbrSnat' ;;\n"
+      "      '-t nat -S KeenPbrSnat') echo '-N KeenPbrSnat' ;;\n"
+      "    esac\n"
+      "    exit 0\n"
+      "    ;;\n"
+      "  extra)\n"
+      "    case \"$*\" in\n"
+      "      '-t nat -S POSTROUTING')\n"
+      "        echo '-A POSTROUTING -j KeenPbrSnat' ;;\n"
+      "      '-t nat -S KeenPbrSnat')\n"
+      "        printf '%s\\n' '-N KeenPbrSnat' "
+      "'-A KeenPbrSnat -m mark --mark "
+      "0x1000000/0x1000000 -j MASQUERADE' "
+      "'-A KeenPbrSnat -j ACCEPT' ;;\n"
+      "    esac\n"
+      "    exit 0\n"
+      "    ;;\n"
+      "  conditional-hook)\n"
+      "    case \"$*\" in\n"
+      "      '-t nat -S POSTROUTING')\n"
+      "        echo '-A POSTROUTING -p tcp -j KeenPbrSnat' ;;\n"
+      "      '-t nat -S KeenPbrSnat')\n"
+      "        printf '%s\\n' '-N KeenPbrSnat' "
+      "'-A KeenPbrSnat -m mark --mark "
+      "0x1000000/0x1000000 -j MASQUERADE' ;;\n"
+      "    esac\n"
+      "    exit 0\n"
+      "    ;;\n"
+      "  missing)\n"
+      "    case \"$*\" in\n"
+      "      '-t nat -S POSTROUTING') exit 0 ;;\n"
+      "      '-t nat -S KeenPbrSnat')\n"
+      "        echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "        exit 1 ;;\n"
+      "    esac\n"
+      "    ;;\n"
+      "  *)\n"
+      "    echo 'xtables lock is temporarily unavailable' >&2\n"
+      "    exit 4\n"
+      "    ;;\n"
+      "esac\n"
+      "exit 0\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment state_env("KPBR_SNAT_STATE");
+  use_iptables_test_path(path, temp.path());
+  state_env.set(mode.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  {
+    std::ofstream out(mode);
+    out << "healthy";
+  }
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true) == OwnedSnatState::healthy);
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/false) == OwnedSnatState::stale);
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true,
+            {"nwg2"},
+            0x00FF0000u) == OwnedSnatState::missing);
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true,
+            {},
+            0x00FF0000u,
+            {{"eth3", "172.16.1.0/24"}}) == OwnedSnatState::missing);
+  {
+    std::ofstream out(mode);
+    out << "interface";
+  }
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true,
+            {"nwg2"},
+            0x00FF0000u) == OwnedSnatState::healthy);
+  {
+    std::ofstream out(mode);
+    out << "source-egress";
+  }
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true,
+            {},
+            0x00FF0000u,
+            {{"eth3", "172.16.1.0/24"}}) == OwnedSnatState::healthy);
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true,
+            {},
+            0x00FF0000u) == OwnedSnatState::missing);
+  {
+    std::ofstream out(mode);
+    out << "interfaces-reversed";
+  }
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true,
+            {"nwg2", "nwg3"},
+            0x00FF0000u) == OwnedSnatState::missing);
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true,
+            {"nwg3", "nwg2"},
+            0x00FF0000u) == OwnedSnatState::healthy);
+  {
+    std::ofstream out(mode);
+    out << "empty";
+  }
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true) == OwnedSnatState::missing);
+  {
+    std::ofstream out(mode);
+    out << "extra";
+  }
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true) == OwnedSnatState::missing);
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/false) == OwnedSnatState::stale);
+  {
+    std::ofstream out(mode);
+    out << "conditional-hook";
+  }
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true) == OwnedSnatState::missing);
+  {
+    std::ofstream out(mode);
+    out << "missing";
+  }
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true) == OwnedSnatState::missing);
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/false) == OwnedSnatState::healthy);
+  {
+    std::ofstream out(mode);
+    out << "unknown";
+  }
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true) == OwnedSnatState::unknown);
+}
+
+TEST_CASE("owned SNAT family aggregation is fail closed") {
+  CHECK(T::combine_owned_snat_states(
+            OwnedSnatState::healthy,
+            OwnedSnatState::healthy) == OwnedSnatState::healthy);
+  CHECK(T::combine_owned_snat_states(
+            OwnedSnatState::stale,
+            OwnedSnatState::healthy) == OwnedSnatState::stale);
+  CHECK(T::combine_owned_snat_states(
+            OwnedSnatState::stale,
+            OwnedSnatState::missing) == OwnedSnatState::missing);
+  CHECK(T::combine_owned_snat_states(
+            OwnedSnatState::missing,
+            OwnedSnatState::unknown) == OwnedSnatState::unknown);
+}
+
+TEST_CASE("owned SNAT inspection includes the last managed IPv6 family") {
+  IptablesTestTempDir temp;
+  const std::string executable =
+      "#!/bin/sh\n"
+      "state=\"$KPBR_SNAT_V4_STATE\"\n"
+      "case \"${0##*/}\" in ip6tables) state=\"$KPBR_SNAT_V6_STATE\" ;; esac\n"
+      "case \"$state:$*\" in\n"
+      "  'healthy:-t nat -S POSTROUTING')\n"
+      "    echo '-A POSTROUTING -j KeenPbrSnat' ;;\n"
+      "  'healthy:-t nat -S KeenPbrSnat')\n"
+      "    printf '%s\\n' '-N KeenPbrSnat' "
+      "'-A KeenPbrSnat -m mark --mark "
+      "0x1000000/0x1000000 -j MASQUERADE' ;;\n"
+      "  'missing:-t nat -S POSTROUTING') exit 0 ;;\n"
+      "  'missing:-t nat -S KeenPbrSnat')\n"
+      "    echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "    exit 1 ;;\n"
+      "  unknown:*) echo 'xtables lock unavailable' >&2; exit 4 ;;\n"
+      "esac\n"
+      "exit 0\n";
+  write_iptables_test_executable(temp.path() / "iptables", executable);
+  write_iptables_test_executable(temp.path() / "ip6tables", executable);
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment ipv4("KPBR_SNAT_V4_STATE");
+  IptablesTestEnvironment ipv6("KPBR_SNAT_V6_STATE");
+  use_iptables_test_path(path, temp.path());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  ipv4.set("healthy");
+  ipv6.set("missing");
+  CHECK(T::inspect_owned_snat_families(
+            /*ipv4_expected=*/true,
+            /*ipv6_expected=*/true,
+            /*ipv6_managed=*/true) == OwnedSnatState::missing);
+
+  ipv4.set("missing");
+  ipv6.set("unknown");
+  CHECK(T::inspect_owned_snat_families(
+            /*ipv4_expected=*/true,
+            /*ipv6_expected=*/true,
+            /*ipv6_managed=*/true) == OwnedSnatState::unknown);
+
+  // Unsupported/unmanaged IPv6 must not turn a valid IPv4-only contract into
+  // an inspection failure.
+  ipv4.set("healthy");
+  ipv6.set("unknown");
+  CHECK(T::inspect_owned_snat_families(
+            /*ipv4_expected=*/true,
+            /*ipv6_expected=*/false,
+            /*ipv6_managed=*/false) == OwnedSnatState::healthy);
 }
 
 TEST_CASE("create_output_mark_rule: carries the router-origin bit for masquerading") {
@@ -443,7 +3573,7 @@ TEST_CASE("build_ipt_script: global prefilter RETURN lines are emitted before ro
   const std::string iface =
       "-A KeenPbrTable ! -i br0 -j RETURN\n";
   const std::string mark =
-      "[0:0] -A KeenPbrTable -m set --match-set myset dst -j MARK --set-xmark 0x100/0xffffffff\n";
+      "-A KeenPbrTable -m set --match-set myset dst -j MARK --set-xmark 0x100/0xffffffff\n";
 
   const auto dnat_pos = s.find(dnat);
   const auto marked_pos = s.find(marked);
@@ -459,6 +3589,149 @@ TEST_CASE("build_ipt_script: global prefilter RETURN lines are emitted before ro
   CHECK(iface_pos < mark_pos);
 }
 
+TEST_CASE("build_ipt_script: restores and saves only keen-pbr conntrack mark bits") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.restore_conntrack_mark = true;
+  prefilter.conntrack_mark_mask = 0x00FF0000;
+
+  const auto s = T::build_ipt_script(
+      false,
+      {mark_rule("myset", false, 0x00120000)},
+      prefilter);
+
+  const std::string restore =
+      "-A KeenPbrTable -m conntrack --ctdir ORIGINAL "
+      "-m connmark ! --mark 0/0xff0000 "
+      "-j CONNMARK --restore-mark --nfmask 0xff0000 --ctmask 0xff0000\n";
+  const std::string restored_return =
+      "-A KeenPbrTable -m conntrack --ctdir ORIGINAL "
+      "-m connmark ! --mark 0/0xff0000 -j RETURN\n";
+  const std::string classify =
+      "-A KeenPbrTable -m set --match-set myset dst "
+      "-j MARK --set-xmark 0x120000/0xffffffff\n";
+  const std::string persist =
+      "-A KeenPbrTable -m set --match-set myset dst "
+      "-j CONNMARK --save-mark --nfmask 0xff0000 --ctmask 0xff0000\n";
+
+  const auto restore_pos = s.find(restore);
+  const auto return_pos = s.find(restored_return);
+  const auto classify_pos = s.find(classify);
+  const auto persist_pos = s.find(persist);
+  REQUIRE(restore_pos != std::string::npos);
+  REQUIRE(return_pos != std::string::npos);
+  REQUIRE(classify_pos != std::string::npos);
+  REQUIRE(persist_pos != std::string::npos);
+  CHECK(restore_pos < return_pos);
+  CHECK(return_pos < classify_pos);
+  CHECK(classify_pos < persist_pos);
+  CHECK(s.find("--ctdir REPLY") == std::string::npos);
+}
+
+TEST_CASE("build_ipt_script: internal VPN bypass precedes conntrack restore and classification") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.bypass_inbound_interfaces = {"nwg0"};
+  prefilter.restore_conntrack_mark = true;
+  prefilter.conntrack_mark_mask = 0x00FF0000;
+
+  const auto s = T::build_ipt_script(
+      false,
+      {mark_rule("myset", false, 0x00120000)},
+      prefilter);
+
+  const auto bypass =
+      s.find("-A KeenPbrTable -i nwg0 -j RETURN\n");
+  const auto restore =
+      s.find("-A KeenPbrTable -m conntrack --ctdir ORIGINAL "
+             "-m connmark ! --mark 0/0xff0000 "
+             "-j CONNMARK --restore-mark");
+  const auto classify =
+      s.find("-A KeenPbrTable -m set --match-set myset dst "
+             "-j MARK --set-xmark 0x120000/0xffffffff\n");
+
+  REQUIRE(bypass != std::string::npos);
+  REQUIRE(restore != std::string::npos);
+  REQUIRE(classify != std::string::npos);
+  CHECK(bypass < restore);
+  CHECK(bypass < classify);
+}
+
+TEST_CASE("raw PREROUTING never references conntrack state or CONNMARK") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.restore_conntrack_mark = true;
+  prefilter.conntrack_mark_mask = 0x00FF0000;
+
+  const auto [raw, output] =
+      T::build_raw_generation_scripts(false, prefilter);
+
+  CHECK(raw.find("CONNMARK") == std::string::npos);
+  CHECK(raw.find("--ctdir") == std::string::npos);
+  CHECK(output.find(
+            "CONNMARK --restore-mark --nfmask 0xff0000 --ctmask 0xff0000") !=
+        std::string::npos);
+  CHECK(output.find(
+            "CONNMARK --save-mark --nfmask 0xff0000 --ctmask 0xff0000") !=
+        std::string::npos);
+}
+
+TEST_CASE("raw PREROUTING uses a mangle conntrack companion for flow stickiness") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.restore_conntrack_mark = true;
+  prefilter.conntrack_mark_mask = 0x00FF0000;
+
+  const auto first = T::build_raw_conntrack_script(false, prefilter);
+  CHECK(first.find(":KeenPbrRawCt - [0:0]") != std::string::npos);
+  CHECK(first.find("-A PREROUTING -j KeenPbrRawCt") ==
+        std::string::npos);
+  CHECK(first.find(
+            "CONNMARK --restore-mark --nfmask 0xff0000 --ctmask 0xff0000") !=
+        std::string::npos);
+  CHECK(first.find(
+            "CONNMARK --save-mark --nfmask 0xff0000 --ctmask 0xff0000") !=
+        std::string::npos);
+  CHECK(first.find("--ctdir REPLY") == std::string::npos);
+
+  const auto replace = T::build_raw_conntrack_script(true, prefilter);
+  CHECK(replace.find("-F KeenPbrRawCt") != std::string::npos);
+  CHECK(replace.find("-A PREROUTING -j KeenPbrRawCt") ==
+        std::string::npos);
+}
+
+TEST_CASE("raw conntrack companion bypasses internal VPN before restore") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.bypass_inbound_interfaces = {"nwg0"};
+  prefilter.restore_conntrack_mark = true;
+  prefilter.conntrack_mark_mask = 0x00FF0000;
+
+  const auto script = T::build_raw_conntrack_script(false, prefilter);
+  const auto bypass =
+      script.find("-A KeenPbrRawCt -i nwg0 -j RETURN\n");
+  const auto restore =
+      script.find("-A KeenPbrRawCt -m conntrack --ctdir ORIGINAL "
+                  "-m connmark ! --mark 0/0xff0000 "
+                  "-j CONNMARK --restore-mark");
+
+  REQUIRE(bypass != std::string::npos);
+  REQUIRE(restore != std::string::npos);
+  CHECK(bypass < restore);
+}
+
+TEST_CASE("raw conntrack companion does not persist expiring UDP peer marks") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.restore_conntrack_mark = true;
+  prefilter.conntrack_mark_mask = 0x00FF0000;
+
+  const auto script = T::build_raw_conntrack_script(
+      false, prefilter, /*include_transient_udp_peer=*/true);
+  const auto transient_return = script.find(
+      "-A KeenPbrRawCt -p udp -m set --match-set "
+      "kpbr4m_meta_whatsapp_ip src,dst,dst -j RETURN\n");
+  const auto save = script.find(
+      "CONNMARK --save-mark --nfmask 0xff0000 --ctmask 0xff0000");
+  REQUIRE(transient_return != std::string::npos);
+  REQUIRE(save != std::string::npos);
+  CHECK(transient_return < save);
+}
+
 TEST_CASE("build_ipt_script: skip_marked_packets prefilter can be disabled") {
   FirewallGlobalPrefilter prefilter;
   prefilter.skip_established_or_dnat = true;
@@ -466,6 +3739,44 @@ TEST_CASE("build_ipt_script: skip_marked_packets prefilter can be disabled") {
 
   auto s = T::build_ipt_script(false, {mark_rule("myset", false, 0x100)}, prefilter);
   CHECK(s.find("-m mark ! --mark 0x0/0xffffffff -j ACCEPT") == std::string::npos);
+}
+
+TEST_CASE("iptables skip-marked guards bypass foreign NDMS marks") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.skip_marked_packets = true;
+  prefilter.conntrack_mark_mask = 0x00FF0000;
+
+  const auto legacy = T::build_ipt_script(
+      false, {mark_rule("myset", false, 0x00120000)}, prefilter);
+  CHECK(legacy.find(
+            "-A KeenPbrTable -m mark ! --mark 0x0/0xffffffff -j ACCEPT\n") !=
+        std::string::npos);
+  CHECK(legacy.find(
+            "-A KeenPbrOutput -m mark ! --mark 0x0/0xffffffff -j ACCEPT\n") !=
+        std::string::npos);
+
+  const auto generation = T::build_generation_script(false, prefilter);
+  CHECK(generation.find(
+            "-A KeenPbrTable_A -m mark ! --mark 0x0/0xffffffff -j ACCEPT\n") !=
+        std::string::npos);
+  CHECK(generation.find(
+            "-A KeenPbrOutput_A -m mark ! --mark 0x0/0xffffffff -j ACCEPT\n") !=
+        std::string::npos);
+
+  const auto [raw, output] =
+      T::build_raw_generation_scripts(false, prefilter);
+  CHECK(raw.find(
+            "-A KeenPbrRaw_A -m mark ! --mark 0x0/0xffffffff -j ACCEPT\n") !=
+        std::string::npos);
+  CHECK(output.find(
+            "-A KeenPbrOutput_A -m mark ! --mark 0x0/0xffffffff -j ACCEPT\n") !=
+        std::string::npos);
+
+  for (const auto* script : {&legacy, &generation, &raw, &output}) {
+    CHECK(script->find(
+              "-m mark ! --mark 0x0/0xff0000 -j ACCEPT\n") ==
+          std::string::npos);
+  }
 }
 
 TEST_CASE("build_ipt_script: multi-interface prefilter expands route rules with -i matches") {
@@ -501,7 +3812,7 @@ TEST_CASE("build_ipt_script: config-derived prefilter keeps route rule body unch
 
   const std::string iface = "-A KeenPbrTable ! -i br0 -j RETURN\n";
   const std::string mark =
-      "[0:0] -A KeenPbrTable -m set --match-set kpbr4_local dst -j MARK --set-xmark 0x100/0xffffffff\n";
+      "-A KeenPbrTable -m set --match-set kpbr4_local dst -j MARK --set-xmark 0x100/0xffffffff\n";
   const auto iface_pos = s.find(iface);
   const auto mark_pos = s.find(mark);
   REQUIRE(iface_pos != std::string::npos);
@@ -509,12 +3820,19 @@ TEST_CASE("build_ipt_script: config-derived prefilter keeps route rule body unch
   CHECK(iface_pos < mark_pos);
 }
 
-TEST_CASE("build_ipt_script_for_rule: masked mark rule uses set-xmark and rule counters") {
+TEST_CASE("build_ipt_script: config rejects interface restore injection before serialization") {
+  CHECK_THROWS(parse_valid_config(
+      "{\"route\":{\"inbound_interfaces\":[\"br0\\n-A KeenPbrTable -j DROP\"],"
+      "\"rules\":[]}}"));
+}
+
+TEST_CASE("build_ipt_script_for_rule: masked mark rule uses set-xmark") {
   FirewallRuleCriteria criteria;
   auto s = T::build_ipt_script_for_rule(false, Rule::Mark, 0x00010000, criteria,
                                         true, 0x00FF0000);
-  CHECK(s.find("[0:0] -A KeenPbrTable -m set --match-set pairwise_set dst -j MARK --set-xmark 0x10000/0xff0000\n") !=
+  CHECK(s.find("-A KeenPbrTable -m set --match-set pairwise_set dst -j MARK --set-xmark 0x10000/0xff0000\n") !=
         std::string::npos);
+  CHECK(s.find("[0:0] -A") == std::string::npos);
 }
 
 TEST_CASE("build_ipt_script: config-derived prefilter omits interface guard when inbound list is empty") {
@@ -620,6 +3938,114 @@ TEST_CASE("build_ipt_script: tcp/udp + port list → two rules") {
                                        mark_rule("s", false, 0x10, fudp)});
   CHECK(s.find("-p tcp -m multiport --dports 80,443") != std::string::npos);
   CHECK(s.find("-p udp -m multiport --dports 80,443") != std::string::npos);
+}
+
+TEST_CASE("build_ipt_script: oversized multiport list is split at 15 slots") {
+  ProtoPortFilter f;
+  f.proto = L4Proto::Tcp;
+  f.dst_port = "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16";
+  auto s = T::build_ipt_script(false, {drop_rule("bl", false, f)});
+  CHECK(s.find("--dports 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 -j DROP") !=
+        std::string::npos);
+  CHECK(s.find("--dports 16 -j DROP") != std::string::npos);
+}
+
+TEST_CASE("build_ipt_script: multiport ranges consume two slots") {
+  ProtoPortFilter f;
+  f.proto = L4Proto::Udp;
+  f.dst_port = "1-2,3-4,5-6,7-8,9-10,11-12,13-14,15-16";
+  auto s = T::build_ipt_script(false, {drop_rule("bl", false, f)});
+  CHECK(s.find("--dports 1:2,3:4,5:6,7:8,9:10,11:12,13:14 -j DROP") !=
+        std::string::npos);
+  CHECK(s.find("--dports 15:16 -j DROP") != std::string::npos);
+}
+
+TEST_CASE("build_ipt_script: oversized negated multiport list remains AND") {
+  ProtoPortFilter f;
+  f.proto = L4Proto::Tcp;
+  f.dst_port = "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16";
+  f.negate_dst_port = true;
+  auto s = T::build_ipt_script(false, {drop_rule("bl", false, f)});
+  CHECK(s.find("-m multiport ! --dports "
+               "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 "
+               "-m multiport ! --dports 16 -j DROP") != std::string::npos);
+}
+
+TEST_CASE("build_ipt_script: source list preserves single destination port") {
+  ProtoPortFilter f;
+  f.proto = L4Proto::Tcp;
+  f.src_port = "80,443";
+  f.dst_port = "8443";
+  auto s = T::build_ipt_script(false, {drop_rule("bl", false, f)});
+  CHECK(s.find("-m multiport --sports 80,443 --dport 8443 -j DROP") !=
+        std::string::npos);
+}
+
+TEST_CASE("build_ipt_script: destination list preserves single source port") {
+  ProtoPortFilter f;
+  f.proto = L4Proto::Tcp;
+  f.src_port = "1024";
+  f.dst_port = "80,443";
+  auto s = T::build_ipt_script(false, {drop_rule("bl", false, f)});
+  CHECK(s.find("--sport 1024 -m multiport --dports 80,443 -j DROP") !=
+        std::string::npos);
+}
+
+TEST_CASE("build_ipt_script: oversized positive port lists cross product") {
+  ProtoPortFilter f;
+  f.proto = L4Proto::Tcp;
+  f.src_port = "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16";
+  f.dst_port =
+      "101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116";
+  auto s = T::build_ipt_script(false, {drop_rule("bl", false, f)});
+  const std::string src_a =
+      "-m multiport --sports 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15";
+  const std::string src_b = "-m multiport --sports 16";
+  const std::string dst_a =
+      "-m multiport --dports "
+      "101,102,103,104,105,106,107,108,109,110,111,112,113,114,115";
+  const std::string dst_b = "-m multiport --dports 116";
+  CHECK(s.find(src_a + " " + dst_a + " -j DROP") != std::string::npos);
+  CHECK(s.find(src_a + " " + dst_b + " -j DROP") != std::string::npos);
+  CHECK(s.find(src_b + " " + dst_a + " -j DROP") != std::string::npos);
+  CHECK(s.find(src_b + " " + dst_b + " -j DROP") != std::string::npos);
+}
+
+TEST_CASE("build_ipt_script: negated chunks combine with positive alternatives") {
+  ProtoPortFilter f;
+  f.proto = L4Proto::Udp;
+  f.src_port = "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16";
+  f.negate_src_port = true;
+  f.dst_port =
+      "101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116";
+  auto s = T::build_ipt_script(false, {drop_rule("bl", false, f)});
+  const std::string excluded =
+      "-m multiport ! --sports 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 "
+      "-m multiport ! --sports 16";
+  CHECK(s.find(excluded + " -m multiport --dports "
+                          "101,102,103,104,105,106,107,108,109,110,111,112,"
+                          "113,114,115 -j DROP") != std::string::npos);
+  CHECK(s.find(excluded + " -m multiport --dports 116 -j DROP") !=
+        std::string::npos);
+}
+
+TEST_CASE("build_ipt_script: positive chunks combine with negated destination") {
+  ProtoPortFilter f;
+  f.proto = L4Proto::Udp;
+  f.src_port = "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16";
+  f.dst_port =
+      "101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116";
+  f.negate_dst_port = true;
+  auto s = T::build_ipt_script(false, {drop_rule("bl", false, f)});
+  const std::string excluded =
+      "-m multiport ! --dports "
+      "101,102,103,104,105,106,107,108,109,110,111,112,113,114,115 "
+      "-m multiport ! --dports 116";
+  CHECK(s.find("-m multiport --sports "
+               "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 " +
+               excluded + " -j DROP") != std::string::npos);
+  CHECK(s.find("-m multiport --sports 16 " + excluded + " -j DROP") !=
+        std::string::npos);
 }
 
 TEST_CASE("build_ipt_script: any proto + src_port expands to tcp and udp rules") {

@@ -1,4 +1,5 @@
 import type { ConfigObject } from "@/api/generated/model/configObject"
+import type { ListDeleteTarget } from "@/api/generated/model/listDeleteTarget"
 import type { RouteRule } from "@/api/generated/model/routeRule"
 
 export type ListDeleteImpact = {
@@ -10,7 +11,6 @@ export type ListDeleteImpact = {
 
 function hasRouteMatchConditionExceptLists(rule: RouteRule): boolean {
   return Boolean(
-    rule.proto ||
     rule.dscp !== undefined ||
     rule.src_port ||
     rule.dest_port ||
@@ -21,7 +21,8 @@ function hasRouteMatchConditionExceptLists(rule: RouteRule): boolean {
 
 export function getListDeleteImpact(
   config: ConfigObject,
-  listIds: Iterable<string>
+  listIds: Iterable<string>,
+  replacementListId?: string
 ): ListDeleteImpact {
   const listIdSet = new Set(listIds)
   const dnsRuleIndexes: number[] = []
@@ -31,13 +32,18 @@ export function getListDeleteImpact(
 
   for (const [index, rule] of (config.route?.rules ?? []).entries()) {
     const beforeLists = rule.list ?? []
-    const afterLists = beforeLists.filter((name) => !listIdSet.has(name))
+    const afterLists = rewriteListReferences(
+      beforeLists,
+      listIdSet,
+      replacementListId
+    )
 
-    if (afterLists.length !== beforeLists.length) {
+    if (!sameStringArrays(afterLists, beforeLists)) {
       routeRuleIndexes.push(index)
     }
 
     if (
+      replacementListId === undefined &&
       beforeLists.length > 0 &&
       afterLists.length === 0 &&
       !hasRouteMatchConditionExceptLists(rule)
@@ -47,13 +53,21 @@ export function getListDeleteImpact(
   }
 
   for (const [index, rule] of (config.dns?.rules ?? []).entries()) {
-    const afterLists = rule.list.filter((name) => !listIdSet.has(name))
+    const afterLists = rewriteListReferences(
+      rule.list,
+      listIdSet,
+      replacementListId
+    )
 
-    if (afterLists.length !== rule.list.length) {
+    if (!sameStringArrays(afterLists, rule.list)) {
       dnsRuleIndexes.push(index)
     }
 
-    if (rule.list.length > 0 && afterLists.length === 0) {
+    if (
+      replacementListId === undefined &&
+      rule.list.length > 0 &&
+      afterLists.length === 0
+    ) {
       removedDnsRuleIndexes.push(index)
     }
   }
@@ -64,6 +78,47 @@ export function getListDeleteImpact(
     removedDnsRuleIndexes,
     removedRouteRuleIndexes,
   }
+}
+
+export function buildListDeleteTargets(
+  listIds: Iterable<string>,
+  replacementListId?: string
+): ListDeleteTarget[] {
+  const replacement = replacementListId?.trim() || undefined
+  return [...new Set(listIds)].map((listId) => ({
+    list_id: listId,
+    replacement_list_id: replacement,
+  }))
+}
+
+function rewriteListReferences(
+  references: readonly string[],
+  deletedListIds: ReadonlySet<string>,
+  replacementListId?: string
+): string[] {
+  const rewritten: string[] = []
+  for (const listId of references) {
+    const next =
+      deletedListIds.has(listId) && replacementListId
+        ? replacementListId
+        : deletedListIds.has(listId)
+          ? undefined
+          : listId
+    if (next && !rewritten.includes(next)) {
+      rewritten.push(next)
+    }
+  }
+  return rewritten
+}
+
+function sameStringArrays(
+  left: readonly string[],
+  right: readonly string[]
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  )
 }
 
 export function buildUpdatedConfigForListsDelete(
@@ -120,4 +175,21 @@ export function buildUpdatedConfigForListDelete(
         .filter((rule) => rule.list.length > 0),
     },
   }
+}
+
+/**
+ * Что показать в колонке «Записей».
+ *
+ * `counted` — список хранится прямо в конфигурации, панель считает его сама,
+ * включая ноль записей. `loaded` и `notLoaded` — список приезжает по ссылке
+ * или из файла: сколько в нём строк, панель не знает, демон это не отдаёт.
+ * Раньше оба последних случая показывались прочерком, и «пустой список» было
+ * не отличить от «ни разу не скачался».
+ */
+export function getListStatsState(list: {
+  stats?: unknown
+  lastUpdated?: string
+}): "counted" | "loaded" | "notLoaded" {
+  if (list.stats) return "counted"
+  return list.lastUpdated ? "loaded" : "notLoaded"
 }

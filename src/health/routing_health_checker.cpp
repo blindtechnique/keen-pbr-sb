@@ -7,17 +7,13 @@
 #include "../util/string_compat.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 
 namespace keen_pbr3 {
 
 namespace {
 
-std::string route_type_label(const RouteSpec& spec) {
-    if (spec.unreachable) return "unreachable";
-    if (spec.blackhole) return "blackhole";
-    return "unicast";
-}
 
 std::string route_type_label(const DumpedRoute& route) {
     if (route.unreachable) return "unreachable";
@@ -31,7 +27,7 @@ bool route_matches(const RouteSpec& expected, const DumpedRoute& actual) {
            expected.gateway == actual.gateway &&
            expected.blackhole == actual.blackhole &&
            expected.unreachable == actual.unreachable &&
-           (expected.metric == 0 || expected.metric == actual.metric) &&
+           route_table_detail::route_metric_matches_live(expected, actual) &&
            (expected.family == 0 || expected.family == actual.family);
 }
 
@@ -50,6 +46,7 @@ RoutingHealthChecker::RoutingHealthChecker(const Firewall& firewall,
 
 RoutingHealthReport build_routing_health_report(
     FirewallBackend firewall_backend,
+    bool use_raw_prerouting,
     const FirewallState& firewall_state,
     const std::vector<RouteSpec>& tracked_routes,
     const std::vector<RuleSpec>& tracked_policy_rules,
@@ -59,7 +56,8 @@ RoutingHealthReport build_routing_health_report(
 
     try {
         // 1. Create firewall verifier
-        auto verifier = create_firewall_verifier(firewall_backend);
+        auto verifier = create_firewall_verifier(
+            firewall_backend, use_raw_prerouting);
         verifier->set_expected_fwmark_mask(firewall_state.get_fwmark_mask());
 
         // 2. Verify firewall chain
@@ -143,7 +141,7 @@ RoutingHealthReport build_routing_health_report(
                     break;
                 }
             }
-            report.policy_rules.push_back(rv.verify_policy_rule(spec, outbound_tag));
+            report.policy_rules.push_back(rv.verify_policy_rule(spec));
         }
 
         // 7. Determine overall_ok
@@ -197,6 +195,7 @@ RoutingHealthReport build_routing_health_report(
 RoutingHealthReport RoutingHealthChecker::check() const {
     return build_routing_health_report(
         firewall_.backend(),
+        firewall_.uses_raw_prerouting(),
         firewall_state_,
         route_table_.get_routes(),
         policy_rules_.get_rules(),
@@ -214,6 +213,143 @@ static api::CheckStatus to_api_check_status(CheckStatus s) {
         case CheckStatus::mismatch: return api::CheckStatus::MISMATCH;
     }
     return api::CheckStatus::MISSING;
+}
+
+// The report carries the state as the string the firewall backend produced, so
+// the health layer does not have to link against the iptables backend just to
+// name a state. Unrecognised input becomes `unknown` rather than being dropped:
+// a state we cannot map is precisely a state nobody should read as "fine".
+static api::TtlBypassState to_api_ttl_bypass_state(const std::string& state) {
+    if (state == "chain_absent") return api::TtlBypassState::CHAIN_ABSENT;
+    if (state == "unsupported")  return api::TtlBypassState::UNSUPPORTED;
+    if (state == "active")       return api::TtlBypassState::ACTIVE;
+    if (state == "conflict")     return api::TtlBypassState::CONFLICT;
+    if (state == "missing")      return api::TtlBypassState::MISSING;
+    if (state == "disabled")     return api::TtlBypassState::DISABLED;
+    return api::TtlBypassState::UNKNOWN;
+}
+
+static std::int64_t ppe_counter_value(std::uint64_t value) {
+    return value > static_cast<std::uint64_t>(
+                       std::numeric_limits<std::int64_t>::max())
+        ? std::numeric_limits<std::int64_t>::max()
+        : static_cast<std::int64_t>(value);
+}
+
+static api::PpeDeoffloadCounter to_api_ppe_counter(
+    std::uint64_t packets,
+    std::uint64_t bytes) {
+    api::PpeDeoffloadCounter counter;
+    counter.packets = ppe_counter_value(packets);
+    counter.bytes = ppe_counter_value(bytes);
+    return counter;
+}
+
+static api::PpeDeoffloadHealth to_api_ppe_deoffload_health(
+    const PpeDeoffloadSnapshot& snapshot) {
+    api::PpeDeoffloadHealth health;
+    health.mode = snapshot.mode == PpeDeoffloadMode::automatic
+        ? api::PpeDeoffloadMode::AUTO
+        : api::PpeDeoffloadMode::OFF;
+    switch (snapshot.state) {
+        case PpeDeoffloadState::ppe_target_missing:
+        case PpeDeoffloadState::connskip_match_missing:
+        case PpeDeoffloadState::backend_incompatible:
+        case PpeDeoffloadState::conntrack_accounting_disabled:
+        case PpeDeoffloadState::ppe_already_disabled:
+        case PpeDeoffloadState::userspace_incompatible:
+            health.capability = api::PpeDeoffloadCapability::UNSUPPORTED;
+            break;
+        case PpeDeoffloadState::active:
+        case PpeDeoffloadState::admissible:
+        case PpeDeoffloadState::nfqueue_inactive:
+        case PpeDeoffloadState::strategy_ports_unavailable:
+            health.capability = snapshot.supported
+                ? api::PpeDeoffloadCapability::SUPPORTED
+                : api::PpeDeoffloadCapability::UNKNOWN;
+            break;
+        default:
+            health.capability = api::PpeDeoffloadCapability::UNKNOWN;
+            break;
+    }
+    switch (snapshot.state) {
+        case PpeDeoffloadState::disabled:
+            health.state = api::PpeDeoffloadHealthState::OFF;
+            break;
+        case PpeDeoffloadState::active:
+            health.state = api::PpeDeoffloadHealthState::ACTIVE;
+            break;
+        case PpeDeoffloadState::admissible:
+            health.state = api::PpeDeoffloadHealthState::ADMISSIBLE;
+            break;
+        case PpeDeoffloadState::nfqueue_inactive:
+        case PpeDeoffloadState::ppe_already_disabled:
+        case PpeDeoffloadState::ppe_target_missing:
+        case PpeDeoffloadState::backend_incompatible:
+            health.state = api::PpeDeoffloadHealthState::INACTIVE;
+            break;
+        case PpeDeoffloadState::unknown:
+        case PpeDeoffloadState::conntrack_accounting_unknown:
+        case PpeDeoffloadState::ppe_state_unknown:
+            health.state = api::PpeDeoffloadHealthState::UNKNOWN;
+            break;
+        default:
+            health.state = api::PpeDeoffloadHealthState::DEGRADED;
+            break;
+    }
+    if (snapshot.state != PpeDeoffloadState::active) {
+        health.reason = ppe_deoffload_state_name(snapshot.state);
+    }
+    if (!snapshot.detail.empty()) health.detail = snapshot.detail;
+    if (snapshot.mode == PpeDeoffloadMode::automatic) {
+        health.connskip_packets =
+            static_cast<std::int64_t>(snapshot.connskip_window);
+    }
+    health.tcp.desired_ports = snapshot.desired_tcp_ports;
+    health.tcp.applied_ports = snapshot.applied_tcp_ports;
+    health.tcp.active = snapshot.active &&
+        !snapshot.applied_tcp_ports.empty();
+    if (snapshot.desired_quic) health.quic.desired_ports = {"443"};
+    if (snapshot.applied_quic) health.quic.applied_ports = {"443"};
+    health.quic.active = snapshot.active && snapshot.applied_quic;
+    if (snapshot.counters.available) {
+        health.tcp.counters = to_api_ppe_counter(
+            snapshot.counters.tcp_packets,
+            snapshot.counters.tcp_bytes);
+        health.quic.counters = to_api_ppe_counter(
+            snapshot.counters.quic_packets,
+            snapshot.counters.quic_bytes);
+        health.prerouting = to_api_ppe_counter(
+            snapshot.counters.prerouting_packets,
+            snapshot.counters.prerouting_bytes);
+        health.forward = to_api_ppe_counter(
+            snapshot.counters.forward_packets,
+            snapshot.counters.forward_bytes);
+        health.observed_at = ppe_counter_value(
+            snapshot.counters.observed_at_unix_seconds);
+    }
+    if (snapshot.last_reconcile_unix_seconds != 0U) {
+        health.last_reconcile_ts = ppe_counter_value(
+            snapshot.last_reconcile_unix_seconds);
+    }
+    return health;
+}
+
+// Same shape and same reason as the TTL mapping above: the health layer names
+// a state without linking against the API server that produced it. An
+// unrecognised value becomes `endpoint_unproven` rather than `usable`, because
+// a state we cannot map must never be the one that says it is safe to delete
+// the only local password.
+static api::SystemAuthState to_api_system_auth_state(const std::string& state) {
+    if (state == "usable")           return api::SystemAuthState::USABLE;
+    if (state == "loopback_not_accepted")
+        return api::SystemAuthState::LOOPBACK_NOT_ACCEPTED;
+    if (state == "challenge_absent") return api::SystemAuthState::CHALLENGE_ABSENT;
+    if (state == "firmware_policy_unknown")
+        return api::SystemAuthState::FIRMWARE_POLICY_UNKNOWN;
+    if (state == "lockout_budget_unsafe")
+        return api::SystemAuthState::LOCKOUT_BUDGET_UNSAFE;
+    return api::SystemAuthState::ENDPOINT_UNPROVEN;
 }
 
 static api::RoutingHealthResponseFirewallBackend to_api_firewall_backend(FirewallBackend backend) {
@@ -245,6 +381,33 @@ nlohmann::json routing_health_report_to_json(const RoutingHealthReport& r) {
     }
 
     resp.firewall_backend = to_api_firewall_backend(*r.firewall_backend);
+
+    // Reported as its own field rather than folded into `overall`. An absent
+    // firmware chain and a missing kernel match are both routine and neither
+    // is a keen-pbr fault; degrading the whole report for them would teach the
+    // operator to ignore the same field when it says a chain is being
+    // rewritten underneath us.
+    if (!r.ttl_bypass_state.empty()) {
+        resp.ttl_bypass_state = to_api_ttl_bypass_state(r.ttl_bypass_state);
+    }
+    if (!r.ttl_bypass_detail.empty()) {
+        resp.ttl_bypass_detail = r.ttl_bypass_detail;
+    }
+    if (r.ppe_deoffload.has_value()) {
+        resp.ppe_deoffload =
+            to_api_ppe_deoffload_health(*r.ppe_deoffload);
+    }
+
+    if (!r.system_auth_state.empty()) {
+        resp.system_auth_state = to_api_system_auth_state(r.system_auth_state);
+    }
+    if (!r.system_auth_detail.empty()) {
+        resp.system_auth_detail = r.system_auth_detail;
+    }
+    if (r.system_auth_forwarded_failures_per_window) {
+        resp.system_auth_forwarded_failures_per_window =
+            *r.system_auth_forwarded_failures_per_window;
+    }
 
     resp.firewall.chain_present = r.firewall_chain.chain_present;
     resp.firewall.prerouting_hook_present = r.firewall_chain.prerouting_hook_present;

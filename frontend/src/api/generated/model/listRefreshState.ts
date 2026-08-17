@@ -7,7 +7,16 @@
  */
 
 export interface ListRefreshState {
-  /** ISO-8601 timestamp of the last successful download or conditional refresh attempt for a URL-backed list.
+  /** ISO-8601 timestamp of the last successful download or conditional refresh attempt for the currently configured URL. A failed attempt never replaces this timestamp.
    */
   last_updated?: string;
+  /** ISO-8601 timestamp of the most recent refresh attempt for the currently configured URL, whether it succeeded or failed.
+   */
+  last_attempt?: string;
+  /** Error from the most recent refresh attempt for the currently configured URL. Omitted after a successful attempt.
+   */
+  last_error?: string;
+  /** Outbound tag used by the most recent refresh attempt. Omitted when the system default route was used.
+   */
+  last_detour?: string;
 }

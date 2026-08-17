@@ -1,8 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { useEffect, useState } from "react"
+import {
+  forwardRef,
+  useImperativeHandle,
+  useState,
+  type ForwardedRef,
+} from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
+import { LogDiagnosticsTools } from "@/components/settings/log-diagnostics-tools"
 import {
   Card,
   CardContent,
@@ -10,7 +16,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
-import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import {
   Select,
@@ -21,11 +26,17 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
+import type {
+  SettingsSectionController,
+  SettingsSectionState,
+} from "@/components/settings/settings-section-control"
 
 type LogSettings = {
   file_enabled: boolean
   level: string
 }
+
+type LogSettingsDraft = Partial<LogSettings>
 
 const LEVELS = ["error", "warn", "info", "verbose", "debug"] as const
 
@@ -34,7 +45,16 @@ const LEVELS = ["error", "warn", "info", "verbose", "debug"] as const
  * on by default. The switch exists for people who would rather not have the
  * router write to flash continuously.
  */
-export function LoggingSettingsCard() {
+export const LoggingSettingsCard = forwardRef(LoggingSettingsCardInner)
+
+function LoggingSettingsCardInner(
+  {
+    onStateChange,
+  }: {
+    onStateChange: (state: SettingsSectionState) => void
+  },
+  ref: ForwardedRef<SettingsSectionController>
+) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
 
@@ -47,14 +67,18 @@ export function LoggingSettingsCard() {
     },
   })
 
-  const [fileEnabled, setFileEnabled] = useState(true)
-  const [level, setLevel] = useState("info")
-
-  useEffect(() => {
-    if (!query.data) return
-    setFileEnabled(query.data.file_enabled)
-    setLevel(query.data.level)
-  }, [query.data])
+  const [draft, setDraft] = useState<LogSettingsDraft>({})
+  const fileEnabled = draft.file_enabled ?? query.data?.file_enabled ?? true
+  const level = draft.level ?? query.data?.level ?? "info"
+  const getSectionState = (nextDraft = draft): SettingsSectionState => ({
+    dirty: Object.keys(nextDraft).length > 0,
+    valid: true,
+  })
+  const updateDraft = (patch: LogSettingsDraft) => {
+    const nextDraft = { ...draft, ...patch }
+    setDraft(nextDraft)
+    onStateChange(getSectionState(nextDraft))
+  }
 
   const saveMutation = useMutation({
     mutationFn: async () => {
@@ -71,16 +95,31 @@ export function LoggingSettingsCard() {
     },
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["log-settings"] })
+      setDraft({})
+      onStateChange({ dirty: false, valid: true })
       toast.success(t("pages.settings.logging.saved"))
     },
     onError: (error: Error) => toast.error(error.message, { richColors: true }),
   })
 
+  useImperativeHandle(ref, () => ({
+    reset: () => {
+      setDraft({})
+      onStateChange({ dirty: false, valid: true })
+    },
+    save: async () => {
+      if (!getSectionState().dirty) {
+        return
+      }
+      await saveMutation.mutateAsync()
+    },
+  }))
+
   return (
     <Card size="sm">
       <CardHeader>
         <CardTitle>{t("pages.settings.logging.title")}</CardTitle>
-        <CardDescription>
+        <CardDescription className="max-w-[480px]">
           {t("pages.settings.logging.description")}
         </CardDescription>
       </CardHeader>
@@ -89,7 +128,9 @@ export function LoggingSettingsCard() {
           <Switch
             checked={fileEnabled}
             id="logging-enabled"
-            onCheckedChange={setFileEnabled}
+            onCheckedChange={(nextEnabled) =>
+              updateDraft({ file_enabled: nextEnabled })
+            }
           />
           <Label className="cursor-pointer" htmlFor="logging-enabled">
             {t("pages.settings.logging.enabled")}
@@ -100,7 +141,7 @@ export function LoggingSettingsCard() {
           <Label>{t("pages.settings.logging.level")}</Label>
           <Select
             disabled={!fileEnabled}
-            onValueChange={(value) => setLevel(value ?? "info")}
+            onValueChange={(value) => updateDraft({ level: value ?? "info" })}
             value={level}
           >
             <SelectTrigger>
@@ -125,20 +166,49 @@ export function LoggingSettingsCard() {
           </p>
         </div>
 
-        <p className="text-xs text-muted-foreground">
+        <p className="max-w-[480px] text-xs text-muted-foreground">
           {t("pages.settings.logging.pathHint")}
         </p>
-
-        <div className="flex justify-end">
-          <Button
-            disabled={saveMutation.isPending}
-            onClick={() => saveMutation.mutate()}
-          >
-            {saveMutation.isPending
-              ? t("common.saving")
-              : t("pages.settings.logging.save")}
-          </Button>
-        </div>
+        <LogDiagnosticsTools
+          labels={{
+            openLogAction: t("pages.settings.logging.viewer.open"),
+            downloadDiagnosticsAction: t(
+              "pages.settings.logging.diagnostics.download"
+            ),
+            downloadingDiagnosticsAction: t(
+              "pages.settings.logging.diagnostics.downloading"
+            ),
+            logDialogTitle: t("pages.settings.logging.viewer.title"),
+            logDialogDescription: t(
+              "pages.settings.logging.viewer.description"
+            ),
+            logEditorAriaLabel: t("pages.settings.logging.viewer.ariaLabel"),
+            refreshLogAction: t("pages.settings.logging.viewer.refresh"),
+            refreshingLogAction: t("pages.settings.logging.viewer.refreshing"),
+            closeAction: t("common.close"),
+            logLoading: t("pages.settings.logging.viewer.loading"),
+            logEmpty: t("pages.settings.logging.viewer.empty"),
+            logLoadFailed: t("pages.settings.logging.viewer.failed"),
+            diagnosticsDownloadFailed: t(
+              "pages.settings.logging.diagnostics.failed"
+            ),
+            diagnosticsDialogTitle: t(
+              "pages.settings.logging.diagnostics.title"
+            ),
+            diagnosticsDialogDescription: t(
+              "pages.settings.logging.diagnostics.description"
+            ),
+            diagnosticsTrustWarning: t(
+              "pages.settings.logging.diagnostics.trustWarning"
+            ),
+            diagnosticsIncludeLists: t(
+              "pages.settings.logging.diagnostics.includeLists"
+            ),
+            diagnosticsConfirmAction: t(
+              "pages.settings.logging.diagnostics.confirm"
+            ),
+          }}
+        />
       </CardContent>
     </Card>
   )

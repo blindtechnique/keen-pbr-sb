@@ -5,7 +5,7 @@ weight: 5
 
 Большинству пользователей эта страница не понадобится.
 
-Здесь описаны настройки для продвинутых сценариев и на уровне сервиса: `daemon`, `api`, `fwmark`, `iproute` и `lists_autoupdate`.
+Здесь описаны настройки для продвинутых сценариев и на уровне сервиса: `daemon`, `api`, `fwmark`, `iproute`, `lists_autoupdate` и `list_refresh`.
 
 ## daemon
 
@@ -16,7 +16,9 @@ weight: 5
 | `pid_file` | string | — | Путь к PID-файлу |
 | `cache_dir` | string | `/var/cache/keen-pbr` | Каталог для кэшированных данных списков |
 | `firewall_backend` | string | `"auto"` | Бэкенд firewall: `auto`, `iptables` или `nftables` |
-| `strict_enforcement` | boolean | зависит от типа | Строгое применение маршрутизации для outbound типа `interface`: если включено, при недоступности шлюза или интерфейса устанавливается недостижимый маршрут по умолчанию. С 3.0.7-sb.5 встроенное значение по умолчанию — `true` для туннельных interface-outbound без шлюза (sing-box TUN, WireGuard/AmneziaWG) и `false` для outbound со шлюзом; явное значение здесь или в outbound всегда приоритетнее. |
+| `clear_dynamic_sets_on_apply` | boolean | `true` | Очищать динамические наборы dnsmasq при полном применении конфигурации или перезапуске runtime. Reconcile с сохранением наборов их не очищает. |
+| `ipv6_enabled` | boolean | `true` | Устанавливать IPv6-маршруты и правила firewall и добавлять IPv6-цели резолвера. Явное значение `false` включает строгий IPv4-only DNS: dnsmasq фильтрует AAAA, а также SVCB/HTTPS с возможными IPv6-подсказками. При этом отключается автоматическое обнаружение HTTP/3 и ECH; обычные A-записи продолжают работать. Если поле отсутствует или равно `null`, IPv6 сохраняется. |
+| `strict_enforcement` | boolean | зависит от типа | Строгое применение маршрутизации для outbound типа `interface`: если включено, при недоступности шлюза или интерфейса устанавливается недостижимый маршрут по умолчанию. С 3.0.7-sb.5 встроенное значение по умолчанию - `true` для туннельных interface-outbound без шлюза (sing-box TUN, WireGuard/AmneziaWG) и `false` для outbound со шлюзом; явное значение здесь или в outbound всегда приоритетнее. |
 | `max_file_size_bytes` | integer | `8388608` (8 MiB) | Максимальный размер загруженного удалённого списка в байтах |
 | `firewall_verify_max_bytes` | integer | `262144` | Максимальное число байт stdout, захватываемых за одну команду проверки firewall (`0` = без ограничений) |
 
@@ -26,6 +28,8 @@ weight: 5
     "pid_file": "/var/run/keen-pbr.pid",
     "cache_dir": "/var/cache/keen-pbr",
     "firewall_backend": "auto",
+    "clear_dynamic_sets_on_apply": true,
+    "ipv6_enabled": true,
     "strict_enforcement": false,
     "max_file_size_bytes": 8388608,
     "firewall_verify_max_bytes": 262144
@@ -120,6 +124,28 @@ Outbounds получают последовательные ID таблиц, н�
 Поле `cron` использует стандартный 5-полевой формат: `минута час день-месяца месяц день-недели`. Пример выше запускается раз в неделю в воскресенье в 04:00.
 
 Поле `cron` валидируется, даже когда `enabled` установлен в `false`.
+
+## list_refresh
+
+Задаёт упорядоченную цепочку исходящих соединений для загрузки URL-списков.
+Одна и та же цепочка используется планировщиком, ручной кнопкой обновления и
+обновлением после применения конфигурации.
+
+```json { filename="config.json" }
+{
+  "list_refresh": {
+    "detour": "primary_vpn",
+    "fallback_detours": ["backup_vpn", "wan"]
+  }
+}
+```
+
+По умолчанию списки наследуют эту цепочку. Список с
+`"refresh_detour_mode": "override"` использует собственные `detour` и
+`fallback_detours`. Старые списки, в которых уже был `detour`, сохраняют
+прежнее индивидуальное поведение без миграции. Если явно заданная цепочка не
+сработала, keen-pbr не пытается незаметно скачать список через системный
+маршрут.
 
 Вы также можете запустить обновление вручную в любое время:
 - Отправьте `SIGHUP` в процесс демона: `kill -HUP $(cat /var/run/keen-pbr.pid)`

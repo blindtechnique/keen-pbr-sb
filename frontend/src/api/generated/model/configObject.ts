@@ -11,9 +11,11 @@ import type { DaemonConfig } from './daemonConfig';
 import type { DnsConfig } from './dnsConfig';
 import type { FwmarkConfig } from './fwmarkConfig';
 import type { IprouteConfig } from './iprouteConfig';
+import type { ListRefreshConfig } from './listRefreshConfig';
 import type { ListsAutoupdateConfig } from './listsAutoupdateConfig';
 import type { Outbound } from './outbound';
 import type { RouteConfig } from './routeConfig';
+import type { UiPreferencesConfig } from './uiPreferencesConfig';
 
 /**
  * keen-pbr configuration file.
@@ -29,4 +31,6 @@ export interface ConfigObject {
   fwmark?: FwmarkConfig;
   iproute?: IprouteConfig;
   lists_autoupdate?: ListsAutoupdateConfig;
+  list_refresh?: ListRefreshConfig;
+  ui_preferences?: UiPreferencesConfig;
 }

@@ -1,11 +1,22 @@
 import type { ConfigObject } from "@/api/generated/model/configObject"
-import { getOutboundDeleteImpact } from "@/pages/outbounds-utils"
+import { getDnsRuleDisplayName } from "@/lib/dns-display"
+import { getListReferenceLabel } from "@/lib/list-display"
+import {
+  createOutboundDisplayNameMap,
+  getOutboundDisplayName,
+} from "@/lib/outbound-display"
+import { getRouteRuleDisplayName } from "@/pages/routing-rules-utils"
+import { getRuleEditHref } from "@/lib/rule-route"
 
 export type DependencyKind =
   | "routingRule"
   | "dnsRule"
   | "dnsServer"
+  // «DNS:» без слова «правила» — так таблица списков показывает выбранный
+  // для списка DNS-сервер (по новой концепции правило — деталь реализации).
+  | "dns"
   | "failoverGroup"
+  | "listRefresh"
   | "list"
 
 export type Dependency = {
@@ -22,13 +33,29 @@ export type BrokenReference = {
   href: string
 }
 
+export type BrokenReferenceTranslationKey =
+  | "missingList"
+  | "listDetour"
+  | "listRefresh"
+
+export type BrokenReferenceTranslator = Readonly<
+  Record<
+    BrokenReferenceTranslationKey,
+    (values: Readonly<Record<string, string>>) => string
+  >
+>
+
 /** Finds references that can be left behind by a manual edit or import. */
 export function findBrokenReferences(
-  config: ConfigObject | undefined
+  config: ConfigObject | undefined,
+  translate: BrokenReferenceTranslator
 ): BrokenReference[] {
   if (!config) return []
   const found = new Map<string, BrokenReference>()
   const outbounds = new Set((config.outbounds ?? []).map((item) => item.tag))
+  const outboundDisplayNames = createOutboundDisplayNameMap(
+    config.outbounds ?? []
+  )
   const lists = new Set(Object.keys(config.lists ?? {}))
   const dnsServers = new Set(
     (config.dns?.servers ?? []).map((item) => item.tag).filter(Boolean)
@@ -39,16 +66,19 @@ export function findBrokenReferences(
     if (!outbounds.has(rule.outbound)) {
       add({
         id: `route:${index}:outbound:${rule.outbound}`,
-        label: `Правило #${index + 1} → ${rule.outbound}`,
-        href: `/routing-rules/${index}/edit`,
+        label: `${getRouteRuleDisplayName(rule, index)} → ${rule.outbound}`,
+        href: getRuleEditHref("routing-rules", rule, index),
       })
     }
     for (const list of rule.list ?? []) {
       if (!lists.has(list)) {
         add({
           id: `route:${index}:list:${list}`,
-          label: `Правило #${index + 1} → список ${list}`,
-          href: `/routing-rules/${index}/edit`,
+          label: translate.missingList({
+            owner: getRouteRuleDisplayName(rule, index),
+            target: getListReferenceLabel(list, config.lists),
+          }),
+          href: getRuleEditHref("routing-rules", rule, index),
         })
       }
     }
@@ -57,16 +87,19 @@ export function findBrokenReferences(
     if (!dnsServers.has(rule.server)) {
       add({
         id: `dns:${index}:server:${rule.server}`,
-        label: `DNS-правило #${index + 1} → ${rule.server}`,
-        href: `/dns-rules/${index}/edit`,
+        label: `${getDnsRuleDisplayName(rule, index)} → ${rule.server}`,
+        href: getRuleEditHref("dns-rules", rule, index),
       })
     }
     for (const list of rule.list ?? []) {
       if (!lists.has(list)) {
         add({
           id: `dns:${index}:list:${list}`,
-          label: `DNS-правило #${index + 1} → список ${list}`,
-          href: `/dns-rules/${index}/edit`,
+          label: translate.missingList({
+            owner: getDnsRuleDisplayName(rule, index),
+            target: getListReferenceLabel(list, config.lists),
+          }),
+          href: getRuleEditHref("dns-rules", rule, index),
         })
       }
     }
@@ -78,7 +111,9 @@ export function findBrokenReferences(
       if (!outbounds.has(member)) {
         add({
           id: `outbound:${outbound.tag}:member:${member}`,
-          label: `${outbound.tag} → ${member}`,
+          label: `${getOutboundDisplayName(outbound)} → ${
+            outboundDisplayNames.get(member) ?? member
+          }`,
           href: `/outbounds/${outbound.tag}/edit`,
         })
       }
@@ -88,104 +123,96 @@ export function findBrokenReferences(
     if (list.detour && !outbounds.has(list.detour)) {
       add({
         id: `list:${name}:detour:${list.detour}`,
-        label: `Список ${name} → ${list.detour}`,
+        label: translate.listDetour({
+          list: getListReferenceLabel(name, config.lists),
+          target: outboundDisplayNames.get(list.detour) ?? list.detour,
+        }),
+        href: `/lists/${name}/edit`,
+      })
+    }
+    for (const [index, fallback] of (list.fallback_detours ?? []).entries()) {
+      if (outbounds.has(fallback)) continue
+      add({
+        id: `list:${name}:fallback:${index}:${fallback}`,
+        label: translate.listDetour({
+          list: getListReferenceLabel(name, config.lists),
+          target: outboundDisplayNames.get(fallback) ?? fallback,
+        }),
         href: `/lists/${name}/edit`,
       })
     }
   }
+  const globalListRefresh = config.list_refresh
+  if (globalListRefresh?.detour && !outbounds.has(globalListRefresh.detour)) {
+    add({
+      id: `list-refresh:detour:${globalListRefresh.detour}`,
+      label: translate.listRefresh({
+        target:
+          outboundDisplayNames.get(globalListRefresh.detour) ??
+          globalListRefresh.detour,
+      }),
+      href: "/general?tab=general",
+    })
+  }
+  for (const [index, fallback] of (
+    globalListRefresh?.fallback_detours ?? []
+  ).entries()) {
+    if (outbounds.has(fallback)) continue
+    add({
+      id: `list-refresh:fallback:${index}:${fallback}`,
+      label: translate.listRefresh({
+        target: outboundDisplayNames.get(fallback) ?? fallback,
+      }),
+      href: "/general?tab=general",
+    })
+  }
   return [...found.values()]
 }
 
+/** Сколько видов связей показывать до того, как список начнёт складываться. */
+export const VISIBLE_DEPENDENCY_KINDS = 3
+
 /**
- * Кто пострадает, если это удалить.
+ * Сколько связей одного вида помещается в строку.
  *
- * Связи в конфигурации существуют давно, но человек узнавал о них в момент
- * удаления — из диалога, который перечислял последствия постфактум. Здесь то
- * же знание считается заранее, чтобы показать его рядом с записью: удаление
- * не должно быть способом выяснить, что от чего зависит.
- *
- * Считается по конфигурации, которая и так лежит на клиенте: ни запросов, ни
- * нового состояния.
+ * Ограничения по видам мало: «Списки:» с одиннадцатью именами — формально одна
+ * строка, а на экране пять.
  */
-export function dependenciesOfList(
-  config: ConfigObject | undefined,
-  listName: string
-): Dependency[] {
-  if (!config) return []
-  const found: Dependency[] = []
+export const VISIBLE_DEPENDENCIES_PER_KIND = 3
 
-  ;(config.route?.rules ?? []).forEach((rule, index) => {
-    if (rule.list?.includes(listName)) {
-      found.push({
-        kind: "routingRule",
-        label: `#${index + 1} → ${rule.outbound}`,
-        href: `/routing-rules/${index}/edit`,
-      })
-    }
-  })
-  ;(config.dns?.rules ?? []).forEach((rule, index) => {
-    if (rule.list?.includes(listName)) {
-      found.push({
-        kind: "dnsRule",
-        label: `#${index + 1} → ${rule.server}`,
-        href: `/dns-rules/${index}/edit`,
-      })
-    }
-  })
-
-  return found
+export type DependencyRow = {
+  kind: string
+  items: Dependency[]
 }
 
-export function dependenciesOfOutbound(
-  config: ConfigObject | undefined,
-  tag: string
-): Dependency[] {
-  if (!config) return []
-  const found: Dependency[] = []
-  const impact = getOutboundDeleteImpact(config, [tag])
-
-  impact.routeRuleIndexes.forEach((index) => {
-    const rule = config.route?.rules?.[index]
-    found.push({
-      kind: "routingRule",
-      label:
-        rule?.list && rule.list.length > 0
-          ? `#${index + 1}: ${rule.list.join(", ")}`
-          : `#${index + 1}`,
-      href: `/routing-rules/${index}/edit`,
-    })
-  })
-
-  // Группа резервирования, у которой это единственный участник, исчезнет
-  // вместе с ним — про такое важно знать до, а не после.
-  for (const membership of impact.urltestMemberships) {
-    found.push({
-      kind: "failoverGroup",
-      label: membership.outboundTag,
-      href: `/outbounds/${membership.outboundTag}/edit`,
-    })
+/**
+ * Свёрнутый вид «Где используется»: строка на вид связи, не больше трёх строк
+ * и не больше трёх имён в строке. Остальное прячется за «Ещё N».
+ *
+ * Считается именно N связей, а не N видов: «Ещё 11» — это одиннадцать списков,
+ * которые сломаются, а «Ещё 2» звучит как две мелочи.
+ */
+export function planDependencyRows(
+  dependencies: Dependency[],
+  expanded: boolean
+): { rows: DependencyRow[]; hiddenCount: number } {
+  const byKind = new Map<string, Dependency[]>()
+  for (const dependency of dependencies) {
+    byKind.set(dependency.kind, [
+      ...(byKind.get(dependency.kind) ?? []),
+      dependency,
+    ])
   }
 
-  for (const serverTag of impact.dnsServerDetours) {
-    found.push({
-      kind: "dnsServer",
-      label: serverTag,
-      href: `/dns-servers/${encodeURIComponent(serverTag)}/edit`,
-    })
-  }
+  const kinds = [...byKind.entries()]
+  const visibleKinds = expanded
+    ? kinds
+    : kinds.slice(0, VISIBLE_DEPENDENCY_KINDS)
+  const rows = visibleKinds.map(([kind, items]) => ({
+    kind,
+    items: expanded ? items : items.slice(0, VISIBLE_DEPENDENCIES_PER_KIND),
+  }))
+  const shown = rows.reduce((total, row) => total + row.items.length, 0)
 
-  return found
-}
-
-/** Списки, которые перестанут куда-либо направляться вместе с соединением. */
-export function listsRoutedThrough(
-  config: ConfigObject | undefined,
-  tag: string
-): string[] {
-  const names = new Set<string>()
-  for (const rule of config?.route?.rules ?? []) {
-    if (rule.outbound !== tag) continue
-    for (const name of rule.list ?? []) names.add(name)
-  }
-  return [...names]
+  return { rows, hiddenCount: dependencies.length - shown }
 }

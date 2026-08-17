@@ -2,6 +2,7 @@
 
 #include "handler_geo.hpp"
 
+#include "../config/config_writer.hpp"
 #include "../http/http_client.hpp"
 #include "../log/logger.hpp"
 
@@ -77,17 +78,20 @@ nlohmann::json& cache() {
 }
 
 void save_cache() {
-    ::mkdir("/opt/var/cache", 0755);
-    ::mkdir("/opt/var/cache/keen-pbr", 0755);
-    const std::string temporary = std::string(kCachePath) + ".tmp";
-    {
-        std::ofstream file(temporary, std::ios::trunc);
-        if (!file) {
-            return;
-        }
-        file << cache().dump();
+    AtomicFileWriteOptions options;
+    options.create_parent_directories = true;
+    options.created_directory_mode = 0755;
+    options.default_file_mode = 0644;
+    options.file_mode = static_cast<mode_t>(0644);
+    try {
+        write_file_atomically(kCachePath, cache().dump(), options);
+    } catch (const std::exception& error) {
+        // Geolocation is cosmetic and reconstructible. Keep the in-memory
+        // result, but never truncate the last usable on-disk cache.
+        Logger::instance().warn(
+            "Cannot persist geolocation cache atomically: {}",
+            error.what());
     }
-    ::rename(temporary.c_str(), kCachePath);
 }
 
 bool cache_entry_is_fresh(const nlohmann::json& entry) {

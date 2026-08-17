@@ -2,6 +2,14 @@
 
 namespace keen_pbr3 {
 
+bool resolver_reload_required(std::string_view expected_hash,
+                              std::string_view actual_hash,
+                              api::ResolverLiveStatus live_status) {
+    return expected_hash.empty() ||
+           expected_hash != actual_hash ||
+           live_status != api::ResolverLiveStatus::HEALTHY;
+}
+
 ResolverActualState build_resolver_actual_state(
     bool routing_runtime_active,
     bool resolver_configured,

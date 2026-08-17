@@ -5,7 +5,9 @@
  * REST API for the keen-pbr policy-based routing daemon.
  * OpenAPI spec version: 3.0.0
  */
+import type { RoutingTestEvaluation } from './routingTestEvaluation';
 import type { RoutingTestListMatch } from './routingTestListMatch';
+import type { RoutingTestUnknownCondition } from './routingTestUnknownCondition';
 
 export interface RoutingTestEntry {
   /** IP address being tested. */
@@ -13,12 +15,15 @@ export interface RoutingTestEntry {
   /** Details of the list entry that matched. Absent when no rule matched.
    */
   list_match?: RoutingTestListMatch;
-  /** Outbound tag determined by scanning route rules against cached list data. "(default)" when no rule matches.
+  /** Outbound tag determined from the active rules, cached list data, and destination address. "(default)" when no rule matches and "(unknown)" when packet context is required.
    */
   expected_outbound: string;
-  /** Outbound tag found in the live kernel firewall sets. "(default)" when the IP is not present in any set. "(unknown)" when the firewall tool is unavailable.
+  /** Outbound tag found from realized firewall rules and live set membership. "(default)" when the IP is not present in any set. "(unknown)" when the firewall tool, set state, or packet context is unavailable.
    */
   actual_outbound: string;
   /** true when expected_outbound equals actual_outbound. */
   ok: boolean;
+  evaluation: RoutingTestEvaluation;
+  /** Packet or runtime fields required for a conclusive result. */
+  unknown_conditions: RoutingTestUnknownCondition[];
 }

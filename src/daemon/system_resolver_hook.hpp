@@ -12,9 +12,18 @@ namespace keen_pbr3 {
 using HookCommandExecutor = std::function<int(const std::vector<std::string>& args)>;
 
 const char* system_resolver_hook_path() noexcept;
+std::string_view runtime_start_resolver_action() noexcept;
+
+bool runtime_restart_should_retry(std::string_view error) noexcept;
 std::vector<std::string> build_system_resolver_hook_args(const Config& config,
-                                                          std::string_view action);
-std::vector<std::string> build_system_resolver_reload_args(const Config& config);
+                                                          std::string_view action,
+                                                          std::string_view attempt_id = {});
+std::vector<std::string> build_system_resolver_reload_args(
+    const Config& config,
+    std::string_view attempt_id = {});
+
+bool is_valid_resolver_attempt_id(std::string_view attempt_id) noexcept;
+std::string generate_resolver_attempt_id();
 
 bool execute_system_resolver_reload_hook(
     const Config& config,

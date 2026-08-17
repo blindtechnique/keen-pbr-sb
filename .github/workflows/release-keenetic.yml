@@ -9,6 +9,10 @@ on:
     branches:
       - alpha
       - next
+  pull_request:
+    branches:
+      - alpha
+      - next
   workflow_dispatch:
     inputs:
       release_tag:
@@ -17,52 +21,234 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   frontend:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.3.14
+
+      - name: Set up Node for backend API code generation
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
 
       - name: Build frontend
         run: |
+          git diff --check
           cd frontend
           bun install --frozen-lockfile
+          make -C .. generate-check
+          bun run lint
+          bun run api:check
+          bun run i18n:check
+          bun run literals:check
           bun test
           bun run typecheck
-          bun run build
+          cd ..
+          sh build_scripts/build-frontend.sh "$PWD" "$PWD/frontend/dist"
 
       - name: Upload frontend bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: frontend-dist
           path: frontend/dist
           if-no-files-found: error
+          include-hidden-files: true
+
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libcurl4-openssl-dev \
+            libnl-3-dev \
+            libnl-route-3-dev \
+            libunwind-dev \
+            busybox-static \
+            lua5.3 \
+            pkg-config \
+            zlib1g-dev
+
+      - name: Run deterministic source and package gates
+        run: >-
+          make check-shell check-openapi-parity check-nfqws-assets
+          check-nfqws-rotator-lua
+
+      - name: Build and run backend test matrix
+        # Includes the monolithic suite, crash smoke test and all eight narrow
+        # lifecycle/DNS/backup/update-lock targets. The Keenetic cross-build
+        # below remains the GCC 8.4 production-binary check.
+        run: >-
+          make test BUILD_JOBS=4
+          TEST_CMAKE_FLAGS="-DKEEN_PBR_USE_LIBUNWIND=ON -DCMAKE_BUILD_TYPE=Release"
+
+      - name: Run IPK validator unit tests
+        run: python3 -m unittest build_scripts.tests.test_validate_keenetic_ipk -v
+
+      - name: Run Keenetic BusyBox package-script smoke tests
+        run: |
+          for variant in full headless; do
+            docker run --rm \
+              -e KEEN_PBR_PACKAGE_IT_CONTAINER=1 \
+              -v "$PWD:/workspace:ro" \
+              busybox:1.37 \
+              sh /workspace/tests/package_it/run-postinst-target-shell.sh \
+                /workspace "$variant"
+          done
+          docker run --rm \
+            -e KEEN_PBR_PACKAGE_IT_CONTAINER=1 \
+            -v "$PWD:/workspace:ro" \
+            busybox:1.37 \
+            sh /workspace/tests/package_it/run-uninstall-target-shell.sh \
+              /workspace
+          docker run --rm \
+            -e KEEN_PBR_PACKAGE_IT_CONTAINER=1 \
+            -v "$PWD:/workspace:ro" \
+            busybox:1.37 \
+            sh /workspace/tests/package_it/run-rescue-guard-lock.sh \
+              /workspace
+          docker run --rm \
+            -v "$PWD:/workspace:ro" \
+            busybox:1.37 \
+            sh /workspace/tests/package_it/run-dnsmasq-helper-lkg.sh \
+              /workspace/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq.sh \
+              /workspace/packages/openwrt/keen-pbr/files/usr/lib/keen-pbr/dnsmasq.sh \
+              /workspace/packages/debian/files/usr/lib/keen-pbr/dnsmasq.sh
+          docker run --rm \
+            -v "$PWD:/workspace:ro" \
+            busybox:1.37 \
+            sh /workspace/tests/package_it/run-netfilter-hook-signals.sh \
+              /workspace/packages/keenetic/keen-pbr/files/opt/etc/ndm/netfilter.d/50-keen-pbr-routing.sh \
+              /workspace/packages/keenetic/keen-pbr/files/opt/etc/init.d/S80keen-pbr \
+              /workspace/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-startup-guard.sh \
+              /workspace/packages/openwrt/keen-pbr/files/etc/init.d/keen-pbr \
+              /workspace/packages/openwrt/keen-pbr/files/usr/lib/keen-pbr/firewall.sh \
+              /workspace/packages/openwrt/keen-pbr/files/etc/hotplug.d/firewall/70-keen-pbr
+          docker run --rm \
+            -v "$PWD:/workspace:ro" \
+            busybox:1.37 \
+            sh /workspace/tests/package_it/run-keenetic-iptables-wait.sh \
+              /workspace/packages/keenetic/keen-pbr/files/opt/etc/init.d/S80keen-pbr
+          docker run --rm \
+            -v "$PWD:/workspace:ro" \
+            busybox:1.37 \
+            sh /workspace/tests/package_it/run-keenetic-startup-dependencies.sh \
+              /workspace/packages/keenetic/keen-pbr/files/opt/etc/init.d/S80keen-pbr
+          docker run --rm \
+            -v "$PWD:/workspace:ro" \
+            busybox:1.37 \
+            sh /workspace/tests/package_it/run-keenetic-meta-udp443-cleanup.sh \
+              /workspace/packages/keenetic/keen-pbr/files/opt/etc/init.d/S80keen-pbr
+          docker run --rm \
+            -v "$PWD:/workspace:ro" \
+            busybox:1.37 \
+            sh /workspace/tests/package_it/run-keenetic-ppe-deoffload-cleanup.sh \
+              /workspace/packages/keenetic/keen-pbr/files/opt/etc/init.d/S80keen-pbr
+          docker run --rm \
+            -v "$PWD:/workspace:ro" \
+            busybox:1.37 \
+            sh /workspace/tests/package_it/run-ndmc-env-contract.sh \
+              /workspace/install.sh \
+              /workspace/uninstall.sh
+
+  crash-diagnostics-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libcurl4-openssl-dev \
+            libnl-3-dev \
+            libnl-route-3-dev \
+            libunwind-dev \
+            pkg-config \
+            zlib1g-dev
+
+      - name: Configure crash diagnostics smoke test
+        run: |
+          cmake -S . -B build-crash-smoke \
+            -DBUILD_TESTS=ON \
+            -DWITH_API=OFF \
+            -DKEEN_PBR_USE_LIBUNWIND=ON \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build crash diagnostics smoke test
+        run: >-
+          cmake --build build-crash-smoke
+          --target crash-diagnostics-smoke
+          --parallel 4
+
+      - name: Run crash diagnostics smoke test
+        run: ./build-crash-smoke/tests/crash-diagnostics-smoke
+
+  clang-thread-safety:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Clang build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            libcurl4-openssl-dev \
+            libnl-3-dev \
+            libnl-route-3-dev \
+            libunwind-dev \
+            pkg-config \
+            zlib1g-dev
+
+      - name: Run Clang thread-safety checks
+        run: make clang-check BUILD_JOBS=4
+
+  firewall-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Run Docker and network namespace integration suite
+        run: make firewall-it
 
   build:
     needs:
+      - backend
       - frontend
       - transport-manager
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON((github.ref == 'refs/heads/alpha' || github.ref == 'refs/heads/next') && '[{"config":"aarch64-3.10","arch":"aarch64"}]' || '[{"config":"aarch64-3.10","arch":"aarch64"},{"config":"mips-3.4","arch":"mips"},{"config":"mipsel-3.4","arch":"mipsel"}]') }}
+        include: ${{ fromJSON((github.ref == 'refs/heads/alpha' || github.ref == 'refs/heads/next' || github.event_name == 'pull_request') && '[{"config":"aarch64-3.10","arch":"aarch64"}]' || '[{"config":"aarch64-3.10","arch":"aarch64"},{"config":"mips-3.4","arch":"mips"},{"config":"mipsel-3.4","arch":"mipsel"}]') }}
     env:
       KEENETIC_VERSION: "3.10"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download frontend bundle
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: frontend-dist
           path: frontend-dist
@@ -74,10 +260,12 @@ jobs:
           cp -a frontend-dist/. frontend/dist/
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: "1.22"
-          cache-dependency-path: extensions/transport-manager/go.sum
+          # This module currently uses only the Go standard library, so there
+          # is no go.sum to cache.
+          cache: false
 
       - name: Build ${{ matrix.config }} IPK
         env:
@@ -96,12 +284,26 @@ jobs:
           set -e
           IPK=$(find build/packages -name 'keen-pbr_*.ipk' | head -1)
           test -n "$IPK"
+          EXPECTED_COMMIT=$(git rev-parse --short=12 HEAD)
           cp "$IPK" .
           IPK_NAME=$(basename "$IPK")
-          python3 build_scripts/validate-keenetic-ipk.py "$IPK_NAME" --arch "${{ matrix.arch }}"
+          python3 build_scripts/validate-keenetic-ipk.py "$IPK_NAME" \
+            --arch "${{ matrix.arch }}" \
+            --expected-commit "$EXPECTED_COMMIT"
+
+      - name: Test packaged maintainer-script lifecycle
+        run: |
+          IPK_NAME=$(find . -maxdepth 1 -name 'keen-pbr_*.ipk' | head -1)
+          test -n "$IPK_NAME"
+          docker run --rm \
+            -e KEEN_PBR_PACKAGE_IT_CONTAINER=1 \
+            -v "$PWD:/workspace:ro" \
+            busybox:1.37 \
+            sh /workspace/tests/package_it/run-built-ipk-lifecycle.sh \
+              "/workspace/${IPK_NAME#./}"
 
       - name: Upload ${{ matrix.config }} IPK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: keenetic-ipk-${{ matrix.config }}
           path: keen-pbr_*.ipk
@@ -111,13 +313,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: "1.22"
-          cache-dependency-path: extensions/transport-manager/go.sum
+          cache: false
 
       - name: Test transport manager
         working-directory: extensions/transport-manager
@@ -129,16 +331,23 @@ jobs:
 
   publish-release:
     if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
-    needs: build
+    needs:
+      - build
+      - backend
+      - crash-diagnostics-smoke
+      - clang-thread-safety
+      - firewall-integration
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     env:
       RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download all Keenetic IPKs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: keenetic-ipk-*
           path: release-assets
@@ -187,11 +396,16 @@ jobs:
 
   upload-next-artifact:
     if: github.ref == 'refs/heads/next'
-    needs: build
+    needs:
+      - build
+      - backend
+      - crash-diagnostics-smoke
+      - clang-thread-safety
+      - firewall-integration
     runs-on: ubuntu-latest
     steps:
       - name: Download aarch64 test IPK
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: keenetic-ipk-aarch64-3.10
           path: release-assets
@@ -202,7 +416,7 @@ jobs:
           sha256sum keen-pbr_*.ipk > SHA256SUMS
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: keen-pbr-ipk
           path: |
@@ -212,11 +426,16 @@ jobs:
 
   upload-alpha-artifact:
     if: github.ref == 'refs/heads/alpha'
-    needs: build
+    needs:
+      - build
+      - backend
+      - crash-diagnostics-smoke
+      - clang-thread-safety
+      - firewall-integration
     runs-on: ubuntu-latest
     steps:
       - name: Download aarch64 alpha IPK
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: keenetic-ipk-aarch64-3.10
           path: release-assets
@@ -227,7 +446,7 @@ jobs:
           sha256sum keen-pbr_*.ipk > SHA256SUMS
 
       - name: Upload alpha workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: keen-pbr-alpha-ipk
           path: |

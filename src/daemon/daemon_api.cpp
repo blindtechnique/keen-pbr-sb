@@ -2,23 +2,37 @@
 
 #ifdef WITH_API
 
+#include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
+#include <future>
+#include <limits>
+#include <sys/epoll.h>
 #include <thread>
 
 #include "../api/handlers.hpp"
+#include "../api/handler_connections.hpp"
+#include "../api/handler_health_service.hpp"
 #include "../api/server.hpp"
+#include "../api/status_stream.hpp"
+#include "../connections/conntrack_event_monitor.hpp"
 #include "../config/routing_state.hpp"
 #include "../dns/dns_router.hpp"
 #include "../dns/dnsmasq_gen.hpp"
 #include "../util/ipv6_support.hpp"
 #include "../health/routing_health_checker.hpp"
 #include "../health/runtime_interface_inventory.hpp"
+#include "../keenetic/ndms_catalog_cache.hpp"
+#include "../keenetic/ndms_interface_inventory.hpp"
 #include "../health/runtime_outbound_state.hpp"
+#include "../api/handler_runtime_inventory.hpp"
+#include "../api/handler_diagnostic_tasks.hpp"
 #include "../lists/list_streamer.hpp"
 #include "../log/logger.hpp"
 #include "../util/system_info.hpp"
 #include "../util/time_utils.hpp"
+#include "scheduler.hpp"
 
 #ifndef KEEN_PBR_FRONTEND_ROOT
 #define KEEN_PBR_FRONTEND_ROOT "/usr/share/keen-pbr/frontend"
@@ -28,39 +42,369 @@ namespace keen_pbr3 {
 
 namespace {
 
-const char* config_operation_state_name(ConfigOperationState state) {
-    switch (state) {
-    case ConfigOperationState::Idle:
-        return "idle";
-    case ConfigOperationState::Saving:
-        return "saving";
-    case ConfigOperationState::Reloading:
-        return "reloading";
-    }
-    return "unknown";
+constexpr auto conntrack_publish_delay = std::chrono::milliseconds{500};
+constexpr auto interface_traffic_sample_interval = std::chrono::seconds{2};
+
+std::int64_t interface_traffic_timestamp_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+std::int64_t interface_traffic_api_integer(std::uint64_t value) {
+    constexpr auto maximum =
+        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+    return static_cast<std::int64_t>(std::min(value, maximum));
 }
 
 } // namespace
 
-void Daemon::finish_config_operation() {
-    KPBR_LOCK_GUARD(config_op_mutex_);
-    config_op_state_.store(ConfigOperationState::Idle, std::memory_order_release);
-    Logger::instance().trace("config_operation_state",
-                             "state={} reason=finish",
-                             config_operation_state_name(ConfigOperationState::Idle));
-    config_op_cv_.notify_all();
-}
+api::RuntimeInterfaceInventoryResponse
+Daemon::build_runtime_interface_inventory_with_uptime() {
+    // Stamp the round before its netlink dump.  Concurrent workers can finish
+    // in the opposite order from the one in which their snapshots started;
+    // begin_round uses this instant to reject a late, older snapshot as a
+    // whole.  The wall/steady pair is also kept together so publication never
+    // derives elapsed time across an RTC step.
+    const auto observed_at = InterfaceUptimeAnchorStore::Clock::now();
+    const auto wall_now = std::chrono::system_clock::now();
 
-void Daemon::begin_config_operation_or_throw(ConfigOperationState state,
-                                             const char* reason,
-                                             bool require_runtime_running,
-                                             bool require_runtime_stopped) {
-    KPBR_UNIQUE_LOCK(lock, config_op_mutex_);
-    if (config_op_state_.load(std::memory_order_acquire) != ConfigOperationState::Idle) {
-        throw ApiError("Another config operation is already in progress", 409);
+    std::vector<DumpedInterface> dumped;
+    try {
+        dumped = netlink_.dump_interfaces();
+    } catch (const NetlinkError&) {
+        return api::RuntimeInterfaceInventoryResponse{};
     }
 
-    const bool runtime_running = runtime_state_store_.snapshot().routing_runtime_active;
+    std::vector<std::string> runtime_names;
+    runtime_names.reserve(dumped.size());
+    for (const auto& item : dumped) {
+        runtime_names.push_back(item.name);
+    }
+    // Open the round before folding in any firmware observation. Ordering is
+    // load-bearing: begin_round records when each interface entered the set,
+    // and a cached catalog read before that instant describes a previous
+    // lifetime of a reused name.
+    interface_uptime_anchors_.begin_round(runtime_names, observed_at);
+
+    // peek(), never get(): this runs on an HTTP worker and on the SSE
+    // reconcile path, and a blocking loopback RCI request there would stall
+    // both. A cold catalog simply leaves the firmware anchor unavailable,
+    // which the entry then reports as unknown instead of guessing.
+    const auto ndms = shared_ndms_catalog_cache().peek();
+    if (ndms.observed_at) {
+        for (const auto& metadata : ndms.catalog.interface_metadata) {
+            if (!metadata.uptime_seconds) {
+                continue;
+            }
+            const auto kernel_name = resolve_ndms_kernel_name(
+                metadata.firmware_interface_name, runtime_names);
+            if (!kernel_name) {
+                continue;
+            }
+            // Stamped with the instant the catalog was read, not with now:
+            // this snapshot can be a whole cache TTL old, and dating it to now
+            // would shorten every uptime it carries by that lag.
+            interface_uptime_anchors_.observe_firmware_uptime(
+                *kernel_name, *metadata.uptime_seconds, *ndms.observed_at);
+        }
+    }
+
+    return build_runtime_interface_inventory_response(
+        std::move(dumped),
+        &interface_traffic_sampler_,
+        &interface_uptime_anchors_,
+        observed_at,
+        wall_now);
+}
+
+void Daemon::sample_interface_traffic_now() {
+    if (!status_stream_ || !status_stream_->has_subscribers()) {
+        const bool sampling_stopped =
+            traffic_sampling_active_ ||
+            !traffic_sampled_interfaces_.empty();
+        if (sampling_stopped) {
+            interface_traffic_sampler_.clear_all();
+            traffic_sampled_interfaces_.clear();
+            traffic_sampling_active_ = false;
+            // The next viewer must not inherit the backoff this one left
+            // behind, or a freshly opened dashboard would sit blank for the
+            // length of a stretched interval.
+            interface_traffic_cadence_.reset();
+            periodic_task_metrics_.record_skipped(
+                "interface-traffic-sample",
+                "status stream has no subscribers");
+        }
+        return;
+    }
+
+    auto task_metrics =
+        periodic_task_metrics_.begin("interface-traffic-sample");
+    try {
+        std::set<std::string> target_interfaces;
+        {
+            std::lock_guard<std::mutex> lock(
+                interface_traffic_targets_mutex_);
+            for (const auto& [source, interfaces] :
+                 interface_traffic_targets_by_source_) {
+                (void)source;
+                target_interfaces.insert(
+                    interfaces.begin(), interfaces.end());
+            }
+        }
+
+        if (target_interfaces.empty()) {
+            if (traffic_sampling_active_ ||
+                !traffic_sampled_interfaces_.empty()) {
+                interface_traffic_sampler_.clear_all();
+                traffic_sampled_interfaces_.clear();
+                traffic_sampling_active_ = false;
+            }
+            interface_traffic_cadence_.reset();
+            task_metrics.noop();
+            return;
+        }
+
+        // A changed target set means a screen was just opened or closed. That
+        // is the worst possible moment to be mid-backoff, so it both restores
+        // the fast rate and guarantees this tick takes a reading.
+        const bool targets_changed =
+            target_interfaces != traffic_sampled_interfaces_;
+        if (targets_changed) {
+            interface_traffic_cadence_.reset();
+        }
+        if (!interface_traffic_cadence_.begin_tick()) {
+            // Nothing has moved for a while. Skipping the read is the whole
+            // point of the backoff; publishing an empty batch here would undo
+            // it by waking every subscriber anyway.
+            task_metrics.noop();
+            return;
+        }
+
+        const auto target_plan = plan_interface_traffic_targets(
+            target_interfaces, traffic_sampled_interfaces_);
+        bool anything_changed = targets_changed;
+        nlohmann::json interfaces = nlohmann::json::array();
+        for (const auto& interface_name : target_plan.reported) {
+            if (target_plan.removed.find(interface_name) !=
+                target_plan.removed.end()) {
+                interface_traffic_sampler_.clear(interface_name);
+                interfaces.push_back(
+                    nlohmann::json{
+                        {"name", interface_name},
+                        {"available", false},
+                        {"reset", false},
+                    });
+                continue;
+            }
+
+            const auto result =
+                interface_traffic_sampler_.sample(interface_name);
+            anything_changed = anything_changed || result.state_changed;
+            const bool unavailable =
+                result.status ==
+                    InterfaceTrafficSampler::SampleStatus::Unavailable ||
+                result.status ==
+                    InterfaceTrafficSampler::SampleStatus::InvalidInterfaceName;
+            nlohmann::json entry{
+                {"name", interface_name},
+                {"available", !unavailable},
+                {"reset",
+                 result.status ==
+                     InterfaceTrafficSampler::SampleStatus::CounterReset},
+            };
+            if (result.point) {
+                // The instant this interface's own counters were read. Emitted
+                // only alongside a real reading, so an interface that was
+                // skipped or failed this round carries no timestamp at all
+                // rather than borrowing the round's and looking as fresh as
+                // the ones that succeeded.
+                entry["observed_at_unix_ms"] =
+                    unix_timestamp_ms(result.point->observed_at);
+                entry["rx_bytes"] =
+                    interface_traffic_api_integer(result.point->rx_bytes);
+                entry["tx_bytes"] =
+                    interface_traffic_api_integer(result.point->tx_bytes);
+                if (result.point->rx_bits_per_second) {
+                    entry["rx_bits_per_second"] =
+                        interface_traffic_api_integer(
+                            *result.point->rx_bits_per_second);
+                }
+                if (result.point->tx_bits_per_second) {
+                    entry["tx_bits_per_second"] =
+                        interface_traffic_api_integer(
+                            *result.point->tx_bits_per_second);
+                }
+            }
+            interfaces.push_back(std::move(entry));
+        }
+
+        interface_traffic_cadence_.end_round(anything_changed);
+        traffic_sampled_interfaces_ = target_interfaces;
+        traffic_sampling_active_ = true;
+        status_stream_->publish_interface_traffic(
+            nlohmann::json{
+                {"sampled_at_unix_ms", interface_traffic_timestamp_ms()},
+                {"interfaces", std::move(interfaces)},
+            });
+        task_metrics.success();
+    } catch (const std::exception& error) {
+        task_metrics.failure(error.what());
+        throw;
+    } catch (...) {
+        task_metrics.failure("interface traffic sampling failed");
+        throw;
+    }
+}
+
+void Daemon::replace_interface_traffic_targets(
+    std::string source,
+    std::vector<std::string> interface_names) {
+    std::set<std::string> valid_names;
+    for (auto& name : interface_names) {
+        if (InterfaceTrafficSampler::is_valid_interface_name(name)) {
+            valid_names.insert(std::move(name));
+        }
+    }
+    std::lock_guard<std::mutex> lock(interface_traffic_targets_mutex_);
+    interface_traffic_targets_by_source_[std::move(source)] =
+        std::move(valid_names);
+}
+
+void Daemon::refresh_interface_traffic_config_targets(
+    const Config& config) {
+    replace_interface_traffic_targets(
+        "active-config", interface_traffic_targets_from_config(config));
+}
+
+void Daemon::schedule_interface_traffic_sampling() {
+    scheduler_->schedule_repeating(
+        interface_traffic_sample_interval,
+        [this]() {
+            sample_interface_traffic_now();
+        },
+        "interface-traffic-sample");
+}
+
+void Daemon::setup_conntrack_events() {
+    conntrack_event_monitor_ = std::make_unique<ConntrackEventMonitor>();
+
+    api::ConnectionEventState state;
+    state.revision = static_cast<std::int64_t>(conntrack_revision_);
+    state.changed_at = 0;
+    state.available = conntrack_event_monitor_->available();
+    status_stream_->publish_connections(state);
+
+    if (!conntrack_event_monitor_->available()) {
+        Logger::instance().warn(
+            "Conntrack event stream unavailable; WebUI will use slow fallback polling: {}",
+            conntrack_event_monitor_->error());
+        conntrack_event_monitor_.reset();
+        return;
+    }
+
+    const int fd = conntrack_event_monitor_->fd();
+    try {
+        add_fd(
+            fd,
+            EPOLLIN | EPOLLERR | EPOLLHUP,
+            [this](std::uint32_t events) { handle_conntrack_events(events); },
+            true,
+            "conntrack-events");
+    } catch (const std::exception& error) {
+        Logger::instance().warn(
+            "Could not register conntrack event stream; WebUI will use slow fallback polling: {}",
+            error.what());
+        conntrack_event_monitor_.reset();
+        state.available = false;
+        status_stream_->publish_connections(std::move(state));
+        return;
+    }
+    Logger::instance().info(
+        "Conntrack event stream enabled for real-time connection updates");
+}
+
+void Daemon::handle_conntrack_events(std::uint32_t events) {
+    if (!conntrack_event_monitor_) return;
+
+    try {
+        if ((events & EPOLLIN) != 0) {
+            const auto count = conntrack_event_monitor_->drain();
+            if (count > 0) {
+                conntrack_revision_ += count;
+                invalidate_connections_snapshot();
+                if (conntrack_publish_task_id_ < 0) {
+                    conntrack_publish_task_id_ = scheduler_->schedule_oneshot(
+                        conntrack_publish_delay,
+                        [this]() {
+                            conntrack_publish_task_id_ = -1;
+                            publish_conntrack_revision();
+                        },
+                        "conntrack-sse-coalesce");
+                }
+            }
+        }
+        if ((events & (EPOLLERR | EPOLLHUP)) != 0) {
+            throw std::runtime_error(
+                "conntrack netlink socket reported an error");
+        }
+    } catch (const std::exception& error) {
+        Logger::instance().warn(
+            "Conntrack event stream stopped; WebUI will use slow fallback polling: {}",
+            error.what());
+        api::ConnectionEventState state;
+        state.revision = static_cast<std::int64_t>(conntrack_revision_);
+        state.changed_at = unix_timestamp_now_seconds();
+        state.available = false;
+        status_stream_->publish_connections(std::move(state));
+        teardown_conntrack_events();
+    }
+}
+
+void Daemon::publish_conntrack_revision() {
+    if (!status_stream_ || !conntrack_event_monitor_) return;
+    api::ConnectionEventState state;
+    state.revision = static_cast<std::int64_t>(conntrack_revision_);
+    state.changed_at = unix_timestamp_now_seconds();
+    state.available = true;
+    status_stream_->publish_connections(std::move(state));
+}
+
+void Daemon::teardown_conntrack_events() {
+    if (conntrack_publish_task_id_ >= 0) {
+        scheduler_->cancel(conntrack_publish_task_id_);
+        conntrack_publish_task_id_ = -1;
+    }
+    if (!conntrack_event_monitor_) return;
+    remove_fd(
+        conntrack_event_monitor_->fd(),
+        true,
+        "conntrack-events");
+    conntrack_event_monitor_.reset();
+}
+
+RuntimeMutationAdmission::Lease
+Daemon::acquire_runtime_mutation_or_throw(
+    std::string label,
+    bool require_runtime_running,
+    bool require_runtime_stopped) {
+    auto lease = runtime_mutation_admission_.try_acquire(label);
+    if (!lease.has_value()) {
+        const auto active = runtime_mutation_admission_.active();
+        const std::string detail = active.has_value() && !active->label.empty()
+            ? ": " + active->label
+            : std::string{};
+        throw ApiError(
+            "Another runtime mutation is already in progress" + detail,
+            409);
+    }
+
+    const auto runtime_snapshot = runtime_state_store_.snapshot();
+    if (runtime_snapshot.runtime_state == RuntimeState::starting ||
+        runtime_snapshot.runtime_state == RuntimeState::shutting_down) {
+        throw ApiError("Routing runtime initialization or shutdown is in progress", 409);
+    }
+    const bool runtime_running = runtime_snapshot.routing_runtime_active;
     if (require_runtime_running && !runtime_running) {
         throw ApiError("Routing runtime is stopped; start it first", 409);
     }
@@ -68,34 +412,28 @@ void Daemon::begin_config_operation_or_throw(ConfigOperationState state,
         throw ApiError("Routing runtime is already started", 409);
     }
 
-    config_op_state_.store(state, std::memory_order_release);
-    Logger::instance().trace("config_operation_state",
-                             "state={} reason={}",
-                             config_operation_state_name(state),
-                             reason);
+    Logger::instance().trace(
+        "runtime_mutation_admitted",
+        "token={} label={}",
+        lease->token(),
+        label);
+    return std::move(*lease);
 }
 
 void Daemon::run_runtime_control_operation_or_throw(const std::string& label,
                                                     const char* operation_name,
                                                     std::function<void()> task) {
-    try {
-        enqueue_control_task(
-            [task = std::move(task), operation_name]() {
-                try {
-                    task();
-                } catch (const std::exception& e) {
-                    Logger::instance().error("{} task failed: {}", operation_name, e.what());
-                    throw;
-                }
-            },
-            true,
-            label);
-    } catch (...) {
-        finish_config_operation();
-        throw;
-    }
-
-    finish_config_operation();
+    enqueue_control_task(
+        [task = std::move(task), operation_name]() {
+            try {
+                task();
+            } catch (const std::exception& e) {
+                Logger::instance().error("{} task failed: {}", operation_name, e.what());
+                throw;
+            }
+        },
+        true,
+        label);
 }
 
 ConfigApplyResult Daemon::apply_validated_config_via_control_task(
@@ -104,30 +442,50 @@ ConfigApplyResult Daemon::apply_validated_config_via_control_task(
     auto result = std::make_shared<ConfigApplyResult>();
     auto prepared = std::make_shared<PreparedRuntimeInputs>();
     auto rollback_prepared = std::make_shared<PreparedRuntimeInputs>();
-    const std::int64_t apply_started_ts = unix_timestamp_now_seconds();
-    result->apply_started_ts = apply_started_ts;
-    apply_started_ts_.store(apply_started_ts, std::memory_order_release);
+
+    const Config active_config = config_store_.active_config();
+    const bool refresh_remote_lists_after_apply =
+        remote_list_sources_changed(active_config, config);
 
     try {
-        *prepared = prepare_runtime_inputs(config, true);
-        *rollback_prepared = prepare_runtime_inputs(config_store_.active_config(), false);
+        *prepared = prepare_runtime_inputs(
+            config,
+            RemoteListPreparationMode::MissingOrInvalid);
+        *rollback_prepared = prepare_runtime_inputs(
+            active_config,
+            RemoteListPreparationMode::None);
     } catch (const std::exception& e) {
         result->error = e.what();
+        result->runtime_unchanged = true;
         Logger::instance().error("Prepare staged config task failed: {}", e.what());
         return *result;
     }
+
+    const std::int64_t apply_started_ts = unix_timestamp_now_seconds();
+    result->apply_started_ts = apply_started_ts;
+    apply_started_ts_.store(apply_started_ts, std::memory_order_release);
 
     enqueue_control_task(
         [this,
          result,
          prepared,
          rollback_prepared,
+         refresh_remote_lists_after_apply,
          saved_config_json = std::move(saved_config_json)]() mutable {
             try {
+                // Rollback must restore the exact DNS snapshot that belongs
+                // to the currently committed runtime generation. The shared
+                // prepare cache may have advanced after both candidates were
+                // prepared on the API worker.
+                rollback_prepared->keenetic_dns = active_keenetic_dns_;
                 apply_prepared_runtime_inputs(std::move(*prepared));
                 result->applied = true;
                 result->rolled_back = false;
+                result->runtime_unchanged = false;
                 config_store_.clear_staged_if_matches(saved_config_json);
+                if (refresh_remote_lists_after_apply) {
+                    refresh_lists_and_maybe_reload_async("post-apply");
+                }
             } catch (const std::exception& e) {
                 result->error = e.what();
                 Logger::instance().error("Apply staged config task failed: {}", e.what());
@@ -151,12 +509,9 @@ ConfigApplyResult Daemon::apply_validated_config_via_control_task(
 }
 
 ListRefreshOperationResult Daemon::refresh_lists_via_api(std::optional<std::string> requested_name) {
-    begin_config_operation_or_throw(ConfigOperationState::Reloading,
-                                    "refresh-lists",
-                                    false,
-                                    false);
+    auto mutation = acquire_runtime_mutation_or_throw(
+        "refresh-lists", false, false);
     if (config_store_.config_is_draft()) {
-        finish_config_operation();
         throw ApiError("List refresh is unavailable while a draft config is staged", 409);
     }
 
@@ -167,7 +522,6 @@ ListRefreshOperationResult Daemon::refresh_lists_via_api(std::optional<std::stri
     const bool runtime_active_snapshot = runtime_state_store_.snapshot().routing_runtime_active;
     const auto target_selection = select_remote_list_targets(config_snapshot, requested_name);
     if (!target_selection.ok()) {
-        finish_config_operation();
         switch (target_selection.error) {
         case RemoteListTargetSelectionError::NotFound:
             throw ApiError("Requested list was not found", 404);
@@ -178,15 +532,31 @@ ListRefreshOperationResult Daemon::refresh_lists_via_api(std::optional<std::stri
         }
     }
 
-    try {
+    {
         const std::set<std::string> relevant_lists = collect_relevant_list_names(config_snapshot);
+        const std::set<std::string> dns_relevant_lists = collect_dns_relevant_list_names(config_snapshot);
         const std::set<std::string> target_lists(target_selection.list_names.begin(),
                                                  target_selection.list_names.end());
-        RemoteListsRefreshResult refresh_result = list_service_.refresh_remote_lists(
-            config_snapshot,
-            marks_snapshot,
-            &relevant_lists,
-            requested_name ? &target_lists : nullptr);
+        RemoteListRefreshControl control;
+        control.cache_commit = make_guarded_cache_commit_callback();
+        const RemoteListsRefreshResult refresh_result =
+            list_service_.refresh_remote_lists(
+                config_snapshot,
+                marks_snapshot,
+                &relevant_lists,
+                requested_name ? &target_lists : nullptr,
+                &dns_relevant_lists,
+                control);
+
+        if (!refresh_result.changed_lists.empty()) {
+            Logger::instance().info("Lists refresh (api): updated list(s): {}",
+                                    format_list_names(refresh_result.changed_lists));
+        } else if (!refresh_result.failed_lists.empty()) {
+            Logger::instance().warn("Lists refresh (api): failed list(s): {}",
+                                    format_list_names(refresh_result.failed_lists));
+        } else {
+            Logger::instance().info("Lists refresh (api): all checked list(s) are up-to-date.");
+        }
 
         bool reloaded = false;
         bool stale_runtime = false;
@@ -210,7 +580,9 @@ ListRefreshOperationResult Daemon::refresh_lists_via_api(std::optional<std::stri
 
                 if (should_reload_runtime_after_list_refresh(runtime_active_snapshot,
                                                             refresh_result)) {
-                    apply_config(config_snapshot, false);
+                    bool rolled_back = false;
+                    apply_config_with_rollback(
+                        config_snapshot, rolled_back, false);
                     reloaded = true;
                 }
             },
@@ -222,8 +594,6 @@ ListRefreshOperationResult Daemon::refresh_lists_via_api(std::optional<std::stri
         operation_result.changed_lists = std::move(refresh_result.changed_lists);
         operation_result.failed_lists = std::move(refresh_result.failed_lists);
         operation_result.reloaded = reloaded;
-
-        finish_config_operation();
 
         if (!target_selection.ok()) {
             return operation_result;
@@ -247,9 +617,120 @@ ListRefreshOperationResult Daemon::refresh_lists_via_api(std::optional<std::stri
         }
 
         return operation_result;
-    } catch (...) {
-        finish_config_operation();
-        throw;
+    }
+}
+
+TestRoutingResult Daemon::run_api_routing_test(
+    const std::string& target) {
+    if (!event_loop_active_.load(std::memory_order_acquire)) {
+        throw ApiError(
+            "Routing diagnostics are unavailable until the control loop is running",
+            503);
+    }
+    const RoutingTestDeadline operation_deadline =
+        std::chrono::steady_clock::now() +
+        kRoutingTestOperationTimeout;
+    auto admitted = routing_test_admission_.try_acquire();
+    if (!admitted.has_value()) {
+        throw ApiError(
+            "Too many routing tests are already running", 503);
+    }
+
+    auto snapshot_promise =
+        std::make_shared<std::promise<RoutingTestSnapshot>>();
+    auto snapshot_future = snapshot_promise->get_future();
+    bool snapshot_posted = false;
+    try {
+        snapshot_posted = post_control_task(
+            [this, snapshot_promise]() {
+                try {
+                    snapshot_promise->set_value(
+                        capture_routing_test_snapshot());
+                } catch (...) {
+                    try {
+                        snapshot_promise->set_exception(
+                            std::current_exception());
+                    } catch (...) {
+                    }
+                }
+            },
+            "api-test-routing-snapshot");
+    } catch (const std::exception& error) {
+        throw ApiError(
+            std::string("Routing diagnostics snapshot is unavailable: ") +
+                error.what(),
+            503);
+    }
+    if (!snapshot_posted) {
+        throw ApiError(
+            "Routing diagnostics snapshot queue is unavailable", 503);
+    }
+
+    if (snapshot_future.wait_until(operation_deadline) !=
+        std::future_status::ready) {
+        throw ApiError(
+            "Routing diagnostics snapshot deadline exceeded", 504);
+    }
+    std::shared_ptr<RoutingTestSnapshot> snapshot;
+    try {
+        snapshot = std::make_shared<RoutingTestSnapshot>(
+            snapshot_future.get());
+    } catch (const std::exception& error) {
+        throw ApiError(
+            std::string("Routing diagnostics snapshot failed: ") +
+                error.what(),
+            503);
+    }
+
+    auto promise = std::make_shared<std::promise<TestRoutingResult>>();
+    auto future = promise->get_future();
+    bool queued = false;
+    try {
+        queued = routing_test_executor_.try_post(
+            "api-test-routing",
+            [this,
+             snapshot,
+             target,
+             promise,
+             operation_deadline,
+             lease = std::move(*admitted)]() mutable {
+                (void)lease;
+                try {
+                    auto result = compute_test_routing(
+                        snapshot->config,
+                        list_service_.cache_manager(),
+                        target,
+                        &snapshot->realized_rules,
+                        operation_deadline,
+                        snapshot->firewall_backend);
+                    result.unapplied_draft =
+                        snapshot->unapplied_draft;
+                    if (result.unapplied_draft) {
+                        result.warnings.push_back(
+                            "An unapplied draft exists; diagnostics use the active applied configuration.");
+                    }
+                    promise->set_value(std::move(result));
+                } catch (...) {
+                    try {
+                        promise->set_exception(
+                            std::current_exception());
+                    } catch (...) {
+                    }
+                }
+            });
+    } catch (const std::exception& error) {
+        throw ApiError(
+            std::string("Routing test executor is unavailable: ") +
+                error.what(),
+            503);
+    }
+    if (!queued) {
+        throw ApiError("Routing test executor queue is full", 503);
+    }
+    try {
+        return future.get();
+    } catch (const RoutingTestTimeoutError& error) {
+        throw ApiError(error.what(), 504);
     }
 }
 
@@ -269,15 +750,32 @@ void Daemon::setup_api() {
         },
         [this](Config staged_config, std::string staged_config_json) {
             config_store_.stage_config(std::move(staged_config), std::move(staged_config_json));
+            if (status_stream_) {
+                status_stream_->reconcile();
+            }
         },
         [this]() -> std::optional<std::pair<Config, std::string>> {
             return config_store_.staged_snapshot();
         },
         [this]() {
             config_store_.clear_staged();
+            if (status_stream_) {
+                status_stream_->reconcile();
+            }
         },
         [this](const Config& config) {
             validate_config(config);
+
+            const auto active_pid_file = config_store_.active_config()
+                .daemon.value_or(DaemonConfig{}).pid_file.value_or("");
+            const auto candidate_pid_file = config.daemon.value_or(DaemonConfig{})
+                .pid_file.value_or("");
+            if (candidate_pid_file != active_pid_file) {
+                throw ConfigValidationError(std::vector<ConfigValidationIssue>{{
+                    "daemon.pid_file",
+                    "daemon.pid_file cannot be changed while the daemon is running",
+                }});
+            }
 
             const auto marks = allocate_outbound_marks(
                 config.fwmark.value_or(FwmarkConfig{}),
@@ -289,7 +787,11 @@ void Daemon::setup_api() {
 
             ListStreamer streamer(list_service_.cache_manager());
             const DnsConfig dns_cfg = config.dns.value_or(DnsConfig{});
-            DnsServerRegistry dns_registry(dns_cfg);
+            const auto keenetic_dns = prepare_keenetic_dns_view(
+                config,
+                /*allow_refresh=*/true);
+            DnsServerRegistry dns_registry(
+                dns_cfg, keenetic_dns.snapshot);
             const Ipv6SupportDecision ipv6_decision = resolve_ipv6_support(config);
             log_ipv6_support_decision_once(ipv6_decision);
             (void)DnsmasqGenerator::compute_config_hash(
@@ -299,7 +801,7 @@ void Daemon::setup_api() {
                 dns_cfg,
                 config.lists.value_or(std::map<std::string, ListConfig>{}),
                 KEEN_PBR3_VERSION_FULL_STRING,
-                ipv6_decision.enabled);
+                resolver_ipv6_policy(ipv6_decision));
         },
         [this]() {
             const auto runtime_snapshot = runtime_state_store_.snapshot();
@@ -308,6 +810,10 @@ void Daemon::setup_api() {
             service_health.status = runtime_snapshot.routing_runtime_active
                 ? api::HealthResponseStatus::RUNNING
                 : api::HealthResponseStatus::STOPPED;
+            service_health.runtime_state =
+                runtime_state_name(runtime_snapshot.runtime_state);
+            service_health.runtime_state_reason =
+                runtime_snapshot.runtime_state_reason;
             service_health.os_type = system_info.os_type;
             service_health.os_version = system_info.os_version;
             service_health.build_variant = system_info.build_variant;
@@ -322,17 +828,27 @@ void Daemon::setup_api() {
             service_health.resolver_config_sync_state =
                 runtime_snapshot.resolver_config_sync_state;
             service_health.config_is_draft = config_store_.config_is_draft();
+            service_health.lifecycle_operation = lifecycle_operation_store_.snapshot();
             return service_health;
         },
         [this]() {
             const auto check_once = [this]() {
                 const auto runtime_snapshot = runtime_state_store_.snapshot();
-                return build_routing_health_report(
+                auto report = build_routing_health_report(
                     firewall_->backend(),
+                    firewall_->uses_raw_prerouting(),
                     runtime_snapshot.firewall_state,
                     runtime_snapshot.route_specs,
                     runtime_snapshot.policy_rule_specs,
                     netlink_);
+                // From the live backend: this is what the last apply observed.
+                // Re-inspecting the firmware chain on a health request would
+                // both duplicate the writer and answer a different question.
+                report.ttl_bypass_state = firewall_->ttl_bypass_state_name();
+                report.ttl_bypass_detail =
+                    firewall_->ttl_bypass_state_detail();
+                report.ppe_deoffload = firewall_->ppe_deoffload_snapshot();
+                return report;
             };
 
             auto report = check_once();
@@ -349,7 +865,9 @@ void Daemon::setup_api() {
             return report;
         },
         [this]() {
-            const Config config_snapshot = config_store_.active_config();
+            const auto active_snapshot =
+                config_store_.active_snapshot();
+            const Config& config_snapshot = active_snapshot.config;
             const auto runtime_snapshot = runtime_state_store_.snapshot();
 
             return build_runtime_outbounds_response(
@@ -362,56 +880,64 @@ void Daemon::setup_api() {
                     }
                     return it->second;
                 },
-                [this](const std::string& tag) -> std::optional<InterfaceProbeResult> {
-                    return interface_probe_.result_for(tag);
+                [this, &active_snapshot, &config_snapshot](
+                    const std::string& tag)
+                    -> std::optional<InterfaceProbeResult> {
+                    if (!config_snapshot.outbounds.has_value()) {
+                        return std::nullopt;
+                    }
+                    const auto& outbounds = *config_snapshot.outbounds;
+                    const auto stable_outbound = std::find_if(
+                        outbounds.begin(),
+                        outbounds.end(),
+                        [&tag](const Outbound& candidate) {
+                            return candidate.tag == tag &&
+                                   candidate.type == OutboundType::INTERFACE;
+                        });
+                    const auto& marks =
+                        active_snapshot.outbound_marks;
+                    const auto mark = marks.find(tag);
+                    if (stable_outbound == outbounds.end() ||
+                        mark == marks.end()) {
+                        return std::nullopt;
+                    }
+                    return interface_probe_.result_for(
+                        InterfaceProbe::Target{
+                            tag,
+                            mark->second,
+                            stable_outbound->interface.value_or(
+                                std::string{})});
                 });
         },
         [this]() {
-            return build_runtime_interface_inventory_response_or_empty(netlink_);
+            return build_runtime_interface_inventory_with_uptime();
         },
         [this](const Config& config) {
             return build_list_refresh_state_map(config, list_service_.cache_manager());
         },
         [this](const std::string& target) {
-            const Config visible_config = config_store_.visible_config();
-            return compute_test_routing(visible_config, list_service_.cache_manager(), target);
+            return run_api_routing_test(target);
         },
-        [this]() {
-            begin_config_operation_or_throw(ConfigOperationState::Saving,
-                                            "begin-save",
-                                            false,
-                                            false);
+        []() {
+            throw std::logic_error(
+                "Legacy config-operation admission reached production wiring");
         },
-        [this]() {
-            finish_config_operation();
-        },
+        []() {},
         [this](Config config, std::string saved_config_json) -> ConfigApplyResult {
             return apply_validated_config_via_control_task(std::move(config),
                                                            std::move(saved_config_json));
         },
         [this]() {
-            begin_config_operation_or_throw(ConfigOperationState::Reloading,
-                                            "start-runtime",
-                                            false,
-                                            true);
             run_runtime_control_operation_or_throw("api-start-runtime",
                                                    "Start routing runtime",
                                                    [this]() { start_routing_runtime(); });
         },
         [this]() {
-            begin_config_operation_or_throw(ConfigOperationState::Reloading,
-                                            "stop-runtime",
-                                            true,
-                                            false);
             run_runtime_control_operation_or_throw("api-stop-runtime",
                                                    "Stop routing runtime",
                                                    [this]() { stop_routing_runtime(); });
         },
         [this]() {
-            begin_config_operation_or_throw(ConfigOperationState::Reloading,
-                                            "restart-runtime",
-                                            true,
-                                            false);
             run_runtime_control_operation_or_throw("api-restart-runtime",
                                                    "Restart routing runtime",
                                                    [this]() { restart_routing_runtime(); });
@@ -419,7 +945,97 @@ void Daemon::setup_api() {
         [this](std::optional<std::string> requested_name) {
             return refresh_lists_via_api(requested_name);
         },
+        nullptr,
+        &lifecycle_operations_,
     });
+    api_ctx_->get_diagnostic_tasks_fn = [this]() {
+        return build_diagnostic_tasks_response(periodic_task_metrics_);
+    };
+    api_ctx_->acquire_runtime_mutation_fn =
+        [this](std::string label,
+               bool require_runtime_running,
+               bool require_runtime_stopped) {
+            return acquire_runtime_mutation_or_throw(
+                std::move(label),
+                require_runtime_running,
+                require_runtime_stopped);
+        };
+    status_stream_ = std::make_unique<StatusStream>([this]() {
+        return build_runtime_inventory(*api_ctx_);
+    });
+    api_ctx_->status_stream = status_stream_.get();
+    api_ctx_->emergency_quiesce_runtime_fn =
+        [this]() {
+            // The config-save handler already owns the runtime mutation lease.
+            // Do not call the public stop callback here: it would try to
+            // acquire a second lease and reject the fail-closed stop as
+            // self-conflicting.
+            enqueue_control_task(
+                [this]() { stop_routing_runtime(); },
+                true,
+                "config-save-emergency-quiesce");
+        };
+    api_ctx_->get_visible_config_snapshot_fn =
+        [this]() {
+            return config_store_.visible_snapshot();
+        };
+    api_ctx_->get_staged_config_cas_snapshot_fn =
+        [this]() {
+            return config_store_.staged_cas_snapshot();
+        };
+    api_ctx_->stage_config_if_visible_revision_fn =
+        [this](
+            const std::string& expected_visible_revision,
+            Config staged_config,
+            std::string staged_config_json) {
+            const bool staged =
+                config_store_.stage_config_if_visible_revision(
+                    expected_visible_revision,
+                    std::move(staged_config),
+                    std::move(staged_config_json));
+            if (staged && status_stream_) {
+                status_stream_->reconcile();
+            }
+            return staged;
+        };
+    api_ctx_->replace_interface_traffic_targets_fn =
+        [this](std::string source, std::vector<std::string> names) {
+            replace_interface_traffic_targets(
+                std::move(source), std::move(names));
+        };
+    api_ctx_->request_netfilter_runtime_refresh_fn = [this]() {
+        bool admitted = false;
+        try {
+            enqueue_control_task(
+                [this, &admitted]() {
+                    schedule_netfilter_runtime_refresh(
+                        NetfilterRefreshReason::full);
+                    // The scheduler owns a retained reason before publishing
+                    // its timer.  Even timer admission failure is therefore
+                    // recoverable by the existing periodic control owner.
+                    admitted = true;
+                },
+                /*wait_for_completion=*/true,
+                "nfqws-ppe-netfilter-refresh",
+                /*require_active_event_loop=*/true);
+        } catch (...) {
+            // During startup rollback or shutdown the HTTP worker must never
+            // fall back to inline firewall work.  Final daemon cleanup owns
+            // the graph in that window; report that no runtime refresh was
+            // admitted instead.
+            return false;
+        }
+        return admitted;
+    };
+    api_ctx_->get_ndms_native_import_readiness_fn = [this]() noexcept {
+        return ndms_native_import_journal_readiness_.load(
+            std::memory_order_acquire);
+    };
+    refresh_interface_traffic_config_targets(config_);
+    lifecycle_operation_store_.set_publish_callback([this]() {
+        if (status_stream_) status_stream_->reconcile();
+    });
+    setup_conntrack_events();
     register_api_handlers(*api_server_, *api_ctx_);
 
     // Latency with its measurement age. Kept out of the generated runtime
@@ -427,7 +1043,8 @@ void Daemon::setup_api() {
     // labelled "measured 12 s ago", and the age belongs to the probe rather
     // than to the outbound state schema.
     api_server_->get("/api/system/probes", [this]() -> std::string {
-        const Config config_snapshot = config_store_.active_config();
+        const auto active_snapshot = config_store_.active_snapshot();
+        const Config& config_snapshot = active_snapshot.config;
         const auto now = std::chrono::steady_clock::now();
 
         nlohmann::json response;
@@ -439,12 +1056,24 @@ void Daemon::setup_api() {
             if (outbound.type != OutboundType::INTERFACE) {
                 continue;
             }
-            const auto result = interface_probe_.result_for(outbound.tag);
+            const auto& marks = active_snapshot.outbound_marks;
+            const auto mark = marks.find(outbound.tag);
+            if (mark == marks.end()) {
+                continue;
+            }
+            const auto result = interface_probe_.result_for(
+                InterfaceProbe::Target{
+                    outbound.tag,
+                    mark->second,
+                    outbound.interface.value_or(std::string{})});
             if (!result.has_value()) {
                 continue;
             }
             nlohmann::json entry;
             entry["success"] = result->success;
+            // Without this the reader cannot tell a measurement of the tunnel
+            // from a measurement of the router's own WAN.
+            entry["attributed"] = result->attributed;
             entry["latency_ms"] = result->latency_ms;
             entry["age_seconds"] = std::chrono::duration_cast<std::chrono::seconds>(
                                        now - result->measured_at).count();
@@ -463,19 +1092,74 @@ void Daemon::setup_api() {
 
     // Manual "measure now": the scheduled round is deliberately unhurried, so
     // there has to be a way to ask for a fresh figure on the spot.
-    api_server_->post("/api/system/probes/run", [this]() -> std::string {
-        bool expected = false;
-        const bool scheduled = manual_probe_inflight_.compare_exchange_strong(expected, true);
-        if (scheduled) {
-            post_control_task([this]() {
-                try {
-                    probe_interfaces_now();
-                } catch (...) {
-                    manual_probe_inflight_.store(false);
-                    throw;
+    api_server_->post(
+        "/api/system/probes/run",
+        [this](const std::string& request_body) -> std::string {
+        // An optional {"tag": "..."} narrows this to one outbound. Without it
+        // the endpoint keeps its original meaning - the whole coalesced round -
+        // so an older frontend and any script calling it keep working.
+        std::string requested_tag;
+        if (!request_body.empty()) {
+            try {
+                const auto request = nlohmann::json::parse(request_body);
+                if (request.is_object()) {
+                    const auto tag = request.find("tag");
+                    if (tag != request.end() && tag->is_string()) {
+                        requested_tag = tag->get<std::string>();
+                    }
                 }
-                manual_probe_inflight_.store(false);
-            });
+            } catch (const nlohmann::json::exception&) {
+                throw ApiError("invalid probe request JSON", 400);
+            }
+        }
+
+        if (!requested_tag.empty()) {
+            // Target discovery reads config_ and outbound_marks_, which are
+            // owned by the event-loop thread.  The HTTP worker may run beside
+            // a config reload, so admission and the immutable target snapshot
+            // must be taken on that owner thread as one control operation.
+            bool started = false;
+            try {
+                enqueue_control_task(
+                    [this, &requested_tag, &started]() {
+                        started = start_targeted_interface_probe(requested_tag);
+                    },
+                    /*wait_for_completion=*/true,
+                    "targeted-interface-probe-admission:" + requested_tag,
+                    /*require_active_event_loop=*/true);
+            } catch (...) {
+                started = false;
+            }
+            nlohmann::json response;
+            response["ok"] = true;
+            // False here means the tag is unknown, already being probed, or
+            // the daemon could not take the work. The caller needs to know
+            // that so it can stop a spinner for a probe that never started.
+            response["scheduled"] = started;
+            response["tag"] = requested_tag;
+            return response.dump();
+        }
+
+        const auto admission =
+            interface_probe_gate_.request(/*manual=*/true);
+        bool scheduled = admission.manual_accepted;
+        if (admission.launch) {
+            bool posted = false;
+            try {
+                posted = post_control_task(
+                    [this]() { start_interface_probe_round(); },
+                    "manual-interface-probe");
+            } catch (...) {
+                // std::function/control-queue allocation may fail before the
+                // task owns the admitted round. Never leave the manual gate
+                // permanently busy in that case.
+                (void)interface_probe_gate_.abort();
+                scheduled = false;
+            }
+            if (!posted) {
+                (void)interface_probe_gate_.abort();
+                scheduled = false;
+            }
         }
         nlohmann::json response;
         response["ok"] = true;
@@ -508,6 +1192,7 @@ void Daemon::setup_api() {
     try {
         api_server_->start();
         Logger::instance().info("REST API listening on {}", listen_addr);
+        schedule_interface_traffic_sampling();
     } catch (const ApiError& e) {
         Logger::instance().error("REST API startup failed on {}: {}", listen_addr, e.what());
         throw;

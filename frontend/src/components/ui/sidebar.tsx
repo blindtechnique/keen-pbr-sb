@@ -1,4 +1,5 @@
 import * as React from "react"
+import { useTranslation } from "react-i18next"
 import { mergeProps } from "@base-ui/react/merge-props"
 import { useRender } from "@base-ui/react/use-render"
 import { cva, type VariantProps } from "class-variance-authority"
@@ -8,13 +9,6 @@ import { cn } from "@/lib/utils"
 import { IconButtonWithTooltip } from "@/components/shared/icon-button-with-tooltip"
 import { Input } from "@/components/ui/input"
 import { Separator } from "@/components/ui/separator"
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet"
 import { Skeleton } from "@/components/ui/skeleton"
 import {
   Tooltip,
@@ -31,11 +25,29 @@ import {
 
 const SIDEBAR_COOKIE_NAME = "sidebar_state"
 const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 7
-// KeeneticOS desktop menu is 255 px wide at the reference viewport.
-const SIDEBAR_WIDTH = "255px"
-const SIDEBAR_WIDTH_MOBILE = "18rem"
-const SIDEBAR_WIDTH_ICON = "5rem"
+// The expanded KeeneticOS menu occupies 264 px, including its divider and
+// scrollbar gutter.
+const SIDEBAR_WIDTH = "264px"
+const SIDEBAR_WIDTH_MOBILE = "100vw"
+// Measured on the collapsed KeeneticOS navigation rail.
+const SIDEBAR_WIDTH_ICON = "72px"
 const SIDEBAR_KEYBOARD_SHORTCUT = "b"
+
+function getInitialSidebarOpen(defaultOpen: boolean) {
+  if (typeof document === "undefined") {
+    return defaultOpen
+  }
+
+  const storedState = document.cookie
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(`${SIDEBAR_COOKIE_NAME}=`))
+    ?.split("=")[1]
+
+  if (storedState === "true") return true
+  if (storedState === "false") return false
+  return defaultOpen
+}
 
 function SidebarProvider({
   defaultOpen = true,
@@ -55,7 +67,9 @@ function SidebarProvider({
 
   // This is the internal state of the sidebar.
   // We use openProp and setOpenProp for control from outside the component.
-  const [_open, _setOpen] = React.useState(defaultOpen)
+  const [_open, _setOpen] = React.useState(() =>
+    getInitialSidebarOpen(defaultOpen)
+  )
   const open = openProp ?? _open
   const setOpen = React.useCallback(
     (value: boolean | ((value: boolean) => boolean)) => {
@@ -118,11 +132,15 @@ function SidebarProvider({
           {
             "--sidebar-width": SIDEBAR_WIDTH,
             "--sidebar-width-icon": SIDEBAR_WIDTH_ICON,
+            "--sidebar-offset": open ? SIDEBAR_WIDTH : SIDEBAR_WIDTH_ICON,
             ...style,
           } as React.CSSProperties
         }
         className={cn(
-          "group/sidebar-wrapper flex min-h-svh w-full has-data-[variant=inset]:bg-sidebar",
+          // dvh, не svh: внутренняя оболочка тоже dvh, и при svh обёртка
+          // оказывалась ниже неё — оставались десятки пикселей, которые
+          // документ мог прокрутить, унося шапку.
+          "group/sidebar-wrapper flex min-h-dvh w-full has-data-[variant=inset]:bg-sidebar",
           className
         )}
         {...props}
@@ -146,7 +164,8 @@ function Sidebar({
   variant?: "sidebar" | "floating" | "inset"
   collapsible?: "offcanvas" | "icon" | "none"
 }) {
-  const { isMobile, state, openMobile, setOpenMobile } = useSidebar()
+  const { isMobile, state, openMobile } = useSidebar()
+  const { t } = useTranslation()
 
   if (collapsible === "none") {
     return (
@@ -164,28 +183,29 @@ function Sidebar({
   }
 
   if (isMobile) {
+    if (!openMobile) return null
+
     return (
-      <Sheet open={openMobile} onOpenChange={setOpenMobile} {...props}>
-        <SheetContent
-          dir={dir}
-          data-sidebar="sidebar"
-          data-slot="sidebar"
-          data-mobile="true"
-          className="w-(--sidebar-width) bg-sidebar p-0 text-sidebar-foreground [&>button]:hidden"
-          style={
-            {
-              "--sidebar-width": SIDEBAR_WIDTH_MOBILE,
-            } as React.CSSProperties
-          }
-          side={side}
-        >
-          <SheetHeader className="sr-only">
-            <SheetTitle>Sidebar</SheetTitle>
-            <SheetDescription>Displays the mobile sidebar.</SheetDescription>
-          </SheetHeader>
-          <div className="flex h-full w-full flex-col">{children}</div>
-        </SheetContent>
-      </Sheet>
+      <div
+        aria-label={t("common.chrome.sidebar")}
+        className={cn(
+          "keen-mobile-sidebar w-(--sidebar-width) gap-0 bg-sidebar p-0 text-sidebar-foreground",
+          className
+        )}
+        data-mobile="true"
+        data-sidebar="sidebar"
+        data-slot="sidebar"
+        dir={dir}
+        role="navigation"
+        style={
+          {
+            "--sidebar-width": SIDEBAR_WIDTH_MOBILE,
+          } as React.CSSProperties
+        }
+        {...props}
+      >
+        <div className="flex h-full w-full flex-col">{children}</div>
+      </div>
     )
   }
 
@@ -214,7 +234,11 @@ function Sidebar({
         data-slot="sidebar-container"
         data-side={side}
         className={cn(
-          "fixed inset-y-0 z-10 hidden h-svh w-(--sidebar-width) transition-[left,right,width] duration-200 ease-linear data-[side=left]:left-0 data-[side=left]:group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)] data-[side=right]:right-0 data-[side=right]:group-data-[collapsible=offcanvas]:right-[calc(var(--sidebar-width)*-1)] md:flex",
+          // Начинается под шапкой, а не от верха окна: в KeeneticOS шапка идёт
+          // во всю ширину (0..window, высота 64px), а колонка меню — .menu,
+          // 264px, начинается с y=64. Этот блок существует только от md, где
+          // шапка и есть, поэтому смещение без брейкпоинта.
+          "fixed top-16 bottom-0 z-10 hidden w-(--sidebar-width) transition-[left,right,width] duration-200 ease-linear data-[side=left]:left-0 data-[side=left]:group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)] data-[side=right]:right-0 data-[side=right]:group-data-[collapsible=offcanvas]:right-[calc(var(--sidebar-width)*-1)] md:flex",
           // Adjust the padding for floating and inset variants.
           variant === "floating" || variant === "inset"
             ? "p-2 group-data-[collapsible=icon]:w-[calc(var(--sidebar-width-icon)+(--spacing(4))+2px)]"
@@ -244,13 +268,14 @@ function SidebarTrigger({
   "children" | "label"
 >) {
   const { toggleSidebar } = useSidebar()
+  const { t } = useTranslation()
 
   return (
     <IconButtonWithTooltip
       data-sidebar="trigger"
       data-slot="sidebar-trigger"
       className={cn(className)}
-      label="Toggle sidebar"
+      label={t("common.chrome.toggleSidebar")}
       onClick={(event) => {
         onClick?.(event)
         toggleSidebar()
@@ -266,15 +291,16 @@ function SidebarTrigger({
 
 function SidebarRail({ className, ...props }: React.ComponentProps<"button">) {
   const { toggleSidebar } = useSidebar()
+  const { t } = useTranslation()
 
   return (
     <button
       data-sidebar="rail"
       data-slot="sidebar-rail"
-      aria-label="Toggle Sidebar"
+      aria-label={t("common.chrome.toggleSidebar")}
       tabIndex={-1}
       onClick={toggleSidebar}
-      title="Toggle Sidebar"
+      title={t("common.chrome.toggleSidebar")}
       className={cn(
         "absolute inset-y-0 z-20 hidden w-4 transition-all ease-linear group-data-[side=left]:-right-4 group-data-[side=right]:left-0 after:absolute after:inset-y-0 after:start-1/2 after:w-[2px] hover:after:bg-sidebar-border sm:flex ltr:-translate-x-1/2 rtl:-translate-x-1/2",
         "in-data-[side=left]:cursor-w-resize in-data-[side=right]:cursor-e-resize",

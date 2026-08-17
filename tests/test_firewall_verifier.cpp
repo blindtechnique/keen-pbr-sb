@@ -388,6 +388,43 @@ TEST_CASE("IptablesFirewallVerifier::verify_rules: mark rule ok") {
     CHECK(*checks[0].actual_fwmark == 65536u);
 }
 
+TEST_CASE("IptablesFirewallVerifier::verify_rules accepts active A/B static set") {
+    const std::string dispatcher =
+        "-N KeenPbrTable\n"
+        "-A KeenPbrTable -j KeenPbrTable_B\n";
+    const std::string generation =
+        "-N KeenPbrTable_B\n"
+        "-A KeenPbrTable_B -m set --match-set kpbr4S_sites dst "
+        "-j MARK --set-xmark 0x20000/0xff0000\n";
+    const std::string prerouting =
+        "-A PREROUTING -j KeenPbrTable\n";
+
+    auto runner = [&](const std::vector<std::string>& args) -> CommandResult {
+        if (matches_args(args, {"iptables", "-t", "mangle", "-S", "KeenPbrTable"})) {
+            return command_result(dispatcher);
+        }
+        if (matches_args(args, {"iptables", "-t", "mangle", "-S", "KeenPbrTable_B"})) {
+            return command_result(generation);
+        }
+        if (matches_args(args, {"iptables", "-t", "mangle", "-S", "PREROUTING"})) {
+            return command_result(prerouting);
+        }
+        return command_result({}, 1);
+    };
+    IptablesFirewallVerifier verifier(runner);
+    verifier.set_expected_fwmark_mask(0x00ff0000u);
+
+    RuleState state;
+    state.set_names = {"kpbr4_sites"};
+    state.action_type = RuleActionType::Mark;
+    state.fwmark = 0x20000u;
+
+    const auto checks = verifier.verify_rules({state});
+    REQUIRE(checks.size() == 1);
+    CHECK(checks[0].status == CheckStatus::ok);
+    CHECK(checks[0].set_name == "kpbr4_sites");
+}
+
 TEST_CASE("IptablesFirewallVerifier::verify_rules: mark rule missing") {
     const std::string prerouting =
         "-P PREROUTING ACCEPT\n"
@@ -669,7 +706,8 @@ TEST_CASE("IptablesFirewallVerifier::verify_chain: missing chain with prerouting
     const auto check = verifier.verify_chain();
     CHECK_FALSE(check.chain_present);
     CHECK(check.prerouting_hook_present);
-    CHECK(check.detail == "KeenPbrTable chain not found in iptables or ip6tables mangle table");
+    CHECK(check.detail ==
+          "KeenPbrTable chain not found in iptables or ip6tables mangle table");
 }
 
 TEST_CASE("IptablesFirewallVerifier::verify_chain: chain without prerouting jump is degraded") {
@@ -1025,11 +1063,88 @@ TEST_CASE("safe_exec_capture: max_bytes overflow sets truncated") {
                                           /*suppress_stderr=*/true,
                                           /*max_bytes=*/64);
     CHECK(result.truncated);
-    CHECK(result.stdout_output.size() > 64);
+    CHECK(result.stdout_output.size() == 64);
+}
+
+TEST_CASE("IptablesFirewallVerifier::verify_chain: raw IPv4 scaffold is healthy") {
+    auto runner = [](const std::vector<std::string>& args) -> CommandResult {
+        if (matches_args(
+                args,
+                {"iptables", "-t", "raw", "-S", "KeenPbrRaw"})) {
+            return command_result(
+                "-N KeenPbrRaw\n-A KeenPbrRaw -j KeenPbrRaw_A\n");
+        }
+        if (matches_args(
+                args,
+                {"iptables", "-t", "raw", "-S", "KeenPbrRaw_A"})) {
+            return command_result(
+                "-N KeenPbrRaw_A\n"
+                "-A KeenPbrRaw_A -m set --match-set kpbr4s_test dst "
+                "-j MARK --set-xmark 0x10000/0xffffffff\n");
+        }
+        if (matches_args(
+                args,
+                {"iptables", "-t", "raw", "-S", "PREROUTING"})) {
+            return command_result("-A PREROUTING -j KeenPbrRaw\n");
+        }
+        return command_result({}, 1);
+    };
+    IptablesFirewallVerifier verifier(runner, true);
+
+    const auto chain = verifier.verify_chain();
+    CHECK(chain.chain_present);
+    CHECK(chain.prerouting_hook_present);
+    CHECK(chain.detail == "ok");
+
+    RuleState expected;
+    expected.rule_index = 0;
+    expected.set_names = {"kpbr4s_test"};
+    expected.action_type = RuleActionType::Mark;
+    expected.fwmark = 0x10000;
+    const auto rules = verifier.verify_rules({expected});
+    REQUIRE(rules.size() == 1);
+    CHECK(rules.front().status == CheckStatus::ok);
+}
+
+TEST_CASE("parse_iptables_s: parses rules from active A/B generation") {
+    const std::string input =
+        "-N KeenPbrTable\n"
+        "-N KeenPbrTable_A\n"
+        "-A PREROUTING -j KeenPbrTable\n"
+        "-A KeenPbrTable -j KeenPbrTable_A\n"
+        "-A KeenPbrTable_A -m set --match-set kpbr4s_local dst "
+        "-j MARK --set-xmark 0x10000/0xff0000\n";
+    const auto state = parse_iptables_s(input);
+    REQUIRE(state.rules.size() == 1);
+    const auto& generated_rule = state.rules.front();
+    CHECK(generated_rule.set_name == "kpbr4s_local");
+    CHECK(generated_rule.is_mark);
+    CHECK(generated_rule.fwmark == 0x10000);
+    CHECK(generated_rule.xmark_mask == 0xff0000);
 }
 
 TEST_CASE("safe_exec_capture: nonzero exit code is preserved") {
     const auto result = safe_exec_capture({"false"});
     CHECK_FALSE(result.truncated);
     CHECK(result.exit_code == 1);
+}
+
+// Found by `keen-pbr-fuzz-iptables`: an unknown port token in a foreign rule
+// must neither abort the complete table inspection nor turn that rule into a
+// less restrictive rule that could satisfy one of our expectations.
+TEST_CASE("parse_iptables_s survives an unparsable port token") {
+    const std::string output =
+        "-N KeenPbrTable\n"
+        "-A PREROUTING -j KeenPbrTable\n"
+        "-A KeenPbrTable -p tcp -m multiport --dports 80,443j -j RETURN\n"
+        "-A KeenPbrTable -p tcp -m tcp --dport\n"
+        "-A KeenPbrTable -p udp -m udp --dport 443 -j RETURN\n";
+
+    keen_pbr3::ParsedIptablesState state;
+    CHECK_NOTHROW(state = keen_pbr3::parse_iptables_s(output));
+    CHECK(state.has_keen_pbr_chain);
+    CHECK(state.has_prerouting_jump);
+    REQUIRE(state.rules.size() == 1);
+    CHECK(state.rules.front().criteria.proto == keen_pbr3::L4Proto::Udp);
+    CHECK(state.rules.front().criteria.dst_port.to_iptables_string() == "443");
 }

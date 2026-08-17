@@ -1,0 +1,2 @@
+udp      17 29 src=192.0.2.10 dst=198.51.100.5 sport=40000 dport=443 src=198.51.100.5 dst=192.0.2.10 sport=443 dport=40000 [ASSURED] mark=512 use=1
+udp      17 10 src=192.0.2.10 dst=203.0.113.9 sport=40001 dport=51820 [UNREPLIED] src=203.0.113.9 dst=192.0.2.10 sport=51820 dport=40001 mark=0 use=1

@@ -1,8 +1,12 @@
 import type { ApiError } from "@/api/client"
 import type { RouteRule } from "@/api/generated/model/routeRule"
 import { getApiErrorMessage as getSharedApiErrorMessage } from "@/lib/api-errors"
+import { stableJsonStringify } from "@/lib/semantic-json"
+import { makeTechnicalId } from "@/lib/technical-id"
 
 export type RouteRuleDraft = {
+  id: string
+  displayName: string
   enabled: boolean
   list: string[]
   outbound: string
@@ -16,11 +20,33 @@ export type RouteRuleDraft = {
 
 export const protoOptions = ["", "tcp", "udp", "tcp/udp"] as const
 
-export function getRoutingRuleRowId(index: number) {
-  return String(index)
+export function getRoutingRuleRowId(rule: RouteRule, index: number) {
+  const stableId = rule.id?.trim()
+  return stableId ? `id:${stableId}` : `index:${index}`
+}
+
+function normalizeRouteRulesForComparison(rules: readonly RouteRule[]) {
+  return rules.map((rule) => ({
+    ...rule,
+    enabled: rule.enabled ?? true,
+    list: rule.list ?? [],
+  }))
+}
+
+export function getRouteRulesSemanticKey(rules: readonly RouteRule[]) {
+  return stableJsonStringify(normalizeRouteRulesForComparison(rules))
+}
+
+export function areRouteRulesSemanticallyEqual(
+  left: readonly RouteRule[],
+  right: readonly RouteRule[]
+) {
+  return getRouteRulesSemanticKey(left) === getRouteRulesSemanticKey(right)
 }
 
 export const emptyRouteRuleDraft: RouteRuleDraft = {
+  id: "",
+  displayName: "",
   enabled: true,
   list: [],
   outbound: "",
@@ -32,20 +58,54 @@ export const emptyRouteRuleDraft: RouteRuleDraft = {
   dest_addr: "",
 }
 
-export function getRuleDetails(rule: RouteRule) {
-  const pieces = [
-    `src_addr: ${rule.src_addr || "-"}`,
-    `dest_addr: ${rule.dest_addr || "-"}`,
-    `dscp: ${rule.dscp ?? "-"}`,
-    `src_port: ${rule.src_port || "-"}`,
-    `dest_port: ${rule.dest_port || "-"}`,
-  ]
+export function createRouteRuleDraft(
+  displayName = "",
+  existingIds: Iterable<string> = []
+): RouteRuleDraft {
+  return {
+    ...emptyRouteRuleDraft,
+    displayName,
+    id: displayName
+      ? makeTechnicalId(displayName, existingIds, { prefix: "rule" })
+      : "",
+  }
+}
 
-  return pieces.join(" · ")
+export function getRouteRuleDisplayName(rule: RouteRule, index: number) {
+  return rule.display_name?.trim() || `#${index + 1}`
+}
+
+/**
+ * У правила без имени `getRouteRuleDisplayName` отдаёт `#N`. Как идентификатор
+ * в ссылках, зависимостях и aria-подписях это правильно, но в колонке
+ * «Название» оно дублирует соседнюю колонку «№» и выглядит как имя, которого
+ * пользователь не давал. Списки уже показаны в «Условии», а маршрут — в
+ * «Маршруте», поэтому вместо третьего повтора там уместен приглушённый
+ * «Без названия».
+ */
+export function isRouteRuleNameGenerated(rule: RouteRule): boolean {
+  return !rule.display_name?.trim()
+}
+
+export function getRouteRuleDerivedName(
+  rule: RouteRule,
+  listDisplayName: (technicalId: string) => string
+): string | undefined {
+  const listIds = (rule.list ?? [])
+    .map((technicalId) => technicalId.trim())
+    .filter(Boolean)
+  if (listIds.length === 0) {
+    return undefined
+  }
+
+  const first = listDisplayName(listIds[0]!)
+  return listIds.length > 1 ? `${first} +${listIds.length - 1}` : first
 }
 
 export function toRouteRuleDraft(rule: RouteRule): RouteRuleDraft {
   return {
+    id: rule.id ?? "",
+    displayName: rule.display_name ?? "",
     enabled: rule.enabled ?? true,
     list: rule.list ?? [],
     outbound: rule.outbound,
@@ -60,6 +120,8 @@ export function toRouteRuleDraft(rule: RouteRule): RouteRuleDraft {
 
 export function normalizeRouteRuleDraft(draft: RouteRuleDraft): RouteRule {
   return {
+    id: trimToUndefined(draft.id),
+    display_name: trimToUndefined(draft.displayName),
     enabled: draft.enabled,
     list: draft.list,
     outbound: draft.outbound,

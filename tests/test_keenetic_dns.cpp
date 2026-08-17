@@ -4,7 +4,10 @@
 #include "../src/config/config.hpp"
 
 #include <chrono>
+#include <future>
 #include <stdexcept>
+#include <thread>
+#include <type_traits>
 
 using namespace keen_pbr3;
 
@@ -15,7 +18,52 @@ struct KeeneticDnsTestStateGuard {
     ~KeeneticDnsTestStateGuard() { reset_keenetic_dns_test_state(); }
 };
 
+std::string keenetic_dns_response(const std::string& address) {
+    return std::string(R"({
+      "proxy-status": [
+        {
+          "proxy-name": "System",
+          "proxy-config": "dns_server = )") + address + R"( .\n"
+        }
+      ]
+    })";
+}
+
 } // namespace
+
+TEST_CASE("keenetic dns: cache view swap is a noexcept transaction primitive") {
+    static_assert(std::is_nothrow_swappable_v<KeeneticDnsCacheView>);
+
+    KeeneticDnsCacheView left{
+        KeeneticDnsSnapshot{{"192.0.2.1"}, {}, {}},
+        KeeneticDnsCacheStatus::fresh,
+        true,
+        true,
+        7,
+        {}};
+    KeeneticDnsCacheView right{
+        std::nullopt,
+        KeeneticDnsCacheStatus::stale,
+        false,
+        false,
+        3,
+        "stale"};
+
+    using std::swap;
+    swap(left, right);
+
+    CHECK_FALSE(left.snapshot.has_value());
+    CHECK(left.status == KeeneticDnsCacheStatus::stale);
+    CHECK(left.generation == 3);
+    CHECK(left.error == "stale");
+    REQUIRE(right.snapshot.has_value());
+    CHECK(right.snapshot->addresses ==
+          std::vector<std::string>{"192.0.2.1"});
+    CHECK(right.status == KeeneticDnsCacheStatus::fresh);
+    CHECK(right.refreshed);
+    CHECK(right.changed);
+    CHECK(right.generation == 7);
+}
 
 TEST_CASE("keenetic dns: parse address from RCI System policy") {
     SUBCASE("ignores domain-scoped entries in real System payload shape") {
@@ -371,7 +419,12 @@ TEST_CASE("keenetic dns: cache refresh semantics") {
     }
 
     SUBCASE("falls back to cached value when stale refresh fails") {
-        CHECK(resolve_keenetic_dns_addresses() == std::vector<std::string>{"203.0.113.10"});
+        const KeeneticDnsRefreshResult initial =
+            refresh_keenetic_dns_address_cache(false);
+        REQUIRE(initial.snapshot.has_value());
+        CHECK(initial.snapshot->addresses ==
+              std::vector<std::string>{"203.0.113.10"});
+        CHECK(initial.generation > 0);
         CHECK(fetch_count == 1);
 
         now += std::chrono::minutes(6);
@@ -383,6 +436,10 @@ TEST_CASE("keenetic dns: cache refresh semantics") {
         const KeeneticDnsRefreshResult result = refresh_keenetic_dns_address_cache(false);
         CHECK(result.status == KeeneticDnsRefreshStatus::FETCH_FAILED_USED_CACHE);
         CHECK(result.addresses == std::vector<std::string>{"203.0.113.10"});
+        REQUIRE(result.snapshot.has_value());
+        CHECK(result.snapshot->addresses ==
+              std::vector<std::string>{"203.0.113.10"});
+        CHECK(result.generation > initial.generation);
         CHECK(fetch_count == 2);
         CHECK(resolve_keenetic_dns_addresses() == std::vector<std::string>{"203.0.113.10"});
     }
@@ -410,7 +467,11 @@ TEST_CASE("keenetic dns: cache refresh semantics") {
     }
 
     SUBCASE("reports updated when forced refresh changes static entries") {
-        CHECK(resolve_keenetic_dns_addresses() == std::vector<std::string>{"203.0.113.10"});
+        const KeeneticDnsRefreshResult initial =
+            refresh_keenetic_dns_address_cache(false);
+        REQUIRE(initial.snapshot.has_value());
+        CHECK(initial.snapshot->addresses ==
+              std::vector<std::string>{"203.0.113.10"});
         CHECK(fetch_count == 1);
         CHECK(get_keenetic_static_dns_entries().empty());
 
@@ -429,6 +490,16 @@ TEST_CASE("keenetic dns: cache refresh semantics") {
         const KeeneticDnsRefreshResult result = refresh_keenetic_dns_address_cache(true);
         CHECK(result.status == KeeneticDnsRefreshStatus::UPDATED);
         CHECK(result.addresses == std::vector<std::string>{"203.0.113.10"});
+        REQUIRE(result.snapshot.has_value());
+        CHECK(result.generation > initial.generation);
+        CHECK(result.snapshot->addresses ==
+              std::vector<std::string>{"203.0.113.10"});
+        REQUIRE(result.snapshot->upstreams.size() == 1);
+        CHECK(result.snapshot->upstreams[0].address == "203.0.113.10");
+        CHECK(result.snapshot->upstreams[0].kind == "Plain");
+        REQUIRE(result.snapshot->static_entries.size() == 1);
+        CHECK(result.snapshot->static_entries[0].domain == "host.example");
+        CHECK(result.snapshot->static_entries[0].address == "198.51.100.180");
         REQUIRE(get_keenetic_static_dns_entries().size() == 1);
         CHECK(get_keenetic_static_dns_entries()[0].domain == "host.example");
         CHECK(get_keenetic_static_dns_entries()[0].address == "198.51.100.180");
@@ -442,8 +513,172 @@ TEST_CASE("keenetic dns: cache refresh semantics") {
         const KeeneticDnsRefreshResult result = refresh_keenetic_dns_address_cache(true);
         CHECK(result.status == KeeneticDnsRefreshStatus::FETCH_FAILED_NO_CACHE);
         CHECK(result.addresses.empty());
+        CHECK_FALSE(result.snapshot.has_value());
+        CHECK(result.generation > 0);
         CHECK_THROWS_AS(resolve_keenetic_dns_addresses(true), KeeneticDnsError);
     }
+}
+
+TEST_CASE("keenetic dns cache: peek does not wait for an in-flight fetch") {
+    std::promise<void> fetch_started;
+    std::promise<void> release_fetch;
+    auto release = release_fetch.get_future().share();
+
+    KeeneticDnsCache cache([&]() {
+        fetch_started.set_value();
+        release.wait();
+        return keenetic_dns_response("203.0.113.20");
+    });
+
+    auto refresh = std::async(std::launch::async, [&]() {
+        return cache.force_refresh();
+    });
+    fetch_started.get_future().wait();
+
+    auto peek = std::async(std::launch::async, [&]() {
+        return cache.peek();
+    });
+    REQUIRE(peek.wait_for(std::chrono::milliseconds(100)) ==
+            std::future_status::ready);
+    const auto while_fetching = peek.get();
+    CHECK(while_fetching.status == KeeneticDnsCacheStatus::unavailable);
+    CHECK_FALSE(while_fetching.snapshot.has_value());
+
+    release_fetch.set_value();
+    const auto refreshed = refresh.get();
+    REQUIRE(refreshed.snapshot.has_value());
+    CHECK(refreshed.snapshot->addresses ==
+          std::vector<std::string>{"203.0.113.20"});
+}
+
+TEST_CASE("keenetic dns cache: concurrent forced refreshes are single-flight") {
+    std::promise<void> fetch_started;
+    std::promise<void> release_fetch;
+    auto release = release_fetch.get_future().share();
+    int fetch_count = 0;
+
+    KeeneticDnsCache cache([&]() {
+        ++fetch_count;
+        fetch_started.set_value();
+        release.wait();
+        return keenetic_dns_response("203.0.113.21");
+    });
+
+    auto first = std::async(std::launch::async, [&]() {
+        return cache.force_refresh();
+    });
+    fetch_started.get_future().wait();
+    auto second = std::async(std::launch::async, [&]() {
+        return cache.force_refresh();
+    });
+
+    CHECK(second.wait_for(std::chrono::milliseconds(50)) ==
+          std::future_status::timeout);
+    release_fetch.set_value();
+
+    const auto first_result = first.get();
+    const auto second_result = second.get();
+    CHECK(fetch_count == 1);
+    REQUIRE(first_result.snapshot.has_value());
+    REQUIRE(second_result.snapshot.has_value());
+    CHECK(first_result.generation == second_result.generation);
+    CHECK(first_result.snapshot->addresses ==
+          std::vector<std::string>{"203.0.113.21"});
+    CHECK(second_result.snapshot->addresses ==
+          std::vector<std::string>{"203.0.113.21"});
+}
+
+TEST_CASE("keenetic dns cache: sequential successful forced refreshes refetch") {
+    int fetch_count = 0;
+    KeeneticDnsCache cache([&]() {
+        ++fetch_count;
+        return keenetic_dns_response(
+            fetch_count == 1 ? "203.0.113.22" : "203.0.113.23");
+    });
+
+    const auto first = cache.force_refresh();
+    const auto second = cache.force_refresh();
+
+    CHECK(fetch_count == 2);
+    REQUIRE(first.snapshot.has_value());
+    REQUIRE(second.snapshot.has_value());
+    CHECK(first.snapshot->addresses ==
+          std::vector<std::string>{"203.0.113.22"});
+    CHECK(second.snapshot->addresses ==
+          std::vector<std::string>{"203.0.113.23"});
+}
+
+TEST_CASE("keenetic dns cache: invalidation rejects an older in-flight result") {
+    std::promise<void> fetch_started;
+    std::promise<void> release_fetch;
+    auto release = release_fetch.get_future().share();
+    int fetch_count = 0;
+
+    KeeneticDnsCache cache([&]() {
+        ++fetch_count;
+        if (fetch_count == 1) {
+            fetch_started.set_value();
+            release.wait();
+            return keenetic_dns_response("203.0.113.30");
+        }
+        return keenetic_dns_response("203.0.113.31");
+    });
+
+    auto old_refresh = std::async(std::launch::async, [&]() {
+        return cache.force_refresh();
+    });
+    fetch_started.get_future().wait();
+    cache.invalidate();
+
+    auto current_refresh = std::async(std::launch::async, [&]() {
+        return cache.get();
+    });
+    CHECK(current_refresh.wait_for(std::chrono::milliseconds(50)) ==
+          std::future_status::timeout);
+
+    release_fetch.set_value();
+    (void)old_refresh.get();
+    const auto current_result = current_refresh.get();
+    CHECK(fetch_count == 2);
+    REQUIRE(current_result.snapshot.has_value());
+    CHECK(current_result.snapshot->addresses ==
+          std::vector<std::string>{"203.0.113.31"});
+    CHECK(current_result.status == KeeneticDnsCacheStatus::fresh);
+}
+
+TEST_CASE("keenetic dns cache: failed refresh keeps LKG and is retry-throttled") {
+    auto now = KeeneticDnsCache::Clock::time_point{};
+    int fetch_count = 0;
+    KeeneticDnsCache cache(
+        [&]() {
+            ++fetch_count;
+            if (fetch_count == 1) {
+                return keenetic_dns_response("203.0.113.40");
+            }
+            throw KeeneticDnsError("simulated RCI outage");
+        },
+        std::chrono::minutes(5),
+        std::chrono::seconds(5),
+        [&]() { return now; });
+
+    REQUIRE(cache.get().snapshot.has_value());
+    now += std::chrono::minutes(6);
+
+    const auto failed = cache.get();
+    CHECK(fetch_count == 2);
+    CHECK(failed.status == KeeneticDnsCacheStatus::stale);
+    REQUIRE(failed.snapshot.has_value());
+    CHECK(failed.snapshot->addresses ==
+          std::vector<std::string>{"203.0.113.40"});
+    CHECK(failed.error == "simulated RCI outage");
+
+    const auto throttled = cache.get();
+    CHECK(fetch_count == 2);
+    CHECK(throttled.status == KeeneticDnsCacheStatus::stale);
+
+    now += std::chrono::seconds(5);
+    (void)cache.get();
+    CHECK(fetch_count == 3);
 }
 
 #ifndef USE_KEENETIC_API

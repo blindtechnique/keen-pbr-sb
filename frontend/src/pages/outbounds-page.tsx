@@ -1,5 +1,4 @@
-import { ArrowRight, Plus, Trash2 } from "lucide-react"
-import type { ReactNode } from "react"
+import { Plus, RotateCw } from "lucide-react"
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 
@@ -9,7 +8,6 @@ import { useLocation } from "wouter"
 import type { ApiError } from "@/api/client"
 import type { ConfigObject } from "@/api/generated/model/configObject"
 import type { Outbound } from "@/api/generated/model/outbound"
-import type { RouteRule } from "@/api/generated/model/routeRule"
 import type { RuntimeInterfaceInventoryEntry } from "@/api/generated/model/runtimeInterfaceInventoryEntry"
 import type { RuntimeOutboundState } from "@/api/generated/model/runtimeOutboundState"
 import {
@@ -23,52 +21,80 @@ import {
   useGetRuntimeOutbounds,
 } from "@/api/queries"
 import { selectConfig, selectOutbounds } from "@/api/selectors"
+import { KeenPencilIcon, KeenTrashIcon } from "@/components/shared/keen-icons"
+import { getOutboundDeleteImpactItems } from "@/components/delete-impact/outbound-items"
+import { ActionButtons } from "@/components/shared/action-buttons"
 import { BulkSelectionToolbar } from "@/components/shared/bulk-selection-toolbar"
 import { ConfigSaveErrorAlert } from "@/components/shared/config-save-error-alert"
 import { ConfigTransferButtons } from "@/components/shared/config-transfer-buttons"
-import { OutboundCard } from "@/components/outbounds/outbound-card"
+import { DataTable } from "@/components/shared/data-table"
+import { DependencyList } from "@/components/shared/dependency-list"
+import {
+  OutboundMemberChain,
+  OutboundName,
+  OutboundPurpose,
+  OutboundStatus,
+} from "@/components/outbounds/outbound-cells"
 import { useInterfaceProtocols } from "@/hooks/use-interface-protocols"
 import { useRunSystemProbes } from "@/hooks/use-run-system-probes"
-import {
-  dependenciesOfOutbound,
-  findBrokenReferences,
-} from "@/lib/dependencies"
-import {
-  DeleteImpactDialog,
-  type DeleteImpactItem,
-} from "@/components/shared/delete-impact-dialog"
+import { useConfigDependencies } from "@/hooks/use-config-dependencies"
+import { findBrokenReferences } from "@/lib/dependencies"
+import { DeleteImpactDialog } from "@/components/shared/delete-impact-dialog"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 
 import { PageHeader } from "@/components/shared/page-header"
+import { SectionHeading } from "@/components/shared/section-heading"
 import { PageActionBar } from "@/components/shared/page-action-bar"
+import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { useRowSelection } from "@/hooks/use-row-selection"
+import { useSectionTab } from "@/hooks/use-section-tab"
+import { useTableSort } from "@/hooks/use-table-sort"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { getApiErrorMessage } from "@/lib/api-errors"
+import { cn } from "@/lib/utils"
+import {
+  createOutboundDisplayNameMap,
+  getOutboundDisplayName,
+} from "@/lib/outbound-display"
 import {
   buildUpdatedConfigForOutboundsDelete,
+  filterDeletableOutboundTags,
+  firstLatency,
   getOutboundDeleteImpact,
   type OutboundDeleteImpact,
 } from "@/pages/outbounds-utils"
-import { OutboundCreateDialog } from "@/pages/outbound-upsert-page"
 
 type OutboundItem = {
   id: string
   tag: string
   type: Outbound["type"]
-  summary: ReactNode
   outbound: Outbound
   runtimeInterface?: RuntimeInterfaceInventoryEntry
   runtimeState?: RuntimeOutboundState
 }
 
-export function OutboundsPage() {
+type OutboundGroupKey = "interfaces" | "failover" | "system"
+
+export function OutboundsPage({
+  embedded = false,
+  group,
+}: {
+  embedded?: boolean
+  /**
+   * Показать только одну группу и не рисовать свои вкладки.
+   *
+   * Страница целиком живёт внутри «Маршрутов и туннелей»: вкладками там
+   * управляет родитель, а две полосы вкладок друг под другом читались бы как
+   * два разных раздела на одном экране.
+   */
+  group?: OutboundGroupKey
+} = {}) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [, navigate] = useLocation()
-  const [createOpen, setCreateOpen] = useState(false)
   const [deleteRequest, setDeleteRequest] = useState<{
     tags: string[]
     impact: OutboundDeleteImpact
@@ -78,18 +104,8 @@ export function OutboundsPage() {
   const [deletePreview, setDeletePreview] = useState<typeof deleteRequest>(null)
   const configMutationPending = useConfigMutationPending()
   const configQuery = useGetConfig()
-  const runtimeOutboundsQuery = useGetRuntimeOutbounds({
-    query: {
-      refetchInterval: 10_000,
-      refetchIntervalInBackground: false,
-    },
-  })
-  const runtimeInterfacesQuery = useGetRuntimeInterfaces({
-    query: {
-      refetchInterval: 10_000,
-      refetchIntervalInBackground: false,
-    },
-  })
+  const runtimeOutboundsQuery = useGetRuntimeOutbounds()
+  const runtimeInterfacesQuery = useGetRuntimeInterfaces()
   const loadedConfig = selectConfig(configQuery.data)
   const visibleDeleteRequest = deleteRequest ?? deletePreview
   // using toasts for mutation errors
@@ -120,25 +136,49 @@ export function OutboundsPage() {
         mapOutboundToItem(
           outbound,
           runtimeOutboundByTag.get(outbound.tag),
-          runtimeInterfaceByName.get(outbound.interface ?? ""),
-          t
+          runtimeInterfaceByName.get(outbound.interface ?? "")
         )
       ),
-    [loadedConfig, runtimeOutboundByTag, runtimeInterfaceByName, t]
+    [loadedConfig, runtimeOutboundByTag, runtimeInterfaceByName]
+  )
+  const outboundDisplayNames = useMemo(
+    () => createOutboundDisplayNameMap(selectOutbounds(loadedConfig)),
+    [loadedConfig]
+  )
+  const dependencyTargets = useMemo(
+    () =>
+      outboundItems.map((item) => ({
+        kind: "outbound" as const,
+        id: item.id,
+      })),
+    [outboundItems]
+  )
+  const dependencyAnalysis = useConfigDependencies(
+    loadedConfig,
+    dependencyTargets
   )
   const dependenciesByTag = useMemo(
     () =>
       new Map(
         outboundItems.map((item) => [
           item.id,
-          dependenciesOfOutbound(loadedConfig, item.id),
+          dependencyAnalysis.dependenciesByTarget.get(`outbound:${item.id}`) ??
+            [],
         ])
       ),
-    [loadedConfig, outboundItems]
+    [dependencyAnalysis.dependenciesByTarget, outboundItems]
   )
   const brokenReferences = useMemo(
-    () => findBrokenReferences(loadedConfig),
-    [loadedConfig]
+    () =>
+      findBrokenReferences(loadedConfig, {
+        missingList: (values) =>
+          t("common.dependencies.brokenReference.missingList", values),
+        listDetour: (values) =>
+          t("common.dependencies.brokenReference.listDetour", values),
+        listRefresh: (values) =>
+          t("common.dependencies.brokenReference.listRefresh", values),
+      }),
+    [loadedConfig, t]
   )
   // Сколько правил ведёт в это направление и сколько списков через них
   // проходит. Это единственное, чего в прежней таблице не было совсем, а
@@ -154,26 +194,246 @@ export function OutboundsPage() {
     selectOutbounds(loadedConfig).find((item) => item.tag === tag)?.interface ??
     ""
 
-  const outboundRowIds = outboundItems.map((outbound) => outbound.id)
-  const outboundSelection = useRowSelection(outboundRowIds)
   // Grouped so the page reads as "what carries traffic" first, then failover
   // groups, then the plumbing, instead of one undifferentiated list.
-  const outboundGroups = [
+  const outboundGroups: Array<{
+    key: OutboundGroupKey
+    items: OutboundItem[]
+  }> = [
     {
-      key: "interfaces",
+      key: "interfaces" as const,
       items: outboundItems.filter((item) => item.type === "interface"),
     },
     {
-      key: "failover",
+      key: "failover" as const,
       items: outboundItems.filter((item) => item.type === "urltest"),
     },
     {
-      key: "system",
+      key: "system" as const,
       items: outboundItems.filter(
         (item) => item.type !== "interface" && item.type !== "urltest"
       ),
     },
-  ].filter((group) => group.items.length > 0)
+  ]
+  const outboundTabs: SectionTab<OutboundGroupKey>[] = outboundGroups.map(
+    (group) => ({
+      value: group.key,
+      label: t(`pages.outbounds.groups.${group.key}`),
+      count: group.items.length,
+    })
+  )
+  const [hashGroupKey, setHashGroupKey] = useSectionTab<OutboundGroupKey>(
+    ["interfaces", "failover", "system"],
+    "interfaces"
+  )
+  const activeGroupKey = group ?? hashGroupKey
+  const setActiveGroupKey = setHashGroupKey
+  const activeOutboundGroup =
+    outboundGroups.find((group) => group.key === activeGroupKey) ??
+    outboundGroups[0]
+  // Сортировка по названию и по задержке. Задержка — единственное число на
+  // странице, и вопрос «какой выход быстрее» без неё решался глазами по
+  // разбросанным карточкам.
+  // Колонки у вкладок разные, поэтому и индекс колонки «Состояние» разный:
+  // у туннелей она вторая, у резервирования третья, у системных маршрутов её
+  // нет вовсе — там нечего измерять.
+  const latencyColumnIndex =
+    activeGroupKey === "interfaces" ? 1 : activeGroupKey === "failover" ? 2 : -1
+  const { sorted: sortedOutbounds, sort } = useTableSort(
+    activeOutboundGroup.items,
+    [
+      { index: 0, get: (item) => getOutboundDisplayName(item.outbound) },
+      ...(latencyColumnIndex >= 0
+        ? [
+            {
+              index: latencyColumnIndex,
+              get: (item: OutboundItem) => firstLatency(item.runtimeState),
+            },
+          ]
+        : []),
+    ]
+  )
+  // Судить об отсутствии интерфейса можно только когда список интерфейсов
+  // действительно приехал: пока запрос не ответил, карта пуста, и без этой
+  // проверки «интерфейс не найден» показалось бы у всех сразу.
+  const runtimeInterfacesKnown =
+    runtimeInterfacesQuery.data?.status === 200 &&
+    runtimeInterfaceByName.size > 0
+  const isInterfaceMissing = (item: OutboundItem) =>
+    runtimeInterfacesKnown &&
+    item.outbound.type === "interface" &&
+    typeof item.outbound.interface === "string" &&
+    item.outbound.interface.length > 0 &&
+    !runtimeInterfaceByName.has(item.outbound.interface)
+
+  // Маршрут, чей интерфейс из системы исчез, — не «ещё один в списке», а
+  // единственная причина, по которой в таблице два «sddvpn mooo VLESS».
+  // Демон по обоим отдаёт healthy: он проверяет свою табличную часть, а не
+  // наличие интерфейса. Значит, различать их должна страница.
+  const brokenOutbounds = sortedOutbounds.filter((item) =>
+    isInterfaceMissing(item)
+  )
+  const workingOutbounds = sortedOutbounds.filter(
+    (item) => !isInterfaceMissing(item)
+  )
+  // Порядок строк один, таблица одна: две таблицы считали бы ширину колонок
+  // каждая по своему содержимому, и «Название» вверху оказывалось заметно уже,
+  // чем внизу.
+  const orderedOutbounds =
+    brokenOutbounds.length > 0
+      ? [...workingOutbounds, ...brokenOutbounds]
+      : sortedOutbounds
+  const outboundGroupHeadings =
+    brokenOutbounds.length > 0
+      ? {
+          0: (
+            <SectionHeading
+              size="compact"
+              title={t("pages.outbounds.split.working")}
+            />
+          ),
+          [workingOutbounds.length]: (
+            <SectionHeading
+              description={t("pages.outbounds.split.brokenDescription")}
+              size="compact"
+              title={t("pages.outbounds.split.broken")}
+              tone="destructive"
+            />
+          ),
+        }
+      : undefined
+
+  const systemGroupActive = activeGroupKey === "system"
+  const outboundRowIds = orderedOutbounds.map((item) => item.id)
+  const outboundSelection = useRowSelection(outboundRowIds)
+  // Одна таблица, но с подзаголовком перед мёртвыми маршрутами. Разделять
+  // именно так, а не сортировкой: два маршрута с одинаковым названием стоят
+  // рядом и отличаются только красной точкой, а под разными заголовками
+  // путать их уже нечем.
+  const renderOutboundTable = (items: OutboundItem[]) => (
+    <DataTable
+      groupHeadings={outboundGroupHeadings}
+      headers={[
+        t("pages.outbounds.headers.tag"),
+        ...(activeGroupKey === "failover"
+          ? [t("pages.outbounds.headers.memberChain")]
+          : []),
+        ...(activeGroupKey === "system"
+          ? [t("pages.outbounds.headers.purpose")]
+          : [t("pages.outbounds.headers.runtime")]),
+        t("pages.outbounds.headers.usedBy"),
+        t("pages.outbounds.headers.actions"),
+      ]}
+      narrowColumns={latencyColumnIndex >= 0 ? [latencyColumnIndex] : []}
+      rows={items.map((item) => [
+        <OutboundName
+          key={`${item.id}-name`}
+          outbound={item.outbound}
+          protocol={
+            item.outbound.type === "urltest"
+              ? protocolOfGroup(item.outbound, interfaceOfTag)
+              : protocolOf(item.outbound.interface ?? "")
+          }
+          withInterface={activeGroupKey === "interfaces"}
+        />,
+        ...(activeGroupKey === "failover"
+          ? [
+              <OutboundMemberChain
+                key={`${item.id}-chain`}
+                outboundDisplayNames={outboundDisplayNames}
+                runtimeState={item.runtimeState}
+              />,
+            ]
+          : []),
+        activeGroupKey === "system" ? (
+          <OutboundPurpose
+            key={`${item.id}-purpose`}
+            outbound={item.outbound}
+          />
+        ) : (
+          <OutboundStatus
+            interfaceMissing={isInterfaceMissing(item)}
+            key={`${item.id}-status`}
+            runtimeState={item.runtimeState}
+          />
+        ),
+        // Связи видно до удаления, а не из диалога, который перечислял
+        // последствия постфактум. До трёх однострочных категорий — чуть
+        // больше, чем у туннелей (решение владельца), но строки таблицы
+        // остаются одной высоты; остаток — числом «Ещё N».
+        <DependencyList
+          cellRows={3}
+          className="min-h-[72px]"
+          dependencies={dependenciesByTag.get(item.id) ?? []}
+          emptyHint={t("pages.outbounds.usage.none")}
+          key={`${item.id}-usage`}
+        />,
+        <ActionButtons
+          actions={[
+            // У системных направлений кнопки замера нет: wan и blackhole
+            // демон не пробирует, и кнопка ничего не замеряла — мёртвый
+            // элемент управления хуже отсутствующего (замечание владельца).
+            ...(systemGroupActive
+              ? []
+              : [
+                  {
+                    // Замеряется именно этот выход. Раньше кнопка на строке
+                    // запускала общий раунд по всем сразу — владелец увидел
+                    // это в интерфейсе, и он был прав: раунд действительно
+                    // трогал все.
+                    disabled:
+                      probeMutation.isPending &&
+                      probeMutation.variables === item.id,
+                    icon: (
+                      <RotateCw
+                        className={cn(
+                          "h-4 w-4",
+                          probeMutation.isPending &&
+                            probeMutation.variables === item.id &&
+                            "animate-spin"
+                        )}
+                      />
+                    ),
+                    label: t("transports.latencyRefresh"),
+                    onClick: () => probeMutation.mutate(item.id),
+                  },
+                ]),
+            {
+              icon: <KeenPencilIcon className="h-4 w-4" />,
+              label: t("common.edit"),
+              onClick: () => navigate(`/outbounds/${item.id}/edit`),
+            },
+          ]}
+          key={`${item.id}-actions`}
+        />,
+      ])}
+      // Системные маршруты выбирать нечем: удаление здесь — единственная
+      // операция над выделением, а удалять их нельзя. Отключённые галочки
+      // выглядели бы как «пока нельзя», хотя нельзя всегда.
+      selection={
+        systemGroupActive
+          ? undefined
+          : {
+              rowIds: items.map((entry) => entry.id),
+              selectedIds: outboundSelection.selectedIds,
+              disabled: configMutationPending,
+              onToggle: outboundSelection.toggleOne,
+              onToggleAll: outboundSelection.setAllVisible,
+              selectAllLabel: t("common.selection.selectAll"),
+              getRowLabel: (rowId) =>
+                t("common.selection.selectRow", {
+                  rowLabel: outboundDisplayNames.get(rowId) ?? rowId,
+                }),
+            }
+      }
+      sort={sort}
+    />
+  )
+
+  const changeActiveGroup = (nextGroup: OutboundGroupKey) => {
+    outboundSelection.clear()
+    setActiveGroupKey(nextGroup)
+  }
 
   const postConfigMutation = usePostConfigMutation({
     mutation: {
@@ -205,7 +465,13 @@ export function OutboundsPage() {
       return
     }
 
-    const tags = [...outboundSelection.selectedIds]
+    const tags = filterDeletableOutboundTags(
+      loadedConfig,
+      outboundSelection.selectedIds
+    )
+    if (tags.length === 0) {
+      return
+    }
     const request = {
       tags,
       impact: getOutboundDeleteImpact(loadedConfig, tags),
@@ -241,11 +507,38 @@ export function OutboundsPage() {
 
   return (
     <div className="space-y-3">
-      <PageHeader
-        description={t("pages.outbounds.description")}
-        title={t("pages.outbounds.title")}
-      />
-      <PageActionBar>
+      {embedded ? null : (
+        <PageHeader
+          description={t("pages.outbounds.description")}
+          title={t("pages.outbounds.title")}
+        />
+      )}
+      <PageActionBar
+        primary={
+          <Button
+            disabled={configMutationPending}
+            onClick={() =>
+              navigate(
+                group === "failover"
+                  ? // На вкладке групп добавляется группа, а не «маршрут или
+                    // группа»: выбор типа уехал в расширенный редактор.
+                    "/outbounds/create?type=urltest"
+                  : group === "system"
+                    ? // Системные направления — заведомо тонкая настройка.
+                      "/outbounds/create?view=page"
+                    : "/outbounds/create"
+              )
+            }
+          >
+            <Plus className="mr-1 h-4 w-4" />
+            {t(
+              group === "failover"
+                ? "pages.outbounds.actions.newGroup"
+                : "pages.outbounds.actions.new"
+            )}
+          </Button>
+        }
+      >
         <ConfigTransferButtons
           config={loadedConfig}
           disabled={configMutationPending}
@@ -254,13 +547,6 @@ export function OutboundsPage() {
             postConfigMutation.mutate({ data: nextConfig })
           }
         />
-        <Button
-          disabled={configMutationPending}
-          onClick={() => setCreateOpen(true)}
-        >
-          <Plus className="mr-1 h-4 w-4" />
-          {t("pages.outbounds.actions.new")}
-        </Button>
       </PageActionBar>
 
       <ConfigSaveErrorAlert error={postConfigMutation.error} />
@@ -297,6 +583,14 @@ export function OutboundsPage() {
         />
       ) : (
         <div className="space-y-3">
+          {group ? null : (
+            <SectionTabs
+              ariaLabel={t("pages.outbounds.tabs.ariaLabel")}
+              onValueChange={changeActiveGroup}
+              tabs={outboundTabs}
+              value={activeGroupKey}
+            />
+          )}
           <div className="relative h-0">
             {outboundSelection.hasSelection ? (
               <BulkSelectionToolbar
@@ -310,45 +604,22 @@ export function OutboundsPage() {
                   size="sm"
                   variant="destructive"
                 >
-                  <Trash2 className="mr-1 h-4 w-4" />
+                  <KeenTrashIcon className="mr-1 h-4 w-4" />
                   {t("pages.outbounds.bulk.delete")}
                 </Button>
               </BulkSelectionToolbar>
             ) : null}
           </div>
-          {outboundGroups.map((group) => (
-            <div className="space-y-2" key={group.key}>
-              <h2 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
-                {t(`pages.outbounds.groups.${group.key}`)}
-              </h2>
-              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                {group.items.map((item) => (
-                  <OutboundCard
-                    key={item.id}
-                    onEdit={() => navigate(`/outbounds/${item.id}/edit`)}
-                    onToggleSelected={() =>
-                      outboundSelection.toggleOne(item.id)
-                    }
-                    outbound={item.outbound}
-                    protocol={
-                      item.outbound.type === "urltest"
-                        ? protocolOfGroup(item.outbound, interfaceOfTag)
-                        : protocolOf(item.outbound.interface ?? "")
-                    }
-                    runtimeState={item.runtimeState}
-                    selectLabel={t("common.selection.selectRow", {
-                      rowLabel: item.id,
-                    })}
-                    selected={outboundSelection.selectedIds.has(item.id)}
-                    dependencies={dependenciesByTag.get(item.id) ?? []}
-                    onRefreshLatency={() => probeMutation.mutate()}
-                    refreshingLatency={probeMutation.isPending}
-                    selectionDisabled={configMutationPending}
-                  />
-                ))}
-              </div>
-            </div>
-          ))}
+          {activeOutboundGroup.items.length === 0 ? (
+            <ListPlaceholder
+              description={t(
+                `pages.outbounds.groupsEmpty.${activeOutboundGroup.key}`
+              )}
+              title={t(`pages.outbounds.groups.${activeOutboundGroup.key}`)}
+            />
+          ) : (
+            renderOutboundTable(orderedOutbounds)
+          )}
         </div>
       )}
       <DeleteImpactDialog
@@ -376,247 +647,21 @@ export function OutboundsPage() {
         open={deleteRequest !== null}
         title={t("pages.outbounds.deleteDialog.title")}
       />
-      <OutboundCreateDialog onOpenChange={setCreateOpen} open={createOpen} />
     </div>
   )
-}
-
-function getOutboundDeleteImpactItems(
-  config: ConfigObject | undefined,
-  requestedTags: string[],
-  impact: OutboundDeleteImpact,
-  t: (key: string, options?: Record<string, unknown>) => string
-) {
-  const items: DeleteImpactItem[] = []
-  const requestedTagSet = new Set(requestedTags)
-
-  for (const tag of requestedTags) {
-    items.push({
-      label: (
-        <>
-          {t("pages.outbounds.deleteDialog.items.outboundPrefix")}{" "}
-          <strong>{tag}</strong>{" "}
-          {t("pages.outbounds.deleteDialog.items.outboundSuffix")}
-        </>
-      ),
-    })
-  }
-
-  for (const tag of impact.deletedOutboundTags) {
-    if (requestedTagSet.has(tag)) {
-      continue
-    }
-
-    items.push({
-      label: (
-        <>
-          {t("pages.outbounds.deleteDialog.items.dependentOutboundPrefix")}{" "}
-          <strong>{tag}</strong>{" "}
-          {t("pages.outbounds.deleteDialog.items.dependentOutboundSuffix")}
-        </>
-      ),
-    })
-  }
-
-  for (const index of impact.routeRuleIndexes) {
-    items.push({
-      label: t("pages.outbounds.deleteDialog.items.routingRule", {
-        number: index + 1,
-      }),
-      details: getRouteRuleImpactDetails(config?.route?.rules?.[index], t),
-    })
-  }
-
-  for (const server of impact.dnsServerDetours) {
-    items.push({
-      label: t("pages.outbounds.deleteDialog.items.dnsDetour", { server }),
-      details: [
-        formatDetail(
-          t("pages.dnsServers.headers.outbound"),
-          formatValueTransition(
-            config?.dns?.servers?.find((item) => item.tag === server)?.detour ??
-              t("common.noneShort"),
-            t("common.noneShort")
-          )
-        ),
-      ],
-    })
-  }
-
-  for (const membership of impact.urltestMemberships) {
-    const group = config?.outbounds?.find(
-      (outbound) => outbound.tag === membership.outboundTag
-    )?.outbound_groups?.[membership.groupIndex]
-    const remainingTags =
-      group?.outbounds.filter(
-        (tag) => !impact.deletedOutboundTags.includes(tag)
-      ) ?? []
-    const isRemoved = remainingTags.length === 0
-
-    items.push({
-      label: isRemoved
-        ? t("pages.outbounds.deleteDialog.items.urltestGroupRemoved", {
-            group: membership.groupIndex + 1,
-            outbound: membership.outboundTag,
-          })
-        : t("pages.outbounds.deleteDialog.items.urltestGroupChanged", {
-            group: membership.groupIndex + 1,
-            outbound: membership.outboundTag,
-          }),
-      details: [
-        formatDetail(
-          t("pages.outbounds.deleteDialog.items.groupOutbounds"),
-          isRemoved
-            ? formatListValue(group?.outbounds ?? [], t)
-            : formatTransition(group?.outbounds ?? [], remainingTags, t)
-        ),
-      ],
-    })
-  }
-
-  return items
-}
-
-function getRouteRuleImpactDetails(
-  rule: RouteRule | undefined,
-  t: (key: string, options?: Record<string, unknown>) => string
-) {
-  if (!rule) {
-    return []
-  }
-
-  const details = [
-    {
-      label: t("pages.routingRules.headers.outbound"),
-      value: rule.outbound,
-    },
-    {
-      label: t("pages.routingRules.criteriaLabels.lists"),
-      value: (rule.list ?? []).join(", "),
-    },
-    {
-      label: t("pages.routingRules.criteriaLabels.proto"),
-      value: rule.proto,
-    },
-    {
-      label: t("pages.routingRules.criteriaLabels.dscp"),
-      value: rule.dscp?.toString(),
-    },
-    {
-      label: t("pages.routingRules.criteriaLabels.sourceIp"),
-      value: rule.src_addr,
-    },
-    {
-      label: t("pages.routingRules.criteriaLabels.destinationIp"),
-      value: rule.dest_addr,
-    },
-    {
-      label: t("pages.routingRules.criteriaLabels.sourcePort"),
-      value: rule.src_port,
-    },
-    {
-      label: t("pages.routingRules.criteriaLabels.destinationPort"),
-      value: rule.dest_port,
-    },
-  ]
-    .filter(
-      (
-        item
-      ): item is {
-        label: string
-        value: string
-      } => typeof item.value === "string" && item.value.trim().length > 0
-    )
-    .map((item) =>
-      t("pages.outbounds.deleteDialog.items.ruleDetail", {
-        label: item.label,
-        value: item.value,
-      })
-    )
-
-  return details
-}
-
-function formatDetail(label: string, value: ReactNode) {
-  return (
-    <>
-      {label}: {value}
-    </>
-  )
-}
-
-function formatTransition(
-  before: string[],
-  after: string[],
-  t: (key: string, options?: Record<string, unknown>) => string
-) {
-  return formatValueTransition(
-    formatListValue(before, t),
-    formatListValue(after, t)
-  )
-}
-
-function formatValueTransition(before: string, after: string) {
-  return <ChangeValue after={after} before={before} />
-}
-
-function ChangeValue({ after, before }: { after: string; before: string }) {
-  return (
-    <span className="inline-flex min-w-0 items-center gap-1 leading-4">
-      <span className="min-w-0 truncate">{before}</span>
-      <ArrowRight className="mt-px size-3 shrink-0" />
-      <span className="min-w-0 truncate">{after}</span>
-    </span>
-  )
-}
-
-function formatListValue(
-  values: string[],
-  t: (key: string, options?: Record<string, unknown>) => string
-) {
-  return values.length > 0 ? values.join(", ") : t("common.noneShort")
 }
 
 function mapOutboundToItem(
   outbound: Outbound,
   runtimeState: RuntimeOutboundState | undefined,
-  runtimeInterface: RuntimeInterfaceInventoryEntry | undefined,
-  t: (key: string, options?: Record<string, unknown>) => string
+  runtimeInterface: RuntimeInterfaceInventoryEntry | undefined
 ): OutboundItem {
   return {
     id: outbound.tag,
     tag: outbound.tag,
     type: outbound.type,
-    summary: getOutboundSummary(outbound, t),
     outbound,
     runtimeInterface,
     runtimeState,
   }
-}
-
-function getOutboundSummary(
-  outbound: Outbound,
-  t: (key: string, options?: Record<string, unknown>) => string
-): ReactNode {
-  if (outbound.type === "interface") {
-    return t("pages.outbounds.summary.interface", {
-      value: outbound.interface ?? "-",
-    })
-  }
-
-  if (outbound.type === "table") {
-    return t("pages.outbounds.summary.table", {
-      value: outbound.table ?? "-",
-    })
-  }
-
-  if (outbound.type === "urltest") {
-    const allOutbounds =
-      outbound.outbound_groups?.flatMap((group) => group.outbounds) ?? []
-    return t("pages.outbounds.summary.urltest", {
-      value: allOutbounds.join(","),
-    })
-  }
-
-  return t("common.noneShort")
 }

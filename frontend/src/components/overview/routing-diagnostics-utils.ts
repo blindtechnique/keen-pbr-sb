@@ -1,7 +1,9 @@
 import type {
+  ConfigObject,
   RouteRule,
   RoutingTestRuleDiagnostic,
 } from "@/api/generated/model"
+import { formatListReferenceLabels } from "@/lib/list-display"
 
 export type RuleCondition = {
   key:
@@ -11,6 +13,7 @@ export type RuleCondition = {
     | "destinationIp"
     | "sourcePort"
     | "destinationPort"
+    | "dscp"
   value: string
 }
 
@@ -30,14 +33,31 @@ export function isGrayRuleDiagnostic(rule: RoutingTestRuleDiagnostic) {
     return false
   }
 
+  if (
+    rule.ip_rows.some(
+      (ipRow) =>
+        ipRow.in_lists ||
+        ipRow.list_match != null ||
+        ipRow.evaluation !== "not_matched"
+    )
+  ) {
+    return false
+  }
+
   return rule.ip_rows.every((ipRow) => ipRow.in_ipset !== true)
 }
 
-export function getRuleConditions(rule: RouteRule): RuleCondition[] {
+export function getRuleConditions(
+  rule: RouteRule,
+  lists?: ConfigObject["lists"]
+): RuleCondition[] {
   const conditions: RuleCondition[] = []
 
   if (rule.list && rule.list.length > 0) {
-    conditions.push({ key: "lists", value: rule.list.join(", ") })
+    conditions.push({
+      key: "lists",
+      value: formatListReferenceLabels(rule.list, lists),
+    })
   }
   if (hasText(rule.proto)) {
     conditions.push({ key: "proto", value: rule.proto })
@@ -53,6 +73,9 @@ export function getRuleConditions(rule: RouteRule): RuleCondition[] {
   }
   if (hasText(rule.dest_port)) {
     conditions.push({ key: "destinationPort", value: rule.dest_port })
+  }
+  if (rule.dscp != null) {
+    conditions.push({ key: "dscp", value: String(rule.dscp) })
   }
 
   return conditions

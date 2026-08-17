@@ -8,9 +8,16 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        default: "bg-primary text-primary-foreground shadow-sm hover:brightness-95",
+        // KeeneticOS: заливка и рамка --primary-color, при наведении обе
+        // становятся #1c6c9a, при нажатии фон #aed6fa с тёмно-синим текстом.
+        // Тени у кнопки нет.
+        default:
+          "border-primary bg-primary text-primary-foreground hover:border-button-hover hover:bg-button-hover active:border-button-hover active:bg-button-active active:text-button-hover",
+        // KeeneticOS: белый фон, бледно-синяя рамка, синий текст; при наведении
+        // заливается #1c6c9a с белым текстом — то есть вторичная кнопка при
+        // наведении выглядит как первичная, а не просто подсвечивается.
         outline:
-          "border-input bg-card hover:border-primary/45 hover:bg-accent hover:text-accent-foreground aria-expanded:bg-accent aria-expanded:text-accent-foreground dark:border-input dark:bg-card dark:hover:bg-accent",
+          "border-button-outline-border bg-card text-primary hover:border-button-hover hover:bg-button-hover hover:text-primary-foreground focus-visible:border-primary active:border-button-hover active:bg-card active:text-button-hover aria-expanded:border-button-hover aria-expanded:bg-button-hover aria-expanded:text-primary-foreground",
         secondary:
           "bg-secondary text-secondary-foreground hover:bg-secondary/80 aria-expanded:bg-secondary aria-expanded:text-secondary-foreground",
         ghost:

@@ -17,6 +17,7 @@ Options:
   --config <path>    Path to JSON config file
   --log-level <lvl>  Log level: error, warn, info, verbose, debug
   --no-api           Disable REST API at runtime
+  --use-raw-prerouting  Use raw PREROUTING for IPv4 forwarded traffic (iptables only)
   --version          Show version and exit
   --help             Show this help and exit
 
@@ -38,8 +39,24 @@ The config file is usually `/etc/keen-pbr/config.json` on OpenWrt and Debian, an
 | `--config <path>` | Path to the JSON config file. |
 | `--log-level <lvl>` | Log verbosity: `error`, `warn`, `info`, `verbose`, or `debug`. |
 | `--no-api` | Disable the REST API even if enabled in config. |
+| `--use-raw-prerouting` | Opt in to raw-table IPv4 forwarded-traffic classification; available only with iptables. |
 | `--version` | Print version and exit. |
 | `--help` | Print help and exit. |
+
+### `--use-raw-prerouting`
+
+This option is disabled by default. It is intended for systems such as
+KeeneticOS where another firewall manager can replace the `mangle` table. The
+option moves only IPv4 forwarded-traffic classification to `raw PREROUTING`.
+Router-originated traffic stays in `mangle OUTPUT`, and IPv6 continues to use
+`mangle`.
+
+On Keenetic the init script probes `iptable_raw.ko` and enables this path
+automatically when it is usable. `KEEN_PBR_RAW_PREROUTING` in
+`/opt/etc/keen-pbr/defaults` accepts `auto`, `on`, or `off`: `on` fails startup
+when the capability is missing, while `off` provides an explicit compatibility
+escape hatch. Because raw PREROUTING runs before conntrack, every forwarded
+IPv4 packet is classified directly there.
 
 ## Commands
 

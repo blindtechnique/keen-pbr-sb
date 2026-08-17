@@ -1,12 +1,17 @@
 #include "config.hpp"
 #include "addr_spec.hpp"
 #include "routing_state.hpp"
+#include "../dns/dns_server.hpp"
+#include "../util/display_name.hpp"
 #include "../util/system_info.hpp"
 
+#include <algorithm>
 #include <arpa/inet.h>
 #include <cctype>
+#include <cstdint>
 #include <iomanip>
 #include <limits>
+#include <net/if.h>
 #include <set>
 #include <sstream>
 
@@ -29,6 +34,17 @@ bool is_valid_ipv4_address(const std::string& ip) {
 bool is_valid_ipv6_address(const std::string& ip) {
     in6_addr addr{};
     return inet_pton(AF_INET6, ip.c_str(), &addr) == 1;
+}
+
+bool is_http_url(const std::string& url) {
+    const auto separator = url.find("://");
+    if (separator == std::string::npos || separator + 3 >= url.size()) return false;
+
+    std::string scheme = url.substr(0, separator);
+    std::transform(scheme.begin(), scheme.end(), scheme.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return scheme == "http" || scheme == "https";
 }
 
 void add_issue(std::vector<ConfigValidationIssue>& issues,
@@ -97,6 +113,54 @@ void validate_optional_boolean_field(const json& root,
     }
 }
 
+void validate_meta_udp443_policy_field(
+    const json& root,
+    std::vector<ConfigValidationIssue>& issues) {
+    const auto daemon_it = root.find("daemon");
+    if (daemon_it == root.end() || !daemon_it->is_object()) return;
+
+    const auto policy_it = daemon_it->find("meta_udp443_policy");
+    if (policy_it == daemon_it->end() || policy_it->is_null()) return;
+
+    constexpr const char* path = "daemon.meta_udp443_policy";
+    if (!policy_it->is_string()) {
+        add_issue(issues, path, std::string(path) + " must be a string");
+        return;
+    }
+
+    const auto& policy = policy_it->get_ref<const std::string&>();
+    if (policy != "balanced" && policy != "messages_first") {
+        add_issue(
+            issues,
+            path,
+            std::string(path) + " must be one of: balanced, messages_first");
+    }
+}
+
+void validate_ppe_deoffload_mode_field(
+    const json& root,
+    std::vector<ConfigValidationIssue>& issues) {
+    const auto daemon_it = root.find("daemon");
+    if (daemon_it == root.end() || !daemon_it->is_object()) return;
+
+    const auto mode_it = daemon_it->find("ppe_deoffload_mode");
+    if (mode_it == daemon_it->end() || mode_it->is_null()) return;
+
+    constexpr const char* path = "daemon.ppe_deoffload_mode";
+    if (!mode_it->is_string()) {
+        add_issue(issues, path, std::string(path) + " must be a string");
+        return;
+    }
+
+    const auto& mode = mode_it->get_ref<const std::string&>();
+    if (mode != "off" && mode != "auto") {
+        add_issue(
+            issues,
+            path,
+            std::string(path) + " must be one of: off, auto");
+    }
+}
+
 void validate_optional_hex_string_field(const json& root,
                                         const char* parent_key,
                                         const char* child_key,
@@ -125,6 +189,53 @@ std::string trim_copy(const std::string& value) {
 
     const auto end = value.find_last_not_of(" \t\n\r\f\v");
     return value.substr(begin, end - begin + 1);
+}
+
+void validate_optional_string_array_field(
+    const json& root,
+    const char* parent_key,
+    const char* child_key,
+    const std::string& path,
+    std::vector<ConfigValidationIssue>& issues) {
+    const auto parent_it = root.find(parent_key);
+    if (parent_it == root.end() || !parent_it->is_object()) return;
+    const auto child_it = parent_it->find(child_key);
+    if (child_it == parent_it->end() || child_it->is_null()) return;
+    if (!child_it->is_array()) {
+        add_issue(issues, path, path + " must be an array of strings");
+        return;
+    }
+    for (std::size_t index = 0; index < child_it->size(); ++index) {
+        if (!child_it->at(index).is_string()) {
+            add_issue(
+                issues,
+                path + "[" + std::to_string(index) + "]",
+                path + " must be an array of strings");
+        }
+    }
+}
+
+bool is_valid_iptables_interface_name(const std::string& interface_name) {
+    if (interface_name.empty() || trim_copy(interface_name).empty() ||
+        interface_name.size() >= IFNAMSIZ || interface_name == "." ||
+        interface_name == ".." || interface_name.back() == '+') {
+        return false;
+    }
+
+    return std::none_of(
+        interface_name.begin(),
+        interface_name.end(),
+        [](unsigned char ch) {
+            return ch == '/' || ch == ':' || ch == '"' || ch == '\\' ||
+                   std::isspace(ch) != 0 || std::iscntrl(ch) != 0;
+        });
+}
+
+std::string iptables_interface_name_requirement(const std::string& path) {
+    return path +
+           " must be a valid iptables interface name (shorter than IFNAMSIZ, "
+           "without '/', ':', quotes, backslashes, whitespace, or control "
+           "characters, and not ending in '+')";
 }
 
 FirewallBackendPreference to_firewall_backend_preference(api::DaemonConfigFirewallBackend backend) {
@@ -168,6 +279,198 @@ bool parse_uint_in_range(const std::string& raw, int min_value, int max_value, i
 constexpr size_t IPSET_MAX_NAME = 31;
 constexpr size_t IPSET_PREFIX_LEN = 7; // len("kpbr4d_")
 constexpr size_t MAX_TAG_LEN = IPSET_MAX_NAME - IPSET_PREFIX_LEN; // 24
+constexpr size_t MAX_HIDDEN_NATIVE_INTERFACE_IDS = 128;
+constexpr size_t MAX_NATIVE_INTERFACE_ID_CODE_POINTS = 128;
+constexpr size_t MAX_PLAIN_DNS_TEMPLATES = 32;
+constexpr size_t MAX_INTERNAL_VPN_SERVERS = 128;
+constexpr size_t MAX_INTERNAL_VPN_SERVICES = 32;
+
+bool is_valid_internal_vpn_service_id(const std::string& value) {
+    return !value.empty() && value.size() <= 128U &&
+           std::all_of(
+               value.begin(),
+               value.end(),
+               [](const unsigned char character) {
+                   const bool ascii_letter =
+                       (character >= 'A' && character <= 'Z') ||
+                       (character >= 'a' && character <= 'z');
+                   const bool ascii_digit =
+                       character >= '0' && character <= '9';
+                   return ascii_letter || ascii_digit ||
+                          character == '.' || character == '_' ||
+                          character == ':' || character == '-';
+               });
+}
+
+void validate_display_name(
+    std::vector<ConfigValidationIssue>& issues,
+    const std::string& path,
+    const std::string& kind,
+    const std::optional<std::string>& display_name) {
+    if (!display_name.has_value()) return;
+    switch (keen_pbr3::display_name::validate(*display_name, false)) {
+        case keen_pbr3::display_name::ValidationError::none:
+            return;
+        case keen_pbr3::display_name::ValidationError::invalid_utf8:
+            add_issue(issues, path, kind + " must be valid UTF-8");
+            return;
+        case keen_pbr3::display_name::ValidationError::ascii_control:
+            add_issue(
+                issues, path,
+                kind + " must not contain ASCII control characters");
+            return;
+        case keen_pbr3::display_name::ValidationError::c1_or_bidirectional_control:
+            add_issue(
+                issues, path,
+                kind +
+                    " must not contain C1 or bidirectional control characters");
+            return;
+        case keen_pbr3::display_name::ValidationError::whitespace_only:
+            add_issue(
+                issues, path,
+                kind + " must contain a non-whitespace character");
+            return;
+        case keen_pbr3::display_name::ValidationError::too_long:
+            add_issue(
+                issues, path,
+                kind + " must not exceed " +
+                    std::to_string(keen_pbr3::display_name::MAX_CODE_POINTS) +
+                    " Unicode code points");
+            return;
+    }
+}
+
+std::string ascii_lower_copy(std::string value) {
+    std::transform(
+        value.begin(), value.end(), value.begin(), [](unsigned char character) {
+            return static_cast<char>(std::tolower(character));
+        });
+    return value;
+}
+
+void validate_ui_preferences(
+    std::vector<ConfigValidationIssue>& issues,
+    const std::optional<UiPreferencesConfig>& preferences) {
+    if (!preferences.has_value()) return;
+
+    const auto hidden_ids =
+        preferences->hidden_native_interface_ids.value_or(
+            std::vector<std::string>{});
+    if (hidden_ids.size() > MAX_HIDDEN_NATIVE_INTERFACE_IDS) {
+        add_issue(
+            issues,
+            "ui_preferences.hidden_native_interface_ids",
+            "ui_preferences.hidden_native_interface_ids must not contain more than " +
+                std::to_string(MAX_HIDDEN_NATIVE_INTERFACE_IDS) + " entries");
+    }
+
+    std::set<std::string> seen_hidden_ids;
+    for (size_t index = 0; index < hidden_ids.size(); ++index) {
+        const auto& interface_id = hidden_ids[index];
+        const std::string path =
+            "ui_preferences.hidden_native_interface_ids[" +
+            std::to_string(index) + "]";
+        const auto summary = display_name::summarize_utf8(interface_id);
+        if (!summary.has_value()) {
+            add_issue(issues, path, path + " must be valid UTF-8");
+        } else if (!summary->has_non_whitespace ||
+                   trim_copy(interface_id) != interface_id) {
+            add_issue(
+                issues,
+                path,
+                path + " must be a non-blank identifier without surrounding whitespace");
+        } else if (summary->code_points >
+                   MAX_NATIVE_INTERFACE_ID_CODE_POINTS) {
+            add_issue(
+                issues,
+                path,
+                path + " must not exceed " +
+                    std::to_string(MAX_NATIVE_INTERFACE_ID_CODE_POINTS) +
+                    " Unicode code points");
+        } else if (summary->has_ascii_control) {
+            add_issue(issues, path, path + " must not contain control characters");
+        }
+
+        if (!seen_hidden_ids.insert(interface_id).second) {
+            add_issue(
+                issues, path,
+                path + " duplicates native interface id '" + interface_id + "'");
+        }
+    }
+
+    const auto templates =
+        preferences->plain_dns_templates.value_or(
+            std::vector<PlainDnsTemplate>{});
+    if (templates.size() > MAX_PLAIN_DNS_TEMPLATES) {
+        add_issue(
+            issues,
+            "ui_preferences.plain_dns_templates",
+            "ui_preferences.plain_dns_templates must not contain more than " +
+                std::to_string(MAX_PLAIN_DNS_TEMPLATES) + " entries");
+    }
+
+    std::set<std::string> seen_names;
+    std::set<std::string> seen_definitions;
+    for (size_t index = 0; index < templates.size(); ++index) {
+        const auto& dns_template = templates[index];
+        const std::string path =
+            "ui_preferences.plain_dns_templates[" +
+            std::to_string(index) + "]";
+
+        validate_display_name(
+            issues,
+            path + ".name",
+            "Plain DNS template name",
+            std::optional<std::string>{dns_template.name});
+        if (trim_copy(dns_template.name) != dns_template.name) {
+            add_issue(
+                issues,
+                path + ".name",
+                "Plain DNS template name must not contain surrounding whitespace");
+        }
+
+        if (!is_valid_ipv4_address(dns_template.primary_ipv4)) {
+            add_issue(
+                issues,
+                path + ".primary_ipv4",
+                "Plain DNS template primary_ipv4 must be a valid IPv4 address");
+        }
+        if (dns_template.secondary_ipv4.has_value() &&
+            !is_valid_ipv4_address(*dns_template.secondary_ipv4)) {
+            add_issue(
+                issues,
+                path + ".secondary_ipv4",
+                "Plain DNS template secondary_ipv4 must be a valid IPv4 address");
+        }
+        if (dns_template.secondary_ipv4.has_value() &&
+            *dns_template.secondary_ipv4 == dns_template.primary_ipv4) {
+            add_issue(
+                issues,
+                path + ".secondary_ipv4",
+                "Plain DNS template secondary_ipv4 must differ from primary_ipv4");
+        }
+
+        const std::string normalized_name =
+            ascii_lower_copy(trim_copy(dns_template.name));
+        if (!seen_names.insert(normalized_name).second) {
+            add_issue(
+                issues,
+                path + ".name",
+                "Plain DNS template name '" + dns_template.name +
+                    "' is duplicated");
+        }
+
+        const std::string definition =
+            dns_template.primary_ipv4 + "|" +
+            dns_template.secondary_ipv4.value_or("");
+        if (!seen_definitions.insert(definition).second) {
+            add_issue(
+                issues,
+                path,
+                "Plain DNS template duplicates an existing resolver definition");
+        }
+    }
+}
 
 bool is_valid_tag(const std::string& value) {
     if (value.empty() || value.size() > MAX_TAG_LEN) {
@@ -518,6 +821,12 @@ void validate_route_inbound_interfaces(const json& root, std::vector<ConfigValid
             continue;
         }
 
+        if (!is_valid_iptables_interface_name(iface)) {
+            add_issue(issues, iface_path,
+                      iptables_interface_name_requirement(iface_path));
+            continue;
+        }
+
         if (!seen_interfaces.insert(iface).second) {
             add_issue(issues, iface_path,
                       iface_path + " duplicates interface '" + iface + "'");
@@ -643,6 +952,52 @@ uint32_t parse_fwmark_mask_or_throw(const FwmarkConfig& fwmark_cfg) {
     return parse_fwmark_hex_or_throw(fwmark_cfg.mask, 0x00FF0000, "fwmark.mask");
 }
 
+namespace {
+
+void validate_route_internal_vpn_servers(
+    const json& root,
+    std::vector<ConfigValidationIssue>& issues);
+void validate_route_internal_vpn_services(
+    const json& root,
+    std::vector<ConfigValidationIssue>& issues);
+
+void validate_list_refresh_fields(
+    const json& root,
+    std::vector<ConfigValidationIssue>& issues) {
+    const auto refresh_it = root.find("list_refresh");
+    if (refresh_it != root.end() && !refresh_it->is_null() &&
+        !refresh_it->is_object()) {
+        add_issue(
+            issues,
+            "list_refresh",
+            "list_refresh must be an object");
+    }
+
+    const auto lists_it = root.find("lists");
+    if (lists_it == root.end() || !lists_it->is_object()) return;
+    for (auto it = lists_it->begin(); it != lists_it->end(); ++it) {
+        if (!it.value().is_object()) continue;
+        const auto mode_it = it.value().find("refresh_detour_mode");
+        if (mode_it == it.value().end() || mode_it->is_null()) continue;
+
+        const std::string path =
+            "lists." + it.key() + ".refresh_detour_mode";
+        if (!mode_it->is_string()) {
+            add_issue(issues, path, path + " must be a string");
+            continue;
+        }
+        const auto& mode = mode_it->get_ref<const std::string&>();
+        if (mode != "inherit" && mode != "override") {
+            add_issue(
+                issues,
+                path,
+                path + " must be one of: inherit, override");
+        }
+    }
+}
+
+} // namespace
+
 Config parse_config(const std::string& json_str) {
     Config cfg;
     json parsed_json;
@@ -650,7 +1005,14 @@ Config parse_config(const std::string& json_str) {
 
     try {
         parsed_json = json::parse(json_str, nullptr, true, true);
-    } catch (const json::parse_error& e) {
+    } catch (const json::exception& e) {
+        // Ловим весь `json::exception`, а не только `parse_error`. Числовой
+        // литерал вроде 7777777777777777e777777777777777777777 синтаксически
+        // корректен, и nlohmann бросает на нём `out_of_range` (406), а не
+        // `parse_error`. Мимо узкого catch такое исключение уходило наружу и
+        // роняло демон вместо понятной ошибки валидации: конфигурация из чужой
+        // резервной копии или правленная руками — обычный вход, а не выдумка.
+        // Найдено фаззингом `keen-pbr-fuzz-config`.
         throw ConfigValidationError(std::vector<ConfigValidationIssue>{
             {"$", std::string("Invalid JSON: ") + e.what()}
         });
@@ -669,12 +1031,35 @@ Config parse_config(const std::string& json_str) {
         parsed_json, "daemon", "max_file_size_bytes", "daemon.max_file_size_bytes", issues);
     validate_optional_string_field(
         parsed_json, "daemon", "firewall_backend", "daemon.firewall_backend", issues);
+    validate_meta_udp443_policy_field(parsed_json, issues);
+    validate_ppe_deoffload_mode_field(parsed_json, issues);
     validate_optional_boolean_field(
         parsed_json, "daemon", "skip_marked_packets", "daemon.skip_marked_packets", issues);
+    validate_optional_boolean_field(
+        parsed_json, "daemon", "ppe_deoffload_quic_enabled",
+        "daemon.ppe_deoffload_quic_enabled", issues);
+    validate_optional_boolean_field(
+        parsed_json, "daemon", "clear_dynamic_sets_on_apply",
+        "daemon.clear_dynamic_sets_on_apply", issues);
+    validate_optional_boolean_field(
+        parsed_json, "daemon", "ttl_bypass_enabled",
+        "daemon.ttl_bypass_enabled", issues);
+    validate_optional_boolean_field(
+        parsed_json, "daemon", "reconnect_unmarked_flows_on_routing_change",
+        "daemon.reconnect_unmarked_flows_on_routing_change", issues);
+    validate_optional_string_array_field(
+        parsed_json,
+        "daemon",
+        "reconnect_owned_flows_on_routing_change_lists",
+        "daemon.reconnect_owned_flows_on_routing_change_lists",
+        issues);
     validate_optional_boolean_field(
         parsed_json, "daemon", "ipv6_enabled", "daemon.ipv6_enabled", issues);
     validate_route_rule_specs(parsed_json, issues);
     validate_route_inbound_interfaces(parsed_json, issues);
+    validate_route_internal_vpn_servers(parsed_json, issues);
+    validate_route_internal_vpn_services(parsed_json, issues);
+    validate_list_refresh_fields(parsed_json, issues);
 
     if (!issues.empty()) {
         throw ConfigValidationError(std::move(issues));
@@ -695,8 +1080,453 @@ Config parse_config(const std::string& json_str) {
     return cfg;
 }
 
+namespace {
+
+constexpr int64_t kMaxUrltestUint32Value =
+    static_cast<int64_t>(std::numeric_limits<uint32_t>::max());
+constexpr int64_t kMaxUrltestGroupWeight =
+    static_cast<int64_t>(std::numeric_limits<uint32_t>::max());
+constexpr int64_t kMaxUrltestRetryAttempts = 1000;
+constexpr int64_t kMaxCircuitFailureThreshold =
+    static_cast<int64_t>(std::numeric_limits<int>::max());
+
+void validate_optional_integer_range(
+    std::vector<ConfigValidationIssue>& issues,
+    const std::string& path,
+    const std::optional<int64_t>& value,
+    int64_t minimum,
+    int64_t maximum) {
+    if (!value.has_value()) {
+        return;
+    }
+
+    if (*value < minimum || *value > maximum) {
+        add_issue(
+            issues,
+            path,
+            path + " must be between " + std::to_string(minimum) + " and " +
+                std::to_string(maximum));
+    }
+}
+
+struct UrltestReference {
+    std::string target_tag;
+    std::string path;
+};
+
+void validate_urltest_cycles(
+    std::vector<ConfigValidationIssue>& issues,
+    const std::map<std::string, std::vector<UrltestReference>>& graph) {
+    enum class VisitState {
+        unvisited,
+        visiting,
+        visited,
+    };
+
+    std::map<std::string, VisitState> states;
+    for (const auto& [tag, unused] : graph) {
+        (void)unused;
+        states.emplace(tag, VisitState::unvisited);
+    }
+
+    struct VisitFrame {
+        std::string tag;
+        size_t next_reference{0};
+    };
+
+    for (const auto& [tag, unused] : graph) {
+        (void)unused;
+        if (states[tag] != VisitState::unvisited) {
+            continue;
+        }
+
+        states[tag] = VisitState::visiting;
+        std::vector<VisitFrame> stack{{tag, 0}};
+        while (!stack.empty()) {
+            auto& frame = stack.back();
+            const auto& references = graph.at(frame.tag);
+            if (frame.next_reference >= references.size()) {
+                states[frame.tag] = VisitState::visited;
+                stack.pop_back();
+                continue;
+            }
+
+            const auto& reference = references[frame.next_reference++];
+            const auto state_it = states.find(reference.target_tag);
+            if (state_it == states.end()) {
+                continue;
+            }
+
+            if (state_it->second == VisitState::visiting) {
+                add_issue(
+                    issues,
+                    reference.path,
+                    "Urltest outbound '" + frame.tag +
+                        "' creates a cyclic reference to urltest outbound '" +
+                        reference.target_tag + "'");
+                continue;
+            }
+
+            if (state_it->second == VisitState::unvisited) {
+                state_it->second = VisitState::visiting;
+                stack.push_back({reference.target_tag, 0});
+            }
+        }
+    }
+}
+
+void validate_route_internal_vpn_servers(
+    const json& root,
+    std::vector<ConfigValidationIssue>& issues) {
+    const auto route_it = root.find("route");
+    if (route_it == root.end() || !route_it->is_object()) {
+        return;
+    }
+
+    const auto servers_it = route_it->find("internal_vpn_servers");
+    if (servers_it == route_it->end() || servers_it->is_null()) {
+        return;
+    }
+
+    if (!servers_it->is_array()) {
+        add_issue(
+            issues,
+            "route.internal_vpn_servers",
+            "route.internal_vpn_servers must be an array of objects");
+        return;
+    }
+
+    if (servers_it->size() > MAX_INTERNAL_VPN_SERVERS) {
+        add_issue(
+            issues,
+            "route.internal_vpn_servers",
+            "route.internal_vpn_servers must not contain more than " +
+                std::to_string(MAX_INTERNAL_VPN_SERVERS) + " entries");
+    }
+
+    std::set<std::string> seen_interfaces;
+    std::set<std::string> seen_ndms_ids;
+    for (size_t index = 0; index < servers_it->size(); ++index) {
+        const auto& server = servers_it->at(index);
+        const std::string path =
+            "route.internal_vpn_servers[" + std::to_string(index) + "]";
+        if (!server.is_object()) {
+            add_issue(issues, path, path + " must be an object");
+            continue;
+        }
+
+        const auto interface_it = server.find("interface");
+        if (interface_it == server.end() || !interface_it->is_string()) {
+            add_issue(
+                issues,
+                path + ".interface",
+                path + ".interface must be a string");
+        } else {
+            const std::string interface = interface_it->get<std::string>();
+            if (!is_valid_iptables_interface_name(interface)) {
+                add_issue(
+                    issues,
+                    path + ".interface",
+                    iptables_interface_name_requirement(path + ".interface"));
+            }
+            if (!seen_interfaces.insert(interface).second) {
+                add_issue(
+                    issues,
+                    path + ".interface",
+                    path + ".interface duplicates interface '" + interface +
+                        "'");
+            }
+        }
+
+        const auto ndms_id_it = server.find("ndms_id");
+        if (ndms_id_it != server.end() && !ndms_id_it->is_null()) {
+            if (!ndms_id_it->is_string()) {
+                add_issue(
+                    issues,
+                    path + ".ndms_id",
+                    path + ".ndms_id must be a string");
+            } else {
+                const std::string ndms_id =
+                    ndms_id_it->get<std::string>();
+                const auto summary = display_name::summarize_utf8(ndms_id);
+                if (!summary.has_value()) {
+                    add_issue(
+                        issues,
+                        path + ".ndms_id",
+                        path + ".ndms_id must be valid UTF-8");
+                } else if (!summary->has_non_whitespace ||
+                           trim_copy(ndms_id) != ndms_id) {
+                    add_issue(
+                        issues,
+                        path + ".ndms_id",
+                        path +
+                            ".ndms_id must be a non-blank identifier without "
+                            "surrounding whitespace");
+                } else if (
+                    summary->code_points >
+                    MAX_NATIVE_INTERFACE_ID_CODE_POINTS) {
+                    add_issue(
+                        issues,
+                        path + ".ndms_id",
+                        path + ".ndms_id must not exceed " +
+                            std::to_string(
+                                MAX_NATIVE_INTERFACE_ID_CODE_POINTS) +
+                            " Unicode code points");
+                } else if (summary->has_ascii_control) {
+                    add_issue(
+                        issues,
+                        path + ".ndms_id",
+                        path + ".ndms_id must not contain control characters");
+                }
+                if (!seen_ndms_ids.insert(ndms_id).second) {
+                    add_issue(
+                        issues,
+                        path + ".ndms_id",
+                        path + ".ndms_id duplicates native interface id '" +
+                            ndms_id + "'");
+                }
+            }
+        }
+
+        const auto process_it = server.find("process_clients");
+        if (process_it == server.end() || !process_it->is_boolean()) {
+            add_issue(
+                issues,
+                path + ".process_clients",
+                path + ".process_clients must be a boolean");
+        }
+    }
+}
+
+void validate_route_internal_vpn_services(
+    const json& root,
+    std::vector<ConfigValidationIssue>& issues) {
+    const auto route_it = root.find("route");
+    if (route_it == root.end() || !route_it->is_object()) {
+        return;
+    }
+    const auto services_it = route_it->find("internal_vpn_services");
+    if (services_it == route_it->end() || services_it->is_null()) {
+        return;
+    }
+    if (!services_it->is_array()) {
+        add_issue(
+            issues,
+            "route.internal_vpn_services",
+            "route.internal_vpn_services must be an array of objects");
+        return;
+    }
+    if (services_it->size() > MAX_INTERNAL_VPN_SERVICES) {
+        add_issue(
+            issues,
+            "route.internal_vpn_services",
+            "route.internal_vpn_services must not contain more than " +
+                std::to_string(MAX_INTERNAL_VPN_SERVICES) + " entries");
+    }
+
+    std::set<std::string> seen_ids;
+    for (size_t index = 0; index < services_it->size(); ++index) {
+        const auto& service = services_it->at(index);
+        const std::string path =
+            "route.internal_vpn_services[" + std::to_string(index) + "]";
+        if (!service.is_object()) {
+            add_issue(issues, path, path + " must be an object");
+            continue;
+        }
+        const auto id_it = service.find("service_id");
+        if (id_it == service.end() || !id_it->is_string()) {
+            add_issue(
+                issues,
+                path + ".service_id",
+                path + ".service_id must be a string");
+        } else {
+            const auto& id = id_it->get_ref<const std::string&>();
+            if (!is_valid_internal_vpn_service_id(id)) {
+                add_issue(
+                    issues,
+                    path + ".service_id",
+                    path +
+                        ".service_id must be 1-128 ASCII letters, digits, "
+                        "dot, underscore, colon or hyphen");
+            } else if (!seen_ids.insert(id).second) {
+                add_issue(
+                    issues,
+                    path + ".service_id",
+                    path + ".service_id duplicates service id '" + id + "'");
+            }
+        }
+        const auto process_it = service.find("process_clients");
+        if (process_it == service.end() || !process_it->is_boolean()) {
+            add_issue(
+                issues,
+                path + ".process_clients",
+                path + ".process_clients must be a boolean");
+        }
+    }
+}
+
+void validate_route_internal_vpn_servers(
+    std::vector<ConfigValidationIssue>& issues,
+    const std::optional<RouteConfig>& route) {
+    if (!route.has_value() || !route->internal_vpn_servers.has_value()) {
+        return;
+    }
+
+    const auto& servers = *route->internal_vpn_servers;
+    if (servers.size() > MAX_INTERNAL_VPN_SERVERS) {
+        add_issue(
+            issues,
+            "route.internal_vpn_servers",
+            "route.internal_vpn_servers must not contain more than " +
+                std::to_string(MAX_INTERNAL_VPN_SERVERS) + " entries");
+    }
+
+    std::set<std::string> seen_interfaces;
+    std::set<std::string> seen_ndms_ids;
+    for (size_t index = 0; index < servers.size(); ++index) {
+        const auto& server = servers[index];
+        const std::string path =
+            "route.internal_vpn_servers[" + std::to_string(index) +
+            "].interface";
+        if (!is_valid_iptables_interface_name(server.interface)) {
+            add_issue(
+                issues,
+                path,
+                iptables_interface_name_requirement(path));
+        }
+        if (!seen_interfaces.insert(server.interface).second) {
+            add_issue(
+                issues,
+                path,
+                path + " duplicates interface '" + server.interface + "'");
+        }
+        if (server.ndms_id.has_value()) {
+            const std::string ndms_path =
+                "route.internal_vpn_servers[" + std::to_string(index) +
+                "].ndms_id";
+            const auto summary =
+                display_name::summarize_utf8(*server.ndms_id);
+            if (!summary.has_value()) {
+                add_issue(
+                    issues, ndms_path, ndms_path + " must be valid UTF-8");
+            } else if (
+                !summary->has_non_whitespace ||
+                trim_copy(*server.ndms_id) != *server.ndms_id) {
+                add_issue(
+                    issues,
+                    ndms_path,
+                    ndms_path +
+                        " must be a non-blank identifier without surrounding "
+                        "whitespace");
+            } else if (
+                summary->code_points >
+                MAX_NATIVE_INTERFACE_ID_CODE_POINTS) {
+                add_issue(
+                    issues,
+                    ndms_path,
+                    ndms_path + " must not exceed " +
+                        std::to_string(MAX_NATIVE_INTERFACE_ID_CODE_POINTS) +
+                        " Unicode code points");
+            } else if (summary->has_ascii_control) {
+                add_issue(
+                    issues,
+                    ndms_path,
+                    ndms_path + " must not contain control characters");
+            }
+            if (!seen_ndms_ids.insert(*server.ndms_id).second) {
+                add_issue(
+                    issues,
+                    ndms_path,
+                    ndms_path + " duplicates native interface id '" +
+                        *server.ndms_id + "'");
+            }
+        }
+    }
+}
+
+void validate_route_internal_vpn_services(
+    std::vector<ConfigValidationIssue>& issues,
+    const std::optional<RouteConfig>& route) {
+    if (!route.has_value() || !route->internal_vpn_services.has_value()) {
+        return;
+    }
+    const auto& services = *route->internal_vpn_services;
+    if (services.size() > MAX_INTERNAL_VPN_SERVICES) {
+        add_issue(
+            issues,
+            "route.internal_vpn_services",
+            "route.internal_vpn_services must not contain more than " +
+                std::to_string(MAX_INTERNAL_VPN_SERVICES) + " entries");
+    }
+    std::set<std::string> seen_ids;
+    for (size_t index = 0; index < services.size(); ++index) {
+        const auto& service = services[index];
+        const std::string path =
+            "route.internal_vpn_services[" + std::to_string(index) +
+            "].service_id";
+        if (!is_valid_internal_vpn_service_id(service.service_id)) {
+            add_issue(
+                issues,
+                path,
+                path +
+                    " must be 1-128 ASCII letters, digits, dot, underscore, "
+                    "colon or hyphen");
+        } else if (!seen_ids.insert(service.service_id).second) {
+            add_issue(
+                issues,
+                path,
+                path + " duplicates service id '" + service.service_id + "'");
+        }
+    }
+}
+
+} // namespace
+
+ListRefreshDetourMode effective_list_refresh_detour_mode(
+    const ListConfig& list_config) {
+    if (list_config.refresh_detour_mode.has_value()) {
+        return *list_config.refresh_detour_mode;
+    }
+    if (list_config.detour.has_value() ||
+        !list_config.fallback_detours.value_or(
+             std::vector<std::string>{}).empty()) {
+        return ListRefreshDetourMode::OVERRIDE;
+    }
+    return ListRefreshDetourMode::INHERIT;
+}
+
+std::vector<std::string> configured_list_refresh_detours(
+    const ListRefreshConfig& refresh_config) {
+    std::vector<std::string> detours;
+    if (refresh_config.detour.has_value()) {
+        detours.push_back(*refresh_config.detour);
+    }
+    const auto fallbacks = refresh_config.fallback_detours.value_or(
+        std::vector<std::string>{});
+    detours.insert(detours.end(), fallbacks.begin(), fallbacks.end());
+    return detours;
+}
+
+std::vector<std::string> effective_list_refresh_detours(
+    const Config& config,
+    const ListConfig& list_config) {
+    if (effective_list_refresh_detour_mode(list_config) ==
+        ListRefreshDetourMode::OVERRIDE) {
+        ListRefreshConfig override_config;
+        override_config.detour = list_config.detour;
+        override_config.fallback_detours = list_config.fallback_detours;
+        return configured_list_refresh_detours(override_config);
+    }
+    return configured_list_refresh_detours(
+        config.list_refresh.value_or(ListRefreshConfig{}));
+}
+
 void validate_config(const Config& cfg) {
     std::vector<ConfigValidationIssue> issues;
+
+    validate_ui_preferences(issues, cfg.ui_preferences);
+    validate_route_internal_vpn_servers(issues, cfg.route);
+    validate_route_internal_vpn_services(issues, cfg.route);
 
     if (cfg.daemon && cfg.daemon->firewall_verify_max_bytes.has_value() &&
         *cfg.daemon->firewall_verify_max_bytes < 0) {
@@ -727,9 +1557,49 @@ void validate_config(const Config& cfg) {
         }
     }
 
+    std::map<std::string, std::string> first_catalog_identity_paths;
     for (const auto& [name, list_cfg] : cfg.lists.value_or(std::map<std::string, ListConfig>{})) {
         const std::string list_path = name.empty() ? "lists" : "lists." + name;
         validate_tag(issues, list_path, "List name", name);
+        validate_display_name(
+            issues,
+            list_path + ".display_name",
+            "List display name",
+            list_cfg.display_name);
+        if (list_cfg.catalog_identity.has_value()) {
+            const auto& identity = *list_cfg.catalog_identity;
+            const bool valid =
+                identity.size() == 64U &&
+                std::all_of(
+                    identity.begin(),
+                    identity.end(),
+                    [](const unsigned char character) {
+                        return std::isdigit(character) != 0 ||
+                               (character >= 'a' &&
+                                character <= 'f');
+                    });
+            if (!valid) {
+                add_issue(
+                    issues,
+                    list_path + ".catalog_identity",
+                    list_path +
+                        ".catalog_identity must be a lowercase SHA-256 digest");
+            } else {
+                const auto identity_path =
+                    list_path + ".catalog_identity";
+                const auto [first, inserted] =
+                    first_catalog_identity_paths.emplace(
+                        identity, identity_path);
+                if (!inserted) {
+                    add_issue(
+                        issues,
+                        identity_path,
+                        identity_path +
+                            " duplicates catalogue provenance first declared at " +
+                            first->second);
+                }
+            }
+        }
 
         const bool has_url = list_cfg.url.has_value();
         const bool has_file = list_cfg.file.has_value();
@@ -744,17 +1614,223 @@ void validate_config(const Config& cfg) {
         }
     }
 
+    if (cfg.daemon &&
+        cfg.daemon->reconnect_owned_flows_on_routing_change_lists.has_value()) {
+        const auto& selected =
+            *cfg.daemon->reconnect_owned_flows_on_routing_change_lists;
+        constexpr std::size_t max_selected_lists = 128U;
+        if (selected.size() > max_selected_lists) {
+            add_issue(
+                issues,
+                "daemon.reconnect_owned_flows_on_routing_change_lists",
+                "daemon.reconnect_owned_flows_on_routing_change_lists must "
+                "not contain more than 128 entries");
+        }
+        const auto lists = cfg.lists.value_or(
+            std::map<std::string, ListConfig>{});
+        std::set<std::string> seen;
+        for (std::size_t index = 0; index < selected.size(); ++index) {
+            const auto& list_name = selected[index];
+            const auto path =
+                "daemon.reconnect_owned_flows_on_routing_change_lists[" +
+                std::to_string(index) + "]";
+            if (!seen.insert(list_name).second) {
+                add_issue(
+                    issues,
+                    path,
+                    path + " duplicates list '" + list_name + "'");
+            }
+            if (lists.count(list_name) == 0U) {
+                add_issue(
+                    issues,
+                    path,
+                    path + " references unknown list '" + list_name + "'");
+            }
+        }
+    }
+
     const auto& outbounds = cfg.outbounds.value_or(std::vector<Outbound>{});
+    std::map<std::string, const Outbound*> outbounds_by_tag;
+    std::map<std::string, size_t> first_outbound_indexes;
+    std::map<std::string, std::vector<UrltestReference>> urltest_graph;
+    for (size_t outbound_index = 0; outbound_index < outbounds.size();
+         ++outbound_index) {
+        const auto& outbound = outbounds[outbound_index];
+        const auto [first_index_it, inserted] =
+            first_outbound_indexes.emplace(outbound.tag, outbound_index);
+        if (!inserted) {
+            const std::string path =
+                "outbounds[" + std::to_string(outbound_index) + "].tag";
+            add_issue(
+                issues,
+                path,
+                path + " duplicates outbound tag '" + outbound.tag +
+                    "' first declared at outbounds[" +
+                    std::to_string(first_index_it->second) + "].tag");
+        }
+
+        outbounds_by_tag.emplace(outbound.tag, &outbound);
+        if (outbound.type == OutboundType::URLTEST) {
+            urltest_graph.emplace(outbound.tag, std::vector<UrltestReference>{});
+        }
+    }
+
+    const auto validate_download_chain =
+        [&](const std::optional<std::string>& primary,
+            const std::vector<std::string>& fallbacks,
+            const std::string& path) {
+        if (!fallbacks.empty() && !primary.has_value()) {
+            add_issue(
+                issues,
+                path + ".fallback_detours",
+                path +
+                    ".fallback_detours requires an explicit primary detour");
+        }
+        if (fallbacks.size() > 3U) {
+            add_issue(
+                issues,
+                path + ".fallback_detours",
+                path +
+                    ".fallback_detours supports at most 3 entries");
+        }
+
+        std::set<std::string> seen_detours;
+        const auto validate_download_detour =
+            [&](const std::string& tag, const std::string& detour_path) {
+                if (tag.empty()) {
+                    add_issue(
+                        issues,
+                        detour_path,
+                        detour_path + " must not be empty");
+                    return;
+                }
+                if (!seen_detours.insert(tag).second) {
+                    add_issue(
+                        issues,
+                        detour_path,
+                        detour_path + " repeats outbound tag '" + tag + "'");
+                    return;
+                }
+
+                const auto outbound_it = outbounds_by_tag.find(tag);
+                if (outbound_it == outbounds_by_tag.end()) {
+                    add_issue(
+                        issues,
+                        detour_path,
+                        detour_path + ": unknown outbound tag '" + tag + "'");
+                    return;
+                }
+                const auto type = outbound_it->second->type;
+                if (type != OutboundType::INTERFACE &&
+                    type != OutboundType::TABLE &&
+                    type != OutboundType::URLTEST) {
+                    add_issue(
+                        issues,
+                        detour_path,
+                        detour_path + ": outbound '" + tag +
+                            "' has no routable download table");
+                }
+            };
+
+        if (primary.has_value()) {
+            validate_download_detour(
+                *primary, path + ".detour");
+        }
+        for (std::size_t index = 0; index < fallbacks.size(); ++index) {
+            validate_download_detour(
+                fallbacks[index],
+                path + ".fallback_detours[" +
+                    std::to_string(index) + "]");
+        }
+    };
+
+    if (cfg.list_refresh.has_value()) {
+        validate_download_chain(
+            cfg.list_refresh->detour,
+            cfg.list_refresh->fallback_detours.value_or(
+                std::vector<std::string>{}),
+            "list_refresh");
+    }
+
+    for (const auto& [name, list_cfg] :
+         cfg.lists.value_or(std::map<std::string, ListConfig>{})) {
+        const std::string list_path =
+            name.empty() ? "lists" : "lists." + name;
+        const auto fallbacks = list_cfg.fallback_detours.value_or(
+            std::vector<std::string>{});
+        const bool has_local_chain =
+            list_cfg.detour.has_value() || !fallbacks.empty();
+        const auto mode = effective_list_refresh_detour_mode(list_cfg);
+
+        if (list_cfg.refresh_detour_mode.has_value() &&
+            !list_cfg.url.has_value()) {
+            add_issue(
+                issues,
+                list_path + ".refresh_detour_mode",
+                list_path +
+                    ".refresh_detour_mode is only valid for URL-backed lists");
+        }
+        if (mode == ListRefreshDetourMode::INHERIT && has_local_chain) {
+            add_issue(
+                issues,
+                list_path + ".refresh_detour_mode",
+                list_path +
+                    " cannot inherit the global download route while local "
+                    "detours are configured");
+        }
+        if (mode == ListRefreshDetourMode::OVERRIDE &&
+            !list_cfg.detour.has_value()) {
+            add_issue(
+                issues,
+                list_path + ".detour",
+                list_path +
+                    ".detour is required when refresh_detour_mode is override");
+        }
+        if (has_local_chain && !list_cfg.url.has_value()) {
+            add_issue(
+                issues,
+                list_path + ".detour",
+                list_path +
+                    " download detours are only valid for URL-backed lists");
+        }
+
+        if (has_local_chain ||
+            mode == ListRefreshDetourMode::OVERRIDE) {
+            validate_download_chain(
+                list_cfg.detour, fallbacks, list_path);
+        }
+    }
+
     for (const auto& ob : outbounds) {
         validate_tag(issues, "outbounds." + ob.tag + ".tag", "Outbound tag", ob.tag);
+        validate_display_name(
+            issues,
+            "outbounds." + ob.tag + ".display_name",
+            "Outbound display name",
+            ob.display_name);
+        if (ob.type != OutboundType::URLTEST &&
+            ob.conntrack_on_switch.has_value()) {
+            add_issue(
+                issues,
+                "outbounds." + ob.tag + ".conntrack_on_switch",
+                "conntrack_on_switch is only valid for urltest outbounds");
+        }
 
         if (ob.type == OutboundType::INTERFACE) {
             const std::string iface = trim_copy(ob.interface.value_or(""));
+            const std::string interface_path =
+                "outbounds." + ob.tag + ".interface";
             if (iface.empty()) {
                 add_issue(issues,
-                          "outbounds." + ob.tag + ".interface",
+                          interface_path,
                           "Interface outbound '" + ob.tag +
                               "' requires a non-empty interface name");
+            } else if (!is_valid_iptables_interface_name(
+                           ob.interface.value_or(""))) {
+                add_issue(
+                    issues,
+                    interface_path,
+                    iptables_interface_name_requirement(interface_path));
             }
             if (ob.gateway.has_value() && !is_valid_ipv4_address(*ob.gateway)) {
                 add_issue(issues,
@@ -772,6 +1848,89 @@ void validate_config(const Config& cfg) {
 
         if (ob.type != OutboundType::URLTEST) continue;
 
+        if (ob.conntrack_on_switch.value_or(
+                ConntrackOnSwitch::PRESERVE) ==
+                ConntrackOnSwitch::DELETE_ON_FAILURE &&
+            ob.selection_mode.value_or(
+                UrltestSelectionMode::LATENCY) !=
+                UrltestSelectionMode::PRIORITY) {
+            add_issue(
+                issues,
+                "outbounds." + ob.tag + ".conntrack_on_switch",
+                "conntrack_on_switch='delete_on_failure' requires "
+                "selection_mode='priority'");
+        }
+
+        if (!ob.url.has_value() || ob.url->empty()) {
+            add_issue(issues, "outbounds." + ob.tag + ".url",
+                      "Urltest outbound '" + ob.tag + "' requires a URL");
+        } else if (!is_http_url(*ob.url)) {
+            add_issue(issues, "outbounds." + ob.tag + ".url",
+                      "Urltest URL must use the http or https scheme");
+        }
+
+        const std::string outbound_path = "outbounds." + ob.tag;
+        validate_optional_integer_range(
+            issues,
+            outbound_path + ".interval_ms",
+            ob.interval_ms,
+            1,
+            kMaxUrltestUint32Value);
+        validate_optional_integer_range(
+            issues,
+            outbound_path + ".probe_timeout_ms",
+            ob.probe_timeout_ms,
+            1,
+            kMaxUrltestUint32Value);
+        validate_optional_integer_range(
+            issues,
+            outbound_path + ".tolerance_ms",
+            ob.tolerance_ms,
+            0,
+            kMaxUrltestUint32Value);
+
+        if (ob.retry.has_value()) {
+            validate_optional_integer_range(
+                issues,
+                outbound_path + ".retry.attempts",
+                ob.retry->attempts,
+                1,
+                kMaxUrltestRetryAttempts);
+            validate_optional_integer_range(
+                issues,
+                outbound_path + ".retry.interval_ms",
+                ob.retry->interval_ms,
+                0,
+                kMaxUrltestUint32Value);
+        }
+
+        if (ob.circuit_breaker.has_value()) {
+            validate_optional_integer_range(
+                issues,
+                outbound_path + ".circuit_breaker.failure_threshold",
+                ob.circuit_breaker->failure_threshold,
+                1,
+                kMaxCircuitFailureThreshold);
+            validate_optional_integer_range(
+                issues,
+                outbound_path + ".circuit_breaker.success_threshold",
+                ob.circuit_breaker->success_threshold,
+                1,
+                kMaxUrltestUint32Value);
+            validate_optional_integer_range(
+                issues,
+                outbound_path + ".circuit_breaker.timeout_ms",
+                ob.circuit_breaker->timeout_ms,
+                0,
+                kMaxUrltestUint32Value);
+            validate_optional_integer_range(
+                issues,
+                outbound_path + ".circuit_breaker.half_open_max_requests",
+                ob.circuit_breaker->half_open_max_requests,
+                1,
+                kMaxUrltestUint32Value);
+        }
+
         if (!ob.outbound_groups.has_value() || ob.outbound_groups->empty()) {
             add_issue(issues, "outbounds." + ob.tag + ".outbound_groups",
                       "Urltest outbound '" + ob.tag +
@@ -779,6 +1938,7 @@ void validate_config(const Config& cfg) {
             continue;
         }
 
+        std::map<std::string, std::string> first_child_paths;
         for (size_t group_index = 0; group_index < ob.outbound_groups->size(); ++group_index) {
             const auto& group = ob.outbound_groups->at(group_index);
             const std::string group_path =
@@ -790,55 +1950,94 @@ void validate_config(const Config& cfg) {
                               "' outbound_group has empty 'outbounds' array");
             }
 
-            for (const auto& ref_tag : group.outbounds) {
-                bool found = false;
-                for (const auto& target : outbounds) {
-                    if (target.tag != ref_tag) {
-                        continue;
-                    }
+            validate_optional_integer_range(
+                issues,
+                group_path + ".weight",
+                group.weight,
+                1,
+                kMaxUrltestGroupWeight);
 
-                    found = true;
-                    // A group may also nest another group: routing follows the
-                    // chain of selections down to a leaf interface.
-                    if (target.type != OutboundType::INTERFACE &&
-                        target.type != OutboundType::TABLE &&
-                        target.type != OutboundType::BLACKHOLE &&
-                        target.type != OutboundType::URLTEST) {
-                        add_issue(
-                            issues,
-                            group_path + ".outbounds",
-                            "Urltest outbound '" + ob.tag +
-                                "' references outbound '" + ref_tag +
-                                "' which is not an interface, table, blackhole, "
-                                "or urltest outbound");
-                    }
-                    if (target.type == OutboundType::URLTEST && target.tag == ob.tag) {
-                        add_issue(issues,
-                                  group_path + ".outbounds",
-                                  "Urltest outbound '" + ob.tag +
-                                      "' cannot reference itself");
-                    }
-                    break;
-                }
+            for (size_t child_index = 0; child_index < group.outbounds.size();
+                 ++child_index) {
+                const auto& ref_tag = group.outbounds[child_index];
+                const std::string child_path =
+                    group_path + ".outbounds[" + std::to_string(child_index) + "]";
 
-                if (!found) {
+                auto [first_path_it, inserted] =
+                    first_child_paths.emplace(ref_tag, child_path);
+                if (!inserted) {
                     add_issue(
                         issues,
-                        group_path + ".outbounds",
+                        child_path,
+                        "Urltest outbound '" + ob.tag + "' repeats outbound '" +
+                            ref_tag + "' first declared at " + first_path_it->second);
+                }
+
+                const auto target_it = outbounds_by_tag.find(ref_tag);
+                if (target_it == outbounds_by_tag.end()) {
+                    add_issue(
+                        issues,
+                        child_path,
                         "Urltest outbound '" + ob.tag +
                             "' references unknown outbound tag '" + ref_tag + "'");
+                    continue;
+                }
+
+                const auto& target = *target_it->second;
+                // A group may also nest another group: routing follows the
+                // chain of selections down to a leaf interface.
+                if (target.type != OutboundType::INTERFACE &&
+                    target.type != OutboundType::TABLE &&
+                    target.type != OutboundType::BLACKHOLE &&
+                    target.type != OutboundType::URLTEST) {
+                    add_issue(
+                        issues,
+                        child_path,
+                        "Urltest outbound '" + ob.tag +
+                            "' references outbound '" + ref_tag +
+                            "' which is not an interface, table, blackhole, "
+                            "or urltest outbound");
+                }
+
+                if (target.type == OutboundType::URLTEST) {
+                    urltest_graph[ob.tag].push_back({ref_tag, child_path});
                 }
             }
         }
     }
+    validate_urltest_cycles(issues, urltest_graph);
 
     const auto list_names = collect_list_names(cfg);
     const auto outbound_tags = collect_outbound_tags(outbounds);
     const auto& route_rules =
         cfg.route.value_or(RouteConfig{}).rules.value_or(std::vector<RouteRule>{});
+    std::map<std::string, size_t> first_route_rule_ids;
     for (size_t rule_index = 0; rule_index < route_rules.size(); ++rule_index) {
         const auto& rule = route_rules[rule_index];
         const std::string rule_path = "route.rules[" + std::to_string(rule_index) + "]";
+
+        if (rule.id.has_value()) {
+            validate_tag(
+                issues,
+                rule_path + ".id",
+                "Route rule id",
+                *rule.id);
+            const auto [first_it, inserted] =
+                first_route_rule_ids.emplace(*rule.id, rule_index);
+            if (!inserted) {
+                add_issue(
+                    issues,
+                    rule_path + ".id",
+                    "Route rule id '" + *rule.id +
+                        "' duplicates route.rules[" +
+                        std::to_string(first_it->second) + "].id");
+            }
+        }
+        validate_display_name(
+            issues,
+            rule_path + ".display_name",
+            "Route rule display name",
+            rule.display_name);
 
         validate_required_reference(issues,
                                     outbound_tags,
@@ -908,6 +2107,11 @@ void validate_config(const Config& cfg) {
         size_t keenetic_servers_count = 0;
         for (const auto& srv : dns_servers) {
             validate_tag(issues, "dns.servers." + srv.tag + ".tag", "DNS server tag", srv.tag);
+            validate_display_name(
+                issues,
+                "dns.servers." + srv.tag + ".display_name",
+                "DNS server display name",
+                srv.display_name);
             if (!dns_server_tags.insert(srv.tag).second) {
                 add_issue(issues, "dns.servers." + srv.tag + ".tag",
                           "Duplicate DNS server tag \"" + srv.tag + "\"");
@@ -915,8 +2119,23 @@ void validate_config(const Config& cfg) {
 
             const auto srv_type = srv.type.value_or(api::DnsServerType::STATIC);
             const std::string srv_addr = srv.address.value_or("");
-            const std::string srv_identity =
+            std::string srv_identity =
                 std::to_string(static_cast<int>(srv_type)) + "|" + srv_addr;
+            if (srv_type == api::DnsServerType::STATIC &&
+                !srv_addr.empty()) {
+                try {
+                    const auto parsed =
+                        parse_dns_address_str(srv_addr);
+                    srv_identity =
+                        std::to_string(static_cast<int>(srv_type)) + "|" +
+                        parsed.ip + "|" + std::to_string(parsed.port);
+                } catch (const DnsError& error) {
+                    add_issue(
+                        issues,
+                        "dns.servers." + srv.tag + ".address",
+                        error.what());
+                }
+            }
             if (!dns_server_identities.insert(srv_identity).second) {
                 add_issue(issues, "dns.servers." + srv.tag,
                           "DNS server \"" + srv.tag +
@@ -930,9 +2149,12 @@ void validate_config(const Config& cfg) {
                           "dns.servers[\"" + srv.tag +
                               "\"].type='keenetic' requires build with USE_KEENETIC_API=ON");
 #endif
+                const auto encrypted_dns_supported =
+                    keenetic_version_supports_encrypted_dns(
+                        system_info.os_version);
                 if (system_info.os_type == "keenetic" &&
-                    !system_info.os_version.empty() &&
-                    !keenetic_version_supports_encrypted_dns(system_info.os_version)) {
+                    encrypted_dns_supported.has_value() &&
+                    !*encrypted_dns_supported) {
                     add_issue(issues, "dns.servers." + srv.tag + ".type",
                               "dns.servers[\"" + srv.tag +
                                   "\"].type='keenetic' requires KeeneticOS 3.x or newer; detected " +
@@ -1030,10 +2252,33 @@ void validate_config(const Config& cfg) {
         }
 
         const auto dns_rules = cfg.dns->rules.value_or(std::vector<DnsRule>{});
+        std::map<std::string, size_t> first_dns_rule_ids;
         for (size_t rule_index = 0; rule_index < dns_rules.size(); ++rule_index) {
             const auto& rule = dns_rules[rule_index];
             const std::string rule_path = "dns.rules[" + std::to_string(rule_index) + "]";
 
+            if (rule.id.has_value()) {
+                validate_tag(
+                    issues,
+                    rule_path + ".id",
+                    "DNS rule id",
+                    *rule.id);
+                const auto [first_it, inserted] =
+                    first_dns_rule_ids.emplace(*rule.id, rule_index);
+                if (!inserted) {
+                    add_issue(
+                        issues,
+                        rule_path + ".id",
+                        rule_path + ".id duplicates DNS rule id '" +
+                            *rule.id + "' first declared at dns.rules[" +
+                            std::to_string(first_it->second) + "].id");
+                }
+            }
+            validate_display_name(
+                issues,
+                rule_path + ".display_name",
+                "DNS rule display name",
+                rule.display_name);
             validate_required_reference(issues,
                                         dns_server_tags,
                                         rule_path + ".server",
@@ -1063,6 +2308,142 @@ void validate_config(const Config& cfg) {
     } else {
         add_issue(issues, "dns.system_resolver",
                   "dns.system_resolver must be present");
+    }
+
+    // Deleting conntrack entries by a selected child's fwmark is safe only
+    // when that mark belongs exclusively to one urltest selector. Otherwise a
+    // failover could also terminate unrelated flows routed directly through
+    // the same child. Preserve mode has no such ownership restriction.
+    std::map<std::string, std::set<std::string>> urltest_parents_by_child;
+    for (const auto& outbound : outbounds) {
+        if (outbound.type != OutboundType::URLTEST ||
+            !outbound.outbound_groups.has_value()) {
+            continue;
+        }
+        for (const auto& group : *outbound.outbound_groups) {
+            for (const auto& child_tag : group.outbounds) {
+                urltest_parents_by_child[child_tag].insert(outbound.tag);
+            }
+        }
+    }
+
+    std::set<std::string> directly_routed_outbounds;
+    for (const auto& rule : route_rules) {
+        directly_routed_outbounds.insert(rule.outbound);
+    }
+
+    std::set<std::string> direct_dns_detours;
+    if (cfg.dns.has_value()) {
+        for (const auto& server :
+             cfg.dns->servers.value_or(std::vector<DnsServer>{})) {
+            if (server.detour.has_value()) {
+                direct_dns_detours.insert(*server.detour);
+            }
+        }
+    }
+
+    std::set<std::string> direct_list_detours;
+    for (const auto& [list_name, list] :
+         cfg.lists.value_or(std::map<std::string, ListConfig>{})) {
+        (void)list_name;
+        if (!list.url.has_value()) {
+            continue;
+        }
+        for (const auto& detour :
+             effective_list_refresh_detours(cfg, list)) {
+            direct_list_detours.insert(detour);
+        }
+    }
+
+    for (const auto& outbound : outbounds) {
+        const auto cleanup_mode =
+            outbound.conntrack_on_switch.value_or(
+                ConntrackOnSwitch::PRESERVE);
+        if (outbound.type != OutboundType::URLTEST ||
+            cleanup_mode == ConntrackOnSwitch::PRESERVE ||
+            !outbound.outbound_groups.has_value()) {
+            continue;
+        }
+
+        const std::string mode_path =
+            "outbounds." + outbound.tag + ".conntrack_on_switch";
+        const std::string mode_name =
+            cleanup_mode == ConntrackOnSwitch::DELETE
+                ? "delete"
+                : "delete_on_failure";
+        std::set<std::string> checked_children;
+        for (const auto& group : *outbound.outbound_groups) {
+            for (const auto& child_tag : group.outbounds) {
+                if (!checked_children.insert(child_tag).second) {
+                    continue;
+                }
+
+                const auto child_it = outbounds_by_tag.find(child_tag);
+                if (child_it != outbounds_by_tag.end() &&
+                    child_it->second->type == OutboundType::URLTEST) {
+                    add_issue(
+                        issues,
+                        mode_path,
+                        "conntrack_on_switch='" + mode_name +
+                            "' does not support nested "
+                        "urltest child '" + child_tag +
+                            "'; use 'preserve' for nested selectors");
+                }
+
+                // Failure-only cleanup deliberately targets every flow using
+                // the failed physical child. Direct rules, DNS/list downloads
+                // and another selector using that same failed child are not
+                // collateral in this mode. Symmetric cleanup can also run
+                // while the retired child is healthy (for example on
+                // failback), so only that legacy mode requires exclusive
+                // ownership.
+                if (cleanup_mode != ConntrackOnSwitch::DELETE) {
+                    continue;
+                }
+
+                const auto parents_it =
+                    urltest_parents_by_child.find(child_tag);
+                if (parents_it != urltest_parents_by_child.end() &&
+                    parents_it->second.size() > 1) {
+                    add_issue(
+                        issues,
+                        mode_path,
+                        "conntrack_on_switch='" + mode_name +
+                            "' requires exclusive child "
+                        "marks, but outbound '" + child_tag +
+                            "' is shared by multiple urltest selectors");
+                }
+                if (directly_routed_outbounds.count(child_tag) > 0) {
+                    add_issue(
+                        issues,
+                        mode_path,
+                        "conntrack_on_switch='" + mode_name +
+                            "' cannot use child '" +
+                            child_tag +
+                            "' because a routing rule also references it "
+                            "directly");
+                }
+                if (direct_dns_detours.count(child_tag) > 0) {
+                    add_issue(
+                        issues,
+                        mode_path,
+                        "conntrack_on_switch='" + mode_name +
+                            "' cannot use child '" +
+                            child_tag +
+                            "' because a DNS server also references it "
+                            "directly");
+                }
+                if (direct_list_detours.count(child_tag) > 0) {
+                    add_issue(
+                        issues,
+                        mode_path,
+                        "conntrack_on_switch='" + mode_name +
+                            "' cannot use child '" + child_tag +
+                            "' because a URL list download also references it "
+                            "directly");
+                }
+            }
+        }
     }
 
     if (!issues.empty()) {
@@ -1103,22 +2484,34 @@ OutboundMarkMap allocate_outbound_marks(const FwmarkConfig& fwmark_cfg,
 
     const uint32_t max_marks = fwmark_mask_mark_capacity(mask);
 
+    std::vector<const Outbound*> routable_outbounds;
+    routable_outbounds.reserve(outbounds.size());
+    for (const auto& outbound : outbounds) {
+        if (outbound.type == OutboundType::INTERFACE ||
+            outbound.type == OutboundType::TABLE ||
+            outbound.type == OutboundType::URLTEST) {
+            routable_outbounds.push_back(&outbound);
+        }
+    }
+    std::sort(
+        routable_outbounds.begin(),
+        routable_outbounds.end(),
+        [](const Outbound* lhs, const Outbound* rhs) {
+            return lhs->tag < rhs->tag;
+        });
+
     OutboundMarkMap mark_map;
     uint32_t current_mark = start;
     uint32_t count = 0;
 
-    for (const auto& ob : outbounds) {
-        if (ob.type != OutboundType::INTERFACE &&
-            ob.type != OutboundType::TABLE &&
-            ob.type != OutboundType::URLTEST) continue;
-
+    for (const auto* outbound : routable_outbounds) {
         if (count >= max_marks) {
             throw ConfigError(
                 "Too many routable outbounds: maximum " + std::to_string(max_marks) +
                 " supported with current fwmark.mask");
         }
 
-        mark_map[ob.tag] = current_mark;
+        mark_map[outbound->tag] = current_mark;
         current_mark += step;
         ++count;
     }

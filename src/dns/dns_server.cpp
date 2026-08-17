@@ -31,6 +31,11 @@ bool is_valid_ipv4(const std::string& addr) {
     for (size_t i = 0; i <= addr.size(); ++i) {
         if (i == addr.size() || addr[i] == '.') {
             if (i == start) return false;
+            // Reject ambiguous legacy spellings such as 008.008.008.008.
+            // ParsedDnsAddress is also the canonical endpoint identity, so
+            // accepting leading zeroes would let an equivalent IPv4 endpoint
+            // bypass global duplicate detection.
+            if (i - start > 1 && addr[start] == '0') return false;
             uint32_t octet = 0;
             auto [ptr, ec] = std::from_chars(addr.data() + start, addr.data() + i, octet);
             if (ec != std::errc{} || ptr != addr.data() + i) return false;
@@ -55,8 +60,18 @@ bool is_valid_ipv6(const std::string& addr) {
     return inet_pton(AF_INET6, addr.c_str(), &parsed) == 1;
 }
 
-bool is_valid_ip(const std::string& addr) {
-    return is_valid_ipv4(addr) || is_valid_ipv6(addr);
+std::optional<std::string> canonical_ipv6(const std::string& addr) {
+    if (!is_valid_ipv6(addr)) return std::nullopt;
+
+    in6_addr parsed{};
+    if (inet_pton(AF_INET6, addr.c_str(), &parsed) != 1) {
+        return std::nullopt;
+    }
+    char text[INET6_ADDRSTRLEN]{};
+    if (inet_ntop(AF_INET6, &parsed, text, sizeof(text)) == nullptr) {
+        return std::nullopt;
+    }
+    return std::string(text);
 }
 
 } // namespace
@@ -103,7 +118,16 @@ ParsedDnsAddress parse_dns_address_str(const std::string& address) {
         }
     }
 
-    if (!is_valid_ip(ip)) {
+    if (is_valid_ipv4(ip)) {
+        // IPv4 already has a single accepted decimal representation per
+        // octet. Preserve it for backwards-compatible diagnostics.
+    } else if (const auto canonical = canonical_ipv6(ip);
+               canonical.has_value()) {
+        // Return the binary-canonical IPv6 spelling. Callers use ParsedDnsAddress
+        // as the endpoint identity, so expanded, compressed, and uppercase
+        // spellings of the same address cannot bypass duplicate detection.
+        ip = *canonical;
+    } else {
         throw DnsError("Invalid DNS server address: '" + address +
                        "' (not a valid IPv4 or IPv6 address)");
     }

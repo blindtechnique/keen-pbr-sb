@@ -67,8 +67,12 @@ function TableHead({ className, ...props }: React.ComponentProps<"th">) {
   return (
     <th
       data-slot="table-head"
+      // KeeneticOS column headers are 48px tall, bold, and carry the same
+      // colour as body text. The muted grey used before scored 2.82:1 on white,
+      // below the 4.5:1 WCAG AA floor for normal text — 12px is not "large".
+      // The colour is inherited so the header row decides it once per theme.
       className={cn(
-        "h-11 px-3 text-left align-middle font-semibold whitespace-nowrap text-muted-foreground [&:has([role=checkbox])]:pr-0",
+        "h-12 px-3 text-left align-middle font-bold whitespace-nowrap [&:has([role=checkbox])]:pr-0",
         className
       )}
       {...props}
