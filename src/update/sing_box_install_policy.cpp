@@ -1,0 +1,125 @@
+#include "sing_box_install_policy.hpp"
+
+#include <algorithm>
+
+namespace keen_pbr3 {
+
+namespace {
+
+// The Entware architecture prefix, i.e. everything before the ABI suffix that
+// `opkg print-architecture` appends ("aarch64-3.10" -> "aarch64").
+std::string entware_family(const std::string& architecture) {
+    const auto dash = architecture.find('-');
+    if (dash == std::string::npos) return {};
+    // A leading dash, or nothing after it, is not an architecture; an empty
+    // family would otherwise fall through to the unmapped branch by accident
+    // rather than by decision.
+    if (dash == 0U || dash + 1U >= architecture.size()) return {};
+    return architecture.substr(0U, dash);
+}
+
+} // namespace
+
+const char* sing_box_install_blocker_name(
+    const SingBoxInstallBlocker blocker) noexcept {
+    switch (blocker) {
+    case SingBoxInstallBlocker::architecture_unsupported:
+        return "architecture_unsupported";
+    case SingBoxInstallBlocker::entware_absent:
+        return "entware_absent";
+    case SingBoxInstallBlocker::target_not_writable:
+        return "target_not_writable";
+    case SingBoxInstallBlocker::foreign_binary_present:
+        return "foreign_binary_present";
+    case SingBoxInstallBlocker::transports_running:
+        return "transports_running";
+    }
+    return "architecture_unsupported";
+}
+
+const char* sing_box_install_operation_name(
+    const SingBoxInstallOperation operation) noexcept {
+    switch (operation) {
+    case SingBoxInstallOperation::install:
+        return "install";
+    case SingBoxInstallOperation::replace:
+        return "replace";
+    case SingBoxInstallOperation::reinstall_same_version:
+        return "reinstall_same_version";
+    case SingBoxInstallOperation::blocked:
+        return "blocked";
+    }
+    return "blocked";
+}
+
+std::string sing_box_asset_architecture(
+    const std::string& entware_architecture) {
+    // install.sh maps the Entware family to its own KEEN_ARCH, then KEEN_ARCH
+    // to the official asset name. Both steps are reproduced here; a gate
+    // compares this table against that file.
+    const std::string family = entware_family(entware_architecture);
+    if (family == "aarch64") return "arm64";
+    if (family == "armv7") return "armv7";
+    if (family == "mipsel") return "mipsle";
+    if (family == "mips") return "mips";
+    if (family == "x64") return "amd64";
+    return {};
+}
+
+SingBoxInstallPolicy evaluate_sing_box_install(
+    const SingBoxInstallObservation& observation,
+    const std::string& pinned_version) {
+    SingBoxInstallPolicy policy;
+    policy.asset_architecture =
+        sing_box_asset_architecture(observation.entware_architecture);
+
+    // Entware first: without it there is no /opt to install into, and the
+    // architecture question is not merely unanswered, it is unaskable.
+    if (!observation.entware_present) {
+        policy.blockers.push_back(SingBoxInstallBlocker::entware_absent);
+    } else if (policy.asset_architecture.empty()) {
+        // An unreadable architecture lands here too, and that is deliberate:
+        // an architecture we could not read is not one we may guess.
+        policy.blockers.push_back(
+            SingBoxInstallBlocker::architecture_unsupported);
+    }
+
+    if (observation.entware_present &&
+        !observation.target_directory_writable) {
+        policy.blockers.push_back(
+            SingBoxInstallBlocker::target_not_writable);
+    }
+
+    if (observation.binary_present && !observation.managed_marker_present) {
+        policy.blockers.push_back(
+            SingBoxInstallBlocker::foreign_binary_present);
+    }
+
+    if (observation.running_transports > 0U) {
+        policy.blockers.push_back(
+            SingBoxInstallBlocker::transports_running);
+    }
+
+    if (!policy.blockers.empty()) {
+        policy.operation = SingBoxInstallOperation::blocked;
+        policy.available = false;
+        return policy;
+    }
+
+    if (!observation.binary_present) {
+        policy.operation = SingBoxInstallOperation::install;
+    } else if (!observation.installed_version.empty() &&
+               observation.installed_version == pinned_version) {
+        policy.operation =
+            SingBoxInstallOperation::reinstall_same_version;
+    } else {
+        // Includes the case where the binary is ours but would not report a
+        // version: something is there, it is not demonstrably the pinned
+        // release, and replacing it is the honest description.
+        policy.operation = SingBoxInstallOperation::replace;
+    }
+    policy.available = true;
+    return policy;
+}
+
+} // namespace keen_pbr3

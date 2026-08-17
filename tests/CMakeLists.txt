@@ -89,6 +89,7 @@ add_executable(keen-pbr-tests
   test_subscription_fetch_policy.cpp
   test_subscription_import_plan.cpp
   test_subscription_transport_naming.cpp
+  test_sing_box_install_policy.cpp
   test_dependency_analysis.cpp
   test_list_delete_planner.cpp
   test_routing_state.cpp
@@ -176,6 +177,7 @@ add_executable(keen-pbr-tests
   ../src/cmd/recover_persistent_state.cpp
   ../src/update/maintenance_lock.cpp
   ../src/update/rollback_availability.cpp
+  ../src/update/sing_box_install_policy.cpp
   ../src/update/package_footprint.cpp
   ../src/config/dependency_analysis.cpp
   ../src/config/list_delete_planner.cpp
