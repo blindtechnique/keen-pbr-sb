@@ -33,6 +33,8 @@ const char* sing_box_install_blocker_name(
         return "foreign_binary_present";
     case SingBoxInstallBlocker::transports_running:
         return "transports_running";
+    case SingBoxInstallBlocker::transport_state_unknown:
+        return "transport_state_unknown";
     }
     return "architecture_unsupported";
 }
@@ -95,7 +97,13 @@ SingBoxInstallPolicy evaluate_sing_box_install(
             SingBoxInstallBlocker::foreign_binary_present);
     }
 
-    if (observation.running_transports > 0U) {
+    if (!observation.running_transports.has_value()) {
+        // Nobody could take the count. Treating that as zero would let an
+        // unreachable transport manager authorise the one operation the
+        // manager exists to veto.
+        policy.blockers.push_back(
+            SingBoxInstallBlocker::transport_state_unknown);
+    } else if (*observation.running_transports > 0U) {
         policy.blockers.push_back(
             SingBoxInstallBlocker::transports_running);
     }

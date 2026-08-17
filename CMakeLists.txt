@@ -450,6 +450,7 @@ set(SOURCES
   src/update/maintenance_lock.cpp
   src/update/rollback_availability.cpp
   src/update/sing_box_install_policy.cpp
+  src/update/sing_box_install_observation.cpp
   src/update/package_footprint.cpp
   src/update/component_transaction_journal.cpp
   src/update/component_capture.cpp

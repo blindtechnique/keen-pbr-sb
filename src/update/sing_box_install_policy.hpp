@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -36,6 +37,10 @@ enum class SingBoxInstallBlocker : std::uint8_t {
     // Swapping it underneath them is what "the current runtime is not changed
     // until a confirmed operation" exists to prevent.
     transports_running,
+    // Nobody could determine whether transports are running. Distinct from
+    // `transports_running` because the operator fixes them differently: one
+    // is "stop your tunnels", the other is "your transport manager is down".
+    transport_state_unknown,
 };
 
 const char* sing_box_install_blocker_name(
@@ -72,8 +77,11 @@ struct SingBoxInstallObservation {
     // absent or would not run. An installed binary we cannot interrogate is
     // not the pinned one as far as this decision is concerned.
     std::string installed_version;
-    // Managed sing-box transports currently running.
-    std::size_t running_transports{0U};
+    // Managed sing-box transports currently running. Empty means nobody could
+    // ask - the manager was unreachable, or the caller supplied no probe.
+    // That is not zero: an install that swaps the binary under running
+    // transports is exactly what a count nobody took would have permitted.
+    std::optional<std::size_t> running_transports;
 };
 
 struct SingBoxInstallPolicy {

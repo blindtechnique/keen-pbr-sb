@@ -2545,7 +2545,7 @@ TEST_CASE("concurrent local logins cannot multiply the key-stretch cost") {
             R"("username":"admin","password":")" +
             encode_local_password_hash(
                 "hunter2", std::string(32U, 0x61),
-                kLocalPasswordHashIterations) +
+                kLocalPasswordHashMaximumIterations) +
             R"(","password_format":")" + kLocalPasswordHashFormat +
             R"("})");
     EnvironmentVariableGuard auth_file(
@@ -2574,10 +2574,12 @@ TEST_CASE("concurrent local logins cannot multiply the key-stretch cost") {
     for (auto& caller : callers) caller.join();
     server.stop();
 
-    // Whatever the interleaving, no caller may have waited behind another
-    // derivation: every request either did the work or was told to retry.
+    // The derivation is deliberately slow here, so six simultaneous callers
+    // cannot all have had the lock to themselves. At least one must have been
+    // refused outright - under a blocking lock that number is always zero,
+    // because nobody is ever refused, they only wait.
     CHECK(accepted.load() >= 1);
-    CHECK(accepted.load() + busy.load() == 6);
+    CHECK(busy.load() >= 1);
 }
 
 } // namespace keen_pbr3

@@ -21,6 +21,7 @@ SingBoxInstallObservation ready() {
     observation.entware_architecture = "aarch64-3.10";
     observation.entware_present = true;
     observation.target_directory_writable = true;
+    observation.running_transports = 0U;
     return observation;
 }
 
@@ -102,6 +103,22 @@ TEST_CASE("running transports block the swap under them") {
     CHECK(blocked_by(policy, Blocker::transports_running));
 }
 
+
+TEST_CASE("a transport count nobody took is not a count of zero") {
+    // The fail-open this replaced: an unreachable transport manager, or a
+    // caller that supplied no probe, produced 0 - and 0 means "nothing is
+    // running", which authorises the one operation the manager exists to veto.
+    auto observation = ready();
+    observation.running_transports.reset();
+    const auto policy = evaluate_sing_box_install(observation, kPinned);
+    CHECK_FALSE(policy.available);
+    CHECK(blocked_by(policy, Blocker::transport_state_unknown));
+    // Named apart from a nonzero count, because the operator fixes them
+    // differently: one is "stop your tunnels", the other is "your transport
+    // manager is down".
+    CHECK_FALSE(blocked_by(policy, Blocker::transports_running));
+}
+
 TEST_CASE("a target that cannot be written to is a blocker, not a surprise") {
     auto observation = ready();
     observation.target_directory_writable = false;
@@ -165,7 +182,7 @@ TEST_CASE("every blocker and operation has a name") {
     for (const auto blocker :
          {Blocker::architecture_unsupported, Blocker::entware_absent,
           Blocker::target_not_writable, Blocker::foreign_binary_present,
-          Blocker::transports_running}) {
+          Blocker::transports_running, Blocker::transport_state_unknown}) {
         CHECK(std::string(sing_box_install_blocker_name(blocker)).size() >
               0U);
     }
