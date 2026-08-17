@@ -12,6 +12,7 @@ import {
 import {
   singBoxInstallBlockerKey,
   singBoxInstallButtonState,
+  singBoxInstallDisplayableBlockers,
   singBoxInstallFailureTitleKey,
   singBoxInstallMayHaveApplied,
   singBoxInstallOperationKey,
@@ -196,6 +197,25 @@ describe("sing-box install model", () => {
         blockers: ["transports_running", "target_not_writable"],
       })
     ).toEqual(["transports_running", "target_not_writable"])
+  })
+
+  it("filters the capability's blockers with the same rule as the refusal's", () => {
+    // A daemon newer than this build can name a blocker in either place, and a
+    // filter on only one path is the same defect as no filter: the unfiltered
+    // one prints its own i18n key at the operator.
+    expect(
+      singBoxInstallDisplayableBlockers([
+        "entware_absent",
+        "moon_phase_wrong",
+        42,
+      ])
+    ).toEqual(["entware_absent"])
+    // Every name the generated union carries survives it.
+    expect(
+      singBoxInstallDisplayableBlockers(
+        Object.values(SingBoxInstallCapabilityBlockersItem)
+      )
+    ).toEqual(Object.values(SingBoxInstallCapabilityBlockersItem))
   })
 
   it("drops a blocker name this build does not know", () => {

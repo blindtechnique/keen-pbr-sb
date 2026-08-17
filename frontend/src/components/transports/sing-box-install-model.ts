@@ -44,22 +44,32 @@ const KNOWN_BLOCKERS: ReadonlySet<string> = new Set(
   Object.values(SingBoxInstallCapabilityBlockersItem)
 )
 
+// Blockers this build can name. A name it cannot is dropped rather than
+// rendered: it would otherwise reach t() as a key that resolves to nothing and
+// print itself at the operator.
+//
+// Applied to BOTH sources of blockers - the capability and the refusal -
+// because a daemon newer than this frontend can name a blocker in either one,
+// and a filter on only one path is the same defect as no filter.
+export function singBoxInstallDisplayableBlockers(
+  blockers: readonly unknown[]
+): string[] {
+  return blockers.filter(
+    (blocker): blocker is string =>
+      typeof blocker === "string" && KNOWN_BLOCKERS.has(blocker)
+  )
+}
+
 // The install re-measures the router before doing anything, so its refusal is
 // newer than whatever the capability query last read - an operator can start a
 // tunnel between the two. These blockers are therefore the authoritative ones
 // and must be shown, not collapsed into the error message.
-//
-// A name this build does not know is dropped rather than rendered: it would
-// otherwise reach t() as a key that resolves to nothing and print itself.
 export function singBoxInstallRefusedBlockers(details: unknown): string[] {
   if (typeof details !== "object" || details === null) return []
   const body = details as Record<string, unknown>
   if (body.reason !== "install_unavailable") return []
   if (!Array.isArray(body.blockers)) return []
-  return body.blockers.filter(
-    (blocker): blocker is string =>
-      typeof blocker === "string" && KNOWN_BLOCKERS.has(blocker)
-  )
+  return singBoxInstallDisplayableBlockers(body.blockers)
 }
 
 export function singBoxInstallOperationKey(

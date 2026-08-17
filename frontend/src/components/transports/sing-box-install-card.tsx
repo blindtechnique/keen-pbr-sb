@@ -21,6 +21,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import {
   singBoxInstallBlockerKey,
+  singBoxInstallDisplayableBlockers,
   singBoxInstallFailureTitleKey,
   singBoxInstallMayHaveApplied,
   singBoxInstallRefusedBlockers,
@@ -102,6 +103,9 @@ export function SingBoxInstallCard() {
   const refusedBlockers = failure
     ? singBoxInstallRefusedBlockers(failure.details)
     : []
+  const capabilityBlockers = capability
+    ? singBoxInstallDisplayableBlockers(capability.blockers)
+    : []
   const verdictKey = result ? singBoxInstallVerdictKey(result) : null
   const stagedVersion = result ? singBoxInstallStagedVersion(result) : null
   const failureTitleKey = singBoxInstallFailureTitleKey(refusedBlockers.length)
@@ -168,7 +172,7 @@ export function SingBoxInstallCard() {
         </p>
       ) : null}
 
-      {capability && !capability.available && capability.blockers.length > 0 ? (
+      {capability && !capability.available && capabilityBlockers.length > 0 ? (
         <Alert className="mt-3" variant="default">
           <AlertTitle>{t("transports.singBoxInstall.blockedTitle")}</AlertTitle>
           <AlertDescription>
@@ -176,8 +180,17 @@ export function SingBoxInstallCard() {
                 one reason they were shown, only to be handed the next, learns
                 to distrust the report. */}
             <ul className="list-disc pl-4">
-              {capability.blockers.map((blocker) => (
-                <li key={blocker}>{t(singBoxInstallBlockerKey(blocker))}</li>
+              {/* Filtered like the refusal's list: a daemon newer than this
+                  build can name a blocker here too, and an unnamable one would
+                  print its own i18n key at the operator. */}
+              {capabilityBlockers.map((blocker) => (
+                <li key={blocker}>
+                  {t(
+                    singBoxInstallBlockerKey(
+                      blocker as SingBoxInstallCapabilityBlockersItem
+                    )
+                  )}
+                </li>
               ))}
             </ul>
           </AlertDescription>
