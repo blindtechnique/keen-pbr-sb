@@ -1359,6 +1359,25 @@ TEST_CASE("package replacement protects the legacy postrm transition") {
         std::string::npos);
 }
 
+TEST_CASE("installer downloads only the pinned sing-box release") {
+    const auto installer = read_file(KEEN_PBR_INSTALL_SCRIPT_PATH);
+
+    CHECK(
+        installer.find("SING_BOX_PINNED_VERSION=\"1.13.14\"") !=
+        std::string::npos);
+    CHECK(
+        installer.find(
+            "[ \"$requested_version\" = \"$SING_BOX_PINNED_VERSION\" ]") !=
+        std::string::npos);
+    CHECK(
+        installer.find(
+            "install_sing_box \"$SING_BOX_PINNED_VERSION\"") !=
+        std::string::npos);
+    CHECK(installer.find("SagerNet/sing-box/releases/latest") ==
+          std::string::npos);
+    CHECK(installer.find("latest_sing_box_version") == std::string::npos);
+}
+
 TEST_CASE("unsafe rescue directory cannot inject metadata helper code") {
     TempDirectory directory;
     const auto root = directory.path;

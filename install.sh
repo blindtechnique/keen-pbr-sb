@@ -5,7 +5,7 @@ umask 077
 
 PROJECT_REPOSITORY="${MYKEENPBR_REPOSITORY:-blindtechnique/keen-pbr-sb}"
 GITHUB_API="https://api.github.com/repos"
-SING_BOX_TESTED_VERSION="1.13.14"
+SING_BOX_PINNED_VERSION="1.13.14"
 TMP_DIR=
 TRANSPORT_CONFIG="/opt/etc/keen-pbr/transports.json"
 RESCUE_DIR="/opt/var/lib/keen-pbr/rescue"
@@ -564,14 +564,10 @@ sing_box_version() {
     "$1" version 2>/dev/null | awk 'NR == 1 { print $3; exit }'
 }
 
-latest_sing_box_version() {
-    release_json="$TMP_DIR/sing-box-latest.json"
-    fetch "$GITHUB_API/SagerNet/sing-box/releases/latest" "$release_json"
-    grep '"tag_name"' "$release_json" | head -n 1 | cut -d '"' -f 4 | sed 's/^v//'
-}
-
 install_sing_box() {
     requested_version=$1
+    [ "$requested_version" = "$SING_BOX_PINNED_VERSION" ] ||
+        die "разрешена только зафиксированная версия sing-box $SING_BOX_PINNED_VERSION"
     case "$KEEN_ARCH" in
         aarch64) sing_arch="arm64" ;;
         armv7) sing_arch="armv7" ;;
@@ -615,49 +611,32 @@ install_sing_box() {
 
 choose_sing_box() {
     existing=$(find_existing_sing_box || true)
-    latest=$(latest_sing_box_version || true)
-    [ -n "$latest" ] || latest="$SING_BOX_TESTED_VERSION"
     if [ -n "$existing" ]; then
         current=$(sing_box_version "$existing")
         say "Найден sing-box: $existing (версия ${current:-не определена})"
         say "  1) Использовать найденный файл (рекомендуется, если он уже проверен)"
-        say "  2) Установить протестированную версию $SING_BOX_TESTED_VERSION в /opt/bin"
-        say "  3) Установить последнюю версию $latest"
-        say "  4) Указать другой существующий путь"
-        say "  5) Продолжить без sing-box (только нативные интерфейсы)"
-        if [ "$latest" != "$SING_BOX_TESTED_VERSION" ]; then
-            say "ПРЕДУПРЕЖДЕНИЕ: версия $latest новее протестированной $SING_BOX_TESTED_VERSION; совместимость не проверялась."
-        fi
-        choice=$(ask "Выберите [1-5] (по умолчанию 1):" "1")
-    else
-        say "sing-box не найден в стандартных каталогах."
-        say "  1) Установить протестированную версию $SING_BOX_TESTED_VERSION в /opt/bin (рекомендуется)"
-        say "  2) Установить последнюю версию $latest"
+        say "  2) Установить зафиксированную версию $SING_BOX_PINNED_VERSION в /opt/bin"
         say "  3) Указать другой существующий путь"
         say "  4) Продолжить без sing-box (только нативные интерфейсы)"
-        if [ "$latest" != "$SING_BOX_TESTED_VERSION" ]; then
-            say "ПРЕДУПРЕЖДЕНИЕ: версия $latest новее протестированной $SING_BOX_TESTED_VERSION; совместимость не проверялась."
-        fi
         choice=$(ask "Выберите [1-4] (по умолчанию 1):" "1")
-        case "$choice" in 1) choice=2 ;; 2) choice=3 ;; 3) choice=4 ;; 4) choice=5 ;; *) die "неверный выбор" ;; esac
+    else
+        say "sing-box не найден в стандартных каталогах."
+        say "  1) Установить зафиксированную версию $SING_BOX_PINNED_VERSION в /opt/bin (рекомендуется)"
+        say "  2) Указать другой существующий путь"
+        say "  3) Продолжить без sing-box (только нативные интерфейсы)"
+        choice=$(ask "Выберите [1-3] (по умолчанию 1):" "1")
+        case "$choice" in 1) choice=2 ;; 2) choice=3 ;; 3) choice=4 ;; *) die "неверный выбор" ;; esac
     fi
 
     case "$choice" in
         1) SING_BOX_PATH="$existing" ;;
-        2) install_sing_box "$SING_BOX_TESTED_VERSION" ;;
+        2) install_sing_box "$SING_BOX_PINNED_VERSION" ;;
         3)
-            if [ "$latest" != "$SING_BOX_TESTED_VERSION" ]; then
-                confirm=$(ask "Установить непроверенную версию $latest? [y/N]:" "N")
-                case "$confirm" in y|Y|yes|YES|д|Д|да|ДА) ;; *) die "установка новой версии отменена" ;; esac
-            fi
-            install_sing_box "$latest"
-            ;;
-        4)
             SING_BOX_PATH=$(ask "Абсолютный путь к sing-box:" "")
             [ -x "$SING_BOX_PATH" ] || die "файл не является исполняемым: $SING_BOX_PATH"
             "$SING_BOX_PATH" version >/dev/null || die "выбранный sing-box не запускается"
             ;;
-        5) SING_BOX_PATH="" ;;
+        4) SING_BOX_PATH="" ;;
         *) die "неверный выбор" ;;
     esac
 }
