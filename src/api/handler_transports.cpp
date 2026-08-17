@@ -11,6 +11,8 @@
 #include "../util/safe_exec.hpp"
 #include "../update/sing_box_install_observation.hpp"
 #include "../update/sing_box_install_policy.hpp"
+#include "../update/sing_box_install_steps.hpp"
+#include "../update/sing_box_installer.hpp"
 
 #include <keen-pbr/version.hpp>
 
@@ -61,6 +63,81 @@ std::string configured_sing_box_binary(const std::string& config_path) {
         return "/opt/bin/sing-box";
     }
     return config.value("sing_box_binary", std::string("/opt/bin/sing-box"));
+}
+
+// Managed sing-box transports currently running. Throws rather than returning
+// a count when the manager cannot answer, so an unreachable manager reaches
+// the policy as "nobody could ask" instead of as a count of zero.
+std::size_t count_running_sing_box_transports(
+    const TransportManagerEndpoint& endpoint) {
+    httplib::Client client(endpoint.host, endpoint.port);
+    client.set_connection_timeout(1, 0);
+    client.set_read_timeout(3, 0);
+    const httplib::Headers headers{
+        {"Authorization", "Bearer " + endpoint.api_key},
+    };
+    const auto response = client.Get("/v1/transports", headers);
+    if (!response || response->status < 200 || response->status >= 300) {
+        throw ApiError("transport manager is unavailable", 503);
+    }
+    const auto body = nlohmann::json::parse(response->body, nullptr, false);
+    if (body.is_discarded() || !body.is_array()) {
+        throw ApiError(
+            "transport manager returned an invalid runtime state", 502);
+    }
+    std::size_t running = 0U;
+    for (const auto& status : body) {
+        if (!status.is_object()) continue;
+        const auto type = status.value("type", std::string{});
+        if (type.rfind("sing-box", 0U) != 0U) continue;
+        // Anything that is not `down` has a process attached to the binary
+        // about to be replaced. `degraded` and `starting` count for exactly
+        // that reason.
+        if (status.value("state", std::string{}) != "down") ++running;
+    }
+    return running;
+}
+
+api::InstallOutcome api_install_outcome(
+    const SingBoxInstallOutcome outcome) {
+    switch (outcome) {
+    case SingBoxInstallOutcome::installed:
+        return api::InstallOutcome::INSTALLED;
+    case SingBoxInstallOutcome::release_refused:
+        return api::InstallOutcome::RELEASE_REFUSED;
+    case SingBoxInstallOutcome::download_failed:
+        return api::InstallOutcome::DOWNLOAD_FAILED;
+    case SingBoxInstallOutcome::checksum_mismatch:
+        return api::InstallOutcome::CHECKSUM_MISMATCH;
+    case SingBoxInstallOutcome::archive_unusable:
+        return api::InstallOutcome::ARCHIVE_UNUSABLE;
+    case SingBoxInstallOutcome::staged_version_mismatch:
+        return api::InstallOutcome::STAGED_VERSION_MISMATCH;
+    case SingBoxInstallOutcome::install_failed:
+        return api::InstallOutcome::INSTALL_FAILED;
+    case SingBoxInstallOutcome::marker_not_written:
+        return api::InstallOutcome::MARKER_NOT_WRITTEN;
+    }
+    return api::InstallOutcome::INSTALL_FAILED;
+}
+
+api::ReleaseVerdict api_release_verdict(
+    const SingBoxReleaseVerdict verdict) {
+    switch (verdict) {
+    case SingBoxReleaseVerdict::ready:
+        return api::ReleaseVerdict::READY;
+    case SingBoxReleaseVerdict::release_unreadable:
+        return api::ReleaseVerdict::RELEASE_UNREADABLE;
+    case SingBoxReleaseVerdict::archive_missing:
+        return api::ReleaseVerdict::ARCHIVE_MISSING;
+    case SingBoxReleaseVerdict::checksums_missing:
+        return api::ReleaseVerdict::CHECKSUMS_MISSING;
+    case SingBoxReleaseVerdict::checksum_unusable:
+        return api::ReleaseVerdict::CHECKSUM_UNUSABLE;
+    case SingBoxReleaseVerdict::checksum_mismatch:
+        return api::ReleaseVerdict::CHECKSUM_MISMATCH;
+    }
+    return api::ReleaseVerdict::RELEASE_UNREADABLE;
 }
 
 api::SingBoxInstallCapabilityOperation api_install_operation(
@@ -603,6 +680,101 @@ static void register_transports_handler_impl(
     ApiServer& server,
     ApiContext& ctx,
     CompositeConfigCommit commit_config) {
+    // Installs the pinned release, and only when the capability that measured
+    // this router says it may. The capability is re-taken here rather than
+    // trusted from whatever the browser last read: between that read and this
+    // request an operator may have started a tunnel, and the whole point of
+    // the transports_running blocker is that the binary is not swapped from
+    // under one.
+    server.post(
+        "/api/transports/sing-box/install",
+        [&ctx]() -> std::string {
+            const auto binary = configured_sing_box_binary(ctx.config_path);
+            const auto endpoint = load_endpoint(ctx.config_path);
+            auto probes = production_sing_box_install_probes();
+            probes.count_running_transports = [&endpoint]() -> std::size_t {
+                return count_running_sing_box_transports(endpoint);
+            };
+
+            SingBoxInstallPaths paths;
+            paths.binary_path = binary;
+            paths.managed_marker_path = kSingBoxManagedMarkerPath;
+
+            const auto observation = observe_sing_box_install(
+                probes, paths.binary_path, paths.managed_marker_path);
+            const auto policy = evaluate_sing_box_install(
+                observation, KEEN_PBR3_SING_BOX_PINNED_VERSION);
+            if (!policy.available) {
+                nlohmann::json blockers = nlohmann::json::array();
+                for (const auto blocker : policy.blockers) {
+                    blockers.push_back(
+                        sing_box_install_blocker_name(blocker));
+                }
+                throw ApiError(
+                    "the sing-box install is not available on this router",
+                    409,
+                    nlohmann::json{
+                        {"error",
+                         "the sing-box install is not available on this "
+                         "router"},
+                        {"reason", "install_unavailable"},
+                        {"blockers", blockers},
+                    }
+                        .dump());
+            }
+
+            try {
+                auto maintenance =
+                    ctx.acquire_maintenance_lease("sing-box-install");
+                (void)maintenance->reserve(maintenance->base_generation());
+
+                const std::string release_url =
+                    std::string(
+                        "https://api.github.com/repos/SagerNet/sing-box/"
+                        "releases/tags/v") +
+                    KEEN_PBR3_SING_BOX_PINNED_VERSION;
+
+                // Anything a previous run left behind is removed first: the
+                // run that failed to clean up is by definition the one that
+                // could not run its own cleanup.
+                discard_sing_box_staging(paths);
+                const auto report = install_pinned_sing_box(
+                    production_sing_box_install_steps(paths),
+                    release_url,
+                    KEEN_PBR3_SING_BOX_PINNED_VERSION,
+                    policy.asset_architecture);
+                discard_sing_box_staging(paths);
+                maintenance->verify_held();
+
+                api::SingBoxInstallResult result;
+                result.install_outcome =
+                    api_install_outcome(report.outcome);
+                result.pinned_version =
+                    KEEN_PBR3_SING_BOX_PINNED_VERSION;
+                if (report.outcome !=
+                    SingBoxInstallOutcome::installed) {
+                    result.release_verdict =
+                        api_release_verdict(report.release_verdict);
+                }
+                if (!report.staged_version.empty()) {
+                    result.staged_version = report.staged_version;
+                }
+                if (report.outcome == SingBoxInstallOutcome::installed) {
+                    Logger::instance().info(
+                        "sing-box {} installed at {}",
+                        KEEN_PBR3_SING_BOX_PINNED_VERSION,
+                        paths.binary_path);
+                } else {
+                    Logger::instance().warn(
+                        "sing-box install did not complete: {}",
+                        sing_box_install_outcome_name(report.outcome));
+                }
+                return nlohmann::json(result).dump();
+            } catch (const MaintenanceLockError& error) {
+                throw_maintenance_api_error(error);
+            }
+        });
+
     // Read-only: measures the router and decides, changes nothing. The
     // measurement and the decision live in src/update, so both are testable
     // without each other and without a router; this handler only supplies the
@@ -616,42 +788,7 @@ static void register_transports_handler_impl(
             const auto endpoint = load_endpoint(ctx.config_path);
             probes.count_running_transports =
                 [&endpoint]() -> std::size_t {
-                // Left unset on any failure below, so an unreachable manager
-                // reaches the policy as "nobody could ask" and blocks, rather
-                // than as a count of zero that would authorise the swap.
-                httplib::Client client(endpoint.host, endpoint.port);
-                client.set_connection_timeout(1, 0);
-                client.set_read_timeout(3, 0);
-                const httplib::Headers headers{
-                    {"Authorization", "Bearer " + endpoint.api_key},
-                };
-                const auto response = client.Get("/v1/transports", headers);
-                if (!response || response->status < 200 ||
-                    response->status >= 300) {
-                    throw ApiError("transport manager is unavailable", 503);
-                }
-                const auto body = nlohmann::json::parse(
-                    response->body, nullptr, false);
-                if (body.is_discarded() || !body.is_array()) {
-                    throw ApiError(
-                        "transport manager returned an invalid runtime "
-                        "state",
-                        502);
-                }
-                std::size_t running = 0U;
-                for (const auto& status : body) {
-                    if (!status.is_object()) continue;
-                    const auto type =
-                        status.value("type", std::string{});
-                    if (type.rfind("sing-box", 0U) != 0U) continue;
-                    // Anything that is not `down` has a process attached to
-                    // the binary about to be replaced. `degraded` and
-                    // `starting` count for exactly that reason.
-                    if (status.value("state", std::string{}) != "down") {
-                        ++running;
-                    }
-                }
-                return running;
+                return count_running_sing_box_transports(endpoint);
             };
 
             const auto observation = observe_sing_box_install(

@@ -1678,6 +1678,79 @@ TEST_CASE("the sing-box install capability reports every blocker it found") {
     CHECK_FALSE(body.at("exact_rollback").get<bool>());
 }
 
+
+TEST_CASE("the install refuses when the capability says it may not") {
+    // The capability is re-taken by the install itself rather than trusted
+    // from whatever the browser last read. Between that read and this request
+    // an operator can start a tunnel, and not swapping the binary from under
+    // one is the entire reason that blocker exists.
+    constexpr int api_port = 18293;
+    const auto directory = std::filesystem::temp_directory_path() /
+                           "keen-pbr-sing-box-install-test";
+    std::filesystem::create_directories(directory);
+    const auto config_path = (directory / "config.json").string();
+
+    httplib::Server manager;
+    manager.Get("/v1/transports",
+                [](const httplib::Request&, httplib::Response& response) {
+                    response.set_content(
+                        nlohmann::json::array(
+                            {{{"tag", "nl"},
+                              {"type", "sing-box"},
+                              {"interface", "vless1"},
+                              {"state", "up"},
+                              {"updated_at", "now"},
+                              {"desired_up", true}}})
+                            .dump(),
+                        "application/json");
+                });
+    const int manager_port = manager.bind_to_any_port("127.0.0.1");
+    REQUIRE(manager_port > 0);
+    {
+        std::ofstream config(directory / "transports.json");
+        config << nlohmann::json{
+            {"listen", "127.0.0.1:" + std::to_string(manager_port)},
+            {"api_key", "test-secret"},
+            {"sing_box_binary",
+             (directory / "absent" / "sing-box").string()},
+        };
+    }
+    std::thread manager_thread([&manager]() { manager.listen_after_bind(); });
+    while (!manager.is_running()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    SseBroadcaster broadcaster;
+    ApiConfig api_config;
+    api_config.listen = "127.0.0.1:" + std::to_string(api_port);
+    ApiServer server(api_config);
+    auto context = make_transports_test_context(broadcaster, config_path);
+    register_transports_handler(server, context);
+    server.start();
+
+    httplib::Client client("127.0.0.1", api_port);
+    client.set_read_timeout(20, 0);
+    const auto response = client.Post(
+        "/api/transports/sing-box/install", "", "application/json");
+    server.stop();
+    manager.stop();
+    manager_thread.join();
+
+    REQUIRE(response != nullptr);
+    CHECK(response->status == 409);
+    const auto body = nlohmann::json::parse(response->body);
+    CHECK(body.at("reason") == "install_unavailable");
+    // Every reason, so an operator is not handed them one at a time.
+    const auto blockers =
+        body.at("blockers").get<std::vector<std::string>>();
+    CHECK(std::find(blockers.begin(), blockers.end(),
+                    "transports_running") != blockers.end());
+    // Nothing was fetched and nothing was staged: the refusal happens before
+    // the network is touched at all.
+    CHECK_FALSE(std::filesystem::exists(
+        directory / "absent" / ".keen-pbr-sing-box-staging"));
+}
+
 } // namespace keen_pbr3
 
 #endif // WITH_API

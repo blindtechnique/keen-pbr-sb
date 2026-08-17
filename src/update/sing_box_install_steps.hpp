@@ -1,0 +1,38 @@
+#pragma once
+
+#include "sing_box_installer.hpp"
+
+#include <string>
+
+namespace keen_pbr3 {
+
+// The steps that actually touch the router, kept apart from the sequence that
+// orders them. The sequence is the correctness and is tested exhaustively with
+// these replaced; these are the parts that can only be judged against a real
+// filesystem, so they are small, obvious, and do one thing each.
+//
+// `binary_path` is the file an install replaces - the one transports.json
+// configures, not a fixed location. Everything is staged inside that file's
+// own directory, because rename() is only atomic within a filesystem and
+// /opt/tmp is not guaranteed to be the same one.
+
+struct SingBoxInstallPaths {
+    std::string binary_path;
+    std::string managed_marker_path;
+};
+
+// Bounds the fetched release archive. sing-box ships around 12 MiB per
+// architecture; this leaves room for growth and still refuses a body that is
+// not a release at all.
+inline constexpr std::size_t kSingBoxArchiveMaximumBytes =
+    64U * 1024U * 1024U;
+
+SingBoxInstallSteps production_sing_box_install_steps(
+    const SingBoxInstallPaths& paths);
+
+// Removes anything a previous run left behind in the staging directory. Called
+// before staging rather than only after it, because the process that failed to
+// clean up is by definition the one that could not run its own cleanup.
+void discard_sing_box_staging(const SingBoxInstallPaths& paths);
+
+} // namespace keen_pbr3

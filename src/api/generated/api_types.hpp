@@ -1036,6 +1036,17 @@ namespace api {
         bool verified_archive_checksum = false;
     };
 
+    enum class InstallOutcome : int { ARCHIVE_UNUSABLE, CHECKSUM_MISMATCH, DOWNLOAD_FAILED, INSTALLED, INSTALL_FAILED, MARKER_NOT_WRITTEN, RELEASE_REFUSED, STAGED_VERSION_MISMATCH };
+
+    enum class ReleaseVerdict : int { ARCHIVE_MISSING, CHECKSUMS_MISSING, CHECKSUM_MISMATCH, CHECKSUM_UNUSABLE, READY, RELEASE_UNREADABLE };
+
+    struct SingBoxInstallResult {
+        InstallOutcome install_outcome;
+        std::string pinned_version;
+        std::optional<ReleaseVerdict> release_verdict;
+        std::optional<std::string> staged_version;
+    };
+
     enum class StatusEventConnectionsType : int { CONNECTIONS };
 
     struct StatusEventConnections {
@@ -1383,6 +1394,7 @@ namespace api {
         std::optional<RuntimeOutboundStateElement> runtime_outbound_state;
         std::optional<ResolverLiveStatus> runtime_outbound_status;
         std::optional<SingBoxInstallCapability> sing_box_install_capability;
+        std::optional<SingBoxInstallResult> sing_box_install_result;
         std::optional<SortOrder> sort_order;
         std::optional<StatusEventConnections> status_event_connections;
         std::optional<StatusEventInterfaces> status_event_interfaces;
@@ -1716,6 +1728,9 @@ namespace api {
     void from_json(const json & j, SingBoxInstallCapability & x);
     void to_json(json & j, const SingBoxInstallCapability & x);
 
+    void from_json(const json & j, SingBoxInstallResult & x);
+    void to_json(json & j, const SingBoxInstallResult & x);
+
     void from_json(const json & j, StatusEventConnections & x);
     void to_json(json & j, const StatusEventConnections & x);
 
@@ -1955,6 +1970,12 @@ namespace api {
 
     void from_json(const json & j, SingBoxInstallCapabilityOperation & x);
     void to_json(json & j, const SingBoxInstallCapabilityOperation & x);
+
+    void from_json(const json & j, InstallOutcome & x);
+    void to_json(json & j, const InstallOutcome & x);
+
+    void from_json(const json & j, ReleaseVerdict & x);
+    void to_json(json & j, const ReleaseVerdict & x);
 
     void from_json(const json & j, StatusEventConnectionsType & x);
     void to_json(json & j, const StatusEventConnectionsType & x);
@@ -3800,6 +3821,21 @@ namespace api {
         j["verified_archive_checksum"] = x.verified_archive_checksum;
     }
 
+    inline void from_json(const json & j, SingBoxInstallResult& x) {
+        x.install_outcome = j.at("install_outcome").get<InstallOutcome>();
+        x.pinned_version = j.at("pinned_version").get<std::string>();
+        x.release_verdict = get_stack_optional<ReleaseVerdict>(j, "release_verdict");
+        x.staged_version = get_stack_optional<std::string>(j, "staged_version");
+    }
+
+    inline void to_json(json & j, const SingBoxInstallResult & x) {
+        j = json::object();
+        j["install_outcome"] = x.install_outcome;
+        j["pinned_version"] = x.pinned_version;
+        j["release_verdict"] = x.release_verdict;
+        j["staged_version"] = x.staged_version;
+    }
+
     inline void from_json(const json & j, StatusEventConnections& x) {
         x.data = j.at("data").get<ConnectionEventState>();
         x.type = j.at("type").get<StatusEventConnectionsType>();
@@ -4297,6 +4333,7 @@ namespace api {
         x.runtime_outbound_state = get_stack_optional<RuntimeOutboundStateElement>(j, "RuntimeOutboundState");
         x.runtime_outbound_status = get_stack_optional<ResolverLiveStatus>(j, "RuntimeOutboundStatus");
         x.sing_box_install_capability = get_stack_optional<SingBoxInstallCapability>(j, "SingBoxInstallCapability");
+        x.sing_box_install_result = get_stack_optional<SingBoxInstallResult>(j, "SingBoxInstallResult");
         x.sort_order = get_stack_optional<SortOrder>(j, "SortOrder");
         x.status_event_connections = get_stack_optional<StatusEventConnections>(j, "StatusEventConnections");
         x.status_event_interfaces = get_stack_optional<StatusEventInterfaces>(j, "StatusEventInterfaces");
@@ -4452,6 +4489,7 @@ namespace api {
         j["RuntimeOutboundState"] = x.runtime_outbound_state;
         j["RuntimeOutboundStatus"] = x.runtime_outbound_status;
         j["SingBoxInstallCapability"] = x.sing_box_install_capability;
+        j["SingBoxInstallResult"] = x.sing_box_install_result;
         j["SortOrder"] = x.sort_order;
         j["StatusEventConnections"] = x.status_event_connections;
         j["StatusEventInterfaces"] = x.status_event_interfaces;
@@ -5452,6 +5490,54 @@ namespace api {
             case SingBoxInstallCapabilityOperation::REINSTALL_SAME_VERSION: j = "reinstall_same_version"; break;
             case SingBoxInstallCapabilityOperation::REPLACE: j = "replace"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"SingBoxInstallCapabilityOperation\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, InstallOutcome & x) {
+        if (j == "archive_unusable") x = InstallOutcome::ARCHIVE_UNUSABLE;
+        else if (j == "checksum_mismatch") x = InstallOutcome::CHECKSUM_MISMATCH;
+        else if (j == "download_failed") x = InstallOutcome::DOWNLOAD_FAILED;
+        else if (j == "installed") x = InstallOutcome::INSTALLED;
+        else if (j == "install_failed") x = InstallOutcome::INSTALL_FAILED;
+        else if (j == "marker_not_written") x = InstallOutcome::MARKER_NOT_WRITTEN;
+        else if (j == "release_refused") x = InstallOutcome::RELEASE_REFUSED;
+        else if (j == "staged_version_mismatch") x = InstallOutcome::STAGED_VERSION_MISMATCH;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"InstallOutcome\""); }
+    }
+
+    inline void to_json(json & j, const InstallOutcome & x) {
+        switch (x) {
+            case InstallOutcome::ARCHIVE_UNUSABLE: j = "archive_unusable"; break;
+            case InstallOutcome::CHECKSUM_MISMATCH: j = "checksum_mismatch"; break;
+            case InstallOutcome::DOWNLOAD_FAILED: j = "download_failed"; break;
+            case InstallOutcome::INSTALLED: j = "installed"; break;
+            case InstallOutcome::INSTALL_FAILED: j = "install_failed"; break;
+            case InstallOutcome::MARKER_NOT_WRITTEN: j = "marker_not_written"; break;
+            case InstallOutcome::RELEASE_REFUSED: j = "release_refused"; break;
+            case InstallOutcome::STAGED_VERSION_MISMATCH: j = "staged_version_mismatch"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"InstallOutcome\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, ReleaseVerdict & x) {
+        if (j == "archive_missing") x = ReleaseVerdict::ARCHIVE_MISSING;
+        else if (j == "checksums_missing") x = ReleaseVerdict::CHECKSUMS_MISSING;
+        else if (j == "checksum_mismatch") x = ReleaseVerdict::CHECKSUM_MISMATCH;
+        else if (j == "checksum_unusable") x = ReleaseVerdict::CHECKSUM_UNUSABLE;
+        else if (j == "ready") x = ReleaseVerdict::READY;
+        else if (j == "release_unreadable") x = ReleaseVerdict::RELEASE_UNREADABLE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"ReleaseVerdict\""); }
+    }
+
+    inline void to_json(json & j, const ReleaseVerdict & x) {
+        switch (x) {
+            case ReleaseVerdict::ARCHIVE_MISSING: j = "archive_missing"; break;
+            case ReleaseVerdict::CHECKSUMS_MISSING: j = "checksums_missing"; break;
+            case ReleaseVerdict::CHECKSUM_MISMATCH: j = "checksum_mismatch"; break;
+            case ReleaseVerdict::CHECKSUM_UNUSABLE: j = "checksum_unusable"; break;
+            case ReleaseVerdict::READY: j = "ready"; break;
+            case ReleaseVerdict::RELEASE_UNREADABLE: j = "release_unreadable"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"ReleaseVerdict\": " + std::to_string(static_cast<int>(x)));
         }
     }
 

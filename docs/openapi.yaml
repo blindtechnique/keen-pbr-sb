@@ -645,6 +645,41 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/transports/sing-box/install:
+    post:
+      summary: Install the pinned sing-box release
+      description: >
+        Installs the one release this build pins, and only when the capability
+        endpoint says it may. The archive is verified against the digest the
+        release publishes before anything is unpacked, and the unpacked binary
+        must report the pinned version before it replaces the installed one -
+        so a failure at any step leaves the router exactly as it was. A release
+        that publishes no checksums file is refused rather than installed
+        unverified, which is where this path is deliberately stricter than the
+        shell installer. Takes no body: there is one release to install.
+      operationId: postSingBoxInstall
+      responses:
+        "200":
+          description: The install ran; the outcome says what happened
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SingBoxInstallResult"
+        "409":
+          description: >
+            The capability refuses the install right now. The response names
+            every blocker, the same ones the capability endpoint reports.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Transport manager is not configured or unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/transports/config:
     get:
       summary: Editable transport definitions
@@ -1790,6 +1825,49 @@ components:
           description: >
             Whether the previous binary is captured so a failure can be undone
             byte-exactly. Currently false.
+
+    SingBoxInstallResult:
+      type: object
+      required: [install_outcome, pinned_version]
+      properties:
+        install_outcome:
+          type: string
+          enum:
+            - installed
+            - release_refused
+            - download_failed
+            - checksum_mismatch
+            - archive_unusable
+            - staged_version_mismatch
+            - install_failed
+            - marker_not_written
+          description: >
+            What happened. `marker_not_written` is neither success nor
+            failure: the binary is in place and correct, but the record that
+            it belongs to this daemon is missing, so the next capability read
+            will treat it as the operator's and refuse to touch it.
+        pinned_version:
+          type: string
+          description: The release that was installed, or would have been.
+        release_verdict:
+          type: string
+          enum:
+            - ready
+            - release_unreadable
+            - archive_missing
+            - checksums_missing
+            - checksum_unusable
+            - checksum_mismatch
+          description: >
+            Why the release was refused, when it was. `checksums_missing`
+            means the release published no checksums file and was therefore
+            not installed.
+        staged_version:
+          type: string
+          description: >
+            What the unpacked binary reported, when it was asked. Present with
+            `staged_version_mismatch` so an operator can see what the archive
+            actually contained.
 
     TransportConfigOperation:
       type: object
