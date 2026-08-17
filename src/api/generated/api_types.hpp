@@ -1020,6 +1020,22 @@ namespace api {
         HealthResponse service;
     };
 
+    enum class Blocker : int { ARCHITECTURE_UNSUPPORTED, ENTWARE_ABSENT, FOREIGN_BINARY_PRESENT, TARGET_NOT_WRITABLE, TRANSPORTS_RUNNING, TRANSPORT_STATE_UNKNOWN };
+
+    enum class SingBoxInstallCapabilityOperation : int { BLOCKED, INSTALL, REINSTALL_SAME_VERSION, REPLACE };
+
+    struct SingBoxInstallCapability {
+        std::optional<std::string> asset_architecture;
+        bool available = false;
+        std::vector<Blocker> blockers;
+        bool exact_rollback = false;
+        std::optional<std::string> installed_version;
+        SingBoxInstallCapabilityOperation operation;
+        std::string pinned_version;
+        bool signed_release = false;
+        bool verified_archive_checksum = false;
+    };
+
     enum class StatusEventConnectionsType : int { CONNECTIONS };
 
     struct StatusEventConnections {
@@ -1366,6 +1382,7 @@ namespace api {
         std::optional<RuntimeOutboundsResponse> runtime_outbounds_response;
         std::optional<RuntimeOutboundStateElement> runtime_outbound_state;
         std::optional<ResolverLiveStatus> runtime_outbound_status;
+        std::optional<SingBoxInstallCapability> sing_box_install_capability;
         std::optional<SortOrder> sort_order;
         std::optional<StatusEventConnections> status_event_connections;
         std::optional<StatusEventInterfaces> status_event_interfaces;
@@ -1696,6 +1713,9 @@ namespace api {
     void from_json(const json & j, RuntimeInventoryResponse & x);
     void to_json(json & j, const RuntimeInventoryResponse & x);
 
+    void from_json(const json & j, SingBoxInstallCapability & x);
+    void to_json(json & j, const SingBoxInstallCapability & x);
+
     void from_json(const json & j, StatusEventConnections & x);
     void to_json(json & j, const StatusEventConnections & x);
 
@@ -1929,6 +1949,12 @@ namespace api {
 
     void from_json(const json & j, RuntimeInterfaceStatusEnum & x);
     void to_json(json & j, const RuntimeInterfaceStatusEnum & x);
+
+    void from_json(const json & j, Blocker & x);
+    void to_json(json & j, const Blocker & x);
+
+    void from_json(const json & j, SingBoxInstallCapabilityOperation & x);
+    void to_json(json & j, const SingBoxInstallCapabilityOperation & x);
 
     void from_json(const json & j, StatusEventConnectionsType & x);
     void to_json(json & j, const StatusEventConnectionsType & x);
@@ -3749,6 +3775,31 @@ namespace api {
         j["service"] = x.service;
     }
 
+    inline void from_json(const json & j, SingBoxInstallCapability& x) {
+        x.asset_architecture = get_stack_optional<std::string>(j, "asset_architecture");
+        x.available = j.at("available").get<bool>();
+        x.blockers = j.at("blockers").get<std::vector<Blocker>>();
+        x.exact_rollback = j.at("exact_rollback").get<bool>();
+        x.installed_version = get_stack_optional<std::string>(j, "installed_version");
+        x.operation = j.at("operation").get<SingBoxInstallCapabilityOperation>();
+        x.pinned_version = j.at("pinned_version").get<std::string>();
+        x.signed_release = j.at("signed_release").get<bool>();
+        x.verified_archive_checksum = j.at("verified_archive_checksum").get<bool>();
+    }
+
+    inline void to_json(json & j, const SingBoxInstallCapability & x) {
+        j = json::object();
+        j["asset_architecture"] = x.asset_architecture;
+        j["available"] = x.available;
+        j["blockers"] = x.blockers;
+        j["exact_rollback"] = x.exact_rollback;
+        j["installed_version"] = x.installed_version;
+        j["operation"] = x.operation;
+        j["pinned_version"] = x.pinned_version;
+        j["signed_release"] = x.signed_release;
+        j["verified_archive_checksum"] = x.verified_archive_checksum;
+    }
+
     inline void from_json(const json & j, StatusEventConnections& x) {
         x.data = j.at("data").get<ConnectionEventState>();
         x.type = j.at("type").get<StatusEventConnectionsType>();
@@ -4245,6 +4296,7 @@ namespace api {
         x.runtime_outbounds_response = get_stack_optional<RuntimeOutboundsResponse>(j, "RuntimeOutboundsResponse");
         x.runtime_outbound_state = get_stack_optional<RuntimeOutboundStateElement>(j, "RuntimeOutboundState");
         x.runtime_outbound_status = get_stack_optional<ResolverLiveStatus>(j, "RuntimeOutboundStatus");
+        x.sing_box_install_capability = get_stack_optional<SingBoxInstallCapability>(j, "SingBoxInstallCapability");
         x.sort_order = get_stack_optional<SortOrder>(j, "SortOrder");
         x.status_event_connections = get_stack_optional<StatusEventConnections>(j, "StatusEventConnections");
         x.status_event_interfaces = get_stack_optional<StatusEventInterfaces>(j, "StatusEventInterfaces");
@@ -4399,6 +4451,7 @@ namespace api {
         j["RuntimeOutboundsResponse"] = x.runtime_outbounds_response;
         j["RuntimeOutboundState"] = x.runtime_outbound_state;
         j["RuntimeOutboundStatus"] = x.runtime_outbound_status;
+        j["SingBoxInstallCapability"] = x.sing_box_install_capability;
         j["SortOrder"] = x.sort_order;
         j["StatusEventConnections"] = x.status_event_connections;
         j["StatusEventInterfaces"] = x.status_event_interfaces;
@@ -5359,6 +5412,46 @@ namespace api {
             case RuntimeInterfaceStatusEnum::UNAVAILABLE: j = "unavailable"; break;
             case RuntimeInterfaceStatusEnum::UNKNOWN: j = "unknown"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"RuntimeInterfaceStatusEnum\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, Blocker & x) {
+        if (j == "architecture_unsupported") x = Blocker::ARCHITECTURE_UNSUPPORTED;
+        else if (j == "entware_absent") x = Blocker::ENTWARE_ABSENT;
+        else if (j == "foreign_binary_present") x = Blocker::FOREIGN_BINARY_PRESENT;
+        else if (j == "target_not_writable") x = Blocker::TARGET_NOT_WRITABLE;
+        else if (j == "transports_running") x = Blocker::TRANSPORTS_RUNNING;
+        else if (j == "transport_state_unknown") x = Blocker::TRANSPORT_STATE_UNKNOWN;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"Blocker\""); }
+    }
+
+    inline void to_json(json & j, const Blocker & x) {
+        switch (x) {
+            case Blocker::ARCHITECTURE_UNSUPPORTED: j = "architecture_unsupported"; break;
+            case Blocker::ENTWARE_ABSENT: j = "entware_absent"; break;
+            case Blocker::FOREIGN_BINARY_PRESENT: j = "foreign_binary_present"; break;
+            case Blocker::TARGET_NOT_WRITABLE: j = "target_not_writable"; break;
+            case Blocker::TRANSPORTS_RUNNING: j = "transports_running"; break;
+            case Blocker::TRANSPORT_STATE_UNKNOWN: j = "transport_state_unknown"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"Blocker\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, SingBoxInstallCapabilityOperation & x) {
+        if (j == "blocked") x = SingBoxInstallCapabilityOperation::BLOCKED;
+        else if (j == "install") x = SingBoxInstallCapabilityOperation::INSTALL;
+        else if (j == "reinstall_same_version") x = SingBoxInstallCapabilityOperation::REINSTALL_SAME_VERSION;
+        else if (j == "replace") x = SingBoxInstallCapabilityOperation::REPLACE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"SingBoxInstallCapabilityOperation\""); }
+    }
+
+    inline void to_json(json & j, const SingBoxInstallCapabilityOperation & x) {
+        switch (x) {
+            case SingBoxInstallCapabilityOperation::BLOCKED: j = "blocked"; break;
+            case SingBoxInstallCapabilityOperation::INSTALL: j = "install"; break;
+            case SingBoxInstallCapabilityOperation::REINSTALL_SAME_VERSION: j = "reinstall_same_version"; break;
+            case SingBoxInstallCapabilityOperation::REPLACE: j = "replace"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"SingBoxInstallCapabilityOperation\": " + std::to_string(static_cast<int>(x)));
         }
     }
 

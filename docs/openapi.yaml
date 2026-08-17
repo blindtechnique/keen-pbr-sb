@@ -620,6 +620,31 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/transports/sing-box/capability:
+    get:
+      summary: What this daemon can do about installing sing-box
+      description: >
+        Reports whether the pinned sing-box release can be installed from the
+        WebUI, and what this build can honestly promise about the result.
+        Read-only: it measures the router and decides, and changes nothing.
+        Every blocker is listed rather than the first one found, and anything
+        that could not be measured blocks - a transport count nobody could
+        take is not a count of zero.
+      operationId: getSingBoxInstallCapability
+      responses:
+        "200":
+          description: The install capability as measured now
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SingBoxInstallCapability"
+        "503":
+          description: Transport manager is not configured or unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/transports/config:
     get:
       summary: Editable transport definitions
@@ -1690,6 +1715,80 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/SubscriptionApplyResult"
+
+    SingBoxInstallCapability:
+      type: object
+      required:
+        - available
+        - operation
+        - pinned_version
+        - blockers
+        - verified_archive_checksum
+        - signed_release
+        - exact_rollback
+      properties:
+        available:
+          type: boolean
+          description: >
+            Whether an install may be offered at all. False whenever there is
+            any blocker, including one that only means something could not be
+            measured.
+        operation:
+          type: string
+          enum: [install, replace, reinstall_same_version, blocked]
+          description: >
+            What installing would do. `reinstall_same_version` is named apart
+            from `replace` so a reinstall is never presented as an upgrade; a
+            binary that will not report its version is `replace`, because it
+            might be the pinned release and might be a truncated download.
+        pinned_version:
+          type: string
+          description: The one release this build installs, from version.mk.
+          example: "1.13.14"
+        installed_version:
+          type: string
+          description: >
+            What the installed binary reports, when there is one and it says
+            so in a form that can be compared with the pin.
+        asset_architecture:
+          type: string
+          description: >
+            The official release asset this router needs, derived from the
+            Entware architecture. Empty when this build has no mapping for it,
+            which blocks rather than guesses.
+          example: "arm64"
+        blockers:
+          type: array
+          description: >
+            Every reason an install is not offered, not just the first. An
+            operator who fixes the one reason they were shown, only to be
+            handed the next, learns to distrust the report.
+          items:
+            type: string
+            enum:
+              - architecture_unsupported
+              - entware_absent
+              - target_not_writable
+              - foreign_binary_present
+              - transports_running
+              - transport_state_unknown
+        verified_archive_checksum:
+          type: boolean
+          description: >
+            Whether the fetched archive's checksum is verified unconditionally.
+            Currently false: the shell installer verifies only when the release
+            publishes a checksums file, and this path will not inherit that.
+        signed_release:
+          type: boolean
+          description: >
+            Whether the release carries a signature this daemon checks.
+            Currently false - GitHub release assets carry none, so
+            "pinned+signed" is pinned-only for now.
+        exact_rollback:
+          type: boolean
+          description: >
+            Whether the previous binary is captured so a failure can be undone
+            byte-exactly. Currently false.
 
     TransportConfigOperation:
       type: object

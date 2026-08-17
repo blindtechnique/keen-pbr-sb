@@ -4,12 +4,15 @@
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <thread>
 #include <unistd.h>
+
+#include <keen-pbr/version.hpp>
 
 #include "../src/api/handler_config.hpp"
 #include "../src/api/handler_transports.hpp"
@@ -1548,6 +1551,131 @@ TEST_CASE(
                 .has_value());
         std::filesystem::remove_all(directory);
     }
+}
+
+
+TEST_CASE("the sing-box install capability blocks when the manager is silent") {
+    // The endpoint exists to answer "may I install", and the one input this
+    // handler alone can take is the running transport count. An unreachable
+    // manager must reach the policy as "nobody could ask", not as zero - zero
+    // is what would authorise swapping the binary under a live tunnel.
+    constexpr int api_port = 18291;
+    const auto directory = std::filesystem::temp_directory_path() /
+                           "keen-pbr-sing-box-capability-test";
+    std::filesystem::create_directories(directory);
+    const auto config_path = (directory / "config.json").string();
+    {
+        std::ofstream config(directory / "transports.json");
+        // A port nothing listens on: the manager is configured but down.
+        config << nlohmann::json{
+            {"listen", "127.0.0.1:1"},
+            {"api_key", "test-secret"},
+        };
+    }
+
+    SseBroadcaster broadcaster;
+    ApiConfig api_config;
+    api_config.listen = "127.0.0.1:" + std::to_string(api_port);
+    ApiServer server(api_config);
+    auto context =
+        make_transports_test_context(broadcaster, config_path);
+    register_transports_handler(server, context);
+    server.start();
+
+    httplib::Client client("127.0.0.1", api_port);
+    const auto response =
+        client.Get("/api/transports/sing-box/capability");
+    server.stop();
+
+    REQUIRE(response != nullptr);
+    // The probe throws ApiError(503) and the route wrapper answers with it:
+    // an unanswerable question is reported, never guessed at.
+    CHECK(response->status == 503);
+}
+
+TEST_CASE("the sing-box install capability reports every blocker it found") {
+    constexpr int api_port = 18292;
+    const auto directory = std::filesystem::temp_directory_path() /
+                           "keen-pbr-sing-box-capability-test";
+    std::filesystem::create_directories(directory);
+    const auto config_path = (directory / "config.json").string();
+
+    httplib::Server manager;
+    manager.Get("/v1/transports",
+                [](const httplib::Request&, httplib::Response& response) {
+                    response.set_content(
+                        nlohmann::json::array(
+                            {{{"tag", "nl"},
+                              {"type", "sing-box"},
+                              {"interface", "vless1"},
+                              {"state", "down"},
+                              {"updated_at", "now"},
+                              {"desired_up", true}},
+                             {{"tag", "de"},
+                              {"type", "native"},
+                              {"interface", "nwg1"},
+                              {"state", "up"},
+                              {"updated_at", "now"},
+                              {"desired_up", true}}})
+                            .dump(),
+                        "application/json");
+                });
+    const int manager_port = manager.bind_to_any_port("127.0.0.1");
+    REQUIRE(manager_port > 0);
+    {
+        std::ofstream config(directory / "transports.json");
+        config << nlohmann::json{
+            {"listen", "127.0.0.1:" + std::to_string(manager_port)},
+            {"api_key", "test-secret"},
+            // A path that does not exist, so nothing is "installed".
+            {"sing_box_binary",
+             (directory / "absent" / "sing-box").string()},
+        };
+    }
+    std::thread manager_thread([&manager]() { manager.listen_after_bind(); });
+    while (!manager.is_running()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    SseBroadcaster broadcaster;
+    ApiConfig api_config;
+    api_config.listen = "127.0.0.1:" + std::to_string(api_port);
+    ApiServer server(api_config);
+    auto context =
+        make_transports_test_context(broadcaster, config_path);
+    register_transports_handler(server, context);
+    server.start();
+
+    httplib::Client client("127.0.0.1", api_port);
+    const auto response =
+        client.Get("/api/transports/sing-box/capability");
+    server.stop();
+    manager.stop();
+    manager_thread.join();
+
+    REQUIRE(response != nullptr);
+    REQUIRE(response->status == 200);
+    const auto body = nlohmann::json::parse(response->body);
+
+    // The pinned version comes from version.mk through the generated header,
+    // so this also pins that the endpoint reports the build's own pin rather
+    // than a literal of its own.
+    CHECK(body.at("pinned_version") == KEEN_PBR3_SING_BOX_PINNED_VERSION);
+    // The sing-box transport is down and the native one is up. Only the
+    // first kind runs on the binary an install would replace, so nothing
+    // here blocks on running transports - and the count was taken, which is
+    // a different thing from being zero.
+    const auto blockers =
+        body.at("blockers").get<std::vector<std::string>>();
+    CHECK(std::find(blockers.begin(), blockers.end(),
+                    "transports_running") == blockers.end());
+    CHECK(std::find(blockers.begin(), blockers.end(),
+                    "transport_state_unknown") == blockers.end());
+
+    // The promises this build does not keep are reported as not kept.
+    CHECK_FALSE(body.at("verified_archive_checksum").get<bool>());
+    CHECK_FALSE(body.at("signed_release").get<bool>());
+    CHECK_FALSE(body.at("exact_rollback").get<bool>());
 }
 
 } // namespace keen_pbr3

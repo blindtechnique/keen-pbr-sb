@@ -9,6 +9,8 @@
 #include "../crypto/sha256.hpp"
 #include "../util/display_name.hpp"
 #include "../util/safe_exec.hpp"
+#include "../update/sing_box_install_observation.hpp"
+#include "../update/sing_box_install_policy.hpp"
 
 #include <keen-pbr/version.hpp>
 
@@ -37,6 +39,62 @@ namespace {
 TransportManagerEndpoint load_endpoint(
     const std::string& keen_pbr_config_path) {
     return load_transport_manager_endpoint(keen_pbr_config_path);
+}
+
+// Where install.sh records the binary it installed. Its presence is what
+// distinguishes a sing-box this daemon put there from one the operator
+// installed themselves.
+constexpr const char* kSingBoxManagedMarkerPath =
+    "/opt/etc/keen-pbr/sing-box-managed.path";
+
+// The binary the transport manager is configured to run, which is the one an
+// install would replace - not a hardcoded path that might not be the one in
+// use.
+std::string configured_sing_box_binary(const std::string& config_path) {
+    const auto path =
+        std::filesystem::path(config_path).parent_path() /
+        "transports.json";
+    std::ifstream input(path);
+    if (!input.is_open()) return "/opt/bin/sing-box";
+    const auto config = nlohmann::json::parse(input, nullptr, false);
+    if (config.is_discarded() || !config.is_object()) {
+        return "/opt/bin/sing-box";
+    }
+    return config.value("sing_box_binary", std::string("/opt/bin/sing-box"));
+}
+
+api::SingBoxInstallCapabilityOperation api_install_operation(
+    const SingBoxInstallOperation operation) {
+    switch (operation) {
+    case SingBoxInstallOperation::install:
+        return api::SingBoxInstallCapabilityOperation::INSTALL;
+    case SingBoxInstallOperation::replace:
+        return api::SingBoxInstallCapabilityOperation::REPLACE;
+    case SingBoxInstallOperation::reinstall_same_version:
+        return api::SingBoxInstallCapabilityOperation::
+            REINSTALL_SAME_VERSION;
+    case SingBoxInstallOperation::blocked:
+        return api::SingBoxInstallCapabilityOperation::BLOCKED;
+    }
+    return api::SingBoxInstallCapabilityOperation::BLOCKED;
+}
+
+api::Blocker api_install_blocker(const SingBoxInstallBlocker blocker) {
+    switch (blocker) {
+    case SingBoxInstallBlocker::architecture_unsupported:
+        return api::Blocker::ARCHITECTURE_UNSUPPORTED;
+    case SingBoxInstallBlocker::entware_absent:
+        return api::Blocker::ENTWARE_ABSENT;
+    case SingBoxInstallBlocker::target_not_writable:
+        return api::Blocker::TARGET_NOT_WRITABLE;
+    case SingBoxInstallBlocker::foreign_binary_present:
+        return api::Blocker::FOREIGN_BINARY_PRESENT;
+    case SingBoxInstallBlocker::transports_running:
+        return api::Blocker::TRANSPORTS_RUNNING;
+    case SingBoxInstallBlocker::transport_state_unknown:
+        return api::Blocker::TRANSPORT_STATE_UNKNOWN;
+    }
+    return api::Blocker::TRANSPORT_STATE_UNKNOWN;
 }
 
 bool valid_transport_tag(const std::string& tag) {
@@ -545,6 +603,85 @@ static void register_transports_handler_impl(
     ApiServer& server,
     ApiContext& ctx,
     CompositeConfigCommit commit_config) {
+    // Read-only: measures the router and decides, changes nothing. The
+    // measurement and the decision live in src/update, so both are testable
+    // without each other and without a router; this handler only supplies the
+    // one probe neither can take on its own - the running transport count,
+    // which only the manager knows.
+    server.get(
+        "/api/transports/sing-box/capability",
+        [&ctx]() -> std::string {
+            const auto binary = configured_sing_box_binary(ctx.config_path);
+            auto probes = production_sing_box_install_probes();
+            const auto endpoint = load_endpoint(ctx.config_path);
+            probes.count_running_transports =
+                [&endpoint]() -> std::size_t {
+                // Left unset on any failure below, so an unreachable manager
+                // reaches the policy as "nobody could ask" and blocks, rather
+                // than as a count of zero that would authorise the swap.
+                httplib::Client client(endpoint.host, endpoint.port);
+                client.set_connection_timeout(1, 0);
+                client.set_read_timeout(3, 0);
+                const httplib::Headers headers{
+                    {"Authorization", "Bearer " + endpoint.api_key},
+                };
+                const auto response = client.Get("/v1/transports", headers);
+                if (!response || response->status < 200 ||
+                    response->status >= 300) {
+                    throw ApiError("transport manager is unavailable", 503);
+                }
+                const auto body = nlohmann::json::parse(
+                    response->body, nullptr, false);
+                if (body.is_discarded() || !body.is_array()) {
+                    throw ApiError(
+                        "transport manager returned an invalid runtime "
+                        "state",
+                        502);
+                }
+                std::size_t running = 0U;
+                for (const auto& status : body) {
+                    if (!status.is_object()) continue;
+                    const auto type =
+                        status.value("type", std::string{});
+                    if (type.rfind("sing-box", 0U) != 0U) continue;
+                    // Anything that is not `down` has a process attached to
+                    // the binary about to be replaced. `degraded` and
+                    // `starting` count for exactly that reason.
+                    if (status.value("state", std::string{}) != "down") {
+                        ++running;
+                    }
+                }
+                return running;
+            };
+
+            const auto observation = observe_sing_box_install(
+                probes, binary, kSingBoxManagedMarkerPath);
+            const auto policy = evaluate_sing_box_install(
+                observation, KEEN_PBR3_SING_BOX_PINNED_VERSION);
+
+            api::SingBoxInstallCapability capability;
+            capability.available = policy.available;
+            capability.operation = api_install_operation(policy.operation);
+            capability.pinned_version =
+                KEEN_PBR3_SING_BOX_PINNED_VERSION;
+            if (!observation.installed_version.empty()) {
+                capability.installed_version =
+                    observation.installed_version;
+            }
+            if (!policy.asset_architecture.empty()) {
+                capability.asset_architecture = policy.asset_architecture;
+            }
+            capability.blockers.reserve(policy.blockers.size());
+            for (const auto blocker : policy.blockers) {
+                capability.blockers.push_back(api_install_blocker(blocker));
+            }
+            capability.verified_archive_checksum =
+                policy.verified_archive_checksum;
+            capability.signed_release = policy.signed_release;
+            capability.exact_rollback = policy.exact_rollback;
+            return nlohmann::json(capability).dump();
+        });
+
     server.get("/api/transports/environment", [&ctx]() -> std::string {
         const auto path = std::filesystem::path(ctx.config_path).parent_path() /
                           "transports.json";
