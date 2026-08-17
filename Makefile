@@ -141,6 +141,7 @@ test: ## Build and run unit tests (doctest)
 	sh -n install.sh
 	python3 -m unittest build_scripts.tests.test_build_identity -v
 	python3 -m unittest build_scripts.tests.test_test_target_coverage -v
+	python3 -m unittest build_scripts.tests.test_pinned_versions -v
 	cmake -S . -B $(GCC_BUILD_DIR) $(GCC_CMAKE_FLAGS) -DBUILD_TESTS=ON \
 		-DWITH_API=ON -DUSE_KEENETIC_API=ON $(TEST_CMAKE_FLAGS)
 	cmake --build $(GCC_BUILD_DIR) --parallel $(BUILD_JOBS) --target keen-pbr keen-pbr-tests crash-diagnostics-smoke $(NARROW_TEST_TARGETS)

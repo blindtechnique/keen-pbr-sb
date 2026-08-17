@@ -10,6 +10,8 @@
 #include "../util/display_name.hpp"
 #include "../util/safe_exec.hpp"
 
+#include <keen-pbr/version.hpp>
+
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
@@ -560,7 +562,16 @@ static void register_transports_handler_impl(
         const bool installed = std::filesystem::is_regular_file(binary, ec);
         return nlohmann::json{{"sing_box_installed", installed},
                               {"sing_box_binary", binary},
-                              {"tested_version", "1.13.14"},
+                              // One source: version.mk, threaded through the
+                              // generated header. The literal that used to sit
+                              // here said "tested" while the installer had been
+                              // renamed to "pinned" - different promises about
+                              // the same number. `tested_version` stays for the
+                              // frontend that already reads it.
+                              {"pinned_version",
+                               KEEN_PBR3_SING_BOX_PINNED_VERSION},
+                              {"tested_version",
+                               KEEN_PBR3_SING_BOX_PINNED_VERSION},
                               // Prevent a newer preview bundle from reporting
                               // false success when an older companion silently
                               // drops fields such as display_name.

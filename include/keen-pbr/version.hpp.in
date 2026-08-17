@@ -9,3 +9,8 @@
 #define KEEN_PBR3_VERSION_FULL_STRING "@KEEN_PBR_VERSION@-@KEEN_PBR_RELEASE@"
 #define KEEN_PBR3_VERSION_COMMIT "@KEEN_PBR_COMMIT@"
 #define KEEN_PBR3_VERSION_IDENTITY_STRING "@KEEN_PBR_VERSION@ (build @KEEN_PBR_RELEASE@, commit @KEEN_PBR_COMMIT@)"
+
+// The sing-box release this build installs and validates against. Single
+// source in version.mk; install.sh reads the same line, and a gate fails when
+// the two drift.
+#define KEEN_PBR3_SING_BOX_PINNED_VERSION "@SING_BOX_PINNED_VERSION@"
