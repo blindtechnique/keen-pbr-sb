@@ -18,6 +18,7 @@
 #include "../src/api/handler_transports.hpp"
 #include "../src/api/server.hpp"
 #include "../src/api/sse_broadcaster.hpp"
+#include "../src/api/status_stream.hpp"
 #include "../src/backup/recovery_coordinator.hpp"
 #include "../src/backup/restore_journal.hpp"
 #include "../src/config/config_writer.hpp"
@@ -1731,6 +1732,27 @@ TEST_CASE("the install refuses when the capability says it may not") {
              (directory / "absent" / "sing-box").string()},
         };
     }
+    // A real status stream, because the refusal's silence on it is part of
+    // what this case asserts. Every other transports test leaves this null,
+    // which is exactly why the progress wiring went unexercised.
+    //
+    // Built before the manager thread exists: anything that throws in here
+    // would otherwise unwind past a joinable std::thread, and destroying one
+    // of those calls std::terminate - so the process dies with SIGABRT and
+    // doctest never gets to report what actually went wrong.
+    // Every enum set explicitly. A default-constructed snapshot leaves them
+    // uninitialised, and serialising one throws on whatever the stack held -
+    // which is why the first version of this passed alone and aborted inside
+    // the full suite.
+    StatusSnapshot snapshot;
+    snapshot.service.status = api::HealthResponseStatus::RUNNING;
+    snapshot.service.runtime_state = api::RuntimeState::RUNNING;
+    snapshot.service.resolver_live_status = api::ResolverLiveStatus::HEALTHY;
+    snapshot.service.config_is_draft = false;
+    StatusStream status_stream([&snapshot] { return snapshot; });
+    auto watcher = status_stream.subscribe();
+    REQUIRE(watcher);
+
     std::thread manager_thread([&manager]() { manager.listen_after_bind(); });
     while (!manager.is_running()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -1741,6 +1763,7 @@ TEST_CASE("the install refuses when the capability says it may not") {
     api_config.listen = "127.0.0.1:" + std::to_string(api_port);
     ApiServer server(api_config);
     auto context = make_transports_test_context(broadcaster, config_path);
+    context.status_stream = &status_stream;
     register_transports_handler(server, context);
     server.start();
 
@@ -1765,6 +1788,27 @@ TEST_CASE("the install refuses when the capability says it may not") {
     // the network is touched at all.
     CHECK_FALSE(std::filesystem::exists(
         directory / "absent" / ".keen-pbr-sing-box-staging"));
+
+    // And nothing was said about an install, because none was attempted. The
+    // progress reporter is armed only after the capability allows the install
+    // and the lease is taken; arming it earlier would broadcast that an
+    // install had finished to every open page whenever one was refused - and
+    // a page that hears "finished" stops showing whatever it was showing.
+    std::vector<std::string> published;
+    {
+        KPBR_LOCK_GUARD(watcher->mutex);
+        published.assign(watcher->messages.begin(), watcher->messages.end());
+    }
+    // The watcher is live - it holds the snapshot every subscriber is sent.
+    // Without this the loop below would be vacuous: "no install frames" is
+    // also what a subscription that never received anything looks like, and a
+    // check that passes when the mechanism is broken proves nothing.
+    REQUIRE_FALSE(published.empty());
+    CHECK(published.front().rfind("event: snapshot\n", 0) == 0);
+    for (const auto& frame : published) {
+        CHECK(frame.find("sing_box_install") == std::string::npos);
+    }
+    status_stream.unsubscribe(watcher);
 }
 
 } // namespace keen_pbr3

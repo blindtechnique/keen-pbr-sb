@@ -61,9 +61,9 @@ SingBoxInstallReport install_pinned_sing_box(
     };
 
     // A missing step is a caller error, and the safe reading of "this
-    // installer was assembled wrong" is that nothing gets installed. Announced
-    // before the step check rather than after: an install that reports no
-    // phase at all is indistinguishable from one that never started.
+    // installer was assembled wrong" is that nothing gets installed. No phase
+    // is announced for it: nothing was attempted, and the caller's own
+    // reporter is what tells anyone watching that the attempt ended.
     if (!steps.fetch || !steps.digest || !steps.stage_archive ||
         !steps.read_staged_version || !steps.install_atomically ||
         !steps.write_managed_marker) {

@@ -115,10 +115,11 @@ struct SingBoxInstallSteps {
 //
 // `progress` is optional and observes only - it cannot change the outcome, and
 // an install must not fail because nobody was listening. It is deliberately
-// not wrapped in a catch here: the only production observer publishes to the
-// status stream and is noexcept (handler_transports.cpp), so a guard around
-// this call could never fire in production, and a guard that cannot fire is a
-// promise the code does not keep.
+// not wrapped in a catch here: the only production observer forwards to
+// publish_sing_box_install_progress (handler_transports.cpp), which is
+// noexcept and swallows, so a guard around this call could never fire in
+// production - and a guard that cannot fire is a promise the code does not
+// keep.
 SingBoxInstallReport install_pinned_sing_box(
     const SingBoxInstallSteps& steps,
     const std::string& release_json_url,

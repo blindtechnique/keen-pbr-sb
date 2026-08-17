@@ -4,9 +4,9 @@
 // this card is which of several honest-but-different things it says, and that
 // is worth testing without rendering anything.
 
+import { SingBoxInstallCapabilityBlockersItem } from "@/api/generated/model"
 import type {
   SingBoxInstallCapability,
-  SingBoxInstallCapabilityBlockersItem,
   SingBoxInstallCapabilityOperation,
   SingBoxInstallResult,
   SingBoxInstallResultInstallOutcome,
@@ -36,14 +36,13 @@ export function singBoxInstallBlockerKey(
   return `transports.singBoxInstall.blocker.${blocker}`
 }
 
-const KNOWN_BLOCKERS: ReadonlySet<string> = new Set([
-  "architecture_unsupported",
-  "entware_absent",
-  "target_not_writable",
-  "foreign_binary_present",
-  "transports_running",
-  "transport_state_unknown",
-])
+// Derived from the generated union rather than typed out again. A hand-written
+// copy would have been the fourth place this set is written, and the one with
+// nothing coupling it to the other three - a blocker added to the schema would
+// have been silently dropped here while every gate stayed green.
+const KNOWN_BLOCKERS: ReadonlySet<string> = new Set(
+  Object.values(SingBoxInstallCapabilityBlockersItem)
+)
 
 // The install re-measures the router before doing anything, so its refusal is
 // newer than whatever the capability query last read - an operator can start a

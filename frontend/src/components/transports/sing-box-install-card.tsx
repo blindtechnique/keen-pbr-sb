@@ -110,7 +110,11 @@ export function SingBoxInstallCard() {
     lastOutcome
   )
 
-  if (capabilityQuery.isError) return null
+  // Nothing measurable to show and nothing to report: stay out of the way.
+  // Not when there IS something to report - the install refetches the
+  // capability when it finishes, and a refetch that fails must not take the
+  // result of the install with it off the screen.
+  if (capabilityQuery.isError && !result && !failure) return null
 
   return (
     <div className="rounded-lg border p-4">
