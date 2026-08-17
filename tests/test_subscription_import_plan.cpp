@@ -2,8 +2,12 @@
 
 #include "../src/config/subscription_import_plan.hpp"
 
+#include <filesystem>
+#include <fstream>
 #include <set>
+#include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace keen_pbr3 {
 
@@ -14,6 +18,53 @@ using Disposition = SubscriptionCandidateDisposition;
 
 const std::set<std::string> kNoTags;
 const std::set<std::string> kNoFingerprints;
+
+struct SharedFingerprintVector {
+    std::string expected;
+    std::vector<std::string> inputs;
+};
+
+SharedFingerprintVector load_shared_fingerprint_vector() {
+    const auto path =
+        std::filesystem::path(__FILE__).parent_path().parent_path() /
+        "extensions/transport-manager/internal/transport/testdata/"
+        "subscription_link_fingerprint_v1.txt";
+    std::ifstream input(path);
+    if (!input.is_open()) {
+        throw std::runtime_error(
+            "cannot open shared subscription fingerprint vector: " +
+            path.string());
+    }
+
+    SharedFingerprintVector vector;
+    std::string version;
+    std::string line;
+    while (std::getline(input, line)) {
+        const auto separator = line.find('=');
+        if (separator == std::string::npos) {
+            throw std::runtime_error(
+                "invalid shared subscription fingerprint vector line");
+        }
+        const auto key = line.substr(0U, separator);
+        const auto value = line.substr(separator + 1U);
+        if (key == "version") {
+            version = value;
+        } else if (key == "expected") {
+            vector.expected = value;
+        } else if (key == "input") {
+            vector.inputs.push_back(value);
+        } else {
+            throw std::runtime_error(
+                "unknown shared subscription fingerprint vector key");
+        }
+    }
+    if (!input.eof() || version != "1" || vector.expected.empty() ||
+        vector.inputs.size() < 2U) {
+        throw std::runtime_error(
+            "incomplete shared subscription fingerprint vector");
+    }
+    return vector;
+}
 
 std::string base64_of(const std::string& value) {
     static const char* alphabet =
@@ -210,17 +261,16 @@ TEST_CASE("a configured entry is recognised through a renamed label") {
 }
 
 TEST_CASE("the link fingerprint is the contract transport-manager mirrors") {
-    // LinkFingerprint in singbox.go derives the same value from the same rule.
-    // Nothing at build time couples them, so both sides pin it: a drift here
-    // does not fail loudly, it just stops ever matching.
+    // LinkFingerprint in singbox.go consumes this exact same vector. A drift on
+    // either side is now a test failure instead of a silent dedupe failure.
     const std::string identity = "vless://u@a.example:443?security=tls";
     const std::string fingerprint = subscription_link_fingerprint(identity);
+    const auto vector = load_shared_fingerprint_vector();
 
-    // The exact value transport.LinkFingerprint produces for this link. A
-    // shared rule stated twice is not a shared rule until one side's answer is
-    // written down where the other side's tests can see it.
-    CHECK(fingerprint ==
-          "6005eaff07bcbb5ec4fb1c8d192197f961c9c369a74b39861a2e5d37d4bffb50");
+    CHECK(fingerprint == vector.expected);
+    for (const auto& input : vector.inputs) {
+        CHECK(subscription_link_fingerprint(input) == vector.expected);
+    }
     CHECK(fingerprint.size() == 64U);
     CHECK(fingerprint == subscription_link_fingerprint(identity + "#NL"));
     CHECK(fingerprint ==

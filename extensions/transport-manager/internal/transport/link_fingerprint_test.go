@@ -1,6 +1,59 @@
 package transport
 
-import "testing"
+import (
+	"bufio"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func loadSharedLinkFingerprintVector(t *testing.T) (string, []string) {
+	t.Helper()
+
+	file, err := os.Open(filepath.Join("testdata", "subscription_link_fingerprint_v1.txt"))
+	if err != nil {
+		t.Fatalf("open shared fingerprint vector: %v", err)
+	}
+	defer file.Close()
+
+	var version string
+	var expected string
+	var inputs []string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		key, value, ok := strings.Cut(scanner.Text(), "=")
+		if !ok {
+			t.Fatalf("invalid shared fingerprint vector line %q", scanner.Text())
+		}
+		switch key {
+		case "version":
+			version = value
+		case "expected":
+			expected = value
+		case "input":
+			inputs = append(inputs, value)
+		default:
+			t.Fatalf("unknown shared fingerprint vector key %q", key)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("read shared fingerprint vector: %v", err)
+	}
+	if version != "1" || expected == "" || len(inputs) < 2 {
+		t.Fatalf("incomplete shared fingerprint vector")
+	}
+	return expected, inputs
+}
+
+func TestLinkFingerprintMatchesSharedContractVector(t *testing.T) {
+	expected, inputs := loadSharedLinkFingerprintVector(t)
+	for _, input := range inputs {
+		if got := LinkFingerprint(input); got != expected {
+			t.Fatalf("LinkFingerprint(%q) = %q, want %q", input, got, expected)
+		}
+	}
+}
 
 // The digest the C++ subscription importer compares against. Both halves of
 // that comparison derive an identity from a share link, and the rule has to be

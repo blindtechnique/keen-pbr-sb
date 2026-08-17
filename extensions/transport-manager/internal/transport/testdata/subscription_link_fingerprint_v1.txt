@@ -1,0 +1,5 @@
+version=1
+expected=6005eaff07bcbb5ec4fb1c8d192197f961c9c369a74b39861a2e5d37d4bffb50
+input=vless://u@a.example:443?security=tls
+input=vless://u@a.example:443?security=tls#Netherlands%2001
+input=  vless://u@a.example:443?security=tls#other
