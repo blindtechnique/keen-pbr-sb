@@ -23,11 +23,41 @@ MAKEFILE = REPO_ROOT / "Makefile"
 DIRECTLY_BUILT = {"keen-pbr-tests", "crash-diagnostics-smoke"}
 # Needs Docker and netns; covered by `make firewall-it`.
 EXEMPT = {"keen-pbr-firewall-it"}
+# Declared inside `if(KEEN_PBR_FUZZ)`, which is OFF by default and requires
+# Clang. Named here rather than left invisible: the anchored pattern this gate
+# used to carry could not see an indented declaration at all, so these five
+# were exempt by accident. An accidental exemption covers whatever is added
+# under the same indentation next.
+OPT_IN_ONLY = {
+    "keen-pbr-fuzz-srs",
+    "keen-pbr-fuzz-config",
+    "keen-pbr-fuzz-list",
+    "keen-pbr-fuzz-iptables",
+    "keen-pbr-fuzz-conntrack",
+}
+# Compiled into a target through a variable rather than a literal path, or
+# deliberately not compiled at all. Every other tests/test_*.cpp must appear in
+# some target's source list.
+UNCOMPILED_SOURCES: set = set()
 
 
 def declared_targets():
     text = CMAKE.read_text(encoding="utf-8")
-    return set(re.findall(r"^add_executable\(([A-Za-z0-9_-]+)", text, re.M))
+    # Leading whitespace allowed: a declaration inside a conditional is still a
+    # declaration, and the gate that cannot see it cannot judge it.
+    return set(
+        re.findall(r"^[ \t]*add_executable\(([A-Za-z0-9_-]+)", text, re.M)
+    )
+
+
+def compiled_sources():
+    """Every tests/*.cpp named in tests/CMakeLists.txt, by bare file name."""
+    text = CMAKE.read_text(encoding="utf-8")
+    return {
+        Path(match).name
+        for match in re.findall(r"[\w./-]+\.cpp", text)
+        if not match.startswith("../")
+    }
 
 
 def gated_targets():
@@ -50,7 +80,7 @@ class TestTargetCoverage(unittest.TestCase):
             "the target this test was written for vanished; update the test "
             "deliberately rather than letting it pass vacuously",
         )
-        covered = gated_targets() | DIRECTLY_BUILT | EXEMPT
+        covered = gated_targets() | DIRECTLY_BUILT | EXEMPT | OPT_IN_ONLY
         missing = sorted(declared - covered)
         self.assertEqual(
             missing,
@@ -72,8 +102,29 @@ class TestTargetCoverage(unittest.TestCase):
     def test_exemptions_are_real_targets(self):
         # An exemption for a target that no longer exists silently widens the
         # allowed gap for whatever is added under that name next.
-        unreal = sorted(EXEMPT - declared_targets())
+        unreal = sorted((EXEMPT | OPT_IN_ONLY) - declared_targets())
         self.assertEqual(unreal, [], "exempted names are not declared targets")
+
+    def test_every_test_source_belongs_to_a_target(self):
+        # The other half of the failure this gate was written for. A target
+        # missing from the list rots unlinkable; a SOURCE missing from every
+        # target never compiles at all, and no target-level check can see it -
+        # the file simply is not mentioned anywhere. That is how
+        # test_ndms_native_import_wal_store.cpp went dark: it built into one
+        # target and no other, so when that target stopped building, so did it.
+        present = compiled_sources()
+        orphans = sorted(
+            path.name
+            for path in (REPO_ROOT / "tests").glob("test_*.cpp")
+            if path.name not in present and path.name not in UNCOMPILED_SOURCES
+        )
+        self.assertEqual(
+            orphans,
+            [],
+            "test sources in tests/ that no target compiles: {}. Add them to "
+            "a target's source list, or record them in UNCOMPILED_SOURCES "
+            "with a reason.".format(orphans),
+        )
 
 
 if __name__ == "__main__":
