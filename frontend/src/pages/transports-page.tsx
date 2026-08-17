@@ -80,6 +80,7 @@ import {
   formatTransportPath,
 } from "@/components/transports/transport-path"
 import { SingBoxProcessModeDialog } from "@/components/transports/sing-box-process-mode-dialog"
+import { SingBoxInstallCard } from "@/components/transports/sing-box-install-card"
 import { SubscriptionImportDialog } from "@/components/transports/subscription-import-dialog"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { DependencyList } from "@/components/shared/dependency-list"
@@ -1659,6 +1660,11 @@ export function TransportsPage({
         onCreate={createRouteFromOffer}
         onDismiss={dismissRouteOffer}
       />
+
+      {/* On this page rather than in settings: sing-box is the program every
+          transport here runs on, and the install is the thing an operator
+          reaches for when a transport will not start because it is missing. */}
+      <SingBoxInstallCard />
 
       {transportTabs.length > 1 ? (
         <SectionTabs

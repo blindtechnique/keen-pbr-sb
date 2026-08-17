@@ -17,6 +17,7 @@ import { createStatusQueryResilience } from "@/api/status-event-resilience"
 import { applyDnsProbeStatusEvent } from "@/api/dns-probe-events"
 import { applyComponentTransactionStatusEvent } from "@/api/component-transaction-events"
 import { applyListRefreshStatusEvent } from "@/api/list-refresh-events"
+import { applySingBoxInstallStatusEvent } from "@/api/sing-box-install-events"
 
 const HIDDEN_DISCONNECT_DELAY_MS = 60_000
 const STATUS_EVENT_NAMES = [
@@ -29,6 +30,7 @@ const STATUS_EVENT_NAMES = [
   "dns_probe",
   "list_refresh",
   "component_transaction",
+  "sing_box_install",
 ] as const
 
 export function StatusEventBridge() {
@@ -82,6 +84,8 @@ export function StatusEventBridge() {
             applyListRefreshStatusEvent(data)
           } else if (eventName === "component_transaction") {
             applyComponentTransactionStatusEvent(data)
+          } else if (eventName === "sing_box_install") {
+            applySingBoxInstallStatusEvent(data)
           } else {
             applyStatusEvent(queryClient, data)
           }

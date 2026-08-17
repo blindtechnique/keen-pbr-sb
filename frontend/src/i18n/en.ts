@@ -993,6 +993,76 @@ export const enTranslation = {
       },
     },
     setupWizard: "Setup wizard",
+    singBoxInstall: {
+      title: "sing-box binary",
+      pinned: "This build installs and tests against {{version}}.",
+      installed: "Installed: {{version}}",
+      measuring: "Checking what this router can install…",
+      action: "Install sing-box",
+      running: "An install is already running",
+      runningPlain: "Installing…",
+      unavailable: "Not available on this router",
+      blockedTitle: "Why this router cannot install sing-box",
+      requestFailed: "The install did not start",
+      stagedVersion: "The archive contained {{version}}.",
+      phaseReadingRelease: "Reading the release…",
+      phaseDownloadingArchive: "Downloading the archive…",
+      phaseDownloadingChecksums: "Downloading the checksums…",
+      phaseVerifyingArchive: "Verifying the archive against its checksum…",
+      phaseUnpacking: "Unpacking…",
+      phaseCheckingStagedVersion: "Asking the unpacked binary its version…",
+      phaseInstalling: "Putting the binary in place…",
+      phaseRecordingMarker: "Recording the binary as ours…",
+      promiseChecksum:
+        "The archive checksum is not verified by this build.",
+      promiseSignature:
+        "The release is not signed, so nothing but the checksum vouches for it.",
+      promiseRollback:
+        "The previous binary is not kept, so a failure cannot be undone byte-exactly.",
+      operation: {
+        install: "sing-box is not installed yet.",
+        replace: "This would replace the installed binary.",
+        reinstall_same_version:
+          "The pinned version is already installed; this would reinstall it.",
+        blocked: "Installing is not possible right now.",
+      },
+      blocker: {
+        architecture_unsupported:
+          "This build has no sing-box asset for this router's architecture.",
+        entware_absent: "Entware was not found, so opkg could not be asked.",
+        target_not_writable:
+          "The directory the binary lives in cannot be written to.",
+        foreign_binary_present:
+          "A sing-box that this daemon did not install is already there. Replacing it is your decision, not ours.",
+        transports_running:
+          "Stop the running sing-box transports first: the install replaces the binary they are using.",
+        transport_state_unknown:
+          "The transport manager did not answer, so it is not known whether anything is running.",
+      },
+      outcome: {
+        installed: "sing-box installed.",
+        release_refused: "The release was refused.",
+        download_failed: "A download failed.",
+        checksum_mismatch: "The archive did not match its published checksum.",
+        archive_unusable: "The archive contained no usable binary.",
+        staged_version_mismatch:
+          "The archive is not the pinned release, so nothing was replaced.",
+        install_failed: "The binary could not be put in place.",
+        marker_not_written:
+          "sing-box was installed, but the record that it belongs to keen-pbr was not written. Until it is, this page will treat the binary as yours and refuse to touch it.",
+      },
+      verdict: {
+        ready: "The release is usable.",
+        release_unreadable: "The release could not be read.",
+        archive_missing:
+          "The release has no archive for this router's architecture.",
+        checksums_missing:
+          "The release publishes no checksums file, so it was not installed unverified.",
+        checksum_unusable:
+          "The checksums file has no usable line for this archive.",
+        checksum_mismatch: "The published checksum did not match.",
+      },
+    },
     subscriptionImport: {
       open: "Import subscription",
       title: "Subscription import",

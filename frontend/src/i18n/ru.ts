@@ -998,6 +998,76 @@ export const ruTranslation = {
       },
     },
     setupWizard: "Мастер настройки",
+    singBoxInstall: {
+      title: "Бинарь sing-box",
+      pinned: "Эта сборка ставит и проверяет версию {{version}}.",
+      installed: "Установлено: {{version}}",
+      measuring: "Проверяем, что этот роутер может поставить…",
+      action: "Установить sing-box",
+      running: "Установка уже идёт",
+      runningPlain: "Устанавливаем…",
+      unavailable: "На этом роутере недоступно",
+      blockedTitle: "Почему установка недоступна",
+      requestFailed: "Установка не началась",
+      stagedVersion: "В архиве оказалась версия {{version}}.",
+      phaseReadingRelease: "Читаем описание релиза…",
+      phaseDownloadingArchive: "Скачиваем архив…",
+      phaseDownloadingChecksums: "Скачиваем контрольные суммы…",
+      phaseVerifyingArchive: "Сверяем архив с контрольной суммой…",
+      phaseUnpacking: "Распаковываем…",
+      phaseCheckingStagedVersion: "Спрашиваем у распакованного бинаря версию…",
+      phaseInstalling: "Ставим бинарь на место…",
+      phaseRecordingMarker: "Записываем, что бинарь наш…",
+      promiseChecksum:
+        "Эта сборка не проверяет контрольную сумму архива.",
+      promiseSignature:
+        "Релиз не подписан — за него ручается только контрольная сумма.",
+      promiseRollback:
+        "Предыдущий бинарь не сохраняется, поэтому точный откат невозможен.",
+      operation: {
+        install: "sing-box ещё не установлен.",
+        replace: "Установленный бинарь будет заменён.",
+        reinstall_same_version:
+          "Запиненная версия уже стоит; это переустановка той же версии.",
+        blocked: "Сейчас установка невозможна.",
+      },
+      blocker: {
+        architecture_unsupported:
+          "Для архитектуры этого роутера у сборки нет соответствующего файла sing-box.",
+        entware_absent: "Entware не найден, спросить opkg не у кого.",
+        target_not_writable: "В каталог, где живёт бинарь, нельзя писать.",
+        foreign_binary_present:
+          "Там уже лежит sing-box, который ставил не этот демон. Заменять его — ваше решение, не наше.",
+        transports_running:
+          "Сначала остановите работающие sing-box-транспорты: установка заменяет бинарь, которым они пользуются.",
+        transport_state_unknown:
+          "Менеджер транспортов не ответил, поэтому неизвестно, работает ли что-нибудь.",
+      },
+      outcome: {
+        installed: "sing-box установлен.",
+        release_refused: "Релиз отклонён.",
+        download_failed: "Загрузка не удалась.",
+        checksum_mismatch:
+          "Архив не совпал с опубликованной контрольной суммой.",
+        archive_unusable: "В архиве не нашлось пригодного бинаря.",
+        staged_version_mismatch:
+          "В архиве не запиненный релиз, поэтому ничего не заменено.",
+        install_failed: "Бинарь не удалось поставить на место.",
+        marker_not_written:
+          "sing-box установлен, но запись о том, что он принадлежит keen-pbr, не сделана. Пока её нет, эта страница считает бинарь вашим и трогать его откажется.",
+      },
+      verdict: {
+        ready: "Релиз пригоден.",
+        release_unreadable: "Описание релиза не удалось прочитать.",
+        archive_missing:
+          "В релизе нет архива для архитектуры этого роутера.",
+        checksums_missing:
+          "Релиз не публикует файл контрольных сумм, поэтому непроверенным он не ставится.",
+        checksum_unusable:
+          "В файле контрольных сумм нет пригодной строки для этого архива.",
+        checksum_mismatch: "Опубликованная контрольная сумма не совпала.",
+      },
+    },
     subscriptionImport: {
       open: "Импорт подписки",
       title: "Импорт подписки",

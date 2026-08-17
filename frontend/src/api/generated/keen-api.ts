@@ -54,6 +54,8 @@ import type {
   RuntimeInterfaceInventoryResponse,
   RuntimeInventoryResponse,
   RuntimeOutboundsResponse,
+  SingBoxInstallCapability,
+  SingBoxInstallResult,
   SubscriptionApplyRequest,
   SubscriptionApplyResponse,
   SubscriptionPreviewRequest,
@@ -2663,6 +2665,222 @@ export const usePostTransportAction = <TError = ErrorResponse,
         TContext
       > => {
       return useMutation(getPostTransportActionMutationOptions(options), queryClient);
+    }
+
+/**
+ * Reports whether the pinned sing-box release can be installed from the WebUI, and what this build can honestly promise about the result. Read-only: it measures the router and decides, and changes nothing. Every blocker is listed rather than the first one found, and anything that could not be measured blocks - a transport count nobody could take is not a count of zero.
+
+ * @summary What this daemon can do about installing sing-box
+ */
+export type getSingBoxInstallCapabilityResponse200 = {
+  data: SingBoxInstallCapability
+  status: 200
+}
+
+export type getSingBoxInstallCapabilityResponse503 = {
+  data: ErrorResponse
+  status: 503
+}
+
+export type getSingBoxInstallCapabilityResponseSuccess = (getSingBoxInstallCapabilityResponse200) & {
+  headers: Headers;
+};
+export type getSingBoxInstallCapabilityResponseError = (getSingBoxInstallCapabilityResponse503) & {
+  headers: Headers;
+};
+
+export type getSingBoxInstallCapabilityResponse = (getSingBoxInstallCapabilityResponseSuccess | getSingBoxInstallCapabilityResponseError)
+
+export const getGetSingBoxInstallCapabilityUrl = () => {
+
+
+
+
+  return `/api/transports/sing-box/capability`
+}
+
+export const getSingBoxInstallCapability = async ( options?: RequestInit): Promise<getSingBoxInstallCapabilityResponse> => {
+
+  return apiFetch<getSingBoxInstallCapabilityResponse>(getGetSingBoxInstallCapabilityUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetSingBoxInstallCapabilityQueryKey = () => {
+    return [
+    `/api/transports/sing-box/capability`
+    ] as const;
+    }
+
+
+export const getGetSingBoxInstallCapabilityQueryOptions = <TData = Awaited<ReturnType<typeof getSingBoxInstallCapability>>, TError = ErrorResponse>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSingBoxInstallCapability>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetSingBoxInstallCapabilityQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getSingBoxInstallCapability>>> = ({ signal }) => getSingBoxInstallCapability({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getSingBoxInstallCapability>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetSingBoxInstallCapabilityQueryResult = NonNullable<Awaited<ReturnType<typeof getSingBoxInstallCapability>>>
+export type GetSingBoxInstallCapabilityQueryError = ErrorResponse
+
+
+export function useGetSingBoxInstallCapability<TData = Awaited<ReturnType<typeof getSingBoxInstallCapability>>, TError = ErrorResponse>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSingBoxInstallCapability>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getSingBoxInstallCapability>>,
+          TError,
+          Awaited<ReturnType<typeof getSingBoxInstallCapability>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetSingBoxInstallCapability<TData = Awaited<ReturnType<typeof getSingBoxInstallCapability>>, TError = ErrorResponse>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSingBoxInstallCapability>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getSingBoxInstallCapability>>,
+          TError,
+          Awaited<ReturnType<typeof getSingBoxInstallCapability>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetSingBoxInstallCapability<TData = Awaited<ReturnType<typeof getSingBoxInstallCapability>>, TError = ErrorResponse>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSingBoxInstallCapability>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary What this daemon can do about installing sing-box
+ */
+
+export function useGetSingBoxInstallCapability<TData = Awaited<ReturnType<typeof getSingBoxInstallCapability>>, TError = ErrorResponse>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSingBoxInstallCapability>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetSingBoxInstallCapabilityQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * Installs the one release this build pins, and only when the capability endpoint says it may. The archive is verified against the digest the release publishes before anything is unpacked, and the unpacked binary must report the pinned version before it replaces the installed one - so a failure at any step leaves the router exactly as it was. A release that publishes no checksums file is refused rather than installed unverified, which is where this path is deliberately stricter than the shell installer. Takes no body: there is one release to install.
+
+ * @summary Install the pinned sing-box release
+ */
+export type postSingBoxInstallResponse200 = {
+  data: SingBoxInstallResult
+  status: 200
+}
+
+export type postSingBoxInstallResponse409 = {
+  data: ErrorResponse
+  status: 409
+}
+
+export type postSingBoxInstallResponse503 = {
+  data: ErrorResponse
+  status: 503
+}
+
+export type postSingBoxInstallResponseSuccess = (postSingBoxInstallResponse200) & {
+  headers: Headers;
+};
+export type postSingBoxInstallResponseError = (postSingBoxInstallResponse409 | postSingBoxInstallResponse503) & {
+  headers: Headers;
+};
+
+export type postSingBoxInstallResponse = (postSingBoxInstallResponseSuccess | postSingBoxInstallResponseError)
+
+export const getPostSingBoxInstallUrl = () => {
+
+
+
+
+  return `/api/transports/sing-box/install`
+}
+
+export const postSingBoxInstall = async ( options?: RequestInit): Promise<postSingBoxInstallResponse> => {
+
+  return apiFetch<postSingBoxInstallResponse>(getPostSingBoxInstallUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+export const getPostSingBoxInstallMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSingBoxInstall>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postSingBoxInstall>>, TError,void, TContext> => {
+
+const mutationKey = ['postSingBoxInstall'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postSingBoxInstall>>, void> = () => {
+
+
+          return  postSingBoxInstall(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostSingBoxInstallMutationResult = NonNullable<Awaited<ReturnType<typeof postSingBoxInstall>>>
+
+    export type PostSingBoxInstallMutationError = ErrorResponse
+
+    /**
+ * @summary Install the pinned sing-box release
+ */
+export const usePostSingBoxInstall = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSingBoxInstall>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postSingBoxInstall>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getPostSingBoxInstallMutationOptions(options), queryClient);
     }
 
 /**
