@@ -1,6 +1,7 @@
 #include "subscription_import_plan.hpp"
 
 #include "../crypto/sha256.hpp"
+#include "../util/display_name.hpp"
 
 #include <algorithm>
 #include <array>
@@ -142,41 +143,85 @@ std::string percent_decoded(const std::string& value) {
     return decoded;
 }
 
-// Drops characters that let a label lie about itself. A bidirectional override
-// inside a remark can make a preview render an endpoint the import will not
-// use, which is the one thing a preview must not do; C0/C1 controls corrupt
-// the surrounding UI instead.
-std::string without_deceptive_controls(const std::string& value) {
+// Rebuilds a value out of the code points that are safe to display, and keeps
+// nothing it could not decode.
+//
+// This was a reject-list - drop C0/C1, drop the bidi sequences I could name,
+// pass every other byte through - and it was wrong twice over. It missed
+// U+061C, which the repository's own authoritative predicate
+// (display_name::is_c1_or_bidirectional_control) has always listed; and it let
+// arbitrary bytes reach the API response, where nlohmann's strict dump throws
+// on the first invalid UTF-8 sequence and answers 500 for the whole document.
+// A provider serving one percent-encoded CP1251 label - ordinary mojibake, not
+// an attack - could make an entire subscription unimportable, with no
+// indication which line was at fault.
+//
+// So it accepts instead: decode a code point, keep it only if it decodes and
+// is not a control or bidi character, and drop what does not. What comes out
+// is valid UTF-8 by construction, which is the property the caller needs and
+// the property a reject-list can never promise.
+std::string displayable_label(const std::string& value) {
     std::string clean;
     clean.reserve(value.size());
-    for (std::size_t i = 0U; i < value.size(); ++i) {
-        const auto byte = static_cast<unsigned char>(value[i]);
-        if (byte < 0x20U || byte == 0x7FU) continue;
-        // U+0080..U+009F
-        if (byte == 0xC2U && i + 1U < value.size()) {
-            const auto next = static_cast<unsigned char>(value[i + 1U]);
-            if (next >= 0x80U && next <= 0x9FU) {
-                ++i;
-                continue;
-            }
+    for (std::size_t offset = 0U; offset < value.size();) {
+        const auto first = static_cast<unsigned char>(value[offset]);
+        std::size_t length = 0U;
+        std::uint32_t code_point = 0U;
+        if (first <= 0x7FU) {
+            length = 1U;
+            code_point = first;
+        } else if (first >= 0xC2U && first <= 0xDFU) {
+            length = 2U;
+            code_point = first & 0x1FU;
+        } else if (first >= 0xE0U && first <= 0xEFU) {
+            length = 3U;
+            code_point = first & 0x0FU;
+        } else if (first >= 0xF0U && first <= 0xF4U) {
+            length = 4U;
+            code_point = first & 0x07U;
+        } else {
+            // A continuation byte or an invalid lead: not the start of
+            // anything. Skip exactly one byte so a corrupt run cannot
+            // resynchronise into a different character than the provider sent.
+            ++offset;
+            continue;
         }
-        if (byte == 0xE2U && i + 2U < value.size()) {
-            const auto second = static_cast<unsigned char>(value[i + 1U]);
-            const auto third = static_cast<unsigned char>(value[i + 2U]);
-            // U+200E, U+200F and U+202A..U+202E
-            const bool marks_or_embedding =
-                second == 0x80U &&
-                (third == 0x8EU || third == 0x8FU ||
-                 (third >= 0xAAU && third <= 0xAEU));
-            // U+2066..U+2069
-            const bool isolates =
-                second == 0x81U && third >= 0xA6U && third <= 0xA9U;
-            if (marks_or_embedding || isolates) {
-                i += 2U;
-                continue;
+
+        if (offset + length > value.size()) break;
+        bool decoded = true;
+        for (std::size_t index = 1U; index < length; ++index) {
+            const auto continuation =
+                static_cast<unsigned char>(value[offset + index]);
+            if ((continuation & 0xC0U) != 0x80U) {
+                decoded = false;
+                break;
             }
+            code_point = (code_point << 6U) | (continuation & 0x3FU);
         }
-        clean.push_back(value[i]);
+        if (decoded && length == 3U) {
+            const auto second =
+                static_cast<unsigned char>(value[offset + 1U]);
+            // Overlong encodings and the surrogate range.
+            decoded = !((first == 0xE0U && second < 0xA0U) ||
+                        (first == 0xEDU && second > 0x9FU));
+        } else if (decoded && length == 4U) {
+            const auto second =
+                static_cast<unsigned char>(value[offset + 1U]);
+            decoded = !((first == 0xF0U && second < 0x90U) ||
+                        (first == 0xF4U && second > 0x8FU));
+        }
+        if (!decoded) {
+            ++offset;
+            continue;
+        }
+
+        const bool displayable =
+            code_point >= 0x20U && code_point != 0x7FU &&
+            !display_name::is_c1_or_bidirectional_control(code_point);
+        if (displayable) {
+            clean.append(value, offset, length);
+        }
+        offset += length;
     }
     return clean;
 }
@@ -199,7 +244,7 @@ LinkParts split_link(const std::string& link) {
     parts.identity =
         hash == std::string::npos ? link : link.substr(0U, hash);
     if (hash != std::string::npos) {
-        parts.remark = without_deceptive_controls(
+        parts.remark = displayable_label(
             percent_decoded(link.substr(hash + 1U)));
     }
 
@@ -234,8 +279,12 @@ LinkParts split_link(const std::string& link) {
         return parts;
     }
 
-    parts.endpoint =
-        at == std::string::npos ? authority : authority.substr(at + 1U);
+    // Filtered like the remark, and for the same reason: an override in the
+    // authority makes the preview render an endpoint the import will not use,
+    // which is precisely what the remark filter exists to prevent. Guarding
+    // only the label left the field the label is meant to corroborate open.
+    parts.endpoint = displayable_label(
+        at == std::string::npos ? authority : authority.substr(at + 1U));
     return parts;
 }
 

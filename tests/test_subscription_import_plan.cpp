@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include "../src/config/subscription_import_plan.hpp"
+#include "../src/util/display_name.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -40,7 +41,11 @@ SharedFingerprintVector load_shared_fingerprint_vector() {
     std::string version;
     std::string line;
     while (std::getline(input, line)) {
-        const auto separator = line.find('=');
+        // Windows checkouts carry CRLF; getline strips only the LF. A trailing
+        // CR inside an input would silently change the bytes this vector
+        // exists to pin.
+        if (!line.empty() && line.back() == 0x0D) line.pop_back();
+        const auto separator = line.find(0x3D);
         if (separator == std::string::npos) {
             throw std::runtime_error(
                 "invalid shared subscription fingerprint vector line");
@@ -518,6 +523,72 @@ TEST_CASE("every kind and disposition has a name") {
         CHECK(std::string(
                   subscription_candidate_disposition_name(disposition))
                   .size() > 0U);
+    }
+}
+
+TEST_CASE("a label survives only as valid UTF-8") {
+    // The reject-list this replaced passed every byte it had not enumerated,
+    // so a percent-encoded CP1251 remark - ordinary mojibake from a provider,
+    // not an attack - reached the API response and made nlohmann's strict
+    // dump throw, answering 500 for the WHOLE document. Not one entry of that
+    // subscription could be imported, and nothing said which line was at fault.
+    const std::string body =
+        "vless://u@a.example:443#%D0%9D%D0%B8%E4\n"
+        "vless://u@b.example:443#%FF%FE\n"
+        "vless://u@c.example:443#ok\n"
+        // The endpoint travels the same path and is not percent-decoded, so
+        // its invalid bytes arrive raw from the document.
+        "https://proxy\xE4.example:8443\n";
+    const auto plan = plan_subscription_import(body, kNoTags, kNoFingerprints);
+
+    REQUIRE(plan.candidates.size() == 4U);
+    for (const auto& candidate : plan.candidates) {
+        // Valid UTF-8 by construction: every retained byte came out of a
+        // sequence this code decoded.
+        CHECK(display_name::summarize_utf8(candidate.remark).has_value());
+        CHECK(display_name::summarize_utf8(candidate.endpoint).has_value());
+    }
+    // The undecodable bytes are gone, the decodable ones stayed.
+    CHECK(plan.candidates[0].remark == "Ни");
+    CHECK(plan.candidates[1].remark.empty());
+    CHECK(plan.candidates[2].remark == "ok");
+    CHECK(plan.candidates[3].endpoint == "proxy.example:8443");
+}
+
+TEST_CASE("every bidi control the repository names is dropped, in both fields") {
+    // The hand-copied list missed U+061C, which
+    // display_name::is_c1_or_bidirectional_control has always carried. Using
+    // that predicate instead of a second list is the point.
+    const std::string body =
+        "vless://u@a.example:443#a%D8%9Cb%E2%80%AEc%E2%81%A6d\n"
+        "https://proxy\xE2\x80\xAE.example:8443\n";
+    const auto plan = plan_subscription_import(body, kNoTags, kNoFingerprints);
+
+    REQUIRE(plan.candidates.size() == 2U);
+    CHECK(plan.candidates[0].remark == "abcd");
+    // The endpoint is filtered too: an override there makes the preview render
+    // a destination the import will not use, which is what the label filter
+    // exists to prevent - guarding only the label left the corroborating field
+    // wide open.
+    CHECK(plan.candidates[1].endpoint.find("‮") ==
+          std::string::npos);
+    CHECK(plan.candidates[1].endpoint == "proxy.example:8443");
+}
+
+TEST_CASE("the fingerprint trims only the set both languages name") {
+    // transport-manager pins the same assertion in link_fingerprint_test.go.
+    // Each language's default idea of "space" differs, and delegating to it
+    // made the halves diverge silently: a fingerprint that fails to match just
+    // reports "not configured yet" and offers a duplicate import.
+    const std::string clean = "vless://u@a.example:443?security=tls";
+    for (const char* ascii : {" ", "\t", "\r", "\n", "\f", "\v"}) {
+        CHECK(subscription_link_fingerprint(ascii + clean + ascii) ==
+              subscription_link_fingerprint(clean));
+    }
+    for (const char* unicode_space :
+         {" ", " ", "　"}) {
+        CHECK(subscription_link_fingerprint(unicode_space + clean) !=
+              subscription_link_fingerprint(clean));
     }
 }
 

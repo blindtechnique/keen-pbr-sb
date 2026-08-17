@@ -77,8 +77,17 @@ type TransportSpec struct {
 // two names is one connection. The subscription importer on the C++ side
 // derives its own identity by the same rule, so a change to either half breaks
 // the comparison silently - both sides pin it in tests.
+// The trimmed set is written out rather than delegated to strings.TrimSpace.
+// TrimSpace removes Unicode whitespace (U+00A0, U+2028, the U+2000 block and
+// more); the C++ half trims " \t\r\n\f\v". Delegating to each language's idea
+// of "space" made the two halves disagree on any link that ends in one of
+// those characters and carries no fragment - and the disagreement is silent,
+// because a fingerprint that does not match simply reports "not configured
+// yet" and offers a duplicate import. Both sides now name the same six bytes.
+const linkFingerprintTrimCutset = " \t\r\n\f\v"
+
 func LinkFingerprint(link string) string {
-	trimmed := strings.TrimSpace(link)
+	trimmed := strings.Trim(link, linkFingerprintTrimCutset)
 	if trimmed == "" {
 		return ""
 	}

@@ -22,7 +22,11 @@ func loadSharedLinkFingerprintVector(t *testing.T) (string, []string) {
 	var inputs []string
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
-		key, value, ok := strings.Cut(scanner.Text(), "=")
+		// The vector is read on Windows checkouts too, where the file carries
+		// CRLF. Scanner strips only the LF, and a trailing CR would land inside
+		// an input - silently changing the very bytes this vector exists to fix.
+		key, value, ok := strings.Cut(
+			strings.TrimSuffix(scanner.Text(), ""), "=")
 		if !ok {
 			t.Fatalf("invalid shared fingerprint vector line %q", scanner.Text())
 		}
@@ -118,5 +122,30 @@ func TestValidateTransportSpecRefusesASuppliedFingerprint(t *testing.T) {
 	spec.LinkFingerprint = ""
 	if err := ValidateTransportSpec(spec); err != nil {
 		t.Fatalf("an ordinary spec must still validate: %v", err)
+	}
+}
+
+// The trimmed set is a cross-language contract, and the two languages disagree
+// about what "space" means: strings.TrimSpace removes U+00A0 and the U+2000
+// block, the C++ half trims " \t\r\n\f\v". Delegating to either default made
+// the halves diverge on links ending in Unicode whitespace with no fragment -
+// silently, because a fingerprint that fails to match just reports "not
+// configured yet" and offers a duplicate import.
+//
+// The C++ side pins the same assertion in
+// tests/test_subscription_import_plan.cpp.
+func TestLinkFingerprintTrimsOnlyTheSharedAsciiSet(t *testing.T) {
+	const clean = "vless://u@a.example:443?security=tls"
+
+	for _, ascii := range []string{" ", "\t", "\r", "\n", "\f", "\v"} {
+		if LinkFingerprint(ascii+clean+ascii) != LinkFingerprint(clean) {
+			t.Fatalf("ASCII whitespace %q must be trimmed", ascii)
+		}
+	}
+	// Unicode whitespace is part of the link, on both sides or neither.
+	for _, unicodeSpace := range []string{" ", " ", "　"} {
+		if LinkFingerprint(unicodeSpace+clean) == LinkFingerprint(clean) {
+			t.Fatalf("Unicode whitespace %q must not be trimmed", unicodeSpace)
+		}
 	}
 }
