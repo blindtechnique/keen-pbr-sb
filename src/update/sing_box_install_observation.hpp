@@ -3,6 +3,7 @@
 #include "sing_box_install_policy.hpp"
 
 #include <functional>
+#include <optional>
 #include <string>
 
 namespace keen_pbr3 {
@@ -27,8 +28,16 @@ struct SingBoxInstallProbes {
     std::function<std::string(const std::string& binary)> read_binary_version;
     std::function<bool(const std::string& path)> path_exists;
     std::function<bool(const std::string& directory)> directory_writable;
-    // Managed sing-box transports currently running.
-    std::function<std::size_t()> count_running_transports;
+    // Managed sing-box transports currently running, or nullopt when the
+    // manager could not be asked.
+    //
+    // Optional rather than throwing, because "nobody could ask" is a state the
+    // policy already knows how to describe (transport_state_unknown) and an
+    // exception is not: an exception leaves the handler entirely, so the
+    // capability read fails with no detail and the blocker it should have
+    // produced can never occur. A probe that cannot report its own failure
+    // makes the decision it feeds unreachable.
+    std::function<std::optional<std::size_t>()> count_running_transports;
 };
 
 // The Entware architecture opkg would install for, chosen the way install.sh

@@ -763,8 +763,19 @@ static void register_transports_handler_impl(
             const auto binary = configured_sing_box_binary(ctx.config_path);
             const auto endpoint = load_endpoint(ctx.config_path);
             auto probes = production_sing_box_install_probes();
-            probes.count_running_transports = [&endpoint]() -> std::size_t {
-                return count_running_sing_box_transports(endpoint);
+            probes.count_running_transports =
+                [&endpoint]() -> std::optional<std::size_t> {
+                // A manager that cannot answer is reported as unknown, not as
+                // an error out of the handler. Letting it escape would fail
+                // the whole read with no detail and make the blocker it should
+                // have produced unreachable - and this route exists to say
+                // what this router can do, of which "the manager is down" is
+                // an answer rather than a failure to answer.
+                try {
+                    return count_running_sing_box_transports(endpoint);
+                } catch (const ApiError&) {
+                    return std::nullopt;
+                }
             };
 
             SingBoxInstallPaths paths;
@@ -871,8 +882,17 @@ static void register_transports_handler_impl(
             auto probes = production_sing_box_install_probes();
             const auto endpoint = load_endpoint(ctx.config_path);
             probes.count_running_transports =
-                [&endpoint]() -> std::size_t {
-                return count_running_sing_box_transports(endpoint);
+                [&endpoint]() -> std::optional<std::size_t> {
+                // Reported as unknown rather than thrown out of the handler.
+                // This route exists to say what this router can do, and "the
+                // transport manager is down" is one of the things it can say;
+                // letting the exception escape failed the whole read with no
+                // detail and made transport_state_unknown unreachable.
+                try {
+                    return count_running_sing_box_transports(endpoint);
+                } catch (const ApiError&) {
+                    return std::nullopt;
+                }
             };
 
             const auto observation = observe_sing_box_install(

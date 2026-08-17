@@ -1588,9 +1588,25 @@ TEST_CASE("the sing-box install capability blocks when the manager is silent") {
     server.stop();
 
     REQUIRE(response != nullptr);
-    // The probe throws ApiError(503) and the route wrapper answers with it:
-    // an unanswerable question is reported, never guessed at.
-    CHECK(response->status == 503);
+    // Answered, not failed. This route's job is to say what this router can
+    // do, and "the transport manager is down" is one of the things it can say.
+    //
+    // It used to assert 503 here, which is what the code did - the probe threw
+    // out of the handler - while the comment above claimed the policy saw
+    // "nobody could ask". It never did: the exception left before the policy
+    // ran, so transport_state_unknown could not occur through this route at
+    // all, despite having a name, a test at the policy level, and text in two
+    // locales.
+    REQUIRE(response->status == 200);
+    const auto body = nlohmann::json::parse(response->body);
+    CHECK(body.at("available") == false);
+    const auto blockers = body.at("blockers").get<std::vector<std::string>>();
+    CHECK(std::find(blockers.begin(), blockers.end(),
+                    "transport_state_unknown") != blockers.end());
+    // Not counted as zero, which is the answer that would authorise swapping
+    // the binary under a live tunnel.
+    CHECK(std::find(blockers.begin(), blockers.end(),
+                    "transports_running") == blockers.end());
 }
 
 TEST_CASE("the sing-box install capability reports every blocker it found") {
