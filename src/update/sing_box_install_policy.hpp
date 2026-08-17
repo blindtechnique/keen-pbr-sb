@@ -95,12 +95,12 @@ struct SingBoxInstallPolicy {
     // than prose so a client cannot render a capability it does not have, and
     // so that turning one true is a visible change.
     //
-    // The release archive is fetched over TLS from GitHub and its checksum is
-    // published beside it - but a checksums file that is merely absent must
-    // not silently downgrade to an unverified install, which is what the shell
-    // installer does today. Until the fetch path here refuses that, this stays
-    // false.
-    bool verified_archive_checksum{false};
+    // True since the installer refuses a release that publishes no checksums
+    // file, rather than downgrading to an unverified install the way the shell
+    // installer does. The archive is verified against the published digest
+    // before anything is unpacked, and the unpacked binary must report the
+    // pinned version before it replaces anything.
+    bool verified_archive_checksum{true};
     // Nothing signs these archives. GitHub release assets carry no signature
     // this daemon can check, so "pinned+signed" is currently pinned-only.
     bool signed_release{false};

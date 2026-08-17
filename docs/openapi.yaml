@@ -1775,9 +1775,10 @@ components:
         verified_archive_checksum:
           type: boolean
           description: >
-            Whether the fetched archive's checksum is verified unconditionally.
-            Currently false: the shell installer verifies only when the release
-            publishes a checksums file, and this path will not inherit that.
+            Whether the fetched archive's checksum is verified
+            unconditionally. True: a release that publishes no checksums file
+            is refused rather than installed unverified, which is where this
+            path is deliberately stricter than the shell installer.
         signed_release:
           type: boolean
           description: >

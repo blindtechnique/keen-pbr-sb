@@ -1672,8 +1672,8 @@ TEST_CASE("the sing-box install capability reports every blocker it found") {
     CHECK(std::find(blockers.begin(), blockers.end(),
                     "transport_state_unknown") == blockers.end());
 
-    // The promises this build does not keep are reported as not kept.
-    CHECK_FALSE(body.at("verified_archive_checksum").get<bool>());
+    // What this build does keep, and what it does not, reported apart.
+    CHECK(body.at("verified_archive_checksum").get<bool>());
     CHECK_FALSE(body.at("signed_release").get<bool>());
     CHECK_FALSE(body.at("exact_rollback").get<bool>());
 }

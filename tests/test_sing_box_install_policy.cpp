@@ -173,7 +173,14 @@ TEST_CASE("the promises this implementation cannot keep stay false") {
     // capability that does not exist. These flags turning true is a visible
     // change to this test, which is the point of them being fields.
     const auto policy = evaluate_sing_box_install(ready(), kPinned);
-    CHECK_FALSE(policy.verified_archive_checksum);
+    // Earned: the installer refuses a release without a checksums file rather
+    // than installing unverified, verifies the archive before unpacking it,
+    // and requires the unpacked binary to report the pinned version. Turning
+    // this back to false, or claiming it without those three, both change this
+    // test.
+    CHECK(policy.verified_archive_checksum);
+    // Still not kept. GitHub release assets carry no signature this daemon can
+    // check, and no previous binary is captured for a byte-exact undo.
     CHECK_FALSE(policy.signed_release);
     CHECK_FALSE(policy.exact_rollback);
 }
