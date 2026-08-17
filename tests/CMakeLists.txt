@@ -91,6 +91,7 @@ add_executable(keen-pbr-tests
   test_subscription_transport_naming.cpp
   test_sing_box_install_policy.cpp
   test_sing_box_install_observation.cpp
+  test_sing_box_release_plan.cpp
   test_dependency_analysis.cpp
   test_list_delete_planner.cpp
   test_routing_state.cpp
@@ -180,6 +181,7 @@ add_executable(keen-pbr-tests
   ../src/update/rollback_availability.cpp
   ../src/update/sing_box_install_policy.cpp
   ../src/update/sing_box_install_observation.cpp
+  ../src/update/sing_box_release_plan.cpp
   ../src/update/package_footprint.cpp
   ../src/config/dependency_analysis.cpp
   ../src/config/list_delete_planner.cpp
