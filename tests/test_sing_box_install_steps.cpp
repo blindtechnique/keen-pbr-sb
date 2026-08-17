@@ -183,4 +183,52 @@ TEST_CASE("a real archive yields an executable staged binary") {
     discard_sing_box_staging(paths);
 }
 
+TEST_CASE("the staged binary is asked its version under a byte bound") {
+    // This reads a program that arrived over the internet. It matched the
+    // digest the release publishes, which is why it got this far - but the
+    // staged-version check exists precisely because a verified archive can
+    // still hold the wrong build, so "verified" cannot mean "safe to read
+    // without a limit".
+    //
+    // Falsifiable on purpose: the version line is valid, so the only thing
+    // that can reject this output is the bound. Dropping it - which is what
+    // passing max_bytes into the wrong parameter did - makes this return
+    // 1.13.14 after reading every byte the program cared to write.
+    StepsTempDir directory;
+    const auto paths = paths_in(directory);
+    const auto steps = production_sing_box_install_steps(paths);
+
+    const auto flooding = directory.path / "flooding-sing-box";
+    {
+        std::ofstream script(flooding);
+        script << "#!/bin/sh\n"
+               << "echo 'sing-box version 1.13.14'\n"
+               << "i=0\n"
+               << "while [ $i -lt 4096 ]; do\n"
+               << "  echo 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\n"
+               << "  i=$((i+1))\n"
+               << "done\n";
+    }
+    REQUIRE(::chmod(flooding.c_str(), 0755) == 0);
+
+    CHECK(steps.read_staged_version(flooding.string()).empty());
+}
+
+TEST_CASE("a staged binary that answers briefly is read") {
+    // The other side of the bound: it must not be so tight that the real
+    // answer cannot fit through it.
+    StepsTempDir directory;
+    const auto paths = paths_in(directory);
+    const auto steps = production_sing_box_install_steps(paths);
+
+    const auto brief = directory.path / "brief-sing-box";
+    {
+        std::ofstream script(brief);
+        script << "#!/bin/sh\necho 'sing-box version 1.13.14'\n";
+    }
+    REQUIRE(::chmod(brief.c_str(), 0755) == 0);
+
+    CHECK(steps.read_staged_version(brief.string()) == "1.13.14");
+}
+
 } // namespace keen_pbr3

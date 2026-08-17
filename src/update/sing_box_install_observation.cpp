@@ -143,16 +143,18 @@ SingBoxInstallProbes production_sing_box_install_probes() {
     probes.read_opkg_architectures = []() -> std::string {
         const auto result = safe_exec_capture(
             {"/opt/bin/opkg", "print-architecture"},
-            true,
-            false,
-            64U * 1024U);
+            /*suppress_stderr=*/true,
+            /*max_bytes=*/64U * 1024U,
+            /*capture_stderr=*/false);
         if (result.exit_code != 0 || result.truncated) return {};
         return result.stdout_output;
     };
     probes.read_binary_version =
         [](const std::string& binary) -> std::string {
-        const auto result =
-            safe_exec_capture({binary, "version"}, true, false, 8U * 1024U);
+        const auto result = safe_exec_capture({binary, "version"},
+                                              /*suppress_stderr=*/true,
+                                              /*max_bytes=*/8U * 1024U,
+                                              /*capture_stderr=*/false);
         if (result.exit_code != 0 || result.truncated) return {};
         return result.stdout_output;
     };

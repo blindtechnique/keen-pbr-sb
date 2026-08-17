@@ -134,7 +134,9 @@ SingBoxInstallSteps production_sing_box_install_steps(
             exit_code = safe_exec_capture(
                               {tar, "-xzf", archive.string(), "-C",
                                staging.string()},
-                              true, true, 64U * 1024U)
+                              /*suppress_stderr=*/true,
+                              /*max_bytes=*/64U * 1024U,
+                              /*capture_stderr=*/false)
                             .exit_code;
             break;
         }
@@ -160,8 +162,15 @@ SingBoxInstallSteps production_sing_box_install_steps(
 
     steps.read_staged_version =
         [](const std::string& staged_binary) -> std::string {
-        const auto result = safe_exec_capture(
-            {staged_binary, "version"}, true, false, 8U * 1024U);
+        // Bounded because this runs a binary that came off the internet. It
+        // matched the digest the release publishes, which is why it got this
+        // far, but "verified" and "trustworthy to read without a limit" are
+        // different claims - the staged-version check exists precisely because
+        // a verified archive can still hold the wrong build.
+        const auto result = safe_exec_capture({staged_binary, "version"},
+                                              /*suppress_stderr=*/true,
+                                              /*max_bytes=*/8U * 1024U,
+                                              /*capture_stderr=*/false);
         if (result.exit_code != 0 || result.truncated) return {};
         return parse_sing_box_version(result.stdout_output);
     };
