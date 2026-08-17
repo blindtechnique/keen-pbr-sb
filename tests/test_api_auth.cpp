@@ -2530,6 +2530,56 @@ TEST_CASE("the local provider is not watched over RCI") {
     server.stop();
 }
 
+TEST_CASE("concurrent local logins cannot multiply the key-stretch cost") {
+    // The key stretch costs 475 ms of CPU by design. The login limiter that
+    // was supposed to bound it is keyed per source, so 256 tracked sources
+    // times three attempts is over three core-seconds per second on a
+    // three-core router - a load generator, not a rate limit. Derivations are
+    // serialised router-wide; a caller that arrives while one is running is
+    // refused rather than queued, because queueing IS the exhaustion.
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    write_text(
+        auth_path,
+        std::string(R"({"enabled":true,"provider":"local",)") +
+            R"("username":"admin","password":")" +
+            encode_local_password_hash(
+                "hunter2", std::string(32U, 0x61),
+                kLocalPasswordHashIterations) +
+            R"(","password_format":")" + kLocalPasswordHashFormat +
+            R"("})");
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+
+    std::atomic<int> accepted{0};
+    std::atomic<int> busy{0};
+    std::vector<std::thread> callers;
+    for (int index = 0; index < 6; ++index) {
+        callers.emplace_back([&config, &accepted, &busy]() {
+            httplib::Client client("127.0.0.1", configured_port(config));
+            client.set_read_timeout(10, 0);
+            const auto login = client.Post(
+                "/api/auth/login",
+                R"({"username":"admin","password":"hunter2"})",
+                "application/json");
+            if (login == nullptr) return;
+            if (login->status == 200) accepted.fetch_add(1);
+            if (login->status == 503) busy.fetch_add(1);
+        });
+    }
+    for (auto& caller : callers) caller.join();
+    server.stop();
+
+    // Whatever the interleaving, no caller may have waited behind another
+    // derivation: every request either did the work or was told to retry.
+    CHECK(accepted.load() >= 1);
+    CHECK(accepted.load() + busy.load() == 6);
+}
+
 } // namespace keen_pbr3
 
 #endif

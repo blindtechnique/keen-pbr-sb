@@ -941,6 +941,9 @@ struct ApiServer::Impl {
     // dropped where it was parsed.
     std::mutex credential_generation_mutex;
     NdmsCredentialGeneration credential_generation;
+    // Bounds the router-wide cost of the local key stretch. See the try_lock
+    // in verify_credentials: the login limiter is per source, this is not.
+    std::mutex local_password_derivation_mutex;
     std::mutex credential_generation_worker_mutex;
     std::condition_variable credential_generation_worker_cv;
     std::thread credential_generation_worker;
@@ -1365,6 +1368,24 @@ struct ApiServer::Impl {
                 return outcome;
             }
         } else {
+            // One derivation at a time, router-wide. The key stretch costs
+            // 475 ms of CPU by design, and the login limiter that was supposed
+            // to bound it is keyed PER SOURCE: 256 tracked sources times three
+            // attempts is over three core-seconds per second on a router with
+            // three cores, which is not a rate limit, it is a load generator.
+            // Serializing bounds this path to one core no matter how many
+            // sources ask, and a refusal here costs an operator a retry while
+            // an exhausted CPU costs them their routing.
+            std::unique_lock<std::mutex> derivation(
+                local_password_derivation_mutex, std::try_to_lock);
+            if (!derivation.owns_lock()) {
+                login_attempt.release();
+                outcome.status = 503;
+                outcome.retry_after_seconds = 2;
+                outcome.body =
+                    R"({"error":"authentication is busy"})";
+                return outcome;
+            }
             // auth.json, not the password bytes, selects the representation.
             // A legacy plaintext value may legitimately begin with the hash
             // marker; treating that marker as a discriminator would lock its
