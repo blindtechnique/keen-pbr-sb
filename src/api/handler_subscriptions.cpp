@@ -244,32 +244,62 @@ void register_subscriptions_handler_impl(
                               .get<api::SubscriptionPreviewRequest>();
             } catch (const std::exception&) {
                 throw ApiError(
-                    "subscription preview requires a JSON body with a url",
+                    "subscription preview requires a JSON body with a url or "
+                    "a document",
                     400);
             }
 
-            const auto verdict = classify_subscription_url(request.url);
-            if (verdict != SubscriptionUrlVerdict::allowed) {
+            const bool has_url =
+                request.url.has_value() && !request.url->empty();
+            const bool has_document =
+                request.document.has_value() && !request.document->empty();
+            // Exactly one, and said so rather than picking a winner: a request
+            // carrying both is a caller that does not know which source it
+            // meant, and guessing for them would import from a source they did
+            // not choose.
+            if (has_url == has_document) {
                 throw ApiError(
-                    std::string("subscription URL refused: ") +
-                        subscription_url_verdict_name(verdict),
-                    400,
-                    nlohmann::json{
-                        {"error", "subscription URL refused"},
-                        {"reason", subscription_url_verdict_name(verdict)},
-                    }
-                        .dump());
+                    "subscription preview takes exactly one of url or "
+                    "document",
+                    400);
+            }
+
+            if (has_url) {
+                const auto verdict = classify_subscription_url(*request.url);
+                if (verdict != SubscriptionUrlVerdict::allowed) {
+                    throw ApiError(
+                        std::string("subscription URL refused: ") +
+                            subscription_url_verdict_name(verdict),
+                        400,
+                        nlohmann::json{
+                            {"error", "subscription URL refused"},
+                            {"reason", subscription_url_verdict_name(verdict)},
+                        }
+                            .dump());
+                }
             }
 
             // The manager is consulted before the fetch: without its tags and
             // fingerprints the plan cannot judge conflicts, and a preview
             // that silently skipped that judgement would read as "no
             // conflicts" - the false-green shape this API must not have.
+            //
+            // Consulted for a document too. The document is not fetched, but
+            // the conflicts it can create are the same ones, and a file import
+            // that skipped the judgement would be exactly the false green a
+            // URL import is not allowed to be.
             const auto endpoint =
                 load_transport_manager_endpoint(ctx.config_path);
             const auto existing = read_existing_transports(endpoint);
 
-            const std::string body = fetcher(request.url);
+            // No size check here on purpose. plan_subscription_import already
+            // refuses a body over kSubscriptionMaximumBytes and says so as
+            // document_kind `too_large`, which is a better answer than a bare
+            // 400 - the operator learns what was wrong with their file. A
+            // second bound here would be the same contract written twice, and
+            // the copy that drifts is always the one nobody is looking at.
+            const std::string body =
+                has_url ? fetcher(*request.url) : *request.document;
             auto plan = plan_subscription_import(
                 body, existing.tags, existing.link_fingerprints);
 

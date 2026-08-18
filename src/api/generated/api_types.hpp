@@ -1126,7 +1126,8 @@ namespace api {
     };
 
     struct SubscriptionPreviewRequest {
-        std::string url;
+        std::optional<std::string> document;
+        std::optional<std::string> url;
     };
 
     enum class DocumentKind : int { BASE64_LINK_LIST, EMPTY, JSON_DOCUMENT, LINK_LIST, TOO_LARGE, UNRECOGNIZED };
@@ -3972,11 +3973,13 @@ namespace api {
     }
 
     inline void from_json(const json & j, SubscriptionPreviewRequest& x) {
-        x.url = j.at("url").get<std::string>();
+        x.document = get_stack_optional<std::string>(j, "document");
+        x.url = get_stack_optional<std::string>(j, "url");
     }
 
     inline void to_json(json & j, const SubscriptionPreviewRequest & x) {
         j = json::object();
+        j["document"] = x.document;
         j["url"] = x.url;
     }
 

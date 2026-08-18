@@ -812,9 +812,13 @@ paths:
 
   /api/subscriptions/preview:
     post:
-      summary: Fetch a sing-box subscription and plan its import
+      summary: Plan the import of a sing-box subscription
       description: >
-        Validates the URL, fetches the body with the subscription destination
+        Takes the subscription either as a URL to fetch or as the document
+        itself, and returns an import plan.
+
+        For a URL: validates it, fetches the body with the subscription
+        destination
         policy applied to every address actually connected to (redirects
         included), decodes it, and returns an import plan: deduplicated
         candidates with derived tags and named conflicts against the
@@ -1586,7 +1590,10 @@ components:
 
     SubscriptionPreviewRequest:
       type: object
-      required: [url]
+      description: >
+        Exactly one of `url` or `document`. A subscription an operator pastes
+        as a link is fetched by the daemon; one they hand over as a file is
+        already in front of them, so it is planned as given and never fetched.
       properties:
         url:
           type: string
@@ -1595,6 +1602,14 @@ components:
             refused before the host is even parsed, because a URL reaches the
             log, the API and frontend storage.
           example: "https://provider.example/subscription"
+        document:
+          type: string
+          description: >
+            The subscription document itself, as the operator's file contained
+            it. No fetch happens, so no destination policy applies - there is
+            no destination. The same size bound as a fetched body still holds:
+            an oversized document is refused whole rather than truncated,
+            because a silently shortened import is worse than a refused one.
 
     SubscriptionPreviewCandidate:
       type: object

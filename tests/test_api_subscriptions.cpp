@@ -293,6 +293,84 @@ TEST_CASE("preview plans against the manager's redacted state") {
     CHECK(response->body.find("secret") == std::string::npos);
 }
 
+TEST_CASE("a subscription handed over as a file is planned without fetching") {
+    // An operator importing a file already has the document in front of them.
+    // Fetching anything at that point would be reaching for a destination
+    // nobody named.
+    constexpr int api_port = 18287;
+    SubscriptionsHarness harness(api_port);
+    harness.fetch_body = "this fetcher must not run";
+    httplib::Client client("127.0.0.1", api_port);
+
+    const std::string document =
+        kConfiguredLink + "\n" +
+        "vless://22222222-2222-2222-2222-222222222222@b.example:443#Fresh\n";
+    const auto response = client.Post(
+        "/api/subscriptions/preview",
+        nlohmann::json{{"document", document}}.dump(),
+        "application/json");
+    REQUIRE(response != nullptr);
+    REQUIRE(response->status == 200);
+    CHECK(harness.fetch_calls == 0U);
+
+    const auto body = nlohmann::json::parse(response->body);
+    CHECK(body.at("document_kind") == "link_list");
+    const auto& candidates = body.at("candidates");
+    REQUIRE(candidates.size() == 2U);
+    // The manager was still consulted: the first line is a transport it
+    // already has, and a file import that skipped that judgement would be the
+    // same false green a URL import is not allowed to be.
+    CHECK(candidates[0].at("disposition") == "already_configured");
+    CHECK(candidates[1].at("disposition") == "importable");
+
+    // Same redaction as the fetched path: the document held credentials and
+    // the response holds none of them.
+    CHECK(response->body.find("22222222-2222") == std::string::npos);
+    CHECK(response->body.find("vless://") == std::string::npos);
+}
+
+TEST_CASE("preview takes exactly one source and says which") {
+    // A request carrying both is a caller that does not know which it meant.
+    // Picking one for them imports from a source they did not choose.
+    constexpr int api_port = 18288;
+    SubscriptionsHarness harness(api_port);
+    httplib::Client client("127.0.0.1", api_port);
+
+    const nlohmann::json bodies[] = {
+        nlohmann::json{{"url", "https://provider.example/sub"},
+                       {"document", "vless://x@a.example:443#One"}},
+        nlohmann::json::object(),
+        nlohmann::json{{"url", ""}, {"document", ""}},
+    };
+    for (const auto& request : bodies) {
+        const auto response = client.Post("/api/subscriptions/preview",
+                                          request.dump(),
+                                          "application/json");
+        REQUIRE(response != nullptr);
+        CHECK(response->status == 400);
+    }
+    CHECK(harness.fetch_calls == 0U);
+}
+
+TEST_CASE("an oversized document is named rather than merely refused") {
+    // The planner already bounds the body and reports `too_large`, which tells
+    // the operator what was wrong with their file. A second bound in the
+    // handler would answer 400 with nothing they could act on.
+    constexpr int api_port = 18289;
+    SubscriptionsHarness harness(api_port);
+    httplib::Client client("127.0.0.1", api_port);
+
+    const auto response = client.Post(
+        "/api/subscriptions/preview",
+        nlohmann::json{{"document", std::string(1024U * 1024U + 1U, 'a')}}
+            .dump(),
+        "application/json");
+    REQUIRE(response != nullptr);
+    REQUIRE(response->status == 200);
+    CHECK(nlohmann::json::parse(response->body).at("document_kind") ==
+          "too_large");
+}
+
 TEST_CASE("preview refuses to plan without the manager") {
     // Without tags and fingerprints the plan cannot judge conflicts, and a
     // preview that silently skipped that judgement would read as "no
