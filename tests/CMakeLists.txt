@@ -122,6 +122,7 @@ add_executable(keen-pbr-tests
   test_api_remote_access.cpp
   test_api_transports.cpp
   test_api_subscriptions.cpp
+  test_api_transport_exit_check.cpp
   test_update_version.cpp
   test_api_test_routing.cpp
   test_api_auth.cpp
@@ -294,6 +295,7 @@ add_executable(keen-pbr-tests
   ../src/health/circuit_breaker.cpp
   ../src/health/interface_probe.cpp
   ../src/health/exit_address_check.cpp
+  ../src/api/handler_transport_exit_check.cpp
   ../src/health/routing_health_checker.cpp
   ../src/routing/firewall_state.cpp
   ../src/routing/urltest_manager.cpp
