@@ -1485,7 +1485,7 @@ export function TransportsPage({
             It reads Install, Update, or nothing-to-do, and says which in its
             tooltip - there is no card and no menu entry, because sing-box is
             a dependency rather than a thing an operator manages. */}
-        <SingBoxInstallButton variant="outline" />
+        <SingBoxInstallButton className="w-full sm:w-auto" variant="outline" />
         <Button
           disabled={
             transferMutation.isPending ||

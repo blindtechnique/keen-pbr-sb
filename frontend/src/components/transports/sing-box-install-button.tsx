@@ -65,9 +65,16 @@ function useSingBoxInstallState() {
 export function SingBoxInstallButton({
   size,
   variant,
+  className,
 }: {
   size?: "sm" | "default"
   variant?: "default" | "outline" | "secondary"
+  // Layout belongs to the row this button is dropped into, not to the button.
+  // The transports action bar hands widths to its direct children, which is
+  // the tooltip wrapper rather than the button, so the caller passes the width
+  // down explicitly - and the setup wizard, whose row hands out nothing, is
+  // left exactly as it was.
+  className?: string
 }) {
   const { t } = useTranslation()
   const capabilityQuery = useGetSingBoxInstallCapability()
@@ -209,11 +216,12 @@ export function SingBoxInstallButton({
       <Tooltip>
         <TooltipTrigger
           render={
-            <span className="inline-flex">
+            <span className="flex sm:inline-flex">
               {/* Wrapped, because a disabled button fires no pointer events -
                   and the tooltip on a disabled control is the one an operator
                   needs most: it says why they cannot press it. */}
               <Button
+                className={className}
                 disabled={!state.enabled}
                 onClick={start}
                 size={size}
@@ -237,8 +245,9 @@ export function SingBoxInstallButton({
         <Tooltip>
           <TooltipTrigger
             render={
-              <span className="inline-flex">
+              <span className="flex sm:inline-flex">
                 <Button
+                  className={className}
                   disabled={cancel.isPending}
                   onClick={() => cancel.mutate()}
                   size={size}
