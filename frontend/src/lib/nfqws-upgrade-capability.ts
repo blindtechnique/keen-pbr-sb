@@ -1,3 +1,5 @@
+import { classifyNfqwsUpdateNotice, type NfqwsUpdateStatus } from "@/api/nfqws"
+
 export type NfqwsUpgradeCapability = {
   available: boolean
   mode: string
@@ -27,4 +29,58 @@ export function nfqwsUpgradeAllowed(
   capability: NfqwsUpgradeCapability | undefined
 ): boolean {
   return capability?.available === true && capability.mode === "guarded_opkg"
+}
+
+// Everything the upgrade control decides, as one pure function.
+//
+// It lives beside the capability predicates because "may this be pressed" and
+// "why not" are the same question asked twice, and answering them in two
+// places is how the two answers drift apart. The shape deliberately mirrors
+// singBoxInstallButton: two update controls that disagreed about what
+// "nothing to do" looks like would teach an operator that the difference
+// means something.
+export type NfqwsUpgradeButtonState = {
+  enabled: boolean
+  tooltipKey: string
+}
+
+function blockedTooltipKey(
+  capability: NfqwsUpgradeCapability | undefined
+): string {
+  return nfqwsUpgradeBlockKind(capability) === "metadata_unverified"
+    ? "nfqws.upgradeTip.metadataUnverified"
+    : "nfqws.upgradeTip.blocked"
+}
+
+export function nfqwsUpgradeButton(
+  update: NfqwsUpdateStatus | undefined,
+  capability: NfqwsUpgradeCapability | undefined,
+  busy: boolean,
+  checking: boolean
+): NfqwsUpgradeButtonState {
+  if (busy) {
+    return { enabled: false, tooltipKey: "nfqws.upgradeTip.busy" }
+  }
+  // No answer yet is not the same as "nothing to do". Saying "you are up to
+  // date" before the check returns would be a claim this build has not earned.
+  if (checking || !update) {
+    return { enabled: false, tooltipKey: "nfqws.upgradeTip.checking" }
+  }
+
+  // classifyNfqwsUpdateNotice, not `update.available`, on purpose: after a
+  // captured file restore the backend withholds current/latest, and reading
+  // that absence as "up to date" would offer reassurance where the panel
+  // does not actually know which binary is installed.
+  const notice = classifyNfqwsUpdateNotice(update)
+  if (notice === "degraded") {
+    return { enabled: false, tooltipKey: blockedTooltipKey(capability) }
+  }
+  if (notice === "up_to_date") {
+    return { enabled: false, tooltipKey: "nfqws.upgradeTip.upToDate" }
+  }
+  if (!nfqwsUpgradeAllowed(capability)) {
+    return { enabled: false, tooltipKey: blockedTooltipKey(capability) }
+  }
+
+  return { enabled: true, tooltipKey: "nfqws.upgradeTip.available" }
 }

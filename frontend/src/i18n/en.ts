@@ -18,9 +18,9 @@ export const enTranslation = {
     upgrade: "Upgrade package",
     upgradeUnavailableTitle: "In-panel upgrade is temporarily unavailable",
     upgradeUnavailableDescription:
-      "The backend did not authorize this package upgrade. Refresh the page; if the block remains, inspect the package transaction state before retrying.",
+      "The router will not update nfqws2 safely right now. Refresh the page; if the button stays dark, an unfinished package operation is waiting to be sorted out.",
     upgradeMetadataUnverifiedDescription:
-      "A retained nfqws2 transaction means the restored files and opkg metadata may describe different versions. Update checks and upgrades in this panel remain blocked until you repair the package manually with opkg over SSH.",
+      "The panel does not know which nfqws2 version is really installed: the files were put back from a restore point while the package itself stayed as it was. Updates stay unavailable until the package is restored by hand with opkg over SSH.",
     upgradeGuardedTitle: "Recovery limitation",
     upgradeGuardedDescription:
       "The upgrade runs the regular opkg path under the shared lock and saves the current nfqws2 files first. This is not an exact package rollback: the previous IPK and opkg state are not preserved, the target IPK is not pinned, and an operation interrupted by reboot is not recovered automatically.",
@@ -39,25 +39,35 @@ export const enTranslation = {
     restoreComponentLimitDescription:
       "Files the newer package added are left in place. This returns nfqws2 to the saved files, not the router to its exact earlier state. The retained degraded state blocks future update checks and upgrades in this panel until manual opkg repair over SSH.",
     maintenance: "Maintenance",
-    maintenanceHint: "Rare actions: package, restore points, backups",
+    maintenanceHint: "Rare actions: restore points and backups",
+    upgradeTip: {
+      available:
+        "Downloads and installs the newer nfqws2. Censorship circumvention pauses while it installs.",
+      upToDate: "The newest version is already installed — nothing to update.",
+      checking: "Checking whether a newer version exists.",
+      busy: "Another nfqws2 operation is running — wait for it to finish.",
+      blocked: "Cannot update right now: the router will not do it safely.",
+      metadataUnverified:
+        "The panel does not know which version is really installed — that happens after files are put back from a restore point. Restoring the package by hand with opkg over SSH fixes it.",
+    },
     serviceHelp: {
       label: "What the service buttons do",
       toggle:
         "The service switch. While nfqws2 is stopped, censorship circumvention does not run at all — the settings are kept.",
       maintenance:
-        "Rare actions behind one button: package upgrade, restore points around it, backups, and reloading the configuration without a stop. Each one is explained in the menu itself.",
+        "Rare actions behind one button: restore points, backups, and re-reading the settings without stopping the service. What each one does is written in the menu itself.",
       restart:
-        "Stops nfqws and starts it again with the current configuration. Connections drop for a second, but everything you changed takes effect.",
+        "Stops nfqws and starts it again with the current settings. Connections drop for a second, but everything you changed takes effect.",
       reload:
-        "The service re-reads its configuration files without stopping, so connections survive. Enough when only lists and parameters changed.",
+        "The service re-reads its settings on the fly, so connections survive. Enough when only lists and parameters changed.",
       upgrade:
-        "Asks the currently configured Entware opkg sources to select and install nfqws2-keenetic under the shared lock. The panel neither pins nor independently cryptographically verifies the target package or source. It saves the current files first, but cannot provide exact package rollback or recovery after a power loss.",
+        "Downloads and installs the newer nfqws2. It saves the current files first, so there is somewhere to go back to. Censorship circumvention pauses while it installs.",
       captureRestorePoint:
-        "Saves the current nfqws2 files — the binary, the configuration and the lists — so you can return to them later. An upgrade does this by itself; use this to take one before changing anything else.",
+        "Remembers nfqws2 as it is right now: the program, the settings and the lists. An upgrade does this by itself — use it when you are about to change something else.",
       restoreComponent:
-        "Puts back the saved nfqws2 files and verifies the original service state, process image and NFQUEUE. This is not an exact opkg package rollback.",
+        "Puts nfqws2 back to the remembered state and checks that it runs again. The files come back but the package does not: updating nfqws2 from the panel stays unavailable until the package is restored by hand.",
       backup:
-        "Save settings, lists, Lua scripts and strategies to a file on this computer — or restore them from such a file.",
+        "Saves settings, lists, Lua scripts and strategies to a file on your computer — or puts them back from such a file.",
       refresh:
         "Re-reads the service state from the router and shows it here. Does not touch the service itself.",
     },

@@ -61,6 +61,11 @@ import {
 const MODE_OPTIONS = ["MODE_AUTO", "MODE_LIST", "MODE_ALL"] as const
 
 import { Switch } from "@/components/ui/switch"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -111,6 +116,7 @@ import { cn } from "@/lib/utils"
 import {
   nfqwsUpgradeBlockKind,
   nfqwsUpgradeAllowed,
+  nfqwsUpgradeButton,
   type NfqwsUpgradeCapability,
 } from "@/lib/nfqws-upgrade-capability"
 import {
@@ -248,6 +254,14 @@ export function NfqwsPage() {
     ...nfqwsUpdateQueryOptions(),
     enabled: status?.installed === true,
   })
+  // Одно решение на кнопку, посчитанное там же, где живут остальные правила
+  // обновления. Страница только рисует то, что ей сказали.
+  const upgradeButton = nfqwsUpgradeButton(
+    updateQuery.data,
+    status?.upgrade_capability,
+    operation.pending,
+    updateQuery.isFetching
+  )
 
   const runOperation: RunOperation = async (title, execute, successMessage) => {
     setOperation({
@@ -689,6 +703,33 @@ export function NfqwsPage() {
                   />
                   {t("nfqws.refresh")}
                 </Button>
+                {/* Обновление уехало из «Обслуживания» на видное место: это не
+                    редкое действие, а то, ради чего страницу и открывают,
+                    когда вышла новая версия. Логика — та же, что у кнопки
+                    sing-box: кнопка не исчезает, когда обновлять нечего, а
+                    гаснет и подсказкой говорит, почему. */}
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <span className="inline-flex">
+                        {/* Обёртка нужна: выключенная кнопка не шлёт события
+                            мыши, а подсказка на выключенной кнопке — ровно
+                            та, которая оператору нужнее всего. */}
+                        <Button
+                          disabled={!upgradeButton.enabled}
+                          onClick={() => setUpgradeOpen(true)}
+                          variant="outline"
+                        >
+                          <DownloadIcon />
+                          {t("nfqws.upgrade")}
+                        </Button>
+                      </span>
+                    }
+                  />
+                  <TooltipContent>
+                    {t(upgradeButton.tooltipKey)}
+                  </TooltipContent>
+                </Tooltip>
                 <NfqwsMaintenanceMenu
                   items={[
                     {
@@ -707,23 +748,6 @@ export function NfqwsPage() {
                             }),
                           t("nfqws.operationCompleted")
                         ),
-                    },
-                    {
-                      key: "upgrade",
-                      icon: DownloadIcon,
-                      label: t("nfqws.upgrade"),
-                      hint: t("nfqws.serviceHelp.upgrade"),
-                      disabled:
-                        operation.pending ||
-                        updateQuery.isFetching ||
-                        !nfqwsUpgradeAllowed(status.upgrade_capability),
-                      // Честная причина вместо объяснения, зачем кнопка,
-                      // когда нажать её всё равно нельзя.
-                      disabledReason:
-                        status.upgrade_capability?.available === false
-                          ? upgradeBlockedDescription
-                          : undefined,
-                      onSelect: () => setUpgradeOpen(true),
                     },
                     {
                       key: "captureRestorePoint",
@@ -2686,6 +2710,12 @@ function ServiceActionsHelp() {
         <dt className="font-medium">{t("nfqws.refresh")}</dt>
         <dd className="text-muted-foreground">
           {t("nfqws.serviceHelp.refresh")}
+        </dd>
+      </div>
+      <div>
+        <dt className="font-medium">{t("nfqws.upgrade")}</dt>
+        <dd className="text-muted-foreground">
+          {t("nfqws.serviceHelp.upgrade")}
         </dd>
       </div>
       <div>

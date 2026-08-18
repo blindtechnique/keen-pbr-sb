@@ -444,6 +444,13 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
       "singBoxInstallButton returns one of the tip* family for every state, including the disabled ones - a disabled control without a reason reads as broken.",
   },
   {
+    file: "src/pages/nfqws-page.tsx",
+    argument: "upgradeButton.tooltipKey",
+    keys: ["nfqws.upgradeTip.*"],
+    reason:
+      "nfqwsUpgradeButton returns one of the upgradeTip family for every state, including the disabled ones - the same rule the sing-box control follows, because two update buttons that explain themselves differently teach an operator a difference that is not there.",
+  },
+  {
     file: "src/components/transports/sing-box-install-button.tsx",
     argument: "singBoxInstallBlockerKey(*)",
     keys: ["transports.singBoxInstall.blocker.*"],
