@@ -121,4 +121,18 @@ SingBoxInstallPolicy evaluate_sing_box_install(
     const SingBoxInstallObservation& observation,
     const std::string& pinned_version);
 
+// Whether an operator's consent can unblock this install.
+//
+// Running transports are the only blocker consent can answer, and the reason
+// is that they are the only one that is about the operator's choice rather
+// than about the router. Somebody can agree to their tunnels stopping for a
+// minute; nobody can agree Entware into existence, or agree a directory into
+// being writable, or agree away a binary that belongs to them.
+//
+// Available already means nothing is blocking, so it is not a case for consent
+// either - and answering true there would let a caller "consent" to stopping
+// transports that are not running.
+bool sing_box_install_awaits_transport_consent(
+    const SingBoxInstallPolicy& policy) noexcept;
+
 } // namespace keen_pbr3

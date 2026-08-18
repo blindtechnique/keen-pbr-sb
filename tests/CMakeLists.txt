@@ -93,6 +93,7 @@ add_executable(keen-pbr-tests
   test_sing_box_install_observation.cpp
   test_sing_box_release_plan.cpp
   test_sing_box_installer.cpp
+  test_sing_box_transport_pause.cpp
   test_sing_box_install_steps.cpp
   test_dependency_analysis.cpp
   test_list_delete_planner.cpp
@@ -185,6 +186,7 @@ add_executable(keen-pbr-tests
   ../src/update/sing_box_install_observation.cpp
   ../src/update/sing_box_release_plan.cpp
   ../src/update/sing_box_installer.cpp
+  ../src/update/sing_box_transport_pause.cpp
   ../src/update/sing_box_install_steps.cpp
   ../src/update/package_footprint.cpp
   ../src/config/dependency_analysis.cpp

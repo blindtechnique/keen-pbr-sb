@@ -656,8 +656,22 @@ paths:
         so a failure at any step leaves the router exactly as it was. A release
         that publishes no checksums file is refused rather than installed
         unverified, which is where this path is deliberately stricter than the
-        shell installer. Takes no body: there is one release to install.
+        shell installer.
+
+
+        Running sing-box transports normally refuse the install, because the
+        binary they are using would be swapped underneath them. An operator who
+        has been told what will happen can consent to it with
+        `stop_running_transports`, and then the daemon stops exactly those
+        transports, installs, and starts exactly those again - including when
+        the install fails.
       operationId: postSingBoxInstall
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SingBoxInstallRequest"
       responses:
         "200":
           description: The install ran; the outcome says what happened
@@ -1822,6 +1836,15 @@ components:
               - foreign_binary_present
               - transports_running
               - transport_state_unknown
+        running_transports:
+          type: integer
+          description: >
+            How many managed sing-box transports are running. Present so a
+            client can tell the operator what consenting to
+            `stop_running_transports` would actually interrupt - "two tunnels"
+            is a decision they can make, "some transports" is not. Absent when
+            the transport manager could not be asked, which is the
+            `transport_state_unknown` blocker.
         verified_archive_checksum:
           type: boolean
           description: >
@@ -1841,10 +1864,40 @@ components:
             Whether the previous binary is captured so a failure can be undone
             byte-exactly. Currently false.
 
+    SingBoxInstallRequest:
+      type: object
+      description: >
+        Optional. Without it the install refuses while transports are running,
+        which is the default and the safe one.
+      properties:
+        stop_running_transports:
+          type: boolean
+          description: >
+            The operator has been told their VPN and proxy transports will stop
+            for the duration of the install and start again afterwards, and has
+            agreed. Only then does the daemon stop anything: nothing here ever
+            interrupts a tunnel that the operator was not asked about.
+
     SingBoxInstallResult:
       type: object
       required: [install_outcome, pinned_version]
       properties:
+        stopped_transports:
+          type: array
+          items:
+            type: string
+          description: >
+            The transports this install stopped and started again. Present only
+            when the operator consented to it. A transport that was already
+            down is not here - it was not stopped, and it was not started.
+        transports_left_down:
+          type: array
+          items:
+            type: string
+          description: >
+            Transports that were stopped for the install and did not start
+            again. Reported because silence here would read as "everything is
+            fine" while the operator's traffic has nowhere to go.
         install_outcome:
           type: string
           enum:

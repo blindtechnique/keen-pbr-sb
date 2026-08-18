@@ -130,4 +130,16 @@ SingBoxInstallPolicy evaluate_sing_box_install(
     return policy;
 }
 
+bool sing_box_install_awaits_transport_consent(
+    const SingBoxInstallPolicy& policy) noexcept {
+    if (policy.available) return false;
+    if (policy.blockers.empty()) return false;
+    for (const auto blocker : policy.blockers) {
+        if (blocker != SingBoxInstallBlocker::transports_running) {
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace keen_pbr3

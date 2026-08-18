@@ -1032,8 +1032,13 @@ namespace api {
         std::optional<std::string> installed_version;
         SingBoxInstallCapabilityOperation operation;
         std::string pinned_version;
+        std::optional<int64_t> running_transports;
         bool signed_release = false;
         bool verified_archive_checksum = false;
+    };
+
+    struct SingBoxInstallRequest {
+        std::optional<bool> stop_running_transports;
     };
 
     enum class InstallOutcome : int { ARCHIVE_UNUSABLE, CHECKSUM_MISMATCH, DOWNLOAD_FAILED, INSTALLED, INSTALL_FAILED, MARKER_NOT_WRITTEN, RELEASE_REFUSED, STAGED_VERSION_MISMATCH };
@@ -1045,6 +1050,8 @@ namespace api {
         std::string pinned_version;
         std::optional<ReleaseVerdict> release_verdict;
         std::optional<std::string> staged_version;
+        std::optional<std::vector<std::string>> stopped_transports;
+        std::optional<std::vector<std::string>> transports_left_down;
     };
 
     enum class StatusEventConnectionsType : int { CONNECTIONS };
@@ -1395,6 +1402,7 @@ namespace api {
         std::optional<RuntimeOutboundStateElement> runtime_outbound_state;
         std::optional<ResolverLiveStatus> runtime_outbound_status;
         std::optional<SingBoxInstallCapability> sing_box_install_capability;
+        std::optional<SingBoxInstallRequest> sing_box_install_request;
         std::optional<SingBoxInstallResult> sing_box_install_result;
         std::optional<SortOrder> sort_order;
         std::optional<StatusEventConnections> status_event_connections;
@@ -1728,6 +1736,9 @@ namespace api {
 
     void from_json(const json & j, SingBoxInstallCapability & x);
     void to_json(json & j, const SingBoxInstallCapability & x);
+
+    void from_json(const json & j, SingBoxInstallRequest & x);
+    void to_json(json & j, const SingBoxInstallRequest & x);
 
     void from_json(const json & j, SingBoxInstallResult & x);
     void to_json(json & j, const SingBoxInstallResult & x);
@@ -3805,6 +3816,7 @@ namespace api {
         x.installed_version = get_stack_optional<std::string>(j, "installed_version");
         x.operation = j.at("operation").get<SingBoxInstallCapabilityOperation>();
         x.pinned_version = j.at("pinned_version").get<std::string>();
+        x.running_transports = get_stack_optional<int64_t>(j, "running_transports");
         x.signed_release = j.at("signed_release").get<bool>();
         x.verified_archive_checksum = j.at("verified_archive_checksum").get<bool>();
     }
@@ -3818,8 +3830,18 @@ namespace api {
         j["installed_version"] = x.installed_version;
         j["operation"] = x.operation;
         j["pinned_version"] = x.pinned_version;
+        j["running_transports"] = x.running_transports;
         j["signed_release"] = x.signed_release;
         j["verified_archive_checksum"] = x.verified_archive_checksum;
+    }
+
+    inline void from_json(const json & j, SingBoxInstallRequest& x) {
+        x.stop_running_transports = get_stack_optional<bool>(j, "stop_running_transports");
+    }
+
+    inline void to_json(json & j, const SingBoxInstallRequest & x) {
+        j = json::object();
+        j["stop_running_transports"] = x.stop_running_transports;
     }
 
     inline void from_json(const json & j, SingBoxInstallResult& x) {
@@ -3827,6 +3849,8 @@ namespace api {
         x.pinned_version = j.at("pinned_version").get<std::string>();
         x.release_verdict = get_stack_optional<ReleaseVerdict>(j, "release_verdict");
         x.staged_version = get_stack_optional<std::string>(j, "staged_version");
+        x.stopped_transports = get_stack_optional<std::vector<std::string>>(j, "stopped_transports");
+        x.transports_left_down = get_stack_optional<std::vector<std::string>>(j, "transports_left_down");
     }
 
     inline void to_json(json & j, const SingBoxInstallResult & x) {
@@ -3835,6 +3859,8 @@ namespace api {
         j["pinned_version"] = x.pinned_version;
         j["release_verdict"] = x.release_verdict;
         j["staged_version"] = x.staged_version;
+        j["stopped_transports"] = x.stopped_transports;
+        j["transports_left_down"] = x.transports_left_down;
     }
 
     inline void from_json(const json & j, StatusEventConnections& x) {
@@ -4336,6 +4362,7 @@ namespace api {
         x.runtime_outbound_state = get_stack_optional<RuntimeOutboundStateElement>(j, "RuntimeOutboundState");
         x.runtime_outbound_status = get_stack_optional<ResolverLiveStatus>(j, "RuntimeOutboundStatus");
         x.sing_box_install_capability = get_stack_optional<SingBoxInstallCapability>(j, "SingBoxInstallCapability");
+        x.sing_box_install_request = get_stack_optional<SingBoxInstallRequest>(j, "SingBoxInstallRequest");
         x.sing_box_install_result = get_stack_optional<SingBoxInstallResult>(j, "SingBoxInstallResult");
         x.sort_order = get_stack_optional<SortOrder>(j, "SortOrder");
         x.status_event_connections = get_stack_optional<StatusEventConnections>(j, "StatusEventConnections");
@@ -4492,6 +4519,7 @@ namespace api {
         j["RuntimeOutboundState"] = x.runtime_outbound_state;
         j["RuntimeOutboundStatus"] = x.runtime_outbound_status;
         j["SingBoxInstallCapability"] = x.sing_box_install_capability;
+        j["SingBoxInstallRequest"] = x.sing_box_install_request;
         j["SingBoxInstallResult"] = x.sing_box_install_result;
         j["SortOrder"] = x.sort_order;
         j["StatusEventConnections"] = x.status_event_connections;

@@ -185,6 +185,38 @@ TEST_CASE("the promises this implementation cannot keep stay false") {
     CHECK_FALSE(policy.exact_rollback);
 }
 
+TEST_CASE("only running transports can be consented away") {
+    // Consent answers the one blocker that is about the operator's choice.
+    // Nobody can agree Entware into existence, agree a directory into being
+    // writable, or agree away a binary that belongs to them - and a build that
+    // let them would stop somebody's tunnels for an install that then refused
+    // anyway.
+    auto observation = ready();
+    observation.running_transports = 2U;
+    const auto running = evaluate_sing_box_install(observation, kPinned);
+    REQUIRE_FALSE(running.available);
+    CHECK(sing_box_install_awaits_transport_consent(running));
+
+    // A second blocker alongside it is not consentable.
+    auto also_unwritable = observation;
+    also_unwritable.target_directory_writable = false;
+    CHECK_FALSE(sing_box_install_awaits_transport_consent(
+        evaluate_sing_box_install(also_unwritable, kPinned)));
+
+    // Nothing blocking is not a case for consent either: answering true here
+    // would let a caller consent to stopping transports that are not running.
+    const auto available = evaluate_sing_box_install(ready(), kPinned);
+    REQUIRE(available.available);
+    CHECK_FALSE(sing_box_install_awaits_transport_consent(available));
+
+    // An unknown count blocks and is NOT consentable - nobody knows what would
+    // be stopped, so nobody can have agreed to it.
+    auto unknown = ready();
+    unknown.running_transports.reset();
+    CHECK_FALSE(sing_box_install_awaits_transport_consent(
+        evaluate_sing_box_install(unknown, kPinned)));
+}
+
 TEST_CASE("every blocker and operation has a name") {
     for (const auto blocker :
          {Blocker::architecture_unsupported, Blocker::entware_absent,

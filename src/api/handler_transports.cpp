@@ -13,6 +13,7 @@
 #include "../update/sing_box_install_observation.hpp"
 #include "../update/sing_box_install_policy.hpp"
 #include "../update/sing_box_install_steps.hpp"
+#include "../update/sing_box_transport_pause.hpp"
 #include "../update/sing_box_installer.hpp"
 
 #include <keen-pbr/version.hpp>
@@ -66,10 +67,17 @@ std::string configured_sing_box_binary(const std::string& config_path) {
     return config.value("sing_box_binary", std::string("/opt/bin/sing-box"));
 }
 
-// Managed sing-box transports currently running. Throws rather than returning
-// a count when the manager cannot answer, so an unreachable manager reaches
-// the policy as "nobody could ask" instead of as a count of zero.
-std::size_t count_running_sing_box_transports(
+// The managed sing-box transports currently running, by tag. Throws rather
+// than returning an empty list when the manager cannot answer, so an
+// unreachable manager reaches the policy as "nobody could ask" instead of as
+// "nothing is running".
+//
+// Tags rather than a count, because the two callers need the same set for
+// different reasons - one asks how many would be disturbed, the other has to
+// stop exactly these and start exactly these again - and deriving both from
+// one read is what keeps them from disagreeing about which transports those
+// are.
+std::vector<std::string> running_sing_box_transport_tags(
     const TransportManagerEndpoint& endpoint) {
     httplib::Client client(endpoint.host, endpoint.port);
     client.set_connection_timeout(1, 0);
@@ -86,7 +94,7 @@ std::size_t count_running_sing_box_transports(
         throw ApiError(
             "transport manager returned an invalid runtime state", 502);
     }
-    std::size_t running = 0U;
+    std::vector<std::string> running;
     for (const auto& status : body) {
         if (!status.is_object()) continue;
         const auto type = status.value("type", std::string{});
@@ -94,9 +102,40 @@ std::size_t count_running_sing_box_transports(
         // Anything that is not `down` has a process attached to the binary
         // about to be replaced. `degraded` and `starting` count for exactly
         // that reason.
-        if (status.value("state", std::string{}) != "down") ++running;
+        if (status.value("state", std::string{}) == "down") continue;
+        const auto tag = status.value("tag", std::string{});
+        // A running transport whose tag the manager did not report cannot be
+        // stopped by name, so it must not be counted as one this daemon could
+        // put back. It still blocks - it is running on the binary.
+        running.push_back(tag);
     }
     return running;
+}
+
+std::size_t count_running_sing_box_transports(
+    const TransportManagerEndpoint& endpoint) {
+    return running_sing_box_transport_tags(endpoint).size();
+}
+
+// Never throws: this is used on the path that puts an operator's tunnels back,
+// and a throw there would abandon the remaining ones.
+bool transport_action(const TransportManagerEndpoint& endpoint,
+                      const std::string& tag,
+                      const char* action) noexcept {
+    try {
+        httplib::Client client(endpoint.host, endpoint.port);
+        client.set_connection_timeout(1, 0);
+        client.set_read_timeout(20, 0);
+        const httplib::Headers headers{
+            {"Authorization", "Bearer " + endpoint.api_key},
+        };
+        const auto response = client.Post(
+            "/v1/transports/" + tag + "/" + action, headers, "",
+            "application/json");
+        return response && response->status >= 200 && response->status < 300;
+    } catch (...) {
+        return false;
+    }
 }
 
 api::InstallOutcome api_install_outcome(
@@ -759,7 +798,22 @@ static void register_transports_handler_impl(
     // under one.
     server.post(
         "/api/transports/sing-box/install",
-        [&ctx]() -> std::string {
+        [&ctx](const std::string& request_body) -> std::string {
+            // Absent body means no consent, which is the safe reading: an
+            // install that stopped somebody's VPN because a field was missing
+            // would be the worst possible default.
+            bool stop_running = false;
+            if (!request_body.empty()) {
+                const auto parsed =
+                    nlohmann::json::parse(request_body, nullptr, false);
+                if (parsed.is_discarded() || !parsed.is_object()) {
+                    throw ApiError(
+                        "sing-box install body must be a JSON object", 400);
+                }
+                stop_running =
+                    parsed.value("stop_running_transports", false);
+            }
+
             const auto binary = configured_sing_box_binary(ctx.config_path);
             const auto endpoint = load_endpoint(ctx.config_path);
             auto probes = production_sing_box_install_probes();
@@ -782,11 +836,7 @@ static void register_transports_handler_impl(
             paths.binary_path = binary;
             paths.managed_marker_path = kSingBoxManagedMarkerPath;
 
-            const auto observation = observe_sing_box_install(
-                probes, paths.binary_path, paths.managed_marker_path);
-            const auto policy = evaluate_sing_box_install(
-                observation, KEEN_PBR3_SING_BOX_PINNED_VERSION);
-            if (!policy.available) {
+            const auto refuse = [](const SingBoxInstallPolicy& policy) {
                 nlohmann::json blockers = nlohmann::json::array();
                 for (const auto blocker : policy.blockers) {
                     blockers.push_back(
@@ -803,12 +853,53 @@ static void register_transports_handler_impl(
                         {"blockers", blockers},
                     }
                         .dump());
-            }
+            };
+
+            const auto observation = observe_sing_box_install(
+                probes, paths.binary_path, paths.managed_marker_path);
+            auto policy = evaluate_sing_box_install(
+                observation, KEEN_PBR3_SING_BOX_PINNED_VERSION);
+
+            // Which blockers consent can answer is a decision, so it lives
+            // with the other decisions in src/update rather than here.
+            const bool pausing =
+                stop_running &&
+                sing_box_install_awaits_transport_consent(policy);
+            if (!policy.available && !pausing) refuse(policy);
 
             try {
                 auto maintenance =
                     ctx.acquire_maintenance_lease("sing-box-install");
                 (void)maintenance->reserve(maintenance->base_generation());
+
+                // Constructed after the lease, so nobody's tunnel goes down
+                // for an install that then could not start. Its destructor
+                // brings them back on every path out of this block, including
+                // the ones that throw.
+                std::optional<SingBoxTransportPause> pause;
+                if (pausing) {
+                    pause.emplace(
+                        [&endpoint](const std::string& tag,
+                                    const char* action) {
+                            return transport_action(endpoint, tag, action);
+                        },
+                        running_sing_box_transport_tags(endpoint));
+                    if (!pause->all_stopped()) {
+                        // Something is still running on the binary about to be
+                        // replaced. The pause destructor restarts whatever it
+                        // did stop.
+                        refuse(policy);
+                    }
+                    // Re-measured with the transports actually down, rather
+                    // than assumed: the consent authorised stopping them, not
+                    // skipping the check that they are stopped.
+                    const auto after = observe_sing_box_install(
+                        probes, paths.binary_path,
+                        paths.managed_marker_path);
+                    policy = evaluate_sing_box_install(
+                        after, KEEN_PBR3_SING_BOX_PINNED_VERSION);
+                    if (!policy.available) refuse(policy);
+                }
 
                 const std::string release_url =
                     std::string(
@@ -853,6 +944,17 @@ static void register_transports_handler_impl(
                 }
                 if (!report.staged_version.empty()) {
                     result.staged_version = report.staged_version;
+                }
+                if (pause) {
+                    // Started again here rather than left to the destructor,
+                    // so the response can report which ones did not come back.
+                    // A destructor cannot tell the operator anything.
+                    const std::vector<std::string> stopped = pause->stopped();
+                    pause->resume();
+                    result.stopped_transports = stopped;
+                    if (!pause->left_down().empty()) {
+                        result.transports_left_down = pause->left_down();
+                    }
                 }
                 if (report.outcome == SingBoxInstallOutcome::installed) {
                     Logger::instance().info(
@@ -915,6 +1017,13 @@ static void register_transports_handler_impl(
             capability.blockers.reserve(policy.blockers.size());
             for (const auto blocker : policy.blockers) {
                 capability.blockers.push_back(api_install_blocker(blocker));
+            }
+            if (observation.running_transports.has_value()) {
+                // Absent when nobody could ask, which is exactly the
+                // transport_state_unknown blocker: a client must not read a
+                // missing count as zero.
+                capability.running_transports = static_cast<int64_t>(
+                    *observation.running_transports);
             }
             capability.verified_archive_checksum =
                 policy.verified_archive_checksum;
