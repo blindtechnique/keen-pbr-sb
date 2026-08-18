@@ -25,6 +25,9 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  BackupDocument,
+  BackupReadRequest,
+  BackupRollbackAvailability,
   CatalogSetupApplyRequest,
   CatalogSetupApplyResponse,
   CatalogSetupPreviewRequest,
@@ -44,6 +47,7 @@ import type {
   ListRefreshResponse,
   NdmsInterfaceInventoryResponse,
   NdmsVpnServerServiceInventoryResponse,
+  OkResponse,
   PeriodicTaskMetricsResponse,
   PostSingBoxInstallCancel200,
   RecommendedListSetupRequest,
@@ -3934,6 +3938,423 @@ export function useGetTransportConfigExport<TData = Awaited<ReturnType<typeof ge
 
 
 
+
+/**
+ * Reads only what the request selects. An absent group is not selected - an empty body therefore backs up nothing rather than everything, which is the safe direction for a request whose caller may have forgotten a field.
+
+Reads under the maintenance lease, so it cannot observe a half-committed change while another operation is writing.
+
+ * @summary Read a backup of the selected groups
+ */
+export type postBackupResponse200 = {
+  data: BackupDocument
+  status: 200
+}
+
+export type postBackupResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postBackupResponse409 = {
+  data: ErrorResponse
+  status: 409
+}
+
+export type postBackupResponse413 = {
+  data: ErrorResponse
+  status: 413
+}
+
+export type postBackupResponseSuccess = (postBackupResponse200) & {
+  headers: Headers;
+};
+export type postBackupResponseError = (postBackupResponse400 | postBackupResponse409 | postBackupResponse413) & {
+  headers: Headers;
+};
+
+export type postBackupResponse = (postBackupResponseSuccess | postBackupResponseError)
+
+export const getPostBackupUrl = () => {
+
+
+
+
+  return `/api/backup`
+}
+
+export const postBackup = async (backupReadRequest: BackupReadRequest, options?: RequestInit): Promise<postBackupResponse> => {
+
+  return apiFetch<postBackupResponse>(getPostBackupUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      backupReadRequest,)
+  }
+);}
+
+
+
+
+export const getPostBackupMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postBackup>>, TError,{data: BackupReadRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postBackup>>, TError,{data: BackupReadRequest}, TContext> => {
+
+const mutationKey = ['postBackup'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postBackup>>, {data: BackupReadRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postBackup(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostBackupMutationResult = NonNullable<Awaited<ReturnType<typeof postBackup>>>
+    export type PostBackupMutationBody = BackupReadRequest
+    export type PostBackupMutationError = ErrorResponse
+
+    /**
+ * @summary Read a backup of the selected groups
+ */
+export const usePostBackup = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postBackup>>, TError,{data: BackupReadRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postBackup>>,
+        TError,
+        {data: BackupReadRequest},
+        TContext
+      > => {
+      return useMutation(getPostBackupMutationOptions(options), queryClient);
+    }
+
+/**
+ * Replaces live configuration with the document's contents. The document is validated before anything is written - wrong `format`, wrong `schema`, or a data section this build does not know is refused rather than partially applied, because a restore that stops halfway leaves a router in a state no one designed.
+
+A rollback snapshot of the current state is captured first, and `POST /api/backup/rollback` returns to it.
+
+ * @summary Restore a backup document
+ */
+export type postBackupRestoreResponse200 = {
+  data: OkResponse
+  status: 200
+}
+
+export type postBackupRestoreResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postBackupRestoreResponse409 = {
+  data: ErrorResponse
+  status: 409
+}
+
+export type postBackupRestoreResponse413 = {
+  data: ErrorResponse
+  status: 413
+}
+
+export type postBackupRestoreResponseSuccess = (postBackupRestoreResponse200) & {
+  headers: Headers;
+};
+export type postBackupRestoreResponseError = (postBackupRestoreResponse400 | postBackupRestoreResponse409 | postBackupRestoreResponse413) & {
+  headers: Headers;
+};
+
+export type postBackupRestoreResponse = (postBackupRestoreResponseSuccess | postBackupRestoreResponseError)
+
+export const getPostBackupRestoreUrl = () => {
+
+
+
+
+  return `/api/backup/restore`
+}
+
+export const postBackupRestore = async (backupDocument: BackupDocument, options?: RequestInit): Promise<postBackupRestoreResponse> => {
+
+  return apiFetch<postBackupRestoreResponse>(getPostBackupRestoreUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      backupDocument,)
+  }
+);}
+
+
+
+
+export const getPostBackupRestoreMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postBackupRestore>>, TError,{data: BackupDocument}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postBackupRestore>>, TError,{data: BackupDocument}, TContext> => {
+
+const mutationKey = ['postBackupRestore'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postBackupRestore>>, {data: BackupDocument}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postBackupRestore(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostBackupRestoreMutationResult = NonNullable<Awaited<ReturnType<typeof postBackupRestore>>>
+    export type PostBackupRestoreMutationBody = BackupDocument
+    export type PostBackupRestoreMutationError = ErrorResponse
+
+    /**
+ * @summary Restore a backup document
+ */
+export const usePostBackupRestore = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postBackupRestore>>, TError,{data: BackupDocument}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postBackupRestore>>,
+        TError,
+        {data: BackupDocument},
+        TContext
+      > => {
+      return useMutation(getPostBackupRestoreMutationOptions(options), queryClient);
+    }
+
+/**
+ * Reports whether a usable rollback snapshot exists. Measured by parsing the stored document, not by the file merely being present: a truncated or foreign snapshot is not something to offer as an undo.
+
+ * @summary Whether a restore can still be undone
+ */
+export type getBackupRollbackResponse200 = {
+  data: BackupRollbackAvailability
+  status: 200
+}
+
+export type getBackupRollbackResponseSuccess = (getBackupRollbackResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getBackupRollbackResponse = (getBackupRollbackResponseSuccess)
+
+export const getGetBackupRollbackUrl = () => {
+
+
+
+
+  return `/api/backup/rollback`
+}
+
+export const getBackupRollback = async ( options?: RequestInit): Promise<getBackupRollbackResponse> => {
+
+  return apiFetch<getBackupRollbackResponse>(getGetBackupRollbackUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetBackupRollbackQueryKey = () => {
+    return [
+    `/api/backup/rollback`
+    ] as const;
+    }
+
+
+export const getGetBackupRollbackQueryOptions = <TData = Awaited<ReturnType<typeof getBackupRollback>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getBackupRollback>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetBackupRollbackQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getBackupRollback>>> = ({ signal }) => getBackupRollback({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getBackupRollback>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetBackupRollbackQueryResult = NonNullable<Awaited<ReturnType<typeof getBackupRollback>>>
+export type GetBackupRollbackQueryError = unknown
+
+
+export function useGetBackupRollback<TData = Awaited<ReturnType<typeof getBackupRollback>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getBackupRollback>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getBackupRollback>>,
+          TError,
+          Awaited<ReturnType<typeof getBackupRollback>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetBackupRollback<TData = Awaited<ReturnType<typeof getBackupRollback>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getBackupRollback>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getBackupRollback>>,
+          TError,
+          Awaited<ReturnType<typeof getBackupRollback>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetBackupRollback<TData = Awaited<ReturnType<typeof getBackupRollback>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getBackupRollback>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Whether a restore can still be undone
+ */
+
+export function useGetBackupRollback<TData = Awaited<ReturnType<typeof getBackupRollback>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getBackupRollback>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetBackupRollbackQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * Returns to the snapshot captured before the most recent restore. Refused when no usable snapshot exists rather than silently doing nothing.
+
+ * @summary Undo the last restore
+ */
+export type postBackupRollbackResponse200 = {
+  data: OkResponse
+  status: 200
+}
+
+export type postBackupRollbackResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postBackupRollbackResponse409 = {
+  data: ErrorResponse
+  status: 409
+}
+
+export type postBackupRollbackResponseSuccess = (postBackupRollbackResponse200) & {
+  headers: Headers;
+};
+export type postBackupRollbackResponseError = (postBackupRollbackResponse400 | postBackupRollbackResponse409) & {
+  headers: Headers;
+};
+
+export type postBackupRollbackResponse = (postBackupRollbackResponseSuccess | postBackupRollbackResponseError)
+
+export const getPostBackupRollbackUrl = () => {
+
+
+
+
+  return `/api/backup/rollback`
+}
+
+export const postBackupRollback = async ( options?: RequestInit): Promise<postBackupRollbackResponse> => {
+
+  return apiFetch<postBackupRollbackResponse>(getPostBackupRollbackUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+export const getPostBackupRollbackMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postBackupRollback>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postBackupRollback>>, TError,void, TContext> => {
+
+const mutationKey = ['postBackupRollback'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postBackupRollback>>, void> = () => {
+
+
+          return  postBackupRollback(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostBackupRollbackMutationResult = NonNullable<Awaited<ReturnType<typeof postBackupRollback>>>
+
+    export type PostBackupRollbackMutationError = ErrorResponse
+
+    /**
+ * @summary Undo the last restore
+ */
+export const usePostBackupRollback = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postBackupRollback>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postBackupRollback>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getPostBackupRollbackMutationOptions(options), queryClient);
+    }
 
 /**
  * Fetches an address echo twice: once pinned to the outbound's own device, and once with no mark and no binding at all. The second is the control - the answer this router gives without the transport - because without it "the address changed" would be a comparison against nothing.

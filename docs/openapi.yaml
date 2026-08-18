@@ -982,6 +982,141 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/backup:
+    post:
+      summary: Read a backup of the selected groups
+      description: >
+        Reads only what the request selects. An absent group is not selected -
+        an empty body therefore backs up nothing rather than everything, which
+        is the safe direction for a request whose caller may have forgotten a
+        field.
+
+
+        Reads under the maintenance lease, so it cannot observe a
+        half-committed change while another operation is writing.
+      operationId: postBackup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BackupReadRequest"
+      responses:
+        "200":
+          description: The backup document, ready to be stored and restored
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupDocument"
+        "400":
+          description: The body is not JSON, or `groups` is not an object
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Another maintenance operation holds the lease
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: The request exceeds the aggregate backup limit
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/backup/restore:
+    post:
+      summary: Restore a backup document
+      description: >
+        Replaces live configuration with the document's contents. The document
+        is validated before anything is written - wrong `format`, wrong
+        `schema`, or a data section this build does not know is refused rather
+        than partially applied, because a restore that stops halfway leaves a
+        router in a state no one designed.
+
+
+        A rollback snapshot of the current state is captured first, and
+        `POST /api/backup/rollback` returns to it.
+      operationId: postBackupRestore
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BackupDocument"
+      responses:
+        "200":
+          description: The restore completed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkResponse"
+        "400":
+          description: >
+            Not a valid backup: bad JSON, wrong format or schema, or an
+            unknown data section. The message names which.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Another runtime mutation is already in progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: The document exceeds the aggregate backup limit
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/backup/rollback:
+    get:
+      summary: Whether a restore can still be undone
+      description: >
+        Reports whether a usable rollback snapshot exists. Measured by parsing
+        the stored document, not by the file merely being present: a truncated
+        or foreign snapshot is not something to offer as an undo.
+      operationId: getBackupRollback
+      responses:
+        "200":
+          description: Rollback availability
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupRollbackAvailability"
+    post:
+      summary: Undo the last restore
+      description: >
+        Returns to the snapshot captured before the most recent restore.
+        Refused when no usable snapshot exists rather than silently doing
+        nothing.
+      operationId: postBackupRollback
+      responses:
+        "200":
+          description: The rollback completed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkResponse"
+        "400":
+          description: The stored snapshot is missing or unusable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Another runtime mutation is already in progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/transports/exit-check:
     post:
       summary: Check what the world sees when traffic takes this outbound
@@ -1538,6 +1673,92 @@ components:
         apply_started_ts:
           type: integer
           format: int64
+
+    OkResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+
+    BackupGroupSelection:
+      type: object
+      description: >
+        Which groups to read. Absent means not selected, so an empty object
+        backs up nothing. `nfqws` is the older single flag; when either
+        `nfqws_config` or `nfqws_lists` is present they decide instead, so a
+        caller that names the halves is never overruled by the whole.
+      properties:
+        general:
+          type: boolean
+        transports:
+          type: boolean
+        outbounds:
+          type: boolean
+        dns:
+          type: boolean
+        routing:
+          type: boolean
+        nfqws:
+          type: boolean
+        nfqws_config:
+          type: boolean
+        nfqws_lists:
+          type: boolean
+
+    BackupReadRequest:
+      type: object
+      properties:
+        groups:
+          $ref: "#/components/schemas/BackupGroupSelection"
+
+    BackupDocument:
+      type: object
+      required: [format, schema, data]
+      description: >
+        A restore refuses anything whose `format` or `schema` does not match
+        this build exactly. That is deliberate: a document from a future
+        schema may describe sections this build would silently drop, and a
+        partial restore is worse than a refused one.
+      properties:
+        format:
+          type: string
+          enum: ["keen-pbr-sb-backup"]
+        schema:
+          type: integer
+          enum: [1]
+        data:
+          type: object
+          description: >
+            Only these sections are accepted; an unknown one is refused by
+            name rather than ignored. Each is present only when it was
+            selected at read time.
+          properties:
+            general:
+              type: object
+            transports:
+              type: object
+            outbounds:
+              type: object
+            dns:
+              type: object
+            lists:
+              type: object
+            route:
+              type: object
+            nfqws:
+              type: object
+          additionalProperties: false
+
+    BackupRollbackAvailability:
+      type: object
+      required: [available]
+      properties:
+        available:
+          type: boolean
+          description: >
+            True only when the stored snapshot parses. A file that exists but
+            cannot be read is not an undo.
 
     TransportExitCheckRequest:
       type: object

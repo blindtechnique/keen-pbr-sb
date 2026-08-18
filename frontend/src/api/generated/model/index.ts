@@ -7,6 +7,20 @@
  */
 
 export * from './apiConfig';
+export * from './backupDocument';
+export * from './backupDocumentData';
+export * from './backupDocumentDataDns';
+export * from './backupDocumentDataGeneral';
+export * from './backupDocumentDataLists';
+export * from './backupDocumentDataNfqws';
+export * from './backupDocumentDataOutbounds';
+export * from './backupDocumentDataRoute';
+export * from './backupDocumentDataTransports';
+export * from './backupDocumentFormat';
+export * from './backupDocumentSchema';
+export * from './backupGroupSelection';
+export * from './backupReadRequest';
+export * from './backupRollbackAvailability';
 export * from './cacheGeneration';
 export * from './cacheMetadata';
 export * from './catalogPresetSelection';
@@ -105,6 +119,7 @@ export * from './ndmsTunnelKind';
 export * from './ndmsVpnServerKind';
 export * from './ndmsVpnServerService';
 export * from './ndmsVpnServerServiceInventoryResponse';
+export * from './okResponse';
 export * from './outbound';
 export * from './outboundGroup';
 export * from './outboundSelectionMode';

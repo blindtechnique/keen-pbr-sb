@@ -23,10 +23,6 @@ POST /api/auth/settings/step-up-preflight
 # которой фронтенд всё равно не сможет работать без остальных.
 POST /api/auth/step-up
 GET  /api/auth/status
-POST /api/backup
-POST /api/backup/restore
-GET  /api/backup/rollback
-POST /api/backup/rollback
 GET  /api/nfqws
 POST /api/nfqws
 GET  /api/system/remote-access

@@ -95,6 +95,43 @@ namespace api {
         std::optional<std::string> listen;
     };
 
+    struct Data {
+        std::optional<std::map<std::string, nlohmann::json>> dns;
+        std::optional<std::map<std::string, nlohmann::json>> general;
+        std::optional<std::map<std::string, nlohmann::json>> lists;
+        std::optional<std::map<std::string, nlohmann::json>> nfqws;
+        std::optional<std::map<std::string, nlohmann::json>> outbounds;
+        std::optional<std::map<std::string, nlohmann::json>> route;
+        std::optional<std::map<std::string, nlohmann::json>> transports;
+    };
+
+    enum class Format : int { KEEN_PBR_SB_BACKUP };
+
+    struct BackupDocument {
+        Data data;
+        Format format;
+        int64_t schema = 0;
+    };
+
+    struct BackupGroupSelection {
+        std::optional<bool> dns;
+        std::optional<bool> general;
+        std::optional<bool> nfqws;
+        std::optional<bool> nfqws_config;
+        std::optional<bool> nfqws_lists;
+        std::optional<bool> outbounds;
+        std::optional<bool> routing;
+        std::optional<bool> transports;
+    };
+
+    struct BackupReadRequest {
+        std::optional<BackupGroupSelection> groups;
+    };
+
+    struct BackupRollbackAvailability {
+        bool available = false;
+    };
+
     struct CacheGeneration {
         std::string filename;
         std::string sha256;
@@ -757,6 +794,10 @@ namespace api {
         std::vector<NdmsVpnServerService> services;
     };
 
+    struct OkResponse {
+        bool ok = false;
+    };
+
     enum class LastOutcome : int { ABANDONED, FAILURE, NOOP, SKIPPED, SUCCESS };
 
     struct PeriodicTaskMetricsEntry {
@@ -1340,6 +1381,10 @@ namespace api {
 
     struct ApiTypes {
         std::optional<ApiConfig> api_config;
+        std::optional<BackupDocument> backup_document;
+        std::optional<BackupGroupSelection> backup_group_selection;
+        std::optional<BackupReadRequest> backup_read_request;
+        std::optional<BackupRollbackAvailability> backup_rollback_availability;
         std::optional<CacheGeneration> cache_generation;
         std::optional<CacheMetadata> cache_metadata;
         std::optional<CatalogPresetSelection> catalog_preset_selection;
@@ -1418,6 +1463,7 @@ namespace api {
         std::optional<NdmsVpnServerKind> ndms_vpn_server_kind;
         std::optional<NdmsVpnServerService> ndms_vpn_server_service;
         std::optional<NdmsVpnServerServiceInventoryResponse> ndms_vpn_server_service_inventory_response;
+        std::optional<OkResponse> ok_response;
         std::optional<OutboundElement> outbound;
         std::optional<OutboundGroupElement> outbound_group;
         std::optional<PeriodicTaskMetricsEntry> periodic_task_metrics_entry;
@@ -1506,6 +1552,21 @@ namespace keen_pbr3 {
 namespace api {
     void from_json(const json & j, ApiConfig & x);
     void to_json(json & j, const ApiConfig & x);
+
+    void from_json(const json & j, Data & x);
+    void to_json(json & j, const Data & x);
+
+    void from_json(const json & j, BackupDocument & x);
+    void to_json(json & j, const BackupDocument & x);
+
+    void from_json(const json & j, BackupGroupSelection & x);
+    void to_json(json & j, const BackupGroupSelection & x);
+
+    void from_json(const json & j, BackupReadRequest & x);
+    void to_json(json & j, const BackupReadRequest & x);
+
+    void from_json(const json & j, BackupRollbackAvailability & x);
+    void to_json(json & j, const BackupRollbackAvailability & x);
 
     void from_json(const json & j, CacheGeneration & x);
     void to_json(json & j, const CacheGeneration & x);
@@ -1720,6 +1781,9 @@ namespace api {
     void from_json(const json & j, NdmsVpnServerServiceInventoryResponse & x);
     void to_json(json & j, const NdmsVpnServerServiceInventoryResponse & x);
 
+    void from_json(const json & j, OkResponse & x);
+    void to_json(json & j, const OkResponse & x);
+
     void from_json(const json & j, PeriodicTaskMetricsEntry & x);
     void to_json(json & j, const PeriodicTaskMetricsEntry & x);
 
@@ -1902,6 +1966,9 @@ namespace api {
 
     void from_json(const json & j, ApiTypes & x);
     void to_json(json & j, const ApiTypes & x);
+
+    void from_json(const json & j, Format & x);
+    void to_json(json & j, const Format & x);
 
     void from_json(const json & j, DnsMode & x);
     void to_json(json & j, const DnsMode & x);
@@ -2164,6 +2231,81 @@ namespace api {
         j = json::object();
         j["enabled"] = x.enabled;
         j["listen"] = x.listen;
+    }
+
+    inline void from_json(const json & j, Data& x) {
+        x.dns = get_stack_optional<std::map<std::string, nlohmann::json>>(j, "dns");
+        x.general = get_stack_optional<std::map<std::string, nlohmann::json>>(j, "general");
+        x.lists = get_stack_optional<std::map<std::string, nlohmann::json>>(j, "lists");
+        x.nfqws = get_stack_optional<std::map<std::string, nlohmann::json>>(j, "nfqws");
+        x.outbounds = get_stack_optional<std::map<std::string, nlohmann::json>>(j, "outbounds");
+        x.route = get_stack_optional<std::map<std::string, nlohmann::json>>(j, "route");
+        x.transports = get_stack_optional<std::map<std::string, nlohmann::json>>(j, "transports");
+    }
+
+    inline void to_json(json & j, const Data & x) {
+        j = json::object();
+        j["dns"] = x.dns;
+        j["general"] = x.general;
+        j["lists"] = x.lists;
+        j["nfqws"] = x.nfqws;
+        j["outbounds"] = x.outbounds;
+        j["route"] = x.route;
+        j["transports"] = x.transports;
+    }
+
+    inline void from_json(const json & j, BackupDocument& x) {
+        x.data = j.at("data").get<Data>();
+        x.format = j.at("format").get<Format>();
+        x.schema = j.at("schema").get<int64_t>();
+    }
+
+    inline void to_json(json & j, const BackupDocument & x) {
+        j = json::object();
+        j["data"] = x.data;
+        j["format"] = x.format;
+        j["schema"] = x.schema;
+    }
+
+    inline void from_json(const json & j, BackupGroupSelection& x) {
+        x.dns = get_stack_optional<bool>(j, "dns");
+        x.general = get_stack_optional<bool>(j, "general");
+        x.nfqws = get_stack_optional<bool>(j, "nfqws");
+        x.nfqws_config = get_stack_optional<bool>(j, "nfqws_config");
+        x.nfqws_lists = get_stack_optional<bool>(j, "nfqws_lists");
+        x.outbounds = get_stack_optional<bool>(j, "outbounds");
+        x.routing = get_stack_optional<bool>(j, "routing");
+        x.transports = get_stack_optional<bool>(j, "transports");
+    }
+
+    inline void to_json(json & j, const BackupGroupSelection & x) {
+        j = json::object();
+        j["dns"] = x.dns;
+        j["general"] = x.general;
+        j["nfqws"] = x.nfqws;
+        j["nfqws_config"] = x.nfqws_config;
+        j["nfqws_lists"] = x.nfqws_lists;
+        j["outbounds"] = x.outbounds;
+        j["routing"] = x.routing;
+        j["transports"] = x.transports;
+    }
+
+    inline void from_json(const json & j, BackupReadRequest& x) {
+        x.groups = get_stack_optional<BackupGroupSelection>(j, "groups");
+    }
+
+    inline void to_json(json & j, const BackupReadRequest & x) {
+        j = json::object();
+        j["groups"] = x.groups;
+    }
+
+    inline void from_json(const json & j, BackupRollbackAvailability& x) {
+        x.available = j.at("available").get<bool>();
+    }
+
+    inline void to_json(json & j, const BackupRollbackAvailability & x) {
+        j = json::object();
+        j["available"] = x.available;
     }
 
     inline void from_json(const json & j, CacheGeneration& x) {
@@ -3405,6 +3547,15 @@ namespace api {
         j["services"] = x.services;
     }
 
+    inline void from_json(const json & j, OkResponse& x) {
+        x.ok = j.at("ok").get<bool>();
+    }
+
+    inline void to_json(json & j, const OkResponse & x) {
+        j = json::object();
+        j["ok"] = x.ok;
+    }
+
     inline void from_json(const json & j, PeriodicTaskMetricsEntry& x) {
         x.abandoned = j.at("abandoned").get<int64_t>();
         x.failure = j.at("failure").get<int64_t>();
@@ -4449,6 +4600,10 @@ namespace api {
 
     inline void from_json(const json & j, ApiTypes& x) {
         x.api_config = get_stack_optional<ApiConfig>(j, "ApiConfig");
+        x.backup_document = get_stack_optional<BackupDocument>(j, "BackupDocument");
+        x.backup_group_selection = get_stack_optional<BackupGroupSelection>(j, "BackupGroupSelection");
+        x.backup_read_request = get_stack_optional<BackupReadRequest>(j, "BackupReadRequest");
+        x.backup_rollback_availability = get_stack_optional<BackupRollbackAvailability>(j, "BackupRollbackAvailability");
         x.cache_generation = get_stack_optional<CacheGeneration>(j, "CacheGeneration");
         x.cache_metadata = get_stack_optional<CacheMetadata>(j, "CacheMetadata");
         x.catalog_preset_selection = get_stack_optional<CatalogPresetSelection>(j, "CatalogPresetSelection");
@@ -4527,6 +4682,7 @@ namespace api {
         x.ndms_vpn_server_kind = get_stack_optional<NdmsVpnServerKind>(j, "NdmsVpnServerKind");
         x.ndms_vpn_server_service = get_stack_optional<NdmsVpnServerService>(j, "NdmsVpnServerService");
         x.ndms_vpn_server_service_inventory_response = get_stack_optional<NdmsVpnServerServiceInventoryResponse>(j, "NdmsVpnServerServiceInventoryResponse");
+        x.ok_response = get_stack_optional<OkResponse>(j, "OkResponse");
         x.outbound = get_stack_optional<OutboundElement>(j, "Outbound");
         x.outbound_group = get_stack_optional<OutboundGroupElement>(j, "OutboundGroup");
         x.periodic_task_metrics_entry = get_stack_optional<PeriodicTaskMetricsEntry>(j, "PeriodicTaskMetricsEntry");
@@ -4612,6 +4768,10 @@ namespace api {
     inline void to_json(json & j, const ApiTypes & x) {
         j = json::object();
         j["ApiConfig"] = x.api_config;
+        j["BackupDocument"] = x.backup_document;
+        j["BackupGroupSelection"] = x.backup_group_selection;
+        j["BackupReadRequest"] = x.backup_read_request;
+        j["BackupRollbackAvailability"] = x.backup_rollback_availability;
         j["CacheGeneration"] = x.cache_generation;
         j["CacheMetadata"] = x.cache_metadata;
         j["CatalogPresetSelection"] = x.catalog_preset_selection;
@@ -4690,6 +4850,7 @@ namespace api {
         j["NdmsVpnServerKind"] = x.ndms_vpn_server_kind;
         j["NdmsVpnServerService"] = x.ndms_vpn_server_service;
         j["NdmsVpnServerServiceInventoryResponse"] = x.ndms_vpn_server_service_inventory_response;
+        j["OkResponse"] = x.ok_response;
         j["Outbound"] = x.outbound;
         j["OutboundGroup"] = x.outbound_group;
         j["PeriodicTaskMetricsEntry"] = x.periodic_task_metrics_entry;
@@ -4770,6 +4931,18 @@ namespace api {
         j["UpdateStartedResponse"] = x.update_started_response;
         j["ValidationError"] = x.validation_error;
         j["VlessRealitySpec"] = x.vless_reality_spec;
+    }
+
+    inline void from_json(const json & j, Format & x) {
+        if (j == "keen-pbr-sb-backup") x = Format::KEEN_PBR_SB_BACKUP;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"Format\""); }
+    }
+
+    inline void to_json(json & j, const Format & x) {
+        switch (x) {
+            case Format::KEEN_PBR_SB_BACKUP: j = "keen-pbr-sb-backup"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"Format\": " + std::to_string(static_cast<int>(x)));
+        }
     }
 
     inline void from_json(const json & j, DnsMode & x) {
