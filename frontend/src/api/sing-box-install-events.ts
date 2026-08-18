@@ -20,6 +20,14 @@ export type SingBoxInstallProgress = {
   // Only meaningful when the install has ended. Either an install outcome name
   // or "aborted" when the request died before it could report one.
   outcome: string
+  // Bytes of the current download, when there is a download and the daemon has
+  // seen any. Absent otherwise - a phase that transfers nothing has no bytes,
+  // and inventing zero would render as a bar stuck at the start.
+  receivedBytes?: number
+  // The whole body's size, present only when the server said what it is. A
+  // chunked response has no size to report, and a client that divided by a
+  // missing one would show a percentage nobody measured.
+  totalBytes?: number
 }
 
 export type SingBoxInstallState = {
@@ -114,6 +122,12 @@ function parse(serialized: string): SingBoxInstallProgress | null {
     return {
       phase: data.phase,
       active: data.active,
+      ...(typeof data.received_bytes === "number"
+        ? { receivedBytes: data.received_bytes }
+        : {}),
+      ...(typeof data.total_bytes === "number"
+        ? { totalBytes: data.total_bytes }
+        : {}),
       pinnedVersion:
         typeof data.pinned_version === "string" ? data.pinned_version : "",
       outcome: typeof data.outcome === "string" ? data.outcome : "",

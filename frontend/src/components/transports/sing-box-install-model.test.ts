@@ -10,6 +10,7 @@ import {
   type SingBoxInstallCapability,
 } from "@/api/generated/model"
 import {
+  singBoxDownloadLabel,
   singBoxInstallBlockerKey,
   singBoxInstallButton,
   singBoxInstallDisplayableBlockers,
@@ -314,5 +315,43 @@ describe("sing-box install messages", () => {
     ]) {
       bothLocales(key)
     }
+  })
+})
+
+describe("download progress", () => {
+  it("shows a percentage only when the server said how big the body is", () => {
+    expect(singBoxDownloadLabel(6 * 1024 * 1024, 12 * 1024 * 1024)).toEqual({
+      kind: "percent",
+      percent: 50,
+    })
+  })
+
+  it("says how much arrived when there is no size to divide by", () => {
+    // A chunked response has no length. Substituting the bytes so far for the
+    // missing total would render every such download as 100%, which is worse
+    // than saying nothing about how far along it is.
+    expect(singBoxDownloadLabel(3 * 1024 * 1024, 0)).toEqual({
+      kind: "received",
+      megabytes: "3.0",
+    })
+    expect(singBoxDownloadLabel(3 * 1024 * 1024, undefined)).toEqual({
+      kind: "received",
+      megabytes: "3.0",
+    })
+  })
+
+  it("says nothing before any bytes arrive", () => {
+    // A phase that transfers nothing has no bytes, and a bar stuck at zero
+    // reads as a stall.
+    expect(singBoxDownloadLabel(0, 12 * 1024 * 1024)).toBeNull()
+    expect(singBoxDownloadLabel(undefined, undefined)).toBeNull()
+  })
+
+  it("never reports more than all of it", () => {
+    // A server that under-reports its own length must not produce 137%.
+    expect(singBoxDownloadLabel(20 * 1024 * 1024, 12 * 1024 * 1024)).toEqual({
+      kind: "percent",
+      percent: 100,
+    })
   })
 })

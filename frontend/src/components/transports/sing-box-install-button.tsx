@@ -30,6 +30,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 import {
+  singBoxDownloadLabel,
   singBoxInstallBlockerKey,
   singBoxInstallButton,
   singBoxInstallFailureTitleKey,
@@ -157,11 +158,27 @@ export function SingBoxInstallButton({
     install.mutate(false)
   }
 
-  const label = installing
+  // The phase, plus how far the download has got when there is a download and
+  // the daemon has seen bytes. Percentage only when the server said how big
+  // the body is; otherwise how much has arrived, because a chunked response
+  // has no denominator and inventing one would show every such download as
+  // finished.
+  const download = progress
+    ? singBoxDownloadLabel(progress.receivedBytes, progress.totalBytes)
+    : null
+  const phaseLabel = installing
     ? phaseKey
       ? t(phaseKey)
       : t("transports.singBoxInstall.runningPlain")
     : t(state.labelKey)
+  const label =
+    installing && download
+      ? download.kind === "percent"
+        ? `${phaseLabel} ${download.percent}%`
+        : t("transports.singBoxInstall.received", {
+            megabytes: download.megabytes,
+          })
+      : phaseLabel
 
   return (
     <>

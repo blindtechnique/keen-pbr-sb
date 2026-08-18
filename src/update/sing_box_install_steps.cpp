@@ -74,16 +74,19 @@ void discard_sing_box_staging(const SingBoxInstallPaths& paths) {
 }
 
 SingBoxInstallSteps production_sing_box_install_steps(
-    const SingBoxInstallPaths& paths) {
+    const SingBoxInstallPaths& paths,
+    SingBoxDownloadProgress download_progress) {
     SingBoxInstallSteps steps;
 
     steps.fetch =
-        [](const std::string& url) -> std::optional<std::string> {
+        [download_progress = std::move(download_progress)](
+            const std::string& url) -> std::optional<std::string> {
         try {
             HttpClient client;
             client.set_timeout(std::chrono::seconds(60));
             client.set_max_response_size(kSingBoxArchiveMaximumBytes);
             HttpRequestOptions options;
+            options.progress = download_progress;
             // The same public-internet rule the subscription fetch uses, and
             // for the same reason: a name that resolves to the router itself
             // must not be reachable from a fetch the operator did not choose

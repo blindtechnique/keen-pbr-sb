@@ -27,8 +27,18 @@ struct SingBoxInstallPaths {
 inline constexpr std::size_t kSingBoxArchiveMaximumBytes =
     64U * 1024U * 1024U;
 
+// Bytes received so far and the whole body's size, or zero for the size when
+// the server did not say.
+//
+// Optional, and the reason it is a separate parameter rather than a step: the
+// phases are what the installer knows, bytes are what the fetch knows, and
+// only the caller can turn both into one thing an operator reads.
+using SingBoxDownloadProgress =
+    std::function<void(std::uint64_t received, std::uint64_t total)>;
+
 SingBoxInstallSteps production_sing_box_install_steps(
-    const SingBoxInstallPaths& paths);
+    const SingBoxInstallPaths& paths,
+    SingBoxDownloadProgress download_progress = {});
 
 // Removes anything a previous run left behind in the staging directory. Called
 // before staging rather than only after it, because the process that failed to

@@ -1020,6 +1020,7 @@ export const ruTranslation = {
       leftDown:
         "Эти подключения не запустились обратно, их нужно запустить вручную: {{tags}}.",
       runningPlain: "Устанавливаем…",
+      received: "Скачано {{megabytes}} МБ…",
       requestRefused: "Установка не началась",
       requestFailed: "Запрос установки не удался",
       mayHaveApplied:

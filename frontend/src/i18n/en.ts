@@ -1015,6 +1015,7 @@ export const enTranslation = {
       leftDown:
         "These connections did not start again and need to be started by hand: {{tags}}.",
       runningPlain: "Installing…",
+      received: "Downloaded {{megabytes}} MB…",
       requestRefused: "The install did not start",
       requestFailed: "The install request failed",
       mayHaveApplied:

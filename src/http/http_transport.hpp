@@ -46,6 +46,19 @@ struct HttpTransportRequest {
     // and catalog downloads go to addresses the operator configured, not to
     // ones an attacker supplied.
     std::function<bool(const std::string&)> destination_filter;
+
+    // Called as bytes arrive, with what has been received and what the server
+    // said the whole body is.
+    //
+    // `total` is zero when the server did not say - a chunked response has no
+    // length to report - and a caller must render that as "so far" rather than
+    // inventing a denominator. Curl reports what it knows; the difference
+    // between "37% of 12 MB" and "4 MB so far" is the difference between a
+    // progress bar that is true and one that is a guess.
+    //
+    // Called from curl's transfer thread, frequently. A caller that publishes
+    // somewhere has to decide how often to actually do it.
+    std::function<void(std::uint64_t received, std::uint64_t total)> progress;
 };
 
 struct HttpTransportResponse {

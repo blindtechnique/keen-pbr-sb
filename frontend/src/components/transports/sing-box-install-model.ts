@@ -239,3 +239,30 @@ export function singBoxInstallLeftDown(result: SingBoxInstallResult): string[] {
   if (!Array.isArray(left)) return []
   return left.filter((tag): tag is string => typeof tag === "string")
 }
+
+// How far the current download has got, as a suffix for the phase label.
+//
+// Two honest shapes and no third. When the server said how big the body is,
+// a percentage is meaningful; when it did not - a chunked response has no
+// length - the only true statement is how much has arrived. Substituting the
+// bytes so far for the missing total would render every chunked download as
+// 100%, which is worse than saying nothing.
+export function singBoxDownloadLabel(
+  received: number | undefined,
+  total: number | undefined
+): { readonly kind: "percent"; readonly percent: number } | {
+  readonly kind: "received"
+  readonly megabytes: string
+} | null {
+  if (typeof received !== "number" || received <= 0) return null
+  if (typeof total === "number" && total > 0) {
+    // Clamped: a server that under-reports its own length must not produce
+    // "137%".
+    const percent = Math.min(100, Math.round((received / total) * 100))
+    return { kind: "percent", percent }
+  }
+  return {
+    kind: "received",
+    megabytes: (received / (1024 * 1024)).toFixed(1),
+  }
+}

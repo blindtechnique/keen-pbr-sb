@@ -27,6 +27,7 @@ HttpTransportRequest request_for(const std::string& url, std::chrono::seconds ti
     request.max_response_size = max_size;
     request.cancellation = options.cancellation;
     request.destination_filter = options.destination_filter;
+    request.progress = options.progress;
     return request;
 }
 bool cancellation_requested(const HttpCancellationToken& cancellation) {

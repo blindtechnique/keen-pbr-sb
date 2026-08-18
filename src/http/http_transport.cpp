@@ -47,9 +47,27 @@ bool cancellation_requested(const HttpTransportRequest& request) {
     return request.cancellation &&
            request.cancellation->load(std::memory_order_relaxed);
 }
-int progress_callback(void* opaque, curl_off_t, curl_off_t, curl_off_t,
+int progress_callback(void* opaque, curl_off_t download_total,
+                      curl_off_t downloaded, curl_off_t,
                       curl_off_t) noexcept {
     const auto* context = static_cast<const TransferContext*>(opaque);
+    if (context->request->progress) {
+        // Curl reports a total of zero when the server did not say. Passed
+        // through as zero rather than replaced with the bytes so far, which
+        // would render as "100%" for the whole of a chunked download.
+        const auto total = download_total > 0
+                               ? static_cast<std::uint64_t>(download_total)
+                               : 0U;
+        const auto received =
+            downloaded > 0 ? static_cast<std::uint64_t>(downloaded) : 0U;
+        // Never allowed to abort the transfer, and never allowed to throw:
+        // this runs on curl's thread across a C callback boundary, and
+        // reporting progress is not a reason to fail a download.
+        try {
+            context->request->progress(received, total);
+        } catch (...) {
+        }
+    }
     return cancellation_requested(*context->request) ? 1 : 0;
 }
 size_t write_callback(char* data, size_t size, size_t count,
@@ -203,7 +221,7 @@ HttpTransportResponse LibcurlHttpTransport::perform(const HttpTransportRequest& 
         setopt(curl.get(), CURLOPT_OPENSOCKETDATA, &context);
     }
     setopt(curl.get(), CURLOPT_ERRORBUFFER, error_buffer);
-    if (request.cancellation) {
+    if (request.cancellation || request.progress) {
         setopt(curl.get(), CURLOPT_NOPROGRESS, 0L);
         setopt(curl.get(), CURLOPT_XFERINFOFUNCTION, progress_callback);
         setopt(curl.get(), CURLOPT_XFERINFODATA, &context);

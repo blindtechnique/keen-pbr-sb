@@ -28,6 +28,11 @@ struct HttpRequestOptions {
     // did not choose must set this, because judging the URL beforehand judges
     // a name and not a destination.
     std::function<bool(const std::string&)> destination_filter;
+    // Bytes received and the whole body's size, or zero for the size when the
+    // server did not say. See HttpTransportRequest::progress: a caller that
+    // renders this must be able to say "so far" as well as a percentage,
+    // because a chunked response has no denominator to offer.
+    std::function<void(std::uint64_t received, std::uint64_t total)> progress;
 };
 
 class HttpError : public std::runtime_error {

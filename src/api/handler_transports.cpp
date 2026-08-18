@@ -227,17 +227,29 @@ api::Blocker api_install_blocker(const SingBoxInstallBlocker blocker) {
 // progress - which is also why install_pinned_sing_box does not guard the
 // observer call: the guard lives here, at the one place that can actually
 // throw, instead of somewhere it could never fire.
-void publish_sing_box_install_progress(const ApiContext& ctx,
-                                       const std::string& phase,
-                                       const bool active,
-                                       const std::string& outcome) noexcept {
+void publish_sing_box_install_progress(
+    const ApiContext& ctx,
+    const std::string& phase,
+    const bool active,
+    const std::string& outcome,
+    const std::uint64_t received = 0U,
+    const std::uint64_t total = 0U) noexcept {
     if (ctx.status_stream == nullptr) return;
     try {
-        ctx.status_stream->publish_sing_box_install(nlohmann::json{
+        nlohmann::json frame{
             {"phase", phase},
             {"active", active},
             {"pinned_version", KEEN_PBR3_SING_BOX_PINNED_VERSION},
-            {"outcome", outcome}});
+            {"outcome", outcome}};
+        // Only when there is something to say. A frame carrying zero bytes on
+        // a phase that downloads nothing would invite a client to render a bar
+        // stuck at nothing.
+        if (received > 0U) frame["received_bytes"] = received;
+        // And the total only when the server actually gave one. Zero is not a
+        // size, it is the absence of one, and a client that divided by it
+        // would show a percentage nobody measured.
+        if (total > 0U) frame["total_bytes"] = total;
+        ctx.status_stream->publish_sing_box_install(std::move(frame));
     } catch (...) {
     }
 }
@@ -269,9 +281,23 @@ public:
     SingBoxInstallProgressReporter& operator=(
         const SingBoxInstallProgressReporter&) = delete;
 
-    void phase(const SingBoxInstallPhase phase) const {
-        publish_sing_box_install_progress(
-            ctx_, sing_box_install_phase_name(phase), true, {});
+    void phase(const SingBoxInstallPhase phase) {
+        current_phase_ = sing_box_install_phase_name(phase);
+        last_published_ = std::chrono::steady_clock::time_point{};
+        publish_sing_box_install_progress(ctx_, current_phase_, true, {});
+    }
+
+    // Bytes for whichever phase is running. Rate-limited because curl calls
+    // this many times a second and every call would be an SSE frame to every
+    // open page: a progress display that floods the stream it travels on is
+    // not an improvement on no progress display.
+    void bytes(const std::uint64_t received,
+               const std::uint64_t total) noexcept {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_published_ < std::chrono::milliseconds(500)) return;
+        last_published_ = now;
+        publish_sing_box_install_progress(ctx_, current_phase_, true, {},
+                                          received, total);
     }
 
     void finish(const std::string& outcome) {
@@ -281,6 +307,8 @@ public:
 
 private:
     const ApiContext& ctx_;
+    std::string current_phase_;
+    std::chrono::steady_clock::time_point last_published_{};
     bool finished_{false};
 };
 
@@ -917,7 +945,12 @@ static void register_transports_handler_impl(
                 // could not run its own cleanup.
                 discard_sing_box_staging(paths);
                 const auto report = install_pinned_sing_box(
-                    production_sing_box_install_steps(paths),
+                    production_sing_box_install_steps(
+                        paths,
+                        [&progress](const std::uint64_t received,
+                                    const std::uint64_t total) {
+                            progress.bytes(received, total);
+                        }),
                     release_url,
                     KEEN_PBR3_SING_BOX_PINNED_VERSION,
                     policy.asset_architecture,
