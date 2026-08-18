@@ -163,6 +163,7 @@ export * from './runtimeOutboundStatus';
 export * from './singBoxInstallCapability';
 export * from './singBoxInstallCapabilityBlockersItem';
 export * from './singBoxInstallCapabilityOperation';
+export * from './singBoxInstallRequest';
 export * from './singBoxInstallResult';
 export * from './singBoxInstallResultInstallOutcome';
 export * from './singBoxInstallResultReleaseVerdict';

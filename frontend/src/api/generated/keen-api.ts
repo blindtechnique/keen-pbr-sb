@@ -55,6 +55,7 @@ import type {
   RuntimeInventoryResponse,
   RuntimeOutboundsResponse,
   SingBoxInstallCapability,
+  SingBoxInstallRequest,
   SingBoxInstallResult,
   SubscriptionApplyRequest,
   SubscriptionApplyResponse,
@@ -2788,7 +2789,9 @@ export function useGetSingBoxInstallCapability<TData = Awaited<ReturnType<typeof
 
 
 /**
- * Installs the one release this build pins, and only when the capability endpoint says it may. The archive is verified against the digest the release publishes before anything is unpacked, and the unpacked binary must report the pinned version before it replaces the installed one - so a failure at any step leaves the router exactly as it was. A release that publishes no checksums file is refused rather than installed unverified, which is where this path is deliberately stricter than the shell installer. Takes no body: there is one release to install.
+ * Installs the one release this build pins, and only when the capability endpoint says it may. The archive is verified against the digest the release publishes before anything is unpacked, and the unpacked binary must report the pinned version before it replaces the installed one - so a failure at any step leaves the router exactly as it was. A release that publishes no checksums file is refused rather than installed unverified, which is where this path is deliberately stricter than the shell installer.
+
+Running sing-box transports normally refuse the install, because the binary they are using would be swapped underneath them. An operator who has been told what will happen can consent to it with `stop_running_transports`, and then the daemon stops exactly those transports, installs, and starts exactly those again - including when the install fails.
 
  * @summary Install the pinned sing-box release
  */
@@ -2824,14 +2827,15 @@ export const getPostSingBoxInstallUrl = () => {
   return `/api/transports/sing-box/install`
 }
 
-export const postSingBoxInstall = async ( options?: RequestInit): Promise<postSingBoxInstallResponse> => {
+export const postSingBoxInstall = async (singBoxInstallRequest?: SingBoxInstallRequest, options?: RequestInit): Promise<postSingBoxInstallResponse> => {
 
   return apiFetch<postSingBoxInstallResponse>(getPostSingBoxInstallUrl(),
   {
     ...options,
-    method: 'POST'
-
-
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      singBoxInstallRequest,)
   }
 );}
 
@@ -2839,8 +2843,8 @@ export const postSingBoxInstall = async ( options?: RequestInit): Promise<postSi
 
 
 export const getPostSingBoxInstallMutationOptions = <TError = ErrorResponse,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSingBoxInstall>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
-): UseMutationOptions<Awaited<ReturnType<typeof postSingBoxInstall>>, TError,void, TContext> => {
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSingBoxInstall>>, TError,{data: SingBoxInstallRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postSingBoxInstall>>, TError,{data: SingBoxInstallRequest}, TContext> => {
 
 const mutationKey = ['postSingBoxInstall'];
 const {mutation: mutationOptions, request: requestOptions} = options ?
@@ -2852,10 +2856,10 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
 
 
-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postSingBoxInstall>>, void> = () => {
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postSingBoxInstall>>, {data: SingBoxInstallRequest}> = (props) => {
+          const {data} = props ?? {};
 
-
-          return  postSingBoxInstall(requestOptions)
+          return  postSingBoxInstall(data,requestOptions)
         }
 
 
@@ -2866,18 +2870,18 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
   return  { mutationFn, ...mutationOptions }}
 
     export type PostSingBoxInstallMutationResult = NonNullable<Awaited<ReturnType<typeof postSingBoxInstall>>>
-
+    export type PostSingBoxInstallMutationBody = SingBoxInstallRequest
     export type PostSingBoxInstallMutationError = ErrorResponse
 
     /**
  * @summary Install the pinned sing-box release
  */
 export const usePostSingBoxInstall = <TError = ErrorResponse,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSingBoxInstall>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSingBoxInstall>>, TError,{data: SingBoxInstallRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof postSingBoxInstall>>,
         TError,
-        void,
+        {data: SingBoxInstallRequest},
         TContext
       > => {
       return useMutation(getPostSingBoxInstallMutationOptions(options), queryClient);
@@ -3329,9 +3333,10 @@ export function useGetTransportConfigExport<TData = Awaited<ReturnType<typeof ge
 
 
 /**
- * Validates the URL, fetches the body with the subscription destination policy applied to every address actually connected to (redirects included), decodes it, and returns an import plan: deduplicated candidates with derived tags and named conflicts against the transports that already exist. Nothing is created and nothing is stored on disk. The raw share links never leave the daemon - they carry credentials - so the response holds a preview identifier the apply call references instead. A preview expires after ten minutes and after a daemon restart.
+ * Takes the subscription either as a URL to fetch or as the document itself, and returns an import plan.
+For a URL: validates it, fetches the body with the subscription destination policy applied to every address actually connected to (redirects included), decodes it, and returns an import plan: deduplicated candidates with derived tags and named conflicts against the transports that already exist. Nothing is created and nothing is stored on disk. The raw share links never leave the daemon - they carry credentials - so the response holds a preview identifier the apply call references instead. A preview expires after ten minutes and after a daemon restart.
 
- * @summary Fetch a sing-box subscription and plan its import
+ * @summary Plan the import of a sing-box subscription
  */
 export type postSubscriptionPreviewResponse200 = {
   data: SubscriptionPreviewResponse
@@ -3417,7 +3422,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type PostSubscriptionPreviewMutationError = ErrorResponse
 
     /**
- * @summary Fetch a sing-box subscription and plan its import
+ * @summary Plan the import of a sing-box subscription
  */
 export const usePostSubscriptionPreview = <TError = ErrorResponse,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSubscriptionPreview>>, TError,{data: SubscriptionPreviewRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}

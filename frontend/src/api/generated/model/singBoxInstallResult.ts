@@ -9,6 +9,12 @@ import type { SingBoxInstallResultInstallOutcome } from './singBoxInstallResultI
 import type { SingBoxInstallResultReleaseVerdict } from './singBoxInstallResultReleaseVerdict';
 
 export interface SingBoxInstallResult {
+  /** The transports this install stopped and started again. Present only when the operator consented to it. A transport that was already down is not here - it was not stopped, and it was not started.
+   */
+  stopped_transports?: string[];
+  /** Transports that were stopped for the install and did not start again. Reported because silence here would read as "everything is fine" while the operator's traffic has nowhere to go.
+   */
+  transports_left_down?: string[];
   /** What happened. `marker_not_written` is neither success nor failure: the binary is in place and correct, but the record that it belongs to this daemon is missing, so the next capability read will treat it as the operator's and refuse to touch it.
    */
   install_outcome: SingBoxInstallResultInstallOutcome;

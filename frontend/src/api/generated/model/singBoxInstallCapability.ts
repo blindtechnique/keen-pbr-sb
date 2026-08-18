@@ -26,6 +26,9 @@ export interface SingBoxInstallCapability {
   /** Every reason an install is not offered, not just the first. An operator who fixes the one reason they were shown, only to be handed the next, learns to distrust the report.
    */
   blockers: SingBoxInstallCapabilityBlockersItem[];
+  /** How many managed sing-box transports are running. Present so a client can tell the operator what consenting to `stop_running_transports` would actually interrupt - "two tunnels" is a decision they can make, "some transports" is not. Absent when the transport manager could not be asked, which is the `transport_state_unknown` blocker.
+   */
+  running_transports?: number;
   /** Whether the fetched archive's checksum is verified unconditionally. True: a release that publishes no checksums file is refused rather than installed unverified, which is where this path is deliberately stricter than the shell installer.
    */
   verified_archive_checksum: boolean;

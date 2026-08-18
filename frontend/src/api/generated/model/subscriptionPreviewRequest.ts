@@ -6,8 +6,15 @@
  * OpenAPI spec version: 3.0.0
  */
 
+/**
+ * Exactly one of `url` or `document`. A subscription an operator pastes as a link is fetched by the daemon; one they hand over as a file is already in front of them, so it is planned as given and never fetched.
+
+ */
 export interface SubscriptionPreviewRequest {
   /** The subscription URL. http/https only; credentials in the URL are refused before the host is even parsed, because a URL reaches the log, the API and frontend storage.
    */
-  url: string;
+  url?: string;
+  /** The subscription document itself, as the operator's file contained it. No fetch happens, so no destination policy applies - there is no destination. The same size bound as a fetched body still holds: an oversized document is refused whole rather than truncated, because a silently shortened import is worse than a refused one.
+   */
+  document?: string;
 }

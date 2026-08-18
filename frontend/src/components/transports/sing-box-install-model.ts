@@ -1,13 +1,12 @@
-// Every decision the sing-box install card makes, as pure functions.
+// Every decision the sing-box install control makes, as pure functions.
 //
 // They are here rather than inside the component because what matters about
-// this card is which of several honest-but-different things it says, and that
-// is worth testing without rendering anything.
+// this control is which of several honest-but-different things it says, and
+// that is worth testing without rendering anything.
 
 import { SingBoxInstallCapabilityBlockersItem } from "@/api/generated/model"
 import type {
   SingBoxInstallCapability,
-  SingBoxInstallCapabilityOperation,
   SingBoxInstallResult,
   SingBoxInstallResultInstallOutcome,
 } from "@/api/generated/model"
@@ -21,7 +20,8 @@ const PHASE_KEYS: Record<string, string> = {
   downloading_checksums: "transports.singBoxInstall.phaseDownloadingChecksums",
   verifying_archive: "transports.singBoxInstall.phaseVerifyingArchive",
   unpacking: "transports.singBoxInstall.phaseUnpacking",
-  checking_staged_version: "transports.singBoxInstall.phaseCheckingStagedVersion",
+  checking_staged_version:
+    "transports.singBoxInstall.phaseCheckingStagedVersion",
   installing: "transports.singBoxInstall.phaseInstalling",
   recording_marker: "transports.singBoxInstall.phaseRecordingMarker",
 }
@@ -30,27 +30,19 @@ export function singBoxInstallPhaseKey(phase: string): string | null {
   return PHASE_KEYS[phase] ?? null
 }
 
-export function singBoxInstallBlockerKey(
-  blocker: SingBoxInstallCapabilityBlockersItem
-): string {
+export function singBoxInstallBlockerKey(blocker: string): string {
   return `transports.singBoxInstall.blocker.${blocker}`
 }
 
-// Derived from the generated union rather than typed out again. A hand-written
-// copy would have been the fourth place this set is written, and the one with
-// nothing coupling it to the other three - a blocker added to the schema would
-// have been silently dropped here while every gate stayed green.
 const KNOWN_BLOCKERS: ReadonlySet<string> = new Set(
   Object.values(SingBoxInstallCapabilityBlockersItem)
 )
 
-// Blockers this build can name. A name it cannot is dropped rather than
-// rendered: it would otherwise reach t() as a key that resolves to nothing and
-// print itself at the operator.
-//
-// Applied to BOTH sources of blockers - the capability and the refusal -
-// because a daemon newer than this frontend can name a blocker in either one,
-// and a filter on only one path is the same defect as no filter.
+// A blocker name this build cannot translate reaches t() as a key that
+// resolves to nothing and prints itself at the operator. Applied to BOTH
+// sources of blockers - the capability and the refusal - because a daemon
+// newer than this frontend can name one in either, and a filter on one of two
+// paths is the same defect as no filter.
 export function singBoxInstallDisplayableBlockers(
   blockers: readonly unknown[]
 ): string[] {
@@ -61,9 +53,7 @@ export function singBoxInstallDisplayableBlockers(
 }
 
 // The install re-measures the router before doing anything, so its refusal is
-// newer than whatever the capability query last read - an operator can start a
-// tunnel between the two. These blockers are therefore the authoritative ones
-// and must be shown, not collapsed into the error message.
+// newer than whatever the capability query last read.
 export function singBoxInstallRefusedBlockers(details: unknown): string[] {
   if (typeof details !== "object" || details === null) return []
   const body = details as Record<string, unknown>
@@ -72,23 +62,110 @@ export function singBoxInstallRefusedBlockers(details: unknown): string[] {
   return singBoxInstallDisplayableBlockers(body.blockers)
 }
 
-export function singBoxInstallOperationKey(
-  operation: SingBoxInstallCapabilityOperation
-): string {
-  return `transports.singBoxInstall.operation.${operation}`
+// Whether the operator can agree this away. Mirrors
+// sing_box_install_awaits_transport_consent in the daemon, which is the
+// authority: this copy exists only because the decision has to be made before
+// the request is sent, and it is pinned against the generated blocker union so
+// a blocker added to the schema cannot silently become consentable here.
+export function singBoxInstallNeedsTransportConsent(
+  capability: SingBoxInstallCapability | undefined
+): boolean {
+  if (!capability || capability.available) return false
+  const blockers = capability.blockers
+  if (blockers.length === 0) return false
+  return blockers.every((blocker) => blocker === "transports_running")
 }
 
-export function singBoxInstallOutcomeKey(
-  outcome: SingBoxInstallResultInstallOutcome
-): string {
-  return `transports.singBoxInstall.outcome.${outcome}`
+export type SingBoxButtonAction = "install" | "update"
+
+export type SingBoxButtonState = {
+  readonly action: SingBoxButtonAction
+  readonly enabled: boolean
+  readonly labelKey: string
+  // Always present. A disabled control with no explanation reads as broken,
+  // and the reason it is disabled is the thing the operator most needs.
+  readonly tooltipKey: string
+  // Pressing this will stop the operator's tunnels, so they have to be asked
+  // first.
+  readonly needsConsent: boolean
+}
+
+// What the one control says and whether it can be pressed.
+//
+// There is no card and no menu entry: sing-box is not a feature an operator
+// manages, it is the program their transports run on, so the only thing they
+// ever need is one button that knows what it would do.
+export function singBoxInstallButton(
+  capability: SingBoxInstallCapability | undefined,
+  installing: boolean,
+  pending: boolean
+): SingBoxButtonState {
+  const installed = Boolean(capability?.installed_version)
+  const action: SingBoxButtonAction = installed ? "update" : "install"
+  const labelKey = installed
+    ? "transports.singBoxInstall.actionUpdate"
+    : "transports.singBoxInstall.actionInstall"
+
+  if (installing) {
+    return {
+      action,
+      enabled: false,
+      labelKey,
+      tooltipKey: "transports.singBoxInstall.tipRunning",
+      needsConsent: false,
+    }
+  }
+  if (pending || !capability) {
+    return {
+      action,
+      enabled: false,
+      labelKey,
+      tooltipKey: "transports.singBoxInstall.tipChecking",
+      needsConsent: false,
+    }
+  }
+
+  // Already on the release this build installs. The button stays visible and
+  // says why it does nothing, rather than disappearing - a control that
+  // vanishes leaves the operator wondering whether it ever existed.
+  if (capability.operation === "reinstall_same_version") {
+    return {
+      action: "update",
+      enabled: false,
+      labelKey,
+      tooltipKey: "transports.singBoxInstall.tipUpToDate",
+      needsConsent: false,
+    }
+  }
+
+  const needsConsent = singBoxInstallNeedsTransportConsent(capability)
+  if (!capability.available && !needsConsent) {
+    return {
+      action,
+      enabled: false,
+      labelKey,
+      tooltipKey: "transports.singBoxInstall.tipBlocked",
+      needsConsent: false,
+    }
+  }
+
+  return {
+    action,
+    enabled: true,
+    labelKey,
+    tooltipKey: needsConsent
+      ? "transports.singBoxInstall.tipWillStopTunnels"
+      : installed
+        ? "transports.singBoxInstall.tipUpdate"
+        : "transports.singBoxInstall.tipInstall",
+    needsConsent,
+  }
 }
 
 // `marker_not_written` is deliberately neither. The binary is in place and
-// correct, so calling it a failure would tell an operator to retry something
-// that already worked; calling it a success would hide that the next
-// capability read will refuse to touch the binary because the record saying it
-// is ours never got written.
+// correct, so calling it a failure tells an operator to retry something that
+// already worked; calling it a success hides that the next capability read
+// will refuse to touch the binary.
 export type ResultTone = "success" | "warning" | "failure"
 
 export function singBoxInstallResultTone(
@@ -99,18 +176,16 @@ export function singBoxInstallResultTone(
   return "failure"
 }
 
-// Why the release was refused, when the outcome alone does not say.
-//
-// Shown for both outcomes that carry a real judgement. `release_refused`
-// separates "no checksums file published" from "no such archive in the
-// release", and `checksum_mismatch` separates "the digest did not match" from
-// "the checksums file had no usable line for this archive" - the first is a
-// corrupt or substituted download, the second is a release published in a
-// shape this daemon cannot read, and an operator does different things about
-// them.
-//
-// Not shown for the rest: a verdict printed beside a download failure or a
-// failed rename would name a judgement that never happened.
+export function singBoxInstallOutcomeKey(
+  outcome: SingBoxInstallResultInstallOutcome
+): string {
+  return `transports.singBoxInstall.outcome.${outcome}`
+}
+
+// Why the release was refused, when the outcome alone does not say. Shown for
+// both outcomes that carry a real judgement and for no others: a verdict
+// printed beside a download failure would name a judgement that never
+// happened.
 export function singBoxInstallVerdictKey(
   result: SingBoxInstallResult
 ): string | null {
@@ -125,8 +200,7 @@ export function singBoxInstallVerdictKey(
 }
 
 // What the archive actually contained, shown only where it explains the
-// outcome. Everywhere else it is noise that invites the reading that the
-// install got further than it did.
+// outcome.
 export function singBoxInstallStagedVersion(
   result: SingBoxInstallResult
 ): string | null {
@@ -134,20 +208,10 @@ export function singBoxInstallStagedVersion(
   return result.staged_version ?? null
 }
 
-// What to call a failed install request.
-//
 // "The install did not start" is only true for the refusal that happens before
-// anything is attempted, and the daemon emits that body (reason
-// install_unavailable) exclusively from the capability re-check, before the
-// maintenance lease and before any work - so a refusal with blockers proves
-// nothing started.
-//
-// Everything else can have failed at any point, including after the binary was
-// already replaced: the daemon verifies it still holds the lease AFTER the
-// swap (handler_transports.cpp), so a lease lost during a minute-long install
-// surfaces here as an error even though the install succeeded. Telling an
-// operator it never started would leave them believing their transports still
-// run the old binary.
+// anything is attempted, and the daemon emits that body exclusively from the
+// capability re-check - before the lease and before any work. Everything else
+// can have failed at any point, including after the binary was replaced.
 export function singBoxInstallFailureTitleKey(
   refusedBlockerCount: number
 ): string {
@@ -156,15 +220,9 @@ export function singBoxInstallFailureTitleKey(
     : "transports.singBoxInstall.requestFailed"
 }
 
-// Whether to warn that the install may have gone through despite the error.
-//
 // Keyed off the daemon's own terminal frame rather than anything the page
-// tracked. `aborted` is published by the RAII reporter exactly when the request
-// died with the install already under way - which is the case this warning is
-// for. Every other ending names a real outcome and comes back in the response
-// body, not as an error.
-//
-// A refusal that named blockers never began, whatever the stream says.
+// tracked. `aborted` is published exactly when the request died with the
+// install already under way.
 export function singBoxInstallMayHaveApplied(
   refusedBlockerCount: number,
   lastOutcome: string | null
@@ -172,43 +230,12 @@ export function singBoxInstallMayHaveApplied(
   return refusedBlockerCount === 0 && lastOutcome === "aborted"
 }
 
-export type InstallButtonState = {
-  readonly enabled: boolean
-  // Why the button cannot be pressed, when it cannot. Rendered near the button
-  // rather than only in a list further up: a control disabled for a reason the
-  // operator has to go looking for reads as broken.
-  readonly disabledReasonKey: string | null
-}
-
-export function singBoxInstallButtonState(
-  capability: SingBoxInstallCapability | undefined,
-  running: boolean,
-  pending: boolean
-): InstallButtonState {
-  if (running) {
-    return { enabled: false, disabledReasonKey: "transports.singBoxInstall.running" }
-  }
-  if (pending) return { enabled: false, disabledReasonKey: null }
-  if (!capability) return { enabled: false, disabledReasonKey: null }
-  if (!capability.available) {
-    // The blockers are listed in full elsewhere in the card. Naming the first
-    // one here as well would repeat one reason and imply it is the only one.
-    return { enabled: false, disabledReasonKey: "transports.singBoxInstall.unavailable" }
-  }
-  return { enabled: true, disabledReasonKey: null }
-}
-
-// The promises item 7 asks for that this build does not keep. Rendered from
-// the capability rather than from a constant here, so a build that starts
-// keeping one stops advertising the gap without anybody editing this list.
-export function singBoxInstallUnmetPromiseKeys(
-  capability: SingBoxInstallCapability
-): string[] {
-  const unmet: string[] = []
-  if (!capability.verified_archive_checksum) {
-    unmet.push("transports.singBoxInstall.promiseChecksum")
-  }
-  if (!capability.signed_release) unmet.push("transports.singBoxInstall.promiseSignature")
-  if (!capability.exact_rollback) unmet.push("transports.singBoxInstall.promiseRollback")
-  return unmet
+// Transports that were stopped for the install and did not start again. The
+// operator has to be told by name: their traffic has nowhere to go, and only
+// they can put it back.
+export function singBoxInstallLeftDown(result: SingBoxInstallResult): string[] {
+  const left = (result as { transports_left_down?: unknown })
+    .transports_left_down
+  if (!Array.isArray(left)) return []
+  return left.filter((tag): tag is string => typeof tag === "string")
 }

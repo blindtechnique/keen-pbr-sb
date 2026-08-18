@@ -427,64 +427,58 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
     reason: "Operational transport state is a finite local union.",
   },
   {
-    file: "src/components/transports/sing-box-install-card.tsx",
+    file: "src/components/transports/sing-box-install-button.tsx",
+    argument: "state.labelKey",
+    keys: [
+      "transports.singBoxInstall.actionInstall",
+      "transports.singBoxInstall.actionUpdate",
+    ],
+    reason:
+      "singBoxInstallButton returns exactly these two labels, chosen by whether a version is installed.",
+  },
+  {
+    file: "src/components/transports/sing-box-install-button.tsx",
+    argument: "state.tooltipKey",
+    keys: ["transports.singBoxInstall.tip*"],
+    reason:
+      "singBoxInstallButton returns one of the tip* family for every state, including the disabled ones - a disabled control without a reason reads as broken.",
+  },
+  {
+    file: "src/components/transports/sing-box-install-button.tsx",
     argument: "singBoxInstallBlockerKey(*)",
     keys: ["transports.singBoxInstall.blocker.*"],
     reason:
-      "Blockers are the generated SingBoxInstallCapabilityBlockersItem union; the refusal body is narrowed to the same names before the call, asserted in sing-box-install-model.test.ts.",
+      "Blockers are narrowed to the generated union before the call, asserted in sing-box-install-model.test.ts.",
   },
   {
-    file: "src/components/transports/sing-box-install-card.tsx",
-    argument: "singBoxInstallOperationKey(*)",
-    keys: ["transports.singBoxInstall.operation.*"],
-    reason:
-      "operation is the generated SingBoxInstallCapabilityOperation union.",
-  },
-  {
-    file: "src/components/transports/sing-box-install-card.tsx",
+    file: "src/components/transports/sing-box-install-button.tsx",
     argument: "singBoxInstallOutcomeKey(*)",
     keys: ["transports.singBoxInstall.outcome.*"],
     reason:
-      "install_outcome is the generated SingBoxInstallResultInstallOutcome union, and every member is asserted to have a key in sing-box-install-model.test.ts.",
+      "install_outcome is the generated union and every member is asserted to have a key.",
   },
   {
-    file: "src/components/transports/sing-box-install-card.tsx",
-    argument: "verdictKey",
-    keys: ["transports.singBoxInstall.verdict.*"],
-    reason:
-      "release_verdict is the generated SingBoxInstallResultReleaseVerdict union; the helper returns null for the outcomes that carry no verdict.",
-  },
-  {
-    file: "src/components/transports/sing-box-install-card.tsx",
-    argument: "phaseKey",
-    keys: ["transports.singBoxInstall.phase*"],
-    reason:
-      "singBoxInstallPhaseKey resolves only within this family and returns null for a phase this build does not know, which renders the plain running text instead.",
-  },
-  {
-    file: "src/components/transports/sing-box-install-card.tsx",
-    argument: "button.disabledReasonKey",
-    keys: [
-      "transports.singBoxInstall.running",
-      "transports.singBoxInstall.unavailable",
-    ],
-    reason: "singBoxInstallButtonState returns only these two keys or null.",
-  },
-  {
-    file: "src/components/transports/sing-box-install-card.tsx",
-    argument: "failureTitleKey",
+    file: "src/components/transports/sing-box-install-button.tsx",
+    argument: "singBoxInstallFailureTitleKey(*)",
     keys: [
       "transports.singBoxInstall.requestRefused",
       "transports.singBoxInstall.requestFailed",
     ],
     reason:
-      "singBoxInstallFailureTitleKey returns exactly these two, chosen by whether the refusal named blockers - which the daemon emits only before anything is attempted.",
+      "Exactly these two, chosen by whether the refusal named blockers - which the daemon emits only before anything is attempted.",
   },
   {
-    file: "src/components/transports/sing-box-install-card.tsx",
-    argument: "key",
-    keys: ["transports.singBoxInstall.promise*"],
+    file: "src/components/transports/sing-box-install-button.tsx",
+    argument: "verdictKey",
+    keys: ["transports.singBoxInstall.verdict.*"],
     reason:
-      "singBoxInstallUnmetPromiseKeys returns only this family, one entry per capability flag this build does not keep.",
+      "release_verdict is the generated union; the helper returns null for the outcomes that carry no verdict.",
+  },
+  {
+    file: "src/components/transports/sing-box-install-button.tsx",
+    argument: "phaseKey",
+    keys: ["transports.singBoxInstall.phase*"],
+    reason:
+      "singBoxInstallPhaseKey resolves only within this family and returns null for a phase this build does not know.",
   },
 ] as const

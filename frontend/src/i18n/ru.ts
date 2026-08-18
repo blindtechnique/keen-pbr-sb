@@ -999,15 +999,27 @@ export const ruTranslation = {
     },
     setupWizard: "Мастер настройки",
     singBoxInstall: {
-      title: "Бинарь sing-box",
-      pinned: "Эта сборка ставит и проверяет версию {{version}}.",
-      installed: "Установлено: {{version}}",
-      measuring: "Проверяем, что этот роутер может поставить…",
-      action: "Установить sing-box",
-      running: "Установка уже идёт",
+      actionInstall: "Установить sing-box",
+      actionUpdate: "Обновить sing-box",
+      tipInstall:
+        "Скачает и установит sing-box, чтобы работали VPN и прокси-подключения.",
+      tipUpdate: "Поставит версию, с которой проверена эта сборка.",
+      tipUpToDate: "sing-box уже последней версии.",
+      tipRunning: "Установка уже идёт.",
+      tipChecking: "Проверяем, что нужно этому роутеру…",
+      tipBlocked: "Сейчас на этом роутере недоступно.",
+      tipWillStopTunnels:
+        "VPN и прокси-подключения ненадолго остановятся и запустятся снова.",
+      consentTitle: "Обновить sing-box?",
+      consentBody:
+        "VPN и прокси-подключения остановятся примерно на минуту, пока обновляется sing-box, и запустятся снова сами. Сейчас работает: {{count}}.",
+      consentConfirm: "Обновить и перезапустить",
+      setupTitle: "sing-box не установлен",
+      setupBody:
+        "Без него не работают VPN и прокси-подключения. Установка занимает около минуты.",
+      leftDown:
+        "Эти подключения не запустились обратно, их нужно запустить вручную: {{tags}}.",
       runningPlain: "Устанавливаем…",
-      unavailable: "На этом роутере недоступно",
-      blockedTitle: "Почему установка недоступна",
       requestRefused: "Установка не началась",
       requestFailed: "Запрос установки не удался",
       mayHaveApplied:
@@ -1021,12 +1033,6 @@ export const ruTranslation = {
       phaseCheckingStagedVersion: "Спрашиваем у распакованного бинаря версию…",
       phaseInstalling: "Ставим бинарь на место…",
       phaseRecordingMarker: "Записываем, что бинарь наш…",
-      promiseChecksum:
-        "Эта сборка не проверяет контрольную сумму архива.",
-      promiseSignature:
-        "Релиз не подписан — за него ручается только контрольная сумма.",
-      promiseRollback:
-        "Предыдущий бинарь не сохраняется, поэтому точный откат невозможен.",
       operation: {
         install: "sing-box ещё не установлен.",
         replace: "Установленный бинарь будет заменён.",

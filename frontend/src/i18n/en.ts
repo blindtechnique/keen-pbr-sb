@@ -994,15 +994,27 @@ export const enTranslation = {
     },
     setupWizard: "Setup wizard",
     singBoxInstall: {
-      title: "sing-box binary",
-      pinned: "This build installs and tests against {{version}}.",
-      installed: "Installed: {{version}}",
-      measuring: "Checking what this router can install…",
-      action: "Install sing-box",
-      running: "An install is already running",
+      actionInstall: "Install sing-box",
+      actionUpdate: "Update sing-box",
+      tipInstall:
+        "Downloads and installs sing-box so VPN and proxy connections can run.",
+      tipUpdate: "Installs the version this build was tested with.",
+      tipUpToDate: "sing-box is already up to date.",
+      tipRunning: "An install is already running.",
+      tipChecking: "Checking what this router needs…",
+      tipBlocked: "Not possible on this router right now.",
+      tipWillStopTunnels:
+        "Your VPN and proxy connections will stop for a moment and start again afterwards.",
+      consentTitle: "Update sing-box?",
+      consentBody:
+        "Your VPN and proxy connections will stop for about a minute while sing-box is updated, then start again on their own. Running now: {{count}}.",
+      consentConfirm: "Update and restart",
+      setupTitle: "sing-box is not installed",
+      setupBody:
+        "VPN and proxy connections need it. Installing takes about a minute.",
+      leftDown:
+        "These connections did not start again and need to be started by hand: {{tags}}.",
       runningPlain: "Installing…",
-      unavailable: "Not available on this router",
-      blockedTitle: "Why this router cannot install sing-box",
       requestRefused: "The install did not start",
       requestFailed: "The install request failed",
       mayHaveApplied:
@@ -1016,12 +1028,6 @@ export const enTranslation = {
       phaseCheckingStagedVersion: "Asking the unpacked binary its version…",
       phaseInstalling: "Putting the binary in place…",
       phaseRecordingMarker: "Recording the binary as ours…",
-      promiseChecksum:
-        "The archive checksum is not verified by this build.",
-      promiseSignature:
-        "The release is not signed, so nothing but the checksum vouches for it.",
-      promiseRollback:
-        "The previous binary is not kept, so a failure cannot be undone byte-exactly.",
       operation: {
         install: "sing-box is not installed yet.",
         replace: "This would replace the installed binary.",

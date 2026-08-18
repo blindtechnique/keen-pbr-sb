@@ -1,3 +1,4 @@
+import { SingBoxSetupOffer } from "@/components/transports/sing-box-setup-offer"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { CheckIcon, Link2Icon, WorkflowIcon } from "lucide-react"
 import { useMemo, useState } from "react"
@@ -281,6 +282,13 @@ export default function SetupWizardPage() {
               {t("pages.setupWizard.connection.description")}
             </p>
           </div>
+
+          {/* An operator who installed the service from the terminal may have
+              declined sing-box there. The wizard is where they find out, and
+              it is the wrong place to send them back to a shell - so the same
+              button is here, and it renders nothing to do when sing-box is
+              already current. */}
+          <SingBoxSetupOffer />
 
           {setupInventoryLoading ? (
             <p className="text-sm text-muted-foreground">
