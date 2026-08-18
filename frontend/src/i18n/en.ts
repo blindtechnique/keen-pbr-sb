@@ -1015,6 +1015,10 @@ export const enTranslation = {
       leftDown:
         "These connections did not start again and need to be started by hand: {{tags}}.",
       runningPlain: "Installing…",
+      stop: "Stop",
+      tipStop:
+        "Stops the install. Nothing on the router has changed yet.",
+      cancelRefused: "The install could not be stopped",
       received: "Downloaded {{megabytes}} MB…",
       requestRefused: "The install did not start",
       requestFailed: "The install request failed",

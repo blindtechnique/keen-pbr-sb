@@ -236,14 +236,21 @@ void publish_sing_box_install_progress(
     const bool active,
     const std::string& outcome,
     const std::uint64_t received = 0U,
-    const std::uint64_t total = 0U) noexcept {
+    const std::uint64_t total = 0U,
+    const bool cancellable = false) noexcept {
     if (ctx.status_stream == nullptr) return;
     try {
         nlohmann::json frame{
             {"phase", phase},
             {"active", active},
             {"pinned_version", KEEN_PBR3_SING_BOX_PINNED_VERSION},
-            {"outcome", outcome}};
+            {"outcome", outcome},
+            // Published rather than left for a client to derive from the phase
+            // name. The rule lives in the installer and the daemon already
+            // applies it; a second copy on the other side of the API is the
+            // contract-in-two-places defect, and the copy that drifts would be
+            // the one offering a Stop button after the swap has begun.
+            {"cancellable", cancellable}};
         // Only when there is something to say. A frame carrying zero bytes on
         // a phase that downloads nothing would invite a client to render a bar
         // stuck at nothing.
@@ -315,8 +322,10 @@ public:
             state.reversible = sing_box_install_phase_is_reversible(phase);
         }
         current_phase_ = sing_box_install_phase_name(phase);
+        cancellable_ = sing_box_install_phase_is_reversible(phase);
         last_published_ = std::chrono::steady_clock::time_point{};
-        publish_sing_box_install_progress(ctx_, current_phase_, true, {});
+        publish_sing_box_install_progress(ctx_, current_phase_, true, {}, 0U,
+                                          0U, cancellable_);
     }
 
     // Bytes for whichever phase is running. Rate-limited because curl calls
@@ -329,7 +338,7 @@ public:
         if (now - last_published_ < std::chrono::milliseconds(500)) return;
         last_published_ = now;
         publish_sing_box_install_progress(ctx_, current_phase_, true, {},
-                                          received, total);
+                                          received, total, cancellable_);
     }
 
     void finish(const std::string& outcome) {
@@ -340,6 +349,7 @@ public:
 private:
     const ApiContext& ctx_;
     std::string current_phase_;
+    bool cancellable_{false};
     std::chrono::steady_clock::time_point last_published_{};
     bool finished_{false};
 };

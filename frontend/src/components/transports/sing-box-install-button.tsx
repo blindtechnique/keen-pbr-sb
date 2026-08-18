@@ -1,4 +1,4 @@
-import { DownloadIcon, Loader2Icon } from "lucide-react"
+import { DownloadIcon, Loader2Icon, XIcon } from "lucide-react"
 import { useEffect, useState } from "react"
 import { useMutation } from "@tanstack/react-query"
 import { useTranslation } from "react-i18next"
@@ -7,6 +7,7 @@ import { toast } from "sonner"
 import type { ApiError } from "@/api/client"
 import {
   postSingBoxInstall,
+  postSingBoxInstallCancel,
   useGetSingBoxInstallCapability,
 } from "@/api/generated/keen-api"
 import type { SingBoxInstallResult } from "@/api/generated/model"
@@ -144,6 +145,22 @@ export function SingBoxInstallButton({
     else toast.error(message, { description })
   }
 
+  // Stopping is offered only while the daemon says stopping is still free.
+  // The rule is the daemon's - it publishes the answer with every frame - so
+  // this side never decides from a phase name it would have to keep in step.
+  const cancel = useMutation({
+    mutationFn: async () => {
+      await postSingBoxInstallCancel()
+    },
+    onError: (error: ApiError) => {
+      // Most likely "too late", which is a fact about their router rather than
+      // a failure of the click.
+      toast.info(t("transports.singBoxInstall.cancelRefused"), {
+        description: getApiErrorMessage(error),
+      })
+    },
+  })
+
   const state = singBoxInstallButton(capability, installing, install.isPending)
   const phaseKey = progress ? singBoxInstallPhaseKey(progress.phase) : null
 
@@ -215,6 +232,30 @@ export function SingBoxInstallButton({
         />
         <TooltipContent>{t(state.tooltipKey)}</TooltipContent>
       </Tooltip>
+
+      {installing && progress?.cancellable ? (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <span className="inline-flex">
+                <Button
+                  disabled={cancel.isPending}
+                  onClick={() => cancel.mutate()}
+                  size={size}
+                  type="button"
+                  variant="outline"
+                >
+                  <XIcon />
+                  {t("transports.singBoxInstall.stop")}
+                </Button>
+              </span>
+            }
+          />
+          <TooltipContent>
+            {t("transports.singBoxInstall.tipStop")}
+          </TooltipContent>
+        </Tooltip>
+      ) : null}
 
       <Dialog onOpenChange={setConfirming} open={confirming}>
         <DialogContent className="sm:max-w-md">

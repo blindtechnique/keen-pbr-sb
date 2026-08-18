@@ -175,6 +175,45 @@ describe("sing-box install status events", () => {
   // Read from the source rather than rendered, the same trade the bridge
   // guard above makes. The repo has no component-render setup at all, and
   // adding one is a bigger decision than this finding warrants.
+
+  it("takes the daemon's word for whether stopping is still free", () => {
+    // The rule lives in the installer and the daemon publishes the answer.
+    // Deriving it here from the phase name would be the same contract in two
+    // places, and the copy that drifted would offer a Stop button after the
+    // binary swap had begun.
+    applySingBoxInstallStatusEvent(
+      frame({
+        phase: "downloading_archive",
+        active: true,
+        outcome: "",
+        cancellable: true,
+      })
+    )
+    expect(getSingBoxInstallProgress()?.cancellable).toBe(true)
+
+    applySingBoxInstallStatusEvent(
+      frame({ phase: "installing", active: true, outcome: "" })
+    )
+    // Absent means not cancellable: a daemon too old to publish the field is
+    // one whose point of no return this build cannot know, and offering to
+    // stop an install nobody can stop is worse than not offering.
+    expect(getSingBoxInstallProgress()?.cancellable).toBe(false)
+  })
+
+  it("is what puts the Stop button on screen and what it calls", () => {
+    // The cancel endpoint shipped once with nothing calling it: written,
+    // exported, generated into the client, and unreachable from the browser.
+    // This is the guard against that happening again.
+    const button = readFileSync(
+      join(import.meta.dir, "..", "components", "transports",
+           "sing-box-install-button.tsx"),
+      "utf8"
+    )
+    // The whole condition, not just the flag: a guard that only looked for the
+    // field stayed green when the render condition was disabled around it.
+    expect(button).toContain("{installing && progress?.cancellable ? (")
+    expect(button).toContain("postSingBoxInstallCancel()")
+  })
   it("is what the install button reads its running state from", () => {
     const button = readFileSync(
       join(import.meta.dir, "..", "components", "transports",

@@ -28,6 +28,11 @@ export type SingBoxInstallProgress = {
   // chunked response has no size to report, and a client that divided by a
   // missing one would show a percentage nobody measured.
   totalBytes?: number
+  // Whether stopping now would leave the router as it was. The daemon decides
+  // this from its own phase list and publishes the answer, so this side never
+  // has to guess from a phase name - a guess that drifted would offer a Stop
+  // button after the binary swap had begun.
+  cancellable: boolean
 }
 
 export type SingBoxInstallState = {
@@ -128,6 +133,10 @@ function parse(serialized: string): SingBoxInstallProgress | null {
       ...(typeof data.total_bytes === "number"
         ? { totalBytes: data.total_bytes }
         : {}),
+      // Absent means not cancellable. A daemon too old to publish the field
+      // is one whose point of no return this build cannot know, and offering
+      // to stop an install nobody can stop is worse than not offering.
+      cancellable: data.cancellable === true,
       pinnedVersion:
         typeof data.pinned_version === "string" ? data.pinned_version : "",
       outcome: typeof data.outcome === "string" ? data.outcome : "",
