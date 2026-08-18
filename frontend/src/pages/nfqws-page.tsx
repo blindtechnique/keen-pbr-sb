@@ -711,11 +711,18 @@ export function NfqwsPage() {
                 <Tooltip>
                   <TooltipTrigger
                     render={
-                      <span className="inline-flex">
+                      <span className="flex sm:inline-flex">
                         {/* Обёртка нужна: выключенная кнопка не шлёт события
                             мыши, а подсказка на выключенной кнопке — ровно
-                            та, которая оператору нужнее всего. */}
+                            та, которая оператору нужнее всего.
+
+                            Но обёртка не должна менять размер кнопки. Ряд на
+                            узком экране — колонка, и её элементы растягиваются
+                            во всю ширину; `inline-flex` сжимался по
+                            содержимому, и эта кнопка одна выбивалась из строя
+                            по ширине. */}
                         <Button
+                          className="w-full sm:w-auto"
                           disabled={!upgradeButton.enabled}
                           onClick={() => setUpgradeOpen(true)}
                           variant="outline"

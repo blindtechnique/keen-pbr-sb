@@ -15,7 +15,7 @@ export const enTranslation = {
     stop: "Stop",
     restart: "Restart service",
     reload: "Reload configuration",
-    upgrade: "Upgrade package",
+    upgrade: "Update nfqws",
     upgradeUnavailableTitle: "In-panel upgrade is temporarily unavailable",
     upgradeUnavailableDescription:
       "The router will not update nfqws2 safely right now. Refresh the page; if the button stays dark, an unfinished package operation is waiting to be sorted out.",
