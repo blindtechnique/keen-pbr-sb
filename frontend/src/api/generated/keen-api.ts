@@ -25,6 +25,11 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  AuthCredentials,
+  AuthSettingsRequest,
+  AuthSettingsResponse,
+  AuthStatus,
+  AuthenticatedResponse,
   BackupDocument,
   BackupReadRequest,
   BackupRollbackAvailability,
@@ -40,6 +45,8 @@ import type {
   DependencyAnalysisRequest,
   DependencyAnalysisResponse,
   ErrorResponse,
+  GetAuthStatusParams,
+  GrantedResponse,
   HealthResponse,
   ListDeleteStageRequest,
   ListDeleteStageResponse,
@@ -3938,6 +3945,640 @@ export function useGetTransportConfigExport<TData = Awaited<ReturnType<typeof ge
 
 
 
+
+/**
+ * Answered for unauthenticated callers too - the panel has to learn that a password is required before it can ask for one.
+
+When authentication is disabled the API is reachable from loopback only, and the response says so rather than implying the router is open: `no_auth_scope` names the scope and `network_api_blocked` says whether this particular caller was outside it.
+
+Served with `Cache-Control: no-store`, because a cached "authenticated" would outlive the session it describes.
+
+ * @summary Whether this caller is authenticated, and how the panel authenticates
+ */
+export type getAuthStatusResponse200 = {
+  data: AuthStatus
+  status: 200
+}
+
+export type getAuthStatusResponseSuccess = (getAuthStatusResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getAuthStatusResponse = (getAuthStatusResponseSuccess)
+
+export const getGetAuthStatusUrl = (params?: GetAuthStatusParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : value.toString())
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/auth/status?${stringifiedParams}` : `/api/auth/status`
+}
+
+export const getAuthStatus = async (params?: GetAuthStatusParams, options?: RequestInit): Promise<getAuthStatusResponse> => {
+
+  return apiFetch<getAuthStatusResponse>(getGetAuthStatusUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetAuthStatusQueryKey = (params?: GetAuthStatusParams,) => {
+    return [
+    `/api/auth/status`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getGetAuthStatusQueryOptions = <TData = Awaited<ReturnType<typeof getAuthStatus>>, TError = unknown>(params?: GetAuthStatusParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getAuthStatus>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetAuthStatusQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getAuthStatus>>> = ({ signal }) => getAuthStatus(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getAuthStatus>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetAuthStatusQueryResult = NonNullable<Awaited<ReturnType<typeof getAuthStatus>>>
+export type GetAuthStatusQueryError = unknown
+
+
+export function useGetAuthStatus<TData = Awaited<ReturnType<typeof getAuthStatus>>, TError = unknown>(
+ params: undefined |  GetAuthStatusParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getAuthStatus>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getAuthStatus>>,
+          TError,
+          Awaited<ReturnType<typeof getAuthStatus>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetAuthStatus<TData = Awaited<ReturnType<typeof getAuthStatus>>, TError = unknown>(
+ params?: GetAuthStatusParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getAuthStatus>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getAuthStatus>>,
+          TError,
+          Awaited<ReturnType<typeof getAuthStatus>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetAuthStatus<TData = Awaited<ReturnType<typeof getAuthStatus>>, TError = unknown>(
+ params?: GetAuthStatusParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getAuthStatus>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Whether this caller is authenticated, and how the panel authenticates
+ */
+
+export function useGetAuthStatus<TData = Awaited<ReturnType<typeof getAuthStatus>>, TError = unknown>(
+ params?: GetAuthStatusParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getAuthStatus>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetAuthStatusQueryOptions(params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * The credential travels in the request body and nowhere else - never a query string, never a path - so it cannot be captured by anything that logs URLs. The response never echoes it.
+
+A 409 means the authentication settings changed between the form being rendered and this request arriving: the login is refused rather than evaluated against settings the caller did not see.
+
+ * @summary Open a session
+ */
+export type postAuthLoginResponse200 = {
+  data: AuthenticatedResponse
+  status: 200
+}
+
+export type postAuthLoginResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postAuthLoginResponse401 = {
+  data: ErrorResponse
+  status: 401
+}
+
+export type postAuthLoginResponse403 = {
+  data: ErrorResponse
+  status: 403
+}
+
+export type postAuthLoginResponse409 = {
+  data: ErrorResponse
+  status: 409
+}
+
+export type postAuthLoginResponse503 = {
+  data: ErrorResponse
+  status: 503
+}
+
+export type postAuthLoginResponseSuccess = (postAuthLoginResponse200) & {
+  headers: Headers;
+};
+export type postAuthLoginResponseError = (postAuthLoginResponse400 | postAuthLoginResponse401 | postAuthLoginResponse403 | postAuthLoginResponse409 | postAuthLoginResponse503) & {
+  headers: Headers;
+};
+
+export type postAuthLoginResponse = (postAuthLoginResponseSuccess | postAuthLoginResponseError)
+
+export const getPostAuthLoginUrl = () => {
+
+
+
+
+  return `/api/auth/login`
+}
+
+export const postAuthLogin = async (authCredentials: AuthCredentials, options?: RequestInit): Promise<postAuthLoginResponse> => {
+
+  return apiFetch<postAuthLoginResponse>(getPostAuthLoginUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      authCredentials,)
+  }
+);}
+
+
+
+
+export const getPostAuthLoginMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postAuthLogin>>, TError,{data: AuthCredentials}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postAuthLogin>>, TError,{data: AuthCredentials}, TContext> => {
+
+const mutationKey = ['postAuthLogin'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postAuthLogin>>, {data: AuthCredentials}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postAuthLogin(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostAuthLoginMutationResult = NonNullable<Awaited<ReturnType<typeof postAuthLogin>>>
+    export type PostAuthLoginMutationBody = AuthCredentials
+    export type PostAuthLoginMutationError = ErrorResponse
+
+    /**
+ * @summary Open a session
+ */
+export const usePostAuthLogin = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postAuthLogin>>, TError,{data: AuthCredentials}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postAuthLogin>>,
+        TError,
+        {data: AuthCredentials},
+        TContext
+      > => {
+      return useMutation(getPostAuthLoginMutationOptions(options), queryClient);
+    }
+
+/**
+ * Required by the operations that install software or change how the router is reached, on top of an existing session. Never reachable without one: the pre-routing guard runs first, so an unauthenticated caller cannot use this to probe credentials.
+
+ * @summary Re-prove the credential for a privileged operation
+ */
+export type postAuthStepUpResponse200 = {
+  data: GrantedResponse
+  status: 200
+}
+
+export type postAuthStepUpResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postAuthStepUpResponse401 = {
+  data: ErrorResponse
+  status: 401
+}
+
+export type postAuthStepUpResponse403 = {
+  data: ErrorResponse
+  status: 403
+}
+
+export type postAuthStepUpResponse409 = {
+  data: ErrorResponse
+  status: 409
+}
+
+export type postAuthStepUpResponseSuccess = (postAuthStepUpResponse200) & {
+  headers: Headers;
+};
+export type postAuthStepUpResponseError = (postAuthStepUpResponse400 | postAuthStepUpResponse401 | postAuthStepUpResponse403 | postAuthStepUpResponse409) & {
+  headers: Headers;
+};
+
+export type postAuthStepUpResponse = (postAuthStepUpResponseSuccess | postAuthStepUpResponseError)
+
+export const getPostAuthStepUpUrl = () => {
+
+
+
+
+  return `/api/auth/step-up`
+}
+
+export const postAuthStepUp = async (authCredentials: AuthCredentials, options?: RequestInit): Promise<postAuthStepUpResponse> => {
+
+  return apiFetch<postAuthStepUpResponse>(getPostAuthStepUpUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      authCredentials,)
+  }
+);}
+
+
+
+
+export const getPostAuthStepUpMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postAuthStepUp>>, TError,{data: AuthCredentials}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postAuthStepUp>>, TError,{data: AuthCredentials}, TContext> => {
+
+const mutationKey = ['postAuthStepUp'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postAuthStepUp>>, {data: AuthCredentials}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postAuthStepUp(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostAuthStepUpMutationResult = NonNullable<Awaited<ReturnType<typeof postAuthStepUp>>>
+    export type PostAuthStepUpMutationBody = AuthCredentials
+    export type PostAuthStepUpMutationError = ErrorResponse
+
+    /**
+ * @summary Re-prove the credential for a privileged operation
+ */
+export const usePostAuthStepUp = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postAuthStepUp>>, TError,{data: AuthCredentials}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postAuthStepUp>>,
+        TError,
+        {data: AuthCredentials},
+        TContext
+      > => {
+      return useMutation(getPostAuthStepUpMutationOptions(options), queryClient);
+    }
+
+/**
+ * Idempotent: a caller without a session gets the same answer as one whose session was just dropped, because "you are not logged in" is the outcome either way.
+
+ * @summary Close this session
+ */
+export type postAuthLogoutResponse200 = {
+  data: AuthenticatedResponse
+  status: 200
+}
+
+export type postAuthLogoutResponseSuccess = (postAuthLogoutResponse200) & {
+  headers: Headers;
+};
+;
+
+export type postAuthLogoutResponse = (postAuthLogoutResponseSuccess)
+
+export const getPostAuthLogoutUrl = () => {
+
+
+
+
+  return `/api/auth/logout`
+}
+
+export const postAuthLogout = async ( options?: RequestInit): Promise<postAuthLogoutResponse> => {
+
+  return apiFetch<postAuthLogoutResponse>(getPostAuthLogoutUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+export const getPostAuthLogoutMutationOptions = <TError = unknown,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postAuthLogout>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postAuthLogout>>, TError,void, TContext> => {
+
+const mutationKey = ['postAuthLogout'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postAuthLogout>>, void> = () => {
+
+
+          return  postAuthLogout(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostAuthLogoutMutationResult = NonNullable<Awaited<ReturnType<typeof postAuthLogout>>>
+
+    export type PostAuthLogoutMutationError = unknown
+
+    /**
+ * @summary Close this session
+ */
+export const usePostAuthLogout = <TError = unknown,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postAuthLogout>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postAuthLogout>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getPostAuthLogoutMutationOptions(options), queryClient);
+    }
+
+/**
+ * Chooses the provider and whether authentication is required at all. Changing this changes who can reach the router, so it is guarded twice: it needs a session, and it needs a step-up - see `/api/auth/settings/step-up-preflight`, which lets the panel find that out before it asks the operator for anything.
+
+The response reports the resulting state, and carries `warning` when the settings are live but their durability could not be confirmed - stated rather than hidden, because a setting that may not survive a reboot is a different promise from one that will.
+
+ * @summary Change how the panel authenticates
+ */
+export type postAuthSettingsResponse200 = {
+  data: AuthSettingsResponse
+  status: 200
+}
+
+export type postAuthSettingsResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postAuthSettingsResponse401 = {
+  data: ErrorResponse
+  status: 401
+}
+
+export type postAuthSettingsResponse403 = {
+  data: ErrorResponse
+  status: 403
+}
+
+export type postAuthSettingsResponse409 = {
+  data: ErrorResponse
+  status: 409
+}
+
+export type postAuthSettingsResponseSuccess = (postAuthSettingsResponse200) & {
+  headers: Headers;
+};
+export type postAuthSettingsResponseError = (postAuthSettingsResponse400 | postAuthSettingsResponse401 | postAuthSettingsResponse403 | postAuthSettingsResponse409) & {
+  headers: Headers;
+};
+
+export type postAuthSettingsResponse = (postAuthSettingsResponseSuccess | postAuthSettingsResponseError)
+
+export const getPostAuthSettingsUrl = () => {
+
+
+
+
+  return `/api/auth/settings`
+}
+
+export const postAuthSettings = async (authSettingsRequest: AuthSettingsRequest, options?: RequestInit): Promise<postAuthSettingsResponse> => {
+
+  return apiFetch<postAuthSettingsResponse>(getPostAuthSettingsUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      authSettingsRequest,)
+  }
+);}
+
+
+
+
+export const getPostAuthSettingsMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postAuthSettings>>, TError,{data: AuthSettingsRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postAuthSettings>>, TError,{data: AuthSettingsRequest}, TContext> => {
+
+const mutationKey = ['postAuthSettings'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postAuthSettings>>, {data: AuthSettingsRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postAuthSettings(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostAuthSettingsMutationResult = NonNullable<Awaited<ReturnType<typeof postAuthSettings>>>
+    export type PostAuthSettingsMutationBody = AuthSettingsRequest
+    export type PostAuthSettingsMutationError = ErrorResponse
+
+    /**
+ * @summary Change how the panel authenticates
+ */
+export const usePostAuthSettings = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postAuthSettings>>, TError,{data: AuthSettingsRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postAuthSettings>>,
+        TError,
+        {data: AuthSettingsRequest},
+        TContext
+      > => {
+      return useMutation(getPostAuthSettingsMutationOptions(options), queryClient);
+    }
+
+/**
+ * Answers the question before the operator is asked for a password, so the panel never collects a credential it turns out not to need.
+
+ * @summary Ask whether changing auth settings would need a step-up
+ */
+export type postAuthSettingsStepUpPreflightResponse200 = {
+  data: GrantedResponse
+  status: 200
+}
+
+export type postAuthSettingsStepUpPreflightResponse401 = {
+  data: ErrorResponse
+  status: 401
+}
+
+export type postAuthSettingsStepUpPreflightResponse403 = {
+  data: ErrorResponse
+  status: 403
+}
+
+export type postAuthSettingsStepUpPreflightResponseSuccess = (postAuthSettingsStepUpPreflightResponse200) & {
+  headers: Headers;
+};
+export type postAuthSettingsStepUpPreflightResponseError = (postAuthSettingsStepUpPreflightResponse401 | postAuthSettingsStepUpPreflightResponse403) & {
+  headers: Headers;
+};
+
+export type postAuthSettingsStepUpPreflightResponse = (postAuthSettingsStepUpPreflightResponseSuccess | postAuthSettingsStepUpPreflightResponseError)
+
+export const getPostAuthSettingsStepUpPreflightUrl = () => {
+
+
+
+
+  return `/api/auth/settings/step-up-preflight`
+}
+
+export const postAuthSettingsStepUpPreflight = async ( options?: RequestInit): Promise<postAuthSettingsStepUpPreflightResponse> => {
+
+  return apiFetch<postAuthSettingsStepUpPreflightResponse>(getPostAuthSettingsStepUpPreflightUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+export const getPostAuthSettingsStepUpPreflightMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postAuthSettingsStepUpPreflight>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postAuthSettingsStepUpPreflight>>, TError,void, TContext> => {
+
+const mutationKey = ['postAuthSettingsStepUpPreflight'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postAuthSettingsStepUpPreflight>>, void> = () => {
+
+
+          return  postAuthSettingsStepUpPreflight(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostAuthSettingsStepUpPreflightMutationResult = NonNullable<Awaited<ReturnType<typeof postAuthSettingsStepUpPreflight>>>
+
+    export type PostAuthSettingsStepUpPreflightMutationError = ErrorResponse
+
+    /**
+ * @summary Ask whether changing auth settings would need a step-up
+ */
+export const usePostAuthSettingsStepUpPreflight = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postAuthSettingsStepUpPreflight>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postAuthSettingsStepUpPreflight>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getPostAuthSettingsStepUpPreflightMutationOptions(options), queryClient);
+    }
 
 /**
  * Reads only what the request selects. An absent group is not selected - an empty body therefore backs up nothing rather than everything, which is the safe direction for a request whose caller may have forgotten a field.

@@ -982,6 +982,251 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/auth/status:
+    get:
+      summary: Whether this caller is authenticated, and how the panel authenticates
+      description: >
+        Answered for unauthenticated callers too - the panel has to learn that
+        a password is required before it can ask for one.
+
+
+        When authentication is disabled the API is reachable from loopback
+        only, and the response says so rather than implying the router is open:
+        `no_auth_scope` names the scope and `network_api_blocked` says whether
+        this particular caller was outside it.
+
+
+        Served with `Cache-Control: no-store`, because a cached "authenticated"
+        would outlive the session it describes.
+      operationId: getAuthStatus
+      parameters:
+        - in: query
+          name: credential_transport
+          required: false
+          schema:
+            type: string
+            enum: ["1"]
+          description: >
+            Ask whether this connection would be trusted to carry a credential,
+            without sending one.
+      responses:
+        "200":
+          description: Authentication state for this caller
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthStatus"
+
+  /api/auth/login:
+    post:
+      summary: Open a session
+      description: >
+        The credential travels in the request body and nowhere else - never a
+        query string, never a path - so it cannot be captured by anything that
+        logs URLs. The response never echoes it.
+
+
+        A 409 means the authentication settings changed between the form being
+        rendered and this request arriving: the login is refused rather than
+        evaluated against settings the caller did not see.
+      operationId: postAuthLogin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthCredentials"
+      responses:
+        "200":
+          description: >
+            A session cookie was set. The body says only that it worked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthenticatedResponse"
+        "400":
+          description: The body is not a valid login request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: The credential was not accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: >
+            This connection may not carry a credential
+            (`protected_secret_transport_unavailable`), or the provider is
+            misconfigured.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Authentication settings changed; retry the login
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: >
+            The session could not be created, or the session limit is reached.
+            Deliberately not an authentication failure: the credential may
+            have been perfectly good.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/auth/step-up:
+    post:
+      summary: Re-prove the credential for a privileged operation
+      description: >
+        Required by the operations that install software or change how the
+        router is reached, on top of an existing session. Never reachable
+        without one: the pre-routing guard runs first, so an unauthenticated
+        caller cannot use this to probe credentials.
+      operationId: postAuthStepUp
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthCredentials"
+      responses:
+        "200":
+          description: Step-up granted for a bounded window
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GrantedResponse"
+        "400":
+          description: The body is not a valid step-up request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: The credential was not accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: This connection may not carry a credential
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Authentication settings changed; retry the step-up
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/auth/logout:
+    post:
+      summary: Close this session
+      description: >
+        Idempotent: a caller without a session gets the same answer as one
+        whose session was just dropped, because "you are not logged in" is the
+        outcome either way.
+      operationId: postAuthLogout
+      responses:
+        "200":
+          description: The session is gone
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthenticatedResponse"
+
+  /api/auth/settings:
+    post:
+      summary: Change how the panel authenticates
+      description: >
+        Chooses the provider and whether authentication is required at all.
+        Changing this changes who can reach the router, so it is guarded twice:
+        it needs a session, and it needs a step-up - see
+        `/api/auth/settings/step-up-preflight`, which lets the panel find that
+        out before it asks the operator for anything.
+
+
+        The response reports the resulting state, and carries `warning` when
+        the settings are live but their durability could not be confirmed -
+        stated rather than hidden, because a setting that may not survive a
+        reboot is a different promise from one that will.
+      operationId: postAuthSettings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthSettingsRequest"
+      responses:
+        "200":
+          description: The resulting authentication state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSettingsResponse"
+        "400":
+          description: Unknown provider, or an unusable endpoint value
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: No session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: >
+            Step-up is required, or this connection may not carry the proof
+            these settings need.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: The settings changed underneath this request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/auth/settings/step-up-preflight:
+    post:
+      summary: Ask whether changing auth settings would need a step-up
+      description: >
+        Answers the question before the operator is asked for a password, so
+        the panel never collects a credential it turns out not to need.
+      operationId: postAuthSettingsStepUpPreflight
+      responses:
+        "200":
+          description: No further proof is required right now
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GrantedResponse"
+        "401":
+          description: No session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: A step-up is required first (`step_up_required`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/backup:
     post:
       summary: Read a backup of the selected groups
@@ -1673,6 +1918,126 @@ components:
         apply_started_ts:
           type: integer
           format: int64
+
+    AuthenticatedResponse:
+      type: object
+      required: [authenticated]
+      properties:
+        authenticated:
+          type: boolean
+
+    GrantedResponse:
+      type: object
+      required: [granted]
+      properties:
+        granted:
+          type: boolean
+
+    AuthCredentials:
+      type: object
+      required: [username, password]
+      description: >
+        Sent in the request body only. Never a query parameter and never part
+        of a path, so nothing that records URLs records the credential; no
+        response echoes it back.
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+          format: password
+
+    AuthStatus:
+      type: object
+      required: [enabled, provider, authenticated, trusted_local_connection]
+      properties:
+        enabled:
+          type: boolean
+          description: Authentication is required at all.
+        provider:
+          type: string
+          description: Which verifier decides, e.g. `local` or the router account.
+        authenticated:
+          type: boolean
+        trusted_local_connection:
+          type: boolean
+          description: >
+            This connection is trusted to carry a credential. False is the
+            safe answer and the default: the panel must not collect a password
+            over a path that cannot protect it.
+        trusted_local_connection_generation:
+          type: string
+          description: >
+            Present only while trusted. A string rather than a number so a
+            browser cannot truncate it into a different generation.
+        trusted_local_connection_valid_for_seconds:
+          type: integer
+          format: int64
+          description: >
+            Present only while trusted. Lets the browser expire the capability
+            itself when the next status refresh fails, instead of assuming it
+            still holds.
+        no_auth_scope:
+          type: string
+          description: >
+            Present only when authentication is disabled. Names the scope the
+            API is reachable from - `loopback_only` - so "no password" is
+            never read as "open to the network".
+        network_api_blocked:
+          type: boolean
+          description: >
+            Present only when authentication is disabled: whether this caller
+            is outside that scope.
+        error:
+          type: string
+          description: >
+            `auth_misconfigured` or `auth_endpoint_unavailable`. Reported on a
+            200 because the caller's own state is still described accurately;
+            the error says the verifier cannot be consulted.
+        keenetic_endpoint:
+          type: string
+          description: Present only for an authenticated router-account session.
+        keenetic_endpoint_mode:
+          type: string
+        keenetic_endpoint_source:
+          type: string
+          description: >
+            `ndms` when the firmware named the endpoint, `fallback` when this
+            build guessed - the difference matters when login fails.
+          enum: [ndms, fallback]
+
+    AuthSettingsRequest:
+      type: object
+      required: [provider]
+      properties:
+        provider:
+          type: string
+          description: Verifier to use. An unknown value is refused, not defaulted.
+        enabled:
+          type: boolean
+          default: true
+        username:
+          type: string
+        password:
+          type: string
+          format: password
+        keenetic_endpoint:
+          type: string
+          description: >
+            Where to reach the router account. Absent leaves the stored value
+            alone; present replaces it.
+
+    AuthSettingsResponse:
+      allOf:
+        - $ref: "#/components/schemas/AuthStatus"
+        - type: object
+          properties:
+            warning:
+              type: string
+              description: >
+                The settings are live but something about them could not be
+                confirmed - durability, most often. Multiple warnings are
+                joined with "; " rather than one replacing another.
 
     OkResponse:
       type: object

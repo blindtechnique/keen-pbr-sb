@@ -7,6 +7,12 @@
  */
 
 export * from './apiConfig';
+export * from './authCredentials';
+export * from './authenticatedResponse';
+export * from './authSettingsRequest';
+export * from './authSettingsResponse';
+export * from './authStatus';
+export * from './authStatusKeeneticEndpointSource';
 export * from './backupDocument';
 export * from './backupDocumentData';
 export * from './backupDocumentDataDns';
@@ -76,6 +82,9 @@ export * from './errorResponse';
 export * from './firewallChain';
 export * from './firewallRuleCheck';
 export * from './fwmarkConfig';
+export * from './getAuthStatusCredentialTransport';
+export * from './getAuthStatusParams';
+export * from './grantedResponse';
 export * from './healthResponse';
 export * from './healthResponseRuntimeState';
 export * from './healthResponseStatus';

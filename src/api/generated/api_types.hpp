@@ -95,6 +95,56 @@ namespace api {
         std::optional<std::string> listen;
     };
 
+    struct AuthCredentials {
+        std::string password;
+        std::string username;
+    };
+
+    struct AuthSettingsRequest {
+        std::optional<bool> enabled;
+        std::optional<std::string> keenetic_endpoint;
+        std::optional<std::string> password;
+        std::string provider;
+        std::optional<std::string> username;
+    };
+
+    enum class KeeneticEndpointSource : int { FALLBACK, NDMS };
+
+    struct AuthSettingsResponse {
+        bool authenticated = false;
+        bool enabled = false;
+        std::optional<std::string> error;
+        std::optional<std::string> keenetic_endpoint;
+        std::optional<std::string> keenetic_endpoint_mode;
+        std::optional<KeeneticEndpointSource> keenetic_endpoint_source;
+        std::optional<bool> network_api_blocked;
+        std::optional<std::string> no_auth_scope;
+        std::string provider;
+        bool trusted_local_connection = false;
+        std::optional<std::string> trusted_local_connection_generation;
+        std::optional<int64_t> trusted_local_connection_valid_for_seconds;
+        std::optional<std::string> warning;
+    };
+
+    struct AuthStatusClass {
+        bool authenticated = false;
+        bool enabled = false;
+        std::optional<std::string> error;
+        std::optional<std::string> keenetic_endpoint;
+        std::optional<std::string> keenetic_endpoint_mode;
+        std::optional<KeeneticEndpointSource> keenetic_endpoint_source;
+        std::optional<bool> network_api_blocked;
+        std::optional<std::string> no_auth_scope;
+        std::string provider;
+        bool trusted_local_connection = false;
+        std::optional<std::string> trusted_local_connection_generation;
+        std::optional<int64_t> trusted_local_connection_valid_for_seconds;
+    };
+
+    struct AuthenticatedResponse {
+        bool authenticated = false;
+    };
+
     struct Data {
         std::optional<std::map<std::string, nlohmann::json>> dns;
         std::optional<std::map<std::string, nlohmann::json>> general;
@@ -597,6 +647,10 @@ namespace api {
         std::optional<std::string> expected_fwmark;
         std::string set_name;
         CheckStatus status;
+    };
+
+    struct GrantedResponse {
+        bool granted = false;
     };
 
     enum class LifecycleOperationStageStatus : int { FAILED, PENDING, RUNNING, SKIPPED, SUCCEEDED };
@@ -1381,6 +1435,11 @@ namespace api {
 
     struct ApiTypes {
         std::optional<ApiConfig> api_config;
+        std::optional<AuthCredentials> auth_credentials;
+        std::optional<AuthenticatedResponse> authenticated_response;
+        std::optional<AuthSettingsRequest> auth_settings_request;
+        std::optional<AuthSettingsResponse> auth_settings_response;
+        std::optional<AuthStatusClass> auth_status;
         std::optional<BackupDocument> backup_document;
         std::optional<BackupGroupSelection> backup_group_selection;
         std::optional<BackupReadRequest> backup_read_request;
@@ -1433,6 +1492,7 @@ namespace api {
         std::optional<FirewallChain> firewall_chain;
         std::optional<FirewallRuleCheck> firewall_rule_check;
         std::optional<Fwmark> fwmark_config;
+        std::optional<GrantedResponse> granted_response;
         std::optional<HealthResponse> health_response;
         std::optional<InternalVpnServerElement> internal_vpn_server;
         std::optional<InternalVpnServiceElement> internal_vpn_service;
@@ -1552,6 +1612,21 @@ namespace keen_pbr3 {
 namespace api {
     void from_json(const json & j, ApiConfig & x);
     void to_json(json & j, const ApiConfig & x);
+
+    void from_json(const json & j, AuthCredentials & x);
+    void to_json(json & j, const AuthCredentials & x);
+
+    void from_json(const json & j, AuthSettingsRequest & x);
+    void to_json(json & j, const AuthSettingsRequest & x);
+
+    void from_json(const json & j, AuthSettingsResponse & x);
+    void to_json(json & j, const AuthSettingsResponse & x);
+
+    void from_json(const json & j, AuthStatusClass & x);
+    void to_json(json & j, const AuthStatusClass & x);
+
+    void from_json(const json & j, AuthenticatedResponse & x);
+    void to_json(json & j, const AuthenticatedResponse & x);
 
     void from_json(const json & j, Data & x);
     void to_json(json & j, const Data & x);
@@ -1729,6 +1804,9 @@ namespace api {
 
     void from_json(const json & j, FirewallRuleCheck & x);
     void to_json(json & j, const FirewallRuleCheck & x);
+
+    void from_json(const json & j, GrantedResponse & x);
+    void to_json(json & j, const GrantedResponse & x);
 
     void from_json(const json & j, LifecycleOperationStageElement & x);
     void to_json(json & j, const LifecycleOperationStageElement & x);
@@ -1966,6 +2044,9 @@ namespace api {
 
     void from_json(const json & j, ApiTypes & x);
     void to_json(json & j, const ApiTypes & x);
+
+    void from_json(const json & j, KeeneticEndpointSource & x);
+    void to_json(json & j, const KeeneticEndpointSource & x);
 
     void from_json(const json & j, Format & x);
     void to_json(json & j, const Format & x);
@@ -2231,6 +2312,107 @@ namespace api {
         j = json::object();
         j["enabled"] = x.enabled;
         j["listen"] = x.listen;
+    }
+
+    inline void from_json(const json & j, AuthCredentials& x) {
+        x.password = j.at("password").get<std::string>();
+        x.username = j.at("username").get<std::string>();
+    }
+
+    inline void to_json(json & j, const AuthCredentials & x) {
+        j = json::object();
+        j["password"] = x.password;
+        j["username"] = x.username;
+    }
+
+    inline void from_json(const json & j, AuthSettingsRequest& x) {
+        x.enabled = get_stack_optional<bool>(j, "enabled");
+        x.keenetic_endpoint = get_stack_optional<std::string>(j, "keenetic_endpoint");
+        x.password = get_stack_optional<std::string>(j, "password");
+        x.provider = j.at("provider").get<std::string>();
+        x.username = get_stack_optional<std::string>(j, "username");
+    }
+
+    inline void to_json(json & j, const AuthSettingsRequest & x) {
+        j = json::object();
+        j["enabled"] = x.enabled;
+        j["keenetic_endpoint"] = x.keenetic_endpoint;
+        j["password"] = x.password;
+        j["provider"] = x.provider;
+        j["username"] = x.username;
+    }
+
+    inline void from_json(const json & j, AuthSettingsResponse& x) {
+        x.authenticated = j.at("authenticated").get<bool>();
+        x.enabled = j.at("enabled").get<bool>();
+        x.error = get_stack_optional<std::string>(j, "error");
+        x.keenetic_endpoint = get_stack_optional<std::string>(j, "keenetic_endpoint");
+        x.keenetic_endpoint_mode = get_stack_optional<std::string>(j, "keenetic_endpoint_mode");
+        x.keenetic_endpoint_source = get_stack_optional<KeeneticEndpointSource>(j, "keenetic_endpoint_source");
+        x.network_api_blocked = get_stack_optional<bool>(j, "network_api_blocked");
+        x.no_auth_scope = get_stack_optional<std::string>(j, "no_auth_scope");
+        x.provider = j.at("provider").get<std::string>();
+        x.trusted_local_connection = j.at("trusted_local_connection").get<bool>();
+        x.trusted_local_connection_generation = get_stack_optional<std::string>(j, "trusted_local_connection_generation");
+        x.trusted_local_connection_valid_for_seconds = get_stack_optional<int64_t>(j, "trusted_local_connection_valid_for_seconds");
+        x.warning = get_stack_optional<std::string>(j, "warning");
+    }
+
+    inline void to_json(json & j, const AuthSettingsResponse & x) {
+        j = json::object();
+        j["authenticated"] = x.authenticated;
+        j["enabled"] = x.enabled;
+        j["error"] = x.error;
+        j["keenetic_endpoint"] = x.keenetic_endpoint;
+        j["keenetic_endpoint_mode"] = x.keenetic_endpoint_mode;
+        j["keenetic_endpoint_source"] = x.keenetic_endpoint_source;
+        j["network_api_blocked"] = x.network_api_blocked;
+        j["no_auth_scope"] = x.no_auth_scope;
+        j["provider"] = x.provider;
+        j["trusted_local_connection"] = x.trusted_local_connection;
+        j["trusted_local_connection_generation"] = x.trusted_local_connection_generation;
+        j["trusted_local_connection_valid_for_seconds"] = x.trusted_local_connection_valid_for_seconds;
+        j["warning"] = x.warning;
+    }
+
+    inline void from_json(const json & j, AuthStatusClass& x) {
+        x.authenticated = j.at("authenticated").get<bool>();
+        x.enabled = j.at("enabled").get<bool>();
+        x.error = get_stack_optional<std::string>(j, "error");
+        x.keenetic_endpoint = get_stack_optional<std::string>(j, "keenetic_endpoint");
+        x.keenetic_endpoint_mode = get_stack_optional<std::string>(j, "keenetic_endpoint_mode");
+        x.keenetic_endpoint_source = get_stack_optional<KeeneticEndpointSource>(j, "keenetic_endpoint_source");
+        x.network_api_blocked = get_stack_optional<bool>(j, "network_api_blocked");
+        x.no_auth_scope = get_stack_optional<std::string>(j, "no_auth_scope");
+        x.provider = j.at("provider").get<std::string>();
+        x.trusted_local_connection = j.at("trusted_local_connection").get<bool>();
+        x.trusted_local_connection_generation = get_stack_optional<std::string>(j, "trusted_local_connection_generation");
+        x.trusted_local_connection_valid_for_seconds = get_stack_optional<int64_t>(j, "trusted_local_connection_valid_for_seconds");
+    }
+
+    inline void to_json(json & j, const AuthStatusClass & x) {
+        j = json::object();
+        j["authenticated"] = x.authenticated;
+        j["enabled"] = x.enabled;
+        j["error"] = x.error;
+        j["keenetic_endpoint"] = x.keenetic_endpoint;
+        j["keenetic_endpoint_mode"] = x.keenetic_endpoint_mode;
+        j["keenetic_endpoint_source"] = x.keenetic_endpoint_source;
+        j["network_api_blocked"] = x.network_api_blocked;
+        j["no_auth_scope"] = x.no_auth_scope;
+        j["provider"] = x.provider;
+        j["trusted_local_connection"] = x.trusted_local_connection;
+        j["trusted_local_connection_generation"] = x.trusted_local_connection_generation;
+        j["trusted_local_connection_valid_for_seconds"] = x.trusted_local_connection_valid_for_seconds;
+    }
+
+    inline void from_json(const json & j, AuthenticatedResponse& x) {
+        x.authenticated = j.at("authenticated").get<bool>();
+    }
+
+    inline void to_json(json & j, const AuthenticatedResponse & x) {
+        j = json::object();
+        j["authenticated"] = x.authenticated;
     }
 
     inline void from_json(const json & j, Data& x) {
@@ -3218,6 +3400,15 @@ namespace api {
         j["expected_fwmark"] = x.expected_fwmark;
         j["set_name"] = x.set_name;
         j["status"] = x.status;
+    }
+
+    inline void from_json(const json & j, GrantedResponse& x) {
+        x.granted = j.at("granted").get<bool>();
+    }
+
+    inline void to_json(json & j, const GrantedResponse & x) {
+        j = json::object();
+        j["granted"] = x.granted;
     }
 
     inline void from_json(const json & j, LifecycleOperationStageElement& x) {
@@ -4600,6 +4791,11 @@ namespace api {
 
     inline void from_json(const json & j, ApiTypes& x) {
         x.api_config = get_stack_optional<ApiConfig>(j, "ApiConfig");
+        x.auth_credentials = get_stack_optional<AuthCredentials>(j, "AuthCredentials");
+        x.authenticated_response = get_stack_optional<AuthenticatedResponse>(j, "AuthenticatedResponse");
+        x.auth_settings_request = get_stack_optional<AuthSettingsRequest>(j, "AuthSettingsRequest");
+        x.auth_settings_response = get_stack_optional<AuthSettingsResponse>(j, "AuthSettingsResponse");
+        x.auth_status = get_stack_optional<AuthStatusClass>(j, "AuthStatus");
         x.backup_document = get_stack_optional<BackupDocument>(j, "BackupDocument");
         x.backup_group_selection = get_stack_optional<BackupGroupSelection>(j, "BackupGroupSelection");
         x.backup_read_request = get_stack_optional<BackupReadRequest>(j, "BackupReadRequest");
@@ -4652,6 +4848,7 @@ namespace api {
         x.firewall_chain = get_stack_optional<FirewallChain>(j, "FirewallChain");
         x.firewall_rule_check = get_stack_optional<FirewallRuleCheck>(j, "FirewallRuleCheck");
         x.fwmark_config = get_stack_optional<Fwmark>(j, "FwmarkConfig");
+        x.granted_response = get_stack_optional<GrantedResponse>(j, "GrantedResponse");
         x.health_response = get_stack_optional<HealthResponse>(j, "HealthResponse");
         x.internal_vpn_server = get_stack_optional<InternalVpnServerElement>(j, "InternalVpnServer");
         x.internal_vpn_service = get_stack_optional<InternalVpnServiceElement>(j, "InternalVpnService");
@@ -4768,6 +4965,11 @@ namespace api {
     inline void to_json(json & j, const ApiTypes & x) {
         j = json::object();
         j["ApiConfig"] = x.api_config;
+        j["AuthCredentials"] = x.auth_credentials;
+        j["AuthenticatedResponse"] = x.authenticated_response;
+        j["AuthSettingsRequest"] = x.auth_settings_request;
+        j["AuthSettingsResponse"] = x.auth_settings_response;
+        j["AuthStatus"] = x.auth_status;
         j["BackupDocument"] = x.backup_document;
         j["BackupGroupSelection"] = x.backup_group_selection;
         j["BackupReadRequest"] = x.backup_read_request;
@@ -4820,6 +5022,7 @@ namespace api {
         j["FirewallChain"] = x.firewall_chain;
         j["FirewallRuleCheck"] = x.firewall_rule_check;
         j["FwmarkConfig"] = x.fwmark_config;
+        j["GrantedResponse"] = x.granted_response;
         j["HealthResponse"] = x.health_response;
         j["InternalVpnServer"] = x.internal_vpn_server;
         j["InternalVpnService"] = x.internal_vpn_service;
@@ -4931,6 +5134,20 @@ namespace api {
         j["UpdateStartedResponse"] = x.update_started_response;
         j["ValidationError"] = x.validation_error;
         j["VlessRealitySpec"] = x.vless_reality_spec;
+    }
+
+    inline void from_json(const json & j, KeeneticEndpointSource & x) {
+        if (j == "fallback") x = KeeneticEndpointSource::FALLBACK;
+        else if (j == "ndms") x = KeeneticEndpointSource::NDMS;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"KeeneticEndpointSource\""); }
+    }
+
+    inline void to_json(json & j, const KeeneticEndpointSource & x) {
+        switch (x) {
+            case KeeneticEndpointSource::FALLBACK: j = "fallback"; break;
+            case KeeneticEndpointSource::NDMS: j = "ndms"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"KeeneticEndpointSource\": " + std::to_string(static_cast<int>(x)));
+        }
     }
 
     inline void from_json(const json & j, Format & x) {
