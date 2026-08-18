@@ -4,6 +4,8 @@ import { BellIcon, CheckCheckIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
 import { nfqwsUpdateQueryOptions } from "@/api/nfqws"
+import { useGetConfig } from "@/api/queries"
+import { selectListRefreshState } from "@/api/selectors"
 import { Button } from "@/components/ui/button"
 import { TOP_BAR_CONTROL_CLASS } from "@/components/layout/top-bar-control-styles"
 import {
@@ -76,6 +78,11 @@ export function NotificationsBell() {
   })
 
   const nfqwsUpdateQuery = useQuery(nfqwsUpdateQueryOptions())
+  // Тот же источник, что у страницы списков. Она молчала про списки, которые
+  // давно обновились, а колокольчик про них кричал — потому что читал журнал,
+  // а не состояние.
+  const configQuery = useGetConfig()
+  const listRefreshState = selectListRefreshState(configQuery.data)
 
   // Колокольчик смонтирован дважды всегда: десктопная и мобильная шапки
   // скрыты через CSS, а не размонтированы. Разбор двухсот строк лога
@@ -87,6 +94,7 @@ export function NotificationsBell() {
         logsQuery.data?.lines ?? [],
         updateQuery.data,
         nfqwsUpdateQuery.data,
+        listRefreshState,
         dismissedUntil,
         dismissedIds,
         t
@@ -95,6 +103,7 @@ export function NotificationsBell() {
       logsQuery.data,
       updateQuery.data,
       nfqwsUpdateQuery.data,
+      listRefreshState,
       dismissedUntil,
       dismissedIds,
       t,

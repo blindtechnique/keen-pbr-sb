@@ -1,3 +1,4 @@
+import type { ConfigStateResponseListRefreshState } from "@/api/generated/model"
 import type { NfqwsUpdateStatus } from "@/api/nfqws"
 
 export type SoftwareUpdateResponse = {
@@ -79,10 +80,59 @@ function isDiagnosticOnlyMessage(text: string): boolean {
   )
 }
 
+// Which lists a refresh-outcome warning is about, or null when the line is not
+// a refresh outcome at all.
+//
+// Deliberately narrow. "List 'x': could not persist refresh failure status"
+// also names a list, but its truth is not what last_error records - that
+// warning fires precisely when the daemon could not write last_error, so
+// clearing it against an empty state would hide the one failure that erased
+// its own evidence.
+export function listsInRefreshOutcome(text: string): string[] | null {
+  const single = text.match(/^List '([^']+)': failed to refresh /)
+  if (single) {
+    return [single[1]]
+  }
+  if (!text.startsWith("Lists refresh")) {
+    return null
+  }
+  const summary = text.match(/list\(s\): (.+)$/)
+  if (!summary) {
+    return null
+  }
+  const names = summary[1]
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean)
+  return names.length > 0 ? names : null
+}
+
+// A logged warning records a moment; a notification claims something is wrong
+// at this one. For list refresh the daemon publishes the current answer per
+// list, and the schema is explicit that last_error is "omitted after a
+// successful attempt" - so a warning about a list the daemon now reports as
+// healthy is history. This is the same source the Lists page already trusts,
+// which is why that page stayed silent while the bell kept accusing.
+export function refreshOutcomeIsResolved(
+  names: readonly string[],
+  state: ConfigStateResponseListRefreshState | undefined
+): boolean {
+  if (!state) {
+    return false
+  }
+  // A name the daemon no longer reports is not evidence of recovery: the map
+  // carries only URL-backed lists still present in the returned config.
+  return names.every((name) => {
+    const entry = state[name]
+    return entry !== undefined && !entry.last_error?.trim()
+  })
+}
+
 export function collectNotices(
   lines: string[],
   softwareUpdate: SoftwareUpdateResponse | undefined,
   nfqwsUpdate: NfqwsUpdateStatus | undefined,
+  listRefreshState: ConfigStateResponseListRefreshState | undefined,
   dismissedUntil: number,
   dismissedIds: ReadonlySet<string>,
   t: Translate
@@ -135,6 +185,15 @@ export function collectNotices(
     // historical details in the downloadable journal without showing them as
     // current, actionable notifications after an upgrade.
     if (isDiagnosticOnlyMessage(text)) {
+      continue
+    }
+    // Already fixed: the daemon's current per-list state outranks what the log
+    // remembers about a night when it was broken.
+    const refreshedLists = listsInRefreshOutcome(text)
+    if (
+      refreshedLists &&
+      refreshOutcomeIsResolved(refreshedLists, listRefreshState)
+    ) {
       continue
     }
     // The log keeps its history; dismissing only hides what was already read.

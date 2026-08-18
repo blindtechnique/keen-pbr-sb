@@ -375,7 +375,17 @@ RemoteListsRefreshResult ListService::download_remote_lists(const Config& config
 
                 throw_if_cancelled(control);
 
-                Logger::instance().warn(
+                // Info, not warn: this is one attempt inside a retry ladder,
+                // and the ladder exists precisely so that a dead route is not
+                // an outcome. When every detour fails, the per-list line below
+                // reports it once with the same cause; when a later detour
+                // succeeds, nothing failed that the operator must act on.
+                //
+                // The level is what reaches the notification bell, which turns
+                // every logged warning into a current incident. A refresh that
+                // succeeded through its backup route used to leave warnings
+                // behind, so a working router accused itself.
+                Logger::instance().info(
                     "List '{}': refresh through {} failed: {}",
                     name,
                     detour.value_or("the system default route"),

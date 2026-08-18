@@ -14,6 +14,7 @@ describe("notification collector", () => {
       ],
       undefined,
       undefined,
+      undefined,
       0,
       new Set(),
       t
@@ -31,6 +32,7 @@ describe("notification collector", () => {
         "2026-07-25 21:00:00.000 [I] Restoring vanished managed route (dst=default, table=153, iface=mooo_vless, gw=(none), metric=1, protocol=186)",
         "2026-07-25 21:00:01.000 [W] Managed route repair failed",
       ],
+      undefined,
       undefined,
       undefined,
       0,
@@ -55,6 +57,7 @@ describe("notification collector", () => {
       ],
       undefined,
       undefined,
+      undefined,
       0,
       new Set(),
       t
@@ -71,6 +74,7 @@ describe("notification collector", () => {
       [
         "2026-07-27 18:30:00.000 [E] Runtime iproute and firewall refresh failed: iptables-restore: line 41 failed (rule: -A malformed)",
       ],
+      undefined,
       undefined,
       undefined,
       0,
@@ -90,6 +94,7 @@ describe("notification collector", () => {
       ],
       undefined,
       undefined,
+      undefined,
       0,
       new Set(),
       t
@@ -107,6 +112,7 @@ describe("notification collector", () => {
         "2026-07-29 12:00:02.000 [W] List 'rules': SRS import is lossy: skipped 3 rule(s), including 1 inverted rule(s)",
         "2026-07-29 12:00:03.000 [W] List 'domains': SRS import is lossy: skipped 4 invalid domain value(s)",
       ],
+      undefined,
       undefined,
       undefined,
       0,
@@ -131,6 +137,7 @@ describe("notification collector", () => {
         latest: "v1.1.0",
         available: true,
       },
+      undefined,
       0,
       new Set(),
       t
@@ -156,6 +163,7 @@ describe("notification collector", () => {
         latest: "",
         available: false,
       },
+      undefined,
       0,
       new Set(),
       t
@@ -176,6 +184,7 @@ describe("notification collector", () => {
         latest: "v1.1.0",
         available: true,
       },
+      undefined,
       0,
       dismissed,
       t
@@ -190,6 +199,7 @@ describe("notification collector", () => {
         latest: "v1.2.0",
         available: true,
       },
+      undefined,
       0,
       dismissed,
       t
@@ -197,5 +207,86 @@ describe("notification collector", () => {
 
     expect(hidden).toEqual([])
     expect(newer[0]?.id).toBe("nfqws-update-v1.2.0")
+  })
+})
+
+describe("list refresh notices follow the daemon, not the journal", () => {
+  const failedNight = [
+    "2026-08-16 04:00:39.746 [W] List 'porn': failed to refresh https://example.invalid/porn.srs: Could not resolve host: example.invalid",
+    "2026-08-16 04:00:41.147 [W] Lists refresh (autoupdate): failed list(s): ads, porn",
+  ]
+
+  test("a list the daemon now reports as healthy stops accusing", () => {
+    const notices = collectNotices(
+      failedNight,
+      undefined,
+      undefined,
+      { ads: { last_updated: "2026-08-18T01:00:00Z" }, porn: {} },
+      0,
+      new Set(),
+      t
+    )
+
+    expect(notices).toHaveLength(0)
+  })
+
+  test("a list that is still broken keeps its notice", () => {
+    const notices = collectNotices(
+      failedNight,
+      undefined,
+      undefined,
+      { ads: {}, porn: { last_error: "Could not resolve host: example.invalid" } },
+      0,
+      new Set(),
+      t
+    )
+
+    expect(notices).toHaveLength(2)
+  })
+
+  test("one still-broken list keeps the summary that names it", () => {
+    const notices = collectNotices(
+      ["2026-08-16 04:00:41.147 [W] Lists refresh: failed to refresh list(s): ads, porn"],
+      undefined,
+      undefined,
+      { ads: {}, porn: { last_error: "boom" } },
+      0,
+      new Set(),
+      t
+    )
+
+    expect(notices).toHaveLength(1)
+  })
+
+  test("a list the daemon does not report is not assumed to have recovered", () => {
+    const notices = collectNotices(
+      ["2026-08-16 04:00:39.746 [W] List 'gone': failed to refresh https://example.invalid/x: boom"],
+      undefined,
+      undefined,
+      {},
+      0,
+      new Set(),
+      t
+    )
+
+    expect(notices).toHaveLength(1)
+  })
+
+  test("a failure that could not record itself is never cleared by an empty record", () => {
+    // This warning fires exactly when last_error could not be written, so an
+    // absent error is its symptom rather than evidence of recovery.
+    const notices = collectNotices(
+      [
+        "2026-08-16 04:00:39.746 [W] List 'ads': could not persist refresh failure status: disk full",
+      ],
+      undefined,
+      undefined,
+      { ads: {} },
+      0,
+      new Set(),
+      t
+    )
+
+    expect(notices).toHaveLength(1)
   })
 })

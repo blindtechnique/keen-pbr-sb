@@ -718,6 +718,76 @@ TEST_CASE("refresh_remote_lists retries network failures through ordered fallbac
     std::filesystem::remove_all(temp_dir);
 }
 
+namespace {
+
+// Captures what the refresh actually logged. The level matters beyond the
+// journal: the notification bell reads the log tail and renders every warning
+// as a current incident, so a warning emitted by a refresh that succeeded is
+// an error the operator is shown about a router that is working.
+class ListRefreshLogCapture {
+public:
+    ListRefreshLogCapture() : previous_level_(Logger::instance().level()) {
+        Logger::instance().set_level(LogLevel::info);
+        Logger::instance().set_sink(
+            [this](const std::string& line) { lines_.push_back(line); });
+    }
+
+    ~ListRefreshLogCapture() {
+        Logger::instance().clear_sink();
+        Logger::instance().set_level(previous_level_);
+    }
+
+    bool any_contains(const std::string& needle) const {
+        return std::any_of(lines_.begin(), lines_.end(),
+                           [&needle](const std::string& line) {
+                               return line.find(needle) != std::string::npos;
+                           });
+    }
+
+private:
+    LogLevel previous_level_;
+    std::vector<std::string> lines_;
+};
+
+}  // namespace
+
+TEST_CASE(
+    "a refresh that succeeds through a fallback detour warns about nothing") {
+    CurlGlobalGuard curl_guard;
+    HttpResponse response;
+    response.body = "example.com\n";
+    response.fail_first_requests = 1;
+    response.transient_status = 403;
+    response.transient_reason = "Forbidden";
+    TestHttpServer server({{"/fallback.txt", response}});
+
+    const auto temp_dir = make_temp_dir();
+    ListService service(temp_dir);
+    service.ensure_dir();
+
+    ListConfig remote;
+    remote.url = server.url("/fallback.txt");
+    remote.detour = "primary";
+    remote.fallback_detours = std::vector<std::string>{"backup"};
+    Config config;
+    config.lists = std::map<std::string, ListConfig>{{"remote", remote}};
+
+    ListRefreshLogCapture logs;
+    const auto result = service.refresh_remote_lists(
+        config, OutboundMarkMap{{"primary", 0}, {"backup", 0}});
+
+    REQUIRE(result.failed_lists.empty());
+    REQUIRE(result.changed_lists == std::vector<std::string>{"remote"});
+
+    // The dead primary detour is still recorded - the operator can see which
+    // route failed - but it is recorded as a step, not as an outcome.
+    CHECK(logs.any_contains("refresh through primary failed"));
+    CHECK_FALSE(logs.any_contains("[W]"));
+    CHECK_FALSE(logs.any_contains("[E]"));
+
+    std::filesystem::remove_all(temp_dir);
+}
+
 TEST_CASE("effective_list_refresh_detours preserves legacy per-list overrides") {
     Config legacy_config;
     ListConfig legacy_direct;
