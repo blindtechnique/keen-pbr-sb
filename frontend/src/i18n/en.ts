@@ -809,6 +809,21 @@ export const enTranslation = {
       show: "Show details",
       hide: "Hide details",
     },
+    exitCheck: {
+      action: "Check",
+      tip: "Sends a request through this connection and shows the address the outside world sees.",
+      tipNoOutbound:
+        "Nothing to check: this connection has no outbound in the routing configuration.",
+      requestFailed: "The check could not be run.",
+      changed:
+        "Working: the outside sees {{through}}, and without this connection it sees {{direct}}.",
+      same: "It answered, but the address did not change: {{direct}} either way. Traffic is going around this connection.",
+      noControl:
+        "Traffic left through this connection and the outside sees {{through}}. Nothing to compare against - the direct check did not answer.",
+      unattributed:
+        "Could not check: there is nothing to bind the request to, so the answer says nothing about this connection in particular.",
+      unreachable: "No answer through this connection.",
+    },
     loopProtection: {
       action: "Exclude server from tunnel",
       confirm:

@@ -23,6 +23,7 @@ HttpTransportRequest request_for(const std::string& url, std::chrono::seconds ti
     request.timeout_ms = static_cast<long>(timeout.count() * 1000);
     request.user_agent = user_agent;
     request.fwmark = options.fwmark;
+    request.bind_interface = options.bind_interface;
     request.max_redirects = 5;
     request.max_response_size = max_size;
     request.cancellation = options.cancellation;

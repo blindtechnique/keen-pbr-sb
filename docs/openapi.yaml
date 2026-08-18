@@ -982,6 +982,67 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/transports/exit-check:
+    post:
+      summary: Check what the world sees when traffic takes this outbound
+      description: >
+        Fetches an address echo twice: once pinned to the outbound's own
+        device, and once with no mark and no binding at all. The second is the
+        control - the answer this router gives without the transport - because
+        without it "the address changed" would be a comparison against nothing.
+
+
+        The verdict has three values rather than two, and the third is the
+        point. A mark alone only expresses a routing preference: when the
+        outbound's table holds no usable default the lookup falls through to
+        main and the request quietly succeeds over the provider. So an outbound
+        with no device to bind to returns `unattributed` - the answer describes
+        some route, but not provably this one - and that is neither a success
+        nor a failure. Reporting it as either is how a panel ends up showing
+        the provider's address as a tunnel's exit.
+
+
+        The echoed body is validated as an IP literal rather than trusted: a
+        captive portal answers 200 with a page, and printing that as "your
+        address" would dress a hijacked request as a measurement. Nothing is
+        changed on the router; this only measures.
+      operationId: postTransportExitCheck
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransportExitCheckRequest"
+      responses:
+        "200":
+          description: >
+            Both measurements and what they earn. A 200 says the check ran,
+            not that the transport works - read `verdict` for that.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransportExitCheckResponse"
+        "400":
+          description: The request body is not JSON or names no outbound
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: No outbound with this tag exists in the visible config
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: >
+            The outbound carries no routing mark, so no policy table selects
+            it and there is no route for a probe to take.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/subscriptions/preview:
     post:
       summary: Plan the import of a sing-box subscription
@@ -1477,6 +1538,64 @@ components:
         apply_started_ts:
           type: integer
           format: int64
+
+    TransportExitCheckRequest:
+      type: object
+      required: [outbound]
+      properties:
+        outbound:
+          type: string
+          description: Tag of the outbound to measure.
+
+    TransportExitCheckProbe:
+      type: object
+      required: [ok, attributed, address, latency_ms, error]
+      properties:
+        ok:
+          type: boolean
+          description: An address came back and parsed as one.
+        attributed:
+          type: boolean
+          description: >
+            The request was bound to a device belonging to this outbound. False
+            leaves the outcome unattributable - it describes some route, not
+            provably this one. Always false for the control probe, which is
+            deliberately bound to nothing.
+        address:
+          type: string
+          description: The address the echo reported, or empty.
+        latency_ms:
+          type: integer
+          format: int64
+        error:
+          type: string
+          description: Empty when the probe succeeded.
+
+    TransportExitCheckResponse:
+      type: object
+      required: [outbound, verdict, exit_address, through, direct]
+      properties:
+        outbound:
+          type: string
+        verdict:
+          type: string
+          description: >
+            What the pinned probe earned. `unattributed` is checked before
+            reachability on purpose: an unbindable probe proves nothing about
+            this transport, and calling it unreachable would send the operator
+            to debug a tunnel the check never touched.
+          enum: [working, unattributed, unreachable]
+        exit_address:
+          type: string
+          description: >
+            Whether the address seen through the outbound differs from the one
+            seen without it. `unknown` whenever either half is missing - a
+            failed control never becomes evidence of a change.
+          enum: [changed, same, unknown]
+        through:
+          $ref: "#/components/schemas/TransportExitCheckProbe"
+        direct:
+          $ref: "#/components/schemas/TransportExitCheckProbe"
 
     UpdateStartedResponse:
       type: object

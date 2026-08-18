@@ -80,6 +80,7 @@ import {
 } from "@/components/transports/transport-path"
 import { SingBoxProcessModeDialog } from "@/components/transports/sing-box-process-mode-dialog"
 import { SingBoxInstallButton } from "@/components/transports/sing-box-install-button"
+import { TransportExitCheckButton } from "@/components/transports/exit-check-button"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { DependencyList } from "@/components/shared/dependency-list"
 import type { Dependency } from "@/lib/dependencies"
@@ -1053,6 +1054,10 @@ export function TransportsPage({
 
     const details = expanded ? (
       <div className="space-y-3 text-sm">
+        {/* Проверка живёт в подробностях, а не в строке: её нажимают, когда
+            уже сомневаются в конкретном подключении, и она делает два сетевых
+            запроса — не то, что стоит предлагать в общем списке. */}
+        <TransportExitCheckButton outbound={boundOutbound?.tag} />
         <div className="grid min-w-0 gap-x-8 gap-y-1.5 sm:grid-cols-2">
           <TransportField
             label={t("transports.server")}

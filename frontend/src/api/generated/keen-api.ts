@@ -70,6 +70,8 @@ import type {
   TransportConfigApplyResponse,
   TransportConfigOperation,
   TransportConfigResponse,
+  TransportExitCheckRequest,
+  TransportExitCheckResponse,
   TransportSpec,
   TransportStatus,
   UpdateStartedResponse
@@ -3932,6 +3934,112 @@ export function useGetTransportConfigExport<TData = Awaited<ReturnType<typeof ge
 
 
 
+
+/**
+ * Fetches an address echo twice: once pinned to the outbound's own device, and once with no mark and no binding at all. The second is the control - the answer this router gives without the transport - because without it "the address changed" would be a comparison against nothing.
+
+The verdict has three values rather than two, and the third is the point. A mark alone only expresses a routing preference: when the outbound's table holds no usable default the lookup falls through to main and the request quietly succeeds over the provider. So an outbound with no device to bind to returns `unattributed` - the answer describes some route, but not provably this one - and that is neither a success nor a failure. Reporting it as either is how a panel ends up showing the provider's address as a tunnel's exit.
+
+The echoed body is validated as an IP literal rather than trusted: a captive portal answers 200 with a page, and printing that as "your address" would dress a hijacked request as a measurement. Nothing is changed on the router; this only measures.
+
+ * @summary Check what the world sees when traffic takes this outbound
+ */
+export type postTransportExitCheckResponse200 = {
+  data: TransportExitCheckResponse
+  status: 200
+}
+
+export type postTransportExitCheckResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postTransportExitCheckResponse404 = {
+  data: ErrorResponse
+  status: 404
+}
+
+export type postTransportExitCheckResponse409 = {
+  data: ErrorResponse
+  status: 409
+}
+
+export type postTransportExitCheckResponseSuccess = (postTransportExitCheckResponse200) & {
+  headers: Headers;
+};
+export type postTransportExitCheckResponseError = (postTransportExitCheckResponse400 | postTransportExitCheckResponse404 | postTransportExitCheckResponse409) & {
+  headers: Headers;
+};
+
+export type postTransportExitCheckResponse = (postTransportExitCheckResponseSuccess | postTransportExitCheckResponseError)
+
+export const getPostTransportExitCheckUrl = () => {
+
+
+
+
+  return `/api/transports/exit-check`
+}
+
+export const postTransportExitCheck = async (transportExitCheckRequest: TransportExitCheckRequest, options?: RequestInit): Promise<postTransportExitCheckResponse> => {
+
+  return apiFetch<postTransportExitCheckResponse>(getPostTransportExitCheckUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      transportExitCheckRequest,)
+  }
+);}
+
+
+
+
+export const getPostTransportExitCheckMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postTransportExitCheck>>, TError,{data: TransportExitCheckRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postTransportExitCheck>>, TError,{data: TransportExitCheckRequest}, TContext> => {
+
+const mutationKey = ['postTransportExitCheck'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postTransportExitCheck>>, {data: TransportExitCheckRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postTransportExitCheck(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostTransportExitCheckMutationResult = NonNullable<Awaited<ReturnType<typeof postTransportExitCheck>>>
+    export type PostTransportExitCheckMutationBody = TransportExitCheckRequest
+    export type PostTransportExitCheckMutationError = ErrorResponse
+
+    /**
+ * @summary Check what the world sees when traffic takes this outbound
+ */
+export const usePostTransportExitCheck = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postTransportExitCheck>>, TError,{data: TransportExitCheckRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postTransportExitCheck>>,
+        TError,
+        {data: TransportExitCheckRequest},
+        TContext
+      > => {
+      return useMutation(getPostTransportExitCheckMutationOptions(options), queryClient);
+    }
 
 /**
  * Takes the subscription either as a URL to fetch or as the document itself, and returns an import plan.

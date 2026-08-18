@@ -72,6 +72,7 @@ add_executable(keen-pbr-tests
   test_ndms_rci_restorable_snapshot.cpp
   test_dns_probe_server.cpp
   test_list_set_usage.cpp
+  test_exit_address_check.cpp
   test_list_service.cpp
   test_cache_manager_durability.cpp
   test_control_protocol.cpp
@@ -292,6 +293,7 @@ add_executable(keen-pbr-tests
   ../src/health/url_tester.cpp
   ../src/health/circuit_breaker.cpp
   ../src/health/interface_probe.cpp
+  ../src/health/exit_address_check.cpp
   ../src/health/routing_health_checker.cpp
   ../src/routing/firewall_state.cpp
   ../src/routing/urltest_manager.cpp
@@ -884,6 +886,8 @@ if(WITH_API)
     ../src/api/handler_dependency_analysis.cpp
     ../src/api/handler_transports.cpp
     ../src/api/handler_subscriptions.cpp
+    ../src/api/handler_transport_exit_check.cpp
+    ../src/health/exit_address_check.cpp
     ../src/api/transport_manager_endpoint.cpp
     ../src/api/handler_test_routing.cpp
     ../src/api/handler_dns_test.cpp

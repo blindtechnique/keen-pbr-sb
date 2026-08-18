@@ -444,6 +444,20 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
       "singBoxInstallButton returns one of the tip* family for every state, including the disabled ones - a disabled control without a reason reads as broken.",
   },
   {
+    file: "src/components/transports/exit-check-button.tsx",
+    argument: "tooltipKey",
+    keys: ["transports.exitCheck.tip", "transports.exitCheck.tipNoOutbound"],
+    reason:
+      "The tooltip explains the button in both states, including the disabled one - a transport with no outbound has nothing to measure, and a control that says only 'no' reads as broken.",
+  },
+  {
+    file: "src/components/transports/exit-check-button.tsx",
+    argument: "summary.titleKey",
+    keys: ["transports.exitCheck.*"],
+    reason:
+      "exitCheckSummary returns one of the exitCheck family for every outcome the daemon can report, including the two that are neither success nor failure - an unattributable answer and an unchanged address.",
+  },
+  {
     file: "src/pages/nfqws-page.tsx",
     argument: "upgradeButton.tooltipKey",
     keys: ["nfqws.upgradeTip.*"],

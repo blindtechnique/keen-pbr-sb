@@ -1269,6 +1269,30 @@ namespace api {
         std::string tag;
     };
 
+    struct TransportExitCheckProbe {
+        std::string address;
+        bool attributed = false;
+        std::string error;
+        int64_t latency_ms = 0;
+        bool ok = false;
+    };
+
+    struct TransportExitCheckRequest {
+        std::string outbound;
+    };
+
+    enum class ExitAddress : int { CHANGED, SAME, UNKNOWN };
+
+    enum class Verdict : int { UNATTRIBUTED, UNREACHABLE, WORKING };
+
+    struct TransportExitCheckResponse {
+        TransportExitCheckProbe direct;
+        ExitAddress exit_address;
+        std::string outbound;
+        TransportExitCheckProbe through;
+        Verdict verdict;
+    };
+
     enum class Confidence : int { AMBIGUOUS, DECLARED, DERIVED, UNKNOWN };
 
     enum class Framing : int { GRPC, HTTP, HTTP2, HTTP_UPGRADE, QUIC, RAW, UNKNOWN, WEBSOCKET, WIREGUARD };
@@ -1463,6 +1487,9 @@ namespace api {
         std::optional<TransportConfigApplyResponse> transport_config_apply_response;
         std::optional<TransportConfigOperation> transport_config_operation;
         std::optional<TransportConfigResponse> transport_config_response;
+        std::optional<TransportExitCheckProbe> transport_exit_check_probe;
+        std::optional<TransportExitCheckRequest> transport_exit_check_request;
+        std::optional<TransportExitCheckResponse> transport_exit_check_response;
         std::optional<LinkedOutbound> transport_linked_outbound_ensure;
         std::optional<TransportPath> transport_path;
         std::optional<Transport> transport_spec;
@@ -1855,6 +1882,15 @@ namespace api {
     void from_json(const json & j, TransportConfigResponse & x);
     void to_json(json & j, const TransportConfigResponse & x);
 
+    void from_json(const json & j, TransportExitCheckProbe & x);
+    void to_json(json & j, const TransportExitCheckProbe & x);
+
+    void from_json(const json & j, TransportExitCheckRequest & x);
+    void to_json(json & j, const TransportExitCheckRequest & x);
+
+    void from_json(const json & j, TransportExitCheckResponse & x);
+    void to_json(json & j, const TransportExitCheckResponse & x);
+
     void from_json(const json & j, TransportPath & x);
     void to_json(json & j, const TransportPath & x);
 
@@ -2094,6 +2130,12 @@ namespace api {
 
     void from_json(const json & j, TransportConfigResponseStatus & x);
     void to_json(json & j, const TransportConfigResponseStatus & x);
+
+    void from_json(const json & j, ExitAddress & x);
+    void to_json(json & j, const ExitAddress & x);
+
+    void from_json(const json & j, Verdict & x);
+    void to_json(json & j, const Verdict & x);
 
     void from_json(const json & j, Confidence & x);
     void to_json(json & j, const Confidence & x);
@@ -4293,6 +4335,49 @@ namespace api {
         j["tag"] = x.tag;
     }
 
+    inline void from_json(const json & j, TransportExitCheckProbe& x) {
+        x.address = j.at("address").get<std::string>();
+        x.attributed = j.at("attributed").get<bool>();
+        x.error = j.at("error").get<std::string>();
+        x.latency_ms = j.at("latency_ms").get<int64_t>();
+        x.ok = j.at("ok").get<bool>();
+    }
+
+    inline void to_json(json & j, const TransportExitCheckProbe & x) {
+        j = json::object();
+        j["address"] = x.address;
+        j["attributed"] = x.attributed;
+        j["error"] = x.error;
+        j["latency_ms"] = x.latency_ms;
+        j["ok"] = x.ok;
+    }
+
+    inline void from_json(const json & j, TransportExitCheckRequest& x) {
+        x.outbound = j.at("outbound").get<std::string>();
+    }
+
+    inline void to_json(json & j, const TransportExitCheckRequest & x) {
+        j = json::object();
+        j["outbound"] = x.outbound;
+    }
+
+    inline void from_json(const json & j, TransportExitCheckResponse& x) {
+        x.direct = j.at("direct").get<TransportExitCheckProbe>();
+        x.exit_address = j.at("exit_address").get<ExitAddress>();
+        x.outbound = j.at("outbound").get<std::string>();
+        x.through = j.at("through").get<TransportExitCheckProbe>();
+        x.verdict = j.at("verdict").get<Verdict>();
+    }
+
+    inline void to_json(json & j, const TransportExitCheckResponse & x) {
+        j = json::object();
+        j["direct"] = x.direct;
+        j["exit_address"] = x.exit_address;
+        j["outbound"] = x.outbound;
+        j["through"] = x.through;
+        j["verdict"] = x.verdict;
+    }
+
     inline void from_json(const json & j, TransportPath& x) {
         x.confidence = j.at("confidence").get<Confidence>();
         x.framing = j.at("framing").get<Framing>();
@@ -4511,6 +4596,9 @@ namespace api {
         x.transport_config_apply_response = get_stack_optional<TransportConfigApplyResponse>(j, "TransportConfigApplyResponse");
         x.transport_config_operation = get_stack_optional<TransportConfigOperation>(j, "TransportConfigOperation");
         x.transport_config_response = get_stack_optional<TransportConfigResponse>(j, "TransportConfigResponse");
+        x.transport_exit_check_probe = get_stack_optional<TransportExitCheckProbe>(j, "TransportExitCheckProbe");
+        x.transport_exit_check_request = get_stack_optional<TransportExitCheckRequest>(j, "TransportExitCheckRequest");
+        x.transport_exit_check_response = get_stack_optional<TransportExitCheckResponse>(j, "TransportExitCheckResponse");
         x.transport_linked_outbound_ensure = get_stack_optional<LinkedOutbound>(j, "TransportLinkedOutboundEnsure");
         x.transport_path = get_stack_optional<TransportPath>(j, "TransportPath");
         x.transport_spec = get_stack_optional<Transport>(j, "TransportSpec");
@@ -4671,6 +4759,9 @@ namespace api {
         j["TransportConfigApplyResponse"] = x.transport_config_apply_response;
         j["TransportConfigOperation"] = x.transport_config_operation;
         j["TransportConfigResponse"] = x.transport_config_response;
+        j["TransportExitCheckProbe"] = x.transport_exit_check_probe;
+        j["TransportExitCheckRequest"] = x.transport_exit_check_request;
+        j["TransportExitCheckResponse"] = x.transport_exit_check_response;
         j["TransportLinkedOutboundEnsure"] = x.transport_linked_outbound_ensure;
         j["TransportPath"] = x.transport_path;
         j["TransportSpec"] = x.transport_spec;
@@ -5984,6 +6075,38 @@ namespace api {
             case TransportConfigResponseStatus::DELETED: j = "deleted"; break;
             case TransportConfigResponseStatus::UPDATED: j = "updated"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"TransportConfigResponseStatus\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, ExitAddress & x) {
+        if (j == "changed") x = ExitAddress::CHANGED;
+        else if (j == "same") x = ExitAddress::SAME;
+        else if (j == "unknown") x = ExitAddress::UNKNOWN;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"ExitAddress\""); }
+    }
+
+    inline void to_json(json & j, const ExitAddress & x) {
+        switch (x) {
+            case ExitAddress::CHANGED: j = "changed"; break;
+            case ExitAddress::SAME: j = "same"; break;
+            case ExitAddress::UNKNOWN: j = "unknown"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"ExitAddress\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, Verdict & x) {
+        if (j == "unattributed") x = Verdict::UNATTRIBUTED;
+        else if (j == "unreachable") x = Verdict::UNREACHABLE;
+        else if (j == "working") x = Verdict::WORKING;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"Verdict\""); }
+    }
+
+    inline void to_json(json & j, const Verdict & x) {
+        switch (x) {
+            case Verdict::UNATTRIBUTED: j = "unattributed"; break;
+            case Verdict::UNREACHABLE: j = "unreachable"; break;
+            case Verdict::WORKING: j = "working"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"Verdict\": " + std::to_string(static_cast<int>(x)));
         }
     }
 

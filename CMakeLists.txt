@@ -493,6 +493,7 @@ set(SOURCES
   src/routing/routing_verifier.cpp
   src/health/circuit_breaker.cpp
   src/health/url_tester.cpp
+  src/health/exit_address_check.cpp
   src/health/interface_probe.cpp
   src/health/routing_health_checker.cpp
   src/health/runtime_outbound_state.cpp
@@ -581,6 +582,7 @@ if(WITH_API)
     src/api/handler_diagnostic_tasks.cpp
     src/api/handler_transports.cpp
     src/api/handler_subscriptions.cpp
+    src/api/handler_transport_exit_check.cpp
     src/api/transport_manager_endpoint.cpp
     src/api/handler_test_routing.cpp
     src/api/handler_dns_test.cpp

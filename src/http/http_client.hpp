@@ -20,6 +20,11 @@ void capture_response_header_line(std::string_view header,
                                   std::string& last_modified);
 }
 
+// Callers initialize this positionally (cache_manager.cpp, handler_catalog.cpp
+// and their tests), and C++17 offers no designated initializers to protect
+// them. New fields therefore go at the END, however much they belong beside an
+// older one: inserting in the middle silently re-aims every positional caller,
+// and here it would have handed a cancellation token to a device name.
 struct HttpRequestOptions {
     uint32_t fwmark{0};
     HttpCancellationToken cancellation;
@@ -33,6 +38,11 @@ struct HttpRequestOptions {
     // renders this must be able to say "so far" as well as a percentage,
     // because a chunked response has no denominator to offer.
     std::function<void(std::uint64_t received, std::uint64_t total)> progress;
+    // Bind the socket to this device (SO_BINDTODEVICE) when non-empty.
+    // See HttpTransportRequest::bind_interface: a mark alone is a routing
+    // preference, and an answer that arrived after falling through to main is
+    // not evidence about the outbound the mark named.
+    std::string bind_interface;
 };
 
 class HttpError : public std::runtime_error {
