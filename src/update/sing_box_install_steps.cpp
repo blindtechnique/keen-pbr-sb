@@ -197,6 +197,24 @@ SingBoxInstallSteps production_sing_box_install_steps(
         if (bytes.empty()) return false;
         if (!write_file(pending, bytes, 0755)) return false;
 
+        // Keep the binary being replaced, byte for byte, beside the target.
+        // Without it "undo this install" means "download the old release and
+        // hope", which is not an undo. Best effort on purpose: failing to
+        // preserve a copy is a reason to have no rollback, not a reason to
+        // refuse an install the operator asked for - and the capability
+        // reports which of those happened rather than assuming.
+        //
+        // Costs one binary's worth of space, about 12 MiB, in a directory on
+        // the same filesystem so the copy cannot land somewhere that fills up
+        // separately.
+        if (fs::exists(target, error) && !error) {
+            const auto previous =
+                directory / (target.filename().string() + ".previous");
+            fs::remove(previous, error);
+            fs::copy_file(target, previous,
+                          fs::copy_options::overwrite_existing, error);
+        }
+
         // The rename is the moment the router changes. Everything before it is
         // reversible by deleting a file nobody runs.
         fs::rename(pending, target, error);

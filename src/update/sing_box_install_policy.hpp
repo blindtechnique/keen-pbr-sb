@@ -73,6 +73,10 @@ struct SingBoxInstallObservation {
     // The marker this daemon writes when it installed that binary. Absent with
     // a present binary means the binary is the operator's.
     bool managed_marker_present{false};
+    // A byte-exact copy of the binary an earlier install replaced, kept beside
+    // the target. Its presence is what makes an undo possible, so the
+    // capability reports the measurement rather than a promise.
+    bool previous_binary_present{false};
     // `sing-box version` as reported by the installed binary, empty when it is
     // absent or would not run. An installed binary we cannot interrogate is
     // not the pinned one as far as this decision is concerned.
@@ -104,7 +108,10 @@ struct SingBoxInstallPolicy {
     // Nothing signs these archives. GitHub release assets carry no signature
     // this daemon can check, so "pinned+signed" is currently pinned-only.
     bool signed_release{false};
-    // No captured previous binary to restore byte-exactly after a failure.
+    // Whether a byte-exact copy of the replaced binary is on the router right
+    // now. Measured, not declared: the first install has nothing to preserve,
+    // and preserving it is best effort - a full filesystem is a reason to have
+    // no rollback, not a reason to refuse an install the operator asked for.
     bool exact_rollback{false};
 };
 

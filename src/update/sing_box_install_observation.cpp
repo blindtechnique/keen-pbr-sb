@@ -121,6 +121,12 @@ SingBoxInstallObservation observe_sing_box_install(
         probes.path_exists && probes.path_exists(binary_path);
     observation.managed_marker_present =
         probes.path_exists && probes.path_exists(managed_marker_path);
+    // The copy an earlier install kept of the binary it replaced. Same name
+    // and directory the install step writes it to, so the capability reports
+    // what is actually on the router rather than whether the code intends to
+    // keep one.
+    observation.previous_binary_present =
+        probes.path_exists && probes.path_exists(binary_path + ".previous");
 
     if (observation.binary_present && probes.read_binary_version) {
         observation.installed_version =

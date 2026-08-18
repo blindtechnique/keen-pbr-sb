@@ -231,4 +231,36 @@ TEST_CASE("a staged binary that answers briefly is read") {
     CHECK(steps.read_staged_version(brief.string()) == "1.13.14");
 }
 
+TEST_CASE("the install keeps the binary it replaced") {
+    // Without a byte-exact copy, "undo this install" means "download the old
+    // release and hope", which is not an undo. The capability reports the
+    // presence of this file, so keeping it is what earns the promise.
+    StepsTempDir directory;
+    const auto paths = paths_in(directory);
+    const auto steps = production_sing_box_install_steps(paths);
+
+    { std::ofstream(paths.binary_path) << "the-old-binary"; }
+    const auto staged = directory.path / "staged-sing-box";
+    { std::ofstream(staged) << "the-new-binary"; }
+
+    REQUIRE(steps.install_atomically(staged.string()));
+    CHECK(read_file(paths.binary_path) == "the-new-binary");
+    CHECK(read_file(paths.binary_path + ".previous") == "the-old-binary");
+}
+
+TEST_CASE("a first install has nothing to keep and still installs") {
+    // Preserving a previous binary is best effort: there being none is a
+    // reason to have no rollback, not a reason to refuse the install.
+    StepsTempDir directory;
+    const auto paths = paths_in(directory);
+    const auto steps = production_sing_box_install_steps(paths);
+
+    const auto staged = directory.path / "staged-sing-box";
+    { std::ofstream(staged) << "the-first-binary"; }
+
+    REQUIRE(steps.install_atomically(staged.string()));
+    CHECK(read_file(paths.binary_path) == "the-first-binary");
+    CHECK_FALSE(fs::exists(paths.binary_path + ".previous"));
+}
+
 } // namespace keen_pbr3
