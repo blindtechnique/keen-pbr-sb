@@ -7,7 +7,7 @@
  */
 
 /**
- * What happened. `marker_not_written` is neither success nor failure: the binary is in place and correct, but the record that it belongs to this daemon is missing, so the next capability read will treat it as the operator's and refuse to touch it.
+ * What happened. `cancelled` is the operator stopping it while stopping was still free; it is reported apart from `download_failed` because "the download failed" would send somebody looking for a network problem they caused on purpose. `marker_not_written` is neither success nor failure: the binary is in place and correct, but the record that it belongs to this daemon is missing, so the next capability read will treat it as the operator's and refuse to touch it.
 
  */
 export type SingBoxInstallResultInstallOutcome = typeof SingBoxInstallResultInstallOutcome[keyof typeof SingBoxInstallResultInstallOutcome];
@@ -22,4 +22,5 @@ export const SingBoxInstallResultInstallOutcome = {
   staged_version_mismatch: 'staged_version_mismatch',
   install_failed: 'install_failed',
   marker_not_written: 'marker_not_written',
+  cancelled: 'cancelled',
 } as const;

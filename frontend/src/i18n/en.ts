@@ -1051,6 +1051,7 @@ export const enTranslation = {
       },
       outcome: {
         installed: "sing-box installed.",
+        cancelled: "Install stopped. Nothing on the router changed.",
         release_refused: "The release was refused.",
         download_failed: "A download failed.",
         checksum_mismatch: "The archive did not match its published checksum.",

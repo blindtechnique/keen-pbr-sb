@@ -166,13 +166,17 @@ export function singBoxInstallButton(
 // correct, so calling it a failure tells an operator to retry something that
 // already worked; calling it a success hides that the next capability read
 // will refuse to touch the binary.
-export type ResultTone = "success" | "warning" | "failure"
+export type ResultTone = "success" | "warning" | "failure" | "info"
 
 export function singBoxInstallResultTone(
   outcome: SingBoxInstallResultInstallOutcome
 ): ResultTone {
   if (outcome === "installed") return "success"
   if (outcome === "marker_not_written") return "warning"
+  // The operator stopped it. Reporting their own decision back to them in red
+  // would teach them to distrust red, which is the one habit an install report
+  // must not build.
+  if (outcome === "cancelled") return "info"
   return "failure"
 }
 

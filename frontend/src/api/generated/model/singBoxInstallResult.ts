@@ -15,7 +15,7 @@ export interface SingBoxInstallResult {
   /** Transports that were stopped for the install and did not start again. Reported because silence here would read as "everything is fine" while the operator's traffic has nowhere to go.
    */
   transports_left_down?: string[];
-  /** What happened. `marker_not_written` is neither success nor failure: the binary is in place and correct, but the record that it belongs to this daemon is missing, so the next capability read will treat it as the operator's and refuse to touch it.
+  /** What happened. `cancelled` is the operator stopping it while stopping was still free; it is reported apart from `download_failed` because "the download failed" would send somebody looking for a network problem they caused on purpose. `marker_not_written` is neither success nor failure: the binary is in place and correct, but the record that it belongs to this daemon is missing, so the next capability read will treat it as the operator's and refuse to touch it.
    */
   install_outcome: SingBoxInstallResultInstallOutcome;
   /** The release that was installed, or would have been. */

@@ -114,6 +114,7 @@ export * from './periodicTaskMetricsResponse';
 export * from './periodicTaskOutcome';
 export * from './plainDnsTemplate';
 export * from './policyRuleCheck';
+export * from './postSingBoxInstallCancel200';
 export * from './ppeDeoffloadCapability';
 export * from './ppeDeoffloadCounter';
 export * from './ppeDeoffloadHealth';

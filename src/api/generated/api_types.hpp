@@ -1041,7 +1041,7 @@ namespace api {
         std::optional<bool> stop_running_transports;
     };
 
-    enum class InstallOutcome : int { ARCHIVE_UNUSABLE, CHECKSUM_MISMATCH, DOWNLOAD_FAILED, INSTALLED, INSTALL_FAILED, MARKER_NOT_WRITTEN, RELEASE_REFUSED, STAGED_VERSION_MISMATCH };
+    enum class InstallOutcome : int { ARCHIVE_UNUSABLE, CANCELLED, CHECKSUM_MISMATCH, DOWNLOAD_FAILED, INSTALLED, INSTALL_FAILED, MARKER_NOT_WRITTEN, RELEASE_REFUSED, STAGED_VERSION_MISMATCH };
 
     enum class ReleaseVerdict : int { ARCHIVE_MISSING, CHECKSUMS_MISSING, CHECKSUM_MISMATCH, CHECKSUM_UNUSABLE, READY, RELEASE_UNREADABLE };
 
@@ -5526,6 +5526,7 @@ namespace api {
 
     inline void from_json(const json & j, InstallOutcome & x) {
         if (j == "archive_unusable") x = InstallOutcome::ARCHIVE_UNUSABLE;
+        else if (j == "cancelled") x = InstallOutcome::CANCELLED;
         else if (j == "checksum_mismatch") x = InstallOutcome::CHECKSUM_MISMATCH;
         else if (j == "download_failed") x = InstallOutcome::DOWNLOAD_FAILED;
         else if (j == "installed") x = InstallOutcome::INSTALLED;
@@ -5539,6 +5540,7 @@ namespace api {
     inline void to_json(json & j, const InstallOutcome & x) {
         switch (x) {
             case InstallOutcome::ARCHIVE_UNUSABLE: j = "archive_unusable"; break;
+            case InstallOutcome::CANCELLED: j = "cancelled"; break;
             case InstallOutcome::CHECKSUM_MISMATCH: j = "checksum_mismatch"; break;
             case InstallOutcome::DOWNLOAD_FAILED: j = "download_failed"; break;
             case InstallOutcome::INSTALLED: j = "installed"; break;

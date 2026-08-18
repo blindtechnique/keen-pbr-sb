@@ -139,6 +139,7 @@ export function SingBoxInstallButton({
     }
     const description = lines.length > 0 ? lines.join(" ") : undefined
     if (tone === "success") toast.success(message, { description })
+    else if (tone === "info") toast.info(message, { description })
     else if (tone === "warning") toast.warning(message, { description })
     else toast.error(message, { description })
   }

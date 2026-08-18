@@ -1055,6 +1055,7 @@ export const ruTranslation = {
       },
       outcome: {
         installed: "sing-box установлен.",
+        cancelled: "Установка остановлена. На роутере ничего не изменилось.",
         release_refused: "Релиз отклонён.",
         download_failed: "Загрузка не удалась.",
         checksum_mismatch:

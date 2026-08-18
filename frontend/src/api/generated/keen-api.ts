@@ -45,6 +45,7 @@ import type {
   NdmsInterfaceInventoryResponse,
   NdmsVpnServerServiceInventoryResponse,
   PeriodicTaskMetricsResponse,
+  PostSingBoxInstallCancel200,
   RecommendedListSetupRequest,
   ReloadResponse,
   RoutingHealthErrorResponse,
@@ -2666,6 +2667,97 @@ export const usePostTransportAction = <TError = ErrorResponse,
         TContext
       > => {
       return useMutation(getPostTransportActionMutationOptions(options), queryClient);
+    }
+
+/**
+ * Aborts the transfers of a running install. Refused once the binary swap has begun: everything up to that point happens in memory or in a staging directory nobody runs from, so abandoning it changes nothing, while a half-written binary is worse than an unwanted new one. The refusal names which of the two reasons it is - `not_running` and `past_point_of_no_return` are different facts about the router.
+
+ * @summary Stop an install that has not changed anything yet
+ */
+export type postSingBoxInstallCancelResponse200 = {
+  data: PostSingBoxInstallCancel200
+  status: 200
+}
+
+export type postSingBoxInstallCancelResponse409 = {
+  data: ErrorResponse
+  status: 409
+}
+
+export type postSingBoxInstallCancelResponseSuccess = (postSingBoxInstallCancelResponse200) & {
+  headers: Headers;
+};
+export type postSingBoxInstallCancelResponseError = (postSingBoxInstallCancelResponse409) & {
+  headers: Headers;
+};
+
+export type postSingBoxInstallCancelResponse = (postSingBoxInstallCancelResponseSuccess | postSingBoxInstallCancelResponseError)
+
+export const getPostSingBoxInstallCancelUrl = () => {
+
+
+
+
+  return `/api/transports/sing-box/install/cancel`
+}
+
+export const postSingBoxInstallCancel = async ( options?: RequestInit): Promise<postSingBoxInstallCancelResponse> => {
+
+  return apiFetch<postSingBoxInstallCancelResponse>(getPostSingBoxInstallCancelUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+export const getPostSingBoxInstallCancelMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSingBoxInstallCancel>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postSingBoxInstallCancel>>, TError,void, TContext> => {
+
+const mutationKey = ['postSingBoxInstallCancel'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postSingBoxInstallCancel>>, void> = () => {
+
+
+          return  postSingBoxInstallCancel(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostSingBoxInstallCancelMutationResult = NonNullable<Awaited<ReturnType<typeof postSingBoxInstallCancel>>>
+
+    export type PostSingBoxInstallCancelMutationError = ErrorResponse
+
+    /**
+ * @summary Stop an install that has not changed anything yet
+ */
+export const usePostSingBoxInstallCancel = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSingBoxInstallCancel>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postSingBoxInstallCancel>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getPostSingBoxInstallCancelMutationOptions(options), queryClient);
     }
 
 /**
