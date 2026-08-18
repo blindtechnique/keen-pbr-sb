@@ -627,6 +627,12 @@ TEST_CASE("status stream replays the sing-box install to a page opened mid-run")
     CHECK(pop(reconnected).rfind("event: snapshot\n", 0) == 0);
     const auto replay = pop(reconnected);
     CHECK(replay.rfind("event: sing_box_install\n", 0) == 0);
+    // The envelope type, not only the SSE event name. The consumer rejects a
+    // frame whose `type` is not this exact string, so a replay carrying a
+    // different one would be dropped silently - and the page that dropped it
+    // is the one reloaded mid-install, left with an enabled Install button
+    // while the binary under every transport is being replaced.
+    CHECK(replay.find("\"type\":\"sing_box_install\"") != std::string::npos);
     CHECK(replay.find("\"phase\":\"downloading_archive\"") !=
           std::string::npos);
 }

@@ -26,6 +26,7 @@
 #include <httplib.h>
 #include <initializer_list>
 #include <iterator>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <set>
@@ -157,6 +158,8 @@ api::InstallOutcome api_install_outcome(
         return api::InstallOutcome::INSTALL_FAILED;
     case SingBoxInstallOutcome::marker_not_written:
         return api::InstallOutcome::MARKER_NOT_WRITTEN;
+    case SingBoxInstallOutcome::cancelled:
+        return api::InstallOutcome::CANCELLED;
     }
     return api::InstallOutcome::INSTALL_FAILED;
 }
@@ -254,6 +257,28 @@ void publish_sing_box_install_progress(
     }
 }
 
+// The one install this daemon may be running, and whether stopping it is still
+// free.
+//
+// Process-wide because the thing being protected is process-wide: there is one
+// binary at one path, and the maintenance lease already means there is at most
+// one install. This only has to answer "is there one, and may it still be
+// stopped".
+struct SingBoxInstallCancellation {
+    std::mutex mutex;
+    std::shared_ptr<std::atomic<bool>> token;
+    // Cleared the moment the install reaches a phase that changes the router.
+    // From then on a cancel is refused rather than queued: there is no version
+    // of stopping a binary swap that leaves an operator better off than
+    // letting it finish.
+    bool reversible{false};
+};
+
+SingBoxInstallCancellation& sing_box_install_cancellation() {
+    static SingBoxInstallCancellation state;
+    return state;
+}
+
 // Guarantees every page watching is told the install ended, on every path out.
 //
 // Without it a throw between the first phase and the last - a lost maintenance
@@ -282,6 +307,13 @@ public:
         const SingBoxInstallProgressReporter&) = delete;
 
     void phase(const SingBoxInstallPhase phase) {
+        {
+            // The point of no return is the phase list itself, so a phase
+            // added later cannot quietly become cancellable.
+            auto& state = sing_box_install_cancellation();
+            const std::lock_guard<std::mutex> lock(state.mutex);
+            state.reversible = sing_box_install_phase_is_reversible(phase);
+        }
         current_phase_ = sing_box_install_phase_name(phase);
         last_published_ = std::chrono::steady_clock::time_point{};
         publish_sing_box_install_progress(ctx_, current_phase_, true, {});
@@ -940,17 +972,37 @@ static void register_transports_handler_impl(
                 // install that never began.
                 SingBoxInstallProgressReporter progress(ctx);
 
+                // Registered for the whole attempt and cleared on every path
+                // out, so a cancel arriving after this install has finished
+                // cannot abort the next one.
+                auto cancellation = std::make_shared<std::atomic<bool>>(false);
+                struct CancellationScope {
+                    ~CancellationScope() {
+                        auto& state = sing_box_install_cancellation();
+                        const std::lock_guard<std::mutex> lock(state.mutex);
+                        state.token.reset();
+                        state.reversible = false;
+                    }
+                } cancellation_scope;
+                {
+                    auto& state = sing_box_install_cancellation();
+                    const std::lock_guard<std::mutex> lock(state.mutex);
+                    state.token = cancellation;
+                    state.reversible = true;
+                }
+
                 // Anything a previous run left behind is removed first: the
                 // run that failed to clean up is by definition the one that
                 // could not run its own cleanup.
                 discard_sing_box_staging(paths);
-                const auto report = install_pinned_sing_box(
+                auto report = install_pinned_sing_box(
                     production_sing_box_install_steps(
                         paths,
                         [&progress](const std::uint64_t received,
                                     const std::uint64_t total) {
                             progress.bytes(received, total);
-                        }),
+                        },
+                        cancellation),
                     release_url,
                     KEEN_PBR3_SING_BOX_PINNED_VERSION,
                     policy.asset_architecture,
@@ -958,12 +1010,20 @@ static void register_transports_handler_impl(
                         progress.phase(phase);
                     });
                 discard_sing_box_staging(paths);
-                // Before finish(), so a lost lease is reported as an abort
-                // rather than as the outcome of an install whose result this
-                // request is no longer entitled to publish.
+
+                // A fetch aborted on purpose reports the same failure as one
+                // that broke, and "the download failed" would send an operator
+                // looking for a network problem they caused themselves.
+                if (cancellation->load(std::memory_order_relaxed) &&
+                    report.outcome ==
+                        SingBoxInstallOutcome::download_failed) {
+                    report.outcome = SingBoxInstallOutcome::cancelled;
+                }
+
+                // The lease is still held, so a lost one is reported as an
+                // abort rather than as the outcome of an install whose result
+                // this request is no longer entitled to publish.
                 maintenance->verify_held();
-                progress.finish(
-                    sing_box_install_outcome_name(report.outcome));
 
                 api::SingBoxInstallResult result;
                 result.install_outcome =
@@ -989,6 +1049,17 @@ static void register_transports_handler_impl(
                         result.transports_left_down = pause->left_down();
                     }
                 }
+
+                // Released before anything says the install is over, and only
+                // now. Every other tab derives "an install is running" from
+                // the terminal frame, so announcing the end while the lease is
+                // still held re-enables their button into a window where the
+                // daemon answers 409 - to this install, to a config save, to
+                // an nfqws upgrade. Saying it late is a moment of stale
+                // "busy"; saying it early is a lie to every open page.
+                maintenance.reset();
+                progress.finish(
+                    sing_box_install_outcome_name(report.outcome));
                 if (report.outcome == SingBoxInstallOutcome::installed) {
                     Logger::instance().info(
                         "sing-box {} installed at {}",
@@ -1004,6 +1075,38 @@ static void register_transports_handler_impl(
                 throw_maintenance_api_error(error);
             }
         });
+
+    // Stops an install that has not changed anything yet.
+    //
+    // Refused once the binary swap has begun, and that is the whole design: a
+    // half-written binary is worse than an unwanted new one, and an operator
+    // who asks to stop wants their router working, not broken sooner. The
+    // refusal says which of the two reasons it is, because "nothing is
+    // running" and "too late" are different facts about their router.
+    server.post("/api/transports/sing-box/install/cancel",
+                []() -> std::string {
+        auto& state = sing_box_install_cancellation();
+        const std::lock_guard<std::mutex> lock(state.mutex);
+        if (!state.token) {
+            throw ApiError(
+                "no sing-box install is running",
+                409,
+                nlohmann::json{{"error", "no sing-box install is running"},
+                               {"reason", "not_running"}}
+                    .dump());
+        }
+        if (!state.reversible) {
+            throw ApiError(
+                "the sing-box install can no longer be stopped",
+                409,
+                nlohmann::json{
+                    {"error", "the sing-box install can no longer be stopped"},
+                    {"reason", "past_point_of_no_return"}}
+                    .dump());
+        }
+        state.token->store(true, std::memory_order_relaxed);
+        return nlohmann::json{{"cancelling", true}}.dump();
+    });
 
     // Read-only: measures the router and decides, changes nothing. The
     // measurement and the decision live in src/update, so both are testable

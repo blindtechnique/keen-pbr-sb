@@ -47,6 +47,11 @@ enum class SingBoxInstallOutcome : std::uint8_t {
     // capability read calls this binary the operator's and refuses to touch
     // it, which is a real state an operator has to be told about.
     marker_not_written,
+    // The operator stopped it while stopping was still free. Distinct from
+    // download_failed, which is what the fetch reports when it is aborted:
+    // "the download failed" would send somebody looking for a network problem
+    // they caused on purpose.
+    cancelled,
 };
 
 const char* sing_box_install_outcome_name(
@@ -73,6 +78,19 @@ enum class SingBoxInstallPhase : std::uint8_t {
 };
 
 const char* sing_box_install_phase_name(SingBoxInstallPhase phase) noexcept;
+
+// Whether stopping during this phase leaves the router as it was.
+//
+// Everything up to and including unpacking happens in memory or in a staging
+// directory nobody runs from, so abandoning it changes nothing. From
+// `installing` onwards the binary is being replaced, and there is no version
+// of "cancel" that improves on waiting: a half-written binary is worse than an
+// unwanted new one, and the operator who asked to stop wanted their router
+// working, not broken faster.
+//
+// `checking_staged_version` is reversible: it runs the staged copy, and the
+// installed binary is still the old one.
+bool sing_box_install_phase_is_reversible(SingBoxInstallPhase phase) noexcept;
 
 // Called immediately BEFORE the phase it names is attempted. Before, not
 // after, is the whole point: a phase that never advances is how a hung step

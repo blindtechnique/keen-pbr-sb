@@ -148,7 +148,13 @@ export function SingBoxInstallButton({
 
   // Nothing measured and nothing to say. Not an error message: an operator who
   // never asked about sing-box should not be told the capability read failed.
-  if (capabilityQuery.isError) return null
+  // isLoadingError, not isError: react-query reports an error on a background
+  // refetch while keeping the data it already has. Unmounting on that would
+  // make the whole control vanish mid-install - the refetch fires on window
+  // focus, and a daemon busy installing is exactly the one that answers 503.
+  // The operator would tab back to no button, no phase, and nothing saying an
+  // install is running.
+  if (capabilityQuery.isLoadingError) return null
 
   const start = () => {
     if (state.needsConsent) {

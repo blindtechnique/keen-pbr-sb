@@ -165,6 +165,38 @@ describe("sing-box install status events", () => {
     expect(handler).toContain("resetSingBoxInstallProgress()")
   })
 
+
+  // Nothing else in this suite would notice if the button stopped reading the
+  // stream. Deleting the subscription leaves every test green while, in
+  // production, a second tab - or this one after a reload - sees no install
+  // running and fires a second one at a daemon holding the lease: the exact
+  // case sing-box-install-events.ts says it exists to prevent.
+  //
+  // Read from the source rather than rendered, the same trade the bridge
+  // guard above makes. The repo has no component-render setup at all, and
+  // adding one is a bigger decision than this finding warrants.
+  it("is what the install button reads its running state from", () => {
+    const button = readFileSync(
+      join(import.meta.dir, "..", "components", "transports",
+           "sing-box-install-button.tsx"),
+      "utf8"
+    )
+    // Subscribed, and inside an effect so it is torn down with the component.
+    expect(button).toContain("useEffect(() => subscribeSingBoxInstall(")
+    // And the button's own idea of "installing" comes from that state, not
+    // from its mutation.
+    expect(button).toContain("progress?.active === true")
+    expect(button).toContain("singBoxInstallButton(capability, installing")
+    // The abort warning keys off the stream's last outcome, which is the only
+    // place that fact exists.
+    expect(button).toContain("singBoxInstallMayHaveApplied(refused.length, lastOutcome)")
+    // isLoadingError, not isError. A background refetch that fails leaves the
+    // data in place and flips isError, so unmounting on it would take the
+    // whole control off the screen mid-install - and the refetch fires on
+    // window focus, against a daemon busy installing.
+    expect(button).toContain("capabilityQuery.isLoadingError")
+    expect(button).not.toContain("capabilityQuery.isError")
+  })
   it("is routed to this module by the bridge", () => {
     const bridge = readFileSync(
       join(import.meta.dir, "status-event-bridge.tsx"),

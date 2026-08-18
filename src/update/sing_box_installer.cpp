@@ -21,8 +21,33 @@ const char* sing_box_install_outcome_name(
         return "install_failed";
     case SingBoxInstallOutcome::marker_not_written:
         return "marker_not_written";
+    case SingBoxInstallOutcome::cancelled:
+        return "cancelled";
     }
     return "release_refused";
+}
+
+bool sing_box_install_phase_is_reversible(
+    const SingBoxInstallPhase phase) noexcept {
+    switch (phase) {
+    case SingBoxInstallPhase::reading_release:
+    case SingBoxInstallPhase::downloading_archive:
+    case SingBoxInstallPhase::downloading_checksums:
+    case SingBoxInstallPhase::verifying_archive:
+    case SingBoxInstallPhase::unpacking:
+    case SingBoxInstallPhase::checking_staged_version:
+        // In memory, or in a staging directory nobody runs from.
+        return true;
+    case SingBoxInstallPhase::installing:
+    case SingBoxInstallPhase::recording_marker:
+        // The binary is being replaced. Stopping here cannot leave the router
+        // better off than finishing does.
+        return false;
+    }
+    // A phase this build does not know is treated as the moment of change.
+    // Guessing the other way would allow a cancel through a step that was
+    // added precisely because it changes something.
+    return false;
 }
 
 const char* sing_box_install_phase_name(

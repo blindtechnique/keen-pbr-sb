@@ -620,6 +620,34 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/transports/sing-box/install/cancel:
+    post:
+      summary: Stop an install that has not changed anything yet
+      description: >
+        Aborts the transfers of a running install. Refused once the binary swap
+        has begun: everything up to that point happens in memory or in a
+        staging directory nobody runs from, so abandoning it changes nothing,
+        while a half-written binary is worse than an unwanted new one. The
+        refusal names which of the two reasons it is - `not_running` and
+        `past_point_of_no_return` are different facts about the router.
+      operationId: postSingBoxInstallCancel
+      responses:
+        "200":
+          description: The install was asked to stop
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cancelling:
+                    type: boolean
+        "409":
+          description: Nothing to stop, or too late to stop it
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/transports/sing-box/capability:
     get:
       summary: What this daemon can do about installing sing-box
@@ -1909,8 +1937,13 @@ components:
             - staged_version_mismatch
             - install_failed
             - marker_not_written
+            - cancelled
           description: >
-            What happened. `marker_not_written` is neither success nor
+            What happened. `cancelled` is the operator stopping it while
+            stopping was still free; it is reported apart from
+            `download_failed` because "the download failed" would send
+            somebody looking for a network problem they caused on purpose.
+            `marker_not_written` is neither success nor
             failure: the binary is in place and correct, but the record that
             it belongs to this daemon is missing, so the next capability read
             will treat it as the operator's and refuse to touch it.

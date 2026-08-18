@@ -2,6 +2,8 @@
 
 #include "sing_box_installer.hpp"
 
+#include "../http/http_transport.hpp"
+
 #include <string>
 
 namespace keen_pbr3 {
@@ -38,7 +40,11 @@ using SingBoxDownloadProgress =
 
 SingBoxInstallSteps production_sing_box_install_steps(
     const SingBoxInstallPaths& paths,
-    SingBoxDownloadProgress download_progress = {});
+    SingBoxDownloadProgress download_progress = {},
+    // Aborts the transfers. Only the fetches take it, and deliberately: a
+    // cancel is only ever honoured while nothing on the router has changed,
+    // and by the time anything has, there is no transfer left to abort.
+    HttpCancellationToken cancellation = {});
 
 // Removes anything a previous run left behind in the staging directory. Called
 // before staging rather than only after it, because the process that failed to
