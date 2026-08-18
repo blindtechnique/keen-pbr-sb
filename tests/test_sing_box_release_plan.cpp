@@ -163,4 +163,76 @@ TEST_CASE("every verdict has a name") {
     }
 }
 
+TEST_CASE("the asset digest verifies a release that publishes no checksums") {
+    // Measured 17.08 on the pinned release: sing-box publishes 154 assets and
+    // no checksums file at all. Refusing on that alone would refuse every
+    // install of the version this build pins - correct and useless. GitHub
+    // publishes a per-asset digest in the same document, which is what this
+    // uses.
+    const auto release = nlohmann::json{
+        {"assets",
+         nlohmann::json::array(
+             {{{"browser_download_url",
+                "https://dl.example/sing-box-1.13.14-linux-arm64.tar.gz"},
+               {"digest",
+                "sha256:4742df6a4314e8ecc41736849fca6d73b8f9e91b6e8b06ee794"
+                "ff17ba180579e"}}})}}
+                              .dump();
+    const auto plan = plan_sing_box_release(release, "1.13.14", "arm64");
+
+    CHECK(plan.verdict == SingBoxReleaseVerdict::ready);
+    CHECK(plan.checksums_url.empty());
+    CHECK(plan.asset_digest ==
+          "4742df6a4314e8ecc41736849fca6d73b8f9e91b6e8b06ee794ff17ba180579e");
+}
+
+TEST_CASE("a digest of another algorithm is not read as SHA-256") {
+    // Comparing a SHA-256 against something else would report a mismatch and
+    // call a healthy download corrupt.
+    const auto release = nlohmann::json{
+        {"assets",
+         nlohmann::json::array(
+             {{{"browser_download_url",
+                "https://dl.example/sing-box-1.13.14-linux-arm64.tar.gz"},
+               {"digest", "sha512:" + std::string(128U, 'a')}}})}}
+                              .dump();
+    const auto plan = plan_sing_box_release(release, "1.13.14", "arm64");
+
+    CHECK(plan.asset_digest.empty());
+    // And with nothing else to compare against, the install is refused.
+    CHECK(plan.verdict == SingBoxReleaseVerdict::checksums_missing);
+}
+
+TEST_CASE("a malformed asset digest is refused rather than trusted") {
+    const auto release = nlohmann::json{
+        {"assets",
+         nlohmann::json::array(
+             {{{"browser_download_url",
+                "https://dl.example/sing-box-1.13.14-linux-arm64.tar.gz"},
+               {"digest", "sha256:not-a-digest"}}})}}
+                              .dump();
+    const auto plan = plan_sing_box_release(release, "1.13.14", "arm64");
+    CHECK(plan.asset_digest.empty());
+    CHECK(plan.verdict == SingBoxReleaseVerdict::checksums_missing);
+}
+
+TEST_CASE("a checksums file still wins when the release publishes one") {
+    // Two verification paths that read different sources would eventually
+    // disagree, and the checksums file is what the shell installer reads.
+    const auto release = nlohmann::json{
+        {"assets",
+         nlohmann::json::array(
+             {{{"browser_download_url",
+                "https://dl.example/sing-box-1.13.14-linux-arm64.tar.gz"},
+               {"digest", "sha256:" + std::string(64U, 'b')}},
+              {{"browser_download_url",
+                "https://dl.example/sing-box-1.13.14-checksums.txt"}}})}}
+                              .dump();
+    const auto plan = plan_sing_box_release(release, "1.13.14", "arm64");
+
+    CHECK(plan.verdict == SingBoxReleaseVerdict::ready);
+    CHECK_FALSE(plan.checksums_url.empty());
+    CHECK(plan.asset_digest == std::string(64U, 'b'));
+}
+
 } // namespace keen_pbr3

@@ -94,18 +94,32 @@ SingBoxInstallReport install_pinned_sing_box(
         report.outcome = SingBoxInstallOutcome::download_failed;
         return report;
     }
-    entering(SingBoxInstallPhase::downloading_checksums);
-    const auto checksums = steps.fetch(plan.checksums_url);
-    if (!checksums.has_value()) {
-        // The checksums file being unreachable is not a reason to install
-        // without it. It is the same refusal as it never having existed.
-        report.outcome = SingBoxInstallOutcome::download_failed;
-        return report;
+    const auto actual_digest = steps.digest(*archive);
+    if (!plan.checksums_url.empty()) {
+        entering(SingBoxInstallPhase::downloading_checksums);
+        const auto checksums = steps.fetch(plan.checksums_url);
+        if (!checksums.has_value()) {
+            // The checksums file being unreachable is not a reason to install
+            // without it, and not a reason to fall back to the asset digest
+            // either: a release that publishes both and cannot serve one is
+            // not a release this should be guessing about.
+            report.outcome = SingBoxInstallOutcome::download_failed;
+            return report;
+        }
+        entering(SingBoxInstallPhase::verifying_archive);
+        report.release_verdict = verify_sing_box_archive(
+            *checksums, plan.archive_name, actual_digest);
+    } else {
+        // No checksums file. The digest GitHub publishes for this exact asset
+        // is what the download is compared against - measured on the pinned
+        // release, sing-box publishes no checksums file at all, so without
+        // this the install would refuse every time.
+        entering(SingBoxInstallPhase::verifying_archive);
+        report.release_verdict =
+            plan.asset_digest == actual_digest
+                ? SingBoxReleaseVerdict::ready
+                : SingBoxReleaseVerdict::checksum_mismatch;
     }
-
-    entering(SingBoxInstallPhase::verifying_archive);
-    report.release_verdict = verify_sing_box_archive(
-        *checksums, plan.archive_name, steps.digest(*archive));
     if (report.release_verdict != SingBoxReleaseVerdict::ready) {
         report.outcome = SingBoxInstallOutcome::checksum_mismatch;
         return report;

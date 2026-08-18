@@ -1,6 +1,7 @@
 #include "sing_box_release_plan.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <sstream>
 
 #include <nlohmann/json.hpp>
@@ -79,6 +80,18 @@ SingBoxReleasePlan plan_sing_box_release(
         const auto name = url_file_name(url);
         if (name == plan.archive_name) {
             plan.archive_url = url;
+            // GitHub publishes "sha256:<hex>" here. Any other algorithm is
+            // ignored rather than guessed at: this planner compares SHA-256,
+            // and treating an unknown prefix as one would compare a digest
+            // against a different function's output and call the mismatch a
+            // corrupt download.
+            const auto digest =
+                asset.value("digest", std::string{});
+            constexpr const char* kPrefix = "sha256:";
+            if (digest.rfind(kPrefix, 0U) == 0U) {
+                auto hex = digest.substr(std::strlen(kPrefix));
+                if (lowercase_sha256(hex)) plan.asset_digest = std::move(hex);
+            }
         } else if (name.size() > 14U &&
                    name.compare(name.size() - 14U, 14U,
                                 "-checksums.txt") == 0 &&
@@ -91,9 +104,10 @@ SingBoxReleasePlan plan_sing_box_release(
         plan.verdict = SingBoxReleaseVerdict::archive_missing;
         return plan;
     }
-    if (plan.checksums_url.empty()) {
+    if (plan.checksums_url.empty() && plan.asset_digest.empty()) {
         // Refused, not downgraded. A browser button must not be softer than
-        // the command an operator types.
+        // the command an operator types - and with neither source there is
+        // nothing to compare the download against at all.
         plan.verdict = SingBoxReleaseVerdict::checksums_missing;
         return plan;
     }
