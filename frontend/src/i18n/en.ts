@@ -1033,13 +1033,6 @@ export const enTranslation = {
       phaseCheckingStagedVersion: "Asking the unpacked binary its version…",
       phaseInstalling: "Putting the binary in place…",
       phaseRecordingMarker: "Recording the binary as ours…",
-      operation: {
-        install: "sing-box is not installed yet.",
-        replace: "This would replace the installed binary.",
-        reinstall_same_version:
-          "The pinned version is already installed; this would reinstall it.",
-        blocked: "Installing is not possible right now.",
-      },
       blocker: {
         architecture_unsupported:
           "This build has no sing-box asset for this router's architecture.",

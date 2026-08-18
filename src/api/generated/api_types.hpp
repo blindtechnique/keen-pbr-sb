@@ -1022,7 +1022,7 @@ namespace api {
 
     enum class Blocker : int { ARCHITECTURE_UNSUPPORTED, ENTWARE_ABSENT, FOREIGN_BINARY_PRESENT, TARGET_NOT_WRITABLE, TRANSPORTS_RUNNING, TRANSPORT_STATE_UNKNOWN };
 
-    enum class SingBoxInstallCapabilityOperation : int { BLOCKED, INSTALL, REINSTALL_SAME_VERSION, REPLACE };
+    enum class SingBoxInstallCapabilityOperation : int { INSTALL, REINSTALL_SAME_VERSION, REPLACE };
 
     struct SingBoxInstallCapability {
         std::optional<std::string> asset_architecture;
@@ -5507,8 +5507,7 @@ namespace api {
     }
 
     inline void from_json(const json & j, SingBoxInstallCapabilityOperation & x) {
-        if (j == "blocked") x = SingBoxInstallCapabilityOperation::BLOCKED;
-        else if (j == "install") x = SingBoxInstallCapabilityOperation::INSTALL;
+        if (j == "install") x = SingBoxInstallCapabilityOperation::INSTALL;
         else if (j == "reinstall_same_version") x = SingBoxInstallCapabilityOperation::REINSTALL_SAME_VERSION;
         else if (j == "replace") x = SingBoxInstallCapabilityOperation::REPLACE;
         else { throw std::runtime_error("Cannot deserialize to enumeration \"SingBoxInstallCapabilityOperation\""); }
@@ -5516,7 +5515,6 @@ namespace api {
 
     inline void to_json(json & j, const SingBoxInstallCapabilityOperation & x) {
         switch (x) {
-            case SingBoxInstallCapabilityOperation::BLOCKED: j = "blocked"; break;
             case SingBoxInstallCapabilityOperation::INSTALL: j = "install"; break;
             case SingBoxInstallCapabilityOperation::REINSTALL_SAME_VERSION: j = "reinstall_same_version"; break;
             case SingBoxInstallCapabilityOperation::REPLACE: j = "replace"; break;

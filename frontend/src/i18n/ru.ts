@@ -1038,13 +1038,6 @@ export const ruTranslation = {
       phaseCheckingStagedVersion: "Спрашиваем у распакованного бинаря версию…",
       phaseInstalling: "Ставим бинарь на место…",
       phaseRecordingMarker: "Записываем, что бинарь наш…",
-      operation: {
-        install: "sing-box ещё не установлен.",
-        replace: "Установленный бинарь будет заменён.",
-        reinstall_same_version:
-          "Запиненная версия уже стоит; это переустановка той же версии.",
-        blocked: "Сейчас установка невозможна.",
-      },
       blocker: {
         architecture_unsupported:
           "Для архитектуры этого роутера у сборки нет соответствующего файла sing-box.",

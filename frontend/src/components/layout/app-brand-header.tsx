@@ -34,7 +34,7 @@ export function AppBrandHeader({ className = "" }: { className?: string }) {
           </span>
           {__APP_VERSION__ ? (
             <span className="truncate text-[11px] leading-[14px] tracking-[0.035em] text-muted-foreground">
-              {`${__APP_VERSION__}-alpha`}
+              {__APP_VERSION__}
             </span>
           ) : null}
         </span>

@@ -19,8 +19,18 @@ function packageVersion() {
   try {
     const raw = fs.readFileSync(path.resolve(__dirname, "../version.mk"), "utf8")
     const version = raw.match(/KEEN_PBR_VERSION\s*=\s*(.+)/)?.[1].trim()
+    if (!version) return ""
+    // The build stamp the package build assigns, which is what the daemon
+    // reports and what the installed package is named. Showing the same string
+    // in the header means an operator comparing "what is running" with "what I
+    // installed" is comparing the same thing - the release counter they saw
+    // before was a number that changed for reasons they never see.
+    const stamp = process.env.KEEN_PBR_RELEASE_OVERRIDE?.trim()
+    if (stamp) return `v${version}-sb.${stamp}`
+    // Built outside the package build. The counter is all there is, and saying
+    // so with the same shape keeps the two readable side by side.
     const release = raw.match(/KEEN_PBR_RELEASE\s*=\s*(.+)/)?.[1].trim()
-    if (version && release) return `${version}-sb.${release}`
+    if (release) return `v${version}-sb.${release}`
   } catch {
     // Building the frontend on its own is allowed; the header just says nothing.
   }

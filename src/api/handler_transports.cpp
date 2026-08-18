@@ -193,10 +193,8 @@ api::SingBoxInstallCapabilityOperation api_install_operation(
     case SingBoxInstallOperation::reinstall_same_version:
         return api::SingBoxInstallCapabilityOperation::
             REINSTALL_SAME_VERSION;
-    case SingBoxInstallOperation::blocked:
-        return api::SingBoxInstallCapabilityOperation::BLOCKED;
     }
-    return api::SingBoxInstallCapabilityOperation::BLOCKED;
+    return api::SingBoxInstallCapabilityOperation::INSTALL;
 }
 
 api::Blocker api_install_blocker(const SingBoxInstallBlocker blocker) {

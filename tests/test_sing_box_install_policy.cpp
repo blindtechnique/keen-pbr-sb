@@ -62,7 +62,10 @@ TEST_CASE("an unreadable architecture is unsupported, not assumed") {
     observation.entware_architecture.clear();
     const auto policy = evaluate_sing_box_install(observation, kPinned);
     CHECK_FALSE(policy.available);
-    CHECK(policy.operation == Operation::blocked);
+    // The operation says what installing would do; being blocked does not
+    // make that unknowable, and on a router with nothing installed it is an
+    // install.
+    CHECK(policy.operation == Operation::install);
     CHECK(blocked_by(policy, Blocker::architecture_unsupported));
     CHECK(policy.asset_architecture.empty());
 }
@@ -227,10 +230,49 @@ TEST_CASE("every blocker and operation has a name") {
     }
     for (const auto operation :
          {Operation::install, Operation::replace,
-          Operation::reinstall_same_version, Operation::blocked}) {
+          Operation::reinstall_same_version}) {
         CHECK(std::string(sing_box_install_operation_name(operation))
                   .size() > 0U);
     }
+}
+
+TEST_CASE("a blocked install still says what installing would do") {
+    // Measured on NC-1812: sing-box at exactly the pinned version, our marker
+    // present, one transport running. The capability answered "blocked" and
+    // nothing else, so the WebUI could not tell "stop your tunnel and I will
+    // update you" from "stop your tunnel so I can install what you already
+    // have" - and offered an Update button that had nothing to do.
+    auto observation = ready();
+    observation.binary_present = true;
+    observation.managed_marker_present = true;
+    observation.installed_version = kPinned;
+    observation.running_transports = 1U;
+
+    const auto policy = evaluate_sing_box_install(observation, kPinned);
+    CHECK_FALSE(policy.available);
+    CHECK(blocked_by(policy, Blocker::transports_running));
+    // The operation is what installing WOULD do, and it does not become
+    // unknowable because something is in the way.
+    CHECK(policy.operation ==
+          SingBoxInstallOperation::reinstall_same_version);
+}
+
+TEST_CASE("consent is not asked for an install that would change nothing") {
+    // Dropping somebody tunnels so the daemon can reinstall the version
+    // already on the router is a question whose honest answer is always no.
+    auto observation = ready();
+    observation.binary_present = true;
+    observation.managed_marker_present = true;
+    observation.installed_version = kPinned;
+    observation.running_transports = 2U;
+    CHECK_FALSE(sing_box_install_awaits_transport_consent(
+        evaluate_sing_box_install(observation, kPinned)));
+
+    // A different installed version is worth the interruption, so consent is
+    // asked there.
+    observation.installed_version = "1.12.0";
+    CHECK(sing_box_install_awaits_transport_consent(
+        evaluate_sing_box_install(observation, kPinned)));
 }
 
 } // namespace keen_pbr3

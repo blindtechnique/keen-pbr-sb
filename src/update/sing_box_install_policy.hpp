@@ -46,6 +46,10 @@ enum class SingBoxInstallBlocker : std::uint8_t {
 const char* sing_box_install_blocker_name(
     SingBoxInstallBlocker blocker) noexcept;
 
+// What installing WOULD do. Deliberately independent of whether it may: a
+// router already on the pinned version says so even while a running transport
+// blocks the install, because "stop your tunnel and I will update you" and
+// "stop your tunnel so I can reinstall what you have" are different requests.
 enum class SingBoxInstallOperation : std::uint8_t {
     // Nothing is installed; a first install would be a pure addition.
     install,
@@ -55,8 +59,6 @@ enum class SingBoxInstallOperation : std::uint8_t {
     // allowed - a corrupt binary is a real reason - but it is not an upgrade
     // and must not be presented as one.
     reinstall_same_version,
-    // At least one blocker; no operation is offered.
-    blocked,
 };
 
 const char* sing_box_install_operation_name(
@@ -90,7 +92,7 @@ struct SingBoxInstallObservation {
 
 struct SingBoxInstallPolicy {
     bool available{false};
-    SingBoxInstallOperation operation{SingBoxInstallOperation::blocked};
+    SingBoxInstallOperation operation{SingBoxInstallOperation::install};
     std::vector<SingBoxInstallBlocker> blockers;
     // The official asset architecture this build would fetch, e.g. "arm64".
     // Empty when the architecture is unsupported.

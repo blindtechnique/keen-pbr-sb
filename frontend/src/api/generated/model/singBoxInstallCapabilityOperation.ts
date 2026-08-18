@@ -7,7 +7,8 @@
  */
 
 /**
- * What installing would do. `reinstall_same_version` is named apart from `replace` so a reinstall is never presented as an upgrade; a binary that will not report its version is `replace`, because it might be the pinned release and might be a truncated download.
+ * What installing WOULD do, independent of whether it may right now - those are different questions, and a client needs both. A router already on the pinned version says `reinstall_same_version` even while a running transport blocks the install, so "stop your tunnel and I will update you" stays distinguishable from "stop your tunnel so I can reinstall what you already have".
+`reinstall_same_version` is named apart from `replace` so a reinstall is never presented as an upgrade; a binary that will not report its version is `replace`, because it might be the pinned release and might be a truncated download.
 
  */
 export type SingBoxInstallCapabilityOperation = typeof SingBoxInstallCapabilityOperation[keyof typeof SingBoxInstallCapabilityOperation];
@@ -17,5 +18,4 @@ export const SingBoxInstallCapabilityOperation = {
   install: 'install',
   replace: 'replace',
   reinstall_same_version: 'reinstall_same_version',
-  blocked: 'blocked',
 } as const;

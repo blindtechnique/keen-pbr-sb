@@ -12,7 +12,8 @@ export interface SingBoxInstallCapability {
   /** Whether an install may be offered at all. False whenever there is any blocker, including one that only means something could not be measured.
    */
   available: boolean;
-  /** What installing would do. `reinstall_same_version` is named apart from `replace` so a reinstall is never presented as an upgrade; a binary that will not report its version is `replace`, because it might be the pinned release and might be a truncated download.
+  /** What installing WOULD do, independent of whether it may right now - those are different questions, and a client needs both. A router already on the pinned version says `reinstall_same_version` even while a running transport blocks the install, so "stop your tunnel and I will update you" stays distinguishable from "stop your tunnel so I can reinstall what you already have".
+  `reinstall_same_version` is named apart from `replace` so a reinstall is never presented as an upgrade; a binary that will not report its version is `replace`, because it might be the pinned release and might be a truncated download.
    */
   operation: SingBoxInstallCapabilityOperation;
   /** The one release this build installs, from version.mk. */

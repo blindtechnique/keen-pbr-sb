@@ -48,10 +48,8 @@ const char* sing_box_install_operation_name(
         return "replace";
     case SingBoxInstallOperation::reinstall_same_version:
         return "reinstall_same_version";
-    case SingBoxInstallOperation::blocked:
-        return "blocked";
     }
-    return "blocked";
+    return "install";
 }
 
 std::string sing_box_asset_architecture(
@@ -108,12 +106,13 @@ SingBoxInstallPolicy evaluate_sing_box_install(
             SingBoxInstallBlocker::transports_running);
     }
 
-    if (!policy.blockers.empty()) {
-        policy.operation = SingBoxInstallOperation::blocked;
-        policy.available = false;
-        return policy;
-    }
-
+    // What installing WOULD do, computed before and regardless of whether it
+    // may. These are different questions, and collapsing them lost the answer
+    // to the first: with a transport running, a router already on the pinned
+    // version reported "blocked" and nothing else, so a client could not tell
+    // "stop your tunnel and I will update you" from "stop your tunnel so I can
+    // install the version you already have". Measured on NC-1812, which is
+    // where it showed up as an Update button that had nothing to do.
     if (!observation.binary_present) {
         policy.operation = SingBoxInstallOperation::install;
     } else if (!observation.installed_version.empty() &&
@@ -127,7 +126,7 @@ SingBoxInstallPolicy evaluate_sing_box_install(
         policy.operation = SingBoxInstallOperation::replace;
     }
     policy.exact_rollback = observation.previous_binary_present;
-    policy.available = true;
+    policy.available = policy.blockers.empty();
     return policy;
 }
 
@@ -135,6 +134,14 @@ bool sing_box_install_awaits_transport_consent(
     const SingBoxInstallPolicy& policy) noexcept {
     if (policy.available) return false;
     if (policy.blockers.empty()) return false;
+    // Nothing to gain. Asking somebody to drop their tunnels so the daemon can
+    // reinstall the version already on the router is a question whose honest
+    // answer is always no - a reinstall is still allowed, but not at that
+    // price and not without being asked for by name.
+    if (policy.operation ==
+        SingBoxInstallOperation::reinstall_same_version) {
+        return false;
+    }
     for (const auto blocker : policy.blockers) {
         if (blocker != SingBoxInstallBlocker::transports_running) {
             return false;
