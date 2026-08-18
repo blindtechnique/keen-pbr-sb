@@ -81,6 +81,7 @@ import {
 import { SingBoxProcessModeDialog } from "@/components/transports/sing-box-process-mode-dialog"
 import { SingBoxInstallButton } from "@/components/transports/sing-box-install-button"
 import { TransportExitCheckButton } from "@/components/transports/exit-check-button"
+import { transportErrorText } from "@/components/transports/transport-error-model"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { DependencyList } from "@/components/shared/dependency-list"
 import type { Dependency } from "@/lib/dependencies"
@@ -1052,12 +1053,9 @@ export function TransportsPage({
       />,
     ]
 
+    const errorText = transportErrorText(item.error)
     const details = expanded ? (
       <div className="space-y-3 text-sm">
-        {/* Проверка живёт в подробностях, а не в строке: её нажимают, когда
-            уже сомневаются в конкретном подключении, и она делает два сетевых
-            запроса — не то, что стоит предлагать в общем списке. */}
-        <TransportExitCheckButton outbound={boundOutbound?.tag} />
         <div className="grid min-w-0 gap-x-8 gap-y-1.5 sm:grid-cols-2">
           <TransportField
             label={t("transports.server")}
@@ -1104,9 +1102,17 @@ export function TransportsPage({
           </div>
         ) : null}
 
-        {item.error ? (
+        {/* Надзиратель отдаёт причину одной непрозрачной английской строкой,
+            собранной как «keen-pbr routing health: <вердикт>: <деталь>».
+            Имя внутреннего компонента оператору ничего не говорит, а сама
+            деталь у панели уже переведена — но выбросить абзац нельзя, это
+            единственное место, где причина вообще видна. Поэтому: узнать
+            форму, перевести знакомое, незнакомое пропустить как есть. */}
+        {errorText ? (
           <p className="rounded-md bg-destructive/10 p-2 text-xs text-destructive">
-            {item.error}
+            {errorText.kind === "issue"
+              ? t(`overview.outbounds.issue.${errorText.code}`)
+              : errorText.text}
           </p>
         ) : null}
 
@@ -1144,6 +1150,12 @@ export function TransportsPage({
         ) : null}
 
         <div className="flex min-w-0 flex-wrap items-center gap-2">
+          {/* Рядом с остальными действиями подключения: их нажимают в одном и
+              том же случае — когда с конкретным туннелем что-то не так. */}
+          <TransportExitCheckButton
+            device={boundOutbound ? undefined : item.interface}
+            outbound={boundOutbound?.tag}
+          />
           {item.server ? (
             <Button
               disabled={bypassMutation.isPending || !keenConfig}

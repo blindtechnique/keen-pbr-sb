@@ -85,10 +85,46 @@ void register_impl(ApiServer& server, ApiContext& ctx, ExitEchoFetcher fetcher) 
             } catch (const nlohmann::json::exception&) {
                 throw ApiError("request body is not JSON", 400);
             }
-            if (!request.is_object() || !request.contains("outbound") ||
-                !request["outbound"].is_string()) {
-                throw ApiError("outbound is required", 400);
+            if (!request.is_object()) {
+                throw ApiError("request body is not an object", 400);
             }
+            const bool by_tag = request.contains("outbound") &&
+                                request["outbound"].is_string();
+            const bool by_device = request.contains("interface") &&
+                                   request["interface"].is_string();
+            // Exactly one, and a request naming both is refused rather than
+            // resolved in someone's favour: a caller that does not know which
+            // it meant must not have the choice made for it.
+            if (by_tag == by_device) {
+                throw ApiError(
+                    "name exactly one of outbound or interface", 400);
+            }
+
+            // A native firmware tunnel usually has no keen-pbr outbound and
+            // therefore no routing mark - the row offers to create a route
+            // instead. Binding the socket to its device is what makes the
+            // measurement attributable, and a mark was never what did that,
+            // so such a tunnel is measurable without one.
+            if (by_device) {
+                const auto device = request["interface"].get<std::string>();
+                if (device.empty() || device.size() >= 16U ||
+                    device.find('/') != std::string::npos) {
+                    throw ApiError("not an interface name", 400);
+                }
+                const ExitProbeOutcome through = fetcher(kEchoUrl, 0U, device);
+                const ExitProbeOutcome direct =
+                    fetcher(kEchoUrl, 0U, std::string());
+                const nlohmann::json response = {
+                    {"outbound", device},
+                    {"verdict",
+                     exit_check_verdict_name(exit_check_verdict(through))},
+                    {"exit_address", exit_address_change_name(
+                                         exit_address_change(through, direct))},
+                    {"through", probe_to_json(through)},
+                    {"direct", probe_to_json(direct)}};
+                return response.dump();
+            }
+
             const auto tag = request["outbound"].get<std::string>();
 
             const Config config = ctx.get_visible_config_fn();

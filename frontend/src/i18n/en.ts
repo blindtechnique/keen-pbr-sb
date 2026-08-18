@@ -814,15 +814,15 @@ export const enTranslation = {
       tip: "Sends a request through this connection and shows the address the outside world sees.",
       tipNoOutbound:
         "Nothing to check: this connection has no outbound in the routing configuration.",
-      requestFailed: "The check could not be run.",
-      changed:
-        "Working: the outside sees {{through}}, and without this connection it sees {{direct}}.",
-      same: "It answered, but the address did not change: {{direct}} either way. Traffic is going around this connection.",
-      noControl:
-        "Traffic left through this connection and the outside sees {{through}}. Nothing to compare against - the direct check did not answer.",
-      unattributed:
-        "Could not check: there is nothing to bind the request to, so the answer says nothing about this connection in particular.",
-      unreachable: "No answer through this connection.",
+      requestFailed: "The check did not run",
+      // Short on purpose: the chip sits in the same row as the buttons, and a
+      // long sentence pushes that row onto a second line. The address is the
+      // valuable part, so it stays and the reasoning goes.
+      changed: "Working: the outside sees {{through}}",
+      same: "Address unchanged: {{direct}} - traffic goes around it",
+      noControl: "Left through this connection: {{through}}",
+      unattributed: "Nothing to bind to - the answer proves nothing",
+      unreachable: "No answer",
     },
     loopProtection: {
       action: "Exclude server from tunnel",

@@ -1,3 +1,4 @@
+import { TransportExitCheckButton } from "@/components/transports/exit-check-button"
 import { EyeIcon, EyeOffIcon, WorkflowIcon } from "lucide-react"
 import type { ReactNode } from "react"
 import { useTranslation } from "react-i18next"
@@ -170,6 +171,17 @@ export function NativeInterfaceDetails({
       {usage}
 
       <div className="flex min-w-0 flex-wrap items-center gap-2">
+        {/* Работает и без маршрута keen-pbr: у нативного туннеля обычно нет
+            своего outbound, а измерение делает атрибутируемым привязка к
+            устройству, а не метка. */}
+        {/* Имя устройства ядра, а не логическое: привязываться можно только к
+            тому, что существует в ядре, и mapNativeInterfaces намеренно не
+            подставляет сюда логическое имя прошивки. Нет его — привязываться
+            не к чему, и кнопка честно гаснет. */}
+        <TransportExitCheckButton
+          device={boundOutboundTag ? undefined : nativeInterface.kernelName}
+          outbound={boundOutboundTag ?? undefined}
+        />
         <Button
           disabled={!actionability.enabled}
           onClick={() => {

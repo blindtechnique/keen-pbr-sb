@@ -1373,7 +1373,8 @@ namespace api {
     };
 
     struct TransportExitCheckRequest {
-        std::string outbound;
+        std::optional<std::string> interface;
+        std::optional<std::string> outbound;
     };
 
     enum class ExitAddress : int { CHANGED, SAME, UNKNOWN };
@@ -4695,11 +4696,13 @@ namespace api {
     }
 
     inline void from_json(const json & j, TransportExitCheckRequest& x) {
-        x.outbound = j.at("outbound").get<std::string>();
+        x.interface = get_stack_optional<std::string>(j, "interface");
+        x.outbound = get_stack_optional<std::string>(j, "outbound");
     }
 
     inline void to_json(json & j, const TransportExitCheckRequest & x) {
         j = json::object();
+        j["interface"] = x.interface;
         j["outbound"] = x.outbound;
     }
 

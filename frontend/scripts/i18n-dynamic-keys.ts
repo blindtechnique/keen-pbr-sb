@@ -444,6 +444,13 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
       "singBoxInstallButton returns one of the tip* family for every state, including the disabled ones - a disabled control without a reason reads as broken.",
   },
   {
+    file: "src/pages/transports-page.tsx",
+    argument: "`overview.outbounds.issue.${errorText.code}`",
+    keys: ["overview.outbounds.issue.*"],
+    reason:
+      "The supervisor's routing-health line is classified with the same vocabulary the dashboard uses, so one daemon detail cannot mean two different things depending on which page shows it.",
+  },
+  {
     file: "src/components/transports/exit-check-button.tsx",
     argument: "tooltipKey",
     keys: ["transports.exitCheck.tip", "transports.exitCheck.tipNoOutbound"],

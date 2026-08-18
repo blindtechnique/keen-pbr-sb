@@ -6,7 +6,14 @@
  * OpenAPI spec version: 3.0.0
  */
 
-export interface TransportExitCheckRequest {
+/**
+ * Name exactly one. A request naming both is refused rather than resolved in either favour: a caller that does not know which it meant must not have the choice made for it.
+
+ */
+export type TransportExitCheckRequest = (unknown & {
   /** Tag of the outbound to measure. */
-  outbound: string;
-}
+  outbound?: string;
+  /** Device to measure directly, for a native firmware tunnel that has no keen-pbr outbound and therefore no routing mark. Binding the socket to the device is what makes a measurement attributable; a mark never was, so such a tunnel is measurable without one.
+   */
+  interface?: string;
+});

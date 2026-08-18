@@ -2127,11 +2127,24 @@ components:
 
     TransportExitCheckRequest:
       type: object
-      required: [outbound]
+      description: >
+        Name exactly one. A request naming both is refused rather than
+        resolved in either favour: a caller that does not know which it meant
+        must not have the choice made for it.
       properties:
         outbound:
           type: string
           description: Tag of the outbound to measure.
+        interface:
+          type: string
+          description: >
+            Device to measure directly, for a native firmware tunnel that has
+            no keen-pbr outbound and therefore no routing mark. Binding the
+            socket to the device is what makes a measurement attributable; a
+            mark never was, so such a tunnel is measurable without one.
+      oneOf:
+        - required: [outbound]
+        - required: [interface]
 
     TransportExitCheckProbe:
       type: object

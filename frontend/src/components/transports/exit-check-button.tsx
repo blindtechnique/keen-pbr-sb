@@ -22,16 +22,32 @@ import { exitCheckSummary } from "@/components/transports/exit-check-model"
  * attribute it to this transport" and "answered, but your address did not
  * change" - are the ones an operator most needs and a boolean cannot express.
  */
-export function TransportExitCheckButton({ outbound }: { outbound?: string }) {
+export function TransportExitCheckButton({
+  outbound,
+  device,
+}: {
+  outbound?: string
+  // A native firmware tunnel usually has no keen-pbr outbound, and therefore
+  // no routing mark. It is still measurable, because binding to its device is
+  // what makes the answer attributable - so such a row names the device and
+  // the check works there too.
+  device?: string
+}) {
   const { t } = useTranslation()
   const [result, setResult] = useState<TransportExitCheckResponse | undefined>()
   const check = usePostTransportExitCheck()
 
+  const target = outbound
+    ? { outbound }
+    : device
+      ? { interface: device }
+      : undefined
+
   const run = () => {
-    if (!outbound) return
+    if (!target) return
     setResult(undefined)
     check.mutate(
-      { data: { outbound } },
+      { data: target },
       {
         onSuccess: (response) => {
           if (response.status === 200) setResult(response.data)
@@ -41,7 +57,7 @@ export function TransportExitCheckButton({ outbound }: { outbound?: string }) {
   }
 
   const summary = exitCheckSummary(result)
-  const tooltipKey = outbound
+  const tooltipKey = target
     ? "transports.exitCheck.tip"
     : "transports.exitCheck.tipNoOutbound"
 
@@ -53,7 +69,7 @@ export function TransportExitCheckButton({ outbound }: { outbound?: string }) {
             <span className="inline-flex">
               {/* Wrapped so the disabled state still explains itself. */}
               <Button
-                disabled={!outbound || check.isPending}
+                disabled={!target || check.isPending}
                 onClick={run}
                 size="sm"
                 type="button"

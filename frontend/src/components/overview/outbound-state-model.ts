@@ -144,7 +144,10 @@ function issueTone(status: string): OutboundRuntimeIssue["tone"] {
   return status === "unknown" ? "warning" : "error"
 }
 
-function runtimeDetailCode(
+// Exported so the transports page can reuse this vocabulary instead of
+// growing a second one. The same daemon detail must not classify differently
+// depending on which page happens to be showing it.
+export function runtimeDetailCode(
   detail: string | undefined,
   fallbackStatus: "degraded" | "unavailable" | string
 ): OutboundRuntimeIssue["code"] {
