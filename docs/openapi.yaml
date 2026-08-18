@@ -518,6 +518,136 @@ paths:
               schema:
                 $ref: "#/components/schemas/NdmsVpnServerServiceInventoryResponse"
 
+  /api/system/update:
+    get:
+      summary: Installed version, the latest release, and update progress
+      description: >
+        Answers two different questions in one payload: what this router is
+        running right now, and what the fork's latest release is. The release
+        half is served from a local cache while it is fresh, so opening the
+        panel does not contact GitHub on every render; `cached` says which of
+        the two you got and `check_error` says why a fresh check failed while
+        still returning the cached answer. An empty `latest` means no release
+        is known at all - it is not a claim that the router is up to date.
+      operationId: getSystemUpdate
+      responses:
+        "200":
+          description: Local update state plus the release comparison
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SystemUpdateStatus"
+    post:
+      summary: Start the keen-pbr-sb self-update
+      description: >
+        Starts the self-update helper in the background and returns as soon as
+        the helper has actually started, not when the update finishes - poll
+        `/api/system/update/status` for progress. A full rollback backup is
+        captured before the helper runs.
+
+
+        Refused rather than attempted when the helper is not installed, when an
+        update or rollback is already running, or when package recovery is
+        pending or in an unknown state, because a second concurrent update is
+        how a router ends up with a half-replaced package. Requires step-up
+        reauthentication.
+      operationId: postSystemUpdate
+      responses:
+        "200":
+          description: The helper started; the update itself runs in background
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpdateStartedResponse"
+        "409":
+          description: >
+            Refused: the helper is missing, an update or rollback is already
+            running, or package recovery must be completed first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: The helper could not be started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/system/update/check:
+    post:
+      summary: Check for a newer release, bypassing the cache
+      description: >
+        Same payload as `GET /api/system/update`, but always contacts the
+        release source instead of serving a fresh cache. Nothing is installed.
+        A failed check is not an error response: the cached release is returned
+        with `check_error` set, because an unreachable GitHub is not a reason
+        to leave the operator without the version they already knew about.
+      operationId: postSystemUpdateCheck
+      responses:
+        "200":
+          description: Local update state plus a freshly checked release
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SystemUpdateStatus"
+
+  /api/system/update/status:
+    get:
+      summary: Update progress without contacting the release source
+      description: >
+        The cheap half of `GET /api/system/update`, for polling while an update
+        runs: it reads local state only and never makes a remote request, so a
+        panel polling every few seconds does not generate a release request
+        every few seconds.
+      operationId: getSystemUpdateStatus
+      responses:
+        "200":
+          description: Local update and package-recovery state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SystemUpdateLocalStatus"
+
+  /api/system/update/rollback:
+    post:
+      summary: Roll the package back to the previous snapshot
+      description: >
+        Starts the rescue helper's rollback in the background, returning when
+        it has started. A full rollback backup is captured first.
+
+
+        Availability is measured, not assumed: the same classification the
+        status endpoint reports is checked here, and the refusal names the
+        reason the operator was already shown - so learning that there is
+        nothing to roll back to happens while it can still change what they
+        do, rather than at the moment they need it. The snapshot's integrity is
+        verified separately before anything starts. Requires step-up
+        reauthentication.
+      operationId: postSystemUpdateRollback
+      responses:
+        "200":
+          description: The rollback started; it runs in background
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpdateStartedResponse"
+        "409":
+          description: >
+            Refused: an update or rollback is already running, no usable
+            snapshot exists, or the snapshot is incomplete or corrupted. The
+            message names which.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: The rollback helper could not be started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/status/events:
     get:
       summary: Stream live WebUI status
@@ -1347,6 +1477,119 @@ components:
         apply_started_ts:
           type: integer
           format: int64
+
+    UpdateStartedResponse:
+      type: object
+      required: [ok, started]
+      description: >
+        The helper was launched. `started` says the process actually came up,
+        not that the update succeeded - the outcome arrives through
+        `/api/system/update/status`.
+      properties:
+        ok:
+          type: boolean
+        started:
+          type: boolean
+
+    SystemUpdateLocalStatus:
+      type: object
+      # The base object is the state file the update helper writes, so keys
+      # this build has never heard of are expected rather than a contract
+      # violation. Only what the daemon itself guarantees is required here.
+      additionalProperties: true
+      required:
+        - running
+        - log
+        - package_recovery_pending
+        - package_recovery_unknown
+        - package_rescue_ready
+        - package_rollback_available
+        - package_rollback_state
+      properties:
+        running:
+          type: boolean
+          description: An update or rollback is in progress right now.
+        log:
+          type: string
+          description: Tail of the update log, at most 24 KiB.
+        package_recovery_pending:
+          type: boolean
+        package_recovery_unknown:
+          type: boolean
+        package_rescue_ready:
+          type: boolean
+          description: >
+            The rescue helper is installed and the currently installed IPK
+            passes its integrity check.
+        package_rollback_available:
+          type: boolean
+        package_rollback_state:
+          type: string
+          description: >
+            Why a rollback is or is not available. Reported alongside the
+            verdict so a refusal can name its reason instead of only denying.
+          enum:
+            - available
+            - recovery_pending
+            - recovery_unknown
+            - helper_missing
+            - never_captured
+            - package_unverified
+            - snapshot_unverified
+
+    SystemUpdateStatus:
+      description: >
+        Local update state plus the release comparison. Every release field is
+        empty when no release is known; an empty `latest` is the absence of an
+        answer, not a claim that the router is current.
+      allOf:
+        - $ref: "#/components/schemas/SystemUpdateLocalStatus"
+        - type: object
+          required:
+            - current
+            - latest
+            - available
+            - current_ahead
+            - release_name
+            - release_notes
+            - release_url
+            - changelog_url
+            - cached
+            - check_error
+          properties:
+            current:
+              type: string
+              description: Version this daemon reports, as `v<version>-sb.<release>`.
+            latest:
+              type: string
+              description: Latest release tag, or empty when none is known.
+            available:
+              type: boolean
+            current_ahead:
+              type: boolean
+              description: >
+                This build is newer than the latest published release, which
+                happens on a locally built package.
+            release_name:
+              type: string
+            release_notes:
+              type: string
+              description: Truncated to 64 KiB with a trailing ellipsis.
+            release_url:
+              type: string
+            changelog_url:
+              type: string
+              description: >
+                Empty unless the tag passed validation, so an unexpected tag
+                cannot be turned into a link.
+            cached:
+              type: boolean
+              description: The release half was served from the local cache.
+            check_error:
+              type: string
+              description: >
+                Why the remote check failed while a cached release was still
+                returned. Empty when the check succeeded.
 
     StatusEventSnapshot:
       type: object

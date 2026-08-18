@@ -62,6 +62,8 @@ import type {
   SubscriptionApplyResponse,
   SubscriptionPreviewRequest,
   SubscriptionPreviewResponse,
+  SystemUpdateLocalStatus,
+  SystemUpdateStatus,
   TransportActionRequest,
   TransportActionResponse,
   TransportConfigApplyRequest,
@@ -69,7 +71,8 @@ import type {
   TransportConfigOperation,
   TransportConfigResponse,
   TransportSpec,
-  TransportStatus
+  TransportStatus,
+  UpdateStartedResponse
 } from './model';
 
 import { apiFetch } from '../client';
@@ -2227,6 +2230,512 @@ export function useGetNdmsVpnServerServices<TData = Awaited<ReturnType<typeof ge
 
 
 
+
+/**
+ * Answers two different questions in one payload: what this router is running right now, and what the fork's latest release is. The release half is served from a local cache while it is fresh, so opening the panel does not contact GitHub on every render; `cached` says which of the two you got and `check_error` says why a fresh check failed while still returning the cached answer. An empty `latest` means no release is known at all - it is not a claim that the router is up to date.
+
+ * @summary Installed version, the latest release, and update progress
+ */
+export type getSystemUpdateResponse200 = {
+  data: SystemUpdateStatus
+  status: 200
+}
+
+export type getSystemUpdateResponseSuccess = (getSystemUpdateResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getSystemUpdateResponse = (getSystemUpdateResponseSuccess)
+
+export const getGetSystemUpdateUrl = () => {
+
+
+
+
+  return `/api/system/update`
+}
+
+export const getSystemUpdate = async ( options?: RequestInit): Promise<getSystemUpdateResponse> => {
+
+  return apiFetch<getSystemUpdateResponse>(getGetSystemUpdateUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetSystemUpdateQueryKey = () => {
+    return [
+    `/api/system/update`
+    ] as const;
+    }
+
+
+export const getGetSystemUpdateQueryOptions = <TData = Awaited<ReturnType<typeof getSystemUpdate>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemUpdate>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetSystemUpdateQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getSystemUpdate>>> = ({ signal }) => getSystemUpdate({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getSystemUpdate>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetSystemUpdateQueryResult = NonNullable<Awaited<ReturnType<typeof getSystemUpdate>>>
+export type GetSystemUpdateQueryError = unknown
+
+
+export function useGetSystemUpdate<TData = Awaited<ReturnType<typeof getSystemUpdate>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemUpdate>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getSystemUpdate>>,
+          TError,
+          Awaited<ReturnType<typeof getSystemUpdate>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetSystemUpdate<TData = Awaited<ReturnType<typeof getSystemUpdate>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemUpdate>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getSystemUpdate>>,
+          TError,
+          Awaited<ReturnType<typeof getSystemUpdate>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetSystemUpdate<TData = Awaited<ReturnType<typeof getSystemUpdate>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemUpdate>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Installed version, the latest release, and update progress
+ */
+
+export function useGetSystemUpdate<TData = Awaited<ReturnType<typeof getSystemUpdate>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemUpdate>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetSystemUpdateQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * Starts the self-update helper in the background and returns as soon as the helper has actually started, not when the update finishes - poll `/api/system/update/status` for progress. A full rollback backup is captured before the helper runs.
+
+Refused rather than attempted when the helper is not installed, when an update or rollback is already running, or when package recovery is pending or in an unknown state, because a second concurrent update is how a router ends up with a half-replaced package. Requires step-up reauthentication.
+
+ * @summary Start the keen-pbr-sb self-update
+ */
+export type postSystemUpdateResponse200 = {
+  data: UpdateStartedResponse
+  status: 200
+}
+
+export type postSystemUpdateResponse409 = {
+  data: ErrorResponse
+  status: 409
+}
+
+export type postSystemUpdateResponse500 = {
+  data: ErrorResponse
+  status: 500
+}
+
+export type postSystemUpdateResponseSuccess = (postSystemUpdateResponse200) & {
+  headers: Headers;
+};
+export type postSystemUpdateResponseError = (postSystemUpdateResponse409 | postSystemUpdateResponse500) & {
+  headers: Headers;
+};
+
+export type postSystemUpdateResponse = (postSystemUpdateResponseSuccess | postSystemUpdateResponseError)
+
+export const getPostSystemUpdateUrl = () => {
+
+
+
+
+  return `/api/system/update`
+}
+
+export const postSystemUpdate = async ( options?: RequestInit): Promise<postSystemUpdateResponse> => {
+
+  return apiFetch<postSystemUpdateResponse>(getPostSystemUpdateUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+export const getPostSystemUpdateMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdate>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdate>>, TError,void, TContext> => {
+
+const mutationKey = ['postSystemUpdate'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postSystemUpdate>>, void> = () => {
+
+
+          return  postSystemUpdate(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostSystemUpdateMutationResult = NonNullable<Awaited<ReturnType<typeof postSystemUpdate>>>
+
+    export type PostSystemUpdateMutationError = ErrorResponse
+
+    /**
+ * @summary Start the keen-pbr-sb self-update
+ */
+export const usePostSystemUpdate = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdate>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postSystemUpdate>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getPostSystemUpdateMutationOptions(options), queryClient);
+    }
+
+/**
+ * Same payload as `GET /api/system/update`, but always contacts the release source instead of serving a fresh cache. Nothing is installed. A failed check is not an error response: the cached release is returned with `check_error` set, because an unreachable GitHub is not a reason to leave the operator without the version they already knew about.
+
+ * @summary Check for a newer release, bypassing the cache
+ */
+export type postSystemUpdateCheckResponse200 = {
+  data: SystemUpdateStatus
+  status: 200
+}
+
+export type postSystemUpdateCheckResponseSuccess = (postSystemUpdateCheckResponse200) & {
+  headers: Headers;
+};
+;
+
+export type postSystemUpdateCheckResponse = (postSystemUpdateCheckResponseSuccess)
+
+export const getPostSystemUpdateCheckUrl = () => {
+
+
+
+
+  return `/api/system/update/check`
+}
+
+export const postSystemUpdateCheck = async ( options?: RequestInit): Promise<postSystemUpdateCheckResponse> => {
+
+  return apiFetch<postSystemUpdateCheckResponse>(getPostSystemUpdateCheckUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+export const getPostSystemUpdateCheckMutationOptions = <TError = unknown,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdateCheck>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdateCheck>>, TError,void, TContext> => {
+
+const mutationKey = ['postSystemUpdateCheck'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postSystemUpdateCheck>>, void> = () => {
+
+
+          return  postSystemUpdateCheck(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostSystemUpdateCheckMutationResult = NonNullable<Awaited<ReturnType<typeof postSystemUpdateCheck>>>
+
+    export type PostSystemUpdateCheckMutationError = unknown
+
+    /**
+ * @summary Check for a newer release, bypassing the cache
+ */
+export const usePostSystemUpdateCheck = <TError = unknown,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdateCheck>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postSystemUpdateCheck>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getPostSystemUpdateCheckMutationOptions(options), queryClient);
+    }
+
+/**
+ * The cheap half of `GET /api/system/update`, for polling while an update runs: it reads local state only and never makes a remote request, so a panel polling every few seconds does not generate a release request every few seconds.
+
+ * @summary Update progress without contacting the release source
+ */
+export type getSystemUpdateStatusResponse200 = {
+  data: SystemUpdateLocalStatus
+  status: 200
+}
+
+export type getSystemUpdateStatusResponseSuccess = (getSystemUpdateStatusResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getSystemUpdateStatusResponse = (getSystemUpdateStatusResponseSuccess)
+
+export const getGetSystemUpdateStatusUrl = () => {
+
+
+
+
+  return `/api/system/update/status`
+}
+
+export const getSystemUpdateStatus = async ( options?: RequestInit): Promise<getSystemUpdateStatusResponse> => {
+
+  return apiFetch<getSystemUpdateStatusResponse>(getGetSystemUpdateStatusUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetSystemUpdateStatusQueryKey = () => {
+    return [
+    `/api/system/update/status`
+    ] as const;
+    }
+
+
+export const getGetSystemUpdateStatusQueryOptions = <TData = Awaited<ReturnType<typeof getSystemUpdateStatus>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemUpdateStatus>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetSystemUpdateStatusQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getSystemUpdateStatus>>> = ({ signal }) => getSystemUpdateStatus({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getSystemUpdateStatus>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetSystemUpdateStatusQueryResult = NonNullable<Awaited<ReturnType<typeof getSystemUpdateStatus>>>
+export type GetSystemUpdateStatusQueryError = unknown
+
+
+export function useGetSystemUpdateStatus<TData = Awaited<ReturnType<typeof getSystemUpdateStatus>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemUpdateStatus>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getSystemUpdateStatus>>,
+          TError,
+          Awaited<ReturnType<typeof getSystemUpdateStatus>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetSystemUpdateStatus<TData = Awaited<ReturnType<typeof getSystemUpdateStatus>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemUpdateStatus>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getSystemUpdateStatus>>,
+          TError,
+          Awaited<ReturnType<typeof getSystemUpdateStatus>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetSystemUpdateStatus<TData = Awaited<ReturnType<typeof getSystemUpdateStatus>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemUpdateStatus>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Update progress without contacting the release source
+ */
+
+export function useGetSystemUpdateStatus<TData = Awaited<ReturnType<typeof getSystemUpdateStatus>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemUpdateStatus>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetSystemUpdateStatusQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * Starts the rescue helper's rollback in the background, returning when it has started. A full rollback backup is captured first.
+
+Availability is measured, not assumed: the same classification the status endpoint reports is checked here, and the refusal names the reason the operator was already shown - so learning that there is nothing to roll back to happens while it can still change what they do, rather than at the moment they need it. The snapshot's integrity is verified separately before anything starts. Requires step-up reauthentication.
+
+ * @summary Roll the package back to the previous snapshot
+ */
+export type postSystemUpdateRollbackResponse200 = {
+  data: UpdateStartedResponse
+  status: 200
+}
+
+export type postSystemUpdateRollbackResponse409 = {
+  data: ErrorResponse
+  status: 409
+}
+
+export type postSystemUpdateRollbackResponse500 = {
+  data: ErrorResponse
+  status: 500
+}
+
+export type postSystemUpdateRollbackResponseSuccess = (postSystemUpdateRollbackResponse200) & {
+  headers: Headers;
+};
+export type postSystemUpdateRollbackResponseError = (postSystemUpdateRollbackResponse409 | postSystemUpdateRollbackResponse500) & {
+  headers: Headers;
+};
+
+export type postSystemUpdateRollbackResponse = (postSystemUpdateRollbackResponseSuccess | postSystemUpdateRollbackResponseError)
+
+export const getPostSystemUpdateRollbackUrl = () => {
+
+
+
+
+  return `/api/system/update/rollback`
+}
+
+export const postSystemUpdateRollback = async ( options?: RequestInit): Promise<postSystemUpdateRollbackResponse> => {
+
+  return apiFetch<postSystemUpdateRollbackResponse>(getPostSystemUpdateRollbackUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+export const getPostSystemUpdateRollbackMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdateRollback>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdateRollback>>, TError,void, TContext> => {
+
+const mutationKey = ['postSystemUpdateRollback'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postSystemUpdateRollback>>, void> = () => {
+
+
+          return  postSystemUpdateRollback(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostSystemUpdateRollbackMutationResult = NonNullable<Awaited<ReturnType<typeof postSystemUpdateRollback>>>
+
+    export type PostSystemUpdateRollbackMutationError = ErrorResponse
+
+    /**
+ * @summary Roll the package back to the previous snapshot
+ */
+export const usePostSystemUpdateRollback = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSystemUpdateRollback>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postSystemUpdateRollback>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getPostSystemUpdateRollbackMutationOptions(options), queryClient);
+    }
 
 /**
  * Streams named Server-Sent Events for service health, runtime outbounds, system interfaces, interactive DNS probes, and conntrack change notifications. Every connection receives a runtime snapshot first, followed by the current conntrack event-source state when available. Later events contain the complete dataset that changed or a revision which invalidates connection pages. Heartbeat comments are sent every 15 seconds; reconnecting starts with fresh state and no event replay is performed. DNS probe notifications use the `dns_probe` event name and are not included in the initial snapshot.

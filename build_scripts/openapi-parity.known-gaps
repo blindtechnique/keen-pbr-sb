@@ -27,11 +27,6 @@ POST /api/backup
 POST /api/backup/restore
 GET  /api/backup/rollback
 POST /api/backup/rollback
-POST /api/system/update
-POST /api/system/update/check
-POST /api/system/update/rollback
-GET  /api/system/update
-GET  /api/system/update/status
 GET  /api/nfqws
 POST /api/nfqws
 GET  /api/system/remote-access

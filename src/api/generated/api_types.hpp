@@ -1146,6 +1146,38 @@ namespace api {
         std::string preview_id;
     };
 
+    enum class PackageRollbackState : int { AVAILABLE, HELPER_MISSING, NEVER_CAPTURED, PACKAGE_UNVERIFIED, RECOVERY_PENDING, RECOVERY_UNKNOWN, SNAPSHOT_UNVERIFIED };
+
+    struct SystemUpdateLocalStatus {
+        std::string log;
+        bool package_recovery_pending = false;
+        bool package_recovery_unknown = false;
+        bool package_rescue_ready = false;
+        bool package_rollback_available = false;
+        PackageRollbackState package_rollback_state;
+        bool running = false;
+    };
+
+    struct SystemUpdateStatus {
+        std::string log;
+        bool package_recovery_pending = false;
+        bool package_recovery_unknown = false;
+        bool package_rescue_ready = false;
+        bool package_rollback_available = false;
+        PackageRollbackState package_rollback_state;
+        bool running = false;
+        bool available = false;
+        bool cached = false;
+        std::string changelog_url;
+        std::string check_error;
+        std::string current;
+        bool current_ahead = false;
+        std::string latest;
+        std::string release_name;
+        std::string release_notes;
+        std::string release_url;
+    };
+
     enum class Action : int { DOWN, RESTART, UP };
 
     struct TransportActionRequest {
@@ -1275,6 +1307,11 @@ namespace api {
         std::string tag;
         std::string type;
         std::string updated_at;
+    };
+
+    struct UpdateStartedResponse {
+        bool ok = false;
+        bool started = false;
     };
 
     struct ApiTypes {
@@ -1418,6 +1455,8 @@ namespace api {
         std::optional<SubscriptionPreviewCandidate> subscription_preview_candidate;
         std::optional<SubscriptionPreviewRequest> subscription_preview_request;
         std::optional<SubscriptionPreviewResponse> subscription_preview_response;
+        std::optional<SystemUpdateLocalStatus> system_update_local_status;
+        std::optional<SystemUpdateStatus> system_update_status;
         std::optional<TransportActionRequest> transport_action_request;
         std::optional<TransportActionResponse> transport_action_response;
         std::optional<TransportConfigApplyRequest> transport_config_apply_request;
@@ -1429,6 +1468,7 @@ namespace api {
         std::optional<Transport> transport_spec;
         std::optional<TransportStatus> transport_status;
         std::optional<UiPreferences> ui_preferences_config;
+        std::optional<UpdateStartedResponse> update_started_response;
         std::optional<ValidationErrorElement> validation_error;
         std::optional<Vless> vless_reality_spec;
     };
@@ -1782,6 +1822,12 @@ namespace api {
     void from_json(const json & j, SubscriptionPreviewResponse & x);
     void to_json(json & j, const SubscriptionPreviewResponse & x);
 
+    void from_json(const json & j, SystemUpdateLocalStatus & x);
+    void to_json(json & j, const SystemUpdateLocalStatus & x);
+
+    void from_json(const json & j, SystemUpdateStatus & x);
+    void to_json(json & j, const SystemUpdateStatus & x);
+
     void from_json(const json & j, TransportActionRequest & x);
     void to_json(json & j, const TransportActionRequest & x);
 
@@ -1814,6 +1860,9 @@ namespace api {
 
     void from_json(const json & j, TransportStatus & x);
     void to_json(json & j, const TransportStatus & x);
+
+    void from_json(const json & j, UpdateStartedResponse & x);
+    void to_json(json & j, const UpdateStartedResponse & x);
 
     void from_json(const json & j, ApiTypes & x);
     void to_json(json & j, const ApiTypes & x);
@@ -2015,6 +2064,9 @@ namespace api {
 
     void from_json(const json & j, DocumentKind & x);
     void to_json(json & j, const DocumentKind & x);
+
+    void from_json(const json & j, PackageRollbackState & x);
+    void to_json(json & j, const PackageRollbackState & x);
 
     void from_json(const json & j, Action & x);
     void to_json(json & j, const Action & x);
@@ -4024,6 +4076,68 @@ namespace api {
         j["preview_id"] = x.preview_id;
     }
 
+    inline void from_json(const json & j, SystemUpdateLocalStatus& x) {
+        x.log = j.at("log").get<std::string>();
+        x.package_recovery_pending = j.at("package_recovery_pending").get<bool>();
+        x.package_recovery_unknown = j.at("package_recovery_unknown").get<bool>();
+        x.package_rescue_ready = j.at("package_rescue_ready").get<bool>();
+        x.package_rollback_available = j.at("package_rollback_available").get<bool>();
+        x.package_rollback_state = j.at("package_rollback_state").get<PackageRollbackState>();
+        x.running = j.at("running").get<bool>();
+    }
+
+    inline void to_json(json & j, const SystemUpdateLocalStatus & x) {
+        j = json::object();
+        j["log"] = x.log;
+        j["package_recovery_pending"] = x.package_recovery_pending;
+        j["package_recovery_unknown"] = x.package_recovery_unknown;
+        j["package_rescue_ready"] = x.package_rescue_ready;
+        j["package_rollback_available"] = x.package_rollback_available;
+        j["package_rollback_state"] = x.package_rollback_state;
+        j["running"] = x.running;
+    }
+
+    inline void from_json(const json & j, SystemUpdateStatus& x) {
+        x.log = j.at("log").get<std::string>();
+        x.package_recovery_pending = j.at("package_recovery_pending").get<bool>();
+        x.package_recovery_unknown = j.at("package_recovery_unknown").get<bool>();
+        x.package_rescue_ready = j.at("package_rescue_ready").get<bool>();
+        x.package_rollback_available = j.at("package_rollback_available").get<bool>();
+        x.package_rollback_state = j.at("package_rollback_state").get<PackageRollbackState>();
+        x.running = j.at("running").get<bool>();
+        x.available = j.at("available").get<bool>();
+        x.cached = j.at("cached").get<bool>();
+        x.changelog_url = j.at("changelog_url").get<std::string>();
+        x.check_error = j.at("check_error").get<std::string>();
+        x.current = j.at("current").get<std::string>();
+        x.current_ahead = j.at("current_ahead").get<bool>();
+        x.latest = j.at("latest").get<std::string>();
+        x.release_name = j.at("release_name").get<std::string>();
+        x.release_notes = j.at("release_notes").get<std::string>();
+        x.release_url = j.at("release_url").get<std::string>();
+    }
+
+    inline void to_json(json & j, const SystemUpdateStatus & x) {
+        j = json::object();
+        j["log"] = x.log;
+        j["package_recovery_pending"] = x.package_recovery_pending;
+        j["package_recovery_unknown"] = x.package_recovery_unknown;
+        j["package_rescue_ready"] = x.package_rescue_ready;
+        j["package_rollback_available"] = x.package_rollback_available;
+        j["package_rollback_state"] = x.package_rollback_state;
+        j["running"] = x.running;
+        j["available"] = x.available;
+        j["cached"] = x.cached;
+        j["changelog_url"] = x.changelog_url;
+        j["check_error"] = x.check_error;
+        j["current"] = x.current;
+        j["current_ahead"] = x.current_ahead;
+        j["latest"] = x.latest;
+        j["release_name"] = x.release_name;
+        j["release_notes"] = x.release_notes;
+        j["release_url"] = x.release_url;
+    }
+
     inline void from_json(const json & j, TransportActionRequest& x) {
         x.action = j.at("action").get<Action>();
         x.tag = j.at("tag").get<std::string>();
@@ -4237,6 +4351,17 @@ namespace api {
         j["updated_at"] = x.updated_at;
     }
 
+    inline void from_json(const json & j, UpdateStartedResponse& x) {
+        x.ok = j.at("ok").get<bool>();
+        x.started = j.at("started").get<bool>();
+    }
+
+    inline void to_json(json & j, const UpdateStartedResponse & x) {
+        j = json::object();
+        j["ok"] = x.ok;
+        j["started"] = x.started;
+    }
+
     inline void from_json(const json & j, ApiTypes& x) {
         x.api_config = get_stack_optional<ApiConfig>(j, "ApiConfig");
         x.cache_generation = get_stack_optional<CacheGeneration>(j, "CacheGeneration");
@@ -4378,6 +4503,8 @@ namespace api {
         x.subscription_preview_candidate = get_stack_optional<SubscriptionPreviewCandidate>(j, "SubscriptionPreviewCandidate");
         x.subscription_preview_request = get_stack_optional<SubscriptionPreviewRequest>(j, "SubscriptionPreviewRequest");
         x.subscription_preview_response = get_stack_optional<SubscriptionPreviewResponse>(j, "SubscriptionPreviewResponse");
+        x.system_update_local_status = get_stack_optional<SystemUpdateLocalStatus>(j, "SystemUpdateLocalStatus");
+        x.system_update_status = get_stack_optional<SystemUpdateStatus>(j, "SystemUpdateStatus");
         x.transport_action_request = get_stack_optional<TransportActionRequest>(j, "TransportActionRequest");
         x.transport_action_response = get_stack_optional<TransportActionResponse>(j, "TransportActionResponse");
         x.transport_config_apply_request = get_stack_optional<TransportConfigApplyRequest>(j, "TransportConfigApplyRequest");
@@ -4389,6 +4516,7 @@ namespace api {
         x.transport_spec = get_stack_optional<Transport>(j, "TransportSpec");
         x.transport_status = get_stack_optional<TransportStatus>(j, "TransportStatus");
         x.ui_preferences_config = get_stack_optional<UiPreferences>(j, "UiPreferencesConfig");
+        x.update_started_response = get_stack_optional<UpdateStartedResponse>(j, "UpdateStartedResponse");
         x.validation_error = get_stack_optional<ValidationErrorElement>(j, "ValidationError");
         x.vless_reality_spec = get_stack_optional<Vless>(j, "VlessRealitySpec");
     }
@@ -4535,6 +4663,8 @@ namespace api {
         j["SubscriptionPreviewCandidate"] = x.subscription_preview_candidate;
         j["SubscriptionPreviewRequest"] = x.subscription_preview_request;
         j["SubscriptionPreviewResponse"] = x.subscription_preview_response;
+        j["SystemUpdateLocalStatus"] = x.system_update_local_status;
+        j["SystemUpdateStatus"] = x.system_update_status;
         j["TransportActionRequest"] = x.transport_action_request;
         j["TransportActionResponse"] = x.transport_action_response;
         j["TransportConfigApplyRequest"] = x.transport_config_apply_request;
@@ -4546,6 +4676,7 @@ namespace api {
         j["TransportSpec"] = x.transport_spec;
         j["TransportStatus"] = x.transport_status;
         j["UiPreferencesConfig"] = x.ui_preferences_config;
+        j["UpdateStartedResponse"] = x.update_started_response;
         j["ValidationError"] = x.validation_error;
         j["VlessRealitySpec"] = x.vless_reality_spec;
     }
@@ -5701,6 +5832,30 @@ namespace api {
             case DocumentKind::TOO_LARGE: j = "too_large"; break;
             case DocumentKind::UNRECOGNIZED: j = "unrecognized"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"DocumentKind\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, PackageRollbackState & x) {
+        if (j == "available") x = PackageRollbackState::AVAILABLE;
+        else if (j == "helper_missing") x = PackageRollbackState::HELPER_MISSING;
+        else if (j == "never_captured") x = PackageRollbackState::NEVER_CAPTURED;
+        else if (j == "package_unverified") x = PackageRollbackState::PACKAGE_UNVERIFIED;
+        else if (j == "recovery_pending") x = PackageRollbackState::RECOVERY_PENDING;
+        else if (j == "recovery_unknown") x = PackageRollbackState::RECOVERY_UNKNOWN;
+        else if (j == "snapshot_unverified") x = PackageRollbackState::SNAPSHOT_UNVERIFIED;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"PackageRollbackState\""); }
+    }
+
+    inline void to_json(json & j, const PackageRollbackState & x) {
+        switch (x) {
+            case PackageRollbackState::AVAILABLE: j = "available"; break;
+            case PackageRollbackState::HELPER_MISSING: j = "helper_missing"; break;
+            case PackageRollbackState::NEVER_CAPTURED: j = "never_captured"; break;
+            case PackageRollbackState::PACKAGE_UNVERIFIED: j = "package_unverified"; break;
+            case PackageRollbackState::RECOVERY_PENDING: j = "recovery_pending"; break;
+            case PackageRollbackState::RECOVERY_UNKNOWN: j = "recovery_unknown"; break;
+            case PackageRollbackState::SNAPSHOT_UNVERIFIED: j = "snapshot_unverified"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"PackageRollbackState\": " + std::to_string(static_cast<int>(x)));
         }
     }
 
