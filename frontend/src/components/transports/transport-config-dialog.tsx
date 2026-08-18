@@ -42,6 +42,8 @@ import {
 import { isSemanticallyDirty } from "@/lib/semantic-dirty"
 import { semanticJsonEqual } from "@/lib/semantic-json"
 import { NativeWireGuardImportFields } from "@/components/transports/native-wireguard-import-card"
+import { SubscriptionImportDialog } from "@/components/transports/subscription-import-dialog"
+import { classifyPastedLink } from "@/components/transports/subscription-import-model"
 import {
   generateTransportIdentity,
   inferTransportProtocol,
@@ -337,6 +339,12 @@ export function TransportConfigForm({
   const [sourceMode, setSourceMode] = useState<SourceMode>(baseline.sourceMode)
   const [displayNameTouched, setDisplayNameTouched] = useState(false)
   const [nativeUriActive, setNativeUriActive] = useState(false)
+  // What the operator handed over that turned out to be a subscription rather
+  // than one connection. Null until then, so the import UI does not exist for
+  // the ordinary case.
+  const [subscriptionSeed, setSubscriptionSeed] = useState<
+    { readonly url: string } | { readonly document: string } | null
+  >(null)
   const showAdvanced = presentation === "page"
   const [technicalIdentityAutomatic, setTechnicalIdentityAutomatic] =
     useState(!initial)
@@ -844,6 +852,7 @@ export function TransportConfigForm({
               value={sourceMode}
             />
             {sourceMode === "link" ? (
+              <>
               <NativeWireGuardImportFields
                 existingInterfaces={nativeImportInterfaces}
                 key={nativeImportFieldsStateBoundaryKey("link")}
@@ -862,11 +871,36 @@ export function TransportConfigForm({
                 readiness={nativeImportReadiness}
                 requiredGuards={nativeImportRequiredGuards}
               />
+              {/* A share link carries its protocol in the scheme; a
+                  subscription is an ordinary web address. That is the whole
+                  difference, so the field takes either and this offer appears
+                  when the operator has pasted the second kind. */}
+              {classifyPastedLink(spec.link ?? "") === "subscription" ? (
+                <div className="flex flex-wrap items-center gap-2 rounded-md border border-dashed p-3">
+                  <p className="text-sm text-muted-foreground">
+                    {t("transports.form.subscriptionDetected")}
+                  </p>
+                  <Button
+                    onClick={() =>
+                      setSubscriptionSeed({ url: (spec.link ?? "").trim() })
+                    }
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    {t("transports.subscriptionImport.open")}
+                  </Button>
+                </div>
+              ) : null}
+              </>
             ) : sourceMode === "file" ? (
               <NativeWireGuardImportFields
                 existingInterfaces={nativeImportInterfaces}
                 key={nativeImportFieldsStateBoundaryKey("file")}
                 mode="file"
+                onSubscriptionDocument={(text) =>
+                  setSubscriptionSeed({ document: text })
+                }
                 readiness={nativeImportReadiness}
                 requiredGuards={nativeImportRequiredGuards}
               />
@@ -983,7 +1017,16 @@ export function TransportConfigForm({
           </Button>
         ) : null}
       </div>
-    </form>
+          {/* Seeded, so the operator is not asked for the subscription a second
+          time: the modal already has what they gave it. */}
+      <SubscriptionImportDialog
+        onOpenChange={(next) => {
+          if (!next) setSubscriptionSeed(null)
+        }}
+        open={subscriptionSeed !== null}
+        {...(subscriptionSeed ? { seed: subscriptionSeed } : {})}
+      />
+</form>
   )
 }
 

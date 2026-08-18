@@ -1,5 +1,5 @@
 import { CheckCircle2Icon, InfoIcon, XCircleIcon } from "lucide-react"
-import { useState } from "react"
+import { useEffect, useState } from "react"
 
 import type { ApiError } from "@/api/client"
 import { useTranslation } from "react-i18next"
@@ -43,9 +43,15 @@ import {
 export function SubscriptionImportDialog({
   onOpenChange,
   open,
+  seed,
 }: {
   onOpenChange: (open: boolean) => void
   open: boolean
+  // What the add-transport modal already has in hand. The operator pasted a
+  // subscription URL or chose a subscription file there; asking them for it a
+  // second time in this dialog would be the modal admitting it did not
+  // understand what they gave it.
+  seed?: { readonly url: string } | { readonly document: string }
 }) {
   const { t } = useTranslation()
   const [url, setUrl] = useState("")
@@ -91,9 +97,9 @@ export function SubscriptionImportDialog({
     onOpenChange(next)
   }
 
-  const fetchPreview = () => {
+  const fetchPreview = (source?: { url: string } | { document: string }) => {
     previewMutation.mutate(
-      { data: { url: url.trim() } },
+      { data: source ?? { url: url.trim() } },
       {
         onSuccess: (response) => {
           if (response.status === 200) {
@@ -105,6 +111,18 @@ export function SubscriptionImportDialog({
       }
     )
   }
+
+  // Seeded openings skip the URL step. Keyed on `open` so closing and
+  // reopening with a different subscription starts over rather than showing
+  // the previous one, and guarded on the mutation so a re-render cannot fetch
+  // the same subscription twice.
+  useEffect(() => {
+    if (!open || !seed) return
+    if (preview || previewMutation.isPending) return
+    if ("url" in seed) setUrl(seed.url)
+    fetchPreview(seed)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, seed])
 
   const problems = preview
     ? selectionProblems(preview.candidates, selected, overrides)
@@ -321,7 +339,7 @@ export function SubscriptionImportDialog({
           ) : (
             <Button
               disabled={!url.trim() || previewMutation.isPending}
-              onClick={fetchPreview}
+              onClick={() => fetchPreview()}
             >
               {t("transports.subscriptionImport.fetch")}
             </Button>

@@ -137,3 +137,39 @@ export function buildSelections(
   }
   return selections
 }
+
+// What the operator pasted into the one field the add-transport modal offers.
+//
+// There is no second field and no mode switch, because the two things are
+// distinguishable without asking: a share link carries the protocol in its
+// scheme (vless://, vmess://, ss://, vpn://…), and a subscription is an
+// ordinary web address the provider hands out. http/https is therefore the
+// whole rule - no share-link scheme is http, and no subscription is fetched
+// over anything else.
+//
+// Deliberately not a list of known share-link schemes: that list would need
+// updating every time a protocol appears, and the failure mode would be
+// silently treating a new scheme as a subscription URL.
+export type PastedLinkKind = "subscription" | "share-link" | "empty"
+
+export function classifyPastedLink(value: string): PastedLinkKind {
+  const trimmed = value.trim()
+  if (trimmed.length === 0) return "empty"
+  const scheme = trimmed.slice(0, trimmed.indexOf(":")).toLowerCase()
+  return scheme === "http" || scheme === "https"
+    ? "subscription"
+    : "share-link"
+}
+
+// A file dropped into the import tab. WireGuard configurations start with a
+// section header; anything else is offered to the subscription planner, which
+// is the component that can actually say what a document is - it recognises a
+// link list, a base64 list, a sing-box JSON document, and says so by name.
+//
+// The check is positive on the WireGuard side rather than negative on the
+// other: "not a subscription" is not a thing this frontend can determine, and
+// pretending it could would send readable subscriptions to the WireGuard
+// parser to fail with the wrong message.
+export function looksLikeWireGuardConfig(text: string): boolean {
+  return /^\s*\[(Interface|Peer)\]/im.test(text)
+}

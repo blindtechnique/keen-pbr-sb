@@ -6,7 +6,6 @@ import {
   EyeIcon,
   EyeOffIcon,
   RefreshCwIcon,
-  RssIcon,
   Settings2Icon,
   ShieldCheckIcon,
   WandSparklesIcon,
@@ -81,7 +80,6 @@ import {
 } from "@/components/transports/transport-path"
 import { SingBoxProcessModeDialog } from "@/components/transports/sing-box-process-mode-dialog"
 import { SingBoxInstallButton } from "@/components/transports/sing-box-install-button"
-import { SubscriptionImportDialog } from "@/components/transports/subscription-import-dialog"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { DependencyList } from "@/components/shared/dependency-list"
 import type { Dependency } from "@/lib/dependencies"
@@ -226,7 +224,6 @@ export function TransportsPage({
   const { t, i18n } = useTranslation()
   const [, navigate] = useLocation()
   const [processModeDialogOpen, setProcessModeDialogOpen] = useState(false)
-  const [subscriptionImportOpen, setSubscriptionImportOpen] = useState(false)
   const [selectedProcessMode, setSelectedProcessMode] =
     useState<SingBoxProcessMode>("isolated")
   const [deleting, setDeleting] = useState<TransportSpec | undefined>()
@@ -1490,13 +1487,6 @@ export function TransportsPage({
             a dependency rather than a thing an operator manages. */}
         <SingBoxInstallButton variant="outline" />
         <Button
-          onClick={() => setSubscriptionImportOpen(true)}
-          variant="outline"
-        >
-          <RssIcon />
-          {t("transports.subscriptionImport.open")}
-        </Button>
-        <Button
           disabled={
             transferMutation.isPending ||
             transportExportPending ||
@@ -1742,10 +1732,7 @@ export function TransportsPage({
           rows={transportRows.map((row) => row.cells)}
         />
       ) : null}
-      <SubscriptionImportDialog
-        onOpenChange={setSubscriptionImportOpen}
-        open={subscriptionImportOpen}
-      />
+
       {processModeQuery.data ? (
         <SingBoxProcessModeDialog
           currentMode={processModeQuery.data.sing_box_process_mode}

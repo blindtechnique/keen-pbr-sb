@@ -1225,7 +1225,9 @@ export const ruTranslation = {
       },
       shareLink: "Ссылка подключения",
       shareLinkHint:
-        "Поддерживаются ссылки VLESS, VMess, Trojan, Shadowsocks, Hysteria2, TUIC, AnyTLS, SOCKS и HTTP-прокси, а также URI Amnezia vpn:// для WireGuard/AmneziaWG.",
+        "Поддерживаются подписки и ссылки VLESS, VMess, Trojan, Shadowsocks, Hysteria2, TUIC, AnyTLS, SOCKS и HTTP-прокси, а также URI Amnezia vpn:// для WireGuard/AmneziaWG. По адресу подписки откроется список её подключений.",
+      subscriptionDetected:
+        "Похоже на подписку, а не на одно подключение.",
       importFile: "Импорт файла",
       outboundJson: "JSON подключения sing-box",
       outboundJsonHint:

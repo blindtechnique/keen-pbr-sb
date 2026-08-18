@@ -3,6 +3,8 @@ import { describe, expect, it } from "bun:test"
 import type { SubscriptionPreviewCandidate } from "@/api/generated/model"
 
 import {
+  classifyPastedLink,
+  looksLikeWireGuardConfig,
   buildSelections,
   effectiveTag,
   initialSelectedLines,
@@ -170,5 +172,58 @@ describe("tags and their fallback", () => {
         candidate({ line: 1, disposition: "tag_conflict" })
       )
     ).toBe(true)
+  })
+})
+
+describe("what the operator pasted", () => {
+  it("calls an ordinary web address a subscription", () => {
+    // A share link carries its protocol in the scheme; a subscription is just
+    // an address. No share-link scheme is http, so this is the whole rule.
+    expect(classifyPastedLink("https://provider.example/sub")).toBe(
+      "subscription"
+    )
+    expect(classifyPastedLink("  http://provider.example/sub  ")).toBe(
+      "subscription"
+    )
+    expect(classifyPastedLink("HTTPS://provider.example/sub")).toBe(
+      "subscription"
+    )
+  })
+
+  it("calls everything else a share link", () => {
+    // Deliberately not a list of known schemes: that list would need updating
+    // for every new protocol, and the failure mode would be treating a new one
+    // as a subscription address.
+    for (const link of [
+      "vless://u@a.example:443#One",
+      "vmess://eyJ2IjoiMiJ9",
+      "trojan://secret@c.example:8443",
+      "ss://YWVzOnBhc3M@d.example:8388",
+      "hy2://e.example:443",
+      "tuic://f.example:443",
+      "anytls://g.example:443",
+      "socks://h.example:1080",
+      "vpn://amnezia-payload",
+      "wireguard://i.example",
+    ]) {
+      expect(classifyPastedLink(link), link).toBe("share-link")
+    }
+  })
+
+  it("says nothing about an empty field", () => {
+    expect(classifyPastedLink("")).toBe("empty")
+    expect(classifyPastedLink("   ")).toBe("empty")
+  })
+
+  it("recognises a WireGuard configuration by its section header", () => {
+    expect(looksLikeWireGuardConfig("[Interface]\nPrivateKey = x\n")).toBe(true)
+    expect(looksLikeWireGuardConfig("\n  [Peer]\nPublicKey = y\n")).toBe(true)
+    // A subscription file is not one, and must reach the planner that can name
+    // what it actually is.
+    expect(
+      looksLikeWireGuardConfig("vless://u@a.example:443#One\nvmess://x\n")
+    ).toBe(false)
+    expect(looksLikeWireGuardConfig("dmxlc3M6Ly9hYmM=")).toBe(false)
+    expect(looksLikeWireGuardConfig("")).toBe(false)
   })
 })

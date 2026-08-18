@@ -1220,7 +1220,9 @@ export const enTranslation = {
       },
       shareLink: "Connection link",
       shareLinkHint:
-        "Supports VLESS, VMess, Trojan, Shadowsocks, Hysteria2, TUIC, AnyTLS, SOCKS and HTTP proxy links, plus Amnezia vpn:// URIs for WireGuard/AmneziaWG.",
+        "Subscriptions and links are both supported: VLESS, VMess, Trojan, Shadowsocks, Hysteria2, TUIC, AnyTLS, SOCKS and HTTP proxy links, plus Amnezia vpn:// URIs for WireGuard/AmneziaWG. A subscription address opens the list of its connections.",
+      subscriptionDetected:
+        "This looks like a subscription rather than one connection.",
       importFile: "Import file",
       outboundJson: "sing-box connection JSON",
       outboundJsonHint:

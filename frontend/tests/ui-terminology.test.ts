@@ -29,8 +29,11 @@ describe("public routing terminology", () => {
     expect(ruTranslation.transports.form.outboundJson).toBe(
       "JSON подключения sing-box"
     )
+    // Subscriptions were folded into this one field, so the sentence that
+    // explains it names them first - an operator pasting a subscription
+    // address needs to know it belongs here before they look for another way.
     expect(ruTranslation.transports.form.shareLinkHint).toContain(
-      "Поддерживаются ссылки VLESS, VMess, Trojan, Shadowsocks, Hysteria2, TUIC, AnyTLS, SOCKS и HTTP-прокси"
+      "Поддерживаются подписки и ссылки VLESS, VMess, Trojan, Shadowsocks, Hysteria2, TUIC, AnyTLS, SOCKS и HTTP-прокси"
     )
     expect(ruTranslation.transports.form.shareLinkHint).toContain("vpn://")
     expect(ruTranslation.nav.items.routesAndTunnels).toBe("VPN, прокси, группы")

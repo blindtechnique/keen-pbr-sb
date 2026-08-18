@@ -39,6 +39,7 @@ import {
 } from "@/lib/native-wireguard-import-alias"
 import { currentNativeWireGuardImportTransportIsProtected } from "@/lib/native-wireguard-import-transport"
 import { parseNativeWireGuardInputPreview } from "@/lib/native-wireguard-vpn-uri-preview"
+import { looksLikeWireGuardConfig } from "@/components/transports/subscription-import-model"
 import { cn } from "@/lib/utils"
 
 type ImportState =
@@ -69,6 +70,7 @@ export function NativeWireGuardImportFields({
   linkValue = "",
   onLinkChange,
   onNativeUriActiveChange,
+  onSubscriptionDocument,
 }: {
   readonly mode: "link" | "file"
   readonly readiness?: NdmsNativeImportReadiness
@@ -78,6 +80,10 @@ export function NativeWireGuardImportFields({
   readonly linkValue?: string
   readonly onLinkChange?: (value: string) => void
   readonly onNativeUriActiveChange?: (active: boolean) => void
+  // A chosen file that is not a WireGuard configuration. The modal takes it
+  // from here to the subscription planner rather than this component deciding
+  // what it is.
+  readonly onSubscriptionDocument?: (text: string, fileName: string) => void
 }) {
   const { t } = useTranslation()
   const authStatus = useTrustedAuthStatus()
@@ -107,6 +113,7 @@ export function NativeWireGuardImportFields({
       mode={mode}
       onLinkChange={onLinkChange}
       onNativeUriActiveChange={onNativeUriActiveChange}
+      onSubscriptionDocument={onSubscriptionDocument}
       protectedTransport={protectedTransport}
       readiness={readiness}
       requiredGuards={requiredGuards}
@@ -131,6 +138,7 @@ function NativeWireGuardImportFieldsContent({
   linkValue,
   onLinkChange,
   onNativeUriActiveChange,
+  onSubscriptionDocument,
   protectedTransport,
 }: {
   readonly mode: "link" | "file"
@@ -141,6 +149,10 @@ function NativeWireGuardImportFieldsContent({
   readonly linkValue: string
   readonly onLinkChange?: (value: string) => void
   readonly onNativeUriActiveChange?: (active: boolean) => void
+  // A chosen file that is not a WireGuard configuration. The modal takes it
+  // from here to the subscription planner rather than this component deciding
+  // what it is.
+  readonly onSubscriptionDocument?: (text: string, fileName: string) => void
   readonly protectedTransport: boolean
 }) {
   const { t, i18n } = useTranslation()
@@ -228,6 +240,20 @@ function NativeWireGuardImportFieldsContent({
       return
     }
     if (!readGateRef.current.isCurrent(generation)) return
+
+    // One file picker, two kinds of file. A WireGuard configuration is
+    // recognised positively by its section header; anything else goes to the
+    // subscription planner, which is the component that can actually name what
+    // a document is - a link list, a base64 list, a sing-box config - and says
+    // so. Guessing "not a subscription" here would send readable subscriptions
+    // into the WireGuard parser to fail with the wrong message.
+    if (onSubscriptionDocument && !looksLikeWireGuardConfig(text)) {
+      readGateRef.current.invalidate()
+      setState({ status: "empty" })
+      onSubscriptionDocument(text, file.name)
+      return
+    }
+
     await analyzeText({
       text,
       generation,
