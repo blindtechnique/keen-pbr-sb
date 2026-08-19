@@ -16,10 +16,15 @@ public:
     keen_pbr3::HttpTransportRequest request;
     keen_pbr3::HttpTransportResponse response;
     bool fail{false};
+    bool bind_fail{false};
     int calls{0};
     keen_pbr3::HttpTransportResponse perform(const keen_pbr3::HttpTransportRequest& value) override {
         request = value;
         ++calls;
+        if (bind_fail) {
+            throw keen_pbr3::HttpTransportBindError(
+                "SO_BINDTODEVICE(nwg1) failed");
+        }
         if (fail) throw keen_pbr3::HttpTransportError("transport unavailable");
         return response;
     }
@@ -157,6 +162,16 @@ TEST_CASE("a destination filter reaches the transport on both download paths") {
     transport->request = {};
     (void)client.download("https://example.test/a");
     CHECK_FALSE(static_cast<bool>(transport->request.destination_filter));
+}
+
+TEST_CASE("http client preserves a typed interface bind failure") {
+    auto transport = std::make_shared<FakeTransport>();
+    transport->bind_fail = true;
+    keen_pbr3::HttpClient client(transport);
+
+    CHECK_THROWS_AS(
+        client.download("https://example.test/a"),
+        keen_pbr3::HttpBindError);
 }
 
 TEST_CASE("the destination filter judges the address curl resolved") {

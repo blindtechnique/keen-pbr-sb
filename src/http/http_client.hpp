@@ -60,6 +60,12 @@ public:
         : HttpError(message) {}
 };
 
+class HttpBindError : public HttpError {
+public:
+    explicit HttpBindError(const std::string& message)
+        : HttpError(message) {}
+};
+
 struct ConditionalDownloadResult {
     bool not_modified = false;
     std::string body;

@@ -6,12 +6,14 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 
 namespace keen_pbr3 {
 
 struct ApiContext;
 class ApiServer;
+class HttpTransport;
 
 // Fetches the echo URL through one outbound and reports what came back.
 //
@@ -25,6 +27,12 @@ using ExitEchoFetcher = std::function<ExitProbeOutcome(
 void register_transport_exit_check_handler(ApiServer& server, ApiContext& ctx);
 
 #ifdef KEEN_PBR3_TESTING
+ExitProbeOutcome fetch_transport_exit_echo_for_test(
+    std::shared_ptr<HttpTransport> transport,
+    const std::string& url,
+    std::uint32_t fwmark,
+    const std::string& device);
+
 void register_transport_exit_check_handler_for_test(ApiServer& server,
                                                     ApiContext& ctx,
                                                     ExitEchoFetcher fetcher);

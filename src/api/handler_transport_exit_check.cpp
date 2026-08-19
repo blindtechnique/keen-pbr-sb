@@ -5,9 +5,13 @@
 #include "handlers.hpp"
 #include "server.hpp"
 #include "../config/config.hpp"
+#include "../config/subscription_fetch_policy.hpp"
 #include "../http/http_client.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <memory>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <utility>
 
@@ -15,10 +19,9 @@ namespace keen_pbr3 {
 
 namespace {
 
-// One pinned echo service, not a configurable one. The operator is not
-// choosing a destination here - the panel is - so there is nothing for a
-// destination filter to protect, and a field the operator could point
-// anywhere would turn a diagnostic into a request-forging surface.
+// One pinned echo service, not a configurable one. Its resolved address and
+// every redirect destination are still untrusted network input, so the
+// transport applies the same actual-connection policy as subscription fetches.
 constexpr const char* kEchoUrl = "https://api.ipify.org";
 
 // An address is tens of bytes. The cap is what stops a hijacked or hostile
@@ -35,20 +38,27 @@ nlohmann::json probe_to_json(const ExitProbeOutcome& outcome) {
                           {"error", outcome.error}};
 }
 
-ExitProbeOutcome fetch_echo(const std::string& url,
-                            std::uint32_t fwmark,
-                            const std::string& device) {
+ExitProbeOutcome fetch_echo_with_transport(
+    const std::shared_ptr<HttpTransport>& transport,
+    const std::string& url,
+    std::uint32_t fwmark,
+    const std::string& device) {
     ExitProbeOutcome outcome;
-    // Attribution is a property of the request we were able to build, not of
-    // the answer: without a device to bind to there is nothing to attribute
-    // the result to, and the same word is used this way by InterfaceProbe.
-    outcome.attributed = !device.empty();
+    // A routing mark attributes TABLE outbounds and a device bind attributes
+    // interface outbounds, even when the far side never answers. A typed bind
+    // failure below is the exception: the socket never became pinned to the
+    // requested interface and must be reported as unattributed.
+    outcome.attributed = fwmark != 0U || !device.empty();
 
-    HttpClient client;
+    HttpClient client(transport);
     client.set_timeout(kEchoTimeout);
     client.set_max_response_size(kEchoResponseLimit);
     HttpRequestOptions options;
     options.fwmark = fwmark;
+    options.destination_filter = [](const std::string& address) {
+        return subscription_destination_permitted(address) ==
+               SubscriptionDestinationVerdict::allowed;
+    };
     options.bind_interface = device;
 
     const auto started = std::chrono::steady_clock::now();
@@ -63,6 +73,10 @@ ExitProbeOutcome fetch_echo(const std::string& url,
         }
         outcome.ok = true;
         outcome.address = *address;
+    } catch (const HttpBindError& error) {
+        outcome.attributed = false;
+        outcome.error = error.what();
+        return outcome;
     } catch (const HttpError& error) {
         outcome.error = error.what();
         return outcome;
@@ -74,10 +88,18 @@ ExitProbeOutcome fetch_echo(const std::string& url,
     return outcome;
 }
 
+ExitProbeOutcome fetch_echo(const std::string& url,
+                            std::uint32_t fwmark,
+                            const std::string& device) {
+    return fetch_echo_with_transport(
+        default_http_transport(), url, fwmark, device);
+}
+
 void register_impl(ApiServer& server, ApiContext& ctx, ExitEchoFetcher fetcher) {
+    auto probe_gate = std::make_shared<std::mutex>();
     server.post(
         "/api/transports/exit-check",
-        [&ctx, fetcher = std::move(fetcher)](
+        [&ctx, fetcher = std::move(fetcher), probe_gate = std::move(probe_gate)](
             const std::string& request_body) -> std::string {
             nlohmann::json request;
             try {
@@ -100,64 +122,63 @@ void register_impl(ApiServer& server, ApiContext& ctx, ExitEchoFetcher fetcher) 
                     "name exactly one of outbound or interface", 400);
             }
 
-            // A native firmware tunnel usually has no keen-pbr outbound and
-            // therefore no routing mark - the row offers to create a route
-            // instead. Binding the socket to its device is what makes the
-            // measurement attributable, and a mark was never what did that,
-            // so such a tunnel is measurable without one.
+            std::string response_name;
+            std::string device;
+            std::uint32_t fwmark = 0U;
+
             if (by_device) {
-                const auto device = request["interface"].get<std::string>();
+                // A native firmware tunnel usually has no keen-pbr outbound
+                // and therefore no routing mark. Binding the socket to its
+                // device is what makes the measurement attributable.
+                device = request["interface"].get<std::string>();
                 if (device.empty() || device.size() >= 16U ||
                     device.find('/') != std::string::npos) {
                     throw ApiError("not an interface name", 400);
                 }
-                const ExitProbeOutcome through = fetcher(kEchoUrl, 0U, device);
-                const ExitProbeOutcome direct =
-                    fetcher(kEchoUrl, 0U, std::string());
-                const nlohmann::json response = {
-                    {"outbound", device},
-                    {"verdict",
-                     exit_check_verdict_name(exit_check_verdict(through))},
-                    {"exit_address", exit_address_change_name(
-                                         exit_address_change(through, direct))},
-                    {"through", probe_to_json(through)},
-                    {"direct", probe_to_json(direct)}};
-                return response.dump();
+                response_name = device;
+            } else {
+                const auto tag = request["outbound"].get<std::string>();
+
+                const Config config = ctx.get_visible_config_fn();
+                const auto outbounds =
+                    config.outbounds.value_or(std::vector<Outbound>{});
+                const auto found = std::find_if(
+                    outbounds.begin(), outbounds.end(),
+                    [&tag](const Outbound& ob) { return ob.tag == tag; });
+                if (found == outbounds.end()) {
+                    throw ApiError("unknown outbound", 404);
+                }
+
+                const auto marks = allocate_outbound_marks(
+                    config.fwmark.value_or(FwmarkConfig{}), outbounds);
+                const auto mark = marks.find(tag);
+                if (mark == marks.end()) {
+                    // No mark means no policy table selects this outbound, so
+                    // there is no route for a probe to take.
+                    throw ApiError(
+                        "this outbound carries no routing mark", 409);
+                }
+
+                response_name = tag;
+                fwmark = mark->second;
+                device = found->interface.value_or(std::string());
             }
 
-            const auto tag = request["outbound"].get<std::string>();
-
-            const Config config = ctx.get_visible_config_fn();
-            const auto outbounds =
-                config.outbounds.value_or(std::vector<Outbound>{});
-            const auto found = std::find_if(
-                outbounds.begin(), outbounds.end(),
-                [&tag](const Outbound& ob) { return ob.tag == tag; });
-            if (found == outbounds.end()) {
-                throw ApiError("unknown outbound", 404);
+            std::unique_lock<std::mutex> gate_lock(
+                *probe_gate, std::try_to_lock);
+            if (!gate_lock.owns_lock()) {
+                throw ApiError("another exit check is already running", 503);
             }
 
-            const auto marks = allocate_outbound_marks(
-                config.fwmark.value_or(FwmarkConfig{}), outbounds);
-            const auto mark = marks.find(tag);
-            if (mark == marks.end()) {
-                // No mark means no policy table selects this outbound, so
-                // there is no route for a probe to take. Saying so is more
-                // use than probing the router's own connection and calling
-                // the answer a tunnel.
-                throw ApiError("this outbound carries no routing mark", 409);
-            }
-
-            const auto device = found->interface.value_or(std::string());
             const ExitProbeOutcome through =
-                fetcher(kEchoUrl, mark->second, device);
+                fetcher(kEchoUrl, fwmark, device);
             // The control runs unmarked and unbound: it is the answer the
             // router gives without this transport, and without it "changed"
             // would be a comparison against nothing.
             const ExitProbeOutcome direct = fetcher(kEchoUrl, 0U, std::string());
 
             const nlohmann::json response = {
-                {"outbound", tag},
+                {"outbound", response_name},
                 {"verdict", exit_check_verdict_name(exit_check_verdict(through))},
                 {"exit_address",
                  exit_address_change_name(exit_address_change(through, direct))},
@@ -174,6 +195,15 @@ void register_transport_exit_check_handler(ApiServer& server, ApiContext& ctx) {
 }
 
 #ifdef KEEN_PBR3_TESTING
+ExitProbeOutcome fetch_transport_exit_echo_for_test(
+    std::shared_ptr<HttpTransport> transport,
+    const std::string& url,
+    std::uint32_t fwmark,
+    const std::string& device) {
+    return fetch_echo_with_transport(
+        std::move(transport), url, fwmark, device);
+}
+
 void register_transport_exit_check_handler_for_test(ApiServer& server,
                                                     ApiContext& ctx,
                                                     ExitEchoFetcher fetcher) {

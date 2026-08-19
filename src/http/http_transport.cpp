@@ -272,6 +272,7 @@ HttpTransportResponse LibcurlHttpTransport::perform(const HttpTransportRequest& 
         if (context.bind_errno) {
             message += "; SO_BINDTODEVICE(" + request.bind_interface +
                        ") failed: " + std::string(std::strerror(context.bind_errno));
+            throw HttpTransportBindError("HTTP request failed: " + message);
         }
         if (context.mark_errno) message += "; SO_MARK failed: " + std::string(std::strerror(context.mark_errno));
         throw HttpTransportError("HTTP request failed: " + message);

@@ -80,6 +80,12 @@ public:
         : HttpTransportError(message) {}
 };
 
+class HttpTransportBindError : public HttpTransportError {
+public:
+    explicit HttpTransportBindError(const std::string& message)
+        : HttpTransportError(message) {}
+};
+
 class HttpTransport {
 public:
     virtual ~HttpTransport() = default;

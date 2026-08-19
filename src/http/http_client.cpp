@@ -77,6 +77,8 @@ std::string HttpClient::download(const std::string& url, const HttpRequestOption
         return response.body;
     } catch (const HttpTransportCancelled& error) {
         throw HttpRequestCancelled(error.what());
+    } catch (const HttpTransportBindError& error) {
+        throw HttpBindError(error.what());
     } catch (const HttpTransportError& error) {
         throw HttpError(error.what());
     }
@@ -104,6 +106,8 @@ ConditionalDownloadResult HttpClient::download_conditional(
         return result;
     } catch (const HttpTransportCancelled& error) {
         throw HttpRequestCancelled(error.what());
+    } catch (const HttpTransportBindError& error) {
+        throw HttpBindError(error.what());
     } catch (const HttpTransportError& error) {
         throw HttpError(error.what());
     }
