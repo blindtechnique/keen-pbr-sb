@@ -2560,6 +2560,119 @@ TEST_CASE("an external router credential change revokes the session cohort") {
     ndms_thread.join();
 }
 
+TEST_CASE(
+    "external router credential change fences verified login publication") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+
+    std::mutex document_mutex;
+    std::string document =
+        R"({"admin":{"password":{"nt":{"hash":"aaaa"}},"tag":["http"]}})";
+    std::atomic<unsigned int> forwarded_credentials{0U};
+    httplib::Server router;
+    router.Get("/auth", [](const httplib::Request&,
+                            httplib::Response& response) {
+        response.status = 401;
+        response.set_header("X-NDM-Realm", "Keenetic");
+        response.set_header("X-NDM-Challenge", "challenge");
+    });
+    router.Post("/auth", [&forwarded_credentials](
+                             const httplib::Request&,
+                             httplib::Response& response) {
+        forwarded_credentials.fetch_add(1U, std::memory_order_relaxed);
+        response.status = 200;
+    });
+    router.Get("/rci/show/rc/user",
+               [&](const httplib::Request&, httplib::Response& response) {
+                   std::lock_guard lock(document_mutex);
+                   response.set_content(document, "application/json");
+               });
+    BoundHttpServer running_router(router);
+    write_text(
+        auth_path,
+        nlohmann::json{
+            {"enabled", true},
+            {"provider", "keenetic"},
+            {"keenetic_endpoint_mode", "manual"},
+            {"keenetic_endpoint",
+             "127.0.0.1:" + std::to_string(running_router.port())},
+        }.dump());
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+    EnvironmentVariableGuard endpoint_override(
+        "KEEN_PBR_TEST_NDMS_USER_ENDPOINT",
+        "http://127.0.0.1:" + std::to_string(running_router.port()) +
+            "/rci/show/rc/user");
+    TrustedLocalConnectionEvaluatorGuard local_transport(
+        [](std::string_view, std::string_view, bool) { return true; });
+
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+    CHECK(server.poll_router_credentials_for_testing() == "unchanged");
+
+    std::mutex barrier_mutex;
+    std::condition_variable barrier_cv;
+    bool login_verified = false;
+    bool release_login = false;
+    set_auth_login_verified_hook_for_testing([&]() {
+        std::unique_lock lock(barrier_mutex);
+        login_verified = true;
+        barrier_cv.notify_all();
+        barrier_cv.wait(lock, [&]() { return release_login; });
+    });
+    struct AuthLoginHookReset {
+        ~AuthLoginHookReset() {
+            reset_auth_login_verified_hook_for_testing();
+        }
+    } auth_login_hook_reset;
+
+    int login_status = 0;
+    std::string set_cookie;
+    std::thread login([&]() {
+        httplib::Client client("127.0.0.1", configured_port(config));
+        const auto response = client.Post(
+            "/api/auth/login",
+            R"({"username":"admin","password":"router-secret"})",
+            "application/json");
+        if (response) {
+            login_status = response->status;
+            set_cookie = response->get_header_value("Set-Cookie");
+        }
+    });
+
+    bool reached_verification = false;
+    {
+        std::unique_lock lock(barrier_mutex);
+        reached_verification = barrier_cv.wait_for(
+            lock,
+            std::chrono::seconds{5},
+            [&]() { return login_verified; });
+    }
+    std::string poll_outcome;
+    if (reached_verification) {
+        {
+            std::lock_guard lock(document_mutex);
+            document =
+                R"({"admin":{"password":{"nt":{"hash":"bbbb"}},"tag":["http"]}})";
+        }
+        poll_outcome = server.poll_router_credentials_for_testing();
+    }
+    {
+        std::lock_guard lock(barrier_mutex);
+        release_login = true;
+    }
+    barrier_cv.notify_all();
+    login.join();
+    server.stop();
+
+    REQUIRE(reached_verification);
+    CHECK(poll_outcome == "changed");
+    CHECK(forwarded_credentials.load(std::memory_order_relaxed) == 1U);
+    CHECK(login_status == 409);
+    CHECK(set_cookie.empty());
+}
+
 TEST_CASE("the local provider is not watched over RCI") {
     // A local password lives in auth.json, and changing it there already
     // advances the generation. Polling NDMS for it would be watching the

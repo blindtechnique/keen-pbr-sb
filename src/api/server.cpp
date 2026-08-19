@@ -1080,6 +1080,24 @@ struct ApiServer::Impl {
         step_up_grants.clear();
     }
 
+    void revoke_auth_sessions_after_external_credential_change() {
+        // Credential verification runs without the epoch, so clearing only
+        // the sessions that already exist is insufficient: a login verified
+        // against the old router credential could publish immediately after
+        // that clear. Advance the generation under the same epoch and lock
+        // order as login publication. The login then either publishes before
+        // this boundary and is cleared below, or observes the new generation
+        // and is rejected.
+        std::lock_guard epoch_lock(auth_revocation_mutex);
+        {
+            std::lock_guard auth_lock(auth_mutex);
+            advance_auth_generation_locked();
+        }
+        close_authenticated_streams_locked();
+        sessions.clear();
+        step_up_grants.clear();
+    }
+
     bool revoke_auth_session(const std::string& token) {
         // Logout is unauthenticated as an endpoint so clients can always
         // discard a stale cookie. Only a currently valid token is authority
@@ -1545,7 +1563,7 @@ struct ApiServer::Impl {
         // Said out loud because an operator whose session just died deserves
         // to find the reason in the log. The digest is not part of it: it is a
         // fingerprint of the credential state and belongs nowhere.
-        revoke_auth_sessions();
+        revoke_auth_sessions_after_external_credential_change();
         try {
             Logger::instance().warn(
                 "Router account credentials changed outside keen-pbr; every "
