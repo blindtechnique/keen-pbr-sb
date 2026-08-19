@@ -16,8 +16,10 @@ namespace keen_pbr3 {
 // to drive had no implementation at all.
 //
 // Both effects are injected so the whole decision is testable without a
-// router: reading is a bounded RCI GET, mutating is one ndmc command. A
-// production wiring helper is provided below.
+// router: reading is a bounded RCI GET, mutating is one command. Production
+// code deliberately has no factory for this capability; this primitive and
+// the operator-level wrapper are linked only into tests until the durable
+// panel-delete coordinator is proven safe.
 struct NdmsNativeInterfaceDeleteDependencies final {
     // Returns the parsed document for an RCI path, or nullopt when the read
     // itself failed. An interface that does not exist is NOT a failure: the
@@ -48,11 +50,6 @@ NdmsNativeImportRecoveryDeleteOutcome delete_exact_owned_ndms_interface(
     const std::string& interface_name,
     const std::string& marker,
     const NdmsNativeInterfaceDeleteDependencies& dependencies);
-
-// Production dependencies live in ndms_native_interface_delete_production.hpp
-// and are deliberately NOT declared here: this translation unit must stay free
-// of HttpClient and ndmc so the narrow native-import test target keeps its
-// independence from the daemon, the API and the router.
 
 // The exact command this operation issues. Exposed so a test can pin the
 // spelling - a delete that names the wrong interface is unrecoverable, and

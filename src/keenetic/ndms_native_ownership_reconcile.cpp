@@ -12,22 +12,33 @@ enum class InterfacePresence { present, absent, unknown };
 
 InterfacePresence presence_of(
     const std::string& interface_name,
-    const NdmsNativeInterfaceDeleteDependencies& dependencies) {
-    const auto describes = [](const std::optional<nlohmann::json>& document) {
-        return document.has_value() && document->is_object() &&
-               !document->empty();
+    const NdmsNativeInterfaceReadDependencies& dependencies) {
+    const auto classify = [](const std::optional<nlohmann::json>& document) {
+        if (!document.has_value()) return InterfacePresence::unknown;
+        if (document->is_null()) return InterfacePresence::absent;
+        if (document->is_object() && !document->empty()) {
+            return InterfacePresence::present;
+        }
+        // Empty objects, arrays and scalars are not the measured absence
+        // shape. Treating a successfully parsed but unexpected document as
+        // absence could retire a live interface's ownership claim.
+        return InterfacePresence::unknown;
     };
     const auto config = dependencies.read_document(
         "show/rc/interface/" + interface_name);
     const auto runtime =
         dependencies.read_document("show/interface/" + interface_name);
-    if (!config.has_value() || !runtime.has_value()) {
-        return InterfacePresence::unknown;
-    }
-    if (describes(config) || describes(runtime)) {
+    const auto config_presence = classify(config);
+    const auto runtime_presence = classify(runtime);
+    if (config_presence == InterfacePresence::present ||
+        runtime_presence == InterfacePresence::present) {
         return InterfacePresence::present;
     }
-    return InterfacePresence::absent;
+    if (config_presence == InterfacePresence::absent &&
+        runtime_presence == InterfacePresence::absent) {
+        return InterfacePresence::absent;
+    }
+    return InterfacePresence::unknown;
 }
 
 } // namespace
@@ -35,7 +46,7 @@ InterfacePresence presence_of(
 NdmsNativeOwnershipReconcileResult reconcile_ndms_native_ownership_claims(
     NdmsNativeOwnershipStore& ownership_store,
     const bool wal_transaction_in_flight,
-    const NdmsNativeInterfaceDeleteDependencies& read_dependencies) {
+    const NdmsNativeInterfaceReadDependencies& read_dependencies) {
     NdmsNativeOwnershipReconcileResult result;
     if (!read_dependencies.read_document) return result;
     if (wal_transaction_in_flight) {

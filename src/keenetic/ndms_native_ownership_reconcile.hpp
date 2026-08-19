@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ndms_native_interface_delete.hpp"
+#include "ndms_native_interface_read.hpp"
 #include "ndms_native_ownership_store.hpp"
 
 #include <cstddef>
@@ -11,15 +11,9 @@ namespace keen_pbr3 {
 
 // Retires ownership claims whose interface no longer exists.
 //
-// Removal has a crash window that the WAL does not cover: a completed import
-// is deleted by remove_owned_ndms_tunnel, the process dies before the claim is
-// retired, and a durable assertion of ownership survives over a slot that is
-// now free - the same residue e15fd85c fixed inside the rollback, reachable
-// here by a different route. Reporting `removed_claim_survived` tells a live
-// caller; nothing tells the next boot. This does.
-//
-// It only ever removes claims. It never deletes an interface, never publishes,
-// and never touches a name the store could not have claimed.
+// It only ever removes claims for interfaces whose configuration and runtime
+// documents are both authoritatively absent. It never deletes an interface,
+// never publishes, and never receives a command-execution capability.
 struct NdmsNativeOwnershipReconcileResult {
     // False when the claim directory could not be enumerated. Distinguished
     // from "nothing to do" because an unreadable store must not be reported
@@ -43,6 +37,6 @@ struct NdmsNativeOwnershipReconcileResult {
 NdmsNativeOwnershipReconcileResult reconcile_ndms_native_ownership_claims(
     NdmsNativeOwnershipStore& ownership_store,
     bool wal_transaction_in_flight,
-    const NdmsNativeInterfaceDeleteDependencies& read_dependencies);
+    const NdmsNativeInterfaceReadDependencies& read_dependencies);
 
 } // namespace keen_pbr3

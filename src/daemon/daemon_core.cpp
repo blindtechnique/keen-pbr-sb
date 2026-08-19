@@ -46,7 +46,7 @@
 #include "../keenetic/internal_vpn_service_resolver.hpp"
 #include "../keenetic/internal_vpn_runtime_generation.hpp"
 #include "../keenetic/ndms_catalog_cache.hpp"
-#include "../keenetic/ndms_native_interface_delete_production.hpp"
+#include "../keenetic/ndms_native_interface_read_production.hpp"
 #include "../keenetic/ndms_native_ownership_reconcile.hpp"
 #include "../keenetic/ndms_vpn_server_service_cache.hpp"
 #include "../lists/list_streamer.hpp"
@@ -3997,7 +3997,7 @@ void Daemon::run() {
                 reconcile_ndms_native_ownership_claims(
                     ndms_native_ownership_store_,
                     transaction_in_flight_or_unknown,
-                    ndms_native_interface_delete_production_dependencies());
+                    ndms_native_interface_read_production_dependencies());
             if (!reconciled.store_readable) {
                 log.warn(
                     "Native import ownership claims could not be read; "

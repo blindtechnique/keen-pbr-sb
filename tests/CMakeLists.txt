@@ -279,8 +279,10 @@ add_executable(keen-pbr-tests
   ../src/crypto/chacha20poly1305.cpp
   ../src/keenetic/ndms_native_secret_snapshot.cpp
   ../src/keenetic/ndms_native_secret_redaction.cpp
+  # Deliberately test-only: production CMake does not link this mutation
+  # primitive or the operator wrapper.
   ../src/keenetic/ndms_native_interface_delete.cpp
-  ../src/keenetic/ndms_native_interface_delete_production.cpp
+  ../src/keenetic/ndms_native_interface_read_production.cpp
   ../src/keenetic/ndms_native_tunnel_removal.cpp
   ../src/keenetic/ndms_native_ownership_reconcile.cpp
   ../src/keenetic/ndms_native_remove_policy.cpp
@@ -381,7 +383,8 @@ set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 foreach(_probe IN ITEMS
     ndms_native_exact_mutation_mint
     ndms_native_exact_mutation_backend
-    ndms_native_exact_mutation_authority)
+    ndms_native_exact_mutation_authority
+    ndms_native_interface_read_command)
   set(_probe_result
       "KEEN_PBR_COMPILE_NEGATIVE_${_probe}")
   unset(${_probe_result} CACHE)

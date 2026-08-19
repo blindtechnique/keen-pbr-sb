@@ -212,10 +212,14 @@ TEST_CASE("a surviving claim after a real delete is not reported as success") {
                                                   router.dependencies());
     fs::permissions(directory.path / "ownership",
                     fs::perms::owner_all, error);
-    // Running as root defeats the permission trick; accept either the honest
-    // split outcome or a clean removal, but never a silent success while the
-    // claim is still readable.
-    if (outcome == Outcome::removed) {
+    // The hardened store rejects a 0500 directory before reading the claim,
+    // so the test-only legacy remover must fail without issuing a command.
+    // On platforms where the permission transition did not take effect,
+    // retain the older exact postcondition checks.
+    if (outcome == Outcome::failed) {
+        CHECK(router.commands.empty());
+        CHECK(fs::exists(claim_path));
+    } else if (outcome == Outcome::removed) {
         CHECK(store.read("Wireguard5").state ==
               NdmsNativeOwnershipReadState::absent);
     } else {
