@@ -6187,6 +6187,11 @@ export type postAuthLoginResponse409 = {
   status: 409
 }
 
+export type postAuthLoginResponse429 = {
+  data: ErrorResponse
+  status: 429
+}
+
 export type postAuthLoginResponse503 = {
   data: ErrorResponse
   status: 503
@@ -6195,7 +6200,7 @@ export type postAuthLoginResponse503 = {
 export type postAuthLoginResponseSuccess = (postAuthLoginResponse200) & {
   headers: Headers;
 };
-export type postAuthLoginResponseError = (postAuthLoginResponse400 | postAuthLoginResponse401 | postAuthLoginResponse403 | postAuthLoginResponse409 | postAuthLoginResponse503) & {
+export type postAuthLoginResponseError = (postAuthLoginResponse400 | postAuthLoginResponse401 | postAuthLoginResponse403 | postAuthLoginResponse409 | postAuthLoginResponse429 | postAuthLoginResponse503) & {
   headers: Headers;
 };
 
@@ -6299,10 +6304,20 @@ export type postAuthStepUpResponse409 = {
   status: 409
 }
 
+export type postAuthStepUpResponse429 = {
+  data: ErrorResponse
+  status: 429
+}
+
+export type postAuthStepUpResponse503 = {
+  data: ErrorResponse
+  status: 503
+}
+
 export type postAuthStepUpResponseSuccess = (postAuthStepUpResponse200) & {
   headers: Headers;
 };
-export type postAuthStepUpResponseError = (postAuthStepUpResponse400 | postAuthStepUpResponse401 | postAuthStepUpResponse403 | postAuthStepUpResponse409) & {
+export type postAuthStepUpResponseError = (postAuthStepUpResponse400 | postAuthStepUpResponse401 | postAuthStepUpResponse403 | postAuthStepUpResponse409 | postAuthStepUpResponse429 | postAuthStepUpResponse503) & {
   headers: Headers;
 };
 
@@ -6492,10 +6507,15 @@ export type postAuthSettingsResponse409 = {
   status: 409
 }
 
+export type postAuthSettingsResponse500 = {
+  data: ErrorResponse
+  status: 500
+}
+
 export type postAuthSettingsResponseSuccess = (postAuthSettingsResponse200) & {
   headers: Headers;
 };
-export type postAuthSettingsResponseError = (postAuthSettingsResponse400 | postAuthSettingsResponse401 | postAuthSettingsResponse403 | postAuthSettingsResponse409) & {
+export type postAuthSettingsResponseError = (postAuthSettingsResponse400 | postAuthSettingsResponse401 | postAuthSettingsResponse403 | postAuthSettingsResponse409 | postAuthSettingsResponse500) & {
   headers: Headers;
 };
 
@@ -7083,9 +7103,9 @@ export const usePostBackupRollback = <TError = ErrorResponse,
     }
 
 /**
- * Fetches an address echo twice: once pinned to the outbound's own device, and once with no mark and no binding at all. The second is the control - the answer this router gives without the transport - because without it "the address changed" would be a comparison against nothing.
+ * Fetches an address echo twice: once pinned to an interface device or marked for a TABLE outbound, and once with no mark and no binding at all. The second is the control - the answer this router gives without the transport - because without it "the address changed" would be a comparison against nothing.
 
-The verdict has three values rather than two, and the third is the point. A mark alone only expresses a routing preference: when the outbound's table holds no usable default the lookup falls through to main and the request quietly succeeds over the provider. So an outbound with no device to bind to returns `unattributed` - the answer describes some route, but not provably this one - and that is neither a success nor a failure. Reporting it as either is how a panel ends up showing the provider's address as a tunnel's exit.
+The verdict has three values rather than two, and the third is the point. An interface outbound is attributable only when the socket bind succeeds; a TABLE outbound is attributable through its non-zero policy mark. A failed interface bind returns `unattributed` - the request never became pinned to that tunnel - and that is neither a success nor a failure.
 
 The echoed body is validated as an IP literal rather than trusted: a captive portal answers 200 with a page, and printing that as "your address" would dress a hijacked request as a measurement. Nothing is changed on the router; this only measures.
 
@@ -7111,10 +7131,15 @@ export type postTransportExitCheckResponse409 = {
   status: 409
 }
 
+export type postTransportExitCheckResponse503 = {
+  data: ErrorResponse
+  status: 503
+}
+
 export type postTransportExitCheckResponseSuccess = (postTransportExitCheckResponse200) & {
   headers: Headers;
 };
-export type postTransportExitCheckResponseError = (postTransportExitCheckResponse400 | postTransportExitCheckResponse404 | postTransportExitCheckResponse409) & {
+export type postTransportExitCheckResponseError = (postTransportExitCheckResponse400 | postTransportExitCheckResponse404 | postTransportExitCheckResponse409 | postTransportExitCheckResponse503) & {
   headers: Headers;
 };
 

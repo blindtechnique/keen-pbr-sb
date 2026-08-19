@@ -124,6 +124,7 @@ add_executable(keen-pbr-tests
   test_api_transports.cpp
   test_api_subscriptions.cpp
   test_api_transport_exit_check.cpp
+  test_openapi_runtime_contracts.cpp
   test_update_version.cpp
   test_api_test_routing.cpp
   test_api_auth.cpp
@@ -813,6 +814,7 @@ set_target_properties(keen-pbr-tests PROPERTIES
 target_compile_definitions(keen-pbr-tests PRIVATE
   KEEN_PBR3_TESTING
   KEEN_PBR_DEFAULT_CONFIG_PATH="${KEEN_PBR_DEFAULT_CONFIG_PATH}"
+  KEEN_PBR_OPENAPI_PATH="${CMAKE_SOURCE_DIR}/docs/openapi.yaml"
   KEEN_PBR_NFQWS_STRATEGY_ROOT="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-strategies"
   KEEN_PBR_RESCUE_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-update.sh"
   KEEN_PBR_RESCUE_STARTUP_GUARD_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-startup-guard.sh"

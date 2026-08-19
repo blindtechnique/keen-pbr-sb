@@ -111,25 +111,20 @@ namespace api {
         std::optional<std::string> username;
     };
 
-    enum class KeeneticEndpointSource : int { FALLBACK, NDMS };
-
     struct AuthSettingsResponse {
-        bool authenticated = false;
-        bool enabled = false;
-        std::optional<std::string> error;
-        std::optional<std::string> keenetic_endpoint;
-        std::optional<std::string> keenetic_endpoint_mode;
-        std::optional<KeeneticEndpointSource> keenetic_endpoint_source;
-        std::optional<bool> network_api_blocked;
-        std::optional<std::string> no_auth_scope;
-        std::string provider;
-        bool trusted_local_connection = false;
-        std::optional<std::string> trusted_local_connection_generation;
-        std::optional<int64_t> trusted_local_connection_valid_for_seconds;
+        bool durable = false;
+        std::optional<int64_t> remote_access_generation;
+        std::optional<bool> remote_access_pending;
+        std::optional<std::string> restart_detail;
+        std::optional<bool> restart_required;
+        std::optional<bool> runtime_auth_enabled;
+        bool saved = false;
         std::optional<std::string> warning;
     };
 
-    struct AuthStatusClass {
+    enum class KeeneticEndpointSource : int { FALLBACK, NDMS };
+
+    struct AuthStatus {
         bool authenticated = false;
         bool enabled = false;
         std::optional<std::string> error;
@@ -153,20 +148,14 @@ namespace api {
         std::optional<std::map<std::string, nlohmann::json>> general;
         std::optional<std::map<std::string, nlohmann::json>> lists;
         std::optional<std::map<std::string, nlohmann::json>> nfqws;
-        std::optional<std::map<std::string, nlohmann::json>> outbounds;
+        std::optional<std::vector<std::map<std::string, nlohmann::json>>> outbounds;
         std::optional<std::map<std::string, nlohmann::json>> route;
         std::optional<std::map<std::string, nlohmann::json>> transports;
     };
 
     enum class Format : int { KEEN_PBR_SB_BACKUP };
 
-    struct BackupDocument {
-        Data data;
-        Format format;
-        int64_t schema = 0;
-    };
-
-    struct BackupGroupSelection {
+    struct Groups {
         std::optional<bool> dns;
         std::optional<bool> general;
         std::optional<bool> nfqws;
@@ -177,8 +166,16 @@ namespace api {
         std::optional<bool> transports;
     };
 
+    struct BackupDocument {
+        std::optional<int64_t> created_at;
+        Data data;
+        Format format;
+        std::optional<Groups> groups;
+        int64_t schema = 0;
+    };
+
     struct BackupReadRequest {
-        std::optional<BackupGroupSelection> groups;
+        std::optional<Groups> groups;
     };
 
     struct BackupRollbackAvailability {
@@ -709,6 +706,7 @@ namespace api {
     };
 
     struct GrantedResponse {
+        std::optional<int64_t> expires_in_seconds;
         bool granted = false;
     };
 
@@ -1719,9 +1717,9 @@ namespace api {
         std::optional<AuthenticatedResponse> authenticated_response;
         std::optional<AuthSettingsRequest> auth_settings_request;
         std::optional<AuthSettingsResponse> auth_settings_response;
-        std::optional<AuthStatusClass> auth_status;
+        std::optional<AuthStatus> auth_status;
         std::optional<BackupDocument> backup_document;
-        std::optional<BackupGroupSelection> backup_group_selection;
+        std::optional<Groups> backup_group_selection;
         std::optional<BackupReadRequest> backup_read_request;
         std::optional<BackupRollbackAvailability> backup_rollback_availability;
         std::optional<CacheGeneration> cache_generation;
@@ -1931,8 +1929,8 @@ void to_json(json & j, const AuthSettingsRequest & x);
 void from_json(const json & j, AuthSettingsResponse & x);
 void to_json(json & j, const AuthSettingsResponse & x);
 
-void from_json(const json & j, AuthStatusClass & x);
-void to_json(json & j, const AuthStatusClass & x);
+void from_json(const json & j, AuthStatus & x);
+void to_json(json & j, const AuthStatus & x);
 
 void from_json(const json & j, AuthenticatedResponse & x);
 void to_json(json & j, const AuthenticatedResponse & x);
@@ -1940,11 +1938,11 @@ void to_json(json & j, const AuthenticatedResponse & x);
 void from_json(const json & j, Data & x);
 void to_json(json & j, const Data & x);
 
+void from_json(const json & j, Groups & x);
+void to_json(json & j, const Groups & x);
+
 void from_json(const json & j, BackupDocument & x);
 void to_json(json & j, const BackupDocument & x);
-
-void from_json(const json & j, BackupGroupSelection & x);
-void to_json(json & j, const BackupGroupSelection & x);
 
 void from_json(const json & j, BackupReadRequest & x);
 void to_json(json & j, const BackupReadRequest & x);
@@ -2770,39 +2768,29 @@ namespace api {
     }
 
     inline void from_json(const json & j, AuthSettingsResponse& x) {
-        x.authenticated = j.at("authenticated").get<bool>();
-        x.enabled = j.at("enabled").get<bool>();
-        x.error = get_stack_optional<std::string>(j, "error");
-        x.keenetic_endpoint = get_stack_optional<std::string>(j, "keenetic_endpoint");
-        x.keenetic_endpoint_mode = get_stack_optional<std::string>(j, "keenetic_endpoint_mode");
-        x.keenetic_endpoint_source = get_stack_optional<KeeneticEndpointSource>(j, "keenetic_endpoint_source");
-        x.network_api_blocked = get_stack_optional<bool>(j, "network_api_blocked");
-        x.no_auth_scope = get_stack_optional<std::string>(j, "no_auth_scope");
-        x.provider = j.at("provider").get<std::string>();
-        x.trusted_local_connection = j.at("trusted_local_connection").get<bool>();
-        x.trusted_local_connection_generation = get_stack_optional<std::string>(j, "trusted_local_connection_generation");
-        x.trusted_local_connection_valid_for_seconds = get_stack_optional<int64_t>(j, "trusted_local_connection_valid_for_seconds");
+        x.durable = j.at("durable").get<bool>();
+        x.remote_access_generation = get_stack_optional<int64_t>(j, "remote_access_generation");
+        x.remote_access_pending = get_stack_optional<bool>(j, "remote_access_pending");
+        x.restart_detail = get_stack_optional<std::string>(j, "restart_detail");
+        x.restart_required = get_stack_optional<bool>(j, "restart_required");
+        x.runtime_auth_enabled = get_stack_optional<bool>(j, "runtime_auth_enabled");
+        x.saved = j.at("saved").get<bool>();
         x.warning = get_stack_optional<std::string>(j, "warning");
     }
 
     inline void to_json(json & j, const AuthSettingsResponse & x) {
         j = json::object();
-        j["authenticated"] = x.authenticated;
-        j["enabled"] = x.enabled;
-        j["error"] = x.error;
-        j["keenetic_endpoint"] = x.keenetic_endpoint;
-        j["keenetic_endpoint_mode"] = x.keenetic_endpoint_mode;
-        j["keenetic_endpoint_source"] = x.keenetic_endpoint_source;
-        j["network_api_blocked"] = x.network_api_blocked;
-        j["no_auth_scope"] = x.no_auth_scope;
-        j["provider"] = x.provider;
-        j["trusted_local_connection"] = x.trusted_local_connection;
-        j["trusted_local_connection_generation"] = x.trusted_local_connection_generation;
-        j["trusted_local_connection_valid_for_seconds"] = x.trusted_local_connection_valid_for_seconds;
+        j["durable"] = x.durable;
+        j["remote_access_generation"] = x.remote_access_generation;
+        j["remote_access_pending"] = x.remote_access_pending;
+        j["restart_detail"] = x.restart_detail;
+        j["restart_required"] = x.restart_required;
+        j["runtime_auth_enabled"] = x.runtime_auth_enabled;
+        j["saved"] = x.saved;
         j["warning"] = x.warning;
     }
 
-    inline void from_json(const json & j, AuthStatusClass& x) {
+    inline void from_json(const json & j, AuthStatus& x) {
         x.authenticated = j.at("authenticated").get<bool>();
         x.enabled = j.at("enabled").get<bool>();
         x.error = get_stack_optional<std::string>(j, "error");
@@ -2817,7 +2805,7 @@ namespace api {
         x.trusted_local_connection_valid_for_seconds = get_stack_optional<int64_t>(j, "trusted_local_connection_valid_for_seconds");
     }
 
-    inline void to_json(json & j, const AuthStatusClass & x) {
+    inline void to_json(json & j, const AuthStatus & x) {
         j = json::object();
         j["authenticated"] = x.authenticated;
         j["enabled"] = x.enabled;
@@ -2847,7 +2835,7 @@ namespace api {
         x.general = get_stack_optional<std::map<std::string, nlohmann::json>>(j, "general");
         x.lists = get_stack_optional<std::map<std::string, nlohmann::json>>(j, "lists");
         x.nfqws = get_stack_optional<std::map<std::string, nlohmann::json>>(j, "nfqws");
-        x.outbounds = get_stack_optional<std::map<std::string, nlohmann::json>>(j, "outbounds");
+        x.outbounds = get_stack_optional<std::vector<std::map<std::string, nlohmann::json>>>(j, "outbounds");
         x.route = get_stack_optional<std::map<std::string, nlohmann::json>>(j, "route");
         x.transports = get_stack_optional<std::map<std::string, nlohmann::json>>(j, "transports");
     }
@@ -2863,20 +2851,7 @@ namespace api {
         j["transports"] = x.transports;
     }
 
-    inline void from_json(const json & j, BackupDocument& x) {
-        x.data = j.at("data").get<Data>();
-        x.format = j.at("format").get<Format>();
-        x.schema = j.at("schema").get<int64_t>();
-    }
-
-    inline void to_json(json & j, const BackupDocument & x) {
-        j = json::object();
-        j["data"] = x.data;
-        j["format"] = x.format;
-        j["schema"] = x.schema;
-    }
-
-    inline void from_json(const json & j, BackupGroupSelection& x) {
+    inline void from_json(const json & j, Groups& x) {
         x.dns = get_stack_optional<bool>(j, "dns");
         x.general = get_stack_optional<bool>(j, "general");
         x.nfqws = get_stack_optional<bool>(j, "nfqws");
@@ -2887,7 +2862,7 @@ namespace api {
         x.transports = get_stack_optional<bool>(j, "transports");
     }
 
-    inline void to_json(json & j, const BackupGroupSelection & x) {
+    inline void to_json(json & j, const Groups & x) {
         j = json::object();
         j["dns"] = x.dns;
         j["general"] = x.general;
@@ -2899,8 +2874,25 @@ namespace api {
         j["transports"] = x.transports;
     }
 
+    inline void from_json(const json & j, BackupDocument& x) {
+        x.created_at = get_stack_optional<int64_t>(j, "created_at");
+        x.data = j.at("data").get<Data>();
+        x.format = j.at("format").get<Format>();
+        x.groups = get_stack_optional<Groups>(j, "groups");
+        x.schema = j.at("schema").get<int64_t>();
+    }
+
+    inline void to_json(json & j, const BackupDocument & x) {
+        j = json::object();
+        j["created_at"] = x.created_at;
+        j["data"] = x.data;
+        j["format"] = x.format;
+        j["groups"] = x.groups;
+        j["schema"] = x.schema;
+    }
+
     inline void from_json(const json & j, BackupReadRequest& x) {
-        x.groups = get_stack_optional<BackupGroupSelection>(j, "groups");
+        x.groups = get_stack_optional<Groups>(j, "groups");
     }
 
     inline void to_json(json & j, const BackupReadRequest & x) {
@@ -3945,11 +3937,13 @@ namespace api {
     }
 
     inline void from_json(const json & j, GrantedResponse& x) {
+        x.expires_in_seconds = get_stack_optional<int64_t>(j, "expires_in_seconds");
         x.granted = j.at("granted").get<bool>();
     }
 
     inline void to_json(json & j, const GrantedResponse & x) {
         j = json::object();
+        j["expires_in_seconds"] = x.expires_in_seconds;
         j["granted"] = x.granted;
     }
 
@@ -5763,9 +5757,9 @@ namespace api {
         x.authenticated_response = get_stack_optional<AuthenticatedResponse>(j, "AuthenticatedResponse");
         x.auth_settings_request = get_stack_optional<AuthSettingsRequest>(j, "AuthSettingsRequest");
         x.auth_settings_response = get_stack_optional<AuthSettingsResponse>(j, "AuthSettingsResponse");
-        x.auth_status = get_stack_optional<AuthStatusClass>(j, "AuthStatus");
+        x.auth_status = get_stack_optional<AuthStatus>(j, "AuthStatus");
         x.backup_document = get_stack_optional<BackupDocument>(j, "BackupDocument");
-        x.backup_group_selection = get_stack_optional<BackupGroupSelection>(j, "BackupGroupSelection");
+        x.backup_group_selection = get_stack_optional<Groups>(j, "BackupGroupSelection");
         x.backup_read_request = get_stack_optional<BackupReadRequest>(j, "BackupReadRequest");
         x.backup_rollback_availability = get_stack_optional<BackupRollbackAvailability>(j, "BackupRollbackAvailability");
         x.cache_generation = get_stack_optional<CacheGeneration>(j, "CacheGeneration");

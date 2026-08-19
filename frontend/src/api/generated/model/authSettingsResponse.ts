@@ -5,10 +5,20 @@
  * REST API for the keen-pbr policy-based routing daemon.
  * OpenAPI spec version: 3.0.0
  */
-import type { AuthStatus } from './authStatus';
 
-export type AuthSettingsResponse = AuthStatus & {
-  /** The settings are live but something about them could not be confirmed - durability, most often. Multiple warnings are joined with "; " rather than one replacing another.
+export interface AuthSettingsResponse {
+  saved: boolean;
+  /** The containing directory was synced after publication. */
+  durable: boolean;
+  /** The fail-closed remote-access firewall still needs reconciliation. */
+  remote_access_pending?: boolean;
+  remote_access_generation?: number;
+  /** Disabling authentication remains staged until restart. */
+  restart_required?: boolean;
+  /** The current process still requires authentication. */
+  runtime_auth_enabled?: boolean;
+  restart_detail?: string;
+  /** The settings were published but some property needs operator attention. Multiple warnings are joined with "; ".
    */
   warning?: string;
-};
+}

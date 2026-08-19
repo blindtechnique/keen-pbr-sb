@@ -9,7 +9,7 @@ import type { BackupDocumentDataDns } from './backupDocumentDataDns';
 import type { BackupDocumentDataGeneral } from './backupDocumentDataGeneral';
 import type { BackupDocumentDataLists } from './backupDocumentDataLists';
 import type { BackupDocumentDataNfqws } from './backupDocumentDataNfqws';
-import type { BackupDocumentDataOutbounds } from './backupDocumentDataOutbounds';
+import type { BackupDocumentDataOutboundsItem } from './backupDocumentDataOutboundsItem';
 import type { BackupDocumentDataRoute } from './backupDocumentDataRoute';
 import type { BackupDocumentDataTransports } from './backupDocumentDataTransports';
 
@@ -20,7 +20,8 @@ import type { BackupDocumentDataTransports } from './backupDocumentDataTransport
 export type BackupDocumentData = {
   general?: BackupDocumentDataGeneral;
   transports?: BackupDocumentDataTransports;
-  outbounds?: BackupDocumentDataOutbounds;
+  /** Serialized outbound objects from the selected configuration. */
+  outbounds?: BackupDocumentDataOutboundsItem[];
   dns?: BackupDocumentDataDns;
   lists?: BackupDocumentDataLists;
   route?: BackupDocumentDataRoute;

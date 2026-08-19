@@ -19,7 +19,7 @@ export * from './backupDocumentDataDns';
 export * from './backupDocumentDataGeneral';
 export * from './backupDocumentDataLists';
 export * from './backupDocumentDataNfqws';
-export * from './backupDocumentDataOutbounds';
+export * from './backupDocumentDataOutboundsItem';
 export * from './backupDocumentDataRoute';
 export * from './backupDocumentDataTransports';
 export * from './backupDocumentFormat';

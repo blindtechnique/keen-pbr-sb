@@ -1701,6 +1701,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Too many credential attempts; retry after the response delay
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "503":
           description: >
             The session could not be created, or the session limit is reached.
@@ -1753,6 +1759,18 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "409":
           description: Authentication settings changed; retry the step-up
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Too many credential attempts; retry after the response delay
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Authentication publication or the bounded grant store is unavailable
           content:
             application/json:
               schema:
@@ -1825,6 +1843,12 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "409":
           description: The settings changed underneath this request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: The published authentication file could not be loaded safely
           content:
             application/json:
               schema:
@@ -1996,20 +2020,19 @@ paths:
     post:
       summary: Check what the world sees when traffic takes this outbound
       description: >
-        Fetches an address echo twice: once pinned to the outbound's own
-        device, and once with no mark and no binding at all. The second is the
-        control - the answer this router gives without the transport - because
-        without it "the address changed" would be a comparison against nothing.
+        Fetches an address echo twice: once pinned to an interface device or
+        marked for a TABLE outbound, and once with no mark and no binding at
+        all. The second is the control - the answer this router gives without
+        the transport - because without it "the address changed" would be a
+        comparison against nothing.
 
 
         The verdict has three values rather than two, and the third is the
-        point. A mark alone only expresses a routing preference: when the
-        outbound's table holds no usable default the lookup falls through to
-        main and the request quietly succeeds over the provider. So an outbound
-        with no device to bind to returns `unattributed` - the answer describes
-        some route, but not provably this one - and that is neither a success
-        nor a failure. Reporting it as either is how a panel ends up showing
-        the provider's address as a tunnel's exit.
+        point. An interface outbound is attributable only when the socket bind
+        succeeds; a TABLE outbound is attributable through its non-zero policy
+        mark. A failed interface bind returns `unattributed` - the request never
+        became pinned to that tunnel - and that is neither a success nor a
+        failure.
 
 
         The echoed body is validated as an IP literal rather than trusted: a
@@ -2048,6 +2071,12 @@ paths:
           description: >
             The outbound carries no routing mark, so no policy table selects
             it and there is no route for a probe to take.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Another exit check is already in progress
           content:
             application/json:
               schema:
@@ -3400,6 +3429,10 @@ components:
       properties:
         granted:
           type: boolean
+        expires_in_seconds:
+          type: integer
+          format: int64
+          description: Present when a bounded step-up grant was created.
 
     AuthCredentials:
       type: object
@@ -3496,16 +3529,33 @@ components:
             alone; present replaces it.
 
     AuthSettingsResponse:
-      allOf:
-        - $ref: "#/components/schemas/AuthStatus"
-        - type: object
-          properties:
-            warning:
-              type: string
-              description: >
-                The settings are live but something about them could not be
-                confirmed - durability, most often. Multiple warnings are
-                joined with "; " rather than one replacing another.
+      type: object
+      required: [saved, durable]
+      properties:
+        saved:
+          type: boolean
+        durable:
+          type: boolean
+          description: The containing directory was synced after publication.
+        remote_access_pending:
+          type: boolean
+          description: The fail-closed remote-access firewall still needs reconciliation.
+        remote_access_generation:
+          type: integer
+          format: int64
+        restart_required:
+          type: boolean
+          description: Disabling authentication remains staged until restart.
+        runtime_auth_enabled:
+          type: boolean
+          description: The current process still requires authentication.
+        restart_detail:
+          type: string
+        warning:
+          type: string
+          description: >
+            The settings were published but some property needs operator
+            attention. Multiple warnings are joined with "; ".
 
     OkResponse:
       type: object
@@ -3560,6 +3610,12 @@ components:
         schema:
           type: integer
           enum: [1]
+        created_at:
+          type: integer
+          format: int64
+          description: Unix timestamp added to documents produced by the backup endpoint.
+        groups:
+          $ref: "#/components/schemas/BackupGroupSelection"
         data:
           type: object
           description: >
@@ -3572,7 +3628,11 @@ components:
             transports:
               type: object
             outbounds:
-              type: object
+              type: array
+              description: Serialized outbound objects from the selected configuration.
+              items:
+                type: object
+                additionalProperties: true
             dns:
               type: object
             lists:

@@ -6,4 +6,4 @@
  * OpenAPI spec version: 3.0.0
  */
 
-export type BackupDocumentDataOutbounds = { [key: string]: unknown };
+export type BackupDocumentDataOutboundsItem = { [key: string]: unknown };

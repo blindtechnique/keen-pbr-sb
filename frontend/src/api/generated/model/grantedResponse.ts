@@ -8,4 +8,6 @@
 
 export interface GrantedResponse {
   granted: boolean;
+  /** Present when a bounded step-up grant was created. */
+  expires_in_seconds?: number;
 }

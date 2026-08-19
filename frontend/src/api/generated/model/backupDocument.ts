@@ -8,6 +8,7 @@
 import type { BackupDocumentData } from './backupDocumentData';
 import type { BackupDocumentFormat } from './backupDocumentFormat';
 import type { BackupDocumentSchema } from './backupDocumentSchema';
+import type { BackupGroupSelection } from './backupGroupSelection';
 
 /**
  * A restore refuses anything whose `format` or `schema` does not match this build exactly. That is deliberate: a document from a future schema may describe sections this build would silently drop, and a partial restore is worse than a refused one.
@@ -16,6 +17,9 @@ import type { BackupDocumentSchema } from './backupDocumentSchema';
 export interface BackupDocument {
   format: BackupDocumentFormat;
   schema: BackupDocumentSchema;
+  /** Unix timestamp added to documents produced by the backup endpoint. */
+  created_at?: number;
+  groups?: BackupGroupSelection;
   /** Only these sections are accepted; an unknown one is refused by name rather than ignored. Each is present only when it was selected at read time.
    */
   data: BackupDocumentData;
