@@ -17,7 +17,7 @@
         "ruleSets": [
           {
             "tag": "geosite-anthropic",
-            "url": "https://repo.hoaxisr.ru/rulesets/srs/claude.srs"
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-anthropic.srs"
           }
         ],
         "action": "tunnel"
@@ -204,8 +204,8 @@
       "singbox": {
         "ruleSets": [
           {
-            "tag": "geosite-copilot",
-            "url": "https://repo.hoaxisr.ru/rulesets/srs/copilot.srs"
+            "tag": "geosite-github-copilot",
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-github-copilot.srs"
           }
         ],
         "action": "tunnel"
@@ -233,7 +233,7 @@
         "ruleSets": [
           {
             "tag": "geosite-google-gemini",
-            "url": "https://repo.hoaxisr.ru/rulesets/srs/gemini.srs"
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-google-gemini.srs"
           }
         ],
         "action": "tunnel"
@@ -258,8 +258,8 @@
       "singbox": {
         "ruleSets": [
           {
-            "tag": "geosite-grok",
-            "url": "https://repo.hoaxisr.ru/rulesets/srs/grok.srs"
+            "tag": "geosite-xai",
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-xai.srs"
           }
         ],
         "action": "tunnel"
@@ -285,7 +285,7 @@
         "ruleSets": [
           {
             "tag": "geosite-openai",
-            "url": "https://repo.hoaxisr.ru/rulesets/srs/openai.srs"
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-openai.srs"
           }
         ],
         "action": "tunnel"
@@ -376,7 +376,7 @@
     "name": "Заблокировано в РФ",
     "iconSlug": "rkn",
     "category": "block",
-    "notice": "Содержит более 90 000 доменов, заблокированных в РФ",
+    "notice": "Содержит более 90 000 доменов, заблокированных в РФ. Источник — hoaxisr/rulesets",
     "origin": "",
     "engines": {
       "singbox": {
@@ -2082,7 +2082,7 @@
         "ruleSets": [
           {
             "tag": "geosite-linkedin",
-            "url": "https://repo.hoaxisr.ru/rulesets/srs/linkedin.srs"
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-linkedin.srs"
           }
         ],
         "action": "tunnel"
@@ -2580,7 +2580,7 @@
         "ruleSets": [
           {
             "tag": "geosite-nintendo",
-            "url": "https://repo.hoaxisr.ru/rulesets/srs/nintendo.srs"
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-nintendo.srs"
           }
         ],
         "action": "tunnel"
@@ -2787,7 +2787,7 @@
         "ruleSets": [
           {
             "tag": "geosite-roblox",
-            "url": "https://repo.hoaxisr.ru/rulesets/srs/roblox.srs"
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-roblox.srs"
           }
         ],
         "action": "tunnel"
@@ -3591,7 +3591,7 @@
         "ruleSets": [
           {
             "tag": "geosite-netflix",
-            "url": "https://repo.hoaxisr.ru/rulesets/srs/netflix.srs"
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-netflix.srs"
           }
         ],
         "action": "tunnel"
@@ -3993,7 +3993,7 @@
         "ruleSets": [
           {
             "tag": "geosite-discord",
-            "url": "https://repo.hoaxisr.ru/rulesets/srs/discord-full.srs"
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-discord.srs"
           }
         ],
         "action": "tunnel"
@@ -4525,7 +4525,7 @@
         "ruleSets": [
           {
             "tag": "geosite-instagram",
-            "url": "https://repo.hoaxisr.ru/rulesets/srs/instagram.srs"
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-instagram.srs"
           }
         ],
         "action": "tunnel"
@@ -4771,7 +4771,7 @@
         "ruleSets": [
           {
             "tag": "geosite-telegram",
-            "url": "https://repo.hoaxisr.ru/rulesets/srs/telegram.srs"
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-telegram.srs"
           }
         ],
         "action": "tunnel"
@@ -4837,7 +4837,7 @@
         "ruleSets": [
           {
             "tag": "geosite-tiktok",
-            "url": "https://repo.hoaxisr.ru/rulesets/srs/tiktok.srs"
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-tiktok.srs"
           }
         ],
         "action": "tunnel"
@@ -4861,7 +4861,7 @@
         "ruleSets": [
           {
             "tag": "geosite-whatsapp",
-            "url": "https://repo.hoaxisr.ru/rulesets/srs/whatsapp.srs"
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-whatsapp.srs"
           }
         ],
         "action": "tunnel"
@@ -4941,7 +4941,7 @@
         "ruleSets": [
           {
             "tag": "geosite-x",
-            "url": "https://repo.hoaxisr.ru/rulesets/srs/x.srs"
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-x.srs"
           }
         ],
         "action": "tunnel"
@@ -4970,7 +4970,7 @@
         "ruleSets": [
           {
             "tag": "geosite-youtube",
-            "url": "https://repo.hoaxisr.ru/rulesets/srs/youtube.srs"
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-youtube.srs"
           }
         ],
         "action": "tunnel"

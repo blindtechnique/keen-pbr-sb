@@ -3,35 +3,35 @@
     "id": "anthropic_claude",
     "name": "Anthropic / Claude",
     "description": "",
-    "url": "https://repo.hoaxisr.ru/rulesets/srs/claude.srs",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-anthropic.srs",
     "category": "ai"
   },
   {
     "id": "gemini",
     "name": "Gemini",
     "description": "",
-    "url": "https://repo.hoaxisr.ru/rulesets/srs/gemini.srs",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-google-gemini.srs",
     "category": "ai"
   },
   {
     "id": "github_copilot",
     "name": "GitHub Copilot",
     "description": "",
-    "url": "https://repo.hoaxisr.ru/rulesets/srs/copilot.srs",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-github-copilot.srs",
     "category": "ai"
   },
   {
     "id": "grok_xai",
     "name": "Grok (xAI)",
     "description": "",
-    "url": "https://repo.hoaxisr.ru/rulesets/srs/grok.srs",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-xai.srs",
     "category": "ai"
   },
   {
     "id": "openai",
     "name": "OpenAI",
     "description": "",
-    "url": "https://repo.hoaxisr.ru/rulesets/srs/openai.srs",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-openai.srs",
     "category": "ai"
   },
   {
@@ -59,7 +59,7 @@
     "id": "discord",
     "name": "Discord",
     "description": "",
-    "url": "https://repo.hoaxisr.ru/rulesets/srs/discord-full.srs",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-discord.srs",
     "category": "social"
   },
   {
@@ -87,7 +87,7 @@
     "id": "instagram",
     "name": "Instagram",
     "description": "",
-    "url": "https://repo.hoaxisr.ru/rulesets/srs/instagram.srs",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-instagram.srs",
     "category": "social"
   },
   {
@@ -137,7 +137,7 @@
     "id": "telegram",
     "name": "Telegram",
     "description": "",
-    "url": "https://repo.hoaxisr.ru/rulesets/srs/telegram.srs",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-telegram.srs",
     "category": "social",
     "catalogPresetId": "telegram"
   },
@@ -152,14 +152,14 @@
     "id": "tiktok",
     "name": "TikTok",
     "description": "",
-    "url": "https://repo.hoaxisr.ru/rulesets/srs/tiktok.srs",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-tiktok.srs",
     "category": "social"
   },
   {
     "id": "whatsapp",
     "name": "WhatsApp",
     "description": "",
-    "url": "https://repo.hoaxisr.ru/rulesets/srs/whatsapp.srs",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-whatsapp.srs",
     "category": "social",
     "catalogPresetId": "whatsapp"
   },
@@ -167,14 +167,14 @@
     "id": "x_twitter",
     "name": "X (Twitter)",
     "description": "",
-    "url": "https://repo.hoaxisr.ru/rulesets/srs/x.srs",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-x.srs",
     "category": "social"
   },
   {
     "id": "youtube",
     "name": "YouTube",
     "description": "",
-    "url": "https://repo.hoaxisr.ru/rulesets/srs/youtube.srs",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-youtube.srs",
     "category": "social"
   },
   {
@@ -224,7 +224,7 @@
     "id": "netflix",
     "name": "Netflix",
     "description": "",
-    "url": "https://repo.hoaxisr.ru/rulesets/srs/netflix.srs",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-netflix.srs",
     "category": "media"
   },
   {
@@ -308,7 +308,7 @@
     "id": "nintendo",
     "name": "Nintendo",
     "description": "",
-    "url": "https://repo.hoaxisr.ru/rulesets/srs/nintendo.srs",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-nintendo.srs",
     "category": "gaming"
   },
   {
@@ -329,7 +329,7 @@
     "id": "roblox",
     "name": "Roblox",
     "description": "",
-    "url": "https://repo.hoaxisr.ru/rulesets/srs/roblox.srs",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-roblox.srs",
     "category": "gaming"
   },
   {
@@ -406,7 +406,7 @@
     "id": "linkedin",
     "name": "LinkedIn",
     "description": "",
-    "url": "https://repo.hoaxisr.ru/rulesets/srs/linkedin.srs",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-linkedin.srs",
     "category": "developer"
   },
   {
@@ -524,7 +524,7 @@
   {
     "id": "list",
     "name": "Заблокировано в РФ",
-    "description": "Содержит более 90 000 доменов, заблокированных в РФ",
+    "description": "Содержит более 90 000 доменов, заблокированных в РФ. Источник — hoaxisr/rulesets",
     "url": "https://repo.hoaxisr.ru/rulesets/srs/rkn.srs",
     "category": "block"
   },

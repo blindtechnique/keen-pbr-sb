@@ -37,7 +37,8 @@ const CATEGORY_ORDER = [
 
 /**
  * Ready-made rule-set sources so a list can be created without hunting for the
- * right .srs URL. Sources are curated by the awg-manager project.
+ * right .srs URL. The sets come from SagerNet's published geosite rule sets,
+ * except the two Russian blocklists that have no neutral equivalent.
  */
 export function TemplatePicker({
   onSelect,
