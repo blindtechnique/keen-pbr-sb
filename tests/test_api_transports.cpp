@@ -5,11 +5,14 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <thread>
+#include <vector>
 #include <unistd.h>
 
 #include <keen-pbr/version.hpp>
@@ -68,6 +71,45 @@ public:
 
 private:
     std::shared_ptr<TransportMaintenanceTestState> state_;
+};
+
+struct SerialTransportMaintenanceState {
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool held{false};
+    std::size_t waiters{0U};
+    std::vector<std::string> operations;
+};
+
+class SerialTransportMaintenanceLease final : public MaintenanceLease {
+public:
+    SerialTransportMaintenanceLease(
+        std::shared_ptr<SerialTransportMaintenanceState> state,
+        std::string operation)
+        : state_(std::move(state)) {
+        std::unique_lock<std::mutex> lock(state_->mutex);
+        ++state_->waiters;
+        state_->changed.notify_all();
+        state_->changed.wait(lock, [&]() { return !state_->held; });
+        --state_->waiters;
+        state_->held = true;
+        state_->operations.push_back(std::move(operation));
+    }
+
+    ~SerialTransportMaintenanceLease() override {
+        const std::lock_guard<std::mutex> lock(state_->mutex);
+        state_->held = false;
+        state_->changed.notify_all();
+    }
+
+    std::uint32_t base_generation() const noexcept override { return 1U; }
+    std::uint32_t reserve(std::uint32_t expected_generation) override {
+        return expected_generation + 1U;
+    }
+    void verify_held() override {}
+
+private:
+    std::shared_ptr<SerialTransportMaintenanceState> state_;
 };
 
 ApiContext make_transports_test_context(SseBroadcaster& broadcaster,
@@ -358,6 +400,115 @@ TEST_CASE("transports handler proxies authenticated companion response") {
     CHECK(nlohmann::json::parse(create_response->body)["status"] == "created");
     REQUIRE(invalid_alias_response != nullptr);
     CHECK(invalid_alias_response->status == 400);
+}
+
+TEST_CASE("external lifecycle actions wait behind the sing-box install fence") {
+    constexpr int api_port = 18294;
+    const auto directory = std::filesystem::temp_directory_path() /
+                           ("keen-pbr-transport-action-fence-" +
+                            std::to_string(::getpid()));
+    std::filesystem::remove_all(directory);
+    std::filesystem::create_directories(directory);
+    const auto config_path = (directory / "config.json").string();
+
+    std::atomic<unsigned int> action_calls{0U};
+    httplib::Server companion;
+    const auto accept_action =
+        [&action_calls](const httplib::Request& request,
+                        httplib::Response& response) {
+        if (request.get_header_value("Authorization") !=
+            "Bearer test-secret") {
+            response.status = 401;
+            return;
+        }
+        action_calls.fetch_add(1U, std::memory_order_relaxed);
+        response.set_content(
+            nlohmann::json{{"status", "accepted"}}.dump(),
+            "application/json");
+    };
+    companion.Post("/v1/transports/reality/up", accept_action);
+    companion.Post("/v1/transports/reality/down", accept_action);
+    companion.Post("/v1/transports/reality/restart", accept_action);
+    const int companion_port = companion.bind_to_any_port("127.0.0.1");
+    REQUIRE(companion_port > 0);
+    {
+        std::ofstream config(directory / "transports.json");
+        config << nlohmann::json{
+            {"listen", "127.0.0.1:" + std::to_string(companion_port)},
+            {"api_key", "test-secret"},
+        };
+    }
+    std::thread companion_thread(
+        [&companion]() { companion.listen_after_bind(); });
+    while (!companion.is_running()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    SseBroadcaster broadcaster;
+    ApiConfig api_config;
+    api_config.listen = "127.0.0.1:" + std::to_string(api_port);
+    ApiServer server(api_config);
+    auto context = make_transports_test_context(broadcaster, config_path);
+    const auto maintenance_state =
+        std::make_shared<SerialTransportMaintenanceState>();
+    context.maintenance_lease_factory_fn =
+        [maintenance_state](std::string operation)
+            -> std::unique_ptr<MaintenanceLease> {
+        return std::make_unique<SerialTransportMaintenanceLease>(
+            maintenance_state, std::move(operation));
+    };
+    register_transports_handler(server, context);
+    server.start();
+
+    for (const char* action : {"up", "down", "restart"}) {
+        const auto calls_before =
+            action_calls.load(std::memory_order_relaxed);
+        auto install_fence =
+            context.acquire_maintenance_lease("sing-box-install");
+        int response_status = 0;
+        std::thread action_thread([&, action]() {
+            httplib::Client client("127.0.0.1", api_port);
+            const auto response = client.Post(
+                "/api/transports",
+                nlohmann::json{{"tag", "reality"}, {"action", action}}
+                    .dump(),
+                "application/json");
+            response_status = response ? response->status : -1;
+        });
+
+        bool waited_for_fence = false;
+        {
+            std::unique_lock<std::mutex> lock(maintenance_state->mutex);
+            waited_for_fence = maintenance_state->changed.wait_for(
+                lock, std::chrono::seconds(2), [&]() {
+                    return maintenance_state->waiters > 0U;
+                });
+        }
+        CHECK(waited_for_fence);
+        CHECK(action_calls.load(std::memory_order_relaxed) == calls_before);
+
+        install_fence.reset();
+        action_thread.join();
+        CHECK(response_status == 200);
+        CHECK(action_calls.load(std::memory_order_relaxed) ==
+              calls_before + 1U);
+    }
+
+    server.stop();
+    companion.stop();
+    companion_thread.join();
+    std::filesystem::remove_all(directory);
+
+    std::vector<std::string> operations;
+    {
+        const std::lock_guard<std::mutex> lock(maintenance_state->mutex);
+        operations = maintenance_state->operations;
+    }
+    for (const char* action : {"up", "down", "restart"}) {
+        CHECK(std::find(operations.begin(), operations.end(),
+                        std::string("transport-action-") + action) !=
+              operations.end());
+    }
 }
 
 TEST_CASE(
@@ -1707,9 +1858,24 @@ TEST_CASE("the install refuses when the capability says it may not") {
     std::filesystem::create_directories(directory);
     const auto config_path = (directory / "config.json").string();
 
+    const auto maintenance_state =
+        std::make_shared<SerialTransportMaintenanceState>();
+    std::atomic<bool> observed_under_install_fence{false};
+
     httplib::Server manager;
     manager.Get("/v1/transports",
-                [](const httplib::Request&, httplib::Response& response) {
+                [maintenance_state, &observed_under_install_fence](
+                    const httplib::Request&, httplib::Response& response) {
+                    {
+                        const std::lock_guard<std::mutex> lock(
+                            maintenance_state->mutex);
+                        observed_under_install_fence.store(
+                            maintenance_state->held &&
+                                !maintenance_state->operations.empty() &&
+                                maintenance_state->operations.back() ==
+                                    "sing-box-install",
+                            std::memory_order_relaxed);
+                    }
                     response.set_content(
                         nlohmann::json::array(
                             {{{"tag", "nl"},
@@ -1763,6 +1929,12 @@ TEST_CASE("the install refuses when the capability says it may not") {
     api_config.listen = "127.0.0.1:" + std::to_string(api_port);
     ApiServer server(api_config);
     auto context = make_transports_test_context(broadcaster, config_path);
+    context.maintenance_lease_factory_fn =
+        [maintenance_state](std::string operation)
+            -> std::unique_ptr<MaintenanceLease> {
+        return std::make_unique<SerialTransportMaintenanceLease>(
+            maintenance_state, std::move(operation));
+    };
     context.status_stream = &status_stream;
     register_transports_handler(server, context);
     server.start();
@@ -1777,6 +1949,7 @@ TEST_CASE("the install refuses when the capability says it may not") {
 
     REQUIRE(response != nullptr);
     CHECK(response->status == 409);
+    CHECK(observed_under_install_fence.load(std::memory_order_relaxed));
     const auto body = nlohmann::json::parse(response->body);
     CHECK(body.at("reason") == "install_unavailable");
     // Every reason, so an operator is not handed them one at a time.

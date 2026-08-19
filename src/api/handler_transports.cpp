@@ -902,21 +902,30 @@ static void register_transports_handler_impl(
                         .dump());
             };
 
-            const auto observation = observe_sing_box_install(
-                probes, paths.binary_path, paths.managed_marker_path);
-            auto policy = evaluate_sing_box_install(
-                observation, KEEN_PBR3_SING_BOX_PINNED_VERSION);
-
-            // Which blockers consent can answer is a decision, so it lives
-            // with the other decisions in src/update rather than here.
-            const bool pausing =
-                stop_running &&
-                sing_box_install_awaits_transport_consent(policy);
-            if (!policy.available && !pausing) refuse(policy);
-
             try {
                 auto maintenance =
                     ctx.acquire_maintenance_lease("sing-box-install");
+
+                // The measurement that authorises a binary swap belongs to
+                // the same critical section as the swap. Otherwise an
+                // external up/restart can start a sing-box process after this
+                // observation but before the binary is replaced.
+                const auto observation = observe_sing_box_install(
+                    probes, paths.binary_path, paths.managed_marker_path);
+                auto policy = evaluate_sing_box_install(
+                    observation, KEEN_PBR3_SING_BOX_PINNED_VERSION);
+
+                // Which blockers consent can answer is a decision, so it
+                // lives with the other decisions in src/update rather than
+                // here.
+                const bool pausing =
+                    stop_running &&
+                    sing_box_install_awaits_transport_consent(policy);
+                if (!policy.available && !pausing) refuse(policy);
+
+                // Reserve only after the under-lease policy has authorised
+                // the attempt. A refusal is observation-only and must not
+                // advance the maintenance generation.
                 (void)maintenance->reserve(maintenance->base_generation());
 
                 // Constructed after the lease, so nobody's tunnel goes down
@@ -1435,31 +1444,49 @@ static void register_transports_handler_impl(
             throw ApiError("transport action must be up, down, or restart", 400);
         }
 
-        const auto endpoint = load_endpoint(ctx.config_path);
-        httplib::Client client(endpoint.host, endpoint.port);
-        client.set_connection_timeout(1, 0);
-        client.set_read_timeout(15, 0);
-        const httplib::Headers headers{
-            {"Authorization", "Bearer " + endpoint.api_key},
-        };
-        const auto response = client.Post("/v1/transports/" + tag + "/" + action,
-                                          headers,
-                                          "",
-                                          "application/json");
-        if (!response) {
-            throw ApiError("transport manager is unavailable", 503);
-        }
-        if (response->status < 200 || response->status >= 300) {
-            throw ApiError("transport manager returned HTTP " +
-                               std::to_string(response->status),
-                           response->status == 404 ? 404 :
-                           response->status == 400 ? 400 : 502,
-                           response->body);
-        }
         try {
-            return nlohmann::json::parse(response->body).dump();
-        } catch (const nlohmann::json::exception&) {
-            throw ApiError("transport manager returned malformed JSON", 502);
+            // All externally requested lifecycle changes share the install
+            // fence. In particular, down is included: it must not race the
+            // installer's own stop/reobserve/resume sequence and undo the
+            // final state the operator requested.
+            auto maintenance = ctx.acquire_maintenance_lease(
+                "transport-action-" + action);
+
+            const auto endpoint = load_endpoint(ctx.config_path);
+            httplib::Client client(endpoint.host, endpoint.port);
+            client.set_connection_timeout(1, 0);
+            client.set_read_timeout(15, 0);
+            const httplib::Headers headers{
+                {"Authorization", "Bearer " + endpoint.api_key},
+            };
+            maintenance->verify_held();
+            const auto response = client.Post(
+                "/v1/transports/" + tag + "/" + action,
+                headers,
+                "",
+                "application/json");
+            if (!response) {
+                throw ApiError("transport manager is unavailable", 503);
+            }
+            if (response->status < 200 || response->status >= 300) {
+                throw ApiError("transport manager returned HTTP " +
+                                   std::to_string(response->status),
+                               response->status == 404 ? 404 :
+                               response->status == 400 ? 400 : 502,
+                               response->body);
+            }
+
+            nlohmann::json body;
+            try {
+                body = nlohmann::json::parse(response->body);
+            } catch (const nlohmann::json::exception&) {
+                throw ApiError(
+                    "transport manager returned malformed JSON", 502);
+            }
+            maintenance->verify_held();
+            return body.dump();
+        } catch (const MaintenanceLockError& error) {
+            throw_maintenance_api_error(error);
         }
     });
 
