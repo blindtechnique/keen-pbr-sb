@@ -1199,17 +1199,45 @@ paths:
       responses:
         "200":
           description: >
-            The action's own result. Shape depends on `action`.
+            The action's own result.
+
+
+            `read_file` returns `{content}`, and for a log the lines come back
+            **newest first** rather than in file order. The write actions
+            return `{ok, durable}` plus `warning` when durability could not be
+            confirmed, and `firewall_reconcile_pending` when the file they
+            touched was the active config - saving it does not restart nfqws2,
+            so the daemon reconciles the firewall instead of leaving a graph
+            derived from stale selectors.
+
+
+            `service` returns `{ok, output, status, firewall_reconcile_pending}`
+            where `ok` is the command's exit status being zero, not a claim
+            about what the service is now doing.
+
+
+            `check_url` always returns `ok: true` - it is the check that ran,
+            not the site that answered - with `reachable` and, when false, the
+            reason. That distinction matters: a name that does not resolve, a
+            refused connection and a cut TLS handshake are three different
+            problems and only the last is what nfqws2 exists to fix.
+
+
+            `capture_restore_point` and `restore_component` both report
+            `exact_package_state: false`, which is the honest limit of a file
+            restore. `restore_component` adds `package_metadata_verified`,
+            false meaning the panel can no longer tell which version is
+            installed - the state that blocks further updates.
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/NfqwsActionResult"
         "400":
           description: >
-            Not JSON, an unsupported service command, a file that may not be
-            deleted, an attempt to create a log, or clearing something that is
-            not one.
+            Not JSON, an unrecognised action, an unsupported service command,
+            an invalid or duplicate file entry, a bundle whose category does
+            not match its contents, a file that may not be deleted, an attempt
+            to create a log, or clearing something that is not one.
           content:
             application/json:
               schema:
@@ -1224,8 +1252,19 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "409":
           description: >
-            nfqws2 is not installed, or the file this action would create
-            already exists.
+            nfqws2 is not installed; the file this action would create already
+            exists; another maintenance operation holds the lease; or - for
+            `upgrade` - a previous package operation never reported an end, so
+            what is installed is unknown and running a package manager over it
+            would turn one interrupted upgrade into an unrecoverable one.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: >
+            A file, a batch or a bundle exceeded its size cap. The write is
+            refused whole rather than truncated.
           content:
             application/json:
               schema:
@@ -2760,8 +2799,27 @@ components:
       required: [action]
       additionalProperties: true
       description: >
-        Carries `action` plus that action's own fields, which are not
-        enumerated here. Unknown members are ignored rather than refused.
+        One object carrying `action` plus the fields that action reads.
+        Deliberately not a discriminated union of seventeen branches: the
+        generators this project runs turn `oneOf` into types worse than the
+        problem, and an enum inlined twice has already renamed a type and
+        broken the build once. Which fields each action reads is documented on
+        the fields themselves.
+
+
+        Unknown members are ignored. An unrecognised `action` is a 400.
+
+
+        **Files.** `category` and `name` together identify a file, and the
+        category decides what is allowed: `config` and `log` cannot be
+        deleted, a `log` cannot be created, and only `list` and `lua` can be
+        batch-saved. Names are validated; a bad one is a 400, not a path.
+
+
+        **Step-up.** `upgrade`, `capture_restore_point` and
+        `restore_component` need a live grant. The rest do not, because
+        guarding the whole path once put a password prompt in front of opening
+        a list.
       properties:
         action:
           type: string
@@ -2786,6 +2844,146 @@ components:
             - save_strategy
             - service
             - upgrade
+        category:
+          type: string
+          description: >
+            Which set the file belongs to. Read by `read_file`, `save_file`,
+            `create_file` and `delete_file`.
+          enum: [config, list, lua, log]
+        name:
+          type: string
+          description: >
+            File name for the file actions and `clear_log`, or the strategy
+            name for `save_strategy`, `apply_strategy` and `delete_strategy`.
+            Validated; an unusable name is refused rather than resolved.
+        content:
+          type: string
+          description: >
+            Text to write. Used by `save_file`, `create_file` and
+            `save_strategy`, and optionally by `apply_strategy` to save the
+            strategy before applying it.
+        command:
+          type: string
+          description: Required by `service`. Anything else is a 400.
+          enum: [start, stop, restart, reload]
+        force:
+          type: boolean
+          default: false
+          description: >
+            `check_update` only: contact the release source instead of
+            answering from the cache.
+        restart:
+          type: boolean
+          default: false
+          description: >
+            `save_files` only: restart the service after writing. Absent means
+            write and leave the service alone.
+        url:
+          type: string
+          description: >
+            `check_url` only. Must start with http:// or https://; anything
+            else is a 400 rather than a fetch.
+        files:
+          description: >
+            `save_files` takes an **array** of {category, name, content}, at
+            most 256 entries and bounded in total size. `import_lists` and
+            `import_bundle` take an **object** instead: import_lists maps a
+            list name to its text, import_bundle maps a category to such a
+            map. A category that does not match the file it contains is
+            refused rather than re-filed.
+          oneOf:
+            - type: array
+              items:
+                $ref: "#/components/schemas/NfqwsFileEntry"
+            - type: object
+              additionalProperties: true
+
+    NfqwsActionResult:
+      type: object
+      additionalProperties: true
+      description: >
+        The union of what the actions return; each populates the subset that
+        applies to it.
+      properties:
+        ok:
+          type: boolean
+          description: >
+            For `service` and the package actions this is the command's exit
+            status being zero - not a claim about what the service is now
+            doing. For `check_url` it means the check ran, not that the site
+            answered.
+        content:
+          type: string
+          description: >
+            `read_file`. For a log the lines are newest first, not file order.
+        output:
+          type: string
+          description: Command output, capped.
+        status:
+          type: integer
+          description: Exit code of the command that ran.
+        durable:
+          type: boolean
+        warning:
+          type: string
+          description: Present when `durable` is false.
+        firewall_reconcile_pending:
+          type: boolean
+          description: >
+            The daemon was asked to reconcile the firewall because this action
+            could change the live queue or the process argv. No firewall
+            command runs on the HTTP worker.
+        reachable:
+          type: boolean
+          description: "`check_url`."
+        error:
+          type: string
+          description: >
+            `check_url`: why it was not reachable. The reason is kept because
+            an unresolved name, a refused connection and a cut TLS handshake
+            are three different problems.
+        captured:
+          type: integer
+        restored:
+          type: integer
+        failed:
+          type: integer
+        files_restored:
+          type: boolean
+        runtime_verified:
+          type: boolean
+        journal_retained:
+          type: boolean
+        package_metadata_verified:
+          type: boolean
+          description: >
+            After `restore_component`, false means the panel can no longer
+            tell which version is installed - which is what blocks further
+            updates until the package is repaired by hand.
+        restore_point:
+          type: string
+        exact_package_state:
+          type: boolean
+          description: >
+            Always false. A file restore is not a package rollback, and the
+            field exists so nothing has to infer that from silence.
+        installed_blobs:
+          type: integer
+        preserved_blobs:
+          type: integer
+
+    NfqwsFileEntry:
+      type: object
+      required: [category, name, content]
+      properties:
+        category:
+          type: string
+          enum: [list, lua]
+          description: Only lists and Lua files can be batch-saved.
+        name:
+          type: string
+        content:
+          type: string
 
     CatalogRefreshRequest:
       type: object

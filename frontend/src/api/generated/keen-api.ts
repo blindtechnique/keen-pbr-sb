@@ -69,10 +69,10 @@ import type {
   NdmsInterfaceInventoryResponse,
   NdmsVpnServerServiceInventoryResponse,
   NfqwsActionRequest,
+  NfqwsActionResult,
   NfqwsStatus,
   OkResponse,
   PeriodicTaskMetricsResponse,
-  PostNfqws200,
   PostSingBoxInstallCancel200,
   RecommendedListSetupRequest,
   ReloadResponse,
@@ -4875,7 +4875,7 @@ Per-action request and response bodies are not described here yet; this document
  * @summary One endpoint, seventeen nfqws2 actions
  */
 export type postNfqwsResponse200 = {
-  data: PostNfqws200
+  data: NfqwsActionResult
   status: 200
 }
 
@@ -4894,6 +4894,11 @@ export type postNfqwsResponse409 = {
   status: 409
 }
 
+export type postNfqwsResponse413 = {
+  data: ErrorResponse
+  status: 413
+}
+
 export type postNfqwsResponse500 = {
   data: ErrorResponse
   status: 500
@@ -4902,7 +4907,7 @@ export type postNfqwsResponse500 = {
 export type postNfqwsResponseSuccess = (postNfqwsResponse200) & {
   headers: Headers;
 };
-export type postNfqwsResponseError = (postNfqwsResponse400 | postNfqwsResponse403 | postNfqwsResponse409 | postNfqwsResponse500) & {
+export type postNfqwsResponseError = (postNfqwsResponse400 | postNfqwsResponse403 | postNfqwsResponse409 | postNfqwsResponse413 | postNfqwsResponse500) & {
   headers: Headers;
 };
 

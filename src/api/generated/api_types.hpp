@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <variant>
 #include <nlohmann/json.hpp>
 
 #include <unordered_map>
@@ -950,8 +951,53 @@ namespace api {
 
     enum class NfqwsActionRequestAction : int { APPLY_STRATEGY, CAPTURE_RESTORE_POINT, CHECK_UPDATE, CHECK_URL, CLEAR_LOG, CREATE_FILE, DELETE_FILE, DELETE_STRATEGY, IMPORT_BUNDLE, IMPORT_LISTS, READ_FILE, RESTORE_COMPONENT, SAVE_FILE, SAVE_FILES, SAVE_STRATEGY, SERVICE, UPGRADE };
 
+    enum class NfqwsActionRequestCategory : int { CONFIG, LIST, LOG, LUA };
+
+    enum class Command : int { RELOAD, RESTART, START, STOP };
+
+    enum class NfqwsFileEntryCategory : int { LIST, LUA };
+
+    struct NfqwsFileEntryElement {
+        NfqwsFileEntryCategory category;
+        std::string content;
+        std::string name;
+    };
+
+    using Files = std::variant<std::vector<NfqwsFileEntryElement>, std::map<std::string, nlohmann::json>>;
+
     struct NfqwsActionRequest {
         NfqwsActionRequestAction action;
+        std::optional<NfqwsActionRequestCategory> category;
+        std::optional<Command> command;
+        std::optional<std::string> content;
+        std::optional<Files> files;
+        std::optional<bool> force;
+        std::optional<std::string> name;
+        std::optional<bool> restart;
+        std::optional<std::string> url;
+    };
+
+    struct NfqwsActionResult {
+        std::optional<int64_t> captured;
+        std::optional<std::string> content;
+        std::optional<bool> durable;
+        std::optional<std::string> error;
+        std::optional<bool> exact_package_state;
+        std::optional<int64_t> failed;
+        std::optional<bool> files_restored;
+        std::optional<bool> firewall_reconcile_pending;
+        std::optional<int64_t> installed_blobs;
+        std::optional<bool> journal_retained;
+        std::optional<bool> ok;
+        std::optional<std::string> output;
+        std::optional<bool> package_metadata_verified;
+        std::optional<int64_t> preserved_blobs;
+        std::optional<bool> reachable;
+        std::optional<std::string> restore_point;
+        std::optional<int64_t> restored;
+        std::optional<bool> runtime_verified;
+        std::optional<int64_t> status;
+        std::optional<std::string> warning;
     };
 
     struct NfqwsStatus {
@@ -1765,6 +1811,8 @@ namespace api {
         std::optional<NdmsVpnServerService> ndms_vpn_server_service;
         std::optional<NdmsVpnServerServiceInventoryResponse> ndms_vpn_server_service_inventory_response;
         std::optional<NfqwsActionRequest> nfqws_action_request;
+        std::optional<NfqwsActionResult> nfqws_action_result;
+        std::optional<NfqwsFileEntryElement> nfqws_file_entry;
         std::optional<NfqwsStatus> nfqws_status;
         std::optional<OkResponse> ok_response;
         std::optional<OutboundElement> outbound;
@@ -1863,789 +1911,814 @@ namespace api {
 
 namespace keen_pbr3 {
 namespace api {
-    void from_json(const json & j, ApiConfig & x);
-    void to_json(json & j, const ApiConfig & x);
+void from_json(const json & j, ApiConfig & x);
+void to_json(json & j, const ApiConfig & x);
 
-    void from_json(const json & j, AuthCredentials & x);
-    void to_json(json & j, const AuthCredentials & x);
+void from_json(const json & j, AuthCredentials & x);
+void to_json(json & j, const AuthCredentials & x);
 
-    void from_json(const json & j, AuthSettingsRequest & x);
-    void to_json(json & j, const AuthSettingsRequest & x);
+void from_json(const json & j, AuthSettingsRequest & x);
+void to_json(json & j, const AuthSettingsRequest & x);
 
-    void from_json(const json & j, AuthSettingsResponse & x);
-    void to_json(json & j, const AuthSettingsResponse & x);
+void from_json(const json & j, AuthSettingsResponse & x);
+void to_json(json & j, const AuthSettingsResponse & x);
 
-    void from_json(const json & j, AuthStatusClass & x);
-    void to_json(json & j, const AuthStatusClass & x);
+void from_json(const json & j, AuthStatusClass & x);
+void to_json(json & j, const AuthStatusClass & x);
 
-    void from_json(const json & j, AuthenticatedResponse & x);
-    void to_json(json & j, const AuthenticatedResponse & x);
+void from_json(const json & j, AuthenticatedResponse & x);
+void to_json(json & j, const AuthenticatedResponse & x);
 
-    void from_json(const json & j, Data & x);
-    void to_json(json & j, const Data & x);
+void from_json(const json & j, Data & x);
+void to_json(json & j, const Data & x);
 
-    void from_json(const json & j, BackupDocument & x);
-    void to_json(json & j, const BackupDocument & x);
+void from_json(const json & j, BackupDocument & x);
+void to_json(json & j, const BackupDocument & x);
 
-    void from_json(const json & j, BackupGroupSelection & x);
-    void to_json(json & j, const BackupGroupSelection & x);
+void from_json(const json & j, BackupGroupSelection & x);
+void to_json(json & j, const BackupGroupSelection & x);
 
-    void from_json(const json & j, BackupReadRequest & x);
-    void to_json(json & j, const BackupReadRequest & x);
+void from_json(const json & j, BackupReadRequest & x);
+void to_json(json & j, const BackupReadRequest & x);
 
-    void from_json(const json & j, BackupRollbackAvailability & x);
-    void to_json(json & j, const BackupRollbackAvailability & x);
+void from_json(const json & j, BackupRollbackAvailability & x);
+void to_json(json & j, const BackupRollbackAvailability & x);
 
-    void from_json(const json & j, CacheGeneration & x);
-    void to_json(json & j, const CacheGeneration & x);
+void from_json(const json & j, CacheGeneration & x);
+void to_json(json & j, const CacheGeneration & x);
 
-    void from_json(const json & j, CacheMetadata & x);
-    void to_json(json & j, const CacheMetadata & x);
+void from_json(const json & j, CacheMetadata & x);
+void to_json(json & j, const CacheMetadata & x);
 
-    void from_json(const json & j, CatalogPresetSelection & x);
-    void to_json(json & j, const CatalogPresetSelection & x);
+void from_json(const json & j, CatalogPresetSelection & x);
+void to_json(json & j, const CatalogPresetSelection & x);
 
-    void from_json(const json & j, CatalogRefreshRequest & x);
-    void to_json(json & j, const CatalogRefreshRequest & x);
+void from_json(const json & j, CatalogRefreshRequest & x);
+void to_json(json & j, const CatalogRefreshRequest & x);
 
-    void from_json(const json & j, CatalogRefreshResult & x);
-    void to_json(json & j, const CatalogRefreshResult & x);
+void from_json(const json & j, CatalogRefreshResult & x);
+void to_json(json & j, const CatalogRefreshResult & x);
 
-    void from_json(const json & j, Intent & x);
-    void to_json(json & j, const Intent & x);
+void from_json(const json & j, Intent & x);
+void to_json(json & j, const Intent & x);
 
-    void from_json(const json & j, CatalogSetupApplyRequest & x);
-    void to_json(json & j, const CatalogSetupApplyRequest & x);
+void from_json(const json & j, CatalogSetupApplyRequest & x);
+void to_json(json & j, const CatalogSetupApplyRequest & x);
 
-    void from_json(const json & j, CatalogSetupApplyResponse & x);
-    void to_json(json & j, const CatalogSetupApplyResponse & x);
+void from_json(const json & j, CatalogSetupApplyResponse & x);
+void to_json(json & j, const CatalogSetupApplyResponse & x);
 
-    void from_json(const json & j, CatalogSetupBlackholeSummary & x);
-    void to_json(json & j, const CatalogSetupBlackholeSummary & x);
+void from_json(const json & j, CatalogSetupBlackholeSummary & x);
+void to_json(json & j, const CatalogSetupBlackholeSummary & x);
 
-    void from_json(const json & j, CatalogSetupDnsRuleSummary & x);
-    void to_json(json & j, const CatalogSetupDnsRuleSummary & x);
+void from_json(const json & j, CatalogSetupDnsRuleSummary & x);
+void to_json(json & j, const CatalogSetupDnsRuleSummary & x);
 
-    void from_json(const json & j, CatalogSetupDnsServerSummary & x);
-    void to_json(json & j, const CatalogSetupDnsServerSummary & x);
+void from_json(const json & j, CatalogSetupDnsServerSummary & x);
+void to_json(json & j, const CatalogSetupDnsServerSummary & x);
 
-    void from_json(const json & j, CatalogSetupListSummary & x);
-    void to_json(json & j, const CatalogSetupListSummary & x);
+void from_json(const json & j, CatalogSetupListSummary & x);
+void to_json(json & j, const CatalogSetupListSummary & x);
 
-    void from_json(const json & j, CatalogSetupPreviewRequest & x);
-    void to_json(json & j, const CatalogSetupPreviewRequest & x);
+void from_json(const json & j, CatalogSetupPreviewRequest & x);
+void to_json(json & j, const CatalogSetupPreviewRequest & x);
 
-    void from_json(const json & j, RouteRule & x);
-    void to_json(json & j, const RouteRule & x);
+void from_json(const json & j, RouteRule & x);
+void to_json(json & j, const RouteRule & x);
 
-    void from_json(const json & j, CatalogSetupSummaryClass & x);
-    void to_json(json & j, const CatalogSetupSummaryClass & x);
+void from_json(const json & j, CatalogSetupSummaryClass & x);
+void to_json(json & j, const CatalogSetupSummaryClass & x);
 
-    void from_json(const json & j, CatalogSetupWarningElement & x);
-    void to_json(json & j, const CatalogSetupWarningElement & x);
+void from_json(const json & j, CatalogSetupWarningElement & x);
+void to_json(json & j, const CatalogSetupWarningElement & x);
 
-    void from_json(const json & j, CatalogSetupPreviewResponse & x);
-    void to_json(json & j, const CatalogSetupPreviewResponse & x);
+void from_json(const json & j, CatalogSetupPreviewResponse & x);
+void to_json(json & j, const CatalogSetupPreviewResponse & x);
 
-    void from_json(const json & j, CircuitBreakerConfig & x);
-    void to_json(json & j, const CircuitBreakerConfig & x);
+void from_json(const json & j, CircuitBreakerConfig & x);
+void to_json(json & j, const CircuitBreakerConfig & x);
 
-    void from_json(const json & j, ClientDnsEnforcement & x);
-    void to_json(json & j, const ClientDnsEnforcement & x);
+void from_json(const json & j, ClientDnsEnforcement & x);
+void to_json(json & j, const ClientDnsEnforcement & x);
 
-    void from_json(const json & j, Daemon & x);
-    void to_json(json & j, const Daemon & x);
+void from_json(const json & j, Daemon & x);
+void to_json(json & j, const Daemon & x);
 
-    void from_json(const json & j, DnsTestServer & x);
-    void to_json(json & j, const DnsTestServer & x);
+void from_json(const json & j, DnsTestServer & x);
+void to_json(json & j, const DnsTestServer & x);
 
-    void from_json(const json & j, DnsRuleElement & x);
-    void to_json(json & j, const DnsRuleElement & x);
+void from_json(const json & j, DnsRuleElement & x);
+void to_json(json & j, const DnsRuleElement & x);
 
-    void from_json(const json & j, DnsServerElement & x);
-    void to_json(json & j, const DnsServerElement & x);
+void from_json(const json & j, DnsServerElement & x);
+void to_json(json & j, const DnsServerElement & x);
 
-    void from_json(const json & j, SystemResolver & x);
-    void to_json(json & j, const SystemResolver & x);
+void from_json(const json & j, SystemResolver & x);
+void to_json(json & j, const SystemResolver & x);
 
-    void from_json(const json & j, Dns & x);
-    void to_json(json & j, const Dns & x);
+void from_json(const json & j, Dns & x);
+void to_json(json & j, const Dns & x);
 
-    void from_json(const json & j, Fwmark & x);
-    void to_json(json & j, const Fwmark & x);
+void from_json(const json & j, Fwmark & x);
+void to_json(json & j, const Fwmark & x);
 
-    void from_json(const json & j, Iproute & x);
-    void to_json(json & j, const Iproute & x);
+void from_json(const json & j, Iproute & x);
+void to_json(json & j, const Iproute & x);
 
-    void from_json(const json & j, ListRefresh & x);
-    void to_json(json & j, const ListRefresh & x);
+void from_json(const json & j, ListRefresh & x);
+void to_json(json & j, const ListRefresh & x);
 
-    void from_json(const json & j, ListConfigValue & x);
-    void to_json(json & j, const ListConfigValue & x);
+void from_json(const json & j, ListConfigValue & x);
+void to_json(json & j, const ListConfigValue & x);
 
-    void from_json(const json & j, ListsAutoupdate & x);
-    void to_json(json & j, const ListsAutoupdate & x);
+void from_json(const json & j, ListsAutoupdate & x);
+void to_json(json & j, const ListsAutoupdate & x);
 
-    void from_json(const json & j, OutboundGroupElement & x);
-    void to_json(json & j, const OutboundGroupElement & x);
+void from_json(const json & j, OutboundGroupElement & x);
+void to_json(json & j, const OutboundGroupElement & x);
 
-    void from_json(const json & j, Retry & x);
-    void to_json(json & j, const Retry & x);
+void from_json(const json & j, Retry & x);
+void to_json(json & j, const Retry & x);
 
-    void from_json(const json & j, OutboundElement & x);
-    void to_json(json & j, const OutboundElement & x);
+void from_json(const json & j, OutboundElement & x);
+void to_json(json & j, const OutboundElement & x);
 
-    void from_json(const json & j, InternalVpnServerElement & x);
-    void to_json(json & j, const InternalVpnServerElement & x);
+void from_json(const json & j, InternalVpnServerElement & x);
+void to_json(json & j, const InternalVpnServerElement & x);
 
-    void from_json(const json & j, InternalVpnServiceElement & x);
-    void to_json(json & j, const InternalVpnServiceElement & x);
+void from_json(const json & j, InternalVpnServiceElement & x);
+void to_json(json & j, const InternalVpnServiceElement & x);
 
-    void from_json(const json & j, RouteRuleElement & x);
-    void to_json(json & j, const RouteRuleElement & x);
+void from_json(const json & j, RouteRuleElement & x);
+void to_json(json & j, const RouteRuleElement & x);
 
-    void from_json(const json & j, Route & x);
-    void to_json(json & j, const Route & x);
+void from_json(const json & j, Route & x);
+void to_json(json & j, const Route & x);
 
-    void from_json(const json & j, PlainDnsTemplateElement & x);
-    void to_json(json & j, const PlainDnsTemplateElement & x);
+void from_json(const json & j, PlainDnsTemplateElement & x);
+void to_json(json & j, const PlainDnsTemplateElement & x);
 
-    void from_json(const json & j, UiPreferences & x);
-    void to_json(json & j, const UiPreferences & x);
+void from_json(const json & j, UiPreferences & x);
+void to_json(json & j, const UiPreferences & x);
 
-    void from_json(const json & j, ConfigObject & x);
-    void to_json(json & j, const ConfigObject & x);
+void from_json(const json & j, ConfigObject & x);
+void to_json(json & j, const ConfigObject & x);
 
-    void from_json(const json & j, ListRefreshStateValue & x);
-    void to_json(json & j, const ListRefreshStateValue & x);
+void from_json(const json & j, ListRefreshStateValue & x);
+void to_json(json & j, const ListRefreshStateValue & x);
 
-    void from_json(const json & j, ConfigStateResponse & x);
-    void to_json(json & j, const ConfigStateResponse & x);
+void from_json(const json & j, ConfigStateResponse & x);
+void to_json(json & j, const ConfigStateResponse & x);
 
-    void from_json(const json & j, ConfigUpdateResponse & x);
-    void to_json(json & j, const ConfigUpdateResponse & x);
+void from_json(const json & j, ConfigUpdateResponse & x);
+void to_json(json & j, const ConfigUpdateResponse & x);
 
-    void from_json(const json & j, ConnectionEntry & x);
-    void to_json(json & j, const ConnectionEntry & x);
+void from_json(const json & j, ConnectionEntry & x);
+void to_json(json & j, const ConnectionEntry & x);
 
-    void from_json(const json & j, ConnectionEventState & x);
-    void to_json(json & j, const ConnectionEventState & x);
+void from_json(const json & j, ConnectionEventState & x);
+void to_json(json & j, const ConnectionEventState & x);
 
-    void from_json(const json & j, ConnectionRecord & x);
-    void to_json(json & j, const ConnectionRecord & x);
+void from_json(const json & j, ConnectionRecord & x);
+void to_json(json & j, const ConnectionRecord & x);
 
-    void from_json(const json & j, ConnectionPage & x);
-    void to_json(json & j, const ConnectionPage & x);
+void from_json(const json & j, ConnectionPage & x);
+void to_json(json & j, const ConnectionPage & x);
 
-    void from_json(const json & j, ConnectionQueryRequest & x);
-    void to_json(json & j, const ConnectionQueryRequest & x);
+void from_json(const json & j, ConnectionQueryRequest & x);
+void to_json(json & j, const ConnectionQueryRequest & x);
 
-    void from_json(const json & j, DependencyAnalysisTargetRequest & x);
-    void to_json(json & j, const DependencyAnalysisTargetRequest & x);
+void from_json(const json & j, DependencyAnalysisTargetRequest & x);
+void to_json(json & j, const DependencyAnalysisTargetRequest & x);
 
-    void from_json(const json & j, DependencyAnalysisRequest & x);
-    void to_json(json & j, const DependencyAnalysisRequest & x);
+void from_json(const json & j, DependencyAnalysisRequest & x);
+void to_json(json & j, const DependencyAnalysisRequest & x);
 
-    void from_json(const json & j, DependencyTarget & x);
-    void to_json(json & j, const DependencyTarget & x);
+void from_json(const json & j, DependencyTarget & x);
+void to_json(json & j, const DependencyTarget & x);
 
-    void from_json(const json & j, DependencyReference & x);
-    void to_json(json & j, const DependencyReference & x);
+void from_json(const json & j, DependencyReference & x);
+void to_json(json & j, const DependencyReference & x);
 
-    void from_json(const json & j, DependencyAnalysisResponse & x);
-    void to_json(json & j, const DependencyAnalysisResponse & x);
+void from_json(const json & j, DependencyAnalysisResponse & x);
+void to_json(json & j, const DependencyAnalysisResponse & x);
 
-    void from_json(const json & j, ValidationErrorElement & x);
-    void to_json(json & j, const ValidationErrorElement & x);
+void from_json(const json & j, ValidationErrorElement & x);
+void to_json(json & j, const ValidationErrorElement & x);
 
-    void from_json(const json & j, ErrorResponse & x);
-    void to_json(json & j, const ErrorResponse & x);
+void from_json(const json & j, ErrorResponse & x);
+void to_json(json & j, const ErrorResponse & x);
 
-    void from_json(const json & j, FirewallChain & x);
-    void to_json(json & j, const FirewallChain & x);
+void from_json(const json & j, FirewallChain & x);
+void to_json(json & j, const FirewallChain & x);
 
-    void from_json(const json & j, FirewallRuleCheck & x);
-    void to_json(json & j, const FirewallRuleCheck & x);
+void from_json(const json & j, FirewallRuleCheck & x);
+void to_json(json & j, const FirewallRuleCheck & x);
 
-    void from_json(const json & j, GeoLocation & x);
-    void to_json(json & j, const GeoLocation & x);
+void from_json(const json & j, GeoLocation & x);
+void to_json(json & j, const GeoLocation & x);
 
-    void from_json(const json & j, GeoLookupRequest & x);
-    void to_json(json & j, const GeoLookupRequest & x);
+void from_json(const json & j, GeoLookupRequest & x);
+void to_json(json & j, const GeoLookupRequest & x);
 
-    void from_json(const json & j, GeoLookupResult & x);
-    void to_json(json & j, const GeoLookupResult & x);
+void from_json(const json & j, GeoLookupResult & x);
+void to_json(json & j, const GeoLookupResult & x);
 
-    void from_json(const json & j, GrantedResponse & x);
-    void to_json(json & j, const GrantedResponse & x);
+void from_json(const json & j, GrantedResponse & x);
+void to_json(json & j, const GrantedResponse & x);
 
-    void from_json(const json & j, LifecycleOperationStageElement & x);
-    void to_json(json & j, const LifecycleOperationStageElement & x);
+void from_json(const json & j, LifecycleOperationStageElement & x);
+void to_json(json & j, const LifecycleOperationStageElement & x);
 
-    void from_json(const json & j, LifecycleOperation & x);
-    void to_json(json & j, const LifecycleOperation & x);
+void from_json(const json & j, LifecycleOperation & x);
+void to_json(json & j, const LifecycleOperation & x);
 
-    void from_json(const json & j, HealthResponse & x);
-    void to_json(json & j, const HealthResponse & x);
+void from_json(const json & j, HealthResponse & x);
+void to_json(json & j, const HealthResponse & x);
 
-    void from_json(const json & j, InterfaceNames & x);
-    void to_json(json & j, const InterfaceNames & x);
+void from_json(const json & j, InterfaceNames & x);
+void to_json(json & j, const InterfaceNames & x);
 
-    void from_json(const json & j, ListDeleteTargetElement & x);
-    void to_json(json & j, const ListDeleteTargetElement & x);
+void from_json(const json & j, ListDeleteTargetElement & x);
+void to_json(json & j, const ListDeleteTargetElement & x);
 
-    void from_json(const json & j, ListDeleteStageRequest & x);
-    void to_json(json & j, const ListDeleteStageRequest & x);
+void from_json(const json & j, ListDeleteStageRequest & x);
+void to_json(json & j, const ListDeleteStageRequest & x);
 
-    void from_json(const json & j, ListDeleteStageSummaryClass & x);
-    void to_json(json & j, const ListDeleteStageSummaryClass & x);
+void from_json(const json & j, ListDeleteStageSummaryClass & x);
+void to_json(json & j, const ListDeleteStageSummaryClass & x);
 
-    void from_json(const json & j, ListDeleteStageResponse & x);
-    void to_json(json & j, const ListDeleteStageResponse & x);
+void from_json(const json & j, ListDeleteStageResponse & x);
+void to_json(json & j, const ListDeleteStageResponse & x);
 
-    void from_json(const json & j, ListRefreshRequest & x);
-    void to_json(json & j, const ListRefreshRequest & x);
+void from_json(const json & j, ListRefreshRequest & x);
+void to_json(json & j, const ListRefreshRequest & x);
 
-    void from_json(const json & j, ListRefreshResponse & x);
-    void to_json(json & j, const ListRefreshResponse & x);
+void from_json(const json & j, ListRefreshResponse & x);
+void to_json(json & j, const ListRefreshResponse & x);
 
-    void from_json(const json & j, LogSettings & x);
-    void to_json(json & j, const LogSettings & x);
+void from_json(const json & j, LogSettings & x);
+void to_json(json & j, const LogSettings & x);
 
-    void from_json(const json & j, LogSettingsRequest & x);
-    void to_json(json & j, const LogSettingsRequest & x);
+void from_json(const json & j, LogSettingsRequest & x);
+void to_json(json & j, const LogSettingsRequest & x);
 
-    void from_json(const json & j, LogSettingsResult & x);
-    void to_json(json & j, const LogSettingsResult & x);
+void from_json(const json & j, LogSettingsResult & x);
+void to_json(json & j, const LogSettingsResult & x);
 
-    void from_json(const json & j, LogTail & x);
-    void to_json(json & j, const LogTail & x);
+void from_json(const json & j, LogTail & x);
+void to_json(json & j, const LogTail & x);
 
-    void from_json(const json & j, NaiveComponentInstallResult & x);
-    void to_json(json & j, const NaiveComponentInstallResult & x);
+void from_json(const json & j, NaiveComponentInstallResult & x);
+void to_json(json & j, const NaiveComponentInstallResult & x);
 
-    void from_json(const json & j, NaiveComponentState & x);
-    void to_json(json & j, const NaiveComponentState & x);
+void from_json(const json & j, NaiveComponentState & x);
+void to_json(json & j, const NaiveComponentState & x);
 
-    void from_json(const json & j, NdmsInterfaceCapabilities & x);
-    void to_json(json & j, const NdmsInterfaceCapabilities & x);
+void from_json(const json & j, NdmsInterfaceCapabilities & x);
+void to_json(json & j, const NdmsInterfaceCapabilities & x);
 
-    void from_json(const json & j, NdmsInterfaceManagementReadiness & x);
-    void to_json(json & j, const NdmsInterfaceManagementReadiness & x);
+void from_json(const json & j, NdmsInterfaceManagementReadiness & x);
+void to_json(json & j, const NdmsInterfaceManagementReadiness & x);
 
-    void from_json(const json & j, NdmsTunnelInterfaceElement & x);
-    void to_json(json & j, const NdmsTunnelInterfaceElement & x);
+void from_json(const json & j, NdmsTunnelInterfaceElement & x);
+void to_json(json & j, const NdmsTunnelInterfaceElement & x);
 
-    void from_json(const json & j, NdmsNativeImportTargetRange & x);
-    void to_json(json & j, const NdmsNativeImportTargetRange & x);
+void from_json(const json & j, NdmsNativeImportTargetRange & x);
+void to_json(json & j, const NdmsNativeImportTargetRange & x);
 
-    void from_json(const json & j, NdmsNativeImportReadiness & x);
-    void to_json(json & j, const NdmsNativeImportReadiness & x);
+void from_json(const json & j, NdmsNativeImportReadiness & x);
+void to_json(json & j, const NdmsNativeImportReadiness & x);
 
-    void from_json(const json & j, NdmsInterfaceInventoryResponse & x);
-    void to_json(json & j, const NdmsInterfaceInventoryResponse & x);
+void from_json(const json & j, NdmsInterfaceInventoryResponse & x);
+void to_json(json & j, const NdmsInterfaceInventoryResponse & x);
 
-    void from_json(const json & j, NdmsVpnServerService & x);
-    void to_json(json & j, const NdmsVpnServerService & x);
+void from_json(const json & j, NdmsVpnServerService & x);
+void to_json(json & j, const NdmsVpnServerService & x);
 
-    void from_json(const json & j, NdmsVpnServerServiceInventoryResponse & x);
-    void to_json(json & j, const NdmsVpnServerServiceInventoryResponse & x);
+void from_json(const json & j, NdmsVpnServerServiceInventoryResponse & x);
+void to_json(json & j, const NdmsVpnServerServiceInventoryResponse & x);
 
-    void from_json(const json & j, NfqwsActionRequest & x);
-    void to_json(json & j, const NfqwsActionRequest & x);
+void from_json(const json & j, NfqwsFileEntryElement & x);
+void to_json(json & j, const NfqwsFileEntryElement & x);
 
-    void from_json(const json & j, NfqwsStatus & x);
-    void to_json(json & j, const NfqwsStatus & x);
+void from_json(const json & j, NfqwsActionRequest & x);
+void to_json(json & j, const NfqwsActionRequest & x);
 
-    void from_json(const json & j, OkResponse & x);
-    void to_json(json & j, const OkResponse & x);
+void from_json(const json & j, NfqwsActionResult & x);
+void to_json(json & j, const NfqwsActionResult & x);
 
-    void from_json(const json & j, PeriodicTaskMetricsEntry & x);
-    void to_json(json & j, const PeriodicTaskMetricsEntry & x);
+void from_json(const json & j, NfqwsStatus & x);
+void to_json(json & j, const NfqwsStatus & x);
 
-    void from_json(const json & j, PeriodicTaskMetricsResponse & x);
-    void to_json(json & j, const PeriodicTaskMetricsResponse & x);
+void from_json(const json & j, OkResponse & x);
+void to_json(json & j, const OkResponse & x);
 
-    void from_json(const json & j, PolicyRuleCheck & x);
-    void to_json(json & j, const PolicyRuleCheck & x);
+void from_json(const json & j, PeriodicTaskMetricsEntry & x);
+void to_json(json & j, const PeriodicTaskMetricsEntry & x);
 
-    void from_json(const json & j, PpeDeoffloadCounter & x);
-    void to_json(json & j, const PpeDeoffloadCounter & x);
+void from_json(const json & j, PeriodicTaskMetricsResponse & x);
+void to_json(json & j, const PeriodicTaskMetricsResponse & x);
 
-    void from_json(const json & j, PpeDeoffloadProtocolHealth & x);
-    void to_json(json & j, const PpeDeoffloadProtocolHealth & x);
+void from_json(const json & j, PolicyRuleCheck & x);
+void to_json(json & j, const PolicyRuleCheck & x);
 
-    void from_json(const json & j, PpeDeoffloadHealth & x);
-    void to_json(json & j, const PpeDeoffloadHealth & x);
+void from_json(const json & j, PpeDeoffloadCounter & x);
+void to_json(json & j, const PpeDeoffloadCounter & x);
 
-    void from_json(const json & j, RecommendedListSetupRequest & x);
-    void to_json(json & j, const RecommendedListSetupRequest & x);
+void from_json(const json & j, PpeDeoffloadProtocolHealth & x);
+void to_json(json & j, const PpeDeoffloadProtocolHealth & x);
 
-    void from_json(const json & j, ReloadResponse & x);
-    void to_json(json & j, const ReloadResponse & x);
+void from_json(const json & j, PpeDeoffloadHealth & x);
+void to_json(json & j, const PpeDeoffloadHealth & x);
 
-    void from_json(const json & j, RemoteAccessRequest & x);
-    void to_json(json & j, const RemoteAccessRequest & x);
+void from_json(const json & j, RecommendedListSetupRequest & x);
+void to_json(json & j, const RecommendedListSetupRequest & x);
 
-    void from_json(const json & j, Settings & x);
-    void to_json(json & j, const Settings & x);
+void from_json(const json & j, ReloadResponse & x);
+void to_json(json & j, const ReloadResponse & x);
 
-    void from_json(const json & j, RemoteAccessResult & x);
-    void to_json(json & j, const RemoteAccessResult & x);
+void from_json(const json & j, RemoteAccessRequest & x);
+void to_json(json & j, const RemoteAccessRequest & x);
 
-    void from_json(const json & j, RemoteAccessRuntime & x);
-    void to_json(json & j, const RemoteAccessRuntime & x);
+void from_json(const json & j, Settings & x);
+void to_json(json & j, const Settings & x);
 
-    void from_json(const json & j, RemoteAccessState & x);
-    void to_json(json & j, const RemoteAccessState & x);
+void from_json(const json & j, RemoteAccessResult & x);
+void to_json(json & j, const RemoteAccessResult & x);
 
-    void from_json(const json & j, RouteTableCheck & x);
-    void to_json(json & j, const RouteTableCheck & x);
+void from_json(const json & j, RemoteAccessRuntime & x);
+void to_json(json & j, const RemoteAccessRuntime & x);
 
-    void from_json(const json & j, RouterInfo & x);
-    void to_json(json & j, const RouterInfo & x);
+void from_json(const json & j, RemoteAccessState & x);
+void to_json(json & j, const RemoteAccessState & x);
 
-    void from_json(const json & j, RoutingHealthErrorResponse & x);
-    void to_json(json & j, const RoutingHealthErrorResponse & x);
+void from_json(const json & j, RouteTableCheck & x);
+void to_json(json & j, const RouteTableCheck & x);
 
-    void from_json(const json & j, RoutingHealthResponse & x);
-    void to_json(json & j, const RoutingHealthResponse & x);
+void from_json(const json & j, RouterInfo & x);
+void to_json(json & j, const RouterInfo & x);
 
-    void from_json(const json & j, ListMatch & x);
-    void to_json(json & j, const ListMatch & x);
+void from_json(const json & j, RoutingHealthErrorResponse & x);
+void to_json(json & j, const RoutingHealthErrorResponse & x);
 
-    void from_json(const json & j, RoutingTestEntry & x);
-    void to_json(json & j, const RoutingTestEntry & x);
+void from_json(const json & j, RoutingHealthResponse & x);
+void to_json(json & j, const RoutingHealthResponse & x);
 
-    void from_json(const json & j, RoutingTestRequest & x);
-    void to_json(json & j, const RoutingTestRequest & x);
+void from_json(const json & j, ListMatch & x);
+void to_json(json & j, const ListMatch & x);
 
-    void from_json(const json & j, RoutingTestRuleIpDiagnosticElement & x);
-    void to_json(json & j, const RoutingTestRuleIpDiagnosticElement & x);
+void from_json(const json & j, RoutingTestEntry & x);
+void to_json(json & j, const RoutingTestEntry & x);
 
-    void from_json(const json & j, RoutingTestRuleDiagnosticElement & x);
-    void to_json(json & j, const RoutingTestRuleDiagnosticElement & x);
+void from_json(const json & j, RoutingTestRequest & x);
+void to_json(json & j, const RoutingTestRequest & x);
 
-    void from_json(const json & j, RoutingTestResponse & x);
-    void to_json(json & j, const RoutingTestResponse & x);
+void from_json(const json & j, RoutingTestRuleIpDiagnosticElement & x);
+void to_json(json & j, const RoutingTestRuleIpDiagnosticElement & x);
 
-    void from_json(const json & j, RuntimeInterfaceTrafficPointElement & x);
-    void to_json(json & j, const RuntimeInterfaceTrafficPointElement & x);
+void from_json(const json & j, RoutingTestRuleDiagnosticElement & x);
+void to_json(json & j, const RoutingTestRuleDiagnosticElement & x);
 
-    void from_json(const json & j, Traffic & x);
-    void to_json(json & j, const Traffic & x);
+void from_json(const json & j, RoutingTestResponse & x);
+void to_json(json & j, const RoutingTestResponse & x);
 
-    void from_json(const json & j, RuntimeInterfaceInventoryEntry & x);
-    void to_json(json & j, const RuntimeInterfaceInventoryEntry & x);
+void from_json(const json & j, RuntimeInterfaceTrafficPointElement & x);
+void to_json(json & j, const RuntimeInterfaceTrafficPointElement & x);
 
-    void from_json(const json & j, RuntimeInterfaceInventoryResponse & x);
-    void to_json(json & j, const RuntimeInterfaceInventoryResponse & x);
+void from_json(const json & j, Traffic & x);
+void to_json(json & j, const Traffic & x);
 
-    void from_json(const json & j, RuntimeInterfaceState & x);
-    void to_json(json & j, const RuntimeInterfaceState & x);
+void from_json(const json & j, RuntimeInterfaceInventoryEntry & x);
+void to_json(json & j, const RuntimeInterfaceInventoryEntry & x);
 
-    void from_json(const json & j, RuntimeInterfaceTrafficSample & x);
-    void to_json(json & j, const RuntimeInterfaceTrafficSample & x);
+void from_json(const json & j, RuntimeInterfaceInventoryResponse & x);
+void to_json(json & j, const RuntimeInterfaceInventoryResponse & x);
 
-    void from_json(const json & j, RuntimeInterfaceTrafficUpdate & x);
-    void to_json(json & j, const RuntimeInterfaceTrafficUpdate & x);
+void from_json(const json & j, RuntimeInterfaceState & x);
+void to_json(json & j, const RuntimeInterfaceState & x);
 
-    void from_json(const json & j, RuntimeOutboundStateElement & x);
-    void to_json(json & j, const RuntimeOutboundStateElement & x);
+void from_json(const json & j, RuntimeInterfaceTrafficSample & x);
+void to_json(json & j, const RuntimeInterfaceTrafficSample & x);
 
-    void from_json(const json & j, RuntimeOutboundsResponse & x);
-    void to_json(json & j, const RuntimeOutboundsResponse & x);
+void from_json(const json & j, RuntimeInterfaceTrafficUpdate & x);
+void to_json(json & j, const RuntimeInterfaceTrafficUpdate & x);
 
-    void from_json(const json & j, RuntimeInventoryResponse & x);
-    void to_json(json & j, const RuntimeInventoryResponse & x);
+void from_json(const json & j, RuntimeOutboundStateElement & x);
+void to_json(json & j, const RuntimeOutboundStateElement & x);
 
-    void from_json(const json & j, SingBoxInstallCapability & x);
-    void to_json(json & j, const SingBoxInstallCapability & x);
+void from_json(const json & j, RuntimeOutboundsResponse & x);
+void to_json(json & j, const RuntimeOutboundsResponse & x);
 
-    void from_json(const json & j, SingBoxInstallRequest & x);
-    void to_json(json & j, const SingBoxInstallRequest & x);
+void from_json(const json & j, RuntimeInventoryResponse & x);
+void to_json(json & j, const RuntimeInventoryResponse & x);
 
-    void from_json(const json & j, SingBoxInstallResult & x);
-    void to_json(json & j, const SingBoxInstallResult & x);
+void from_json(const json & j, SingBoxInstallCapability & x);
+void to_json(json & j, const SingBoxInstallCapability & x);
 
-    void from_json(const json & j, StatusEventConnections & x);
-    void to_json(json & j, const StatusEventConnections & x);
+void from_json(const json & j, SingBoxInstallRequest & x);
+void to_json(json & j, const SingBoxInstallRequest & x);
 
-    void from_json(const json & j, StatusEventInterfaceTraffic & x);
-    void to_json(json & j, const StatusEventInterfaceTraffic & x);
+void from_json(const json & j, SingBoxInstallResult & x);
+void to_json(json & j, const SingBoxInstallResult & x);
 
-    void from_json(const json & j, StatusEventInterfaces & x);
-    void to_json(json & j, const StatusEventInterfaces & x);
+void from_json(const json & j, StatusEventConnections & x);
+void to_json(json & j, const StatusEventConnections & x);
 
-    void from_json(const json & j, StatusEventOutbounds & x);
-    void to_json(json & j, const StatusEventOutbounds & x);
+void from_json(const json & j, StatusEventInterfaceTraffic & x);
+void to_json(json & j, const StatusEventInterfaceTraffic & x);
 
-    void from_json(const json & j, StatusEventService & x);
-    void to_json(json & j, const StatusEventService & x);
+void from_json(const json & j, StatusEventInterfaces & x);
+void to_json(json & j, const StatusEventInterfaces & x);
 
-    void from_json(const json & j, StatusEventSnapshot & x);
-    void to_json(json & j, const StatusEventSnapshot & x);
+void from_json(const json & j, StatusEventOutbounds & x);
+void to_json(json & j, const StatusEventOutbounds & x);
 
-    void from_json(const json & j, SubscriptionApplySelectionElement & x);
-    void to_json(json & j, const SubscriptionApplySelectionElement & x);
+void from_json(const json & j, StatusEventService & x);
+void to_json(json & j, const StatusEventService & x);
 
-    void from_json(const json & j, SubscriptionApplyRequest & x);
-    void to_json(json & j, const SubscriptionApplyRequest & x);
+void from_json(const json & j, StatusEventSnapshot & x);
+void to_json(json & j, const StatusEventSnapshot & x);
 
-    void from_json(const json & j, SubscriptionApplyResultElement & x);
-    void to_json(json & j, const SubscriptionApplyResultElement & x);
+void from_json(const json & j, SubscriptionApplySelectionElement & x);
+void to_json(json & j, const SubscriptionApplySelectionElement & x);
 
-    void from_json(const json & j, SubscriptionApplyResponse & x);
-    void to_json(json & j, const SubscriptionApplyResponse & x);
+void from_json(const json & j, SubscriptionApplyRequest & x);
+void to_json(json & j, const SubscriptionApplyRequest & x);
 
-    void from_json(const json & j, SubscriptionPreviewCandidate & x);
-    void to_json(json & j, const SubscriptionPreviewCandidate & x);
+void from_json(const json & j, SubscriptionApplyResultElement & x);
+void to_json(json & j, const SubscriptionApplyResultElement & x);
 
-    void from_json(const json & j, SubscriptionPreviewRequest & x);
-    void to_json(json & j, const SubscriptionPreviewRequest & x);
+void from_json(const json & j, SubscriptionApplyResponse & x);
+void to_json(json & j, const SubscriptionApplyResponse & x);
 
-    void from_json(const json & j, SubscriptionPreviewResponse & x);
-    void to_json(json & j, const SubscriptionPreviewResponse & x);
+void from_json(const json & j, SubscriptionPreviewCandidate & x);
+void to_json(json & j, const SubscriptionPreviewCandidate & x);
 
-    void from_json(const json & j, SystemUpdateLocalStatus & x);
-    void to_json(json & j, const SystemUpdateLocalStatus & x);
+void from_json(const json & j, SubscriptionPreviewRequest & x);
+void to_json(json & j, const SubscriptionPreviewRequest & x);
 
-    void from_json(const json & j, SystemUpdateStatus & x);
-    void to_json(json & j, const SystemUpdateStatus & x);
+void from_json(const json & j, SubscriptionPreviewResponse & x);
+void to_json(json & j, const SubscriptionPreviewResponse & x);
 
-    void from_json(const json & j, TransportActionRequest & x);
-    void to_json(json & j, const TransportActionRequest & x);
+void from_json(const json & j, SystemUpdateLocalStatus & x);
+void to_json(json & j, const SystemUpdateLocalStatus & x);
 
-    void from_json(const json & j, TransportActionResponse & x);
-    void to_json(json & j, const TransportActionResponse & x);
+void from_json(const json & j, SystemUpdateStatus & x);
+void to_json(json & j, const SystemUpdateStatus & x);
 
-    void from_json(const json & j, LinkedOutbound & x);
-    void to_json(json & j, const LinkedOutbound & x);
+void from_json(const json & j, TransportActionRequest & x);
+void to_json(json & j, const TransportActionRequest & x);
 
-    void from_json(const json & j, Vless & x);
-    void to_json(json & j, const Vless & x);
+void from_json(const json & j, TransportActionResponse & x);
+void to_json(json & j, const TransportActionResponse & x);
 
-    void from_json(const json & j, Transport & x);
-    void to_json(json & j, const Transport & x);
+void from_json(const json & j, LinkedOutbound & x);
+void to_json(json & j, const LinkedOutbound & x);
 
-    void from_json(const json & j, TransportConfigApplyRequest & x);
-    void to_json(json & j, const TransportConfigApplyRequest & x);
+void from_json(const json & j, Vless & x);
+void to_json(json & j, const Vless & x);
 
-    void from_json(const json & j, TransportConfigApplyResponse & x);
-    void to_json(json & j, const TransportConfigApplyResponse & x);
+void from_json(const json & j, Transport & x);
+void to_json(json & j, const Transport & x);
 
-    void from_json(const json & j, TransportConfigOperation & x);
-    void to_json(json & j, const TransportConfigOperation & x);
+void from_json(const json & j, TransportConfigApplyRequest & x);
+void to_json(json & j, const TransportConfigApplyRequest & x);
 
-    void from_json(const json & j, TransportConfigResponse & x);
-    void to_json(json & j, const TransportConfigResponse & x);
+void from_json(const json & j, TransportConfigApplyResponse & x);
+void to_json(json & j, const TransportConfigApplyResponse & x);
 
-    void from_json(const json & j, TransportExitCheckProbe & x);
-    void to_json(json & j, const TransportExitCheckProbe & x);
+void from_json(const json & j, TransportConfigOperation & x);
+void to_json(json & j, const TransportConfigOperation & x);
 
-    void from_json(const json & j, TransportExitCheckRequest & x);
-    void to_json(json & j, const TransportExitCheckRequest & x);
+void from_json(const json & j, TransportConfigResponse & x);
+void to_json(json & j, const TransportConfigResponse & x);
 
-    void from_json(const json & j, TransportExitCheckResponse & x);
-    void to_json(json & j, const TransportExitCheckResponse & x);
+void from_json(const json & j, TransportExitCheckProbe & x);
+void to_json(json & j, const TransportExitCheckProbe & x);
 
-    void from_json(const json & j, TransportManagerSettings & x);
-    void to_json(json & j, const TransportManagerSettings & x);
+void from_json(const json & j, TransportExitCheckRequest & x);
+void to_json(json & j, const TransportExitCheckRequest & x);
 
-    void from_json(const json & j, TransportPath & x);
-    void to_json(json & j, const TransportPath & x);
+void from_json(const json & j, TransportExitCheckResponse & x);
+void to_json(json & j, const TransportExitCheckResponse & x);
 
-    void from_json(const json & j, TransportProcessModeRequest & x);
-    void to_json(json & j, const TransportProcessModeRequest & x);
+void from_json(const json & j, TransportManagerSettings & x);
+void to_json(json & j, const TransportManagerSettings & x);
 
-    void from_json(const json & j, TransportStatus & x);
-    void to_json(json & j, const TransportStatus & x);
+void from_json(const json & j, TransportPath & x);
+void to_json(json & j, const TransportPath & x);
 
-    void from_json(const json & j, TransportsEnvironment & x);
-    void to_json(json & j, const TransportsEnvironment & x);
+void from_json(const json & j, TransportProcessModeRequest & x);
+void to_json(json & j, const TransportProcessModeRequest & x);
 
-    void from_json(const json & j, UpdateStartedResponse & x);
-    void to_json(json & j, const UpdateStartedResponse & x);
+void from_json(const json & j, TransportStatus & x);
+void to_json(json & j, const TransportStatus & x);
 
-    void from_json(const json & j, ApiTypes & x);
-    void to_json(json & j, const ApiTypes & x);
+void from_json(const json & j, TransportsEnvironment & x);
+void to_json(json & j, const TransportsEnvironment & x);
 
-    void from_json(const json & j, KeeneticEndpointSource & x);
-    void to_json(json & j, const KeeneticEndpointSource & x);
+void from_json(const json & j, UpdateStartedResponse & x);
+void to_json(json & j, const UpdateStartedResponse & x);
 
-    void from_json(const json & j, Format & x);
-    void to_json(json & j, const Format & x);
+void from_json(const json & j, ApiTypes & x);
+void to_json(json & j, const ApiTypes & x);
 
-    void from_json(const json & j, DnsMode & x);
-    void to_json(json & j, const DnsMode & x);
+void from_json(const json & j, KeeneticEndpointSource & x);
+void to_json(json & j, const KeeneticEndpointSource & x);
 
-    void from_json(const json & j, CatalogSetupModeEnum & x);
-    void to_json(json & j, const CatalogSetupModeEnum & x);
+void from_json(const json & j, Format & x);
+void to_json(json & j, const Format & x);
 
-    void from_json(const json & j, Code & x);
-    void to_json(json & j, const Code & x);
+void from_json(const json & j, DnsMode & x);
+void to_json(json & j, const DnsMode & x);
 
-    void from_json(const json & j, CheckStatus & x);
-    void to_json(json & j, const CheckStatus & x);
+void from_json(const json & j, CatalogSetupModeEnum & x);
+void to_json(json & j, const CatalogSetupModeEnum & x);
 
-    void from_json(const json & j, DaemonConfigFirewallBackend & x);
-    void to_json(json & j, const DaemonConfigFirewallBackend & x);
+void from_json(const json & j, Code & x);
+void to_json(json & j, const Code & x);
 
-    void from_json(const json & j, MetaUdp443Policy & x);
-    void to_json(json & j, const MetaUdp443Policy & x);
+void from_json(const json & j, CheckStatus & x);
+void to_json(json & j, const CheckStatus & x);
 
-    void from_json(const json & j, PpeDeoffloadMode & x);
-    void to_json(json & j, const PpeDeoffloadMode & x);
+void from_json(const json & j, DaemonConfigFirewallBackend & x);
+void to_json(json & j, const DaemonConfigFirewallBackend & x);
 
-    void from_json(const json & j, DnsServerType & x);
-    void to_json(json & j, const DnsServerType & x);
+void from_json(const json & j, MetaUdp443Policy & x);
+void to_json(json & j, const MetaUdp443Policy & x);
 
-    void from_json(const json & j, RefreshDetourMode & x);
-    void to_json(json & j, const RefreshDetourMode & x);
+void from_json(const json & j, PpeDeoffloadMode & x);
+void to_json(json & j, const PpeDeoffloadMode & x);
 
-    void from_json(const json & j, ConntrackOnSwitch & x);
-    void to_json(json & j, const ConntrackOnSwitch & x);
+void from_json(const json & j, DnsServerType & x);
+void to_json(json & j, const DnsServerType & x);
 
-    void from_json(const json & j, SelectionMode & x);
-    void to_json(json & j, const SelectionMode & x);
+void from_json(const json & j, RefreshDetourMode & x);
+void to_json(json & j, const RefreshDetourMode & x);
 
-    void from_json(const json & j, OutboundType & x);
-    void to_json(json & j, const OutboundType & x);
+void from_json(const json & j, ConntrackOnSwitch & x);
+void to_json(json & j, const ConntrackOnSwitch & x);
 
-    void from_json(const json & j, ConfigUpdateResponseStatus & x);
-    void to_json(json & j, const ConfigUpdateResponseStatus & x);
+void from_json(const json & j, SelectionMode & x);
+void to_json(json & j, const SelectionMode & x);
 
-    void from_json(const json & j, SortOrder & x);
-    void to_json(json & j, const SortOrder & x);
+void from_json(const json & j, OutboundType & x);
+void to_json(json & j, const OutboundType & x);
 
-    void from_json(const json & j, ConnectionSort & x);
-    void to_json(json & j, const ConnectionSort & x);
+void from_json(const json & j, ConfigUpdateResponseStatus & x);
+void to_json(json & j, const ConfigUpdateResponseStatus & x);
 
-    void from_json(const json & j, DependencyEntityKind & x);
-    void to_json(json & j, const DependencyEntityKind & x);
+void from_json(const json & j, SortOrder & x);
+void to_json(json & j, const SortOrder & x);
 
-    void from_json(const json & j, DependencyConsequence & x);
-    void to_json(json & j, const DependencyConsequence & x);
+void from_json(const json & j, ConnectionSort & x);
+void to_json(json & j, const ConnectionSort & x);
 
-    void from_json(const json & j, DependencyDependentKind & x);
-    void to_json(json & j, const DependencyDependentKind & x);
+void from_json(const json & j, DependencyEntityKind & x);
+void to_json(json & j, const DependencyEntityKind & x);
 
-    void from_json(const json & j, DependencyRelation & x);
-    void to_json(json & j, const DependencyRelation & x);
+void from_json(const json & j, DependencyConsequence & x);
+void to_json(json & j, const DependencyConsequence & x);
 
-    void from_json(const json & j, GeoLookupResultError & x);
-    void to_json(json & j, const GeoLookupResultError & x);
+void from_json(const json & j, DependencyDependentKind & x);
+void to_json(json & j, const DependencyDependentKind & x);
 
-    void from_json(const json & j, LifecycleOperationStageStatus & x);
-    void to_json(json & j, const LifecycleOperationStageStatus & x);
+void from_json(const json & j, DependencyRelation & x);
+void to_json(json & j, const DependencyRelation & x);
 
-    void from_json(const json & j, LifecycleOperationStatus & x);
-    void to_json(json & j, const LifecycleOperationStatus & x);
+void from_json(const json & j, GeoLookupResultError & x);
+void to_json(json & j, const GeoLookupResultError & x);
 
-    void from_json(const json & j, LifecycleOperationType & x);
-    void to_json(json & j, const LifecycleOperationType & x);
+void from_json(const json & j, LifecycleOperationStageStatus & x);
+void to_json(json & j, const LifecycleOperationStageStatus & x);
 
-    void from_json(const json & j, ResolverConfigProbeStatus & x);
-    void to_json(json & j, const ResolverConfigProbeStatus & x);
+void from_json(const json & j, LifecycleOperationStatus & x);
+void to_json(json & j, const LifecycleOperationStatus & x);
 
-    void from_json(const json & j, ResolverConfigSyncState & x);
-    void to_json(json & j, const ResolverConfigSyncState & x);
+void from_json(const json & j, LifecycleOperationType & x);
+void to_json(json & j, const LifecycleOperationType & x);
 
-    void from_json(const json & j, ResolverLiveStatus & x);
-    void to_json(json & j, const ResolverLiveStatus & x);
+void from_json(const json & j, ResolverConfigProbeStatus & x);
+void to_json(json & j, const ResolverConfigProbeStatus & x);
 
-    void from_json(const json & j, RuntimeState & x);
-    void to_json(json & j, const RuntimeState & x);
+void from_json(const json & j, ResolverConfigSyncState & x);
+void to_json(json & j, const ResolverConfigSyncState & x);
 
-    void from_json(const json & j, HealthResponseStatus & x);
-    void to_json(json & j, const HealthResponseStatus & x);
+void from_json(const json & j, ResolverLiveStatus & x);
+void to_json(json & j, const ResolverLiveStatus & x);
 
-    void from_json(const json & j, CatalogStatus & x);
-    void to_json(json & j, const CatalogStatus & x);
+void from_json(const json & j, RuntimeState & x);
+void to_json(json & j, const RuntimeState & x);
 
-    void from_json(const json & j, LogLevel & x);
-    void to_json(json & j, const LogLevel & x);
+void from_json(const json & j, HealthResponseStatus & x);
+void to_json(json & j, const HealthResponseStatus & x);
 
-    void from_json(const json & j, NaiveComponentInstallResultError & x);
-    void to_json(json & j, const NaiveComponentInstallResultError & x);
+void from_json(const json & j, CatalogStatus & x);
+void to_json(json & j, const CatalogStatus & x);
 
-    void from_json(const json & j, Kind & x);
-    void to_json(json & j, const Kind & x);
+void from_json(const json & j, LogLevel & x);
+void to_json(json & j, const LogLevel & x);
 
-    void from_json(const json & j, NdmsManagementBlockerElement & x);
-    void to_json(json & j, const NdmsManagementBlockerElement & x);
+void from_json(const json & j, NaiveComponentInstallResultError & x);
+void to_json(json & j, const NaiveComponentInstallResultError & x);
 
-    void from_json(const json & j, Owner & x);
-    void to_json(json & j, const Owner & x);
+void from_json(const json & j, Kind & x);
+void to_json(json & j, const Kind & x);
 
-    void from_json(const json & j, Role & x);
-    void to_json(json & j, const Role & x);
+void from_json(const json & j, NdmsManagementBlockerElement & x);
+void to_json(json & j, const NdmsManagementBlockerElement & x);
 
-    void from_json(const json & j, MutationMode & x);
-    void to_json(json & j, const MutationMode & x);
+void from_json(const json & j, Owner & x);
+void to_json(json & j, const Owner & x);
 
-    void from_json(const json & j, NdmsNativeImportTargetPrefix & x);
-    void to_json(json & j, const NdmsNativeImportTargetPrefix & x);
+void from_json(const json & j, Role & x);
+void to_json(json & j, const Role & x);
 
-    void from_json(const json & j, NdmsNativeImportBlocker & x);
-    void to_json(json & j, const NdmsNativeImportBlocker & x);
+void from_json(const json & j, MutationMode & x);
+void to_json(json & j, const MutationMode & x);
 
-    void from_json(const json & j, NdmsNativeImportJournalState & x);
-    void to_json(json & j, const NdmsNativeImportJournalState & x);
+void from_json(const json & j, NdmsNativeImportTargetPrefix & x);
+void to_json(json & j, const NdmsNativeImportTargetPrefix & x);
 
-    void from_json(const json & j, NdmsNativeImportReconcileBarrierState & x);
-    void to_json(json & j, const NdmsNativeImportReconcileBarrierState & x);
+void from_json(const json & j, NdmsNativeImportBlocker & x);
+void to_json(json & j, const NdmsNativeImportBlocker & x);
 
-    void from_json(const json & j, RequiredGuard & x);
-    void to_json(json & j, const RequiredGuard & x);
+void from_json(const json & j, NdmsNativeImportJournalState & x);
+void to_json(json & j, const NdmsNativeImportJournalState & x);
 
-    void from_json(const json & j, NdmsVpnServerKind & x);
-    void to_json(json & j, const NdmsVpnServerKind & x);
+void from_json(const json & j, NdmsNativeImportReconcileBarrierState & x);
+void to_json(json & j, const NdmsNativeImportReconcileBarrierState & x);
 
-    void from_json(const json & j, NfqwsActionRequestAction & x);
-    void to_json(json & j, const NfqwsActionRequestAction & x);
+void from_json(const json & j, RequiredGuard & x);
+void to_json(json & j, const RequiredGuard & x);
 
-    void from_json(const json & j, LastOutcome & x);
-    void to_json(json & j, const LastOutcome & x);
+void from_json(const json & j, NdmsVpnServerKind & x);
+void to_json(json & j, const NdmsVpnServerKind & x);
 
-    void from_json(const json & j, PpeDeoffloadCapability & x);
-    void to_json(json & j, const PpeDeoffloadCapability & x);
+void from_json(const json & j, NfqwsActionRequestAction & x);
+void to_json(json & j, const NfqwsActionRequestAction & x);
 
-    void from_json(const json & j, PpeDeoffloadHealthState & x);
-    void to_json(json & j, const PpeDeoffloadHealthState & x);
+void from_json(const json & j, NfqwsActionRequestCategory & x);
+void to_json(json & j, const NfqwsActionRequestCategory & x);
 
-    void from_json(const json & j, BlockedReason & x);
-    void to_json(json & j, const BlockedReason & x);
+void from_json(const json & j, Command & x);
+void to_json(json & j, const Command & x);
 
-    void from_json(const json & j, RoutingHealthErrorResponseOverall & x);
-    void to_json(json & j, const RoutingHealthErrorResponseOverall & x);
+void from_json(const json & j, NfqwsFileEntryCategory & x);
+void to_json(json & j, const NfqwsFileEntryCategory & x);
 
-    void from_json(const json & j, RoutingHealthResponseFirewallBackend & x);
-    void to_json(json & j, const RoutingHealthResponseFirewallBackend & x);
+void from_json(const json & j, LastOutcome & x);
+void to_json(json & j, const LastOutcome & x);
 
-    void from_json(const json & j, RoutingHealthResponseOverall & x);
-    void to_json(json & j, const RoutingHealthResponseOverall & x);
+void from_json(const json & j, PpeDeoffloadCapability & x);
+void to_json(json & j, const PpeDeoffloadCapability & x);
 
-    void from_json(const json & j, SystemAuthState & x);
-    void to_json(json & j, const SystemAuthState & x);
+void from_json(const json & j, PpeDeoffloadHealthState & x);
+void to_json(json & j, const PpeDeoffloadHealthState & x);
 
-    void from_json(const json & j, TtlBypassState & x);
-    void to_json(json & j, const TtlBypassState & x);
+void from_json(const json & j, BlockedReason & x);
+void to_json(json & j, const BlockedReason & x);
 
-    void from_json(const json & j, Evaluation & x);
-    void to_json(json & j, const Evaluation & x);
+void from_json(const json & j, RoutingHealthErrorResponseOverall & x);
+void to_json(json & j, const RoutingHealthErrorResponseOverall & x);
 
-    void from_json(const json & j, RoutingTestUnknownConditionElement & x);
-    void to_json(json & j, const RoutingTestUnknownConditionElement & x);
+void from_json(const json & j, RoutingHealthResponseFirewallBackend & x);
+void to_json(json & j, const RoutingHealthResponseFirewallBackend & x);
 
-    void from_json(const json & j, ConfigScope & x);
-    void to_json(json & j, const ConfigScope & x);
+void from_json(const json & j, RoutingHealthResponseOverall & x);
+void to_json(json & j, const RoutingHealthResponseOverall & x);
 
-    void from_json(const json & j, LinkUptimeSource & x);
-    void to_json(json & j, const LinkUptimeSource & x);
+void from_json(const json & j, SystemAuthState & x);
+void to_json(json & j, const SystemAuthState & x);
 
-    void from_json(const json & j, RuntimeInterfaceInventoryStatusEnum & x);
-    void to_json(json & j, const RuntimeInterfaceInventoryStatusEnum & x);
+void from_json(const json & j, TtlBypassState & x);
+void to_json(json & j, const TtlBypassState & x);
 
-    void from_json(const json & j, RuntimeInterfaceStatusEnum & x);
-    void to_json(json & j, const RuntimeInterfaceStatusEnum & x);
+void from_json(const json & j, Evaluation & x);
+void to_json(json & j, const Evaluation & x);
 
-    void from_json(const json & j, Blocker & x);
-    void to_json(json & j, const Blocker & x);
+void from_json(const json & j, RoutingTestUnknownConditionElement & x);
+void to_json(json & j, const RoutingTestUnknownConditionElement & x);
 
-    void from_json(const json & j, SingBoxInstallCapabilityOperation & x);
-    void to_json(json & j, const SingBoxInstallCapabilityOperation & x);
+void from_json(const json & j, ConfigScope & x);
+void to_json(json & j, const ConfigScope & x);
 
-    void from_json(const json & j, InstallOutcome & x);
-    void to_json(json & j, const InstallOutcome & x);
+void from_json(const json & j, LinkUptimeSource & x);
+void to_json(json & j, const LinkUptimeSource & x);
 
-    void from_json(const json & j, ReleaseVerdict & x);
-    void to_json(json & j, const ReleaseVerdict & x);
+void from_json(const json & j, RuntimeInterfaceInventoryStatusEnum & x);
+void to_json(json & j, const RuntimeInterfaceInventoryStatusEnum & x);
 
-    void from_json(const json & j, SingBoxProcessMode & x);
-    void to_json(json & j, const SingBoxProcessMode & x);
+void from_json(const json & j, RuntimeInterfaceStatusEnum & x);
+void to_json(json & j, const RuntimeInterfaceStatusEnum & x);
 
-    void from_json(const json & j, StatusEventConnectionsType & x);
-    void to_json(json & j, const StatusEventConnectionsType & x);
+void from_json(const json & j, Blocker & x);
+void to_json(json & j, const Blocker & x);
 
-    void from_json(const json & j, StatusEventInterfaceTrafficType & x);
-    void to_json(json & j, const StatusEventInterfaceTrafficType & x);
+void from_json(const json & j, SingBoxInstallCapabilityOperation & x);
+void to_json(json & j, const SingBoxInstallCapabilityOperation & x);
 
-    void from_json(const json & j, StatusEventInterfacesType & x);
-    void to_json(json & j, const StatusEventInterfacesType & x);
+void from_json(const json & j, InstallOutcome & x);
+void to_json(json & j, const InstallOutcome & x);
 
-    void from_json(const json & j, StatusEventOutboundsType & x);
-    void to_json(json & j, const StatusEventOutboundsType & x);
+void from_json(const json & j, ReleaseVerdict & x);
+void to_json(json & j, const ReleaseVerdict & x);
 
-    void from_json(const json & j, StatusEventServiceType & x);
-    void to_json(json & j, const StatusEventServiceType & x);
+void from_json(const json & j, SingBoxProcessMode & x);
+void to_json(json & j, const SingBoxProcessMode & x);
 
-    void from_json(const json & j, StatusEventSnapshotType & x);
-    void to_json(json & j, const StatusEventSnapshotType & x);
+void from_json(const json & j, StatusEventConnectionsType & x);
+void to_json(json & j, const StatusEventConnectionsType & x);
 
-    void from_json(const json & j, Outcome & x);
-    void to_json(json & j, const Outcome & x);
+void from_json(const json & j, StatusEventInterfaceTrafficType & x);
+void to_json(json & j, const StatusEventInterfaceTrafficType & x);
 
-    void from_json(const json & j, Disposition & x);
-    void to_json(json & j, const Disposition & x);
+void from_json(const json & j, StatusEventInterfacesType & x);
+void to_json(json & j, const StatusEventInterfacesType & x);
 
-    void from_json(const json & j, DocumentKind & x);
-    void to_json(json & j, const DocumentKind & x);
+void from_json(const json & j, StatusEventOutboundsType & x);
+void to_json(json & j, const StatusEventOutboundsType & x);
 
-    void from_json(const json & j, PackageRollbackState & x);
-    void to_json(json & j, const PackageRollbackState & x);
+void from_json(const json & j, StatusEventServiceType & x);
+void to_json(json & j, const StatusEventServiceType & x);
 
-    void from_json(const json & j, TransportActionRequestAction & x);
-    void to_json(json & j, const TransportActionRequestAction & x);
+void from_json(const json & j, StatusEventSnapshotType & x);
+void to_json(json & j, const StatusEventSnapshotType & x);
 
-    void from_json(const json & j, TransportActionResponseStatus & x);
-    void to_json(json & j, const TransportActionResponseStatus & x);
+void from_json(const json & j, Outcome & x);
+void to_json(json & j, const Outcome & x);
 
-    void from_json(const json & j, TransportLinkedOutboundEnsureMode & x);
-    void to_json(json & j, const TransportLinkedOutboundEnsureMode & x);
+void from_json(const json & j, Disposition & x);
+void to_json(json & j, const Disposition & x);
 
-    void from_json(const json & j, TransportConfigApplyRequestOperation & x);
-    void to_json(json & j, const TransportConfigApplyRequestOperation & x);
+void from_json(const json & j, DocumentKind & x);
+void to_json(json & j, const DocumentKind & x);
 
-    void from_json(const json & j, GeoMode & x);
-    void to_json(json & j, const GeoMode & x);
+void from_json(const json & j, PackageRollbackState & x);
+void to_json(json & j, const PackageRollbackState & x);
 
-    void from_json(const json & j, TransportSpecType & x);
-    void to_json(json & j, const TransportSpecType & x);
+void from_json(const json & j, TransportActionRequestAction & x);
+void to_json(json & j, const TransportActionRequestAction & x);
 
-    void from_json(const json & j, TransportConfigApplyResponseStatus & x);
-    void to_json(json & j, const TransportConfigApplyResponseStatus & x);
+void from_json(const json & j, TransportActionResponseStatus & x);
+void to_json(json & j, const TransportActionResponseStatus & x);
 
-    void from_json(const json & j, TransportConfigOperationOperation & x);
-    void to_json(json & j, const TransportConfigOperationOperation & x);
+void from_json(const json & j, TransportLinkedOutboundEnsureMode & x);
+void to_json(json & j, const TransportLinkedOutboundEnsureMode & x);
 
-    void from_json(const json & j, TransportConfigResponseStatus & x);
-    void to_json(json & j, const TransportConfigResponseStatus & x);
+void from_json(const json & j, TransportConfigApplyRequestOperation & x);
+void to_json(json & j, const TransportConfigApplyRequestOperation & x);
 
-    void from_json(const json & j, ExitAddress & x);
-    void to_json(json & j, const ExitAddress & x);
+void from_json(const json & j, GeoMode & x);
+void to_json(json & j, const GeoMode & x);
 
-    void from_json(const json & j, Verdict & x);
-    void to_json(json & j, const Verdict & x);
+void from_json(const json & j, TransportSpecType & x);
+void to_json(json & j, const TransportSpecType & x);
 
-    void from_json(const json & j, Confidence & x);
-    void to_json(json & j, const Confidence & x);
+void from_json(const json & j, TransportConfigApplyResponseStatus & x);
+void to_json(json & j, const TransportConfigApplyResponseStatus & x);
 
-    void from_json(const json & j, Framing & x);
-    void to_json(json & j, const Framing & x);
+void from_json(const json & j, TransportConfigOperationOperation & x);
+void to_json(json & j, const TransportConfigOperationOperation & x);
 
-    void from_json(const json & j, PayloadNetwork & x);
-    void to_json(json & j, const PayloadNetwork & x);
+void from_json(const json & j, TransportConfigResponseStatus & x);
+void to_json(json & j, const TransportConfigResponseStatus & x);
 
-    void from_json(const json & j, WireTransport & x);
-    void to_json(json & j, const WireTransport & x);
+void from_json(const json & j, ExitAddress & x);
+void to_json(json & j, const ExitAddress & x);
 
-    void from_json(const json & j, Security & x);
-    void to_json(json & j, const Security & x);
+void from_json(const json & j, Verdict & x);
+void to_json(json & j, const Verdict & x);
 
-    void from_json(const json & j, State & x);
-    void to_json(json & j, const State & x);
+void from_json(const json & j, Confidence & x);
+void to_json(json & j, const Confidence & x);
 
+void from_json(const json & j, Framing & x);
+void to_json(json & j, const Framing & x);
+
+void from_json(const json & j, PayloadNetwork & x);
+void to_json(json & j, const PayloadNetwork & x);
+
+void from_json(const json & j, WireTransport & x);
+void to_json(json & j, const WireTransport & x);
+
+void from_json(const json & j, Security & x);
+void to_json(json & j, const Security & x);
+
+void from_json(const json & j, State & x);
+void to_json(json & j, const State & x);
+}
+}
+namespace nlohmann {
+template <>
+struct adl_serializer<std::variant<std::vector<keen_pbr3::api::NfqwsFileEntryElement>, std::map<std::string, json>>> {
+    static void from_json(const json & j, std::variant<std::vector<keen_pbr3::api::NfqwsFileEntryElement>, std::map<std::string, json>> & x);
+    static void to_json(json & j, const std::variant<std::vector<keen_pbr3::api::NfqwsFileEntryElement>, std::map<std::string, json>> & x);
+};
+}
+namespace keen_pbr3 {
+namespace api {
     inline void from_json(const json & j, ApiConfig& x) {
         x.enabled = get_stack_optional<bool>(j, "enabled");
         x.listen = get_stack_optional<std::string>(j, "listen");
@@ -4278,13 +4351,89 @@ namespace api {
         j["services"] = x.services;
     }
 
+    inline void from_json(const json & j, NfqwsFileEntryElement& x) {
+        x.category = j.at("category").get<NfqwsFileEntryCategory>();
+        x.content = j.at("content").get<std::string>();
+        x.name = j.at("name").get<std::string>();
+    }
+
+    inline void to_json(json & j, const NfqwsFileEntryElement & x) {
+        j = json::object();
+        j["category"] = x.category;
+        j["content"] = x.content;
+        j["name"] = x.name;
+    }
+
     inline void from_json(const json & j, NfqwsActionRequest& x) {
         x.action = j.at("action").get<NfqwsActionRequestAction>();
+        x.category = get_stack_optional<NfqwsActionRequestCategory>(j, "category");
+        x.command = get_stack_optional<Command>(j, "command");
+        x.content = get_stack_optional<std::string>(j, "content");
+        x.files = get_stack_optional<std::variant<std::vector<NfqwsFileEntryElement>, std::map<std::string, nlohmann::json>>>(j, "files");
+        x.force = get_stack_optional<bool>(j, "force");
+        x.name = get_stack_optional<std::string>(j, "name");
+        x.restart = get_stack_optional<bool>(j, "restart");
+        x.url = get_stack_optional<std::string>(j, "url");
     }
 
     inline void to_json(json & j, const NfqwsActionRequest & x) {
         j = json::object();
         j["action"] = x.action;
+        j["category"] = x.category;
+        j["command"] = x.command;
+        j["content"] = x.content;
+        j["files"] = x.files;
+        j["force"] = x.force;
+        j["name"] = x.name;
+        j["restart"] = x.restart;
+        j["url"] = x.url;
+    }
+
+    inline void from_json(const json & j, NfqwsActionResult& x) {
+        x.captured = get_stack_optional<int64_t>(j, "captured");
+        x.content = get_stack_optional<std::string>(j, "content");
+        x.durable = get_stack_optional<bool>(j, "durable");
+        x.error = get_stack_optional<std::string>(j, "error");
+        x.exact_package_state = get_stack_optional<bool>(j, "exact_package_state");
+        x.failed = get_stack_optional<int64_t>(j, "failed");
+        x.files_restored = get_stack_optional<bool>(j, "files_restored");
+        x.firewall_reconcile_pending = get_stack_optional<bool>(j, "firewall_reconcile_pending");
+        x.installed_blobs = get_stack_optional<int64_t>(j, "installed_blobs");
+        x.journal_retained = get_stack_optional<bool>(j, "journal_retained");
+        x.ok = get_stack_optional<bool>(j, "ok");
+        x.output = get_stack_optional<std::string>(j, "output");
+        x.package_metadata_verified = get_stack_optional<bool>(j, "package_metadata_verified");
+        x.preserved_blobs = get_stack_optional<int64_t>(j, "preserved_blobs");
+        x.reachable = get_stack_optional<bool>(j, "reachable");
+        x.restore_point = get_stack_optional<std::string>(j, "restore_point");
+        x.restored = get_stack_optional<int64_t>(j, "restored");
+        x.runtime_verified = get_stack_optional<bool>(j, "runtime_verified");
+        x.status = get_stack_optional<int64_t>(j, "status");
+        x.warning = get_stack_optional<std::string>(j, "warning");
+    }
+
+    inline void to_json(json & j, const NfqwsActionResult & x) {
+        j = json::object();
+        j["captured"] = x.captured;
+        j["content"] = x.content;
+        j["durable"] = x.durable;
+        j["error"] = x.error;
+        j["exact_package_state"] = x.exact_package_state;
+        j["failed"] = x.failed;
+        j["files_restored"] = x.files_restored;
+        j["firewall_reconcile_pending"] = x.firewall_reconcile_pending;
+        j["installed_blobs"] = x.installed_blobs;
+        j["journal_retained"] = x.journal_retained;
+        j["ok"] = x.ok;
+        j["output"] = x.output;
+        j["package_metadata_verified"] = x.package_metadata_verified;
+        j["preserved_blobs"] = x.preserved_blobs;
+        j["reachable"] = x.reachable;
+        j["restore_point"] = x.restore_point;
+        j["restored"] = x.restored;
+        j["runtime_verified"] = x.runtime_verified;
+        j["status"] = x.status;
+        j["warning"] = x.warning;
     }
 
     inline void from_json(const json & j, NfqwsStatus& x) {
@@ -5687,6 +5836,8 @@ namespace api {
         x.ndms_vpn_server_service = get_stack_optional<NdmsVpnServerService>(j, "NdmsVpnServerService");
         x.ndms_vpn_server_service_inventory_response = get_stack_optional<NdmsVpnServerServiceInventoryResponse>(j, "NdmsVpnServerServiceInventoryResponse");
         x.nfqws_action_request = get_stack_optional<NfqwsActionRequest>(j, "NfqwsActionRequest");
+        x.nfqws_action_result = get_stack_optional<NfqwsActionResult>(j, "NfqwsActionResult");
+        x.nfqws_file_entry = get_stack_optional<NfqwsFileEntryElement>(j, "NfqwsFileEntry");
         x.nfqws_status = get_stack_optional<NfqwsStatus>(j, "NfqwsStatus");
         x.ok_response = get_stack_optional<OkResponse>(j, "OkResponse");
         x.outbound = get_stack_optional<OutboundElement>(j, "Outbound");
@@ -5887,6 +6038,8 @@ namespace api {
         j["NdmsVpnServerService"] = x.ndms_vpn_server_service;
         j["NdmsVpnServerServiceInventoryResponse"] = x.ndms_vpn_server_service_inventory_response;
         j["NfqwsActionRequest"] = x.nfqws_action_request;
+        j["NfqwsActionResult"] = x.nfqws_action_result;
+        j["NfqwsFileEntry"] = x.nfqws_file_entry;
         j["NfqwsStatus"] = x.nfqws_status;
         j["OkResponse"] = x.ok_response;
         j["Outbound"] = x.outbound;
@@ -6783,6 +6936,56 @@ namespace api {
         }
     }
 
+    inline void from_json(const json & j, NfqwsActionRequestCategory & x) {
+        if (j == "config") x = NfqwsActionRequestCategory::CONFIG;
+        else if (j == "list") x = NfqwsActionRequestCategory::LIST;
+        else if (j == "log") x = NfqwsActionRequestCategory::LOG;
+        else if (j == "lua") x = NfqwsActionRequestCategory::LUA;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NfqwsActionRequestCategory\""); }
+    }
+
+    inline void to_json(json & j, const NfqwsActionRequestCategory & x) {
+        switch (x) {
+            case NfqwsActionRequestCategory::CONFIG: j = "config"; break;
+            case NfqwsActionRequestCategory::LIST: j = "list"; break;
+            case NfqwsActionRequestCategory::LOG: j = "log"; break;
+            case NfqwsActionRequestCategory::LUA: j = "lua"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NfqwsActionRequestCategory\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, Command & x) {
+        if (j == "reload") x = Command::RELOAD;
+        else if (j == "restart") x = Command::RESTART;
+        else if (j == "start") x = Command::START;
+        else if (j == "stop") x = Command::STOP;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"Command\""); }
+    }
+
+    inline void to_json(json & j, const Command & x) {
+        switch (x) {
+            case Command::RELOAD: j = "reload"; break;
+            case Command::RESTART: j = "restart"; break;
+            case Command::START: j = "start"; break;
+            case Command::STOP: j = "stop"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"Command\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, NfqwsFileEntryCategory & x) {
+        if (j == "list") x = NfqwsFileEntryCategory::LIST;
+        else if (j == "lua") x = NfqwsFileEntryCategory::LUA;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NfqwsFileEntryCategory\""); }
+    }
+
+    inline void to_json(json & j, const NfqwsFileEntryCategory & x) {
+        switch (x) {
+            case NfqwsFileEntryCategory::LIST: j = "list"; break;
+            case NfqwsFileEntryCategory::LUA: j = "lua"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NfqwsFileEntryCategory\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
     inline void from_json(const json & j, LastOutcome & x) {
         if (j == "abandoned") x = LastOutcome::ABANDONED;
         else if (j == "failure") x = LastOutcome::FAILURE;
@@ -7583,4 +7786,25 @@ namespace api {
         }
     }
 }
+}
+namespace nlohmann {
+    inline void adl_serializer<std::variant<std::vector<keen_pbr3::api::NfqwsFileEntryElement>, std::map<std::string, json>>>::from_json(const json & j, std::variant<std::vector<keen_pbr3::api::NfqwsFileEntryElement>, std::map<std::string, json>> & x) {
+        if (j.is_object())
+            x = j.get<std::map<std::string, json>>();
+        else if (j.is_array())
+            x = j.get<std::vector<keen_pbr3::api::NfqwsFileEntryElement>>();
+        else throw std::runtime_error("Could not deserialise!");
+    }
+
+    inline void adl_serializer<std::variant<std::vector<keen_pbr3::api::NfqwsFileEntryElement>, std::map<std::string, json>>>::to_json(json & j, const std::variant<std::vector<keen_pbr3::api::NfqwsFileEntryElement>, std::map<std::string, json>> & x) {
+        switch (x.index()) {
+            case 0:
+                j = std::get<std::vector<keen_pbr3::api::NfqwsFileEntryElement>>(x);
+                break;
+            case 1:
+                j = std::get<std::map<std::string, json>>(x);
+                break;
+            default: throw std::runtime_error("Input JSON does not conform to schema!");
+        }
+    }
 }

@@ -6,14 +6,46 @@
  * OpenAPI spec version: 3.0.0
  */
 import type { NfqwsActionRequestAction } from './nfqwsActionRequestAction';
+import type { NfqwsActionRequestCategory } from './nfqwsActionRequestCategory';
+import type { NfqwsActionRequestCommand } from './nfqwsActionRequestCommand';
+import type { NfqwsActionRequestFiles } from './nfqwsActionRequestFiles';
 
 /**
- * Carries `action` plus that action's own fields, which are not enumerated here. Unknown members are ignored rather than refused.
+ * One object carrying `action` plus the fields that action reads. Deliberately not a discriminated union of seventeen branches: the generators this project runs turn `oneOf` into types worse than the problem, and an enum inlined twice has already renamed a type and broken the build once. Which fields each action reads is documented on the fields themselves.
+
+Unknown members are ignored. An unrecognised `action` is a 400.
+
+**Files.** `category` and `name` together identify a file, and the category decides what is allowed: `config` and `log` cannot be deleted, a `log` cannot be created, and only `list` and `lua` can be batch-saved. Names are validated; a bad one is a 400, not a path.
+
+**Step-up.** `upgrade`, `capture_restore_point` and `restore_component` need a live grant. The rest do not, because guarding the whole path once put a password prompt in front of opening a list.
 
  */
 export interface NfqwsActionRequest {
   /** `upgrade`, `capture_restore_point` and `restore_component` require a live step-up grant; the rest do not.
    */
   action: NfqwsActionRequestAction;
+  /** Which set the file belongs to. Read by `read_file`, `save_file`, `create_file` and `delete_file`.
+   */
+  category?: NfqwsActionRequestCategory;
+  /** File name for the file actions and `clear_log`, or the strategy name for `save_strategy`, `apply_strategy` and `delete_strategy`. Validated; an unusable name is refused rather than resolved.
+   */
+  name?: string;
+  /** Text to write. Used by `save_file`, `create_file` and `save_strategy`, and optionally by `apply_strategy` to save the strategy before applying it.
+   */
+  content?: string;
+  /** Required by `service`. Anything else is a 400. */
+  command?: NfqwsActionRequestCommand;
+  /** `check_update` only: contact the release source instead of answering from the cache.
+   */
+  force?: boolean;
+  /** `save_files` only: restart the service after writing. Absent means write and leave the service alone.
+   */
+  restart?: boolean;
+  /** `check_url` only. Must start with http:// or https://; anything else is a 400 rather than a fetch.
+   */
+  url?: string;
+  /** `save_files` takes an **array** of {category, name, content}, at most 256 entries and bounded in total size. `import_lists` and `import_bundle` take an **object** instead: import_lists maps a list name to its text, import_bundle maps a category to such a map. A category that does not match the file it contains is refused rather than re-filed.
+   */
+  files?: NfqwsActionRequestFiles;
   [key: string]: unknown;
  }
