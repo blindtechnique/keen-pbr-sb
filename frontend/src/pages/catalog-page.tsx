@@ -79,11 +79,12 @@ import {
 } from "@/pages/catalog-setup-intent"
 
 /**
- * Ready-made lists borrowed from the awg-manager catalogue.
+ * Ready-made lists that ship inside the package.
  *
- * The upstream file is the source of truth, so this page renders whatever it
- * currently contains rather than a curated copy - the copy we kept by hand
- * went stale within days.
+ * The catalogue is package data now: a release is how it changes, so nothing
+ * is downloaded and no third party decides what this page offers. `url` is
+ * empty in that case; it is filled only when an operator pointed the daemon
+ * at a catalogue of their own by hand.
  */
 type CatalogResponse = {
   source?: string
@@ -249,6 +250,10 @@ export function CatalogPage() {
     DIRECT
   )
   const effectiveSourceDetour = sourceDetour ?? catalogQuery.data?.detour ?? ""
+  // Empty means the catalogue in the package. The button then only stores the
+  // download route, and saying "check now" would promise a fetch that cannot
+  // happen.
+  const catalogSourceUrl = catalogQuery.data?.url ?? ""
 
   const refreshMutation = useMutation({
     mutationFn: async () => {
@@ -261,10 +266,17 @@ export function CatalogPage() {
       if (!response.ok || data.error) {
         throw new Error(data.error || `HTTP ${response.status}`)
       }
-      return data as { updated?: boolean }
+      return data as { updated?: boolean; packaged?: boolean }
     },
     onSuccess: async (data) => {
       await queryClient.invalidateQueries({ queryKey: ["catalog"] })
+      // A packaged catalogue has nothing to fetch, so `updated: false` is the
+      // normal answer here and must not be reported as a failed download.
+      // What the press did accomplish is storing the route.
+      if (data.packaged) {
+        toast.success(t("pages.catalog.detourStored"))
+        return
+      }
       toast.success(
         data.updated
           ? t("pages.catalog.refreshed")
@@ -518,15 +530,13 @@ export function CatalogPage() {
 
       <div className="flex flex-wrap items-center justify-between gap-3 border-y border-border px-3 py-2">
         <p className="text-[13px] text-muted-foreground">
-          {t("pages.catalog.source")}{" "}
-          <a
-            className="text-primary hover:underline"
-            href="https://github.com/hoaxisr/awg-manager"
-            rel="noreferrer"
-            target="_blank"
-          >
-            hoaxisr/awg-manager
-          </a>
+          {/* A configured source is an address the operator typed into
+              catalog-source.json, so it is shown as text rather than as a
+              link: this page must not turn a hand-edited file into something
+              a reader clicks. */}
+          {catalogSourceUrl
+            ? `${t("pages.catalog.source")} ${catalogSourceUrl}`
+            : t("pages.catalog.packagedSource")}
           {catalogUpdatedAt
             ? ` · ${t("pages.catalog.updatedAt", {
                 date: catalogUpdatedAt,
@@ -578,7 +588,9 @@ export function CatalogPage() {
                 refreshMutation.isPending && "animate-spin"
               )}
             />
-            {t("pages.catalog.checkNow")}
+            {catalogSourceUrl
+              ? t("pages.catalog.checkNow")
+              : t("pages.catalog.rememberDetour")}
           </Button>
         </div>
       </div>

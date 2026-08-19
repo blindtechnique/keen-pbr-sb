@@ -7,9 +7,12 @@
  */
 
 export interface CatalogRefreshResult {
-  /** New content arrived. False means the fetch ran and changed nothing - not that it was skipped.
+  /** New content arrived. With a configured source, false means the fetch ran and changed nothing. With the packaged catalogue it is always false because no fetch exists - read `packaged` before treating it as a failure.
    */
   updated?: boolean;
+  /** True when the catalogue is the one inside the package and no source URL is configured, so nothing was or could be downloaded.
+   */
+  packaged?: boolean;
   /** What this refresh actually used, and what is now stored. */
   detour?: string;
   /** False when the stored setting is visible but its durability could not be confirmed.

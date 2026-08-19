@@ -4410,7 +4410,11 @@ export function useGetSystemRouter<TData = Awaited<ReturnType<typeof getSystemRo
 
 
 /**
- * Served from the snapshot on disk; this never fetches. Use `POST /api/catalog/refresh` to make it fetch, and note that doing so also stores the detour it used.
+ * Served from the snapshot on disk; this never fetches.
+
+The catalogue is package data: it ships inside the IPK and a release is how it changes, so on a stock install nothing is downloaded and no third party decides which lists the router offers. `source` is `bundled` for that copy.
+
+An operator who wants a different or mirrored catalogue writes its URL into `catalog-source.json` on the router by hand - the API never sets one. Only then does a download happen, only then is a cache kept, and `source` becomes `cache` while `url` names it. On a stock install `url` is empty, which is the honest answer to "where did this come from".
 
  * @summary The stored preset catalogue
  */
@@ -4982,15 +4986,15 @@ export const usePostNfqws = <TError = ErrorResponse,
     }
 
 /**
- * Always refreshes - staleness is not consulted. `updated` says whether the fetch produced new content, not whether it ran.
+ * The catalogue ships in the package, so on a stock install there is nothing to fetch and this endpoint only stores `detour`. `packaged` true says exactly that, so `updated: false` is not read as a failed download. A fetch happens only when `catalog-source.json` names a catalogue of the operator's own; then staleness is not consulted and `updated` says whether the fetch produced new content.
 
-Sending `detour` does two things, and the second is easy to miss: it routes this refresh, and it is **persisted** as the catalogue's source setting for every later refresh. A caller that meant "just this once" has changed a stored preference.
+Sending `detour` does two things, and the second is easy to miss: it routes this refresh, and it is **persisted** as the catalogue's source setting for every later refresh. A caller that meant "just this once" has changed a stored preference. The write merges into the settings file rather than replacing it, so a hand-configured catalogue URL living beside it survives.
 
 The tag is resolved against the *visible* configuration, which is the staged draft whenever one exists rather than the running config. So a refresh started while an unsaved edit is open can route through an outbound that is not active yet - or fail to find one that is.
 
 The body is optional; an empty body refreshes through the stored setting. A `detour` that is not a string is read as "no detour" rather than refused.
 
- * @summary Refresh the catalogue now, optionally through a different outbound
+ * @summary Store the download route, and fetch when a source is configured
  */
 export type postCatalogRefreshResponse200 = {
   data: CatalogRefreshResult
@@ -5059,7 +5063,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type PostCatalogRefreshMutationError = unknown
 
     /**
- * @summary Refresh the catalogue now, optionally through a different outbound
+ * @summary Store the download route, and fetch when a source is configured
  */
 export const usePostCatalogRefresh = <TError = unknown,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postCatalogRefresh>>, TError,{data: CatalogRefreshRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}

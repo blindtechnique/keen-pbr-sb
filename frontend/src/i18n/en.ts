@@ -1791,11 +1791,15 @@ export const enTranslation = {
         "Ready-made sets of domains and rules. Pick the ones you want and say where their traffic should go.",
       categoriesAriaLabel: "Catalog categories",
       source: "Source:",
+      packagedSource: "The catalogue ships with the package",
       updatedAt: "updated {{date}}",
       count: "lists: {{count}}",
       downloadVia: "Download via",
       directly: "Directly",
       checkNow: "Check now",
+      rememberDetour: "Remember route",
+      detourStored:
+        "Route remembered. The catalogue ships with the package and updates with it.",
       refreshed: "Catalogue updated",
       refreshFailed:
         "Could not refresh; showing the previous catalogue. Try downloading through a tunnel.",

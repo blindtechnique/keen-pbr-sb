@@ -1087,9 +1087,20 @@ paths:
     get:
       summary: The stored preset catalogue
       description: >
-        Served from the snapshot on disk; this never fetches. Use
-        `POST /api/catalog/refresh` to make it fetch, and note that doing so
-        also stores the detour it used.
+        Served from the snapshot on disk; this never fetches.
+
+
+        The catalogue is package data: it ships inside the IPK and a release is
+        how it changes, so on a stock install nothing is downloaded and no
+        third party decides which lists the router offers. `source` is
+        `bundled` for that copy.
+
+
+        An operator who wants a different or mirrored catalogue writes its URL
+        into `catalog-source.json` on the router by hand - the API never sets
+        one. Only then does a download happen, only then is a cache kept, and
+        `source` becomes `cache` while `url` names it. On a stock install `url`
+        is empty, which is the honest answer to "where did this come from".
       operationId: getCatalog
       responses:
         "200":
@@ -1278,16 +1289,22 @@ paths:
 
   /api/catalog/refresh:
     post:
-      summary: Refresh the catalogue now, optionally through a different outbound
+      summary: Store the download route, and fetch when a source is configured
       description: >
-        Always refreshes - staleness is not consulted. `updated` says whether
-        the fetch produced new content, not whether it ran.
+        The catalogue ships in the package, so on a stock install there is
+        nothing to fetch and this endpoint only stores `detour`. `packaged`
+        true says exactly that, so `updated: false` is not read as a failed
+        download. A fetch happens only when `catalog-source.json` names a
+        catalogue of the operator's own; then staleness is not consulted and
+        `updated` says whether the fetch produced new content.
 
 
         Sending `detour` does two things, and the second is easy to miss: it
         routes this refresh, and it is **persisted** as the catalogue's source
         setting for every later refresh. A caller that meant "just this once"
-        has changed a stored preference.
+        has changed a stored preference. The write merges into the settings
+        file rather than replacing it, so a hand-configured catalogue URL
+        living beside it survives.
 
 
         The tag is resolved against the *visible* configuration, which is the
@@ -3001,8 +3018,15 @@ components:
         updated:
           type: boolean
           description: >
-            New content arrived. False means the fetch ran and changed
-            nothing - not that it was skipped.
+            New content arrived. With a configured source, false means the
+            fetch ran and changed nothing. With the packaged catalogue it is
+            always false because no fetch exists - read `packaged` before
+            treating it as a failure.
+        packaged:
+          type: boolean
+          description: >
+            True when the catalogue is the one inside the package and no
+            source URL is configured, so nothing was or could be downloaded.
         detour:
           type: string
           description: What this refresh actually used, and what is now stored.

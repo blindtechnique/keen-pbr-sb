@@ -8,6 +8,7 @@
 #include "../log/logger.hpp"
 #include "../setup/catalog_setup_planner.hpp"
 
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <optional>
@@ -22,22 +23,26 @@ namespace keen_pbr3 {
 
 namespace {
 
-// The catalogue lives in one file in the awg-manager repository. Pointing at
-// the branch rather than a pinned commit is deliberate: the whole purpose is
-// to follow the author's additions and removals.
-constexpr const char* kCatalogUrl =
-    "https://raw.githubusercontent.com/hoaxisr/awg-manager/master/"
-    "internal/presets/defaults.json";
-// Unlike the cache/bundled transport source, this identity describes the
-// logical authoritative catalogue and remains stable across refreshes.
+// This string is hashed into the provenance of every installed list
+// (see setup::catalog_preset_identity). Changing it would give every preset a
+// new identity and orphan every list a user has already installed, so it stays
+// exactly as first published even though the catalogue no longer comes from
+// that repository. It is never shown to anyone.
 constexpr const char* kCatalogIdentity =
     "github:hoaxisr/awg-manager:internal/presets/defaults.json";
 
-constexpr const char* kCachePath = "/opt/var/cache/keen-pbr/catalog.json";
-constexpr const char* kSettingsPath = "/opt/etc/keen-pbr/catalog-source.json";
-// Shipped with the package so a fresh install without internet still offers
-// something to choose from.
+// The catalogue is package data: it ships in the IPK and a release is how it
+// changes. Nothing is fetched by default, so a blocked or hostile network
+// cannot decide which lists the router offers.
 constexpr const char* kBundledPath = "/opt/usr/share/keen-pbr/catalog.json";
+
+// An operator who wants a different or mirrored catalogue writes its URL into
+// catalog-source.json by hand. The API never sets it: the daemon must not be
+// talked into fetching an arbitrary address by an HTTP request.
+constexpr const char* kSettingsPath = "/opt/etc/keen-pbr/catalog-source.json";
+// Only ever written when such a URL is configured. Installs that predate the
+// package-owned catalogue may still have a file here; it is now ignored.
+constexpr const char* kCachePath = "/opt/var/cache/keen-pbr/catalog.json";
 
 constexpr auto kMaxAge = std::chrono::hours(24 * 7);
 
@@ -85,6 +90,48 @@ std::optional<std::chrono::system_clock::time_point> file_mtime(
         return std::nullopt;
     }
     return std::chrono::system_clock::from_time_t(st.st_mtime);
+}
+
+nlohmann::json read_catalog_settings() {
+    try {
+        const auto raw = read_file(kSettingsPath);
+        if (raw.empty()) return nlohmann::json::object();
+        auto parsed = nlohmann::json::parse(raw);
+        return parsed.is_object() ? parsed : nlohmann::json::object();
+    } catch (const std::exception&) {
+        return nlohmann::json::object();
+    }
+}
+
+// A rejected URL is treated as no URL at all rather than as an error: the
+// catalogue in the package is always a working answer, and refusing to serve
+// one because a hand-edited settings file is wrong would be worse than
+// ignoring the file. The rules match the ones the setup planner applies to
+// every catalogue URL, so a source that passes here cannot smuggle in a
+// preset the planner would then refuse.
+std::string configured_catalog_url() {
+    const auto settings = read_catalog_settings();
+    const auto url = settings.value("url", std::string{});
+    if (url.empty()) return {};
+
+    for (const unsigned char character : url) {
+        if (character <= 0x20U || character == 0x7fU || character == '\\') {
+            return {};
+        }
+    }
+    const auto scheme_end = url.find("://");
+    if (scheme_end == std::string::npos) return {};
+    std::string scheme = url.substr(0, scheme_end);
+    for (auto& character : scheme) {
+        character = static_cast<char>(
+            std::tolower(static_cast<unsigned char>(character)));
+    }
+    if (scheme != "https") return {};
+    const auto authority_start = scheme_end + 3U;
+    const auto authority_end = url.find_first_of("/?#", authority_start);
+    if (authority_end == authority_start) return {};
+    if (authority_start >= url.size()) return {};
+    return url;
 }
 
 bool cache_is_fresh() {
@@ -269,8 +316,17 @@ uint32_t mark_for_detour(const Config& config, const std::string& tag) {
 
 // catalog_mutex() must be held by the caller.
 nlohmann::json load_catalog_snapshot_locked() {
-    std::string source = "cache";
-    auto payload = read_file(kCachePath);
+    // The package copy is authoritative. A cache is consulted only when the
+    // operator pointed the daemon at a catalogue of their own; without that
+    // the file left behind by older versions is not a source, and reading it
+    // would silently reinstate the third-party catalogue it holds.
+    const auto configured_url = configured_catalog_url();
+    std::string source = "bundled";
+    std::string payload;
+    if (!configured_url.empty()) {
+        payload = read_file(kCachePath);
+        if (!payload.empty()) source = "cache";
+    }
     if (payload.empty()) {
         payload = read_file(kBundledPath);
         source = "bundled";
@@ -291,17 +347,22 @@ nlohmann::json load_catalog_snapshot_locked() {
     try {
         auto presets = nlohmann::json::parse(payload);
         auto bundled = nlohmann::json::array();
-        try {
-            const auto bundled_payload = read_file(kBundledPath);
-            if (!bundled_payload.empty()) {
-                bundled =
-                    nlohmann::json::parse(bundled_payload);
+        // The overlay exists to give a foreign catalogue the routing
+        // companions and subnets it does not carry. When the package copy is
+        // itself the source there is nothing to overlay onto it.
+        if (source == "cache") {
+            try {
+                const auto bundled_payload = read_file(kBundledPath);
+                if (!bundled_payload.empty()) {
+                    bundled =
+                        nlohmann::json::parse(bundled_payload);
+                }
+            } catch (const std::exception& error) {
+                Logger::instance().warn(
+                    "List catalogue: bundled routing companion overlay is "
+                    "unavailable: {}",
+                    error.what());
             }
-        } catch (const std::exception& error) {
-            Logger::instance().warn(
-                "List catalogue: bundled routing companion overlay is "
-                "unavailable: {}",
-                error.what());
         }
         response["presets"] =
             enrich_catalog_with_routing_companions(
@@ -311,7 +372,10 @@ nlohmann::json load_catalog_snapshot_locked() {
         response["presets"] = nlohmann::json::array();
         response["error"] = "catalogue is unavailable";
     }
-    response["url"] = kCatalogUrl;
+    // Empty unless the operator configured a catalogue of their own. Clients
+    // read it as "where this came from", and for a packaged catalogue the
+    // honest answer is "nowhere on the network".
+    response["url"] = configured_url;
     response["detour"] = catalog_detour();
     return response;
 }
@@ -479,19 +543,19 @@ nlohmann::json enrich_catalog_with_routing_companions(
 }
 
 std::string catalog_detour() {
-    try {
-        const auto raw = read_file(kSettingsPath);
-        if (raw.empty()) {
-            return {};
-        }
-        return nlohmann::json::parse(raw).value("detour", std::string{});
-    } catch (const std::exception&) {
-        return {};
-    }
+    return read_catalog_settings().value("detour", std::string{});
 }
 
 bool refresh_catalog_if_stale(bool force, uint32_t fwmark) {
     std::lock_guard<std::mutex> lock(catalog_mutex());
+
+    // No configured source means the catalogue is the one in the package, and
+    // a package is updated by opkg rather than by this function. Returning
+    // quietly keeps the daily scheduled run from logging a non-event.
+    const auto url = configured_catalog_url();
+    if (url.empty()) {
+        return false;
+    }
 
     if (!force && cache_is_fresh()) {
         return false;
@@ -502,17 +566,17 @@ bool refresh_catalog_if_stale(bool force, uint32_t fwmark) {
         client.set_timeout(std::chrono::seconds(20));
         client.set_max_response_size(4U * 1024U * 1024U);
 
-        const auto payload = client.download(kCatalogUrl, HttpRequestOptions{fwmark});
+        const auto payload = client.download(url, HttpRequestOptions{fwmark});
         if (!store_if_valid(payload)) {
             Logger::instance().warn(
                 "List catalogue: downloaded file is not a valid catalogue, keeping the previous copy");
             return false;
         }
-        Logger::instance().info("List catalogue updated from {}", kCatalogUrl);
+        Logger::instance().info("List catalogue updated from {}", url);
         return true;
     } catch (const std::exception& e) {
-        // The router's link to GitHub is unreliable; a failed refresh simply
-        // leaves the previous copy in place.
+        // The router's link to the configured host is unreliable; a failed
+        // refresh simply leaves the previous copy in place.
         Logger::instance().warn("List catalogue refresh failed: {}", e.what());
         return false;
     }
@@ -529,9 +593,11 @@ void register_catalog_handler(ApiServer& server, ApiContext& ctx) {
         return load_catalog_snapshot().dump();
     });
 
-    // POST /api/catalog/refresh - fetch now instead of waiting for the weekly
-    // run. An optional detour is remembered, so the scheduled refresh keeps
-    // using whatever route worked when the user pressed the button.
+    // POST /api/catalog/refresh - remember the route lists are downloaded
+    // through, and fetch the catalogue now when the operator configured one of
+    // their own. With the packaged catalogue there is nothing to fetch, and
+    // "packaged": true says so rather than leaving the client to read a bare
+    // "updated": false as a failure.
     server.post("/api/catalog/refresh", [&ctx](const std::string& body) -> std::string {
         nlohmann::json response;
         std::string detour = catalog_detour();
@@ -544,7 +610,10 @@ void register_catalog_handler(ApiServer& server, ApiContext& ctx) {
                     detour = request["detour"].is_string()
                                  ? request["detour"].get<std::string>()
                                  : std::string{};
-                    nlohmann::json settings;
+                    // Read-modify-write: a hand-configured catalogue URL
+                    // lives in the same file, and remembering a detour must
+                    // not delete it.
+                    auto settings = read_catalog_settings();
                     settings["detour"] = detour;
                     settings_durable = write_file(
                         kSettingsPath,
@@ -567,6 +636,7 @@ void register_catalog_handler(ApiServer& server, ApiContext& ctx) {
 
         const auto mark = mark_for_detour(ctx.get_visible_config(), detour);
         response["updated"] = refresh_catalog_if_stale(/*force=*/true, mark);
+        response["packaged"] = configured_catalog_url().empty();
         response["detour"] = detour;
         response["settings_durable"] = settings_durable;
         if (!settings_durable) {

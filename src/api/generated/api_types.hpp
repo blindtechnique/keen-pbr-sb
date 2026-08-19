@@ -220,6 +220,7 @@ namespace api {
     struct CatalogRefreshResult {
         std::optional<std::string> detour;
         std::optional<std::string> error;
+        std::optional<bool> packaged;
         std::optional<bool> settings_durable;
         std::optional<bool> updated;
         std::optional<std::string> warning;
@@ -2977,6 +2978,7 @@ namespace api {
     inline void from_json(const json & j, CatalogRefreshResult& x) {
         x.detour = get_stack_optional<std::string>(j, "detour");
         x.error = get_stack_optional<std::string>(j, "error");
+        x.packaged = get_stack_optional<bool>(j, "packaged");
         x.settings_durable = get_stack_optional<bool>(j, "settings_durable");
         x.updated = get_stack_optional<bool>(j, "updated");
         x.warning = get_stack_optional<std::string>(j, "warning");
@@ -2986,6 +2988,7 @@ namespace api {
         j = json::object();
         j["detour"] = x.detour;
         j["error"] = x.error;
+        j["packaged"] = x.packaged;
         j["settings_durable"] = x.settings_durable;
         j["updated"] = x.updated;
         j["warning"] = x.warning;
