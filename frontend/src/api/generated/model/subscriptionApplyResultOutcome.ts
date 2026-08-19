@@ -7,7 +7,7 @@
  */
 
 /**
- * What happened to this entry. `already_imported` means an earlier apply of the same preview already created it - a preview is a one-shot import, so re-applying a line cannot duplicate the transport it produced. It is deliberately not `failed`: nothing went wrong and there is nothing for the operator to fix, and presenting it as an error would teach them to distrust the report.
+ * What happened to this entry. `already_imported` means no new POST was needed: either an earlier apply of the same preview created the line, or a transport with the same link fingerprint appeared after preview. It is deliberately not `failed`: nothing went wrong and there is nothing for the operator to fix.
 
  */
 export type SubscriptionApplyResultOutcome = typeof SubscriptionApplyResultOutcome[keyof typeof SubscriptionApplyResultOutcome];

@@ -23,6 +23,7 @@
 #include <map>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <set>
 #include <utility>
 #include <vector>
@@ -39,13 +40,18 @@ constexpr std::chrono::seconds kPreviewTtl{600};
 // about bounding held credentials, not about capacity.
 constexpr std::size_t kMaximumPreviews = 4U;
 
+struct TransportIdentity {
+    std::optional<std::string> tag;
+    std::optional<std::string> interface_name;
+};
+
 struct PreviewSession {
     std::chrono::steady_clock::time_point expires;
     SubscriptionImportPlan plan;
-    // Lines already turned into transports by an apply. A preview is a
-    // one-shot import: re-applying the same line must not duplicate the
-    // transport it already created.
-    std::set<std::size_t> consumed_lines;
+    // The exact identities created for lines by an apply. A preview is a
+    // one-shot import: re-applying a line must neither duplicate its transport
+    // nor relabel that transport with a new override from the retry request.
+    std::map<std::size_t, TransportIdentity> imported_lines;
 };
 
 struct PreviewRegistry {
@@ -110,15 +116,16 @@ std::string random_preview_token() {
     return token;
 }
 
-// The transports that already exist, as the two sets the plan and the naming
-// need. Read from the manager's redacted state: the tags are public, and the
-// identities arrive as link fingerprints precisely so this caller never has
-// to see a link. They are sensitive internal metadata and never belong in a
-// browser-facing response.
+// The transports that already exist, as the identities the plan, naming, and
+// idempotent result need. Read from the manager's redacted state: tags and
+// interfaces are public. Link identities arrive as fingerprints precisely so
+// this caller never has to see a link. They are sensitive internal metadata
+// and never belong in a browser-facing response.
 struct ExistingTransports {
     std::set<std::string> tags;
     std::set<std::string> interfaces;
     std::set<std::string> link_fingerprints;
+    std::map<std::string, TransportIdentity> identities_by_fingerprint;
 };
 
 ExistingTransports read_existing_transports(
@@ -147,13 +154,16 @@ ExistingTransports read_existing_transports(
                 502);
         }
         for (const auto& spec : body) {
+            TransportIdentity identity;
             if (spec.contains("tag") && spec["tag"].is_string()) {
-                existing.tags.insert(spec["tag"].get<std::string>());
+                identity.tag = spec["tag"].get<std::string>();
+                existing.tags.insert(*identity.tag);
             }
             if (spec.contains("interface") &&
                 spec["interface"].is_string()) {
-                existing.interfaces.insert(
-                    spec["interface"].get<std::string>());
+                identity.interface_name =
+                    spec["interface"].get<std::string>();
+                existing.interfaces.insert(*identity.interface_name);
             }
             if (spec.contains("link_fingerprint") &&
                 spec["link_fingerprint"].is_string()) {
@@ -161,6 +171,19 @@ ExistingTransports read_existing_transports(
                     spec["link_fingerprint"].get<std::string>();
                 if (!fingerprint.empty()) {
                     existing.link_fingerprints.insert(fingerprint);
+                    // The manager may expose a fingerprint without one of the
+                    // public identity fields. Keep whatever it proved and omit
+                    // the rest from an already-imported response.
+                    const auto [stored, inserted] =
+                        existing.identities_by_fingerprint.try_emplace(
+                            fingerprint, std::move(identity));
+                    if (!inserted) {
+                        // A fingerprint still proves that no POST is needed,
+                        // but it cannot identify one transport when the
+                        // manager reports more than one match. Do not pick an
+                        // arbitrary public identity and present it as actual.
+                        stored->second = TransportIdentity{};
+                    }
                 }
             }
         }
@@ -494,36 +517,44 @@ void register_subscriptions_handler_impl(
                 };
 
                 api::SubscriptionApplyResponse response;
-                const auto mark_consumed = [&request](const std::size_t line) {
-                    auto& registry = preview_registry();
-                    std::lock_guard<std::mutex> lock(registry.mutex);
-                    const auto found =
-                        registry.sessions.find(request.preview_id);
-                    if (found != registry.sessions.end()) {
-                        found->second.consumed_lines.insert(line);
-                    }
-                };
+                const auto remember_import =
+                    [&request](const std::size_t line,
+                               TransportIdentity identity) {
+                        auto& registry = preview_registry();
+                        std::lock_guard<std::mutex> lock(registry.mutex);
+                        const auto found =
+                            registry.sessions.find(request.preview_id);
+                        if (found != registry.sessions.end()) {
+                            found->second.imported_lines.insert_or_assign(
+                                line, std::move(identity));
+                        }
+                    };
                 for (const auto& entry : entries) {
                     api::SubscriptionApplyResultElement result;
                     result.line = static_cast<int64_t>(entry.line);
-                    result.tag = entry.tag;
 
-                    bool already_consumed = false;
+                    std::optional<TransportIdentity> imported_identity;
                     {
                         auto& registry = preview_registry();
                         std::lock_guard<std::mutex> lock(registry.mutex);
                         const auto found =
                             registry.sessions.find(request.preview_id);
-                        already_consumed =
-                            found != registry.sessions.end() &&
-                            found->second.consumed_lines.count(
-                                entry.line) != 0U;
+                        if (found != registry.sessions.end()) {
+                            const auto imported =
+                                found->second.imported_lines.find(entry.line);
+                            if (imported !=
+                                found->second.imported_lines.end()) {
+                                imported_identity = imported->second;
+                            }
+                        }
                     }
-                    if (already_consumed) {
+                    if (imported_identity.has_value()) {
                         // Not a failure: nothing went wrong and there is
                         // nothing to fix. Reporting it as one would teach
                         // the operator to distrust the report.
                         result.outcome = api::Outcome::ALREADY_IMPORTED;
+                        result.tag = imported_identity->tag;
+                        result.interface = imported_identity->interface_name;
                         response.results.push_back(std::move(result));
                         continue;
                     }
@@ -541,7 +572,16 @@ void register_subscriptions_handler_impl(
                         // after preview. This is the same benign state as a
                         // consumed line: no POST and nothing to repair.
                         result.outcome = api::Outcome::ALREADY_IMPORTED;
-                        mark_consumed(entry.line);
+                        TransportIdentity identity;
+                        const auto actual =
+                            existing.identities_by_fingerprint.find(fingerprint);
+                        if (actual !=
+                            existing.identities_by_fingerprint.end()) {
+                            identity = actual->second;
+                        }
+                        result.tag = identity.tag;
+                        result.interface = identity.interface_name;
+                        remember_import(entry.line, std::move(identity));
                         response.results.push_back(std::move(result));
                         continue;
                     }
@@ -555,8 +595,6 @@ void register_subscriptions_handler_impl(
                         response.results.push_back(std::move(result));
                         continue;
                     }
-                    result.interface = interface_name;
-
                     nlohmann::json spec{
                         {"tag", entry.tag},
                         {"type", "sing-box"},
@@ -587,10 +625,16 @@ void register_subscriptions_handler_impl(
                             sanitized_manager_error(created->status);
                     } else {
                         result.outcome = api::Outcome::CREATED;
+                        result.tag = entry.tag;
+                        result.interface = interface_name;
                         taken.insert(entry.tag);
                         taken.insert(interface_name);
                         existing.link_fingerprints.insert(fingerprint);
-                        mark_consumed(entry.line);
+                        TransportIdentity identity{
+                            entry.tag, interface_name};
+                        existing.identities_by_fingerprint.insert_or_assign(
+                            fingerprint, identity);
+                        remember_import(entry.line, std::move(identity));
                     }
                     response.results.push_back(std::move(result));
                 }

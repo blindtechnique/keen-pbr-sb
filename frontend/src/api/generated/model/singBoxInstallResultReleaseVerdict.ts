@@ -7,7 +7,7 @@
  */
 
 /**
- * Why the release was refused, when it was. `checksums_missing` means the release published no checksums file and was therefore not installed.
+ * Why the release was refused, when it was. `checksums_missing` means the release supplied neither a checksum file nor a usable per-asset SHA-256 digest for this archive, so it was not installed.
 
  */
 export type SingBoxInstallResultReleaseVerdict = typeof SingBoxInstallResultReleaseVerdict[keyof typeof SingBoxInstallResultReleaseVerdict];

@@ -4266,28 +4266,31 @@ components:
           type: string
           enum: [created, already_imported, failed]
           description: >
-            What happened to this entry. `already_imported` means an earlier
-            apply of the same preview already created it - a preview is a
-            one-shot import, so re-applying a line cannot duplicate the
-            transport it produced. It is deliberately not `failed`: nothing
-            went wrong and there is nothing for the operator to fix, and
-            presenting it as an error would teach them to distrust the
-            report.
+            What happened to this entry. `already_imported` means no new POST
+            was needed: either an earlier apply of the same preview created the
+            line, or a transport with the same link fingerprint appeared after
+            preview. It is deliberately not `failed`: nothing went wrong and
+            there is nothing for the operator to fix.
         tag:
           type: string
-          description: The tag the transport was created with.
+          nullable: true
+          description: >
+            The actual tag of the created or already-existing transport, when
+            the manager supplied it. Null when that identity is unavailable.
         interface:
           type: string
+          nullable: true
           description: >
-            The derived kernel interface name, produced by the same rule the
-            manual creation dialog uses, so an imported transport is
-            indistinguishable from a hand-made one.
+            The actual kernel interface of the created or already-existing
+            transport, when known; null otherwise. A newly created interface is
+            derived by the same rule the manual creation dialog uses.
         error:
           type: string
+          nullable: true
           description: >
-            Why this entry failed. Present only with `outcome: failed`, and
-            never contains the link - a transport manager error that echoes
-            the share link is replaced before it reaches here.
+            Why this entry failed. A string only with `outcome: failed`, null
+            otherwise, and never contains the link - a transport manager error
+            that echoes the share link is replaced before it reaches here.
 
     SubscriptionApplyResponse:
       type: object

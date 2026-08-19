@@ -98,6 +98,8 @@ struct FakeManager {
     std::string create_error_body;
     std::string late_existing_link;
     std::atomic<bool> expose_late_existing{false};
+    std::atomic<bool> expose_late_identity{true};
+    std::atomic<bool> expose_duplicate_late_identity{false};
     std::atomic<bool> rotated_api_key{false};
 
     explicit FakeManager(const std::filesystem::path& directory) {
@@ -120,13 +122,27 @@ struct FakeManager {
                       {"link_fingerprint",
                        subscription_link_fingerprint(kConfiguredLink)}}});
                 if (expose_late_existing.load(std::memory_order_acquire)) {
-                    transports.push_back(
-                        {{"tag", "late"},
-                         {"type", "sing-box"},
-                         {"interface", "vless9"},
-                         {"link_fingerprint",
-                          subscription_link_fingerprint(
-                              late_existing_link)}});
+                    nlohmann::json late{
+                        {"type", "sing-box"},
+                        {"link_fingerprint",
+                         subscription_link_fingerprint(late_existing_link)},
+                    };
+                    if (expose_late_identity.load(
+                            std::memory_order_acquire)) {
+                        late["tag"] = "winner";
+                        late["interface"] = "vless9";
+                    }
+                    transports.push_back(std::move(late));
+                    if (expose_duplicate_late_identity.load(
+                            std::memory_order_acquire)) {
+                        transports.push_back(
+                            {{"tag", "other-winner"},
+                             {"type", "sing-box"},
+                             {"interface", "vless10"},
+                             {"link_fingerprint",
+                              subscription_link_fingerprint(
+                                  late_existing_link)}});
+                    }
                 }
                 response.set_content(transports.dump(), "application/json");
             });
@@ -413,6 +429,7 @@ TEST_CASE("apply creates the selected entry through the manager") {
     const auto& result = body.at("results")[0];
     CHECK(result.at("outcome") == "created");
     CHECK(result.at("tag") == "fresh_nl");
+    CHECK(result.at("error").is_null());
     // vless1 belongs to the existing transport; the derived name is the next
     // free one, by the same rule the manual dialog uses.
     CHECK(result.at("interface") == "vless2");
@@ -436,7 +453,9 @@ TEST_CASE("apply creates the selected entry through the manager") {
         "/api/subscriptions/apply",
         nlohmann::json{
             {"preview_id", preview_id},
-            {"selections", nlohmann::json::array({{{"line", 1}}})},
+            {"selections",
+             nlohmann::json::array(
+                 {{{"line", 1}, {"tag", "retry_name"}}})},
         }
             .dump(),
         "application/json");
@@ -447,6 +466,8 @@ TEST_CASE("apply creates the selected entry through the manager") {
     // outcome, so the UI need not read an English error string to tell a
     // benign repeat from a real one.
     CHECK(second.at("results")[0].at("outcome") == "already_imported");
+    CHECK(second.at("results")[0].at("tag") == "fresh_nl");
+    CHECK(second.at("results")[0].at("interface") == "vless2");
     CHECK(second.at("results")[0].at("error").is_null());
     CHECK(harness.manager->created.size() == 1U);
 }
@@ -477,7 +498,9 @@ TEST_CASE("apply rechecks link identity after acquiring the mutation lease") {
         "/api/subscriptions/apply",
         nlohmann::json{
             {"preview_id", preview_id},
-            {"selections", nlohmann::json::array({{{"line", 1}}})},
+            {"selections",
+             nlohmann::json::array(
+                 {{{"line", 1}, {"tag", "requested_name"}}})},
         }
             .dump(),
         "application/json");
@@ -486,7 +509,87 @@ TEST_CASE("apply rechecks link identity after acquiring the mutation lease") {
     const auto body = nlohmann::json::parse(response->body);
     REQUIRE(body.at("results").size() == 1U);
     CHECK(body.at("results")[0].at("outcome") == "already_imported");
+    CHECK(body.at("results")[0].at("tag") == "winner");
+    CHECK(body.at("results")[0].at("interface") == "vless9");
     CHECK(body.at("results")[0].at("error").is_null());
+    CHECK(harness.manager->created.empty());
+}
+
+TEST_CASE("a late fingerprint without public identity returns null identity") {
+    constexpr int api_port = 18290;
+    SubscriptionsHarness harness(api_port);
+    const std::string link =
+        "vless://66666666-6666-6666-6666-666666666666@late.example:443"
+        "#NoIdentity";
+    harness.fetch_body = link + "\n";
+    httplib::Client client("127.0.0.1", api_port);
+    const auto preview_id = preview_and_get_id(client);
+
+    harness.manager->late_existing_link = link;
+    harness.manager->expose_late_identity.store(false,
+                                                std::memory_order_release);
+    harness.context.maintenance_lease_factory_fn =
+        [&harness](std::string) -> std::unique_ptr<MaintenanceLease> {
+        harness.manager->expose_late_existing.store(
+            true, std::memory_order_release);
+        return std::make_unique<SubscriptionsTestMaintenanceLease>();
+    };
+
+    const auto response = client.Post(
+        "/api/subscriptions/apply",
+        nlohmann::json{
+            {"preview_id", preview_id},
+            {"selections", nlohmann::json::array({{{"line", 1}}})},
+        }
+            .dump(),
+        "application/json");
+    REQUIRE(response != nullptr);
+    REQUIRE(response->status == 200);
+    const auto result =
+        nlohmann::json::parse(response->body).at("results")[0];
+    CHECK(result.at("outcome") == "already_imported");
+    CHECK(result.at("tag").is_null());
+    CHECK(result.at("interface").is_null());
+    CHECK(result.at("error").is_null());
+    CHECK(harness.manager->created.empty());
+}
+
+TEST_CASE("duplicate late fingerprints do not claim an arbitrary identity") {
+    constexpr int api_port = 18291;
+    SubscriptionsHarness harness(api_port);
+    const std::string link =
+        "vless://77777777-7777-7777-7777-777777777777@late.example:443"
+        "#DuplicateIdentity";
+    harness.fetch_body = link + "\n";
+    httplib::Client client("127.0.0.1", api_port);
+    const auto preview_id = preview_and_get_id(client);
+
+    harness.manager->late_existing_link = link;
+    harness.manager->expose_duplicate_late_identity.store(
+        true, std::memory_order_release);
+    harness.context.maintenance_lease_factory_fn =
+        [&harness](std::string) -> std::unique_ptr<MaintenanceLease> {
+        harness.manager->expose_late_existing.store(
+            true, std::memory_order_release);
+        return std::make_unique<SubscriptionsTestMaintenanceLease>();
+    };
+
+    const auto response = client.Post(
+        "/api/subscriptions/apply",
+        nlohmann::json{
+            {"preview_id", preview_id},
+            {"selections", nlohmann::json::array({{{"line", 1}}})},
+        }
+            .dump(),
+        "application/json");
+    REQUIRE(response != nullptr);
+    REQUIRE(response->status == 200);
+    const auto result =
+        nlohmann::json::parse(response->body).at("results")[0];
+    CHECK(result.at("outcome") == "already_imported");
+    CHECK(result.at("tag").is_null());
+    CHECK(result.at("interface").is_null());
+    CHECK(result.at("error").is_null());
     CHECK(harness.manager->created.empty());
 }
 
@@ -633,6 +736,8 @@ TEST_CASE("manager response text is never reflected through the API") {
     REQUIRE(response->status == 200);
     const auto body = nlohmann::json::parse(response->body);
     CHECK(body.at("results")[0].at("outcome") == "failed");
+    CHECK(body.at("results")[0].at("tag").is_null());
+    CHECK(body.at("results")[0].at("interface").is_null());
     const auto error =
         body.at("results")[0].at("error").get<std::string>();
     CHECK(error == "transport manager refused this entry (HTTP 400)");
