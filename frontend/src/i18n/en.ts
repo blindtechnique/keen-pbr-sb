@@ -1820,8 +1820,10 @@ export const enTranslation = {
       blockSelected: "The selected lists will be blocked",
       directSelected:
         "The selected lists will bypass every tunnel and go direct",
-      mixedSelection: "Routing and blocking lists must be added separately.",
-      mixedSelectionShort: "Add routing lists first, then add blocking lists.",
+      mixedSelection:
+        "Lists with different actions - tunnel, block, direct - must be added separately.",
+      mixedSelectionShort:
+        "Keep the lists that share one action; add the rest in a second pass.",
       invalidSelection: "The selected items do not contain importable data.",
       configUnavailable:
         "Could not reload the current configuration. Nothing was changed.",
@@ -1885,6 +1887,8 @@ export const enTranslation = {
           "This session creates at most one shared rule for the selected blocking lists. Lists already covered by blocking are not duplicated, and no DNS rule is created for blocking.",
         batchPolicyDirect:
           "The selected lists will be added without a routing rule or DNS rule because the direct route is selected.",
+        batchPolicyDirectRoute:
+          "One routing rule to the main table is created for the selected lists, so their traffic goes direct, past every tunnel. The rule is placed at the top of the table so a broader rule below cannot override it. No DNS rule is created. If no outbound on the main table exists yet, one is added.",
         planTitle: "Lists in the checked plan",
         ipListCidrs: "IP list · {{count}} subnets",
         ipListRemote: "IP list · updated from URL",

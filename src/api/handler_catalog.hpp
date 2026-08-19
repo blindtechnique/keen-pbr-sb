@@ -12,21 +12,36 @@
 
 namespace keen_pbr3 {
 
-// Ready-made lists borrowed from the awg-manager catalogue.
+// Ready-made lists that ship inside the package.
 //
-// The upstream project maintains one file with every preset it ships, and
-// keeps adding and removing entries. Fetching that file weekly means the
-// choice stays current without us curating a copy by hand - the copy we did
-// keep by hand went stale within days.
+// The catalogue is package data: one file in the IPK holds every preset, and a
+// release is how it changes. Nothing is fetched on a stock install, so a
+// blocked or hostile network cannot decide what the router offers.
 void register_catalog_handler(ApiServer& server, ApiContext& ctx);
 
-// Downloads the catalogue when the cached copy is older than a week.
-// Returns true when a fresh copy was stored.
+// Downloads the catalogue when one is configured and the cached copy is older
+// than a week. Returns true when a fresh copy was stored, and false without
+// touching the network when no source URL is configured - which is the normal
+// case, because the catalogue comes with the package.
 //
 // The fwmark routes the download through a tunnel. It matters more here than
-// for ordinary lists: the catalogue lives on GitHub, which is exactly the kind
-// of host a user reaches for this software because they cannot reach directly.
+// for ordinary lists: a configured catalogue is usually on GitHub, which is
+// exactly the kind of host a user reaches for this software because they
+// cannot reach it directly.
 bool refresh_catalog_if_stale(bool force = false, uint32_t fwmark = 0);
+
+// The catalogue URL an operator configured in catalog-source.json, or empty
+// when the packaged catalogue is in use. Exposed for tests: the production
+// path reads the file, and this takes its parsed contents.
+std::string catalog_source_url_for_testing(const nlohmann::json& settings);
+
+// Redirects the three files this module reads - packaged catalogue, source
+// settings, download cache - so tests can exercise which one wins. Empty
+// strings restore the production paths. Not for production use: the daemon
+// reads these from several threads and this setter takes no lock.
+void set_catalog_paths_for_testing(const std::string& bundled,
+                                   const std::string& settings,
+                                   const std::string& cache);
 
 // Outbound tag the catalogue should be downloaded through, empty for direct.
 std::string catalog_detour();

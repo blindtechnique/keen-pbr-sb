@@ -1766,6 +1766,179 @@ TEST_CASE(
         "/tmp/stale-draft");
 }
 
+namespace {
+
+struct CatalogPathFixture {
+    std::filesystem::path root;
+
+    CatalogPathFixture()
+        : root(
+              std::filesystem::temp_directory_path() /
+              ("keen-pbr-catalog-" +
+               std::to_string(
+                   reinterpret_cast<std::uintptr_t>(this)))) {
+        std::filesystem::create_directories(root);
+        set_catalog_paths_for_testing(
+            (root / "bundled.json").string(),
+            (root / "source.json").string(),
+            (root / "cache.json").string());
+    }
+
+    ~CatalogPathFixture() {
+        set_catalog_paths_for_testing("", "", "");
+        std::error_code ignored;
+        std::filesystem::remove_all(root, ignored);
+    }
+
+    void write(const std::string& name, const std::string& content) const {
+        std::ofstream out(root / name, std::ios::binary);
+        out << content;
+    }
+};
+
+} // namespace
+
+TEST_CASE("the packaged catalogue is served and the stale cache ignored") {
+    CatalogPathFixture files;
+    files.write(
+        "bundled.json",
+        R"([{"id":"kinopub","name":"Kino.pub","engines":)"
+        R"({"dns":{"domains":["kino.pub"]}},)"
+        R"("domainSupplements":["alador.space","kino.pub"]}])");
+    // What an install from before the packaged catalogue left behind. Reading
+    // it would silently reinstate a third-party catalogue.
+    files.write(
+        "cache.json",
+        R"([{"id":"stale","name":"Из кэша","engines":)"
+        R"({"dns":{"domains":["stale.example"]}}}])");
+
+    const auto snapshot = load_catalog_snapshot();
+
+    CHECK(snapshot.at("source") == "bundled");
+    CHECK(snapshot.at("url") == "");
+    const auto& presets = snapshot.at("presets");
+    REQUIRE(presets.is_array());
+    REQUIRE(presets.size() == 1U);
+    CHECK(presets.at(0).at("id") == "kinopub");
+
+    // The overlay must run on the packaged path too: it folds
+    // domainSupplements into the domains and then erases the key.
+    const auto domains =
+        presets.at(0).at("engines").at("dns").at("domains")
+            .get<std::vector<std::string>>();
+    CHECK(
+        domains == std::vector<std::string>{"kino.pub", "alador.space"});
+    CHECK(presets.at(0).find("domainSupplements") == presets.at(0).end());
+}
+
+TEST_CASE("a configured source makes the cache authoritative again") {
+    CatalogPathFixture files;
+    files.write(
+        "bundled.json",
+        R"([{"id":"kinopub","name":"Kino.pub","engines":)"
+        R"({"dns":{"domains":["kino.pub"]}}}])");
+    files.write(
+        "cache.json",
+        R"([{"id":"mirrored","name":"Из зеркала","engines":)"
+        R"({"dns":{"domains":["mirror.example"]}}}])");
+    files.write(
+        "source.json",
+        R"({"url":"https://mirror.example/catalog.json"})");
+
+    const auto snapshot = load_catalog_snapshot();
+
+    CHECK(snapshot.at("source") == "cache");
+    CHECK(snapshot.at("url") == "https://mirror.example/catalog.json");
+    REQUIRE(snapshot.at("presets").is_array());
+    CHECK(snapshot.at("presets").at(0).at("id") == "mirrored");
+}
+
+TEST_CASE("a hand-edited source file cannot break the catalogue endpoint") {
+    CatalogPathFixture files;
+    files.write(
+        "bundled.json",
+        R"([{"id":"kinopub","name":"Kino.pub","engines":)"
+        R"({"dns":{"domains":["kino.pub"]}}}])");
+
+    // `null` is a natural way to spell "none" by hand, and json::value() would
+    // throw type_error.302 on it - every catalogue endpoint answering 500.
+    files.write("source.json", R"({"url":null,"detour":5})");
+    CHECK_NOTHROW(load_catalog_snapshot());
+    CHECK(load_catalog_snapshot().at("source") == "bundled");
+    CHECK(catalog_detour().empty());
+
+    // Not an object at all, and not parseable at all.
+    files.write("source.json", R"(["url"])");
+    CHECK_NOTHROW(load_catalog_snapshot());
+    files.write("source.json", "{\"url\": \"https://a.example/c.json\",}");
+    CHECK_NOTHROW(load_catalog_snapshot());
+    CHECK(load_catalog_snapshot().at("source") == "bundled");
+}
+
+TEST_CASE(
+    "packaged catalogue still folds domainSupplements into its domains") {
+    // The overlay runs even when the package copy is both the source and the
+    // overlay. Treating that as a no-op and skipping it cost kinopub its
+    // supplement domains and leaked package-only metadata into the response.
+    const auto packaged = nlohmann::json::array({
+        {
+            {"id", "kinopub"},
+            {"name", "Kino.pub"},
+            {"engines",
+             {{"dns", {{"domains", {"kino.pub"}}}}}},
+            {"domainSupplements", {"alador.space", "kino.pub"}},
+        },
+    });
+
+    const auto enriched =
+        enrich_catalog_with_routing_companions(packaged, packaged);
+
+    REQUIRE(enriched.is_array());
+    REQUIRE(enriched.size() == 1U);
+    const auto& preset = enriched.at(0);
+    const auto domains =
+        preset.at("engines").at("dns").at("domains")
+            .get<std::vector<std::string>>();
+    CHECK(
+        domains ==
+        std::vector<std::string>{"kino.pub", "alador.space"});
+    CHECK(preset.find("domainSupplements") == preset.end());
+}
+
+TEST_CASE("a hand-edited catalogue source cannot take the endpoint down") {
+    // catalog-source.json is written by a person, so `{"url": null}` is a
+    // natural way to spell "none". json::value() would throw type_error.302 on
+    // it and every catalogue endpoint would answer 500.
+    CHECK(
+        catalog_source_url_for_testing(
+            nlohmann::json{{"url", nullptr}}).empty());
+    CHECK(
+        catalog_source_url_for_testing(
+            nlohmann::json{{"url", 5}}).empty());
+    CHECK(
+        catalog_source_url_for_testing(
+            nlohmann::json::object()).empty());
+
+    // Nothing but https, and nothing with a control character or a backslash:
+    // a rejected URL reads as "no URL", because the packaged catalogue is
+    // always a working answer.
+    CHECK(
+        catalog_source_url_for_testing(
+            nlohmann::json{{"url", "http://example.org/catalog.json"}})
+            .empty());
+    CHECK(
+        catalog_source_url_for_testing(
+            nlohmann::json{{"url", "https://"}}).empty());
+    CHECK(
+        catalog_source_url_for_testing(
+            nlohmann::json{{"url", "https://example.org/a\\b.json"}})
+            .empty());
+    CHECK(
+        catalog_source_url_for_testing(
+            nlohmann::json{{"url", "HTTPS://example.org/catalog.json"}}) ==
+        "HTTPS://example.org/catalog.json");
+}
+
 } // namespace keen_pbr3
 
 #endif // WITH_API

@@ -102,12 +102,17 @@ export default function SetupWizardPage() {
     },
     enabled: step === 2,
   })
+  // This step reads "tick the services - their traffic goes through <tunnel>",
+  // so only presets that can actually go through it belong here. An allow-list
+  // rather than a deny-list: a blocking or always-direct preset would ignore
+  // the tunnel the user just created, and the wizard has no wording for a
+  // destination other than the one it is about.
   const routePresets = useMemo(
     () =>
-      (catalogQuery.data?.presets ?? []).filter(
-        (preset) =>
-          !preset.hidden && preset.engines?.singbox?.action !== "reject"
-      ),
+      (catalogQuery.data?.presets ?? []).filter((preset) => {
+        const action = preset.engines?.singbox?.action
+        return !preset.hidden && (!action || action === "tunnel")
+      }),
     [catalogQuery.data?.presets]
   )
 

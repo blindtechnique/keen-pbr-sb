@@ -34,15 +34,40 @@ constexpr const char* kCatalogIdentity =
 // The catalogue is package data: it ships in the IPK and a release is how it
 // changes. Nothing is fetched by default, so a blocked or hostile network
 // cannot decide which lists the router offers.
-constexpr const char* kBundledPath = "/opt/usr/share/keen-pbr/catalog.json";
+constexpr const char* kDefaultBundledPath =
+    "/opt/usr/share/keen-pbr/catalog.json";
 
 // An operator who wants a different or mirrored catalogue writes its URL into
 // catalog-source.json by hand. The API never sets it: the daemon must not be
 // talked into fetching an arbitrary address by an HTTP request.
-constexpr const char* kSettingsPath = "/opt/etc/keen-pbr/catalog-source.json";
+constexpr const char* kDefaultSettingsPath =
+    "/opt/etc/keen-pbr/catalog-source.json";
 // Only ever written when such a URL is configured. Installs that predate the
 // package-owned catalogue may still have a file here; it is now ignored.
-constexpr const char* kCachePath = "/opt/var/cache/keen-pbr/catalog.json";
+constexpr const char* kDefaultCachePath =
+    "/opt/var/cache/keen-pbr/catalog.json";
+
+// Which file is authoritative, which is ignored, and what a damaged settings
+// file does are decisions this code makes by reading these three paths, and
+// getting them wrong is silent - a skipped overlay costs a preset its domains
+// without an error anywhere. Tests redirect the paths into a temporary
+// directory so those decisions can be exercised instead of argued about.
+// Production never calls the setter, so the values are effectively constant
+// once the daemon starts.
+struct CatalogPaths {
+    std::string bundled{kDefaultBundledPath};
+    std::string settings{kDefaultSettingsPath};
+    std::string cache{kDefaultCachePath};
+};
+
+CatalogPaths& catalog_paths() {
+    static CatalogPaths paths;
+    return paths;
+}
+
+const std::string& bundled_path() { return catalog_paths().bundled; }
+const std::string& settings_path() { return catalog_paths().settings; }
+const std::string& cache_path() { return catalog_paths().cache; }
 
 constexpr auto kMaxAge = std::chrono::hours(24 * 7);
 
@@ -92,15 +117,44 @@ std::optional<std::chrono::system_clock::time_point> file_mtime(
     return std::chrono::system_clock::from_time_t(st.st_mtime);
 }
 
-nlohmann::json read_catalog_settings() {
+enum class CatalogSettingsState {
+    absent,   // no file, or an empty one
+    parsed,   // a JSON object this daemon can read
+    damaged,  // a file that exists but is not a JSON object
+};
+
+nlohmann::json read_catalog_settings(
+    CatalogSettingsState* state = nullptr) {
+    const auto set = [&](CatalogSettingsState value) {
+        if (state != nullptr) *state = value;
+    };
     try {
-        const auto raw = read_file(kSettingsPath);
-        if (raw.empty()) return nlohmann::json::object();
+        const auto raw = read_file(settings_path());
+        if (raw.empty()) {
+            set(CatalogSettingsState::absent);
+            return nlohmann::json::object();
+        }
         auto parsed = nlohmann::json::parse(raw);
-        return parsed.is_object() ? parsed : nlohmann::json::object();
+        if (!parsed.is_object()) {
+            set(CatalogSettingsState::damaged);
+            return nlohmann::json::object();
+        }
+        set(CatalogSettingsState::parsed);
+        return parsed;
     } catch (const std::exception&) {
+        set(CatalogSettingsState::damaged);
         return nlohmann::json::object();
     }
+}
+
+// json::value() throws type_error.302 when the key is present with another
+// type, and this file is hand-edited: `{"url": null}` is a natural way to
+// spell "none". A wrong type is read as absent so a typo cannot take the
+// catalogue endpoints down with a 500.
+std::string settings_string(const nlohmann::json& settings, const char* key) {
+    const auto found = settings.find(key);
+    if (found == settings.end() || !found->is_string()) return {};
+    return found->get<std::string>();
 }
 
 // A rejected URL is treated as no URL at all rather than as an error: the
@@ -109,9 +163,8 @@ nlohmann::json read_catalog_settings() {
 // ignoring the file. The rules match the ones the setup planner applies to
 // every catalogue URL, so a source that passes here cannot smuggle in a
 // preset the planner would then refuse.
-std::string configured_catalog_url() {
-    const auto settings = read_catalog_settings();
-    const auto url = settings.value("url", std::string{});
+std::string catalog_url_from_settings(const nlohmann::json& settings) {
+    const auto url = settings_string(settings, "url");
     if (url.empty()) return {};
 
     for (const unsigned char character : url) {
@@ -134,8 +187,12 @@ std::string configured_catalog_url() {
     return url;
 }
 
+std::string configured_catalog_url() {
+    return catalog_url_from_settings(read_catalog_settings());
+}
+
 bool cache_is_fresh() {
-    const auto mtime = file_mtime(kCachePath);
+    const auto mtime = file_mtime(cache_path());
     if (!mtime) {
         return false;
     }
@@ -288,7 +345,7 @@ bool store_if_valid(const std::string& payload) {
     } catch (const std::exception&) {
         return false;
     }
-    const bool durable = write_file(kCachePath, payload, 0644);
+    const bool durable = write_file(cache_path(), payload, 0644);
     if (!durable) {
         Logger::instance().warn(
             "List catalogue cache is visible, but its durability could not "
@@ -324,11 +381,11 @@ nlohmann::json load_catalog_snapshot_locked() {
     std::string source = "bundled";
     std::string payload;
     if (!configured_url.empty()) {
-        payload = read_file(kCachePath);
+        payload = read_file(cache_path());
         if (!payload.empty()) source = "cache";
     }
     if (payload.empty()) {
-        payload = read_file(kBundledPath);
+        payload = read_file(bundled_path());
         source = "bundled";
     }
 
@@ -337,7 +394,7 @@ nlohmann::json load_catalog_snapshot_locked() {
     response["catalog_id"] = kCatalogIdentity;
 
     if (const auto mtime =
-            file_mtime(source == "cache" ? kCachePath : kBundledPath)) {
+            file_mtime(source == "cache" ? cache_path() : bundled_path())) {
         response["updated_at"] =
             std::chrono::duration_cast<std::chrono::seconds>(
                 mtime->time_since_epoch())
@@ -347,22 +404,22 @@ nlohmann::json load_catalog_snapshot_locked() {
     try {
         auto presets = nlohmann::json::parse(payload);
         auto bundled = nlohmann::json::array();
-        // The overlay exists to give a foreign catalogue the routing
-        // companions and subnets it does not carry. When the package copy is
-        // itself the source there is nothing to overlay onto it.
-        if (source == "cache") {
-            try {
-                const auto bundled_payload = read_file(kBundledPath);
-                if (!bundled_payload.empty()) {
-                    bundled =
-                        nlohmann::json::parse(bundled_payload);
-                }
-            } catch (const std::exception& error) {
-                Logger::instance().warn(
-                    "List catalogue: bundled routing companion overlay is "
-                    "unavailable: {}",
-                    error.what());
+        // The overlay runs even when the package copy is the source, and that
+        // is not the no-op it looks like: merge_domain_supplements folds
+        // domainSupplements into engines.dns.domains and then erases the key.
+        // Skipping it left kinopub short of 21 domains and leaked package-only
+        // merge metadata into the public response.
+        try {
+            const auto bundled_payload = read_file(bundled_path());
+            if (!bundled_payload.empty()) {
+                bundled =
+                    nlohmann::json::parse(bundled_payload);
             }
+        } catch (const std::exception& error) {
+            Logger::instance().warn(
+                "List catalogue: bundled routing companion overlay is "
+                "unavailable: {}",
+                error.what());
         }
         response["presets"] =
             enrich_catalog_with_routing_companions(
@@ -543,7 +600,20 @@ nlohmann::json enrich_catalog_with_routing_companions(
 }
 
 std::string catalog_detour() {
-    return read_catalog_settings().value("detour", std::string{});
+    return settings_string(read_catalog_settings(), "detour");
+}
+
+std::string catalog_source_url_for_testing(const nlohmann::json& settings) {
+    return catalog_url_from_settings(settings);
+}
+
+void set_catalog_paths_for_testing(const std::string& bundled,
+                                   const std::string& settings,
+                                   const std::string& cache) {
+    catalog_paths().bundled = bundled.empty() ? kDefaultBundledPath : bundled;
+    catalog_paths().settings =
+        settings.empty() ? kDefaultSettingsPath : settings;
+    catalog_paths().cache = cache.empty() ? kDefaultCachePath : cache;
 }
 
 bool refresh_catalog_if_stale(bool force, uint32_t fwmark) {
@@ -612,11 +682,22 @@ void register_catalog_handler(ApiServer& server, ApiContext& ctx) {
                                  : std::string{};
                     // Read-modify-write: a hand-configured catalogue URL
                     // lives in the same file, and remembering a detour must
-                    // not delete it.
-                    auto settings = read_catalog_settings();
+                    // not delete it. A file that exists but cannot be parsed
+                    // reads as an empty object, and writing over it is exactly
+                    // the case the merge exists to prevent - a trailing comma
+                    // or a BOM would cost the operator their URL. Refuse
+                    // instead, and name the file so it can be repaired.
+                    CatalogSettingsState state{};
+                    auto settings = read_catalog_settings(&state);
+                    if (state == CatalogSettingsState::damaged) {
+                        response["error"] =
+                            "catalog-source.json is not a JSON object; "
+                            "refusing to overwrite it";
+                        return response.dump();
+                    }
                     settings["detour"] = detour;
                     settings_durable = write_file(
-                        kSettingsPath,
+                        settings_path(),
                         settings.dump(2) + "\n",
                         0600);
                     if (!settings_durable) {

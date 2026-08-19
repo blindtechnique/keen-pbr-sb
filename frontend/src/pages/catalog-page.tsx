@@ -933,12 +933,18 @@ export function CatalogPage() {
                   {t("pages.catalog.setup.batchPolicyTitle")}
                 </AlertTitle>
                 <AlertDescription>
+                  {/* mode "direct" is not mode "none": it creates a routing
+                      rule and pins it at the top of the table. Sharing the
+                      "no routing rule will be created" wording with "none"
+                      would tell the user the opposite of what happens. */}
                   {t(
                     setupIntent.mode === "outbound"
                       ? "pages.catalog.setup.batchPolicyOutbound"
                       : setupIntent.mode === "block"
                         ? "pages.catalog.setup.batchPolicyBlock"
-                        : "pages.catalog.setup.batchPolicyDirect"
+                        : setupIntent.mode === "direct"
+                          ? "pages.catalog.setup.batchPolicyDirectRoute"
+                          : "pages.catalog.setup.batchPolicyDirect"
                   )}
                 </AlertDescription>
               </Alert>
