@@ -37,6 +37,7 @@ const std::vector<StepUpProtectedRoute>& registered_privileged_routes() {
         {"POST", "/api/system/update/check"},
         {"POST", "/api/system/update/rollback"},
         {"GET", "/api/system/update/status"},
+        {"POST", "/api/transports/sing-box/install"},
     };
     return routes;
 }
@@ -83,6 +84,7 @@ const std::vector<std::string>& registered_routes() {
         "/api/transports/config",
         "/api/transports/config/export",
         "/api/transports/environment",
+        "/api/transports/sing-box/install",
         "/api/transports/settings",
     };
     return routes;
@@ -124,6 +126,7 @@ TEST_CASE("the package and access operations require a step-up") {
     CHECK(requires_step_up("POST", "/api/system/update"));
     CHECK(requires_step_up("POST", "/api/system/update/rollback"));
     CHECK(requires_step_up("POST", "/api/system/naive-component"));
+    CHECK(requires_step_up("POST", "/api/transports/sing-box/install"));
     CHECK(requires_step_up("POST", "/api/nfqws", "upgrade"));
     CHECK(requires_step_up("POST", "/api/nfqws",
                            "capture_restore_point"));

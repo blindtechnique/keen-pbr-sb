@@ -2182,6 +2182,55 @@ TEST_CASE("nfqws action step-up runs after body read and before its handler") {
     CHECK(handled.load(std::memory_order_relaxed) == 5U);
 }
 
+TEST_CASE("sing-box install requires step-up before its handler runs") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    write_text(
+        auth_path,
+        R"({"enabled":true,"provider":"local","username":"admin","password":"secret"})");
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+
+    TrustedLocalConnectionEvaluatorGuard trusted_local_transport(
+        [](std::string_view, std::string_view, bool) { return true; });
+
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    std::atomic<unsigned int> handled{0U};
+    server.post(
+        "/api/transports/sing-box/install",
+        [&](const std::string&) {
+            handled.fetch_add(1U, std::memory_order_relaxed);
+            return nlohmann::json{{"installed", true}}.dump();
+        });
+    server.start();
+    httplib::Client client("127.0.0.1", configured_port(config));
+    const auto login = client.Post(
+        "/api/auth/login",
+        R"({"username":"admin","password":"secret"})",
+        "application/json");
+    REQUIRE(login != nullptr);
+    REQUIRE(login->status == 200);
+    const httplib::Headers session{{"Cookie", session_cookie(*login)}};
+
+    const auto denied = client.Post(
+        "/api/transports/sing-box/install", session,
+        R"({"stop_running_transports":false})", "application/json");
+    REQUIRE(denied != nullptr);
+    CHECK(denied->status == 403);
+    CHECK(nlohmann::json::parse(denied->body).at("error") ==
+          "step_up_required");
+    CHECK(handled.load(std::memory_order_relaxed) == 0U);
+
+    grant_local_step_up(client, session, "admin", "secret");
+    const auto granted = client.Post(
+        "/api/transports/sing-box/install", session,
+        R"({"stop_running_transports":false})", "application/json");
+    REQUIRE(granted != nullptr);
+    CHECK(granted->status == 200);
+    CHECK(handled.load(std::memory_order_relaxed) == 1U);
+}
+
 TEST_CASE("rate limiter atomically caps parallel attempts from one source") {
     using Clock = AuthLoginRateLimiter::Clock;
     const auto start = Clock::now();
