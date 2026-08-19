@@ -2,6 +2,9 @@
 
 #include "../src/update/sing_box_install_observation.hpp"
 
+#include <algorithm>
+#include <cstdlib>
+#include <filesystem>
 #include <string>
 
 namespace keen_pbr3 {
@@ -15,6 +18,21 @@ constexpr const char* kRealOpkgOutput =
     "arch all 1\n"
     "arch aarch64-3.10 10\n"
     "arch aarch64-3.10_kn 20\n";
+
+class ObservationTempDir {
+public:
+    ObservationTempDir() {
+        char pattern[] = "/tmp/keen-pbr-sing-box-observation-XXXXXX";
+        const char* created = ::mkdtemp(pattern);
+        REQUIRE(created != nullptr);
+        path = created;
+    }
+    ~ObservationTempDir() {
+        std::error_code error;
+        std::filesystem::remove_all(path, error);
+    }
+    std::filesystem::path path;
+};
 
 SingBoxInstallProbes silent_probes() {
     SingBoxInstallProbes probes;
@@ -102,6 +120,47 @@ TEST_CASE("only protected root marker metadata grants ownership") {
         0U, 1U, 0664U));
     CHECK_FALSE(sing_box_managed_marker_metadata_is_trusted(
         0U, 1U, 0646U));
+}
+
+TEST_CASE("the production presence probe does not follow a dangling target") {
+    ObservationTempDir directory;
+    const auto target = directory.path / "sing-box";
+    std::error_code error;
+    std::filesystem::create_symlink(directory.path / "missing", target, error);
+    REQUIRE_FALSE(error);
+
+    const auto probes = production_sing_box_install_probes();
+    const auto present = probes.path_exists(target.string());
+    REQUIRE(present.has_value());
+    CHECK(*present);
+}
+
+TEST_CASE("an uninspectable binary target never inherits marker authority") {
+    SingBoxInstallProbes probes = silent_probes();
+    probes.read_opkg_architectures = []() {
+        return std::string(kRealOpkgOutput);
+    };
+    probes.path_exists = [](const std::string& path) -> std::optional<bool> {
+        if (path == "/opt/bin/sing-box") return std::nullopt;
+        return false;
+    };
+    probes.read_managed_marker = [](const std::string&) {
+        return std::optional<std::string>{"/opt/bin/sing-box\n"};
+    };
+    probes.directory_writable = [](const std::string&) { return true; };
+    probes.count_running_transports = []() { return std::size_t{0U}; };
+
+    const auto observation = observe_sing_box_install(
+        probes, "/opt/bin/sing-box",
+        "/opt/etc/keen-pbr/sing-box-managed.path");
+    CHECK(observation.binary_present);
+    CHECK_FALSE(observation.managed_marker_matches_binary);
+
+    const auto policy = evaluate_sing_box_install(observation, "1.13.14");
+    CHECK_FALSE(policy.available);
+    CHECK(std::find(policy.blockers.begin(), policy.blockers.end(),
+                    SingBoxInstallBlocker::foreign_binary_present) !=
+          policy.blockers.end());
 }
 
 TEST_CASE("a router that answers nothing is unknown, never assumed empty") {

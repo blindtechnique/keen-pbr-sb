@@ -135,20 +135,30 @@ SingBoxInstallObservation observe_sing_box_install(
     observation.entware_architecture =
         select_entware_architecture(architectures);
 
+    const auto binary_presence =
+        probes.path_exists ? probes.path_exists(binary_path)
+                           : std::optional<bool>{};
+    const bool binary_presence_known = binary_presence.has_value();
+    // An uninspectable target is occupied for replacement-authority purposes.
+    // Treating an error as absence would let rename() replace an operator-owned
+    // entry without the marker that is required for every known-present entry.
     observation.binary_present =
-        probes.path_exists && probes.path_exists(binary_path);
-    if (probes.read_managed_marker) {
+        !binary_presence_known || *binary_presence;
+    if (binary_presence_known && probes.read_managed_marker) {
         const auto marker = probes.read_managed_marker(managed_marker_path);
         observation.managed_marker_matches_binary =
             marker.has_value() &&
             sing_box_managed_marker_matches(*marker, binary_path);
     }
-    // The copy an earlier install kept of the binary it replaced. Same name
-    // and directory the install step writes it to, so the capability reports
-    // what is actually on the router rather than whether the code intends to
-    // keep one.
-    observation.previous_binary_present =
-        probes.path_exists && probes.path_exists(binary_path + ".previous");
+    // The path where an earlier install tried to keep the replaced binary.
+    // This is only a presence observation; policy separately decides whether
+    // that is enough to promise a rollback capability.
+    if (probes.path_exists) {
+        const auto previous_presence =
+            probes.path_exists(binary_path + ".previous");
+        observation.previous_binary_present =
+            previous_presence.has_value() && *previous_presence;
+    }
 
     if (observation.binary_present && probes.read_binary_version) {
         observation.installed_version =
@@ -228,9 +238,17 @@ SingBoxInstallProbes production_sing_box_install_probes() {
         if (trailing != 0) return std::nullopt;
         return contents;
     };
-    probes.path_exists = [](const std::string& path) {
+    probes.path_exists = [](const std::string& path) -> std::optional<bool> {
         std::error_code error;
-        return std::filesystem::exists(path, error) && !error;
+        const auto status = std::filesystem::symlink_status(path, error);
+        if (error) {
+            if (error == std::errc::no_such_file_or_directory ||
+                error == std::errc::not_a_directory) {
+                return false;
+            }
+            return std::nullopt;
+        }
+        return status.type() != std::filesystem::file_type::not_found;
     };
     probes.directory_writable = [](const std::string& directory) {
         if (directory.empty()) return false;

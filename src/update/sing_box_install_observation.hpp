@@ -32,7 +32,10 @@ struct SingBoxInstallProbes {
     // mistaken for authority to replace a binary.
     std::function<std::optional<std::string>(const std::string& marker)>
         read_managed_marker;
-    std::function<bool(const std::string& path)> path_exists;
+    // Presence of a directory entry without following symlinks. nullopt means
+    // the path could not be inspected, which the observation treats as an
+    // occupied target with no proven ownership.
+    std::function<std::optional<bool>(const std::string& path)> path_exists;
     std::function<bool(const std::string& directory)> directory_writable;
     // Managed sing-box transports currently running, or nullopt when the
     // manager could not be asked.
