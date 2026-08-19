@@ -126,6 +126,40 @@ static_assert(!std::is_copy_constructible_v<
               NdmsNativeExactMutationDispatchCapability>);
 static_assert(std::is_nothrow_move_constructible_v<
               NdmsNativeExactMutationDispatchCapability>);
+static_assert(!std::is_default_constructible_v<
+              NdmsNativeExactMutationDispatchAuthority>);
+static_assert(!std::is_copy_constructible_v<
+              NdmsNativeExactMutationDispatchAuthority>);
+static_assert(std::is_nothrow_move_constructible_v<
+              NdmsNativeExactMutationDispatchAuthority>);
+static_assert(std::is_nothrow_move_assignable_v<
+              NdmsNativeExactMutationDispatchAuthority>);
+
+TEST_CASE("exact mutation authority is one-shot across moves") {
+    auto authority =
+        NdmsNativeExactMutationDispatchAuthorityTestIssuer::issue();
+    auto moved = std::move(authority);
+
+    CHECK_FALSE(
+        NdmsNativeExactMutationDispatchAuthorityTestIssuer::
+            consume_for_test(authority));
+    CHECK(
+        NdmsNativeExactMutationDispatchAuthorityTestIssuer::
+            consume_for_test(moved));
+    CHECK_FALSE(
+        NdmsNativeExactMutationDispatchAuthorityTestIssuer::
+            consume_for_test(moved));
+}
+
+TEST_CASE("exact mutation authority self-move poisons the authority") {
+    auto authority =
+        NdmsNativeExactMutationDispatchAuthorityTestIssuer::issue();
+    authority = std::move(authority);
+
+    CHECK_FALSE(
+        NdmsNativeExactMutationDispatchAuthorityTestIssuer::
+            consume_for_test(authority));
+}
 
 TEST_CASE("exact native delete request has a closed canonical grammar") {
     auto request =

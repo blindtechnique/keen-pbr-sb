@@ -13,6 +13,9 @@ namespace keen_pbr3 {
 struct NdmsNativePanelDeleteExecutionPlan;
 struct NdmsNativePanelDeleteExecutionResult;
 class NdmsNativePanelDeleteExecutorDependencies;
+#ifdef KEEN_PBR3_TESTING
+class NdmsNativeExactMutationDispatchAuthorityTestIssuer;
+#endif
 
 inline constexpr std::size_t
     kNdmsNativeExactMutationMaximumResponseBytes = 64U * 1024U;
@@ -114,9 +117,9 @@ struct NdmsNativeExactMutationTransportResult;
 class NdmsNativeExactMutationDispatchAuthority final {
 public:
     NdmsNativeExactMutationDispatchAuthority(
-        NdmsNativeExactMutationDispatchAuthority&&) noexcept = default;
+        NdmsNativeExactMutationDispatchAuthority&& other) noexcept;
     NdmsNativeExactMutationDispatchAuthority& operator=(
-        NdmsNativeExactMutationDispatchAuthority&&) noexcept = default;
+        NdmsNativeExactMutationDispatchAuthority&& other) noexcept;
     NdmsNativeExactMutationDispatchAuthority(
         const NdmsNativeExactMutationDispatchAuthority&) = delete;
     NdmsNativeExactMutationDispatchAuthority& operator=(
@@ -127,9 +130,28 @@ private:
     struct ConstructionKey final {};
     explicit NdmsNativeExactMutationDispatchAuthority(
         ConstructionKey) noexcept : valid_(true) {}
+    bool consume() noexcept;
 
     bool valid_{false};
+
+    friend NdmsNativePanelDeleteExecutionResult
+    execute_ndms_native_panel_delete_transaction(
+        const NdmsNativePanelDeleteExecutionPlan&,
+        NdmsNativeExactMutationDispatchAuthority&&,
+        const NdmsNativePanelDeleteExecutorDependencies&);
+#ifdef KEEN_PBR3_TESTING
+    friend class NdmsNativeExactMutationDispatchAuthorityTestIssuer;
+#endif
 };
+
+#ifdef KEEN_PBR3_TESTING
+class NdmsNativeExactMutationDispatchAuthorityTestIssuer final {
+public:
+    static NdmsNativeExactMutationDispatchAuthority issue() noexcept;
+    static bool consume_for_test(
+        NdmsNativeExactMutationDispatchAuthority& authority) noexcept;
+};
+#endif
 
 // The backend has no endpoint argument. Its only production implementation
 // posts once to the compile-time loopback RCI URL; no generic HttpTransport

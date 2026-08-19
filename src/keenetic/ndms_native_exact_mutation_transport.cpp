@@ -397,6 +397,44 @@ NdmsNativeExactMutationRawResponse::
 NdmsNativeExactMutationRawResponse()
     : body(kNdmsNativeExactMutationMaximumResponseBytes + 1U) {}
 
+NdmsNativeExactMutationDispatchAuthority::
+NdmsNativeExactMutationDispatchAuthority(
+    NdmsNativeExactMutationDispatchAuthority&& other) noexcept
+    : valid_(other.valid_) {
+    other.valid_ = false;
+}
+
+NdmsNativeExactMutationDispatchAuthority&
+NdmsNativeExactMutationDispatchAuthority::operator=(
+    NdmsNativeExactMutationDispatchAuthority&& other) noexcept {
+    if (this == &other) {
+        valid_ = false;
+        return *this;
+    }
+    valid_ = other.valid_;
+    other.valid_ = false;
+    return *this;
+}
+
+bool NdmsNativeExactMutationDispatchAuthority::consume() noexcept {
+    const bool was_valid = valid_;
+    valid_ = false;
+    return was_valid;
+}
+
+#ifdef KEEN_PBR3_TESTING
+NdmsNativeExactMutationDispatchAuthority
+NdmsNativeExactMutationDispatchAuthorityTestIssuer::issue() noexcept {
+    return NdmsNativeExactMutationDispatchAuthority{
+        NdmsNativeExactMutationDispatchAuthority::ConstructionKey{}};
+}
+
+bool NdmsNativeExactMutationDispatchAuthorityTestIssuer::consume_for_test(
+    NdmsNativeExactMutationDispatchAuthority& authority) noexcept {
+    return authority.consume();
+}
+#endif
+
 NdmsNativeExactMutationRawResponse
 NdmsNativeLibcurlExactMutationBackend::post_fixed_loopback_once(
     NdmsNativeExactMutationDispatchCapability&&,
