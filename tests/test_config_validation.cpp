@@ -5,6 +5,7 @@
 #include "../src/util/system_info.hpp"
 
 #include <nlohmann/json.hpp>
+#include <set>
 #include <string>
 
 using namespace keen_pbr3;
@@ -2486,11 +2487,12 @@ TEST_CASE("fwmark mask: non-consecutive F nibbles are rejected during config par
 TEST_CASE("fwmark mask: validator rejects more routable outbounds than mask allows") {
     nlohmann::json config;
     config["fwmark"] = {
+        {"start", "0x00001000"},
         {"mask", "0x0000F000"}
     };
     config["outbounds"] = nlohmann::json::array();
 
-    for (int i = 0; i < 17; ++i) {
+    for (int i = 0; i < 16; ++i) {
         config["outbounds"].push_back({
             {"tag", "wan" + std::to_string(i)},
             {"type", "interface"},
@@ -2507,7 +2509,7 @@ TEST_CASE("fwmark mask: validator rejects more routable outbounds than mask allo
             continue;
         }
 
-        if (issue.message.find("maximum 16 supported with current fwmark.mask") !=
+        if (issue.message.find("maximum 15 supported with current fwmark.mask") !=
             std::string::npos) {
             saw_capacity_error = true;
             break;
@@ -2515,6 +2517,48 @@ TEST_CASE("fwmark mask: validator rejects more routable outbounds than mask allo
     }
 
     CHECK(saw_capacity_error);
+}
+
+TEST_CASE("fwmark mask: boundary allocation never aliases unmarked traffic") {
+    FwmarkConfig fwmark;
+    fwmark.start = "0x00001000";
+    fwmark.mask = "0x0000F000";
+
+    std::vector<Outbound> outbounds;
+    for (int i = 0; i < 15; ++i) {
+        Outbound outbound;
+        outbound.tag = "wan" + std::to_string(i);
+        outbound.type = OutboundType::INTERFACE;
+        outbound.interface = "wg" + std::to_string(i);
+        outbounds.push_back(std::move(outbound));
+    }
+
+    const auto marks = allocate_outbound_marks(fwmark, outbounds);
+    REQUIRE(marks.size() == 15);
+
+    std::set<uint32_t> masked_marks;
+    for (const auto& [tag, mark] : marks) {
+        CAPTURE(tag, mark);
+        const uint32_t masked_mark = mark & 0x0000F000u;
+        CHECK(masked_mark != 0);
+        CHECK(masked_marks.insert(masked_mark).second);
+    }
+}
+
+TEST_CASE("fwmark start: zero masked value is rejected") {
+    FwmarkConfig fwmark;
+    fwmark.start = "0x00010000";
+    fwmark.mask = "0x0000F000";
+
+    Outbound outbound;
+    outbound.tag = "wan";
+    outbound.type = OutboundType::INTERFACE;
+    outbound.interface = "wg0";
+
+    CHECK_THROWS_WITH_AS(
+        allocate_outbound_marks(fwmark, {outbound}),
+        "fwmark.start must select a non-zero value within fwmark.mask",
+        ConfigError);
 }
 
 TEST_CASE("fwmark start and mask: non-string values are rejected during config parsing") {

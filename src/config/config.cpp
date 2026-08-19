@@ -873,8 +873,18 @@ static bool has_consecutive_full_f_nibbles(uint32_t normalized_mask) {
     return true;
 }
 
-static uint32_t fwmark_mask_mark_capacity(uint32_t mask) {
-    return normalized_fwmark_mask(mask) + 1;
+static uint32_t fwmark_mask_mark_capacity(uint32_t mask, uint32_t start) {
+    const uint32_t lowest_bit = mask & (~mask + 1);
+    const uint32_t first_value = (start & mask) / lowest_bit;
+    if (first_value == 0) {
+        throw ConfigError(
+            "fwmark.start must select a non-zero value within fwmark.mask");
+    }
+
+    // A zero value under the configured mask is indistinguishable from
+    // unmarked traffic.  Sequential allocation starts at first_value, so only
+    // the remaining non-zero masked values are usable.
+    return normalized_fwmark_mask(mask) - first_value + 1;
 }
 
 // Validate that the fwmark mask has one or more consecutive hex nibbles set to F.
@@ -2482,7 +2492,7 @@ OutboundMarkMap allocate_outbound_marks(const FwmarkConfig& fwmark_cfg,
     uint32_t lowest_bit = mask & (~mask + 1);
     uint32_t step = lowest_bit;
 
-    const uint32_t max_marks = fwmark_mask_mark_capacity(mask);
+    const uint32_t max_marks = fwmark_mask_mark_capacity(mask, start);
 
     std::vector<const Outbound*> routable_outbounds;
     routable_outbounds.reserve(outbounds.size());
