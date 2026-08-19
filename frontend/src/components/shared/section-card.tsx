@@ -47,8 +47,13 @@ export function SectionCard({
       )}
     >
       <CardHeader className={cn(flat && "px-0")}>
-        <div className="flex items-center justify-between gap-3">
-          <div className="space-y-1">
+        {/* Переносится, а не подрезается: заголовок с действием рядом не
+            всегда помещается в узкую карточку — «Диагностика» со «Скачать файл
+            диагностики» требует 350 px при 341 доступных, и лишние девять
+            съедал overflow-hidden карточки. min-w-0 нужен, чтобы длинный
+            заголовок сжимался, а не распирал строку. */}
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0 space-y-1">
             <CardTitle>{title}</CardTitle>
             {description ? (
               <CardDescription>{description}</CardDescription>

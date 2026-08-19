@@ -201,7 +201,11 @@ export function OverviewPage() {
           ) : null}
         </SectionCard>
 
-        <div className="space-y-6 xl:col-span-2">
+        {/* min-w-0, иначе колонка сетки растягивается под самое широкое
+            неразрывное содержимое карточек и вылезает за экран: на 375 px
+            измерено 402 px колонки при контейнере 343. Сама карточка слева
+            сжимается за счёт overflow-hidden, а этой обёртке сжиматься нечем. */}
+        <div className="min-w-0 space-y-6 xl:col-span-2">
           <div className="scroll-mt-24" id={dashboardSectionIds.service}>
             <ServicesStatusCard />
           </div>
