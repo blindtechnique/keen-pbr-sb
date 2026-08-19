@@ -18,6 +18,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 
 import { RoutingDiagnosticsResult } from "./routing-diagnostics-result"
 import { sanitizeRoutingTarget } from "./sanitize-routing-target"
+import { TargetFacts } from "./target-facts"
 
 export function RoutingTestPanel({
   lists,
@@ -130,11 +131,19 @@ export function RoutingTestPanel({
       ) : null}
 
       {routingDiagnostics ? (
-        <RoutingDiagnosticsResult
-          diagnostics={routingDiagnostics}
-          lists={lists}
-          outbounds={outbounds}
-        />
+        <>
+          <RoutingDiagnosticsResult
+            diagnostics={routingDiagnostics}
+            lists={lists}
+            outbounds={outbounds}
+          />
+          {/* Below the routing verdict, not merged into it: nfqws coverage and
+              the registry are separate facts that the route does not answer. */}
+          <TargetFacts
+            nfqws={routingDiagnostics.nfqws}
+            target={routingDiagnostics.target}
+          />
+        </>
       ) : null}
     </SectionCard>
   )

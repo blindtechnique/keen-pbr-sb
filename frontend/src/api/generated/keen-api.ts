@@ -75,6 +75,8 @@ import type {
   PeriodicTaskMetricsResponse,
   PostSingBoxInstallCancel200,
   RecommendedListSetupRequest,
+  RegistryCheckRequest,
+  RegistryCheckResponse,
   ReloadResponse,
   RemoteAccessRequest,
   RemoteAccessResult,
@@ -1284,6 +1286,10 @@ export const usePostConfigDiscard = <TError = ErrorResponse,
 /**
  * Resolves the target (if a domain name), scans configured route rules against cached list data to determine the expected outbound, and queries the live kernel firewall sets to determine the actual outbound. Useful for diagnosing routing mismatches without restarting the daemon.
 
+The response also carries `nfqws`: which nfqws lists cover this target, read from the files nfqws2.conf names. That is a separate question from routing and is answered separately - a domain can be routed nowhere in particular and still be handled by nfqws, or the reverse.
+
+Nothing here reaches the network beyond DNS resolution. Whether the target is on Russia's blocking registry is `POST /api/routing/registry-check`, which is opt-in for exactly that reason.
+
  * @summary Test routing for an IP or domain
  */
 export type postRoutingTestResponse200 = {
@@ -1371,6 +1377,104 @@ export const usePostRoutingTest = <TError = ErrorResponse,
         TContext
       > => {
       return useMutation(getPostRoutingTestMutationOptions(options), queryClient);
+    }
+
+/**
+ * Asks cheburcheck.ru whether a domain or address is on the registry, and reports what it says. Their code is not vendored; only the verdict is shown, and the service is credited.
+
+**Nothing leaves the router without `allow_external_lookup`.** This is the one call in the daemon that reaches a service we do not control, so it is opt-in per request and never scheduled - rendering a panel must not cause a third party to learn what someone is looking up. The target is sent verbatim, which is the whole point of the lookup and worth saying out loud in any interface that offers it.
+
+The answer is about the registry, not about this router. A domain can be listed and still work here, or be absent and still fail through a blocked CDN prefix. What actually happens to it is `POST /api/routing/test` and the reachability probes; the two are kept apart deliberately.
+
+Verdicts are cached for an hour. Failures answer `checked: false` with 200 rather than an error status, because a lookup that did not run is a different thing from a target that is not blocked, and the difference must survive into the interface.
+
+ * @summary Is this target on Russia's blocking registry
+ */
+export type postRoutingRegistryCheckResponse200 = {
+  data: RegistryCheckResponse
+  status: 200
+}
+
+export type postRoutingRegistryCheckResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postRoutingRegistryCheckResponseSuccess = (postRoutingRegistryCheckResponse200) & {
+  headers: Headers;
+};
+export type postRoutingRegistryCheckResponseError = (postRoutingRegistryCheckResponse400) & {
+  headers: Headers;
+};
+
+export type postRoutingRegistryCheckResponse = (postRoutingRegistryCheckResponseSuccess | postRoutingRegistryCheckResponseError)
+
+export const getPostRoutingRegistryCheckUrl = () => {
+
+
+
+
+  return `/api/routing/registry-check`
+}
+
+export const postRoutingRegistryCheck = async (registryCheckRequest: RegistryCheckRequest, options?: RequestInit): Promise<postRoutingRegistryCheckResponse> => {
+
+  return apiFetch<postRoutingRegistryCheckResponse>(getPostRoutingRegistryCheckUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      registryCheckRequest,)
+  }
+);}
+
+
+
+
+export const getPostRoutingRegistryCheckMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postRoutingRegistryCheck>>, TError,{data: RegistryCheckRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postRoutingRegistryCheck>>, TError,{data: RegistryCheckRequest}, TContext> => {
+
+const mutationKey = ['postRoutingRegistryCheck'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postRoutingRegistryCheck>>, {data: RegistryCheckRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postRoutingRegistryCheck(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostRoutingRegistryCheckMutationResult = NonNullable<Awaited<ReturnType<typeof postRoutingRegistryCheck>>>
+    export type PostRoutingRegistryCheckMutationBody = RegistryCheckRequest
+    export type PostRoutingRegistryCheckMutationError = ErrorResponse
+
+    /**
+ * @summary Is this target on Russia's blocking registry
+ */
+export const usePostRoutingRegistryCheck = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postRoutingRegistryCheck>>, TError,{data: RegistryCheckRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postRoutingRegistryCheck>>,
+        TError,
+        {data: RegistryCheckRequest},
+        TContext
+      > => {
+      return useMutation(getPostRoutingRegistryCheckMutationOptions(options), queryClient);
     }
 
 /**

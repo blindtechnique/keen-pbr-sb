@@ -6,6 +6,7 @@
  * OpenAPI spec version: 3.0.0
  */
 import type { RoutingTestEntry } from './routingTestEntry';
+import type { RoutingTestNfqws } from './routingTestNfqws';
 import type { RoutingTestResponseConfigScope } from './routingTestResponseConfigScope';
 import type { RoutingTestRuleDiagnostic } from './routingTestRuleDiagnostic';
 
@@ -31,4 +32,5 @@ export interface RoutingTestResponse {
   rule_diagnostics: RoutingTestRuleDiagnostic[];
   /** Per-IP routing test results. */
   results: RoutingTestEntry[];
+  nfqws?: RoutingTestNfqws;
 }

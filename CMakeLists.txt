@@ -472,6 +472,7 @@ set(SOURCES
   src/config/routing_state.cpp
   src/config/list_parser.cpp
   src/setup/catalog_setup_planner.cpp
+  src/nfqws/list_match.cpp
   src/lists/ipset.cpp
   src/lists/kernel_set_tester.cpp
   src/lists/list_streamer.cpp
@@ -586,6 +587,7 @@ if(WITH_API)
     src/api/handler_subscriptions.cpp
     src/api/handler_transport_exit_check.cpp
     src/api/transport_manager_endpoint.cpp
+    src/api/handler_registry_check.cpp
     src/api/handler_test_routing.cpp
     src/api/handler_dns_test.cpp
     src/api/handler_connections.cpp

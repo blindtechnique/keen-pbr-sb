@@ -1736,6 +1736,39 @@ export const ruTranslation = {
         manualIncomplete: "Ручной тест устройства ещё не завершён.",
       },
     },
+    targetFacts: {
+      nfqwsTitle: "nfqws",
+      nfqws: {
+        unknown: "Не удалось прочитать настройки nfqws — покрытие неизвестно.",
+        covered: "Домен есть в списках nfqws — обход DPI к нему применяется.",
+        excluded:
+          "Домен в списке исключений nfqws — обход к нему не применяется, даже если он есть в других списках.",
+        uncovered: "Домена нет ни в одном списке nfqws.",
+      },
+      nfqwsMatch: "{{role}}: {{entry}} — совпало с {{matched}} ({{list}})",
+      role: {
+        hostlist: "список доменов",
+        hostlist_auto: "автосписок",
+        hostlist_exclude: "исключения",
+        ipset: "список адресов",
+        ipset_exclude: "исключения по адресам",
+      },
+      registryTitle: "Реестр РКН",
+      registryPrompt:
+        "Проверяется во внешнем сервисе, поэтому только по нажатию: запрашиваемый адрес станет ему известен.",
+      registryCheck: "Проверить в реестре",
+      registry: {
+        "not-checked":
+          "Проверка не выполнена — это не то же самое, что «не заблокирован».",
+        listed: "Домен есть в реестре заблокированных.",
+        "not-listed": "Домена в реестре нет.",
+        "subnet-only":
+          "Самого домена в реестре нет, но его адреса попадают в заблокированные подсети.",
+      },
+      registrySubnets: "Заблокированные подсети: {{subnets}}",
+      registryCdn: "Адреса принадлежат CDN: {{providers}}",
+      registrySource: "Источник: {{service}}",
+    },
     routingTest: {
       title: "Куда пойдёт этот трафик?",
       placeholder: "напр. google.com или 1.2.3.4",

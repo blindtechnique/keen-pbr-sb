@@ -875,7 +875,7 @@ namespace api {
 
     enum class Owner : int { KEENETIC };
 
-    enum class Role : int { CLIENT, SERVER, UNKNOWN };
+    enum class NdmsInterfaceRoleEnum : int { CLIENT, SERVER, UNKNOWN };
 
     struct NdmsTunnelInterfaceElement {
         NdmsInterfaceCapabilities capabilities;
@@ -891,7 +891,7 @@ namespace api {
         std::optional<bool> link;
         NdmsInterfaceManagementReadiness management_readiness;
         Owner owner;
-        Role role;
+        NdmsInterfaceRoleEnum role;
     };
 
     enum class MutationMode : int { DISABLED };
@@ -1101,6 +1101,29 @@ namespace api {
         std::string list_id;
     };
 
+    struct RegistryCheckRequest {
+        std::optional<bool> allow_external_lookup;
+        std::optional<std::string> detour;
+        std::string target;
+    };
+
+    enum class Reason : int { EXTERNAL_LOOKUP_NOT_ALLOWED, LOOKUP_FAILED, UNREADABLE_RESPONSE };
+
+    struct RegistryCheckResponse {
+        std::optional<bool> blocked;
+        std::optional<std::vector<std::string>> blocked_subnets;
+        std::optional<bool> cached;
+        std::optional<std::vector<std::string>> cdn_providers;
+        bool checked = false;
+        std::optional<std::string> error;
+        std::optional<std::vector<std::string>> ips;
+        std::optional<std::string> organisation;
+        std::optional<Reason> reason;
+        std::optional<std::string> rkn_domain;
+        std::string service;
+        std::optional<std::string> target;
+    };
+
     struct ReloadResponse {
         std::string message;
         ConfigUpdateResponseStatus status;
@@ -1253,6 +1276,22 @@ namespace api {
         std::vector<RoutingTestUnknownConditionElement> unknown_conditions;
     };
 
+    enum class RoutingTestNfqwsMatchRole : int { HOSTLIST, HOSTLIST_AUTO, HOSTLIST_EXCLUDE, IPSET, IPSET_EXCLUDE };
+
+    struct RoutingTestNfqwsMatchElement {
+        std::string entry;
+        bool exact = false;
+        bool includes = false;
+        std::string list;
+        std::string matched;
+        RoutingTestNfqwsMatchRole role;
+    };
+
+    struct RoutingTestNfqws {
+        bool available = false;
+        std::vector<RoutingTestNfqwsMatchElement> matches;
+    };
+
     struct RoutingTestRequest {
         std::string target;
     };
@@ -1282,6 +1321,7 @@ namespace api {
         ConfigScope config_scope;
         std::optional<std::string> dns_error;
         bool is_domain = false;
+        std::optional<RoutingTestNfqws> nfqws;
         bool no_matching_rule = false;
         std::vector<std::string> resolved_ips;
         std::vector<RoutingTestEntry> results;
@@ -1808,7 +1848,7 @@ namespace api {
         std::optional<NdmsInterfaceCapabilities> ndms_interface_capabilities;
         std::optional<NdmsInterfaceInventoryResponse> ndms_interface_inventory_response;
         std::optional<NdmsInterfaceManagementReadiness> ndms_interface_management_readiness;
-        std::optional<Role> ndms_interface_role;
+        std::optional<NdmsInterfaceRoleEnum> ndms_interface_role;
         std::optional<NdmsManagementBlockerElement> ndms_management_blocker;
         std::optional<NdmsNativeImportReadiness> ndms_native_import_readiness;
         std::optional<NdmsNativeImportTargetRange> ndms_native_import_target_range;
@@ -1835,6 +1875,8 @@ namespace api {
         std::optional<PpeDeoffloadMode> ppe_deoffload_mode;
         std::optional<PpeDeoffloadProtocolHealth> ppe_deoffload_protocol_health;
         std::optional<RecommendedListSetupRequest> recommended_list_setup_request;
+        std::optional<RegistryCheckRequest> registry_check_request;
+        std::optional<RegistryCheckResponse> registry_check_response;
         std::optional<ReloadResponse> reload_response;
         std::optional<RemoteAccessRequest> remote_access_request;
         std::optional<RemoteAccessResult> remote_access_result;
@@ -1853,6 +1895,8 @@ namespace api {
         std::optional<RoutingTestEntry> routing_test_entry;
         std::optional<Evaluation> routing_test_evaluation;
         std::optional<ListMatch> routing_test_list_match;
+        std::optional<RoutingTestNfqws> routing_test_nfqws;
+        std::optional<RoutingTestNfqwsMatchElement> routing_test_nfqws_match;
         std::optional<RoutingTestRequest> routing_test_request;
         std::optional<RoutingTestResponse> routing_test_response;
         std::optional<RoutingTestRuleDiagnosticElement> routing_test_rule_diagnostic;
@@ -2245,6 +2289,12 @@ void to_json(json & j, const PpeDeoffloadHealth & x);
 void from_json(const json & j, RecommendedListSetupRequest & x);
 void to_json(json & j, const RecommendedListSetupRequest & x);
 
+void from_json(const json & j, RegistryCheckRequest & x);
+void to_json(json & j, const RegistryCheckRequest & x);
+
+void from_json(const json & j, RegistryCheckResponse & x);
+void to_json(json & j, const RegistryCheckResponse & x);
+
 void from_json(const json & j, ReloadResponse & x);
 void to_json(json & j, const ReloadResponse & x);
 
@@ -2280,6 +2330,12 @@ void to_json(json & j, const ListMatch & x);
 
 void from_json(const json & j, RoutingTestEntry & x);
 void to_json(json & j, const RoutingTestEntry & x);
+
+void from_json(const json & j, RoutingTestNfqwsMatchElement & x);
+void to_json(json & j, const RoutingTestNfqwsMatchElement & x);
+
+void from_json(const json & j, RoutingTestNfqws & x);
+void to_json(json & j, const RoutingTestNfqws & x);
 
 void from_json(const json & j, RoutingTestRequest & x);
 void to_json(json & j, const RoutingTestRequest & x);
@@ -2542,8 +2598,8 @@ void to_json(json & j, const NdmsManagementBlockerElement & x);
 void from_json(const json & j, Owner & x);
 void to_json(json & j, const Owner & x);
 
-void from_json(const json & j, Role & x);
-void to_json(json & j, const Role & x);
+void from_json(const json & j, NdmsInterfaceRoleEnum & x);
+void to_json(json & j, const NdmsInterfaceRoleEnum & x);
 
 void from_json(const json & j, MutationMode & x);
 void to_json(json & j, const MutationMode & x);
@@ -2587,6 +2643,9 @@ void to_json(json & j, const PpeDeoffloadCapability & x);
 void from_json(const json & j, PpeDeoffloadHealthState & x);
 void to_json(json & j, const PpeDeoffloadHealthState & x);
 
+void from_json(const json & j, Reason & x);
+void to_json(json & j, const Reason & x);
+
 void from_json(const json & j, BlockedReason & x);
 void to_json(json & j, const BlockedReason & x);
 
@@ -2610,6 +2669,9 @@ void to_json(json & j, const Evaluation & x);
 
 void from_json(const json & j, RoutingTestUnknownConditionElement & x);
 void to_json(json & j, const RoutingTestUnknownConditionElement & x);
+
+void from_json(const json & j, RoutingTestNfqwsMatchRole & x);
+void to_json(json & j, const RoutingTestNfqwsMatchRole & x);
 
 void from_json(const json & j, ConfigScope & x);
 void to_json(json & j, const ConfigScope & x);
@@ -4254,7 +4316,7 @@ namespace api {
         x.link = get_stack_optional<bool>(j, "link");
         x.management_readiness = j.at("management_readiness").get<NdmsInterfaceManagementReadiness>();
         x.owner = j.at("owner").get<Owner>();
-        x.role = j.at("role").get<Role>();
+        x.role = j.at("role").get<NdmsInterfaceRoleEnum>();
     }
 
     inline void to_json(json & j, const NdmsTunnelInterfaceElement & x) {
@@ -4646,6 +4708,50 @@ namespace api {
         j["list_id"] = x.list_id;
     }
 
+    inline void from_json(const json & j, RegistryCheckRequest& x) {
+        x.allow_external_lookup = get_stack_optional<bool>(j, "allow_external_lookup");
+        x.detour = get_stack_optional<std::string>(j, "detour");
+        x.target = j.at("target").get<std::string>();
+    }
+
+    inline void to_json(json & j, const RegistryCheckRequest & x) {
+        j = json::object();
+        j["allow_external_lookup"] = x.allow_external_lookup;
+        j["detour"] = x.detour;
+        j["target"] = x.target;
+    }
+
+    inline void from_json(const json & j, RegistryCheckResponse& x) {
+        x.blocked = get_stack_optional<bool>(j, "blocked");
+        x.blocked_subnets = get_stack_optional<std::vector<std::string>>(j, "blocked_subnets");
+        x.cached = get_stack_optional<bool>(j, "cached");
+        x.cdn_providers = get_stack_optional<std::vector<std::string>>(j, "cdn_providers");
+        x.checked = j.at("checked").get<bool>();
+        x.error = get_stack_optional<std::string>(j, "error");
+        x.ips = get_stack_optional<std::vector<std::string>>(j, "ips");
+        x.organisation = get_stack_optional<std::string>(j, "organisation");
+        x.reason = get_stack_optional<Reason>(j, "reason");
+        x.rkn_domain = get_stack_optional<std::string>(j, "rkn_domain");
+        x.service = j.at("service").get<std::string>();
+        x.target = get_stack_optional<std::string>(j, "target");
+    }
+
+    inline void to_json(json & j, const RegistryCheckResponse & x) {
+        j = json::object();
+        j["blocked"] = x.blocked;
+        j["blocked_subnets"] = x.blocked_subnets;
+        j["cached"] = x.cached;
+        j["cdn_providers"] = x.cdn_providers;
+        j["checked"] = x.checked;
+        j["error"] = x.error;
+        j["ips"] = x.ips;
+        j["organisation"] = x.organisation;
+        j["reason"] = x.reason;
+        j["rkn_domain"] = x.rkn_domain;
+        j["service"] = x.service;
+        j["target"] = x.target;
+    }
+
     inline void from_json(const json & j, ReloadResponse& x) {
         x.message = j.at("message").get<std::string>();
         x.status = j.at("status").get<ConfigUpdateResponseStatus>();
@@ -4930,6 +5036,36 @@ namespace api {
         j["unknown_conditions"] = x.unknown_conditions;
     }
 
+    inline void from_json(const json & j, RoutingTestNfqwsMatchElement& x) {
+        x.entry = j.at("entry").get<std::string>();
+        x.exact = j.at("exact").get<bool>();
+        x.includes = j.at("includes").get<bool>();
+        x.list = j.at("list").get<std::string>();
+        x.matched = j.at("matched").get<std::string>();
+        x.role = j.at("role").get<RoutingTestNfqwsMatchRole>();
+    }
+
+    inline void to_json(json & j, const RoutingTestNfqwsMatchElement & x) {
+        j = json::object();
+        j["entry"] = x.entry;
+        j["exact"] = x.exact;
+        j["includes"] = x.includes;
+        j["list"] = x.list;
+        j["matched"] = x.matched;
+        j["role"] = x.role;
+    }
+
+    inline void from_json(const json & j, RoutingTestNfqws& x) {
+        x.available = j.at("available").get<bool>();
+        x.matches = j.at("matches").get<std::vector<RoutingTestNfqwsMatchElement>>();
+    }
+
+    inline void to_json(json & j, const RoutingTestNfqws & x) {
+        j = json::object();
+        j["available"] = x.available;
+        j["matches"] = x.matches;
+    }
+
     inline void from_json(const json & j, RoutingTestRequest& x) {
         x.target = j.at("target").get<std::string>();
     }
@@ -4983,6 +5119,7 @@ namespace api {
         x.config_scope = j.at("config_scope").get<ConfigScope>();
         x.dns_error = get_stack_optional<std::string>(j, "dns_error");
         x.is_domain = j.at("is_domain").get<bool>();
+        x.nfqws = get_stack_optional<RoutingTestNfqws>(j, "nfqws");
         x.no_matching_rule = j.at("no_matching_rule").get<bool>();
         x.resolved_ips = j.at("resolved_ips").get<std::vector<std::string>>();
         x.results = j.at("results").get<std::vector<RoutingTestEntry>>();
@@ -4997,6 +5134,7 @@ namespace api {
         j["config_scope"] = x.config_scope;
         j["dns_error"] = x.dns_error;
         j["is_domain"] = x.is_domain;
+        j["nfqws"] = x.nfqws;
         j["no_matching_rule"] = x.no_matching_rule;
         j["resolved_ips"] = x.resolved_ips;
         j["results"] = x.results;
@@ -5850,7 +5988,7 @@ namespace api {
         x.ndms_interface_capabilities = get_stack_optional<NdmsInterfaceCapabilities>(j, "NdmsInterfaceCapabilities");
         x.ndms_interface_inventory_response = get_stack_optional<NdmsInterfaceInventoryResponse>(j, "NdmsInterfaceInventoryResponse");
         x.ndms_interface_management_readiness = get_stack_optional<NdmsInterfaceManagementReadiness>(j, "NdmsInterfaceManagementReadiness");
-        x.ndms_interface_role = get_stack_optional<Role>(j, "NdmsInterfaceRole");
+        x.ndms_interface_role = get_stack_optional<NdmsInterfaceRoleEnum>(j, "NdmsInterfaceRole");
         x.ndms_management_blocker = get_stack_optional<NdmsManagementBlockerElement>(j, "NdmsManagementBlocker");
         x.ndms_native_import_readiness = get_stack_optional<NdmsNativeImportReadiness>(j, "NdmsNativeImportReadiness");
         x.ndms_native_import_target_range = get_stack_optional<NdmsNativeImportTargetRange>(j, "NdmsNativeImportTargetRange");
@@ -5877,6 +6015,8 @@ namespace api {
         x.ppe_deoffload_mode = get_stack_optional<PpeDeoffloadMode>(j, "PpeDeoffloadMode");
         x.ppe_deoffload_protocol_health = get_stack_optional<PpeDeoffloadProtocolHealth>(j, "PpeDeoffloadProtocolHealth");
         x.recommended_list_setup_request = get_stack_optional<RecommendedListSetupRequest>(j, "RecommendedListSetupRequest");
+        x.registry_check_request = get_stack_optional<RegistryCheckRequest>(j, "RegistryCheckRequest");
+        x.registry_check_response = get_stack_optional<RegistryCheckResponse>(j, "RegistryCheckResponse");
         x.reload_response = get_stack_optional<ReloadResponse>(j, "ReloadResponse");
         x.remote_access_request = get_stack_optional<RemoteAccessRequest>(j, "RemoteAccessRequest");
         x.remote_access_result = get_stack_optional<RemoteAccessResult>(j, "RemoteAccessResult");
@@ -5895,6 +6035,8 @@ namespace api {
         x.routing_test_entry = get_stack_optional<RoutingTestEntry>(j, "RoutingTestEntry");
         x.routing_test_evaluation = get_stack_optional<Evaluation>(j, "RoutingTestEvaluation");
         x.routing_test_list_match = get_stack_optional<ListMatch>(j, "RoutingTestListMatch");
+        x.routing_test_nfqws = get_stack_optional<RoutingTestNfqws>(j, "RoutingTestNfqws");
+        x.routing_test_nfqws_match = get_stack_optional<RoutingTestNfqwsMatchElement>(j, "RoutingTestNfqwsMatch");
         x.routing_test_request = get_stack_optional<RoutingTestRequest>(j, "RoutingTestRequest");
         x.routing_test_response = get_stack_optional<RoutingTestResponse>(j, "RoutingTestResponse");
         x.routing_test_rule_diagnostic = get_stack_optional<RoutingTestRuleDiagnosticElement>(j, "RoutingTestRuleDiagnostic");
@@ -6080,6 +6222,8 @@ namespace api {
         j["PpeDeoffloadMode"] = x.ppe_deoffload_mode;
         j["PpeDeoffloadProtocolHealth"] = x.ppe_deoffload_protocol_health;
         j["RecommendedListSetupRequest"] = x.recommended_list_setup_request;
+        j["RegistryCheckRequest"] = x.registry_check_request;
+        j["RegistryCheckResponse"] = x.registry_check_response;
         j["ReloadResponse"] = x.reload_response;
         j["RemoteAccessRequest"] = x.remote_access_request;
         j["RemoteAccessResult"] = x.remote_access_result;
@@ -6098,6 +6242,8 @@ namespace api {
         j["RoutingTestEntry"] = x.routing_test_entry;
         j["RoutingTestEvaluation"] = x.routing_test_evaluation;
         j["RoutingTestListMatch"] = x.routing_test_list_match;
+        j["RoutingTestNfqws"] = x.routing_test_nfqws;
+        j["RoutingTestNfqwsMatch"] = x.routing_test_nfqws_match;
         j["RoutingTestRequest"] = x.routing_test_request;
         j["RoutingTestResponse"] = x.routing_test_response;
         j["RoutingTestRuleDiagnostic"] = x.routing_test_rule_diagnostic;
@@ -6783,19 +6929,19 @@ namespace api {
         }
     }
 
-    inline void from_json(const json & j, Role & x) {
-        if (j == "client") x = Role::CLIENT;
-        else if (j == "server") x = Role::SERVER;
-        else if (j == "unknown") x = Role::UNKNOWN;
-        else { throw std::runtime_error("Cannot deserialize to enumeration \"Role\""); }
+    inline void from_json(const json & j, NdmsInterfaceRoleEnum & x) {
+        if (j == "client") x = NdmsInterfaceRoleEnum::CLIENT;
+        else if (j == "server") x = NdmsInterfaceRoleEnum::SERVER;
+        else if (j == "unknown") x = NdmsInterfaceRoleEnum::UNKNOWN;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsInterfaceRoleEnum\""); }
     }
 
-    inline void to_json(json & j, const Role & x) {
+    inline void to_json(json & j, const NdmsInterfaceRoleEnum & x) {
         switch (x) {
-            case Role::CLIENT: j = "client"; break;
-            case Role::SERVER: j = "server"; break;
-            case Role::UNKNOWN: j = "unknown"; break;
-            default: throw std::runtime_error("Unexpected value in enumeration \"Role\": " + std::to_string(static_cast<int>(x)));
+            case NdmsInterfaceRoleEnum::CLIENT: j = "client"; break;
+            case NdmsInterfaceRoleEnum::SERVER: j = "server"; break;
+            case NdmsInterfaceRoleEnum::UNKNOWN: j = "unknown"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NdmsInterfaceRoleEnum\": " + std::to_string(static_cast<int>(x)));
         }
     }
 
@@ -7071,6 +7217,22 @@ namespace api {
         }
     }
 
+    inline void from_json(const json & j, Reason & x) {
+        if (j == "external_lookup_not_allowed") x = Reason::EXTERNAL_LOOKUP_NOT_ALLOWED;
+        else if (j == "lookup_failed") x = Reason::LOOKUP_FAILED;
+        else if (j == "unreadable_response") x = Reason::UNREADABLE_RESPONSE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"Reason\""); }
+    }
+
+    inline void to_json(json & j, const Reason & x) {
+        switch (x) {
+            case Reason::EXTERNAL_LOOKUP_NOT_ALLOWED: j = "external_lookup_not_allowed"; break;
+            case Reason::LOOKUP_FAILED: j = "lookup_failed"; break;
+            case Reason::UNREADABLE_RESPONSE: j = "unreadable_response"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"Reason\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
     inline void from_json(const json & j, BlockedReason & x) {
         if (j == "auth_state_unavailable") x = BlockedReason::AUTH_STATE_UNAVAILABLE;
         else if (j == "keenetic_auth_plaintext_wan") x = BlockedReason::KEENETIC_AUTH_PLAINTEXT_WAN;
@@ -7222,6 +7384,26 @@ namespace api {
             case RoutingTestUnknownConditionElement::SOURCE_ADDRESS: j = "source_address"; break;
             case RoutingTestUnknownConditionElement::SOURCE_PORT: j = "source_port"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"RoutingTestUnknownConditionElement\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, RoutingTestNfqwsMatchRole & x) {
+        if (j == "hostlist") x = RoutingTestNfqwsMatchRole::HOSTLIST;
+        else if (j == "hostlist_auto") x = RoutingTestNfqwsMatchRole::HOSTLIST_AUTO;
+        else if (j == "hostlist_exclude") x = RoutingTestNfqwsMatchRole::HOSTLIST_EXCLUDE;
+        else if (j == "ipset") x = RoutingTestNfqwsMatchRole::IPSET;
+        else if (j == "ipset_exclude") x = RoutingTestNfqwsMatchRole::IPSET_EXCLUDE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"RoutingTestNfqwsMatchRole\""); }
+    }
+
+    inline void to_json(json & j, const RoutingTestNfqwsMatchRole & x) {
+        switch (x) {
+            case RoutingTestNfqwsMatchRole::HOSTLIST: j = "hostlist"; break;
+            case RoutingTestNfqwsMatchRole::HOSTLIST_AUTO: j = "hostlist_auto"; break;
+            case RoutingTestNfqwsMatchRole::HOSTLIST_EXCLUDE: j = "hostlist_exclude"; break;
+            case RoutingTestNfqwsMatchRole::IPSET: j = "ipset"; break;
+            case RoutingTestNfqwsMatchRole::IPSET_EXCLUDE: j = "ipset_exclude"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"RoutingTestNfqwsMatchRole\": " + std::to_string(static_cast<int>(x)));
         }
     }
 

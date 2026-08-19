@@ -1720,6 +1720,39 @@ export const enTranslation = {
         manualIncomplete: "Manual device test has not completed yet.",
       },
     },
+    targetFacts: {
+      nfqwsTitle: "nfqws",
+      nfqws: {
+        unknown: "The nfqws configuration could not be read, so coverage is unknown.",
+        covered: "This domain is in an nfqws list, so DPI circumvention applies to it.",
+        excluded:
+          "This domain is on the nfqws exclude list, so circumvention does not apply - even though another list also matches it.",
+        uncovered: "This domain is in no nfqws list.",
+      },
+      nfqwsMatch: "{{role}}: {{entry}} matched {{matched}} ({{list}})",
+      role: {
+        hostlist: "domain list",
+        hostlist_auto: "auto list",
+        hostlist_exclude: "excludes",
+        ipset: "address list",
+        ipset_exclude: "address excludes",
+      },
+      registryTitle: "Russian blocking registry",
+      registryPrompt:
+        "Answered by an outside service, so it runs only on request: the address you ask about becomes known to it.",
+      registryCheck: "Check the registry",
+      registry: {
+        "not-checked":
+          "The lookup did not run, which is not the same as not being blocked.",
+        listed: "This domain is on the blocking registry.",
+        "not-listed": "This domain is not on the registry.",
+        "subnet-only":
+          "The domain itself is not on the registry, but its addresses fall inside blocked prefixes.",
+      },
+      registrySubnets: "Blocked prefixes: {{subnets}}",
+      registryCdn: "Addresses belong to CDNs: {{providers}}",
+      registrySource: "Source: {{service}}",
+    },
     routingTest: {
       title: "Where does this traffic go?",
       placeholder: "e.g. google.com or 1.2.3.4",

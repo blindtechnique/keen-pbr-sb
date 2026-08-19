@@ -516,4 +516,25 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
     reason:
       "singBoxInstallPhaseKey resolves only within this family and returns null for a phase this build does not know.",
   },
+  {
+    file: "src/components/overview/target-facts.tsx",
+    argument: "`overview.targetFacts.nfqws.${verdict}`",
+    keys: ["overview.targetFacts.nfqws.*"],
+    reason:
+      "nfqwsVerdict returns the NfqwsVerdict union and nothing else; every member has a key here.",
+  },
+  {
+    file: "src/components/overview/target-facts.tsx",
+    argument: "`overview.targetFacts.role.${match.role}`",
+    keys: ["overview.targetFacts.role.*"],
+    reason:
+      "role is the generated RoutingTestNfqwsMatchRole enum, which the daemon fills from the five nfqws list flags.",
+  },
+  {
+    file: "src/components/overview/target-facts.tsx",
+    argument: "`overview.targetFacts.registry.${registryState}`",
+    keys: ["overview.targetFacts.registry.*"],
+    reason:
+      "registryVerdict returns the RegistryVerdict union, and the branch only renders once a response exists.",
+  },
 ] as const

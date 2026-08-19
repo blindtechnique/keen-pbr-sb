@@ -1,0 +1,229 @@
+#include "list_match.hpp"
+
+#include <algorithm>
+#include <arpa/inet.h>
+#include <array>
+#include <cctype>
+#include <cstring>
+#include <sstream>
+
+namespace keen_pbr3::nfqws {
+
+namespace {
+
+std::string trim(std::string value) {
+    const auto not_space = [](unsigned char character) {
+        return std::isspace(character) == 0;
+    };
+    value.erase(value.begin(),
+                std::find_if(value.begin(), value.end(), not_space));
+    value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(),
+                value.end());
+    return value;
+}
+
+std::string lower(std::string value) {
+    for (auto& character : value) {
+        character = static_cast<char>(
+            std::tolower(static_cast<unsigned char>(character)));
+    }
+    return value;
+}
+
+struct ParsedPrefix {
+    int family{0};
+    std::array<unsigned char, 16> bytes{};
+    int bits{0};
+};
+
+// Accepts "10.0.0.0/8", "2001:db8::/32" and a bare address, which is its own
+// full-length prefix. Anything else is not a prefix and must not be guessed at.
+std::optional<ParsedPrefix> parse_prefix(const std::string& entry) {
+    const auto slash = entry.find('/');
+    const auto address =
+        slash == std::string::npos ? entry : entry.substr(0, slash);
+    if (address.empty()) return std::nullopt;
+
+    ParsedPrefix parsed;
+    if (address.find(':') != std::string::npos) {
+        if (inet_pton(AF_INET6, address.c_str(), parsed.bytes.data()) != 1) {
+            return std::nullopt;
+        }
+        parsed.family = AF_INET6;
+        parsed.bits = 128;
+    } else {
+        if (inet_pton(AF_INET, address.c_str(), parsed.bytes.data()) != 1) {
+            return std::nullopt;
+        }
+        parsed.family = AF_INET;
+        parsed.bits = 32;
+    }
+
+    if (slash != std::string::npos) {
+        const auto text = entry.substr(slash + 1U);
+        if (text.empty()) return std::nullopt;
+        int bits = 0;
+        for (const unsigned char character : text) {
+            if (character < '0' || character > '9') return std::nullopt;
+            bits = bits * 10 + (character - '0');
+            if (bits > 128) return std::nullopt;
+        }
+        const int limit = parsed.family == AF_INET6 ? 128 : 32;
+        if (bits > limit) return std::nullopt;
+        parsed.bits = bits;
+    }
+    return parsed;
+}
+
+bool prefix_contains(const ParsedPrefix& prefix, const ParsedPrefix& address) {
+    // A v4 address inside a v6 prefix is not a match, whatever the bytes say.
+    if (prefix.family != address.family) return false;
+    const int whole_bytes = prefix.bits / 8;
+    const int spare_bits = prefix.bits % 8;
+    if (whole_bytes > 0 &&
+        std::memcmp(prefix.bytes.data(),
+                    address.bytes.data(),
+                    static_cast<std::size_t>(whole_bytes)) != 0) {
+        return false;
+    }
+    if (spare_bits == 0) return true;
+    const auto mask = static_cast<unsigned char>(0xFFU << (8 - spare_bits));
+    return (prefix.bytes[static_cast<std::size_t>(whole_bytes)] & mask) ==
+           (address.bytes[static_cast<std::size_t>(whole_bytes)] & mask);
+}
+
+} // namespace
+
+bool role_includes(ListRole role) noexcept {
+    return role == ListRole::hostlist || role == ListRole::hostlist_auto ||
+           role == ListRole::ipset;
+}
+
+bool role_is_hostlist(ListRole role) noexcept {
+    return role == ListRole::hostlist || role == ListRole::hostlist_auto ||
+           role == ListRole::hostlist_exclude;
+}
+
+std::vector<ListReference> parse_list_references(
+    const std::string& config_contents) {
+    // Longest first: "--hostlist-exclude=" also starts with "--hostlist", and
+    // matching the shorter flag would file an exclude list as coverage.
+    static const std::vector<std::pair<std::string, ListRole>> kFlags{
+        {"--hostlist-exclude=", ListRole::hostlist_exclude},
+        {"--hostlist-auto=", ListRole::hostlist_auto},
+        {"--hostlist=", ListRole::hostlist},
+        {"--ipset-exclude=", ListRole::ipset_exclude},
+        {"--ipset=", ListRole::ipset},
+    };
+
+    std::vector<ListReference> references;
+    for (const auto& [flag, role] : kFlags) {
+        std::string::size_type at = 0;
+        while ((at = config_contents.find(flag, at)) != std::string::npos) {
+            const auto start = at + flag.size();
+            auto end = start;
+            while (end < config_contents.size()) {
+                const char character = config_contents[end];
+                if (character == ' ' || character == '\t' ||
+                    character == '\n' || character == '\r' ||
+                    character == '"' || character == '\'') {
+                    break;
+                }
+                ++end;
+            }
+            auto path = config_contents.substr(start, end - start);
+            at = end;
+            if (path.empty()) continue;
+            const bool already = std::any_of(
+                references.begin(), references.end(),
+                [&](const ListReference& existing) {
+                    return existing.path == path && existing.role == role;
+                });
+            if (!already) references.push_back(ListReference{path, role});
+        }
+    }
+    return references;
+}
+
+std::vector<std::string> parse_hostlist(const std::string& contents) {
+    std::vector<std::string> entries;
+    std::istringstream stream(contents);
+    std::string line;
+    while (std::getline(stream, line)) {
+        // Files edited on Windows arrive with CR still attached; an entry with
+        // a trailing CR would never match anything and would look like a
+        // working rule in the panel.
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        auto entry = trim(std::move(line));
+        if (entry.empty() || entry.front() == '#') continue;
+        entries.push_back(std::move(entry));
+    }
+    return entries;
+}
+
+std::optional<HostlistMatch> match_hostlist(
+    const std::vector<std::string>& entries,
+    const std::string& domain) {
+    const auto needle = lower(trim(domain));
+    if (needle.empty()) return std::nullopt;
+
+    std::optional<HostlistMatch> best;
+    for (const auto& raw : entries) {
+        const auto entry = lower(raw);
+        if (entry.empty()) continue;
+
+        bool covers = false;
+        bool exact = false;
+        if (entry == needle) {
+            covers = true;
+            exact = true;
+        } else if (needle.size() > entry.size() &&
+                   needle.compare(needle.size() - entry.size(),
+                                  entry.size(),
+                                  entry) == 0 &&
+                   needle[needle.size() - entry.size() - 1U] == '.') {
+            // The dot is what keeps "youtube.com" from covering
+            // "notyoutube.com": a suffix test alone would report the wrong
+            // entry as the reason traffic is handled.
+            covers = true;
+        }
+        if (!covers) continue;
+
+        // Longer means more specific, and an exact hit beats any parent.
+        if (!best || exact ||
+            (!best->exact && raw.size() > best->entry.size())) {
+            best = HostlistMatch{raw, exact};
+            if (exact) break;
+        }
+    }
+    return best;
+}
+
+std::optional<HostlistMatch> match_ipset(
+    const std::vector<std::string>& entries,
+    const std::string& ip) {
+    const auto address = parse_prefix(trim(ip));
+    if (!address) return std::nullopt;
+    // A queried address is a single host; a prefix in the query position would
+    // mean something this function does not answer.
+    if (address->bits != (address->family == AF_INET6 ? 128 : 32)) {
+        return std::nullopt;
+    }
+
+    std::optional<HostlistMatch> best;
+    int best_bits = -1;
+    for (const auto& raw : entries) {
+        const auto prefix = parse_prefix(trim(raw));
+        if (!prefix || !prefix_contains(*prefix, *address)) continue;
+        // Narrowest wins: /32 out of a /8 is the entry that decided this.
+        if (prefix->bits > best_bits) {
+            best_bits = prefix->bits;
+            const bool exact =
+                prefix->bits == (prefix->family == AF_INET6 ? 128 : 32);
+            best = HostlistMatch{raw, exact};
+        }
+    }
+    return best;
+}
+
+} // namespace keen_pbr3::nfqws

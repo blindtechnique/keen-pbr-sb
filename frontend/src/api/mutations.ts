@@ -21,6 +21,7 @@ import {
   usePostConfigDiscard,
   usePostConfigSave,
   usePostRecommendedListSetup,
+  usePostRoutingRegistryCheck,
   usePostRoutingTest,
   usePostTransportAction,
   usePostTransportConfigApply,
@@ -54,6 +55,9 @@ type UsePostRecommendedListSetupOptions = Parameters<
   typeof usePostRecommendedListSetup
 >[0]
 type UsePostRoutingTestOptions = Parameters<typeof usePostRoutingTest>[0]
+type UsePostRoutingRegistryCheckOptions = Parameters<
+  typeof usePostRoutingRegistryCheck
+>[0]
 type UsePostTransportActionOptions = Parameters<
   typeof usePostTransportAction
 >[0]
@@ -386,6 +390,13 @@ export const useDiscardConfigMutation = (
 export const usePostRoutingTestMutation = (
   options?: UsePostRoutingTestOptions
 ) => usePostRoutingTest(options)
+
+// The one call that leaves the router on purpose. It is a separate mutation
+// from the routing test so that nothing renders it by accident: the panel asks
+// only when someone presses the button.
+export const usePostRoutingRegistryCheckMutation = (
+  options?: UsePostRoutingRegistryCheckOptions
+) => usePostRoutingRegistryCheck(options)
 
 type ServiceAction = "start" | "stop" | "restart"
 const serviceActionMutationKey = (action: ServiceAction) =>

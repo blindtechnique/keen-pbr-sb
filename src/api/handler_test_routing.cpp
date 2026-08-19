@@ -2,9 +2,12 @@
 
 #include "handler_test_routing.hpp"
 #include "../cmd/test_routing.hpp"
+#include "../nfqws/list_match.hpp"
 #include "generated/api_types.hpp"
 
+#include <fstream>
 #include <nlohmann/json.hpp>
+#include <sstream>
 
 namespace keen_pbr3 {
 
@@ -32,6 +35,89 @@ to_api_unknown_conditions(const std::vector<std::string>& conditions) {
             value.get<api::RoutingTestUnknownConditionElement>());
     }
     return converted;
+}
+
+constexpr const char* kNfqwsConfigPath = "/opt/etc/nfqws2/nfqws2.conf";
+
+std::string read_text_file(const std::string& path) {
+    std::ifstream file(path);
+    if (!file.is_open()) return {};
+    std::ostringstream out;
+    out << file.rdbuf();
+    return out.str();
+}
+
+api::RoutingTestNfqwsMatchRole to_api_role(nfqws::ListRole role) {
+    switch (role) {
+        case nfqws::ListRole::hostlist:
+            return api::RoutingTestNfqwsMatchRole::HOSTLIST;
+        case nfqws::ListRole::hostlist_auto:
+            return api::RoutingTestNfqwsMatchRole::HOSTLIST_AUTO;
+        case nfqws::ListRole::hostlist_exclude:
+            return api::RoutingTestNfqwsMatchRole::HOSTLIST_EXCLUDE;
+        case nfqws::ListRole::ipset:
+            return api::RoutingTestNfqwsMatchRole::IPSET;
+        case nfqws::ListRole::ipset_exclude:
+            return api::RoutingTestNfqwsMatchRole::IPSET_EXCLUDE;
+    }
+    return api::RoutingTestNfqwsMatchRole::HOSTLIST;
+}
+
+// Which nfqws lists cover this target, taken from the lists nfqws2.conf
+// actually names rather than from a fixed pair of filenames: an operator may
+// add lists of their own, and address lists are matched by prefix while
+// hostlists are matched by domain.
+//
+// Exclude lists are reported too, and reported as themselves. They are not
+// coverage - they are the reason coverage does not apply - and folding the two
+// into one answer would invert the meaning for every domain on them.
+api::RoutingTestNfqws nfqws_coverage(const TestRoutingResult& result) {
+    api::RoutingTestNfqws coverage;
+    const auto config = read_text_file(kNfqwsConfigPath);
+    coverage.available = !config.empty();
+    if (config.empty()) return coverage;
+
+    // The target itself when it is an address, plus everything it resolved to:
+    // a domain is handled by nfqws through its hostlists, but its addresses can
+    // still sit in an ipset.
+    std::vector<std::string> addresses;
+    if (!result.is_domain) addresses.push_back(result.target);
+    addresses.insert(addresses.end(),
+                     result.resolved_ips.begin(),
+                     result.resolved_ips.end());
+
+    for (const auto& reference : nfqws::parse_list_references(config)) {
+        const auto contents = read_text_file(reference.path);
+        if (contents.empty()) continue;
+        const auto entries = nfqws::parse_hostlist(contents);
+
+        const auto append = [&](const nfqws::HostlistMatch& hit,
+                                const std::string& matched) {
+            api::RoutingTestNfqwsMatchElement element;
+            element.list = reference.path;
+            element.role = to_api_role(reference.role);
+            element.includes = nfqws::role_includes(reference.role);
+            element.entry = hit.entry;
+            element.matched = matched;
+            element.exact = hit.exact;
+            coverage.matches.push_back(std::move(element));
+        };
+
+        if (nfqws::role_is_hostlist(reference.role)) {
+            if (!result.is_domain) continue;
+            if (const auto hit = nfqws::match_hostlist(entries, result.target)) {
+                append(*hit, result.target);
+            }
+            continue;
+        }
+        for (const auto& address : addresses) {
+            if (const auto hit = nfqws::match_ipset(entries, address)) {
+                append(*hit, address);
+                break;
+            }
+        }
+    }
+    return coverage;
 }
 
 api::ListMatch to_api_list_match(const ListMatchInfo& match) {
@@ -77,6 +163,9 @@ void register_test_routing_handler(ApiServer& server, ApiContext& ctx) {
         resp.no_matching_rule = result.no_matching_rule;
         resp.resolved_ips = result.resolved_ips;
         resp.warnings     = result.warnings;
+        // A separate question with a separate answer: nfqws can be handling a
+        // target the routing rules never touch, and the reverse.
+        resp.nfqws        = nfqws_coverage(result);
 
         for (const auto& entry : result.entries) {
             api::RoutingTestEntry e;

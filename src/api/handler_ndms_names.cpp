@@ -42,16 +42,16 @@ api::Kind api_tunnel_kind(NdmsTunnelKind kind) {
     throw std::runtime_error("unsupported NDMS tunnel kind");
 }
 
-api::Role api_interface_role(NdmsInterfaceRole role) {
+api::NdmsInterfaceRoleEnum api_interface_role(NdmsInterfaceRole role) {
     switch (role) {
     case NdmsInterfaceRole::client:
-        return api::Role::CLIENT;
+        return api::NdmsInterfaceRoleEnum::CLIENT;
     case NdmsInterfaceRole::server:
-        return api::Role::SERVER;
+        return api::NdmsInterfaceRoleEnum::SERVER;
     case NdmsInterfaceRole::unknown:
-        return api::Role::UNKNOWN;
+        return api::NdmsInterfaceRoleEnum::UNKNOWN;
     }
-    return api::Role::UNKNOWN;
+    return api::NdmsInterfaceRoleEnum::UNKNOWN;
 }
 
 api::CatalogStatus api_catalog_status(

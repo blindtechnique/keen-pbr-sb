@@ -334,6 +334,18 @@ paths:
         against cached list data to determine the expected outbound, and
         queries the live kernel firewall sets to determine the actual outbound.
         Useful for diagnosing routing mismatches without restarting the daemon.
+
+
+        The response also carries `nfqws`: which nfqws lists cover this target,
+        read from the files nfqws2.conf names. That is a separate question from
+        routing and is answered separately - a domain can be routed nowhere in
+        particular and still be handled by nfqws, or the reverse.
+
+
+        Nothing here reaches the network beyond DNS resolution. Whether the
+        target is on Russia's blocking registry is
+        `POST /api/routing/registry-check`, which is opt-in for exactly that
+        reason.
       operationId: postRoutingTest
       requestBody:
         required: true
@@ -350,6 +362,59 @@ paths:
                 $ref: "#/components/schemas/RoutingTestResponse"
         "400":
           description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/routing/registry-check:
+    post:
+      summary: Is this target on Russia's blocking registry
+      description: >
+        Asks cheburcheck.ru whether a domain or address is on the registry, and
+        reports what it says. Their code is not vendored; only the verdict is
+        shown, and the service is credited.
+
+
+        **Nothing leaves the router without `allow_external_lookup`.** This is
+        the one call in the daemon that reaches a service we do not control, so
+        it is opt-in per request and never scheduled - rendering a panel must
+        not cause a third party to learn what someone is looking up. The target
+        is sent verbatim, which is the whole point of the lookup and worth
+        saying out loud in any interface that offers it.
+
+
+        The answer is about the registry, not about this router. A domain can
+        be listed and still work here, or be absent and still fail through a
+        blocked CDN prefix. What actually happens to it is
+        `POST /api/routing/test` and the reachability probes; the two are kept
+        apart deliberately.
+
+
+        Verdicts are cached for an hour. Failures answer `checked: false` with
+        200 rather than an error status, because a lookup that did not run is a
+        different thing from a target that is not blocked, and the difference
+        must survive into the interface.
+      operationId: postRoutingRegistryCheck
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegistryCheckRequest"
+      responses:
+        "200":
+          description: >
+            The verdict, or `checked: false` when no lookup ran.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegistryCheckResponse"
+        "400":
+          description: >
+            Not JSON, or a target that is not a plausible host: only letters,
+            digits, dot, hyphen and colon are sent, and anything else is
+            refused rather than escaped into a URL.
           content:
             application/json:
               schema:
@@ -5796,6 +5861,147 @@ components:
           description: Per-IP routing test results.
           items:
             $ref: "#/components/schemas/RoutingTestEntry"
+        nfqws:
+          $ref: "#/components/schemas/RoutingTestNfqws"
+
+    RoutingTestNfqwsMatch:
+      type: object
+      required: [list, role, includes, entry, matched, exact]
+      properties:
+        list:
+          type: string
+          description: Path of the list file, as nfqws2.conf names it.
+        role:
+          type: string
+          enum: [hostlist, hostlist_auto, hostlist_exclude, ipset, ipset_exclude]
+          description: >
+            The flag that named this file. The role is taken from the flag and
+            never from the file name: an operator may add lists of their own,
+            and `user.list` is a convention rather than a contract.
+        includes:
+          type: boolean
+          description: >
+            false for the two exclude roles. An exclude match is not coverage -
+            it is the reason coverage does not apply - so it is reported as
+            itself rather than folded into the same answer.
+        entry:
+          type: string
+          description: >
+            The line that matched, as written in the file, so it can be found
+            and edited.
+        matched:
+          type: string
+          description: >
+            What it matched: the domain for a hostlist, or the address for an
+            address list. A domain's resolved addresses are tried against
+            address lists too.
+        exact:
+          type: boolean
+          description: >
+            true when the entry is the domain or address itself rather than a
+            parent domain or a wider prefix.
+
+    RoutingTestNfqws:
+      type: object
+      required: [available, matches]
+      description: >
+        Which nfqws lists cover this target. Read from the files on disk, so it
+        says what nfqws is configured to act on - not whether nfqws is running
+        or whether its strategy works, which are separate questions with
+        separate answers.
+      properties:
+        available:
+          type: boolean
+          description: false when nfqws2.conf could not be read at all.
+        matches:
+          type: array
+          items:
+            $ref: "#/components/schemas/RoutingTestNfqwsMatch"
+
+    RegistryCheckRequest:
+      type: object
+      required: [target]
+      properties:
+        target:
+          type: string
+          description: Domain name or IP address to look up.
+        allow_external_lookup:
+          type: boolean
+          default: false
+          description: >
+            Defaults to **false**, and that default is the point: this is the
+            one call in the daemon that reaches a service we do not control, so
+            rendering a panel must never cause it. Without this flag the
+            response is `checked: false` and nothing leaves the router.
+        detour:
+          type: string
+          description: >
+            Outbound tag to send the lookup through. The service expects to be
+            reached from inside Russia; a detour that leaves the country may
+            change what it can resolve.
+
+    RegistryCheckResponse:
+      type: object
+      required: [checked, service]
+      description: >
+        Whether the target is on Russia's blocking registry, according to
+        cheburcheck.ru. This is a fact about the registry, not about this
+        router: whether the site actually works from here is what the routing
+        test and the reachability probes answer, and the panel keeps the two
+        apart on purpose.
+      properties:
+        checked:
+          type: boolean
+          description: >
+            false when no lookup happened. Read it before `blocked`: a lookup
+            that did not run must never be shown as a clean bill of health.
+        service:
+          type: string
+          description: The service credited for the verdict.
+        reason:
+          type: string
+          enum: [external_lookup_not_allowed, lookup_failed, unreadable_response]
+          description: Present when `checked` is false.
+        error:
+          type: string
+          description: Present with reason `lookup_failed`.
+        cached:
+          type: boolean
+          description: >
+            true when the verdict came from the hour-long cache rather than a
+            fresh request. The registry moves in days, and the service
+            publishes neither terms nor a rate limit.
+        target:
+          type: string
+        blocked:
+          type: boolean
+          description: The domain itself is on the registry.
+        rkn_domain:
+          type: string
+          description: The registry entry that covers it, when there is one.
+        blocked_subnets:
+          type: array
+          items:
+            type: string
+          description: >
+            Blocked prefixes covering the target's addresses. A site with no
+            registry entry of its own can still be unreachable through one of
+            these.
+        ips:
+          type: array
+          items:
+            type: string
+          description: Addresses the service resolved, which may differ from ours.
+        cdn_providers:
+          type: array
+          items:
+            type: string
+          description: >
+            CDNs the addresses belong to. A blocked prefix on a shared CDN
+            explains an outage that the domain's own registry status does not.
+        organisation:
+          type: string
+          description: Owner of the address range, when known.
 
     # -------------------------------------------------------------------------
     # Internal: cache metadata (not exposed via API paths)

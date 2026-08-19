@@ -87,6 +87,7 @@ add_executable(keen-pbr-tests
   test_config_validation.cpp
   test_config_store.cpp
   test_catalog_setup_planner.cpp
+  test_nfqws_list_match.cpp
   test_config_writer.cpp
   test_subscription_fetch_policy.cpp
   test_subscription_import_plan.cpp
@@ -123,6 +124,7 @@ add_executable(keen-pbr-tests
   test_api_remote_access.cpp
   test_api_transports.cpp
   test_api_subscriptions.cpp
+  test_api_registry_check.cpp
   test_api_transport_exit_check.cpp
   test_openapi_runtime_contracts.cpp
   test_update_version.cpp
@@ -174,6 +176,7 @@ add_executable(keen-pbr-tests
   ../src/daemon/daemon_api.cpp
   ../src/daemon/daemon_dns_probe.cpp
   ../src/setup/catalog_setup_planner.cpp
+  ../src/nfqws/list_match.cpp
   ../src/config/config_writer.cpp
   ../src/config/subscription_fetch_policy.cpp
   ../src/config/subscription_import_plan.cpp
@@ -935,6 +938,7 @@ if(WITH_API)
     ../src/api/handler_transport_exit_check.cpp
     ../src/health/exit_address_check.cpp
     ../src/api/transport_manager_endpoint.cpp
+    ../src/api/handler_registry_check.cpp
     ../src/api/handler_test_routing.cpp
     ../src/api/handler_dns_test.cpp
     ../src/api/handler_connections.cpp
