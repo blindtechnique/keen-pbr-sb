@@ -47,6 +47,7 @@ add_executable(keen-pbr-tests
   test_ndms_native_import_startup_recovery.cpp
   test_ndms_native_import_request.cpp
   test_ndms_native_import_transport.cpp
+  test_ndms_native_exact_mutation_transport.cpp
   test_ndms_native_import_wal.cpp
   test_ndms_native_import_recovery_observation.cpp
   test_ndms_native_import_recovery_lease.cpp
@@ -265,6 +266,7 @@ add_executable(keen-pbr-tests
   ../src/keenetic/ndms_native_import_startup_recovery.cpp
   ../src/keenetic/ndms_native_import_request.cpp
   ../src/keenetic/ndms_native_import_transport.cpp
+  ../src/keenetic/ndms_native_exact_mutation_transport.cpp
   ../src/keenetic/ndms_native_import_wal.cpp
   ../src/keenetic/ndms_native_import_recovery_observation.cpp
   ../src/keenetic/ndms_native_import_recovery_lease.cpp
@@ -372,6 +374,41 @@ add_test(
 
 # Keep the secret-bearing native WG/AWG import transaction boundary
 # independently buildable. It has no daemon, API route or router dependency.
+set(_keen_pbr_saved_try_compile_target_type
+    "${CMAKE_TRY_COMPILE_TARGET_TYPE}")
+set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+foreach(_probe IN ITEMS
+    ndms_native_exact_mutation_mint
+    ndms_native_exact_mutation_backend
+    ndms_native_exact_mutation_authority)
+  set(_probe_result
+      "KEEN_PBR_COMPILE_NEGATIVE_${_probe}")
+  unset(${_probe_result} CACHE)
+  try_compile(
+    ${_probe_result}
+    "${CMAKE_CURRENT_BINARY_DIR}/compile-negative/${_probe}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/compile_negative/${_probe}.cpp"
+    CMAKE_FLAGS
+      "-DCMAKE_CXX_STANDARD=17"
+      "-DCMAKE_CXX_STANDARD_REQUIRED=ON"
+      "-DCMAKE_CXX_EXTENSIONS=OFF"
+    OUTPUT_VARIABLE _probe_output)
+  if(${_probe_result})
+    message(FATAL_ERROR
+      "production boundary probe ${_probe} unexpectedly compiled")
+  endif()
+  unset(${_probe_result} CACHE)
+endforeach()
+if(_keen_pbr_saved_try_compile_target_type STREQUAL "")
+  unset(CMAKE_TRY_COMPILE_TARGET_TYPE)
+else()
+  set(CMAKE_TRY_COMPILE_TARGET_TYPE
+      "${_keen_pbr_saved_try_compile_target_type}")
+endif()
+unset(_keen_pbr_saved_try_compile_target_type)
+unset(_probe_result)
+unset(_probe_output)
+
 add_executable(keen-pbr-native-tunnel-import-tests
   test_main.cpp
   test_ndms_native_allocator_fence.cpp
@@ -382,6 +419,7 @@ add_executable(keen-pbr-native-tunnel-import-tests
   test_ndms_native_import_startup_recovery.cpp
   test_ndms_native_import_request.cpp
   test_ndms_native_import_transport.cpp
+  test_ndms_native_exact_mutation_transport.cpp
   test_ndms_native_import_wal.cpp
   test_ndms_native_import_recovery_observation.cpp
   test_ndms_native_import_recovery_lease.cpp
@@ -411,6 +449,7 @@ add_executable(keen-pbr-native-tunnel-import-tests
   ../src/keenetic/ndms_native_import_startup_recovery.cpp
   ../src/keenetic/ndms_native_import_request.cpp
   ../src/keenetic/ndms_native_import_transport.cpp
+  ../src/keenetic/ndms_native_exact_mutation_transport.cpp
   ../src/keenetic/ndms_native_import_wal.cpp
   ../src/keenetic/ndms_native_import_recovery_observation.cpp
   ../src/keenetic/ndms_native_import_recovery_lease.cpp
