@@ -150,6 +150,7 @@ enum class NdmsNativeImportExecutionStop : std::uint8_t {
     none,
     missing_dependency,
     request_identity_invalid,
+    unsupported_tunnel_kind,
     expected_target_ineligible,
     baseline_mismatch,
     incompatible_fence_mode,
@@ -199,10 +200,12 @@ std::string ndms_native_import_request_binding_digest(
 // Executes the create-only stock import boundary. There is no delete,
 // ownership publish, API registration, retry or recovery mutation here.
 //
-// A receipt is intentionally consumed through a move-only optional: production
-// code cannot construct or replay one, and the measured KeeneticOS 5.1.1
-// provider always returns nullopt. Consequently this function cannot reach
-// transport on that firmware.
+// The current WAL/recovery schema is WireGuard-only, so an AmneziaWG request
+// is rejected before any WAL or transport work even in tests. A receipt is
+// intentionally consumed through a move-only optional: production code cannot
+// construct or replay one, and the measured KeeneticOS 5.1.1 provider always
+// returns nullopt. Consequently this function cannot reach transport on that
+// firmware.
 NdmsNativeImportExecutionResult execute_ndms_native_import_transaction(
     NdmsNativeWireguardImportRequest request,
     const NdmsNativeImportExecutionPlan& plan,

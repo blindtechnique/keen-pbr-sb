@@ -172,7 +172,36 @@ struct CanonicalNumberText {
     std::string listen_port;
     std::string mtu;
     std::vector<std::string> persistent_keepalive;
+    std::string jc;
+    std::string jmin;
+    std::string jmax;
+    std::string s1;
+    std::string s2;
+    std::string s3;
+    std::string s4;
 };
+
+bool has_extended_awg_parameters(
+    const NdmsNativeTunnelImportAwgParameters& awg) noexcept {
+    return awg.s3.has_value() || awg.s4.has_value() ||
+           (awg.i1 && !awg.i1->empty()) ||
+           (awg.i2 && !awg.i2->empty()) ||
+           (awg.i3 && !awg.i3->empty()) ||
+           (awg.i4 && !awg.i4->empty()) ||
+           (awg.i5 && !awg.i5->empty());
+}
+
+using AwgSignatureView = std::pair<
+    std::string_view, const std::optional<std::string>*>;
+
+std::array<AwgSignatureView, 5U> awg_signatures(
+    const NdmsNativeTunnelImportAwgParameters& awg) noexcept {
+    return {{
+        {"I1 = ", &awg.i1}, {"I2 = ", &awg.i2},
+        {"I3 = ", &awg.i3}, {"I4 = ", &awg.i4},
+        {"I5 = ", &awg.i5},
+    }};
+}
 
 CanonicalNumberText number_text(
     const NdmsNativeTunnelImport& imported) {
@@ -181,6 +210,17 @@ CanonicalNumberText number_text(
         result.listen_port = std::to_string(*imported.listen_port);
     }
     if (imported.mtu) result.mtu = std::to_string(*imported.mtu);
+    if (imported.awg) {
+        result.jc = std::to_string(imported.awg->jc);
+        result.jmin = std::to_string(imported.awg->jmin);
+        result.jmax = std::to_string(imported.awg->jmax);
+        result.s1 = std::to_string(imported.awg->s1);
+        result.s2 = std::to_string(imported.awg->s2);
+        if (has_extended_awg_parameters(*imported.awg)) {
+            result.s3 = std::to_string(imported.awg->s3.value_or(0U));
+            result.s4 = std::to_string(imported.awg->s4.value_or(0U));
+        }
+    }
     result.persistent_keepalive.reserve(imported.peers.size());
     for (const auto& peer : imported.peers) {
         result.persistent_keepalive.push_back(
@@ -212,6 +252,29 @@ std::size_t canonical_conf_size(
     }
     if (imported.mtu) {
         size = checked_add(size, line_size("MTU = ", numbers.mtu));
+    }
+    if (imported.awg) {
+        const auto& awg = *imported.awg;
+        size = checked_add(size, line_size("Jc = ", numbers.jc));
+        size = checked_add(size, line_size("Jmin = ", numbers.jmin));
+        size = checked_add(size, line_size("Jmax = ", numbers.jmax));
+        size = checked_add(size, line_size("S1 = ", numbers.s1));
+        size = checked_add(size, line_size("S2 = ", numbers.s2));
+        size = checked_add(size, line_size("H1 = ", awg.h1));
+        size = checked_add(size, line_size("H2 = ", awg.h2));
+        size = checked_add(size, line_size("H3 = ", awg.h3));
+        size = checked_add(size, line_size("H4 = ", awg.h4));
+        if (has_extended_awg_parameters(awg)) {
+            size = checked_add(size, line_size("S3 = ", numbers.s3));
+            size = checked_add(size, line_size("S4 = ", numbers.s4));
+            for (const auto& signature : awg_signatures(awg)) {
+                if (*signature.second &&
+                    !signature.second->value().empty()) {
+                    size = checked_add(size, line_size(
+                        signature.first, signature.second->value()));
+                }
+            }
+        }
     }
 
     for (std::size_t index = 0U;
@@ -279,6 +342,28 @@ std::string build_canonical_conf(
         append_line(output, "ListenPort = ", numbers.listen_port);
     }
     if (imported.mtu) append_line(output, "MTU = ", numbers.mtu);
+    if (imported.awg) {
+        const auto& awg = *imported.awg;
+        append_line(output, "Jc = ", numbers.jc);
+        append_line(output, "Jmin = ", numbers.jmin);
+        append_line(output, "Jmax = ", numbers.jmax);
+        append_line(output, "S1 = ", numbers.s1);
+        append_line(output, "S2 = ", numbers.s2);
+        append_line(output, "H1 = ", awg.h1);
+        append_line(output, "H2 = ", awg.h2);
+        append_line(output, "H3 = ", awg.h3);
+        append_line(output, "H4 = ", awg.h4);
+        if (has_extended_awg_parameters(awg)) {
+            append_line(output, "S3 = ", numbers.s3);
+            append_line(output, "S4 = ", numbers.s4);
+            for (const auto& signature : awg_signatures(awg)) {
+                if (*signature.second && !signature.second->value().empty()) {
+                    append_line(
+                        output, signature.first, signature.second->value());
+                }
+            }
+        }
+    }
 
     for (std::size_t index = 0U;
          index < imported.peers.size(); ++index) {
@@ -317,9 +402,6 @@ const char* ndms_native_wireguard_import_request_error_code_name(
     switch (code) {
     case NdmsNativeWireguardImportRequestErrorCode::unsupported_source:
         return "unsupported_source";
-    case NdmsNativeWireguardImportRequestErrorCode::
-            amnezia_wireguard_blocked:
-        return "amnezia_wireguard_blocked";
     case NdmsNativeWireguardImportRequestErrorCode::entropy_unavailable:
         return "entropy_unavailable";
     case NdmsNativeWireguardImportRequestErrorCode::already_consumed:
@@ -343,11 +425,13 @@ NdmsNativeWireguardImportRequestError::code() const noexcept {
 
 NdmsNativeWireguardImportRequest::NdmsNativeWireguardImportRequest(
     std::string canonical_conf,
+    const NdmsNativeTunnelImportKind kind,
     std::string transaction_id,
     std::string marker,
     std::string filename,
     std::string candidate_revision)
-    : transaction_id_(std::move(transaction_id)),
+    : kind_(kind),
+      transaction_id_(std::move(transaction_id)),
       marker_(std::move(marker)),
       filename_(std::move(filename)),
       candidate_revision_(std::move(candidate_revision)),
@@ -373,7 +457,8 @@ NdmsNativeWireguardImportRequest::~NdmsNativeWireguardImportRequest() {
 
 NdmsNativeWireguardImportRequest::NdmsNativeWireguardImportRequest(
     NdmsNativeWireguardImportRequest&& other) noexcept
-    : transaction_id_(std::move(other.transaction_id_)),
+    : kind_(other.kind_),
+      transaction_id_(std::move(other.transaction_id_)),
       marker_(std::move(other.marker_)),
       filename_(std::move(other.filename_)),
       candidate_revision_(std::move(other.candidate_revision_)),
@@ -391,6 +476,7 @@ NdmsNativeWireguardImportRequest::operator=(
     if (this != &other) {
         wipe_secret();
         canonical_conf_.swap(other.canonical_conf_);
+        kind_ = other.kind_;
         transaction_id_ = std::move(other.transaction_id_);
         marker_ = std::move(other.marker_);
         filename_ = std::move(other.filename_);
@@ -407,6 +493,11 @@ NdmsNativeWireguardImportRequest::operator=(
 std::string_view NdmsNativeWireguardImportRequest::operation()
     const noexcept {
     return kOperation;
+}
+
+NdmsNativeTunnelImportKind NdmsNativeWireguardImportRequest::kind()
+    const noexcept {
+    return kind_;
 }
 
 std::string_view NdmsNativeWireguardImportRequest::marker()
@@ -521,11 +612,6 @@ make_ndms_native_wireguard_import_request(std::string&& raw_conf) {
     }
 
     auto imported = parse_ndms_native_tunnel_import(raw_conf);
-    if (imported.kind ==
-        NdmsNativeTunnelImportKind::amnezia_wireguard) {
-        fail(NdmsNativeWireguardImportRequestErrorCode::
-                 amnezia_wireguard_blocked);
-    }
     if (imported.source !=
         NdmsNativeTunnelImportSource::wireguard_conf) {
         fail(NdmsNativeWireguardImportRequestErrorCode::
@@ -542,6 +628,7 @@ make_ndms_native_wireguard_import_request(std::string&& raw_conf) {
     WipeStringGuard canonical_guard(canonical_conf);
     return NdmsNativeWireguardImportRequest(
         std::move(canonical_conf),
+        imported.kind,
         std::move(transaction_id),
         std::move(marker),
         std::move(filename),

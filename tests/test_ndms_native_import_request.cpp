@@ -92,9 +92,23 @@ std::string awg_conf() {
     value.insert(
         peer,
         "\nJc = 4\nJmin = 40\nJmax = 70\n"
-        "S1 = 100\nS2 = 200\n"
+        "S1 = 100\nS2 = 200\nS3 = 300\nS4 = 400\n"
         "H1 = 101010101\nH2 = 202020202\n"
-        "H3 = 303030303\nH4 = 404040404\n");
+        "H3 = 303030303\nH4 = 404040404\n"
+        "I1 = <r 8><c><t>\nI5 = <b 0x10>\n");
+    return value;
+}
+
+std::string zero_base_awg_conf() {
+    auto value = wg_conf();
+    const auto peer = value.find("\n\n[Peer]");
+    REQUIRE(peer != std::string::npos);
+    value.insert(
+        peer,
+        "\nJc = 0\nJmin = 0\nJmax = 0\n"
+        "S1 = 0\nS2 = 0\n"
+        "H1 =\nH2 =\nH3 =\nH4 =\n"
+        "I1 = <b 0x0102>\n");
     return value;
 }
 
@@ -241,6 +255,7 @@ TEST_CASE("native WG request is an exact canonical stock batch") {
     auto request = make_ndms_native_wireguard_import_request(wg_conf());
 
     CHECK(request.operation() == "interface.wireguard.import");
+    CHECK(request.kind() == NdmsNativeTunnelImportKind::wireguard);
     CHECK(std::regex_match(
         std::string(request.marker()),
         std::regex{"^kpbr-ni-v1-[0-9a-f]{32}$"}));
@@ -298,10 +313,83 @@ TEST_CASE("native WG request is an exact canonical stock batch") {
         NdmsNativeWireguardImportRequestError);
 }
 
-TEST_CASE("native WG request blocks AWG and URI envelopes") {
-    CHECK(request_error(awg_conf()) ==
-          NdmsNativeWireguardImportRequestErrorCode::
-              amnezia_wireguard_blocked);
+TEST_CASE("native AWG request emits complete base and extended parameters") {
+    auto request = make_ndms_native_wireguard_import_request(awg_conf());
+    CHECK(request.kind() ==
+          NdmsNativeTunnelImportKind::amnezia_wireguard);
+    std::string canonical =
+        "# Name = " + std::string(request.marker()) + "\n"
+        "[Interface]\n"
+        "PrivateKey = " + key('P') + "\n"
+        "Address = 10.8.0.2/32\n"
+        "DNS = 1.1.1.1\n"
+        "ListenPort = 51820\n"
+        "MTU = 1420\n"
+        "Jc = 4\nJmin = 40\nJmax = 70\n"
+        "S1 = 100\nS2 = 200\n"
+        "H1 = 101010101\nH2 = 202020202\n"
+        "H3 = 303030303\nH4 = 404040404\n"
+        "S3 = 300\nS4 = 400\n"
+        "I1 = <r 8><c><t>\nI5 = <b 0x10>\n"
+        "\n[Peer]\n"
+        "PublicKey = " + key('K') + "\n"
+        "PresharedKey = " + key('S') + "\n"
+        "Endpoint = vpn.example.test:443\n"
+        "AllowedIPs = 0.0.0.0/0, 10.0.0.0/8\n"
+        "PersistentKeepalive = 25\n";
+    WipeGuard canonical_guard(canonical);
+    auto encoded = base64_encode_for_test(canonical);
+    WipeGuard encoded_guard(encoded);
+    std::string expected =
+        "[{\"interface\":{\"wireguard\":{\"import\":{\"import\":\"" +
+        encoded + "\",\"name\":\"\",\"filename\":\"" +
+        std::string(request.filename()) + "\"}}}}]";
+    WipeGuard expected_guard(expected);
+
+    CapturingSecretSink sink(request.content_length());
+    CHECK(request.write_stock_rci_body_once(sink));
+    CHECK(sink.body() == expected);
+    CHECK_FALSE(request.has_pending_secret_body());
+}
+
+TEST_CASE("native AWG request fills extended S3 and S4 when signatures need them") {
+    auto request =
+        make_ndms_native_wireguard_import_request(zero_base_awg_conf());
+    std::string canonical =
+        "# Name = " + std::string(request.marker()) + "\n"
+        "[Interface]\n"
+        "PrivateKey = " + key('P') + "\n"
+        "Address = 10.8.0.2/32\n"
+        "DNS = 1.1.1.1\n"
+        "ListenPort = 51820\n"
+        "MTU = 1420\n"
+        "Jc = 0\nJmin = 0\nJmax = 0\n"
+        "S1 = 0\nS2 = 0\n"
+        "H1 = \nH2 = \nH3 = \nH4 = \n"
+        "S3 = 0\nS4 = 0\n"
+        "I1 = <b 0x0102>\n"
+        "\n[Peer]\n"
+        "PublicKey = " + key('K') + "\n"
+        "PresharedKey = " + key('S') + "\n"
+        "Endpoint = vpn.example.test:443\n"
+        "AllowedIPs = 0.0.0.0/0, 10.0.0.0/8\n"
+        "PersistentKeepalive = 25\n";
+    WipeGuard canonical_guard(canonical);
+    auto encoded = base64_encode_for_test(canonical);
+    WipeGuard encoded_guard(encoded);
+    std::string expected =
+        "[{\"interface\":{\"wireguard\":{\"import\":{\"import\":\"" +
+        encoded + "\",\"name\":\"\",\"filename\":\"" +
+        std::string(request.filename()) + "\"}}}}]";
+    WipeGuard expected_guard(expected);
+
+    CapturingSecretSink sink(request.content_length());
+    CHECK(request.write_stock_rci_body_once(sink));
+    CHECK(sink.body() == expected);
+    CHECK_FALSE(request.has_pending_secret_body());
+}
+
+TEST_CASE("native WG and AWG requests still reject URI envelopes") {
     CHECK(request_error(wireguard_vpn_uri()) ==
           NdmsNativeWireguardImportRequestErrorCode::unsupported_source);
 }
@@ -358,6 +446,16 @@ TEST_CASE("native WG request wipes its secret after every sink outcome") {
         CHECK_THROWS_WITH(
             request.write_stock_rci_body_once(sink),
             "synthetic transport failure");
+        CHECK_FALSE(request.has_pending_secret_body());
+    }
+
+    SUBCASE("AWG sink rejection") {
+        auto raw = awg_conf();
+        auto request =
+            make_ndms_native_wireguard_import_request(std::move(raw));
+        CHECK(raw.empty());
+        RejectingSecretSink sink(2U);
+        CHECK_FALSE(request.write_stock_rci_body_once(sink));
         CHECK_FALSE(request.has_pending_secret_body());
     }
 }

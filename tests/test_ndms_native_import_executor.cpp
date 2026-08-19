@@ -48,6 +48,20 @@ std::string plain_wireguard_config() {
            "\nEndpoint = vpn.example:51820\nAllowedIPs = 0.0.0.0/0\n";
 }
 
+std::string amnezia_wireguard_config() {
+    auto config = plain_wireguard_config();
+    const auto peer = config.find("\n\n[Peer]");
+    if (peer == std::string::npos) {
+        throw std::runtime_error("invalid AWG executor fixture");
+    }
+    config.insert(
+        peer,
+        "\nJc = 4\nJmin = 40\nJmax = 70\n"
+        "S1 = 100\nS2 = 200\n"
+        "H1 = 101\nH2 = 202\nH3 = 303\nH4 = 404\n");
+    return config;
+}
+
 std::string digest(const std::string& prefix, const char digit) {
     return prefix + std::string(64U, digit);
 }
@@ -311,6 +325,32 @@ TEST_CASE("native import request binding is deterministic and target-bound") {
 }
 
 TEST_CASE("native import executor cannot dispatch without every authority") {
+    SUBCASE("AWG serialization cannot enter the WG-only WAL") {
+        Fixture fixture;
+        const auto plan = execution_plan();
+        auto request = make_ndms_native_wireguard_import_request(
+            amnezia_wireguard_config());
+        REQUIRE(request.kind() ==
+                NdmsNativeTunnelImportKind::amnezia_wireguard);
+        auto receipt = fence_receipt(plan, request);
+
+        const auto result = execute_ndms_native_import_transaction(
+            std::move(request),
+            plan,
+            fixture.baseline(),
+            std::optional<NdmsNativeAllocatorFenceReceipt>{
+                std::move(receipt)},
+            fixture.dependencies);
+
+        CHECK(result.status == NdmsNativeImportExecutionStatus::blocked);
+        CHECK(result.stop ==
+              NdmsNativeImportExecutionStop::unsupported_tunnel_kind);
+        CHECK(fixture.wal.calls == 0U);
+        CHECK(fixture.generations.observe_calls == 0U);
+        CHECK(fixture.generations.reserve_calls == 0U);
+        CHECK(fixture.backend.calls == 0U);
+    }
+
     SUBCASE("current firmware provider yields no fence") {
         Fixture fixture;
         const auto plan = execution_plan();

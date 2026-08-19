@@ -236,6 +236,13 @@ NdmsNativeImportExecutionResult execute_ndms_native_import_transaction(
         return blocked(
             NdmsNativeImportExecutionStop::request_identity_invalid);
     }
+    if (request.kind() != NdmsNativeTunnelImportKind::wireguard) {
+        // Serialization support is deliberately ahead of execution support.
+        // The v2 WAL and ownership publication flow are still WG-only; never
+        // mislabel an AWG request as WireGuard in durable recovery state.
+        return blocked(
+            NdmsNativeImportExecutionStop::unsupported_tunnel_kind);
+    }
     if (!ndms_native_created_target_is_eligible(
             plan.expected_created_interface)) {
         return blocked(
@@ -570,6 +577,8 @@ const char* ndms_native_import_execution_stop_name(
         return "missing_dependency";
     case NdmsNativeImportExecutionStop::request_identity_invalid:
         return "request_identity_invalid";
+    case NdmsNativeImportExecutionStop::unsupported_tunnel_kind:
+        return "unsupported_tunnel_kind";
     case NdmsNativeImportExecutionStop::expected_target_ineligible:
         return "expected_target_ineligible";
     case NdmsNativeImportExecutionStop::baseline_mismatch:

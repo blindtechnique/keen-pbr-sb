@@ -9,14 +9,14 @@
 
 namespace keen_pbr3 {
 
-// The stock importer accepts a plain WireGuard .conf. URI envelopes and
-// AmneziaWG extensions deliberately remain outside this request boundary.
+// The stock importer accepts WireGuard and AmneziaWG .conf documents. URI
+// envelopes deliberately remain outside this request boundary: the request
+// owns only the already-validated canonical configuration it will send.
 constexpr std::size_t kNdmsNativeWireguardImportRequestMaximumBytes =
     kNdmsNativeTunnelImportMaximumBytes;
 
 enum class NdmsNativeWireguardImportRequestErrorCode {
     unsupported_source,
-    amnezia_wireguard_blocked,
     entropy_unavailable,
     already_consumed,
 };
@@ -64,6 +64,7 @@ public:
         NdmsNativeWireguardImportRequest&& other) noexcept;
 
     std::string_view operation() const noexcept;
+    NdmsNativeTunnelImportKind kind() const noexcept;
     std::string_view transaction_id() const noexcept;
     std::string_view marker() const noexcept;
     std::string_view filename() const noexcept;
@@ -82,6 +83,7 @@ private:
 
     NdmsNativeWireguardImportRequest(
         std::string canonical_conf,
+        NdmsNativeTunnelImportKind kind,
         std::string transaction_id,
         std::string marker,
         std::string filename,
@@ -90,6 +92,8 @@ private:
     void wipe_secret() noexcept;
 
     std::string canonical_conf_;
+    NdmsNativeTunnelImportKind kind_{
+        NdmsNativeTunnelImportKind::wireguard};
     std::string transaction_id_;
     std::string marker_;
     std::string filename_;
@@ -98,11 +102,12 @@ private:
     bool consumed_{true};
 };
 
-// Validates and canonicalizes one bounded plain WireGuard .conf. It strips
-// all caller comments/labels, injects a cryptographically random ownership
-// marker, and derives the only filename used by the RCI body from that marker.
-// The rvalue-only boundary wipes the caller's adopted allocation before
-// returning or throwing; callers cannot accidentally retain an lvalue copy.
+// Validates and canonicalizes one bounded WireGuard or AmneziaWG .conf. It
+// strips all caller comments/labels, injects a cryptographically random
+// ownership marker, and derives the only filename used by the RCI body from
+// that marker. The rvalue-only boundary wipes the caller's adopted allocation
+// before returning or throwing; callers cannot accidentally retain an lvalue
+// copy.
 NdmsNativeWireguardImportRequest
 make_ndms_native_wireguard_import_request(std::string&& raw_conf);
 
