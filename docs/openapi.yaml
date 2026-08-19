@@ -808,13 +808,14 @@ paths:
       summary: Install the pinned sing-box release
       description: >
         Installs the one release this build pins, and only when the capability
-        endpoint says it may. The archive is verified against the digest the
-        release publishes before anything is unpacked, and the unpacked binary
-        must report the pinned version before it replaces the installed one -
-        so a failure at any step leaves the router exactly as it was. A release
-        that publishes no checksums file is refused rather than installed
-        unverified, which is where this path is deliberately stricter than the
-        shell installer.
+        endpoint says it may. Before anything is unpacked, the archive is
+        verified against either the release checksum file or the exact
+        per-asset SHA-256 digest published for that archive. The unpacked binary
+        must report the pinned version before the atomic replacement begins.
+        Failures before that commit leave the installed binary unchanged;
+        failures after it are reported explicitly through `install_outcome` and
+        `durable`, because the new binary may already be visible even when its
+        ownership marker or directory durability could not be established.
 
 
         Running sing-box transports normally refuse the install, because the
@@ -4373,9 +4374,10 @@ components:
           type: boolean
           description: >
             Whether the fetched archive's checksum is verified
-            unconditionally. True: a release that publishes no checksums file
-            is refused rather than installed unverified, which is where this
-            path is deliberately stricter than the shell installer.
+            unconditionally. True means the install requires either a usable
+            checksum file or the exact per-asset SHA-256 digest published for
+            that archive; when neither source exists, the release is refused
+            rather than installed unverified.
         signed_release:
           type: boolean
           description: >
@@ -4465,8 +4467,8 @@ components:
             - checksum_mismatch
           description: >
             Why the release was refused, when it was. `checksums_missing`
-            means the release published no checksums file and was therefore
-            not installed.
+            means the release supplied neither a checksum file nor a usable
+            per-asset SHA-256 digest for this archive, so it was not installed.
         staged_version:
           type: string
           description: >

@@ -23,7 +23,7 @@ export interface SingBoxInstallResult {
   /** Present only after the binary replacement committed. `true` means the target directory was synced after the rename. `false` means the new binary is already visible and may be running, but a crash or power loss can still lose that rename; it must not be reported as an ordinary durable success.
    */
   durable?: boolean;
-  /** Why the release was refused, when it was. `checksums_missing` means the release published no checksums file and was therefore not installed.
+  /** Why the release was refused, when it was. `checksums_missing` means the release supplied neither a checksum file nor a usable per-asset SHA-256 digest for this archive, so it was not installed.
    */
   release_verdict?: SingBoxInstallResultReleaseVerdict;
   /** What the unpacked binary reported, when it was asked. Present with `staged_version_mismatch` so an operator can see what the archive actually contained.

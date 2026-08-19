@@ -30,7 +30,7 @@ export interface SingBoxInstallCapability {
   /** How many managed sing-box transports are running. Present so a client can tell the operator what consenting to `stop_running_transports` would actually interrupt - "two tunnels" is a decision they can make, "some transports" is not. Absent when the transport manager could not be asked, which is the `transport_state_unknown` blocker.
    */
   running_transports?: number;
-  /** Whether the fetched archive's checksum is verified unconditionally. True: a release that publishes no checksums file is refused rather than installed unverified, which is where this path is deliberately stricter than the shell installer.
+  /** Whether the fetched archive's checksum is verified unconditionally. True means the install requires either a usable checksum file or the exact per-asset SHA-256 digest published for that archive; when neither source exists, the release is refused rather than installed unverified.
    */
   verified_archive_checksum: boolean;
   /** Whether the release carries a signature this daemon checks. Currently false - GitHub release assets carry none, so "pinned+signed" is pinned-only for now.

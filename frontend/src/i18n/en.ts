@@ -1092,7 +1092,7 @@ export const enTranslation = {
         archive_missing:
           "The release has no archive for this router's architecture.",
         checksums_missing:
-          "The release publishes no checksums file, so it was not installed unverified.",
+          "The release provides neither a checksum file nor a usable SHA-256 digest for this archive, so it was not installed unverified.",
         checksum_unusable:
           "The checksums file has no usable line for this archive.",
         checksum_mismatch: "The published checksum did not match.",
