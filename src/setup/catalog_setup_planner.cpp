@@ -267,6 +267,65 @@ const Outbound* find_outbound(const Config& config, const std::string& tag) {
     return found == outbounds.end() ? nullptr : &*found;
 }
 
+enum class CatalogRouteTier : std::uint8_t {
+    tunnel = 0,
+    direct = 1,
+    block = 2,
+};
+
+CatalogRouteTier catalog_route_tier(CatalogAction action) {
+    switch (action) {
+        case CatalogAction::reject: return CatalogRouteTier::block;
+        case CatalogAction::direct: return CatalogRouteTier::direct;
+        case CatalogAction::tunnel: break;
+    }
+    return CatalogRouteTier::tunnel;
+}
+
+CatalogRouteTier catalog_route_tier(const Config& config,
+                                    const RouteRule& rule) {
+    const auto* outbound = find_outbound(config, rule.outbound);
+    if (outbound != nullptr &&
+        outbound->type == OutboundType::BLACKHOLE) {
+        return CatalogRouteTier::block;
+    }
+    if (outbound != nullptr &&
+        outbound->type == OutboundType::TABLE &&
+        outbound->table == kMainRoutingTable) {
+        return CatalogRouteTier::direct;
+    }
+    return CatalogRouteTier::tunnel;
+}
+
+std::size_t catalog_route_insertion_index(
+    const Config& config,
+    const std::vector<RouteRule>& rules,
+    CatalogAction action) {
+    const auto incoming_tier = catalog_route_tier(action);
+
+    // Existing rules, including hand-written ones, never move. In a regular
+    // tiered sequence this places the new rule after its higher/equal peers
+    // and before the first lower tier. If a user already arranged conflicting
+    // tiers, the last higher-tier rule is the hard lower bound: preserving the
+    // existing order is safer than silently normalizing it, but a new lower
+    // tier must still never leap over an active higher tier.
+    std::size_t after_last_higher = 0U;
+    for (std::size_t index = 0; index < rules.size(); ++index) {
+        if (!route_rule_enabled(rules[index])) continue;
+        if (catalog_route_tier(config, rules[index]) > incoming_tier) {
+            after_last_higher = index + 1U;
+        }
+    }
+    for (std::size_t index = after_last_higher;
+         index < rules.size(); ++index) {
+        if (!route_rule_enabled(rules[index])) continue;
+        if (catalog_route_tier(config, rules[index]) < incoming_tier) {
+            return index;
+        }
+    }
+    return rules.size();
+}
+
 const DnsServer* find_dns_server(const Config& config,
                                  const std::string& tag) {
     if (!config.dns.has_value() || !config.dns->servers.has_value()) {
@@ -2056,31 +2115,9 @@ CatalogSetupPlan plan_catalog_setup(
         auto route = candidate.route.value_or(RouteConfig{});
         auto rules = route.rules.value_or(std::vector<RouteRule>{});
         auto ids = occupied_route_ids(active_config);
-        std::size_t base_insertion_index = rules.size();
-        // Both of these go to the top, and for the same reason: they are
-        // exceptions. A blocked domain must not be rescued by a broader tunnel
-        // rule below it, and a domain kept direct must not be swept into a
-        // tunnel by one either - "always direct" that loses to the next rule
-        // is not always.
-        if (intent.mode == CatalogSetupMode::block ||
-            intent.mode == CatalogSetupMode::direct) {
-            base_insertion_index = 0U;
-        } else {
-            std::set<std::string> blackhole_tags;
-            for (const auto& outbound :
-                 candidate.outbounds.value_or(std::vector<Outbound>{})) {
-                if (outbound.type == OutboundType::BLACKHOLE) {
-                    blackhole_tags.insert(outbound.tag);
-                }
-            }
-            for (std::size_t index = 0; index < rules.size(); ++index) {
-                if (route_rule_enabled(rules[index]) &&
-                    blackhole_tags.count(rules[index].outbound) != 0U) {
-                    base_insertion_index = index;
-                    break;
-                }
-            }
-        }
+        const auto base_insertion_index =
+            catalog_route_insertion_index(
+                candidate, rules, selected_action);
 
         std::vector<ParsedPreset> route_presets;
         route_presets.reserve(missing_route_list_ids.size());

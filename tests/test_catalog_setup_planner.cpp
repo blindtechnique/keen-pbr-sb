@@ -1625,7 +1625,7 @@ TEST_CASE("catalog planner creates a collision-safe blackhole") {
     CHECK(plan.candidate.route->rules->front().outbound == "block_2");
 }
 
-TEST_CASE("normal catalog route is inserted before the first active blackhole") {
+TEST_CASE("normal catalog route is inserted after every active blackhole") {
     auto config = base_config();
     ListConfig existing;
     existing.domains = std::vector<std::string>{"existing.example"};
@@ -1656,16 +1656,225 @@ TEST_CASE("normal catalog route is inserted before the first active blackhole") 
         nlohmann::json::array({routing_preset()}),
         config);
     REQUIRE(plan.summary.route_rule.has_value());
-    CHECK(plan.summary.route_rule->insertion_index == 1U);
+    CHECK(plan.summary.route_rule->insertion_index == 3U);
     CHECK(
         plan.candidate.route->rules->at(0).id ==
         std::optional<std::string>{"disabled"});
     CHECK(
         plan.candidate.route->rules->at(1).id ==
-        std::optional<std::string>{"catalog_category_ai"});
+        std::optional<std::string>{"active"});
     CHECK(
         plan.candidate.route->rules->at(2).id ==
-        std::optional<std::string>{"active"});
+        std::optional<std::string>{"later"});
+    CHECK(
+        plan.candidate.route->rules->at(3).id ==
+        std::optional<std::string>{"catalog_category_ai"});
+}
+
+TEST_CASE(
+    "catalog route tiers are deterministic for every install order") {
+    struct RouteKind {
+        const char* id;
+        const char* action;
+        CatalogSetupMode mode;
+        int tier;
+    };
+    constexpr std::array<RouteKind, 3U> kinds{{
+        {"tier-block", "reject", CatalogSetupMode::block, 3},
+        {"tier-direct", "direct", CatalogSetupMode::direct, 2},
+        {"tier-tunnel", "tunnel", CatalogSetupMode::outbound, 1},
+    }};
+    constexpr std::array<std::array<std::size_t, 2U>, 6U> orders{{
+        {0U, 1U},
+        {1U, 0U},
+        {0U, 2U},
+        {2U, 0U},
+        {1U, 2U},
+        {2U, 1U},
+    }};
+    constexpr std::array<std::array<std::size_t, 3U>, 6U>
+        permutations{{
+            {0U, 1U, 2U},
+            {0U, 2U, 1U},
+            {1U, 0U, 2U},
+            {1U, 2U, 0U},
+            {2U, 0U, 1U},
+            {2U, 1U, 0U},
+        }};
+
+    const auto preset_for = [](const RouteKind& kind) {
+        auto preset = routing_preset(
+            kind.id,
+            kind.id,
+            std::string(
+                "https://repo.hoaxisr.ru/rulesets/srs/") +
+                kind.id + ".srs");
+        preset["engines"]["singbox"]["action"] = kind.action;
+        preset["engines"]["dns"]["domains"] =
+            nlohmann::json::array({"overlap.example"});
+        return preset;
+    };
+    const nlohmann::json catalog = {
+        {"catalog_id", "test:route-tier-order"},
+        {"presets",
+         nlohmann::json::array({
+             preset_for(kinds[0]),
+             preset_for(kinds[1]),
+             preset_for(kinds[2]),
+         })},
+    };
+    const auto intent_for = [](const RouteKind& kind) {
+        CatalogSetupIntent intent;
+        intent.selections = {{kind.id, std::nullopt}};
+        intent.mode = kind.mode;
+        intent.dns_mode = CatalogDnsMode::none;
+        if (kind.mode == CatalogSetupMode::outbound) {
+            intent.outbound_tag = "proxy";
+        }
+        return intent;
+    };
+    const auto tier_for = [](const Config& config,
+                             const RouteRule& rule) {
+        const auto& outbounds = *config.outbounds;
+        const auto outbound = std::find_if(
+            outbounds.begin(),
+            outbounds.end(),
+            [&](const Outbound& value) {
+                return value.tag == rule.outbound;
+            });
+        if (outbound == outbounds.end()) return -1;
+        if (outbound->type == OutboundType::BLACKHOLE) return 3;
+        if (outbound->type == OutboundType::TABLE &&
+            outbound->table == 254) {
+            return 2;
+        }
+        return 1;
+    };
+
+    for (const auto& order : orders) {
+        CAPTURE(order[0]);
+        CAPTURE(order[1]);
+        const auto& first_kind = kinds[order[0]];
+        const auto& second_kind = kinds[order[1]];
+        const auto first = plan_catalog_setup(
+            intent_for(first_kind), catalog, base_config());
+        const auto second = plan_catalog_setup(
+            intent_for(second_kind), catalog, first.candidate);
+
+        REQUIRE(second.summary.route_rule.has_value());
+        CHECK(
+            second.summary.route_rule->insertion_index ==
+            (first_kind.tier > second_kind.tier ? 1U : 0U));
+        REQUIRE(second.candidate.route.has_value());
+        REQUIRE(second.candidate.route->rules.has_value());
+        REQUIRE(second.candidate.outbounds.has_value());
+        REQUIRE(second.candidate.lists.has_value());
+        const auto& rules = *second.candidate.route->rules;
+        REQUIRE(rules.size() == 2U);
+        CHECK(
+            tier_for(second.candidate, rules[0]) >
+            tier_for(second.candidate, rules[1]));
+
+        for (const auto& rule : rules) {
+            REQUIRE(rule.list.has_value());
+            REQUIRE(rule.list->size() == 1U);
+            const auto& list =
+                second.candidate.lists->at(rule.list->front());
+            REQUIRE(list.domains.has_value());
+            CHECK(
+                std::find(
+                    list.domains->begin(),
+                    list.domains->end(),
+                    "overlap.example") != list.domains->end());
+        }
+    }
+
+    for (const auto& order : permutations) {
+        CAPTURE(order[0]);
+        CAPTURE(order[1]);
+        CAPTURE(order[2]);
+        const auto first = plan_catalog_setup(
+            intent_for(kinds[order[0]]), catalog, base_config());
+        const auto second = plan_catalog_setup(
+            intent_for(kinds[order[1]]), catalog, first.candidate);
+        const auto third = plan_catalog_setup(
+            intent_for(kinds[order[2]]), catalog, second.candidate);
+
+        REQUIRE(third.candidate.route.has_value());
+        REQUIRE(third.candidate.route->rules.has_value());
+        REQUIRE(third.candidate.outbounds.has_value());
+        REQUIRE(third.candidate.lists.has_value());
+        const auto& rules = *third.candidate.route->rules;
+        REQUIRE(rules.size() == 3U);
+        CHECK(tier_for(third.candidate, rules[0]) == 3);
+        CHECK(tier_for(third.candidate, rules[1]) == 2);
+        CHECK(tier_for(third.candidate, rules[2]) == 1);
+
+        for (const auto& rule : rules) {
+            REQUIRE(rule.list.has_value());
+            REQUIRE(rule.list->size() == 1U);
+            const auto& list =
+                third.candidate.lists->at(rule.list->front());
+            REQUIRE(list.domains.has_value());
+            CHECK(
+                std::find(
+                    list.domains->begin(),
+                    list.domains->end(),
+                    "overlap.example") != list.domains->end());
+        }
+    }
+}
+
+TEST_CASE(
+    "catalog tier insertion preserves conflicting custom route order") {
+    auto config = base_config();
+    ListConfig shared;
+    shared.domains = std::vector<std::string>{"overlap.example"};
+    config.lists = std::map<std::string, ListConfig>{
+        {"custom_tunnel", shared},
+        {"custom_block", shared},
+    };
+
+    Outbound blackhole;
+    blackhole.tag = "drop";
+    blackhole.type = OutboundType::BLACKHOLE;
+    config.outbounds->push_back(blackhole);
+    RouteRule custom_tunnel;
+    custom_tunnel.id = "custom_tunnel_first";
+    custom_tunnel.list = std::vector<std::string>{"custom_tunnel"};
+    custom_tunnel.outbound = "proxy";
+    RouteRule custom_block;
+    custom_block.id = "custom_block_second";
+    custom_block.list = std::vector<std::string>{"custom_block"};
+    custom_block.outbound = "drop";
+    const auto custom_tunnel_before =
+        nlohmann::json(custom_tunnel).dump();
+    const auto custom_block_before =
+        nlohmann::json(custom_block).dump();
+    config.route->rules =
+        std::vector<RouteRule>{custom_tunnel, custom_block};
+    validate_config(config);
+
+    const auto plan = plan_catalog_setup(
+        direct_intent(),
+        nlohmann::json::array({direct_preset()}),
+        config);
+    REQUIRE(plan.summary.route_rule.has_value());
+    CHECK(plan.summary.route_rule->insertion_index == 2U);
+    REQUIRE(plan.candidate.route->rules->size() == 3U);
+    CHECK(
+        plan.candidate.route->rules->at(0).id ==
+        custom_tunnel.id);
+    CHECK(
+        plan.candidate.route->rules->at(1).id ==
+        custom_block.id);
+    CHECK(
+        nlohmann::json(plan.candidate.route->rules->at(0)).dump() ==
+        custom_tunnel_before);
+    CHECK(
+        nlohmann::json(plan.candidate.route->rules->at(1)).dump() ==
+        custom_block_before);
+    CHECK(plan.candidate.route->rules->at(2).outbound == "wan");
 }
 
 TEST_CASE("source detour applies only to URL-backed lists") {
