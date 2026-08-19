@@ -2538,7 +2538,8 @@ TEST_CASE("fwmark mask: boundary allocation never aliases unmarked traffic") {
 
     std::set<uint32_t> masked_marks;
     for (const auto& [tag, mark] : marks) {
-        CAPTURE(tag, mark);
+        CAPTURE(tag);
+        CAPTURE(mark);
         const uint32_t masked_mark = mark & 0x0000F000u;
         CHECK(masked_mark != 0);
         CHECK(masked_marks.insert(masked_mark).second);
