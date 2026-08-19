@@ -21,20 +21,12 @@ GET  /api/nfqws
 POST /api/nfqws
 GET  /api/system/remote-access
 POST /api/system/remote-access
-GET  /api/system/naive-component
-POST /api/system/naive-component
 GET  /api/transports/settings
 POST /api/transports/settings
-GET  /api/logs/settings
-POST /api/logs/settings
 
 # --- Очередь 2: read-only --------------------------------------------------
 GET  /api/catalog
 POST /api/catalog/refresh
 GET  /api/connections
 GET  /api/connections/active
-GET  /api/logs
 POST /api/system/geo
-GET  /api/system/interface-names
-GET  /api/system/router
-GET  /api/transports/environment

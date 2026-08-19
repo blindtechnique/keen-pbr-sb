@@ -54,17 +54,17 @@ api::Role api_interface_role(NdmsInterfaceRole role) {
     return api::Role::UNKNOWN;
 }
 
-api::NdmsCatalogStatus api_catalog_status(
+api::CatalogStatus api_catalog_status(
     NdmsCatalogCacheStatus status) {
     switch (status) {
     case NdmsCatalogCacheStatus::fresh:
-        return api::NdmsCatalogStatus::FRESH;
+        return api::CatalogStatus::FRESH;
     case NdmsCatalogCacheStatus::stale:
-        return api::NdmsCatalogStatus::STALE;
+        return api::CatalogStatus::STALE;
     case NdmsCatalogCacheStatus::unavailable:
-        return api::NdmsCatalogStatus::UNAVAILABLE;
+        return api::CatalogStatus::UNAVAILABLE;
     }
-    return api::NdmsCatalogStatus::UNAVAILABLE;
+    return api::CatalogStatus::UNAVAILABLE;
 }
 
 api::NdmsVpnServerKind api_vpn_server_kind(

@@ -46,12 +46,20 @@ import type {
   DependencyAnalysisResponse,
   ErrorResponse,
   GetAuthStatusParams,
+  GetLogsParams,
   GrantedResponse,
   HealthResponse,
+  InterfaceNames,
   ListDeleteStageRequest,
   ListDeleteStageResponse,
   ListRefreshRequest,
   ListRefreshResponse,
+  LogSettings,
+  LogSettingsRequest,
+  LogSettingsResult,
+  LogTail,
+  NaiveComponentInstallResult,
+  NaiveComponentState,
   NdmsInterfaceInventoryResponse,
   NdmsVpnServerServiceInventoryResponse,
   OkResponse,
@@ -59,6 +67,7 @@ import type {
   PostSingBoxInstallCancel200,
   RecommendedListSetupRequest,
   ReloadResponse,
+  RouterInfo,
   RoutingHealthErrorResponse,
   RoutingHealthResponse,
   RoutingTestRequest,
@@ -85,6 +94,7 @@ import type {
   TransportExitCheckResponse,
   TransportSpec,
   TransportStatus,
+  TransportsEnvironment,
   UpdateStartedResponse
 } from './model';
 
@@ -3936,6 +3946,870 @@ export function useGetTransportConfigExport<TData = Awaited<ReturnType<typeof ge
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getGetTransportConfigExportQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * The router runs keen-pbr from an init script that discards stderr, so without this the only way to read a startup failure is over SSH.
+
+A `lines` value that is not a number is not an error: the default is used instead, because a diagnostics endpoint that refuses to answer is useless precisely when it is needed. Invalid bytes in a legacy log are replaced rather than failing the response for the same reason.
+
+ * @summary Tail of the daemon log
+ */
+export type getLogsResponse200 = {
+  data: LogTail
+  status: 200
+}
+
+export type getLogsResponseSuccess = (getLogsResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getLogsResponse = (getLogsResponseSuccess)
+
+export const getGetLogsUrl = (params?: GetLogsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : value.toString())
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/logs?${stringifiedParams}` : `/api/logs`
+}
+
+export const getLogs = async (params?: GetLogsParams, options?: RequestInit): Promise<getLogsResponse> => {
+
+  return apiFetch<getLogsResponse>(getGetLogsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetLogsQueryKey = (params?: GetLogsParams,) => {
+    return [
+    `/api/logs`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getGetLogsQueryOptions = <TData = Awaited<ReturnType<typeof getLogs>>, TError = unknown>(params?: GetLogsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getLogs>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetLogsQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getLogs>>> = ({ signal }) => getLogs(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getLogs>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetLogsQueryResult = NonNullable<Awaited<ReturnType<typeof getLogs>>>
+export type GetLogsQueryError = unknown
+
+
+export function useGetLogs<TData = Awaited<ReturnType<typeof getLogs>>, TError = unknown>(
+ params: undefined |  GetLogsParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getLogs>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getLogs>>,
+          TError,
+          Awaited<ReturnType<typeof getLogs>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetLogs<TData = Awaited<ReturnType<typeof getLogs>>, TError = unknown>(
+ params?: GetLogsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getLogs>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getLogs>>,
+          TError,
+          Awaited<ReturnType<typeof getLogs>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetLogs<TData = Awaited<ReturnType<typeof getLogs>>, TError = unknown>(
+ params?: GetLogsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getLogs>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Tail of the daemon log
+ */
+
+export function useGetLogs<TData = Awaited<ReturnType<typeof getLogs>>, TError = unknown>(
+ params?: GetLogsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getLogs>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetLogsQueryOptions(params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * Reports what is in force now. Read this before concluding anything from an empty log: `file_enabled` can be false, and then a perfectly healthy daemon writes nothing at all.
+
+ * @summary Current logging preferences
+ */
+export type getLogSettingsResponse200 = {
+  data: LogSettings
+  status: 200
+}
+
+export type getLogSettingsResponseSuccess = (getLogSettingsResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getLogSettingsResponse = (getLogSettingsResponseSuccess)
+
+export const getGetLogSettingsUrl = () => {
+
+
+
+
+  return `/api/logs/settings`
+}
+
+export const getLogSettings = async ( options?: RequestInit): Promise<getLogSettingsResponse> => {
+
+  return apiFetch<getLogSettingsResponse>(getGetLogSettingsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetLogSettingsQueryKey = () => {
+    return [
+    `/api/logs/settings`
+    ] as const;
+    }
+
+
+export const getGetLogSettingsQueryOptions = <TData = Awaited<ReturnType<typeof getLogSettings>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getLogSettings>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetLogSettingsQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getLogSettings>>> = ({ signal }) => getLogSettings({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getLogSettings>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetLogSettingsQueryResult = NonNullable<Awaited<ReturnType<typeof getLogSettings>>>
+export type GetLogSettingsQueryError = unknown
+
+
+export function useGetLogSettings<TData = Awaited<ReturnType<typeof getLogSettings>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getLogSettings>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getLogSettings>>,
+          TError,
+          Awaited<ReturnType<typeof getLogSettings>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetLogSettings<TData = Awaited<ReturnType<typeof getLogSettings>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getLogSettings>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getLogSettings>>,
+          TError,
+          Awaited<ReturnType<typeof getLogSettings>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetLogSettings<TData = Awaited<ReturnType<typeof getLogSettings>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getLogSettings>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Current logging preferences
+ */
+
+export function useGetLogSettings<TData = Awaited<ReturnType<typeof getLogSettings>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getLogSettings>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetLogSettingsQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * Only fields that are present AND of the right type are honoured; the rest keep their current value. A level is validated before it is stored, so a typo cannot silence the log.
+
+**Failure is reported in the body, not in the status.** Every outcome is HTTP 200; read `ok` and `error`. A caller that checks only the HTTP code will believe it turned logging on when it did not.
+
+Worth knowing before drawing conclusions from a quiet log: setting `file_enabled` to false stops all file output, and `level` above `info` hides the daemon's ordinary progress lines - including the ones a successful reload writes.
+
+ * @summary Turn the log file on or off, or change verbosity
+ */
+export type postLogSettingsResponse200 = {
+  data: LogSettingsResult
+  status: 200
+}
+
+export type postLogSettingsResponseSuccess = (postLogSettingsResponse200) & {
+  headers: Headers;
+};
+;
+
+export type postLogSettingsResponse = (postLogSettingsResponseSuccess)
+
+export const getPostLogSettingsUrl = () => {
+
+
+
+
+  return `/api/logs/settings`
+}
+
+export const postLogSettings = async (logSettingsRequest: LogSettingsRequest, options?: RequestInit): Promise<postLogSettingsResponse> => {
+
+  return apiFetch<postLogSettingsResponse>(getPostLogSettingsUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      logSettingsRequest,)
+  }
+);}
+
+
+
+
+export const getPostLogSettingsMutationOptions = <TError = unknown,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postLogSettings>>, TError,{data: LogSettingsRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postLogSettings>>, TError,{data: LogSettingsRequest}, TContext> => {
+
+const mutationKey = ['postLogSettings'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postLogSettings>>, {data: LogSettingsRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postLogSettings(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostLogSettingsMutationResult = NonNullable<Awaited<ReturnType<typeof postLogSettings>>>
+    export type PostLogSettingsMutationBody = LogSettingsRequest
+    export type PostLogSettingsMutationError = unknown
+
+    /**
+ * @summary Turn the log file on or off, or change verbosity
+ */
+export const usePostLogSettings = <TError = unknown,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postLogSettings>>, TError,{data: LogSettingsRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postLogSettings>>,
+        TError,
+        {data: LogSettingsRequest},
+        TContext
+      > => {
+      return useMutation(getPostLogSettingsMutationOptions(options), queryClient);
+    }
+
+/**
+ * Served from a 5-second cache, so polling it costs nothing extra.
+
+Every field is optional and present only when this router could be asked: absent means "not known here", never zero. A missing `cpu_temperature_c` is a router without that sensor, and rendering it as 0 would invent a reading.
+
+ * @summary Hardware and firmware facts
+ */
+export type getSystemRouterResponse200 = {
+  data: RouterInfo
+  status: 200
+}
+
+export type getSystemRouterResponseSuccess = (getSystemRouterResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getSystemRouterResponse = (getSystemRouterResponseSuccess)
+
+export const getGetSystemRouterUrl = () => {
+
+
+
+
+  return `/api/system/router`
+}
+
+export const getSystemRouter = async ( options?: RequestInit): Promise<getSystemRouterResponse> => {
+
+  return apiFetch<getSystemRouterResponse>(getGetSystemRouterUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetSystemRouterQueryKey = () => {
+    return [
+    `/api/system/router`
+    ] as const;
+    }
+
+
+export const getGetSystemRouterQueryOptions = <TData = Awaited<ReturnType<typeof getSystemRouter>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemRouter>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetSystemRouterQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getSystemRouter>>> = ({ signal }) => getSystemRouter({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getSystemRouter>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetSystemRouterQueryResult = NonNullable<Awaited<ReturnType<typeof getSystemRouter>>>
+export type GetSystemRouterQueryError = unknown
+
+
+export function useGetSystemRouter<TData = Awaited<ReturnType<typeof getSystemRouter>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemRouter>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getSystemRouter>>,
+          TError,
+          Awaited<ReturnType<typeof getSystemRouter>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetSystemRouter<TData = Awaited<ReturnType<typeof getSystemRouter>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemRouter>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getSystemRouter>>,
+          TError,
+          Awaited<ReturnType<typeof getSystemRouter>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetSystemRouter<TData = Awaited<ReturnType<typeof getSystemRouter>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemRouter>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Hardware and firmware facts
+ */
+
+export function useGetSystemRouter<TData = Awaited<ReturnType<typeof getSystemRouter>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemRouter>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetSystemRouterQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * `available` is true only when the firmware answered AND the cached catalogue is fresh - a stale catalogue is offered as data with `catalog_status: stale`, but not as something to rely on for naming.
+
+ * @summary Human names the firmware gives its interfaces
+ */
+export type getSystemInterfaceNamesResponse200 = {
+  data: InterfaceNames
+  status: 200
+}
+
+export type getSystemInterfaceNamesResponseSuccess = (getSystemInterfaceNamesResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getSystemInterfaceNamesResponse = (getSystemInterfaceNamesResponseSuccess)
+
+export const getGetSystemInterfaceNamesUrl = () => {
+
+
+
+
+  return `/api/system/interface-names`
+}
+
+export const getSystemInterfaceNames = async ( options?: RequestInit): Promise<getSystemInterfaceNamesResponse> => {
+
+  return apiFetch<getSystemInterfaceNamesResponse>(getGetSystemInterfaceNamesUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetSystemInterfaceNamesQueryKey = () => {
+    return [
+    `/api/system/interface-names`
+    ] as const;
+    }
+
+
+export const getGetSystemInterfaceNamesQueryOptions = <TData = Awaited<ReturnType<typeof getSystemInterfaceNames>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemInterfaceNames>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetSystemInterfaceNamesQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getSystemInterfaceNames>>> = ({ signal }) => getSystemInterfaceNames({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getSystemInterfaceNames>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetSystemInterfaceNamesQueryResult = NonNullable<Awaited<ReturnType<typeof getSystemInterfaceNames>>>
+export type GetSystemInterfaceNamesQueryError = unknown
+
+
+export function useGetSystemInterfaceNames<TData = Awaited<ReturnType<typeof getSystemInterfaceNames>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemInterfaceNames>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getSystemInterfaceNames>>,
+          TError,
+          Awaited<ReturnType<typeof getSystemInterfaceNames>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetSystemInterfaceNames<TData = Awaited<ReturnType<typeof getSystemInterfaceNames>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemInterfaceNames>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getSystemInterfaceNames>>,
+          TError,
+          Awaited<ReturnType<typeof getSystemInterfaceNames>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetSystemInterfaceNames<TData = Awaited<ReturnType<typeof getSystemInterfaceNames>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemInterfaceNames>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Human names the firmware gives its interfaces
+ */
+
+export function useGetSystemInterfaceNames<TData = Awaited<ReturnType<typeof getSystemInterfaceNames>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemInterfaceNames>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetSystemInterfaceNamesQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * @summary Whether the naive component is installed
+ */
+export type getSystemNaiveComponentResponse200 = {
+  data: NaiveComponentState
+  status: 200
+}
+
+export type getSystemNaiveComponentResponseSuccess = (getSystemNaiveComponentResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getSystemNaiveComponentResponse = (getSystemNaiveComponentResponseSuccess)
+
+export const getGetSystemNaiveComponentUrl = () => {
+
+
+
+
+  return `/api/system/naive-component`
+}
+
+export const getSystemNaiveComponent = async ( options?: RequestInit): Promise<getSystemNaiveComponentResponse> => {
+
+  return apiFetch<getSystemNaiveComponentResponse>(getGetSystemNaiveComponentUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetSystemNaiveComponentQueryKey = () => {
+    return [
+    `/api/system/naive-component`
+    ] as const;
+    }
+
+
+export const getGetSystemNaiveComponentQueryOptions = <TData = Awaited<ReturnType<typeof getSystemNaiveComponent>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemNaiveComponent>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetSystemNaiveComponentQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getSystemNaiveComponent>>> = ({ signal }) => getSystemNaiveComponent({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getSystemNaiveComponent>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetSystemNaiveComponentQueryResult = NonNullable<Awaited<ReturnType<typeof getSystemNaiveComponent>>>
+export type GetSystemNaiveComponentQueryError = unknown
+
+
+export function useGetSystemNaiveComponent<TData = Awaited<ReturnType<typeof getSystemNaiveComponent>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemNaiveComponent>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getSystemNaiveComponent>>,
+          TError,
+          Awaited<ReturnType<typeof getSystemNaiveComponent>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetSystemNaiveComponent<TData = Awaited<ReturnType<typeof getSystemNaiveComponent>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemNaiveComponent>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getSystemNaiveComponent>>,
+          TError,
+          Awaited<ReturnType<typeof getSystemNaiveComponent>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetSystemNaiveComponent<TData = Awaited<ReturnType<typeof getSystemNaiveComponent>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemNaiveComponent>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Whether the naive component is installed
+ */
+
+export function useGetSystemNaiveComponent<TData = Awaited<ReturnType<typeof getSystemNaiveComponent>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemNaiveComponent>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetSystemNaiveComponentQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * Idempotent: when the library is already present nothing is fetched and the current state is returned. Installs are serialised, because two at once would write the same temporary file and the second would take the first's half-written copy.
+
+**Failure is reported in the body, not in the status.** A caller that checks only the HTTP code will read every outcome as success; read `error` and `installed`.
+
+ * @summary Install the naive component
+ */
+export type postSystemNaiveComponentResponse200 = {
+  data: NaiveComponentInstallResult
+  status: 200
+}
+
+export type postSystemNaiveComponentResponseSuccess = (postSystemNaiveComponentResponse200) & {
+  headers: Headers;
+};
+;
+
+export type postSystemNaiveComponentResponse = (postSystemNaiveComponentResponseSuccess)
+
+export const getPostSystemNaiveComponentUrl = () => {
+
+
+
+
+  return `/api/system/naive-component`
+}
+
+export const postSystemNaiveComponent = async ( options?: RequestInit): Promise<postSystemNaiveComponentResponse> => {
+
+  return apiFetch<postSystemNaiveComponentResponse>(getPostSystemNaiveComponentUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+export const getPostSystemNaiveComponentMutationOptions = <TError = unknown,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSystemNaiveComponent>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postSystemNaiveComponent>>, TError,void, TContext> => {
+
+const mutationKey = ['postSystemNaiveComponent'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postSystemNaiveComponent>>, void> = () => {
+
+
+          return  postSystemNaiveComponent(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostSystemNaiveComponentMutationResult = NonNullable<Awaited<ReturnType<typeof postSystemNaiveComponent>>>
+
+    export type PostSystemNaiveComponentMutationError = unknown
+
+    /**
+ * @summary Install the naive component
+ */
+export const usePostSystemNaiveComponent = <TError = unknown,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSystemNaiveComponent>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postSystemNaiveComponent>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getPostSystemNaiveComponentMutationOptions(options), queryClient);
+    }
+
+/**
+ * `sing_box_installed` is measured - the binary named by `sing_box_binary` is checked on disk - rather than remembered from an install.
+
+`tested_version` repeats `pinned_version` and exists only for a frontend that already reads that name. They were once different promises about the same number, which is exactly the kind of drift this endpoint should not reintroduce.
+
+ * @summary What this build pins and what the router actually has
+ */
+export type getTransportsEnvironmentResponse200 = {
+  data: TransportsEnvironment
+  status: 200
+}
+
+export type getTransportsEnvironmentResponseSuccess = (getTransportsEnvironmentResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getTransportsEnvironmentResponse = (getTransportsEnvironmentResponseSuccess)
+
+export const getGetTransportsEnvironmentUrl = () => {
+
+
+
+
+  return `/api/transports/environment`
+}
+
+export const getTransportsEnvironment = async ( options?: RequestInit): Promise<getTransportsEnvironmentResponse> => {
+
+  return apiFetch<getTransportsEnvironmentResponse>(getGetTransportsEnvironmentUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetTransportsEnvironmentQueryKey = () => {
+    return [
+    `/api/transports/environment`
+    ] as const;
+    }
+
+
+export const getGetTransportsEnvironmentQueryOptions = <TData = Awaited<ReturnType<typeof getTransportsEnvironment>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTransportsEnvironment>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetTransportsEnvironmentQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getTransportsEnvironment>>> = ({ signal }) => getTransportsEnvironment({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getTransportsEnvironment>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetTransportsEnvironmentQueryResult = NonNullable<Awaited<ReturnType<typeof getTransportsEnvironment>>>
+export type GetTransportsEnvironmentQueryError = unknown
+
+
+export function useGetTransportsEnvironment<TData = Awaited<ReturnType<typeof getTransportsEnvironment>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTransportsEnvironment>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getTransportsEnvironment>>,
+          TError,
+          Awaited<ReturnType<typeof getTransportsEnvironment>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetTransportsEnvironment<TData = Awaited<ReturnType<typeof getTransportsEnvironment>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTransportsEnvironment>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getTransportsEnvironment>>,
+          TError,
+          Awaited<ReturnType<typeof getTransportsEnvironment>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetTransportsEnvironment<TData = Awaited<ReturnType<typeof getTransportsEnvironment>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTransportsEnvironment>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary What this build pins and what the router actually has
+ */
+
+export function useGetTransportsEnvironment<TData = Awaited<ReturnType<typeof getTransportsEnvironment>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTransportsEnvironment>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetTransportsEnvironmentQueryOptions(options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 

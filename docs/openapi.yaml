@@ -982,6 +982,180 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/logs:
+    get:
+      summary: Tail of the daemon log
+      description: >
+        The router runs keen-pbr from an init script that discards stderr, so
+        without this the only way to read a startup failure is over SSH.
+
+
+        A `lines` value that is not a number is not an error: the default is
+        used instead, because a diagnostics endpoint that refuses to answer is
+        useless precisely when it is needed. Invalid bytes in a legacy log are
+        replaced rather than failing the response for the same reason.
+      operationId: getLogs
+      parameters:
+        - in: query
+          name: lines
+          required: false
+          schema:
+            type: integer
+            default: 300
+            minimum: 1
+            maximum: 5000
+          description: >
+            Clamped into range; an unparseable value falls back to the default.
+      responses:
+        "200":
+          description: The tail, plus where it came from
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LogTail"
+
+  /api/logs/settings:
+    get:
+      summary: Current logging preferences
+      description: >
+        Reports what is in force now. Read this before concluding anything
+        from an empty log: `file_enabled` can be false, and then a perfectly
+        healthy daemon writes nothing at all.
+      operationId: getLogSettings
+      responses:
+        "200":
+          description: Logging preferences
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LogSettings"
+    post:
+      summary: Turn the log file on or off, or change verbosity
+      description: >
+        Only fields that are present AND of the right type are honoured; the
+        rest keep their current value. A level is validated before it is
+        stored, so a typo cannot silence the log.
+
+
+        **Failure is reported in the body, not in the status.** Every outcome
+        is HTTP 200; read `ok` and `error`. A caller that checks only the HTTP
+        code will believe it turned logging on when it did not.
+
+
+        Worth knowing before drawing conclusions from a quiet log: setting
+        `file_enabled` to false stops all file output, and `level` above
+        `info` hides the daemon's ordinary progress lines - including the ones
+        a successful reload writes.
+      operationId: postLogSettings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LogSettingsRequest"
+      responses:
+        "200":
+          description: >
+            The resulting settings, or `error` when the body was not JSON, the
+            level was unknown, or logging.json could not be written.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LogSettingsResult"
+
+  /api/system/router:
+    get:
+      summary: Hardware and firmware facts
+      description: >
+        Served from a 5-second cache, so polling it costs nothing extra.
+
+
+        Every field is optional and present only when this router could be
+        asked: absent means "not known here", never zero. A missing
+        `cpu_temperature_c` is a router without that sensor, and rendering it
+        as 0 would invent a reading.
+      operationId: getSystemRouter
+      responses:
+        "200":
+          description: What the firmware and the kernel report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RouterInfo"
+
+  /api/system/interface-names:
+    get:
+      summary: Human names the firmware gives its interfaces
+      description: >
+        `available` is true only when the firmware answered AND the cached
+        catalogue is fresh - a stale catalogue is offered as data with
+        `catalog_status: stale`, but not as something to rely on for naming.
+      operationId: getSystemInterfaceNames
+      responses:
+        "200":
+          description: Names keyed by interface, with the catalogue's state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InterfaceNames"
+
+  /api/system/naive-component:
+    get:
+      summary: Whether the naive component is installed
+      operationId: getSystemNaiveComponent
+      responses:
+        "200":
+          description: Presence, size and path of the component
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NaiveComponentState"
+    post:
+      summary: Install the naive component
+      description: >
+        Idempotent: when the library is already present nothing is fetched and
+        the current state is returned. Installs are serialised, because two at
+        once would write the same temporary file and the second would take the
+        first's half-written copy.
+
+
+        **Failure is reported in the body, not in the status.** A caller that
+        checks only the HTTP code will read every outcome as success; read
+        `error` and `installed`.
+      operationId: postSystemNaiveComponent
+      responses:
+        "200":
+          description: >
+            The resulting state. `error` is `script_missing` when the
+            installer is absent, or `install_failed` when it ran and returned
+            non-zero - in which case `log` carries its output.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NaiveComponentInstallResult"
+
+  /api/transports/environment:
+    get:
+      summary: What this build pins and what the router actually has
+      description: >
+        `sing_box_installed` is measured - the binary named by
+        `sing_box_binary` is checked on disk - rather than remembered from an
+        install.
+
+
+        `tested_version` repeats `pinned_version` and exists only for a
+        frontend that already reads that name. They were once different
+        promises about the same number, which is exactly the kind of drift
+        this endpoint should not reintroduce.
+      operationId: getTransportsEnvironment
+      responses:
+        "200":
+          description: Pinned version and the installed binary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransportsEnvironment"
+
   /api/auth/status:
     get:
       summary: Whether this caller is authenticated, and how the panel authenticates
@@ -1918,6 +2092,226 @@ components:
         apply_started_ts:
           type: integer
           format: int64
+
+    # One named enum rather than two inline copies. Two identical inline enums
+    # make the generator invent a shared type of its own choosing, and a third
+    # use elsewhere would rename it under everyone.
+    LogLevel:
+      type: string
+      enum: [error, warn, info, verbose, debug]
+
+    LogTail:
+      type: object
+      required: [path, exists, size_bytes, lines]
+      properties:
+        path:
+          type: string
+          description: Where the daemon writes, whether or not it exists.
+        exists:
+          type: boolean
+        size_bytes:
+          type: integer
+          format: int64
+        lines:
+          type: array
+          items:
+            type: string
+          description: >
+            Newest last. Empty when the file is absent or logging to file is
+            switched off - see LogSettings.file_enabled before reading silence
+            as health.
+        last_command_failure:
+          type: object
+          description: >
+            Present only when a helper command failed and left a snapshot.
+            Sanitized at write time.
+          additionalProperties: true
+
+    LogSettings:
+      type: object
+      required: [file_enabled, level]
+      properties:
+        file_enabled:
+          type: boolean
+          description: >
+            When false the daemon writes nothing to its log file. A quiet log
+            then says nothing about the daemon's health, and rotation never
+            runs either, so the file also stops changing size.
+        level:
+          allOf:
+            - $ref: "#/components/schemas/LogLevel"
+            - description: >
+                Levels below this are not written. `info` is the default, and a
+                successful operation that only logs at info leaves no trace
+                above it.
+
+    LogSettingsRequest:
+      type: object
+      description: >
+        Both fields optional. A field of the wrong JSON type is ignored rather
+        than rejected, which means a typed mistake leaves the old value in
+        force - check the returned `settings` rather than assuming.
+      properties:
+        file_enabled:
+          type: boolean
+        level:
+          $ref: "#/components/schemas/LogLevel"
+
+    LogSettingsResult:
+      type: object
+      description: >
+        Success and failure share this shape and both arrive as HTTP 200.
+        `ok` is present only on success; `error` only on failure.
+      properties:
+        ok:
+          type: boolean
+        durable:
+          type: boolean
+          description: >
+            False when the settings are live but the directory fsync could not
+            be confirmed - they may not survive a power cut.
+        warning:
+          type: string
+          description: Present only when `durable` is false.
+        settings:
+          $ref: "#/components/schemas/LogSettings"
+        error:
+          type: string
+          description: >
+            The body was not JSON, the level was unknown, or logging.json could
+            not be written.
+
+    NaiveComponentInstallResult:
+      type: object
+      required: [installed]
+      description: >
+        Success and failure share this shape and both arrive as HTTP 200.
+      properties:
+        installed:
+          type: boolean
+          description: Measured after the attempt, not assumed from its exit code.
+        size:
+          type: integer
+          format: int64
+        log:
+          type: string
+          description: >
+            Installer output, present only when it ran. Capped, so a very
+            chatty installer is truncated rather than returned whole.
+        error:
+          type: string
+          enum: [script_missing, install_failed]
+
+    RouterInfo:
+      type: object
+      description: >
+        Every field is optional: absent means this router could not be asked,
+        which is not the same as zero.
+      properties:
+        model:
+          type: string
+        vendor:
+          type: string
+        hw_id:
+          type: string
+        region:
+          type: string
+        arch:
+          type: string
+        firmware_title:
+          type: string
+        firmware_release:
+          type: string
+        firmware_channel:
+          type: string
+        firmware_date:
+          type: string
+        cpu_model:
+          type: string
+        cpu_load_percent:
+          type: integer
+        cpu_temperature_c:
+          type: number
+          description: Absent on a router with no such sensor.
+        memory_total_mb:
+          type: integer
+        memory_used_mb:
+          type: integer
+        memory_used_percent:
+          type: integer
+        disk_total_mb:
+          type: integer
+          format: int64
+        disk_used_mb:
+          type: integer
+          format: int64
+        disk_used_percent:
+          type: integer
+        uptime_seconds:
+          type: integer
+          format: int64
+
+    InterfaceNames:
+      type: object
+      required: [names, available, catalog_status]
+      properties:
+        names:
+          type: object
+          additionalProperties:
+            type: string
+          description: Interface identifier to the name the firmware shows.
+        available:
+          type: boolean
+          description: >
+            True only when the firmware answered and the catalogue is fresh.
+            False with a non-empty `names` means the data is there but old.
+        # Referenced, not restated. An inline enum with the same values makes
+        # quicktype merge the two into one differently-named type, and every
+        # existing user of NdmsCatalogStatus stops compiling.
+        catalog_status:
+          $ref: "#/components/schemas/NdmsCatalogStatus"
+
+    NaiveComponentState:
+      type: object
+      required: [installed, size, path]
+      properties:
+        installed:
+          type: boolean
+        size:
+          type: integer
+          format: int64
+          description: Zero when absent.
+        path:
+          type: string
+
+    TransportsEnvironment:
+      type: object
+      required:
+        - sing_box_installed
+        - sing_box_binary
+        - pinned_version
+        - tested_version
+        - transport_api_version
+      properties:
+        sing_box_installed:
+          type: boolean
+          description: Measured on disk, not remembered from an install.
+        sing_box_binary:
+          type: string
+          description: >
+            From transports.json when set, otherwise /opt/bin/sing-box.
+        pinned_version:
+          type: string
+        tested_version:
+          type: string
+          description: >
+            The same value as pinned_version, kept for a frontend that reads
+            this name.
+        transport_api_version:
+          type: integer
+          description: >
+            Lets a newer bundle refuse to report success against an older
+            companion that would silently drop fields.
 
     AuthenticatedResponse:
       type: object

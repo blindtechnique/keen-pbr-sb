@@ -708,6 +708,14 @@ namespace api {
         std::string version;
     };
 
+    enum class CatalogStatus : int { FRESH, STALE, UNAVAILABLE };
+
+    struct InterfaceNames {
+        bool available = false;
+        CatalogStatus catalog_status;
+        std::map<std::string, std::string> names;
+    };
+
     struct ListDeleteTargetElement {
         std::string list_id;
         std::optional<std::string> replacement_list_id;
@@ -746,7 +754,48 @@ namespace api {
         ConfigUpdateResponseStatus status;
     };
 
-    enum class NdmsCatalogStatus : int { FRESH, STALE, UNAVAILABLE };
+    enum class LogLevel : int { DEBUG, ERROR, INFO, VERBOSE, WARN };
+
+    struct LogSettings {
+        bool file_enabled = false;
+        LogLevel level;
+    };
+
+    struct LogSettingsRequest {
+        std::optional<bool> file_enabled;
+        std::optional<LogLevel> level;
+    };
+
+    struct LogSettingsResult {
+        std::optional<bool> durable;
+        std::optional<std::string> error;
+        std::optional<bool> ok;
+        std::optional<LogSettings> settings;
+        std::optional<std::string> warning;
+    };
+
+    struct LogTail {
+        bool exists = false;
+        std::optional<std::map<std::string, nlohmann::json>> last_command_failure;
+        std::vector<std::string> lines;
+        std::string path;
+        int64_t size_bytes = 0;
+    };
+
+    enum class Error : int { INSTALL_FAILED, SCRIPT_MISSING };
+
+    struct NaiveComponentInstallResult {
+        std::optional<Error> error;
+        bool installed = false;
+        std::optional<std::string> log;
+        std::optional<int64_t> size;
+    };
+
+    struct NaiveComponentState {
+        bool installed = false;
+        std::string path;
+        int64_t size = 0;
+    };
 
     struct NdmsInterfaceCapabilities {
         bool backup_required = false;
@@ -821,7 +870,7 @@ namespace api {
 
     struct NdmsInterfaceInventoryResponse {
         bool available = false;
-        NdmsCatalogStatus catalog_status;
+        CatalogStatus catalog_status;
         std::vector<NdmsTunnelInterfaceElement> interfaces;
         MutationMode mutation_mode;
         NdmsNativeImportReadiness native_import_readiness;
@@ -843,7 +892,7 @@ namespace api {
 
     struct NdmsVpnServerServiceInventoryResponse {
         bool available = false;
-        NdmsCatalogStatus catalog_status;
+        CatalogStatus catalog_status;
         bool read_only = false;
         std::vector<NdmsVpnServerService> services;
     };
@@ -946,6 +995,28 @@ namespace api {
         CheckStatus status;
         bool table_exists = false;
         int64_t table_id = 0;
+    };
+
+    struct RouterInfo {
+        std::optional<std::string> arch;
+        std::optional<int64_t> cpu_load_percent;
+        std::optional<std::string> cpu_model;
+        std::optional<double> cpu_temperature_c;
+        std::optional<int64_t> disk_total_mb;
+        std::optional<int64_t> disk_used_mb;
+        std::optional<int64_t> disk_used_percent;
+        std::optional<std::string> firmware_channel;
+        std::optional<std::string> firmware_date;
+        std::optional<std::string> firmware_release;
+        std::optional<std::string> firmware_title;
+        std::optional<std::string> hw_id;
+        std::optional<int64_t> memory_total_mb;
+        std::optional<int64_t> memory_used_mb;
+        std::optional<int64_t> memory_used_percent;
+        std::optional<std::string> model;
+        std::optional<std::string> region;
+        std::optional<int64_t> uptime_seconds;
+        std::optional<std::string> vendor;
     };
 
     enum class RoutingHealthErrorResponseOverall : int { ERROR };
@@ -1429,6 +1500,14 @@ namespace api {
         std::string updated_at;
     };
 
+    struct TransportsEnvironment {
+        std::string pinned_version;
+        std::string sing_box_binary;
+        bool sing_box_installed = false;
+        std::string tested_version;
+        int64_t transport_api_version = 0;
+    };
+
     struct UpdateStartedResponse {
         bool ok = false;
         bool started = false;
@@ -1495,6 +1574,7 @@ namespace api {
         std::optional<Fwmark> fwmark_config;
         std::optional<GrantedResponse> granted_response;
         std::optional<HealthResponse> health_response;
+        std::optional<InterfaceNames> interface_names;
         std::optional<InternalVpnServerElement> internal_vpn_server;
         std::optional<InternalVpnServiceElement> internal_vpn_service;
         std::optional<Iproute> iproute_config;
@@ -1511,7 +1591,14 @@ namespace api {
         std::optional<ListRefreshResponse> list_refresh_response;
         std::optional<ListRefreshStateValue> list_refresh_state;
         std::optional<ListsAutoupdate> lists_autoupdate_config;
-        std::optional<NdmsCatalogStatus> ndms_catalog_status;
+        std::optional<LogLevel> log_level;
+        std::optional<LogSettings> log_settings;
+        std::optional<LogSettingsRequest> log_settings_request;
+        std::optional<LogSettingsResult> log_settings_result;
+        std::optional<LogTail> log_tail;
+        std::optional<NaiveComponentInstallResult> naive_component_install_result;
+        std::optional<NaiveComponentState> naive_component_state;
+        std::optional<CatalogStatus> ndms_catalog_status;
         std::optional<NdmsInterfaceCapabilities> ndms_interface_capabilities;
         std::optional<NdmsInterfaceInventoryResponse> ndms_interface_inventory_response;
         std::optional<NdmsInterfaceManagementReadiness> ndms_interface_management_readiness;
@@ -1543,6 +1630,7 @@ namespace api {
         std::optional<ResolverConfigSyncState> resolver_config_sync_state;
         std::optional<Retry> retry_config;
         std::optional<Route> route_config;
+        std::optional<RouterInfo> router_info;
         std::optional<RouteRuleElement> route_rule;
         std::optional<RouteTableCheck> route_table_check;
         std::optional<RoutingHealthErrorResponse> routing_health_error_response;
@@ -1599,6 +1687,7 @@ namespace api {
         std::optional<TransportExitCheckResponse> transport_exit_check_response;
         std::optional<LinkedOutbound> transport_linked_outbound_ensure;
         std::optional<TransportPath> transport_path;
+        std::optional<TransportsEnvironment> transports_environment;
         std::optional<Transport> transport_spec;
         std::optional<TransportStatus> transport_status;
         std::optional<UiPreferences> ui_preferences_config;
@@ -1818,6 +1907,9 @@ namespace api {
     void from_json(const json & j, HealthResponse & x);
     void to_json(json & j, const HealthResponse & x);
 
+    void from_json(const json & j, InterfaceNames & x);
+    void to_json(json & j, const InterfaceNames & x);
+
     void from_json(const json & j, ListDeleteTargetElement & x);
     void to_json(json & j, const ListDeleteTargetElement & x);
 
@@ -1835,6 +1927,24 @@ namespace api {
 
     void from_json(const json & j, ListRefreshResponse & x);
     void to_json(json & j, const ListRefreshResponse & x);
+
+    void from_json(const json & j, LogSettings & x);
+    void to_json(json & j, const LogSettings & x);
+
+    void from_json(const json & j, LogSettingsRequest & x);
+    void to_json(json & j, const LogSettingsRequest & x);
+
+    void from_json(const json & j, LogSettingsResult & x);
+    void to_json(json & j, const LogSettingsResult & x);
+
+    void from_json(const json & j, LogTail & x);
+    void to_json(json & j, const LogTail & x);
+
+    void from_json(const json & j, NaiveComponentInstallResult & x);
+    void to_json(json & j, const NaiveComponentInstallResult & x);
+
+    void from_json(const json & j, NaiveComponentState & x);
+    void to_json(json & j, const NaiveComponentState & x);
 
     void from_json(const json & j, NdmsInterfaceCapabilities & x);
     void to_json(json & j, const NdmsInterfaceCapabilities & x);
@@ -1889,6 +1999,9 @@ namespace api {
 
     void from_json(const json & j, RouteTableCheck & x);
     void to_json(json & j, const RouteTableCheck & x);
+
+    void from_json(const json & j, RouterInfo & x);
+    void to_json(json & j, const RouterInfo & x);
 
     void from_json(const json & j, RoutingHealthErrorResponse & x);
     void to_json(json & j, const RoutingHealthErrorResponse & x);
@@ -2040,6 +2153,9 @@ namespace api {
     void from_json(const json & j, TransportStatus & x);
     void to_json(json & j, const TransportStatus & x);
 
+    void from_json(const json & j, TransportsEnvironment & x);
+    void to_json(json & j, const TransportsEnvironment & x);
+
     void from_json(const json & j, UpdateStartedResponse & x);
     void to_json(json & j, const UpdateStartedResponse & x);
 
@@ -2133,8 +2249,14 @@ namespace api {
     void from_json(const json & j, HealthResponseStatus & x);
     void to_json(json & j, const HealthResponseStatus & x);
 
-    void from_json(const json & j, NdmsCatalogStatus & x);
-    void to_json(json & j, const NdmsCatalogStatus & x);
+    void from_json(const json & j, CatalogStatus & x);
+    void to_json(json & j, const CatalogStatus & x);
+
+    void from_json(const json & j, LogLevel & x);
+    void to_json(json & j, const LogLevel & x);
+
+    void from_json(const json & j, Error & x);
+    void to_json(json & j, const Error & x);
 
     void from_json(const json & j, Kind & x);
     void to_json(json & j, const Kind & x);
@@ -3493,6 +3615,19 @@ namespace api {
         j["version"] = x.version;
     }
 
+    inline void from_json(const json & j, InterfaceNames& x) {
+        x.available = j.at("available").get<bool>();
+        x.catalog_status = j.at("catalog_status").get<CatalogStatus>();
+        x.names = j.at("names").get<std::map<std::string, std::string>>();
+    }
+
+    inline void to_json(json & j, const InterfaceNames & x) {
+        j = json::object();
+        j["available"] = x.available;
+        j["catalog_status"] = x.catalog_status;
+        j["names"] = x.names;
+    }
+
     inline void from_json(const json & j, ListDeleteTargetElement& x) {
         x.list_id = j.at("list_id").get<std::string>();
         x.replacement_list_id = get_stack_optional<std::string>(j, "replacement_list_id");
@@ -3573,6 +3708,90 @@ namespace api {
         j["refreshed_lists"] = x.refreshed_lists;
         j["reloaded"] = x.reloaded;
         j["status"] = x.status;
+    }
+
+    inline void from_json(const json & j, LogSettings& x) {
+        x.file_enabled = j.at("file_enabled").get<bool>();
+        x.level = j.at("level").get<LogLevel>();
+    }
+
+    inline void to_json(json & j, const LogSettings & x) {
+        j = json::object();
+        j["file_enabled"] = x.file_enabled;
+        j["level"] = x.level;
+    }
+
+    inline void from_json(const json & j, LogSettingsRequest& x) {
+        x.file_enabled = get_stack_optional<bool>(j, "file_enabled");
+        x.level = get_stack_optional<LogLevel>(j, "level");
+    }
+
+    inline void to_json(json & j, const LogSettingsRequest & x) {
+        j = json::object();
+        j["file_enabled"] = x.file_enabled;
+        j["level"] = x.level;
+    }
+
+    inline void from_json(const json & j, LogSettingsResult& x) {
+        x.durable = get_stack_optional<bool>(j, "durable");
+        x.error = get_stack_optional<std::string>(j, "error");
+        x.ok = get_stack_optional<bool>(j, "ok");
+        x.settings = get_stack_optional<LogSettings>(j, "settings");
+        x.warning = get_stack_optional<std::string>(j, "warning");
+    }
+
+    inline void to_json(json & j, const LogSettingsResult & x) {
+        j = json::object();
+        j["durable"] = x.durable;
+        j["error"] = x.error;
+        j["ok"] = x.ok;
+        j["settings"] = x.settings;
+        j["warning"] = x.warning;
+    }
+
+    inline void from_json(const json & j, LogTail& x) {
+        x.exists = j.at("exists").get<bool>();
+        x.last_command_failure = get_stack_optional<std::map<std::string, nlohmann::json>>(j, "last_command_failure");
+        x.lines = j.at("lines").get<std::vector<std::string>>();
+        x.path = j.at("path").get<std::string>();
+        x.size_bytes = j.at("size_bytes").get<int64_t>();
+    }
+
+    inline void to_json(json & j, const LogTail & x) {
+        j = json::object();
+        j["exists"] = x.exists;
+        j["last_command_failure"] = x.last_command_failure;
+        j["lines"] = x.lines;
+        j["path"] = x.path;
+        j["size_bytes"] = x.size_bytes;
+    }
+
+    inline void from_json(const json & j, NaiveComponentInstallResult& x) {
+        x.error = get_stack_optional<Error>(j, "error");
+        x.installed = j.at("installed").get<bool>();
+        x.log = get_stack_optional<std::string>(j, "log");
+        x.size = get_stack_optional<int64_t>(j, "size");
+    }
+
+    inline void to_json(json & j, const NaiveComponentInstallResult & x) {
+        j = json::object();
+        j["error"] = x.error;
+        j["installed"] = x.installed;
+        j["log"] = x.log;
+        j["size"] = x.size;
+    }
+
+    inline void from_json(const json & j, NaiveComponentState& x) {
+        x.installed = j.at("installed").get<bool>();
+        x.path = j.at("path").get<std::string>();
+        x.size = j.at("size").get<int64_t>();
+    }
+
+    inline void to_json(json & j, const NaiveComponentState & x) {
+        j = json::object();
+        j["installed"] = x.installed;
+        j["path"] = x.path;
+        j["size"] = x.size;
     }
 
     inline void from_json(const json & j, NdmsInterfaceCapabilities& x) {
@@ -3684,7 +3903,7 @@ namespace api {
 
     inline void from_json(const json & j, NdmsInterfaceInventoryResponse& x) {
         x.available = j.at("available").get<bool>();
-        x.catalog_status = j.at("catalog_status").get<NdmsCatalogStatus>();
+        x.catalog_status = j.at("catalog_status").get<CatalogStatus>();
         x.interfaces = j.at("interfaces").get<std::vector<NdmsTunnelInterfaceElement>>();
         x.mutation_mode = j.at("mutation_mode").get<MutationMode>();
         x.native_import_readiness = j.at("native_import_readiness").get<NdmsNativeImportReadiness>();
@@ -3726,7 +3945,7 @@ namespace api {
 
     inline void from_json(const json & j, NdmsVpnServerServiceInventoryResponse& x) {
         x.available = j.at("available").get<bool>();
-        x.catalog_status = j.at("catalog_status").get<NdmsCatalogStatus>();
+        x.catalog_status = j.at("catalog_status").get<CatalogStatus>();
         x.read_only = j.at("read_only").get<bool>();
         x.services = j.at("services").get<std::vector<NdmsVpnServerService>>();
     }
@@ -3935,6 +4154,51 @@ namespace api {
         j["status"] = x.status;
         j["table_exists"] = x.table_exists;
         j["table_id"] = x.table_id;
+    }
+
+    inline void from_json(const json & j, RouterInfo& x) {
+        x.arch = get_stack_optional<std::string>(j, "arch");
+        x.cpu_load_percent = get_stack_optional<int64_t>(j, "cpu_load_percent");
+        x.cpu_model = get_stack_optional<std::string>(j, "cpu_model");
+        x.cpu_temperature_c = get_stack_optional<double>(j, "cpu_temperature_c");
+        x.disk_total_mb = get_stack_optional<int64_t>(j, "disk_total_mb");
+        x.disk_used_mb = get_stack_optional<int64_t>(j, "disk_used_mb");
+        x.disk_used_percent = get_stack_optional<int64_t>(j, "disk_used_percent");
+        x.firmware_channel = get_stack_optional<std::string>(j, "firmware_channel");
+        x.firmware_date = get_stack_optional<std::string>(j, "firmware_date");
+        x.firmware_release = get_stack_optional<std::string>(j, "firmware_release");
+        x.firmware_title = get_stack_optional<std::string>(j, "firmware_title");
+        x.hw_id = get_stack_optional<std::string>(j, "hw_id");
+        x.memory_total_mb = get_stack_optional<int64_t>(j, "memory_total_mb");
+        x.memory_used_mb = get_stack_optional<int64_t>(j, "memory_used_mb");
+        x.memory_used_percent = get_stack_optional<int64_t>(j, "memory_used_percent");
+        x.model = get_stack_optional<std::string>(j, "model");
+        x.region = get_stack_optional<std::string>(j, "region");
+        x.uptime_seconds = get_stack_optional<int64_t>(j, "uptime_seconds");
+        x.vendor = get_stack_optional<std::string>(j, "vendor");
+    }
+
+    inline void to_json(json & j, const RouterInfo & x) {
+        j = json::object();
+        j["arch"] = x.arch;
+        j["cpu_load_percent"] = x.cpu_load_percent;
+        j["cpu_model"] = x.cpu_model;
+        j["cpu_temperature_c"] = x.cpu_temperature_c;
+        j["disk_total_mb"] = x.disk_total_mb;
+        j["disk_used_mb"] = x.disk_used_mb;
+        j["disk_used_percent"] = x.disk_used_percent;
+        j["firmware_channel"] = x.firmware_channel;
+        j["firmware_date"] = x.firmware_date;
+        j["firmware_release"] = x.firmware_release;
+        j["firmware_title"] = x.firmware_title;
+        j["hw_id"] = x.hw_id;
+        j["memory_total_mb"] = x.memory_total_mb;
+        j["memory_used_mb"] = x.memory_used_mb;
+        j["memory_used_percent"] = x.memory_used_percent;
+        j["model"] = x.model;
+        j["region"] = x.region;
+        j["uptime_seconds"] = x.uptime_seconds;
+        j["vendor"] = x.vendor;
     }
 
     inline void from_json(const json & j, RoutingHealthErrorResponse& x) {
@@ -4781,6 +5045,23 @@ namespace api {
         j["updated_at"] = x.updated_at;
     }
 
+    inline void from_json(const json & j, TransportsEnvironment& x) {
+        x.pinned_version = j.at("pinned_version").get<std::string>();
+        x.sing_box_binary = j.at("sing_box_binary").get<std::string>();
+        x.sing_box_installed = j.at("sing_box_installed").get<bool>();
+        x.tested_version = j.at("tested_version").get<std::string>();
+        x.transport_api_version = j.at("transport_api_version").get<int64_t>();
+    }
+
+    inline void to_json(json & j, const TransportsEnvironment & x) {
+        j = json::object();
+        j["pinned_version"] = x.pinned_version;
+        j["sing_box_binary"] = x.sing_box_binary;
+        j["sing_box_installed"] = x.sing_box_installed;
+        j["tested_version"] = x.tested_version;
+        j["transport_api_version"] = x.transport_api_version;
+    }
+
     inline void from_json(const json & j, UpdateStartedResponse& x) {
         x.ok = j.at("ok").get<bool>();
         x.started = j.at("started").get<bool>();
@@ -4853,6 +5134,7 @@ namespace api {
         x.fwmark_config = get_stack_optional<Fwmark>(j, "FwmarkConfig");
         x.granted_response = get_stack_optional<GrantedResponse>(j, "GrantedResponse");
         x.health_response = get_stack_optional<HealthResponse>(j, "HealthResponse");
+        x.interface_names = get_stack_optional<InterfaceNames>(j, "InterfaceNames");
         x.internal_vpn_server = get_stack_optional<InternalVpnServerElement>(j, "InternalVpnServer");
         x.internal_vpn_service = get_stack_optional<InternalVpnServiceElement>(j, "InternalVpnService");
         x.iproute_config = get_stack_optional<Iproute>(j, "IprouteConfig");
@@ -4869,7 +5151,14 @@ namespace api {
         x.list_refresh_response = get_stack_optional<ListRefreshResponse>(j, "ListRefreshResponse");
         x.list_refresh_state = get_stack_optional<ListRefreshStateValue>(j, "ListRefreshState");
         x.lists_autoupdate_config = get_stack_optional<ListsAutoupdate>(j, "ListsAutoupdateConfig");
-        x.ndms_catalog_status = get_stack_optional<NdmsCatalogStatus>(j, "NdmsCatalogStatus");
+        x.log_level = get_stack_optional<LogLevel>(j, "LogLevel");
+        x.log_settings = get_stack_optional<LogSettings>(j, "LogSettings");
+        x.log_settings_request = get_stack_optional<LogSettingsRequest>(j, "LogSettingsRequest");
+        x.log_settings_result = get_stack_optional<LogSettingsResult>(j, "LogSettingsResult");
+        x.log_tail = get_stack_optional<LogTail>(j, "LogTail");
+        x.naive_component_install_result = get_stack_optional<NaiveComponentInstallResult>(j, "NaiveComponentInstallResult");
+        x.naive_component_state = get_stack_optional<NaiveComponentState>(j, "NaiveComponentState");
+        x.ndms_catalog_status = get_stack_optional<CatalogStatus>(j, "NdmsCatalogStatus");
         x.ndms_interface_capabilities = get_stack_optional<NdmsInterfaceCapabilities>(j, "NdmsInterfaceCapabilities");
         x.ndms_interface_inventory_response = get_stack_optional<NdmsInterfaceInventoryResponse>(j, "NdmsInterfaceInventoryResponse");
         x.ndms_interface_management_readiness = get_stack_optional<NdmsInterfaceManagementReadiness>(j, "NdmsInterfaceManagementReadiness");
@@ -4901,6 +5190,7 @@ namespace api {
         x.resolver_config_sync_state = get_stack_optional<ResolverConfigSyncState>(j, "ResolverConfigSyncState");
         x.retry_config = get_stack_optional<Retry>(j, "RetryConfig");
         x.route_config = get_stack_optional<Route>(j, "RouteConfig");
+        x.router_info = get_stack_optional<RouterInfo>(j, "RouterInfo");
         x.route_rule = get_stack_optional<RouteRuleElement>(j, "RouteRule");
         x.route_table_check = get_stack_optional<RouteTableCheck>(j, "RouteTableCheck");
         x.routing_health_error_response = get_stack_optional<RoutingHealthErrorResponse>(j, "RoutingHealthErrorResponse");
@@ -4957,6 +5247,7 @@ namespace api {
         x.transport_exit_check_response = get_stack_optional<TransportExitCheckResponse>(j, "TransportExitCheckResponse");
         x.transport_linked_outbound_ensure = get_stack_optional<LinkedOutbound>(j, "TransportLinkedOutboundEnsure");
         x.transport_path = get_stack_optional<TransportPath>(j, "TransportPath");
+        x.transports_environment = get_stack_optional<TransportsEnvironment>(j, "TransportsEnvironment");
         x.transport_spec = get_stack_optional<Transport>(j, "TransportSpec");
         x.transport_status = get_stack_optional<TransportStatus>(j, "TransportStatus");
         x.ui_preferences_config = get_stack_optional<UiPreferences>(j, "UiPreferencesConfig");
@@ -5027,6 +5318,7 @@ namespace api {
         j["FwmarkConfig"] = x.fwmark_config;
         j["GrantedResponse"] = x.granted_response;
         j["HealthResponse"] = x.health_response;
+        j["InterfaceNames"] = x.interface_names;
         j["InternalVpnServer"] = x.internal_vpn_server;
         j["InternalVpnService"] = x.internal_vpn_service;
         j["IprouteConfig"] = x.iproute_config;
@@ -5043,6 +5335,13 @@ namespace api {
         j["ListRefreshResponse"] = x.list_refresh_response;
         j["ListRefreshState"] = x.list_refresh_state;
         j["ListsAutoupdateConfig"] = x.lists_autoupdate_config;
+        j["LogLevel"] = x.log_level;
+        j["LogSettings"] = x.log_settings;
+        j["LogSettingsRequest"] = x.log_settings_request;
+        j["LogSettingsResult"] = x.log_settings_result;
+        j["LogTail"] = x.log_tail;
+        j["NaiveComponentInstallResult"] = x.naive_component_install_result;
+        j["NaiveComponentState"] = x.naive_component_state;
         j["NdmsCatalogStatus"] = x.ndms_catalog_status;
         j["NdmsInterfaceCapabilities"] = x.ndms_interface_capabilities;
         j["NdmsInterfaceInventoryResponse"] = x.ndms_interface_inventory_response;
@@ -5075,6 +5374,7 @@ namespace api {
         j["ResolverConfigSyncState"] = x.resolver_config_sync_state;
         j["RetryConfig"] = x.retry_config;
         j["RouteConfig"] = x.route_config;
+        j["RouterInfo"] = x.router_info;
         j["RouteRule"] = x.route_rule;
         j["RouteTableCheck"] = x.route_table_check;
         j["RoutingHealthErrorResponse"] = x.routing_health_error_response;
@@ -5131,6 +5431,7 @@ namespace api {
         j["TransportExitCheckResponse"] = x.transport_exit_check_response;
         j["TransportLinkedOutboundEnsure"] = x.transport_linked_outbound_ensure;
         j["TransportPath"] = x.transport_path;
+        j["TransportsEnvironment"] = x.transports_environment;
         j["TransportSpec"] = x.transport_spec;
         j["TransportStatus"] = x.transport_status;
         j["UiPreferencesConfig"] = x.ui_preferences_config;
@@ -5631,19 +5932,53 @@ namespace api {
         }
     }
 
-    inline void from_json(const json & j, NdmsCatalogStatus & x) {
-        if (j == "fresh") x = NdmsCatalogStatus::FRESH;
-        else if (j == "stale") x = NdmsCatalogStatus::STALE;
-        else if (j == "unavailable") x = NdmsCatalogStatus::UNAVAILABLE;
-        else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsCatalogStatus\""); }
+    inline void from_json(const json & j, CatalogStatus & x) {
+        if (j == "fresh") x = CatalogStatus::FRESH;
+        else if (j == "stale") x = CatalogStatus::STALE;
+        else if (j == "unavailable") x = CatalogStatus::UNAVAILABLE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"CatalogStatus\""); }
     }
 
-    inline void to_json(json & j, const NdmsCatalogStatus & x) {
+    inline void to_json(json & j, const CatalogStatus & x) {
         switch (x) {
-            case NdmsCatalogStatus::FRESH: j = "fresh"; break;
-            case NdmsCatalogStatus::STALE: j = "stale"; break;
-            case NdmsCatalogStatus::UNAVAILABLE: j = "unavailable"; break;
-            default: throw std::runtime_error("Unexpected value in enumeration \"NdmsCatalogStatus\": " + std::to_string(static_cast<int>(x)));
+            case CatalogStatus::FRESH: j = "fresh"; break;
+            case CatalogStatus::STALE: j = "stale"; break;
+            case CatalogStatus::UNAVAILABLE: j = "unavailable"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"CatalogStatus\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, LogLevel & x) {
+        if (j == "debug") x = LogLevel::DEBUG;
+        else if (j == "error") x = LogLevel::ERROR;
+        else if (j == "info") x = LogLevel::INFO;
+        else if (j == "verbose") x = LogLevel::VERBOSE;
+        else if (j == "warn") x = LogLevel::WARN;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"LogLevel\""); }
+    }
+
+    inline void to_json(json & j, const LogLevel & x) {
+        switch (x) {
+            case LogLevel::DEBUG: j = "debug"; break;
+            case LogLevel::ERROR: j = "error"; break;
+            case LogLevel::INFO: j = "info"; break;
+            case LogLevel::VERBOSE: j = "verbose"; break;
+            case LogLevel::WARN: j = "warn"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"LogLevel\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, Error & x) {
+        if (j == "install_failed") x = Error::INSTALL_FAILED;
+        else if (j == "script_missing") x = Error::SCRIPT_MISSING;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"Error\""); }
+    }
+
+    inline void to_json(json & j, const Error & x) {
+        switch (x) {
+            case Error::INSTALL_FAILED: j = "install_failed"; break;
+            case Error::SCRIPT_MISSING: j = "script_missing"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"Error\": " + std::to_string(static_cast<int>(x)));
         }
     }
 
