@@ -583,7 +583,16 @@ export function DataTable({
 
                   return (
                     <div
-                      className="grid grid-cols-[minmax(0,7.5rem)_minmax(0,1fr)] items-start gap-2 text-sm"
+                      // 9rem, а не 7.5: «ГДЕ ИСПОЛЬЗУЕТСЯ» в верхнем регистре
+                      // занимает 124 px и в 120 переносилось на вторую строку,
+                      // из-за чего ряд переставал читаться рядом. Та же ширина,
+                      // что у подписей в подробностях, поэтому обе колонки на
+                      // странице стоят в линию.
+                      //
+                      // items-center, а не items-start: значение здесь — бейдж
+                      // или плашка выше строки подписи, и при выравнивании по
+                      // верху текст оказывался на пару пикселей ниже подписи.
+                      className="grid grid-cols-[minmax(0,9rem)_minmax(0,1fr)] items-center gap-2 text-sm"
                       key={cellIndex}
                     >
                       <span className="text-xs text-muted-foreground uppercase">

@@ -1954,7 +1954,10 @@ function UsedByCell({
   return (
     <DependencyList
       cellRows={2}
-      className="min-h-[46px]"
+      // Высота нужна таблице, чтобы строки были одинаковыми, — а таблица есть
+      // только с md. На телефоне она добавляла 46 px пустоты, внутри которых
+      // содержимое центрировалось и оказывалось на 15 px ниже подписи.
+      className="md:min-h-[46px]"
       dependencies={bound ? trimSelfRouteSuffix(dependencies, selfNames) : []}
       emptyHint={bound ? undefined : t("transports.usedByNone")}
     />

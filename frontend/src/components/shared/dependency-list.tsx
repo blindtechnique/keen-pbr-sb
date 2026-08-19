@@ -68,7 +68,7 @@ export function DependencyList({
     if (dependencies.length === 0) {
       return (
         <div
-          className={cn("flex max-w-[26rem] min-w-0 items-center", className)}
+          className={cn("flex max-w-[26rem] min-w-0 md:items-center", className)}
         >
           <span
             className="block truncate text-xs text-muted-foreground"
@@ -99,7 +99,7 @@ export function DependencyList({
     return (
       <div
         className={cn(
-          "max-w-[26rem] min-w-0 content-center space-y-1",
+          "max-w-[26rem] min-w-0 space-y-1 md:content-center",
           className
         )}
       >
