@@ -1150,12 +1150,6 @@ export function TransportsPage({
         ) : null}
 
         <div className="flex min-w-0 flex-wrap items-center gap-2">
-          {/* Рядом с остальными действиями подключения: их нажимают в одном и
-              том же случае — когда с конкретным туннелем что-то не так. */}
-          <TransportExitCheckButton
-            device={boundOutbound ? undefined : item.interface}
-            outbound={boundOutbound?.tag}
-          />
           {item.server ? (
             <Button
               disabled={bypassMutation.isPending || !keenConfig}
@@ -1188,6 +1182,13 @@ export function TransportsPage({
               ? t("transports.routing.openOutbound")
               : t("transports.routing.bindOutbound")}
           </Button>
+          {/* Последней в ряду: на широком экране это правый край, на узком —
+              низ, потому что ряд там переносится. Проверку нажимают после
+              того, как посмотрели на остальное, а не вместо. */}
+          <TransportExitCheckButton
+            device={boundOutbound ? undefined : item.interface}
+            outbound={boundOutbound?.tag}
+          />
         </div>
 
         {isNative ? (
@@ -1503,37 +1504,8 @@ export function TransportsPage({
             tooltip - there is no card and no menu entry, because sing-box is
             a dependency rather than a thing an operator manages. */}
         <SingBoxInstallButton className="w-full sm:w-auto" variant="outline" />
-        <Button
-          disabled={
-            transferMutation.isPending ||
-            transportExportPending ||
-            configured.length === 0
-          }
-          onClick={() => void exportTransports()}
-          variant="outline"
-        >
-          <FolderOutputIcon />
-          {t("configTransfer.export")}
-        </Button>
-        <Button
-          disabled={transferMutation.isPending}
-          onClick={() => transportImportRef.current?.click()}
-          variant="outline"
-        >
-          <FolderInputIcon />
-          {t("configTransfer.import")}
-        </Button>
-        <input
-          accept="application/json,.json"
-          className="hidden"
-          onChange={(event) => {
-            const file = event.target.files?.[0]
-            if (file) transferMutation.mutate(file)
-          }}
-          ref={transportImportRef}
-          type="file"
-        />
-
+        {/* Сразу за установкой sing-box: обе кнопки про один и тот же бинарь,
+            и разлучать их импортом и экспортом транспортов незачем. */}
         <Button
           aria-describedby={
             processModeQuery.isError
@@ -1567,6 +1539,37 @@ export function TransportsPage({
             {t("transports.processMode.unavailable")}
           </span>
         ) : null}
+        <Button
+          disabled={
+            transferMutation.isPending ||
+            transportExportPending ||
+            configured.length === 0
+          }
+          onClick={() => void exportTransports()}
+          variant="outline"
+        >
+          <FolderOutputIcon />
+          {t("configTransfer.export")}
+        </Button>
+        <Button
+          disabled={transferMutation.isPending}
+          onClick={() => transportImportRef.current?.click()}
+          variant="outline"
+        >
+          <FolderInputIcon />
+          {t("configTransfer.import")}
+        </Button>
+        <input
+          accept="application/json,.json"
+          className="hidden"
+          onChange={(event) => {
+            const file = event.target.files?.[0]
+            if (file) transferMutation.mutate(file)
+          }}
+          ref={transportImportRef}
+          type="file"
+        />
+
         <Button
           disabled={
             query.isFetching ||

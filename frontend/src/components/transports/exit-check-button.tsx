@@ -71,7 +71,6 @@ export function TransportExitCheckButton({
               <Button
                 disabled={!target || check.isPending}
                 onClick={run}
-                size="sm"
                 type="button"
                 variant="outline"
               >

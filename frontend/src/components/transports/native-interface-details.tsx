@@ -171,17 +171,6 @@ export function NativeInterfaceDetails({
       {usage}
 
       <div className="flex min-w-0 flex-wrap items-center gap-2">
-        {/* Работает и без маршрута keen-pbr: у нативного туннеля обычно нет
-            своего outbound, а измерение делает атрибутируемым привязка к
-            устройству, а не метка. */}
-        {/* Имя устройства ядра, а не логическое: привязываться можно только к
-            тому, что существует в ядре, и mapNativeInterfaces намеренно не
-            подставляет сюда логическое имя прошивки. Нет его — привязываться
-            не к чему, и кнопка честно гаснет. */}
-        <TransportExitCheckButton
-          device={boundOutboundTag ? undefined : nativeInterface.kernelName}
-          outbound={boundOutboundTag ?? undefined}
-        />
         <Button
           disabled={!actionability.enabled}
           onClick={() => {
@@ -205,6 +194,15 @@ export function NativeInterfaceDetails({
             ? t("transports.nativeInterface.restore")
             : t("transports.nativeInterface.hide")}
         </Button>
+        {/* Последней в ряду, как и у своих туннелей. Работает и без маршрута
+            keen-pbr: у нативного его обычно нет, а измерение делает
+            атрибутируемым привязка к устройству, а не метка. Имя берётся
+            ядерное — привязаться можно только к тому, что в ядре есть, и
+            mapNativeInterfaces намеренно не подставляет сюда логическое. */}
+        <TransportExitCheckButton
+          device={boundOutboundTag ? undefined : nativeInterface.kernelName}
+          outbound={boundOutboundTag ?? undefined}
+        />
       </div>
     </div>
   )
