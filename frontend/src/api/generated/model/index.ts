@@ -35,6 +35,7 @@ export * from './catalogRefreshResult';
 export * from './catalogSetupApplyRequest';
 export * from './catalogSetupApplyResponse';
 export * from './catalogSetupBlackholeSummary';
+export * from './catalogSetupDirectOutboundSummary';
 export * from './catalogSetupDnsMode';
 export * from './catalogSetupDnsRuleSummary';
 export * from './catalogSetupDnsServerSummary';

@@ -1829,11 +1829,14 @@ export const ruTranslation = {
       domainsAndCidrs: "{{domains}} доменов · {{cidrs}} CIDR",
       actionTunnel: "в туннель",
       actionBlock: "блокировать",
+      actionDirect: "напрямую",
       alreadyAdded: "уже добавлен",
       selected: "Выбрано: {{count}}",
       addTunnel: "Добавить туннель",
       routeTo: "Направить в",
       blockSelected: "Выбранные списки будут заблокированы",
+      directSelected:
+        "Выбранные списки пойдут напрямую, мимо туннеля",
       mixedSelection:
         "Списки для маршрутизации и блокировки нужно добавлять отдельно.",
       mixedSelectionShort:

@@ -6,6 +6,14 @@
  * OpenAPI spec version: 3.0.0
  */
 
+/**
+ * Where the selected lists end up. `outbound` is the only mode that carries `outbound_tag`; `block` sends the traffic to a blackhole and `direct` keeps it on the router's ordinary route, and both choose their own destination.
+
+A preset's action decides which mode is legal for it: a `reject` preset must use `block`, a `direct` preset must use `direct`, and `direct` mode accepts nothing else. Presets whose actions differ cannot be planned together at all - one plan emits one route rule, and two destinations have no single answer.
+
+Both `block` and `direct` insert their rule at the top of the route table, because both are exceptions that a broader rule below must not override.
+
+ */
 export type CatalogSetupMode = typeof CatalogSetupMode[keyof typeof CatalogSetupMode];
 
 
@@ -13,4 +21,5 @@ export const CatalogSetupMode = {
   none: 'none',
   outbound: 'outbound',
   block: 'block',
+  direct: 'direct',
 } as const;

@@ -43,6 +43,17 @@ constexpr std::array<AutomaticDnsEndpoint, 10U>
         {"yandex", "Yandex", "77.88.8.1"},
     }};
 
+// What a catalogue preset says should happen to the traffic it matches. Three
+// destinations, and each decides the plan's shape: `tunnel` needs an outbound
+// from the operator, `reject` needs a blackhole, `direct` needs the main
+// routing table. A preset that mixes them with another in one plan is refused
+// rather than silently resolved.
+enum class CatalogAction {
+    tunnel,
+    reject,
+    direct,
+};
+
 struct ParsedPreset {
     std::string id;
     std::string name;
@@ -50,7 +61,7 @@ struct ParsedPreset {
     std::optional<std::string> url;
     std::vector<std::string> domains;
     std::vector<std::string> ip_cidrs;
-    bool rejects{false};
+    CatalogAction action{CatalogAction::tunnel};
     bool dns_eligible{true};
     bool allow_legacy_adoption{true};
     bool reconcile_managed_sources{false};
@@ -184,6 +195,10 @@ std::string validate_catalog_url(std::string url,
 
     return url;
 }
+
+// Linux calls table 254 `main`; it is where an unmarked packet goes. Routing a
+// list here is what "always direct" means on this router.
+constexpr int64_t kMainRoutingTable = 254;
 
 bool is_routable(OutboundType type) {
     return type == OutboundType::INTERFACE ||
@@ -627,14 +642,25 @@ std::optional<std::string> parse_url(const nlohmann::json& preset,
     return ruleset_url ? ruleset_url : subscription_url;
 }
 
-bool parse_reject_action(const nlohmann::json& preset,
-                         const std::string& path) {
+// An absent engine, an absent action and an empty action all mean `tunnel`:
+// most of the catalogue predates the field, and a list with no sing-box engine
+// at all - one built purely from a DNS subscription - still routes somewhere.
+// An unrecognised value is refused rather than defaulted, because guessing
+// would route traffic somewhere the catalogue did not ask for.
+CatalogAction parse_catalog_action(const nlohmann::json& preset,
+                                   const std::string& path) {
     const auto engines = preset.find("engines");
-    if (engines == preset.end() || !engines->is_object()) return false;
+    if (engines == preset.end() || !engines->is_object()) {
+        return CatalogAction::tunnel;
+    }
     const auto singbox = engines->find("singbox");
-    if (singbox == engines->end() || !singbox->is_object()) return false;
+    if (singbox == engines->end() || !singbox->is_object()) {
+        return CatalogAction::tunnel;
+    }
     const auto action = singbox->find("action");
-    if (action == singbox->end() || action->is_null()) return false;
+    if (action == singbox->end() || action->is_null()) {
+        return CatalogAction::tunnel;
+    }
     if (!action->is_string()) {
         fail(
             CatalogSetupErrorCode::malformed_preset,
@@ -642,8 +668,9 @@ bool parse_reject_action(const nlohmann::json& preset,
             "Catalogue action must be a string");
     }
     const auto value = action->get<std::string>();
-    if (value == "reject") return true;
-    if (value.empty() || value == "tunnel") return false;
+    if (value == "reject") return CatalogAction::reject;
+    if (value == "direct") return CatalogAction::direct;
+    if (value.empty() || value == "tunnel") return CatalogAction::tunnel;
     fail(
         CatalogSetupErrorCode::malformed_preset,
         path + ".engines.singbox.action",
@@ -754,7 +781,7 @@ ParsedPreset parse_preset(const nlohmann::json& preset,
     // snapshot has no inline domain preview.
     result.dns_eligible =
         !result.domains.empty() || result.url.has_value();
-    result.rejects = parse_reject_action(preset, path);
+    result.action = parse_catalog_action(preset, path);
     result.broad_traffic_scope_warning =
         parse_broad_traffic_scope_warning(preset, path);
     return result;
@@ -850,7 +877,7 @@ std::vector<ParsedPreset> parse_routing_companions(
             }
             companion.catalog_identity_id = identity_id;
         }
-        companion.rejects = parsed_parent.rejects;
+        companion.action = parsed_parent.action;
         companion.dns_eligible = false;
         companion.reconcile_managed_sources = true;
         // Companions did not exist in older packages. Do not silently adopt
@@ -1111,7 +1138,7 @@ std::vector<ParsedPreset> select_presets(
                 normalized_values(preset.domains) ||
             normalized_values(previous.ip_cidrs) !=
                 normalized_values(preset.ip_cidrs) ||
-            previous.rejects != preset.rejects ||
+            previous.action != preset.action ||
             previous.dns_eligible != preset.dns_eligible) {
             fail(
                 CatalogSetupErrorCode::malformed_preset,
@@ -1581,23 +1608,60 @@ CatalogSetupPlan plan_catalog_setup(
     validate_intent_shape(intent);
     const auto presets = select_presets(intent, catalog_snapshot);
 
-    const bool has_reject = std::any_of(
-        presets.begin(), presets.end(),
-        [](const ParsedPreset& preset) { return preset.rejects; });
-    const bool has_tunnel = std::any_of(
-        presets.begin(), presets.end(),
-        [](const ParsedPreset& preset) { return !preset.rejects; });
-    if (has_reject && has_tunnel) {
+    // Each action needs a different destination - an operator-chosen outbound,
+    // a blackhole, the main table - and one plan emits one route rule. Two
+    // actions in one selection have no single answer, so the mix is refused
+    // instead of resolved by precedence nobody asked for.
+    const auto action_name = [](CatalogAction action) -> const char* {
+        switch (action) {
+            case CatalogAction::reject: return "reject";
+            case CatalogAction::direct: return "direct";
+            case CatalogAction::tunnel: break;
+        }
+        return "tunnel";
+    };
+    std::set<CatalogAction> selected_actions;
+    for (const auto& preset : presets) selected_actions.insert(preset.action);
+    if (selected_actions.size() > 1U) {
+        std::string names;
+        for (const auto action : selected_actions) {
+            if (!names.empty()) names += ", ";
+            names += action_name(action);
+        }
         fail(
             CatalogSetupErrorCode::mixed_catalog_actions,
             "intent.selections",
-            "Reject and tunnel catalogue presets must be planned separately");
+            "Catalogue presets with different actions (" + names +
+                ") must be planned separately");
     }
-    if (has_reject && intent.mode != CatalogSetupMode::block) {
+
+    const auto selected_action = selected_actions.empty()
+                                     ? CatalogAction::tunnel
+                                     : *selected_actions.begin();
+    // A `reject` or `direct` preset names its own destination, so a mode that
+    // would send it anywhere else is a contradiction. A `tunnel` preset names
+    // none, and blocking or installing one without a route stays the
+    // operator's call - the same latitude these presets have always had.
+    if (selected_action == CatalogAction::reject &&
+        intent.mode != CatalogSetupMode::block) {
         fail(
             CatalogSetupErrorCode::incompatible_intent,
             "intent.mode",
             "A reject catalogue preset must use block mode");
+    }
+    if (selected_action == CatalogAction::direct &&
+        intent.mode != CatalogSetupMode::direct) {
+        fail(
+            CatalogSetupErrorCode::incompatible_intent,
+            "intent.mode",
+            "A direct catalogue preset must use direct mode");
+    }
+    if (selected_action != CatalogAction::direct &&
+        intent.mode == CatalogSetupMode::direct) {
+        fail(
+            CatalogSetupErrorCode::incompatible_intent,
+            "intent.mode",
+            "Direct mode is only for catalogue presets that ask for it");
     }
 
     Config candidate = active_config;
@@ -1636,6 +1700,7 @@ CatalogSetupPlan plan_catalog_setup(
 
     std::optional<std::string> route_outbound;
     bool create_blackhole_if_needed = false;
+    bool create_direct_outbound_if_needed = false;
     if (intent.mode == CatalogSetupMode::outbound) {
         const auto* outbound =
             find_outbound(active_config, *intent.outbound_tag);
@@ -1672,6 +1737,32 @@ CatalogSetupPlan plan_catalog_setup(
                 unique_technical_id("block", "block", occupied);
             route_outbound = tag;
             create_blackhole_if_needed = true;
+        }
+    } else if (intent.mode == CatalogSetupMode::direct) {
+        // "Direct" is the main routing table, so any outbound already pointed
+        // at it is the same destination and is reused rather than duplicated -
+        // the same reasoning that makes block reuse an existing blackhole.
+        // Only when the router has none does the plan add one, named `wan`
+        // after the example configuration this project ships.
+        auto outbounds =
+            candidate.outbounds.value_or(std::vector<Outbound>{});
+        const auto existing = std::find_if(
+            outbounds.begin(), outbounds.end(),
+            [](const Outbound& outbound) {
+                return outbound.type == OutboundType::TABLE &&
+                       outbound.table.has_value() &&
+                       *outbound.table == kMainRoutingTable;
+            });
+        if (existing != outbounds.end()) {
+            route_outbound = existing->tag;
+        } else {
+            std::set<std::string> occupied;
+            for (const auto& outbound : outbounds) {
+                occupied.insert(outbound.tag);
+            }
+            route_outbound =
+                unique_technical_id("wan", "outbound", occupied);
+            create_direct_outbound_if_needed = true;
         }
     }
 
@@ -1874,13 +1965,35 @@ CatalogSetupPlan plan_catalog_setup(
             *route_outbound, create_blackhole_if_needed};
     }
 
+    if (!missing_route_list_ids.empty() &&
+        intent.mode == CatalogSetupMode::direct) {
+        if (create_direct_outbound_if_needed) {
+            auto outbounds =
+                candidate.outbounds.value_or(std::vector<Outbound>{});
+            Outbound wan;
+            wan.tag = *route_outbound;
+            wan.type = OutboundType::TABLE;
+            wan.table = kMainRoutingTable;
+            outbounds.push_back(std::move(wan));
+            candidate.outbounds = std::move(outbounds);
+        }
+        plan.summary.direct_outbound = CatalogDirectOutboundPlanSummary{
+            *route_outbound, create_direct_outbound_if_needed};
+    }
+
     if (route_outbound.has_value() &&
         !missing_route_list_ids.empty()) {
         auto route = candidate.route.value_or(RouteConfig{});
         auto rules = route.rules.value_or(std::vector<RouteRule>{});
         auto ids = occupied_route_ids(active_config);
         std::size_t base_insertion_index = rules.size();
-        if (intent.mode == CatalogSetupMode::block) {
+        // Both of these go to the top, and for the same reason: they are
+        // exceptions. A blocked domain must not be rescued by a broader tunnel
+        // rule below it, and a domain kept direct must not be swept into a
+        // tunnel by one either - "always direct" that loses to the next rule
+        // is not always.
+        if (intent.mode == CatalogSetupMode::block ||
+            intent.mode == CatalogSetupMode::direct) {
             base_insertion_index = 0U;
         } else {
             std::set<std::string> blackhole_tags;

@@ -77,6 +77,33 @@ nlohmann::json routing_preset(
     };
 }
 
+// A list that exists to stay off every tunnel. It carries a DNS subscription
+// and no rule set, which is the shape the shipped "Российские сервисы" preset
+// has: the action is the only thing its sing-box engine says.
+nlohmann::json direct_preset() {
+    return {
+        {"id", "russian-services"},
+        {"name", "Российские сервисы"},
+        {"engines",
+         {
+             {"dns",
+              {{"domains", {"gosuslugi.ru", "sberbank.ru"}},
+               {"subscriptionUrl",
+                "https://raw.githubusercontent.com/itdoginfo/"
+                "allow-domains/master/Russia/outside-raw.lst"}}},
+             {"singbox", {{"action", "direct"}}},
+         }},
+    };
+}
+
+CatalogSetupIntent direct_intent() {
+    CatalogSetupIntent intent;
+    intent.selections = {{"russian-services", std::nullopt}};
+    intent.mode = CatalogSetupMode::direct;
+    intent.dns_mode = CatalogDnsMode::none;
+    return intent;
+}
+
 nlohmann::json blocking_preset() {
     return {
         {"id", "ads"},
@@ -1353,7 +1380,184 @@ TEST_CASE("catalog planner rejects mixed tunnel and reject semantics") {
             nlohmann::json::array(
                 {routing_preset(), blocking_preset()}),
             base_config()),
-        "Reject and tunnel catalogue presets must be planned separately",
+        "Catalogue presets with different actions (tunnel, reject) must be "
+        "planned separately",
+        CatalogSetupPlanError);
+}
+
+TEST_CASE("catalog planner rejects mixed tunnel and direct semantics") {
+    auto intent = outbound_intent();
+    intent.selections = {
+        {"category-ai", std::nullopt},
+        {"russian-services", std::nullopt},
+    };
+    CHECK_THROWS_WITH_AS(
+        plan_catalog_setup(
+            intent,
+            nlohmann::json::array({routing_preset(), direct_preset()}),
+            base_config()),
+        "Catalogue presets with different actions (tunnel, direct) must be "
+        "planned separately",
+        CatalogSetupPlanError);
+}
+
+TEST_CASE("catalog planner rejects mixed reject and direct semantics") {
+    auto intent = direct_intent();
+    intent.selections = {
+        {"ads", std::nullopt},
+        {"russian-services", std::nullopt},
+    };
+    CHECK_THROWS_WITH_AS(
+        plan_catalog_setup(
+            intent,
+            nlohmann::json::array({blocking_preset(), direct_preset()}),
+            base_config()),
+        "Catalogue presets with different actions (reject, direct) must be "
+        "planned separately",
+        CatalogSetupPlanError);
+}
+
+TEST_CASE("catalog planner refuses a direct preset sent to an outbound") {
+    auto intent = outbound_intent();
+    intent.selections = {{"russian-services", std::nullopt}};
+    CHECK_THROWS_WITH_AS(
+        plan_catalog_setup(
+            intent,
+            nlohmann::json::array({direct_preset()}),
+            base_config()),
+        "A direct catalogue preset must use direct mode",
+        CatalogSetupPlanError);
+}
+
+TEST_CASE("catalog planner refuses direct mode for an ordinary preset") {
+    auto intent = direct_intent();
+    intent.selections = {{"category-ai", std::nullopt}};
+    CHECK_THROWS_WITH_AS(
+        plan_catalog_setup(
+            intent,
+            nlohmann::json::array({routing_preset()}),
+            base_config()),
+        "Direct mode is only for catalogue presets that ask for it",
+        CatalogSetupPlanError);
+}
+
+TEST_CASE("catalog planner refuses an outbound tag in direct mode") {
+    auto intent = direct_intent();
+    intent.outbound_tag = "proxy";
+    CHECK_THROWS_WITH_AS(
+        plan_catalog_setup(
+            intent,
+            nlohmann::json::array({direct_preset()}),
+            base_config()),
+        "outbound_tag is only valid in outbound mode",
+        CatalogSetupPlanError);
+}
+
+TEST_CASE("catalog planner reuses the main-table outbound for a direct list") {
+    auto config = base_config();
+    RouteRule tunnelled;
+    tunnelled.id = "tunnelled";
+    tunnelled.list = std::vector<std::string>{"existing"};
+    tunnelled.outbound = "proxy";
+    ListConfig existing;
+    existing.domains = std::vector<std::string>{"existing.example"};
+    config.lists = std::map<std::string, ListConfig>{{"existing", existing}};
+    config.route->rules = std::vector<RouteRule>{tunnelled};
+    validate_config(config);
+
+    const auto plan = plan_catalog_setup(
+        direct_intent(),
+        nlohmann::json::array({direct_preset()}),
+        config);
+
+    // base_config already has wan on table 254, so nothing is created: the
+    // same destination must not be duplicated under a second tag.
+    REQUIRE(plan.summary.direct_outbound.has_value());
+    CHECK(plan.summary.direct_outbound->tag == "wan");
+    CHECK_FALSE(plan.summary.direct_outbound->created);
+    CHECK(plan.candidate.outbounds->size() == config.outbounds->size());
+
+    // Above the tunnel rule, or "always direct" would lose to it.
+    REQUIRE(plan.summary.route_rule.has_value());
+    CHECK(plan.summary.route_rule->outbound == "wan");
+    CHECK(plan.summary.route_rule->insertion_index == 0U);
+    CHECK_FALSE(plan.summary.route_rule->blocking);
+    CHECK(plan.candidate.route->rules->front().outbound == "wan");
+    CHECK(plan.candidate.route->rules->at(1).id == "tunnelled");
+    CHECK_NOTHROW(validate_config(plan.candidate));
+}
+
+TEST_CASE("catalog planner creates the main-table outbound when absent") {
+    auto config = base_config();
+    auto outbounds = *config.outbounds;
+    outbounds.erase(
+        std::remove_if(
+            outbounds.begin(), outbounds.end(),
+            [](const Outbound& outbound) {
+                return outbound.type == OutboundType::TABLE &&
+                       outbound.table.has_value() && *outbound.table == 254;
+            }),
+        outbounds.end());
+    config.outbounds = outbounds;
+    validate_config(config);
+
+    const auto plan = plan_catalog_setup(
+        direct_intent(),
+        nlohmann::json::array({direct_preset()}),
+        config);
+
+    REQUIRE(plan.summary.direct_outbound.has_value());
+    CHECK(plan.summary.direct_outbound->created);
+    CHECK(plan.summary.direct_outbound->tag == "wan");
+    const auto& created = plan.candidate.outbounds->back();
+    CHECK(created.tag == "wan");
+    CHECK(created.type == OutboundType::TABLE);
+    REQUIRE(created.table.has_value());
+    CHECK(*created.table == 254);
+    CHECK(plan.candidate.route->rules->front().outbound == "wan");
+    CHECK_NOTHROW(validate_config(plan.candidate));
+}
+
+TEST_CASE("catalog planner creates a collision-safe main-table outbound") {
+    auto config = base_config();
+    auto outbounds = *config.outbounds;
+    for (auto& outbound : outbounds) {
+        // Leave the tag taken by something that is not the main table, so the
+        // planner cannot reuse it and must not overwrite it either.
+        if (outbound.tag == "wan") {
+            outbound.type = OutboundType::INTERFACE;
+            outbound.table = std::nullopt;
+            outbound.interface = "tun9";
+        }
+    }
+    config.outbounds = outbounds;
+    validate_config(config);
+
+    const auto plan = plan_catalog_setup(
+        direct_intent(),
+        nlohmann::json::array({direct_preset()}),
+        config);
+
+    REQUIRE(plan.summary.direct_outbound.has_value());
+    CHECK(plan.summary.direct_outbound->created);
+    CHECK(plan.summary.direct_outbound->tag == "wan_2");
+    CHECK(plan.candidate.outbounds->back().tag == "wan_2");
+    CHECK(plan.candidate.outbounds->back().type == OutboundType::TABLE);
+    CHECK(
+        plan.candidate.outbounds->at(
+            plan.candidate.outbounds->size() - 1U).table == 254);
+    CHECK(plan.candidate.route->rules->front().outbound == "wan_2");
+    CHECK_NOTHROW(validate_config(plan.candidate));
+}
+
+TEST_CASE("catalog planner refuses an unknown catalogue action") {
+    auto preset = direct_preset();
+    preset["engines"]["singbox"]["action"] = "bypass";
+    CHECK_THROWS_AS(
+        plan_catalog_setup(
+            direct_intent(),
+            nlohmann::json::array({preset}),
+            base_config()),
         CatalogSetupPlanError);
 }
 

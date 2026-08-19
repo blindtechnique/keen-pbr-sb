@@ -23,6 +23,11 @@ const presets: CatalogPreset[] = [
     name: "Реклама",
     engines: { singbox: { action: "reject" } },
   },
+  {
+    id: "russian-services",
+    name: "Российские сервисы",
+    engines: { singbox: { action: "direct" } },
+  },
 ]
 
 describe("catalog setup intent", () => {
@@ -273,5 +278,44 @@ describe("catalog setup intent", () => {
     expect(
       getCatalogSelectionMode(presets, new Set(["instagram", "ads"]))
     ).toBe("mixed")
+  })
+
+  test("an always-direct list is its own kind of selection", () => {
+    expect(
+      getCatalogSelectionMode(presets, new Set(["russian-services"]))
+    ).toBe("direct")
+  })
+
+  test("direct pairs with neither routing nor blocking", () => {
+    expect(
+      getCatalogSelectionMode(presets, new Set(["instagram", "russian-services"]))
+    ).toBe("mixed")
+    expect(
+      getCatalogSelectionMode(presets, new Set(["ads", "russian-services"]))
+    ).toBe("mixed")
+  })
+
+  test("an always-direct selection ignores the chosen destination", () => {
+    // The picker still holds a tunnel from an earlier selection. A list that
+    // exists to stay off every tunnel must not inherit it, and the server
+    // refuses an outbound tag in this mode anyway.
+    expect(
+      createCatalogSetupIntent({
+        presets,
+        selectedIds: new Set(["russian-services"]),
+        selectionMode: "direct",
+        destination: "vpn",
+        directDestination: "__direct__",
+        sourceDetour: "",
+        combinedDisplayName: "Каталог",
+      })
+    ).toEqual({
+      selections: [
+        { preset_id: "russian-services", display_name: "Российские сервисы" },
+      ],
+      mode: "direct",
+      dns_mode: "none",
+      route_display_name: "Российские сервисы",
+    })
   })
 })

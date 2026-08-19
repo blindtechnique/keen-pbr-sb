@@ -395,7 +395,7 @@
     "name": "Российские сервисы",
     "iconSlug": "rkn",
     "category": "block",
-    "notice": "Основной источник — itdoginfo/allow-domains (Russia outside-raw). Дополнительно включены домены банков, госуслуг, Yandex/VK, WB/Ozon другие",
+    "notice": "Всегда напрямую, мимо туннеля. Основной источник — itdoginfo/allow-domains (Russia outside-raw). Дополнительно включены домены банков, госуслуг, Yandex/VK, WB/Ozon и другие",
     "origin": "",
     "engines": {
       "dns": {
@@ -508,6 +508,9 @@
           "xn--c1avg"
         ],
         "subscriptionUrl": "https://raw.githubusercontent.com/itdoginfo/allow-domains/master/Russia/outside-raw.lst"
+      },
+      "singbox": {
+        "action": "direct"
       }
     }
   },

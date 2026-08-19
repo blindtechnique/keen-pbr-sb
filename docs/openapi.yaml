@@ -2244,7 +2244,24 @@ components:
 
     CatalogSetupMode:
       type: string
-      enum: [none, outbound, block]
+      description: >
+        Where the selected lists end up. `outbound` is the only mode that
+        carries `outbound_tag`; `block` sends the traffic to a blackhole and
+        `direct` keeps it on the router's ordinary route, and both choose their
+        own destination.
+
+
+        A preset's action decides which mode is legal for it: a `reject` preset
+        must use `block`, a `direct` preset must use `direct`, and `direct` mode
+        accepts nothing else. Presets whose actions differ cannot be planned
+        together at all - one plan emits one route rule, and two destinations
+        have no single answer.
+
+
+        Both `block` and `direct` insert their rule at the top of the route
+        table, because both are exceptions that a broader rule below must not
+        override.
+      enum: [none, outbound, block, direct]
 
     CatalogSetupDnsMode:
       type: string
@@ -2449,6 +2466,21 @@ components:
         created:
           type: boolean
 
+    CatalogSetupDirectOutboundSummary:
+      type: object
+      additionalProperties: false
+      required: [tag, created]
+      description: >
+        The main-table outbound a `direct` plan routes to. An outbound already
+        pointed at table 254 is reused, because it is the same destination;
+        `created` true means the router had none and the plan adds one, so a
+        new outbound never appears unannounced.
+      properties:
+        tag:
+          type: string
+        created:
+          type: boolean
+
     CatalogSetupSummary:
       type: object
       additionalProperties: false
@@ -2492,6 +2524,8 @@ components:
             modified.
         blackhole:
           $ref: "#/components/schemas/CatalogSetupBlackholeSummary"
+        direct_outbound:
+          $ref: "#/components/schemas/CatalogSetupDirectOutboundSummary"
 
     CatalogSetupPreviewResponse:
       type: object

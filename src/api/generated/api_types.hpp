@@ -228,7 +228,7 @@ namespace api {
 
     enum class DnsMode : int { AUTOMATIC, EXPLICIT_SERVER, NONE };
 
-    enum class CatalogSetupModeEnum : int { BLOCK, NONE, OUTBOUND };
+    enum class CatalogSetupModeEnum : int { BLOCK, DIRECT, NONE, OUTBOUND };
 
     struct Intent {
         std::optional<std::string> dns_display_name;
@@ -260,6 +260,11 @@ namespace api {
     };
 
     struct CatalogSetupBlackholeSummary {
+        bool created = false;
+        std::string tag;
+    };
+
+    struct CatalogSetupDirectOutboundSummary {
         bool created = false;
         std::string tag;
     };
@@ -304,6 +309,7 @@ namespace api {
 
     struct CatalogSetupSummaryClass {
         std::optional<CatalogSetupBlackholeSummary> blackhole;
+        std::optional<CatalogSetupDirectOutboundSummary> direct_outbound;
         std::optional<CatalogSetupDnsRuleSummary> dns_rule;
         std::optional<std::vector<CatalogSetupDnsRuleSummary>> dns_rules;
         std::optional<CatalogSetupDnsServerSummary> dns_server;
@@ -1726,6 +1732,7 @@ namespace api {
         std::optional<CatalogSetupApplyRequest> catalog_setup_apply_request;
         std::optional<CatalogSetupApplyResponse> catalog_setup_apply_response;
         std::optional<CatalogSetupBlackholeSummary> catalog_setup_blackhole_summary;
+        std::optional<CatalogSetupDirectOutboundSummary> catalog_setup_direct_outbound_summary;
         std::optional<DnsMode> catalog_setup_dns_mode;
         std::optional<CatalogSetupDnsRuleSummary> catalog_setup_dns_rule_summary;
         std::optional<CatalogSetupDnsServerSummary> catalog_setup_dns_server_summary;
@@ -1971,6 +1978,9 @@ void to_json(json & j, const CatalogSetupApplyResponse & x);
 
 void from_json(const json & j, CatalogSetupBlackholeSummary & x);
 void to_json(json & j, const CatalogSetupBlackholeSummary & x);
+
+void from_json(const json & j, CatalogSetupDirectOutboundSummary & x);
+void to_json(json & j, const CatalogSetupDirectOutboundSummary & x);
 
 void from_json(const json & j, CatalogSetupDnsRuleSummary & x);
 void to_json(json & j, const CatalogSetupDnsRuleSummary & x);
@@ -3066,6 +3076,17 @@ namespace api {
         j["tag"] = x.tag;
     }
 
+    inline void from_json(const json & j, CatalogSetupDirectOutboundSummary& x) {
+        x.created = j.at("created").get<bool>();
+        x.tag = j.at("tag").get<std::string>();
+    }
+
+    inline void to_json(json & j, const CatalogSetupDirectOutboundSummary & x) {
+        j = json::object();
+        j["created"] = x.created;
+        j["tag"] = x.tag;
+    }
+
     inline void from_json(const json & j, CatalogSetupDnsRuleSummary& x) {
         x.display_name = j.at("display_name").get<std::string>();
         x.insertion_index = j.at("insertion_index").get<int64_t>();
@@ -3149,6 +3170,7 @@ namespace api {
 
     inline void from_json(const json & j, CatalogSetupSummaryClass& x) {
         x.blackhole = get_stack_optional<CatalogSetupBlackholeSummary>(j, "blackhole");
+        x.direct_outbound = get_stack_optional<CatalogSetupDirectOutboundSummary>(j, "direct_outbound");
         x.dns_rule = get_stack_optional<CatalogSetupDnsRuleSummary>(j, "dns_rule");
         x.dns_rules = get_stack_optional<std::vector<CatalogSetupDnsRuleSummary>>(j, "dns_rules");
         x.dns_server = get_stack_optional<CatalogSetupDnsServerSummary>(j, "dns_server");
@@ -3161,6 +3183,7 @@ namespace api {
     inline void to_json(json & j, const CatalogSetupSummaryClass & x) {
         j = json::object();
         j["blackhole"] = x.blackhole;
+        j["direct_outbound"] = x.direct_outbound;
         j["dns_rule"] = x.dns_rule;
         j["dns_rules"] = x.dns_rules;
         j["dns_server"] = x.dns_server;
@@ -5753,6 +5776,7 @@ namespace api {
         x.catalog_setup_apply_request = get_stack_optional<CatalogSetupApplyRequest>(j, "CatalogSetupApplyRequest");
         x.catalog_setup_apply_response = get_stack_optional<CatalogSetupApplyResponse>(j, "CatalogSetupApplyResponse");
         x.catalog_setup_blackhole_summary = get_stack_optional<CatalogSetupBlackholeSummary>(j, "CatalogSetupBlackholeSummary");
+        x.catalog_setup_direct_outbound_summary = get_stack_optional<CatalogSetupDirectOutboundSummary>(j, "CatalogSetupDirectOutboundSummary");
         x.catalog_setup_dns_mode = get_stack_optional<DnsMode>(j, "CatalogSetupDnsMode");
         x.catalog_setup_dns_rule_summary = get_stack_optional<CatalogSetupDnsRuleSummary>(j, "CatalogSetupDnsRuleSummary");
         x.catalog_setup_dns_server_summary = get_stack_optional<CatalogSetupDnsServerSummary>(j, "CatalogSetupDnsServerSummary");
@@ -5955,6 +5979,7 @@ namespace api {
         j["CatalogSetupApplyRequest"] = x.catalog_setup_apply_request;
         j["CatalogSetupApplyResponse"] = x.catalog_setup_apply_response;
         j["CatalogSetupBlackholeSummary"] = x.catalog_setup_blackhole_summary;
+        j["CatalogSetupDirectOutboundSummary"] = x.catalog_setup_direct_outbound_summary;
         j["CatalogSetupDnsMode"] = x.catalog_setup_dns_mode;
         j["CatalogSetupDnsRuleSummary"] = x.catalog_setup_dns_rule_summary;
         j["CatalogSetupDnsServerSummary"] = x.catalog_setup_dns_server_summary;
@@ -6181,6 +6206,7 @@ namespace api {
 
     inline void from_json(const json & j, CatalogSetupModeEnum & x) {
         if (j == "block") x = CatalogSetupModeEnum::BLOCK;
+        else if (j == "direct") x = CatalogSetupModeEnum::DIRECT;
         else if (j == "none") x = CatalogSetupModeEnum::NONE;
         else if (j == "outbound") x = CatalogSetupModeEnum::OUTBOUND;
         else { throw std::runtime_error("Cannot deserialize to enumeration \"CatalogSetupModeEnum\""); }
@@ -6189,6 +6215,7 @@ namespace api {
     inline void to_json(json & j, const CatalogSetupModeEnum & x) {
         switch (x) {
             case CatalogSetupModeEnum::BLOCK: j = "block"; break;
+            case CatalogSetupModeEnum::DIRECT: j = "direct"; break;
             case CatalogSetupModeEnum::NONE: j = "none"; break;
             case CatalogSetupModeEnum::OUTBOUND: j = "outbound"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"CatalogSetupModeEnum\": " + std::to_string(static_cast<int>(x)));

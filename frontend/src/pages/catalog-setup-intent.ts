@@ -71,12 +71,17 @@ export function createCatalogSetupIntent({
     selections.length === 1
       ? selections[0]?.display_name
       : trimToUndefined(combinedDisplayName)
+  // A reject or direct preset names its own destination, so the picker's value
+  // is not consulted for either: choosing an outbound for a list that is meant
+  // to stay off every tunnel would be a contradiction the server refuses.
   const mode: CatalogSetupMode =
     selectionMode === "reject"
       ? "block"
-      : destination === directDestination
-        ? "none"
-        : "outbound"
+      : selectionMode === "direct"
+        ? "direct"
+        : destination === directDestination
+          ? "none"
+          : "outbound"
 
   return {
     selections,

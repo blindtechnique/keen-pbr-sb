@@ -16,6 +16,10 @@ enum class CatalogSetupMode {
     none,
     outbound,
     block,
+    // Keep the traffic on the router's ordinary route. The destination is not
+    // the operator's to pick - it is the main routing table - so this mode
+    // carries no outbound tag, exactly as `block` carries none.
+    direct,
 };
 
 enum class CatalogDnsMode {
@@ -127,6 +131,15 @@ struct CatalogBlackholePlanSummary {
     bool created{false};
 };
 
+// The main-table outbound a `direct` selection routes to. `created` true means
+// the router had no outbound on the main table and the plan adds one, so the
+// panel can say that a new outbound appears rather than letting it turn up
+// unannounced.
+struct CatalogDirectOutboundPlanSummary {
+    std::string tag;
+    bool created{false};
+};
+
 struct CatalogSetupSummary {
     CatalogSetupMode mode{CatalogSetupMode::none};
     std::vector<CatalogListPlanSummary> lists;
@@ -140,6 +153,7 @@ struct CatalogSetupSummary {
     std::optional<CatalogDnsRulePlanSummary> dns_rule;
     std::optional<CatalogDnsServerPlanSummary> dns_server;
     std::optional<CatalogBlackholePlanSummary> blackhole;
+    std::optional<CatalogDirectOutboundPlanSummary> direct_outbound;
 };
 
 struct CatalogSetupPlan {

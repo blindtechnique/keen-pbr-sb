@@ -101,6 +101,7 @@ CatalogSetupMode parse_mode(const nlohmann::json& intent) {
     if (mode == "none") return CatalogSetupMode::none;
     if (mode == "outbound") return CatalogSetupMode::outbound;
     if (mode == "block") return CatalogSetupMode::block;
+    if (mode == "direct") return CatalogSetupMode::direct;
     bad_request(
         "Unsupported catalog setup mode '" + mode + "'",
         "$.intent.mode");
@@ -234,6 +235,8 @@ const char* mode_name(CatalogSetupMode mode) {
         return "outbound";
     case CatalogSetupMode::block:
         return "block";
+    case CatalogSetupMode::direct:
+        return "direct";
     }
     return "none";
 }
@@ -376,6 +379,12 @@ nlohmann::json summary_json(const CatalogSetupPlan& plan) {
             {"created", plan.summary.blackhole->created},
         };
     }
+    if (plan.summary.direct_outbound.has_value()) {
+        summary["direct_outbound"] = {
+            {"tag", plan.summary.direct_outbound->tag},
+            {"created", plan.summary.direct_outbound->created},
+        };
+    }
     return summary;
 }
 
@@ -405,7 +414,9 @@ bool catalog_plan_has_changes(const CatalogSetupPlan& plan) {
            (plan.summary.dns_server.has_value() &&
             plan.summary.dns_server->created) ||
            (plan.summary.blackhole.has_value() &&
-            plan.summary.blackhole->created);
+            plan.summary.blackhole->created) ||
+           (plan.summary.direct_outbound.has_value() &&
+            plan.summary.direct_outbound->created);
 }
 
 struct CatalogSetupPreview {

@@ -6,6 +6,7 @@
  * OpenAPI spec version: 3.0.0
  */
 import type { CatalogSetupBlackholeSummary } from './catalogSetupBlackholeSummary';
+import type { CatalogSetupDirectOutboundSummary } from './catalogSetupDirectOutboundSummary';
 import type { CatalogSetupDnsRuleSummary } from './catalogSetupDnsRuleSummary';
 import type { CatalogSetupDnsServerSummary } from './catalogSetupDnsServerSummary';
 import type { CatalogSetupListSummary } from './catalogSetupListSummary';
@@ -31,4 +32,5 @@ export interface CatalogSetupSummary {
    */
   dns_server?: CatalogSetupDnsServerSummary;
   blackhole?: CatalogSetupBlackholeSummary;
+  direct_outbound?: CatalogSetupDirectOutboundSummary;
 }

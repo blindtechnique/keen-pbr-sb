@@ -631,7 +631,9 @@ export function CatalogPage() {
             preset,
             presets
           )
-          const blocks = preset.engines?.singbox?.action === "reject"
+          const presetAction = preset.engines?.singbox?.action
+          const blocks = presetAction === "reject"
+          const staysDirect = presetAction === "direct"
           const installState = installStateByPresetId.get(preset.id)
           const installedListId = installState?.primaryListId
           const installedList = installedListId
@@ -784,12 +786,16 @@ export function CatalogPage() {
                       "shrink-0 rounded-full px-2 py-0.5 text-xs",
                       blocks
                         ? "bg-destructive/10 text-destructive"
-                        : "bg-success/10 text-success"
+                        : staysDirect
+                          ? "bg-muted text-muted-foreground"
+                          : "bg-success/10 text-success"
                     )}
                   >
                     {blocks
                       ? t("pages.catalog.actionBlock")
-                      : t("pages.catalog.actionTunnel")}
+                      : staysDirect
+                        ? t("pages.catalog.actionDirect")
+                        : t("pages.catalog.actionTunnel")}
                   </span>
                 </span>
               </span>
@@ -826,6 +832,12 @@ export function CatalogPage() {
           {selectedMode === "reject" ? (
             <span className="text-[13px] text-destructive">
               {t("pages.catalog.blockSelected")}
+            </span>
+          ) : selectedMode === "direct" ? (
+            /* Такому списку выбирать назначение нечего: он существует ровно
+               затем, чтобы никуда не сворачивать. */
+            <span className="text-[13px] text-muted-foreground">
+              {t("pages.catalog.directSelected")}
             </span>
           ) : (
             <>

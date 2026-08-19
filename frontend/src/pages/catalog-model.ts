@@ -43,7 +43,12 @@ export type CatalogPreset = {
   }
 }
 
-export type CatalogSelectionMode = "empty" | "route" | "reject" | "mixed"
+export type CatalogSelectionMode =
+  | "empty"
+  | "route"
+  | "reject"
+  | "direct"
+  | "mixed"
 
 export interface CatalogPresetSourceSummary {
   readonly urlBacked: boolean
@@ -113,23 +118,33 @@ export function getCatalogSelectionMode(
 ): CatalogSelectionMode {
   let hasRoute = false
   let hasReject = false
+  let hasDirect = false
 
   for (const preset of presets) {
     if (!selectedIds.has(preset.id)) {
       continue
     }
-    if (preset.engines?.singbox?.action === "reject") {
+    const action = preset.engines?.singbox?.action
+    if (action === "reject") {
       hasReject = true
+    } else if (action === "direct") {
+      hasDirect = true
     } else {
       hasRoute = true
     }
   }
 
-  if (hasRoute && hasReject) {
+  // Each action ends somewhere else - a tunnel, a blackhole, the ordinary
+  // route - and one dialog produces one destination, so any two together are
+  // "mixed" rather than something the dialog quietly picks between.
+  if (Number(hasRoute) + Number(hasReject) + Number(hasDirect) > 1) {
     return "mixed"
   }
   if (hasReject) {
     return "reject"
+  }
+  if (hasDirect) {
+    return "direct"
   }
   return hasRoute ? "route" : "empty"
 }
