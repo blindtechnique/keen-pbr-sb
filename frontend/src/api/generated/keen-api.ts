@@ -1382,7 +1382,9 @@ export const usePostRoutingTest = <TError = ErrorResponse,
 /**
  * Asks cheburcheck.ru whether a domain or address is on the registry, and reports what it says. Their code is not vendored; only the verdict is shown, and the service is credited.
 
-**Nothing leaves the router without `allow_external_lookup`.** This is the one call in the daemon that reaches a service we do not control, so it is opt-in per request and never scheduled - rendering a panel must not cause a third party to learn what someone is looking up. The target is sent verbatim, which is the whole point of the lookup and worth saying out loud in any interface that offers it.
+**Nothing leaves the router unless `ui_preferences.registry_lookup_enabled` is on.** The daemon reads that from its own configuration rather than from the request: a browser cannot authorise the lookup by asking for it, and the consent survives a cleared browser, a different device and a restore from backup. With the switch off the answer is `checked: false` with reason `registry_lookup_disabled` and nothing is sent anywhere.
+
+With it on, every address check also sends that address to the service. That is the whole point of the lookup, and it is stated where the switch is.
 
 The answer is about the registry, not about this router. A domain can be listed and still work here, or be absent and still fail through a blocked CDN prefix. What actually happens to it is `POST /api/routing/test` and the reachability probes; the two are kept apart deliberately.
 

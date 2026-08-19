@@ -1,10 +1,11 @@
-import { Loader2, ShieldQuestion } from "lucide-react"
-import { useEffect, useState } from "react"
+import { Loader2 } from "lucide-react"
+import { useEffect, useRef } from "react"
 import { useTranslation } from "react-i18next"
 
 import { usePostRoutingRegistryCheckMutation } from "@/api/mutations"
 import type { RoutingTestNfqws } from "@/api/generated/model"
-import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Label } from "@/components/ui/label"
 
 import {
   nfqwsVerdict,
@@ -23,9 +24,15 @@ import {
  */
 export function TargetFacts({
   nfqws,
+  onRegistryEnabledChange,
+  registryEnabled,
+  registrySaving,
   target,
 }: {
   nfqws?: RoutingTestNfqws
+  onRegistryEnabledChange: (enabled: boolean) => void
+  registryEnabled: boolean
+  registrySaving: boolean
   target: string
 }) {
   const { t } = useTranslation()
@@ -33,18 +40,27 @@ export function TargetFacts({
   const verdict = nfqwsVerdict(coverage)
   const registryMutation = usePostRoutingRegistryCheckMutation()
 
-  // A verdict belongs to the target it was asked about. Without this a new
-  // search shows the previous target's answer until the request returns.
-  const [askedFor, setAskedFor] = useState<string | null>(null)
+  // One lookup per target per switch state, fired from the effect rather than
+  // from a button: the preference is the consent, so a checked target should
+  // not need a second click. The ref is what keeps a re-render from asking
+  // again for a target already asked about.
+  const askedRef = useRef<string | null>(null)
+  const { mutate: askRegistry, reset: resetRegistry } = registryMutation
   useEffect(() => {
-    if (askedFor !== null && askedFor !== target) {
-      registryMutation.reset()
-      setAskedFor(null)
+    if (!registryEnabled) {
+      if (askedRef.current !== null) {
+        askedRef.current = null
+        resetRegistry()
+      }
+      return
     }
-  }, [target, askedFor, registryMutation])
+    if (!target || askedRef.current === target) return
+    askedRef.current = target
+    askRegistry({ data: { target } })
+  }, [registryEnabled, target, askRegistry, resetRegistry])
 
   const registry =
-    registryMutation.data?.status === 200 && askedFor === target
+    registryMutation.data?.status === 200 && askedRef.current === target
       ? registryMutation.data.data
       : undefined
   const registryState = registry ? registryVerdict(registry) : null
@@ -79,32 +95,40 @@ export function TargetFacts({
         <div className="text-xs font-medium">
           {t("overview.targetFacts.registryTitle")}
         </div>
-        {!registry ? (
-          <>
-            <p className="text-sm text-muted-foreground">
-              {t("overview.targetFacts.registryPrompt")}
-            </p>
-            <Button
-              className="mt-1"
-              disabled={registryMutation.isPending || !target}
-              onClick={() => {
-                setAskedFor(target)
-                registryMutation.mutate({
-                  data: { target, allow_external_lookup: true },
-                })
-              }}
-              size="sm"
-              variant="outline"
-            >
-              {registryMutation.isPending ? (
-                <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-              ) : (
-                <ShieldQuestion className="mr-1 h-4 w-4" />
-              )}
-              {t("overview.targetFacts.registryCheck")}
-            </Button>
-          </>
-        ) : (
+
+        {/* The switch sits with the answer it governs, and is stored on the
+            router: a consent kept in the browser would be asked again on every
+            other device and lost with the first cleared cache. */}
+        <div className="flex items-start gap-2 py-1">
+          <Checkbox
+            checked={registryEnabled}
+            className="mt-0.5"
+            disabled={registrySaving}
+            id="registry-lookup-enabled"
+            onCheckedChange={(checked) =>
+              onRegistryEnabledChange(checked === true)
+            }
+          />
+          <Label
+            className="text-sm font-normal text-muted-foreground"
+            htmlFor="registry-lookup-enabled"
+          >
+            {t("overview.targetFacts.registryConsent")}
+          </Label>
+          {registrySaving ? (
+            <Loader2 className="mt-0.5 h-4 w-4 animate-spin" />
+          ) : null}
+        </div>
+
+        {!registryEnabled ? null : registryMutation.isPending ? (
+          <p className="text-sm text-muted-foreground">
+            {t("overview.targetFacts.registryChecking")}
+          </p>
+        ) : registryMutation.isError ? (
+          <p className="text-sm text-destructive">
+            {t("overview.targetFacts.registry.not-checked")}
+          </p>
+        ) : registry ? (
           <>
             <p className="text-sm text-muted-foreground">
               {t(`overview.targetFacts.registry.${registryState}`)}
@@ -129,11 +153,6 @@ export function TargetFacts({
               })}
             </p>
           </>
-        )}
-        {registryMutation.isError ? (
-          <p className="text-xs text-destructive">
-            {t("overview.targetFacts.registry.not-checked")}
-          </p>
         ) : null}
       </div>
     </div>

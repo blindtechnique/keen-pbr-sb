@@ -189,10 +189,16 @@ void register_handler(ApiServer& server,
                 throw ApiError("Invalid target", 400, payload.dump());
             }
 
-            // The gate is the whole point: a panel that renders this section
-            // must not cause a request to a third party by rendering.
-            if (!request.value("allow_external_lookup", false)) {
-                return not_checked("external_lookup_not_allowed").dump();
+            // The consent is the daemon's own setting, not something the
+            // request may assert. A browser cannot authorise this by asking,
+            // and the answer stays the same across a cleared browser, another
+            // device, or a restore from backup.
+            const auto config = ctx.get_visible_config();
+            const bool enabled =
+                config.ui_preferences.has_value() &&
+                config.ui_preferences->registry_lookup_enabled.value_or(false);
+            if (!enabled) {
+                return not_checked("registry_lookup_disabled").dump();
             }
 
             {
@@ -209,9 +215,7 @@ void register_handler(ApiServer& server,
 
             const auto detour = request.value("detour", std::string{});
             const auto mark =
-                detour.empty()
-                    ? 0U
-                    : mark_for_detour(ctx.get_visible_config(), detour);
+                detour.empty() ? 0U : mark_for_detour(config, detour);
 
             std::string raw_body;
             try {

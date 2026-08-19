@@ -222,6 +222,7 @@ export function OverviewPage() {
       </div>
 
       <RoutingTestPanel
+        config={loadedConfig}
         lists={loadedConfig?.lists}
         outbounds={loadedConfig?.outbounds}
       />

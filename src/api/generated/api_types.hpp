@@ -519,6 +519,7 @@ namespace api {
     struct UiPreferences {
         std::optional<std::vector<std::string>> hidden_native_interface_ids;
         std::optional<std::vector<PlainDnsTemplateElement>> plain_dns_templates;
+        std::optional<bool> registry_lookup_enabled;
     };
 
     struct ConfigObject {
@@ -1102,12 +1103,11 @@ namespace api {
     };
 
     struct RegistryCheckRequest {
-        std::optional<bool> allow_external_lookup;
         std::optional<std::string> detour;
         std::string target;
     };
 
-    enum class Reason : int { EXTERNAL_LOOKUP_NOT_ALLOWED, LOOKUP_FAILED, UNREADABLE_RESPONSE };
+    enum class Reason : int { LOOKUP_FAILED, REGISTRY_LOOKUP_DISABLED, UNREADABLE_RESPONSE };
 
     struct RegistryCheckResponse {
         std::optional<bool> blocked;
@@ -3634,12 +3634,14 @@ namespace api {
     inline void from_json(const json & j, UiPreferences& x) {
         x.hidden_native_interface_ids = get_stack_optional<std::vector<std::string>>(j, "hidden_native_interface_ids");
         x.plain_dns_templates = get_stack_optional<std::vector<PlainDnsTemplateElement>>(j, "plain_dns_templates");
+        x.registry_lookup_enabled = get_stack_optional<bool>(j, "registry_lookup_enabled");
     }
 
     inline void to_json(json & j, const UiPreferences & x) {
         j = json::object();
         j["hidden_native_interface_ids"] = x.hidden_native_interface_ids;
         j["plain_dns_templates"] = x.plain_dns_templates;
+        j["registry_lookup_enabled"] = x.registry_lookup_enabled;
     }
 
     inline void from_json(const json & j, ConfigObject& x) {
@@ -4709,14 +4711,12 @@ namespace api {
     }
 
     inline void from_json(const json & j, RegistryCheckRequest& x) {
-        x.allow_external_lookup = get_stack_optional<bool>(j, "allow_external_lookup");
         x.detour = get_stack_optional<std::string>(j, "detour");
         x.target = j.at("target").get<std::string>();
     }
 
     inline void to_json(json & j, const RegistryCheckRequest & x) {
         j = json::object();
-        j["allow_external_lookup"] = x.allow_external_lookup;
         j["detour"] = x.detour;
         j["target"] = x.target;
     }
@@ -7218,16 +7218,16 @@ namespace api {
     }
 
     inline void from_json(const json & j, Reason & x) {
-        if (j == "external_lookup_not_allowed") x = Reason::EXTERNAL_LOOKUP_NOT_ALLOWED;
-        else if (j == "lookup_failed") x = Reason::LOOKUP_FAILED;
+        if (j == "lookup_failed") x = Reason::LOOKUP_FAILED;
+        else if (j == "registry_lookup_disabled") x = Reason::REGISTRY_LOOKUP_DISABLED;
         else if (j == "unreadable_response") x = Reason::UNREADABLE_RESPONSE;
         else { throw std::runtime_error("Cannot deserialize to enumeration \"Reason\""); }
     }
 
     inline void to_json(json & j, const Reason & x) {
         switch (x) {
-            case Reason::EXTERNAL_LOOKUP_NOT_ALLOWED: j = "external_lookup_not_allowed"; break;
             case Reason::LOOKUP_FAILED: j = "lookup_failed"; break;
+            case Reason::REGISTRY_LOOKUP_DISABLED: j = "registry_lookup_disabled"; break;
             case Reason::UNREADABLE_RESPONSE: j = "unreadable_response"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"Reason\": " + std::to_string(static_cast<int>(x)));
         }

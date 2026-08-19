@@ -1738,9 +1738,9 @@ export const enTranslation = {
         ipset_exclude: "address excludes",
       },
       registryTitle: "Russian blocking registry",
-      registryPrompt:
-        "Answered by an outside service, so it runs only on request: the address you ask about becomes known to it.",
-      registryCheck: "Check the registry",
+      registryConsent:
+        "Also check the address against the blocking registry. An outside service answers it, so the address you ask about becomes known to it. The setting is kept on the router.",
+      registryChecking: "Checking…",
       registry: {
         "not-checked":
           "The lookup did not run, which is not the same as not being blocked.",

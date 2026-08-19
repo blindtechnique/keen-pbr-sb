@@ -2,7 +2,14 @@ import { Loader2, Search } from "lucide-react"
 import { useState } from "react"
 import { useTranslation } from "react-i18next"
 
-import { usePostRoutingTestMutation } from "@/api/mutations"
+import { toast } from "sonner"
+
+import {
+  usePostConfigMutation,
+  usePostRoutingTestMutation,
+} from "@/api/mutations"
+import type { ApiError } from "@/api/client"
+import { getApiErrorMessage } from "@/lib/api-errors"
 import type { ConfigObject } from "@/api/generated/model"
 import { SectionCard } from "@/components/shared/section-card"
 import { Alert, AlertDescription } from "@/components/ui/alert"
@@ -21,13 +28,40 @@ import { sanitizeRoutingTarget } from "./sanitize-routing-target"
 import { TargetFacts } from "./target-facts"
 
 export function RoutingTestPanel({
+  config,
   lists,
   outbounds,
 }: {
+  config?: ConfigObject
   lists?: ConfigObject["lists"]
   outbounds?: ConfigObject["outbounds"]
 }) {
   const { t } = useTranslation()
+  // Persisted on the router through the ordinary configuration, so the consent
+  // survives a cleared browser and travels with a backup.
+  const preferenceMutation = usePostConfigMutation({
+    mutation: {
+      onError: (mutationError) =>
+        toast.error(getApiErrorMessage(mutationError as ApiError), {
+          richColors: true,
+        }),
+    },
+  })
+  const registryEnabled = Boolean(
+    config?.ui_preferences?.registry_lookup_enabled
+  )
+  const setRegistryEnabled = (enabled: boolean) => {
+    if (!config) return
+    preferenceMutation.mutate({
+      data: {
+        ...config,
+        ui_preferences: {
+          ...(config.ui_preferences ?? {}),
+          registry_lookup_enabled: enabled,
+        },
+      },
+    })
+  }
   const [testTarget, setTestTarget] = useState("")
   const [routingInputError, setRoutingInputError] = useState<string | null>(
     null
@@ -141,6 +175,9 @@ export function RoutingTestPanel({
               the registry are separate facts that the route does not answer. */}
           <TargetFacts
             nfqws={routingDiagnostics.nfqws}
+            onRegistryEnabledChange={setRegistryEnabled}
+            registryEnabled={registryEnabled}
+            registrySaving={preferenceMutation.isPending}
             target={routingDiagnostics.target}
           />
         </>

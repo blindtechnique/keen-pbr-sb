@@ -16,8 +16,11 @@
 namespace keen_pbr3 {
 namespace {
 
-Config registry_test_config() {
+Config registry_test_config(bool registry_enabled) {
     Config config;
+    api::UiPreferences preferences;
+    preferences.registry_lookup_enabled = registry_enabled;
+    config.ui_preferences = preferences;
     Outbound tunnel;
     tunnel.tag = "wg";
     tunnel.type = OutboundType::INTERFACE;
@@ -26,11 +29,12 @@ Config registry_test_config() {
     return config;
 }
 
-ApiContext make_registry_test_context(SseBroadcaster& broadcaster) {
+ApiContext make_registry_test_context(SseBroadcaster& broadcaster,
+                                      bool registry_enabled) {
     return ApiContext{
         std::string("/nonexistent/config.json"),
         broadcaster,
-        []() { return registry_test_config(); },
+        [registry_enabled]() { return registry_test_config(registry_enabled); },
         []() { return false; },
         [](Config, std::string) {},
         []() -> std::optional<std::pair<Config, std::string>> {
@@ -82,8 +86,8 @@ struct RegistryHarness {
     bool fail{false};
     std::string body{kBlockedBody};
 
-    explicit RegistryHarness(const int api_port)
-        : context(make_registry_test_context(broadcaster)),
+    RegistryHarness(const int api_port, const bool registry_enabled = true)
+        : context(make_registry_test_context(broadcaster, registry_enabled)),
           server([api_port]() {
               ApiConfig api_config;
               api_config.listen = "127.0.0.1:" + std::to_string(api_port);
@@ -120,20 +124,23 @@ httplib::Result post_check(httplib::Client& client,
 
 }  // namespace
 
-TEST_CASE("registry check asks nobody without an explicit opt-in") {
+TEST_CASE("the daemon's own setting decides, not the request") {
     constexpr int api_port = 18321;
-    RegistryHarness harness(api_port);
+    RegistryHarness harness(api_port, /*registry_enabled=*/false);
     httplib::Client client("127.0.0.1", api_port);
 
-    const auto response = post_check(client, {{"target", "rutracker.org"}});
+    // The request asks as loudly as it can. It does not matter: consent lives
+    // in the configuration, so a browser cannot authorise the lookup by
+    // claiming it may.
+    const auto response = post_check(
+        client,
+        {{"target", "rutracker.org"}, {"allow_external_lookup", true}});
 
     REQUIRE(response);
     CHECK(response->status == 200);
     const auto json = nlohmann::json::parse(response->body);
     CHECK_FALSE(json.at("checked").get<bool>());
-    CHECK(json.at("reason") == "external_lookup_not_allowed");
-    // The point of the flag: rendering a panel must not tell a third party
-    // what someone is looking up.
+    CHECK(json.at("reason") == "registry_lookup_disabled");
     CHECK(harness.asked().empty());
 }
 
@@ -142,9 +149,7 @@ TEST_CASE("registry check reports the verdict and credits the service") {
     RegistryHarness harness(api_port);
     httplib::Client client("127.0.0.1", api_port);
 
-    const auto response = post_check(
-        client,
-        {{"target", "RuTracker.ORG "}, {"allow_external_lookup", true}});
+    const auto response = post_check(client, {{"target", "RuTracker.ORG "}});
 
     REQUIRE(response);
     CHECK(response->status == 200);
@@ -172,10 +177,8 @@ TEST_CASE("a second look at the same target does not ask again") {
     RegistryHarness harness(api_port);
     httplib::Client client("127.0.0.1", api_port);
 
-    post_check(client, {{"target", "rutracker.org"},
-                        {"allow_external_lookup", true}});
-    const auto again = post_check(
-        client, {{"target", "rutracker.org"}, {"allow_external_lookup", true}});
+    post_check(client, {{"target", "rutracker.org"}});
+    const auto again = post_check(client, {{"target", "rutracker.org"}});
 
     REQUIRE(again);
     const auto json = nlohmann::json::parse(again->body);
@@ -190,8 +193,7 @@ TEST_CASE("a failed lookup is not a clean bill of health") {
     harness.fail = true;
     httplib::Client client("127.0.0.1", api_port);
 
-    const auto response = post_check(
-        client, {{"target", "example.org"}, {"allow_external_lookup", true}});
+    const auto response = post_check(client, {{"target", "example.org"}});
 
     REQUIRE(response);
     CHECK(response->status == 200);
@@ -208,8 +210,7 @@ TEST_CASE("an unreadable answer is reported as unreadable") {
     harness.body = "<html>captive portal</html>";
     httplib::Client client("127.0.0.1", api_port);
 
-    const auto response = post_check(
-        client, {{"target", "example.org"}, {"allow_external_lookup", true}});
+    const auto response = post_check(client, {{"target", "example.org"}});
 
     REQUIRE(response);
     const auto json = nlohmann::json::parse(response->body);
@@ -228,13 +229,22 @@ TEST_CASE("a target that could not be a host is refused, not escaped") {
                                "example.org?x=1",
                                "exa mple.org",
                                ""}) {
-        const auto response = post_check(
-            client,
-            {{"target", target}, {"allow_external_lookup", true}});
+        const auto response = post_check(client, {{"target", target}});
         REQUIRE(response);
         CHECK(response->status == 400);
     }
     CHECK(harness.asked().empty());
+}
+
+TEST_CASE("an address is a valid target, not only a domain") {
+    constexpr int api_port = 18327;
+    RegistryHarness harness(api_port);
+    httplib::Client client("127.0.0.1", api_port);
+
+    CHECK(post_check(client, {{"target", "104.21.32.39"}})->status == 200);
+    CHECK(post_check(client, {{"target", "2606:4700:3037::ac43:b6c4"}})
+              ->status == 200);
+    CHECK(harness.asked().size() == 2);
 }
 
 }  // namespace keen_pbr3

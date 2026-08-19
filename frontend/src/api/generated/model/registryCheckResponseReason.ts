@@ -13,7 +13,7 @@ export type RegistryCheckResponseReason = typeof RegistryCheckResponseReason[key
 
 
 export const RegistryCheckResponseReason = {
-  external_lookup_not_allowed: 'external_lookup_not_allowed',
+  registry_lookup_disabled: 'registry_lookup_disabled',
   lookup_failed: 'lookup_failed',
   unreadable_response: 'unreadable_response',
 } as const;

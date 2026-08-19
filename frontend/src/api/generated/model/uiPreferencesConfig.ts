@@ -8,10 +8,17 @@
 import type { PlainDnsTemplate } from './plainDnsTemplate';
 
 /**
- * Server-persisted presentation preferences. They are part of the normal configuration so backup, restore, import, and export preserve them.
+ * Preferences the panel sets and the server keeps. They are part of the normal configuration so backup, restore, import, and export preserve them.
+
+Most are presentation only, but not all: `registry_lookup_enabled` decides whether the daemon may reach an outside service. It lives here because the panel is what sets it and what it governs, and because a consent that survives a browser change - or is visible in a backup - is the one worth having.
 
  */
 export interface UiPreferencesConfig {
+  /** Whether the address check may also ask cheburcheck.ru if a target is on Russia's blocking registry.
+
+  Off by default, and the daemon reads it from here rather than trusting the request: a browser cannot authorise the lookup by asking for it. Turning it on means every address check also sends that address to the service, which is the whole point of the lookup and is stated where the switch is.
+   */
+  registry_lookup_enabled?: boolean;
   /**
      * Native Keenetic tunnel interface identifiers hidden from ordinary service inventory cards. Hiding is reversible and does not delete, disable, or remove an interface from creation selectors.
 
