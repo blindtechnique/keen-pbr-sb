@@ -2,9 +2,12 @@
 
 #include "../util/safe_exec.hpp"
 
+#include <cerrno>
 #include <cstdio>
 #include <filesystem>
+#include <fcntl.h>
 #include <sstream>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
 
@@ -101,6 +104,21 @@ std::string parse_sing_box_version(const std::string& version_output) {
     return digit_seen ? version : std::string{};
 }
 
+bool sing_box_managed_marker_matches(
+    const std::string& marker_contents,
+    const std::string& binary_path) noexcept {
+    if (binary_path.empty() || binary_path.front() != '/') return false;
+    return marker_contents == binary_path + "\n";
+}
+
+bool sing_box_managed_marker_metadata_is_trusted(
+    const std::uintmax_t owner_uid,
+    const std::uintmax_t hard_link_count,
+    const std::uint32_t mode) noexcept {
+    return owner_uid == 0U && hard_link_count == 1U &&
+           (mode & static_cast<std::uint32_t>(S_IWGRP | S_IWOTH)) == 0U;
+}
+
 SingBoxInstallObservation observe_sing_box_install(
     const SingBoxInstallProbes& probes,
     const std::string& binary_path,
@@ -119,8 +137,12 @@ SingBoxInstallObservation observe_sing_box_install(
 
     observation.binary_present =
         probes.path_exists && probes.path_exists(binary_path);
-    observation.managed_marker_present =
-        probes.path_exists && probes.path_exists(managed_marker_path);
+    if (probes.read_managed_marker) {
+        const auto marker = probes.read_managed_marker(managed_marker_path);
+        observation.managed_marker_matches_binary =
+            marker.has_value() &&
+            sing_box_managed_marker_matches(*marker, binary_path);
+    }
     // The copy an earlier install kept of the binary it replaced. Same name
     // and directory the install step writes it to, so the capability reports
     // what is actually on the router rather than whether the code intends to
@@ -163,6 +185,48 @@ SingBoxInstallProbes production_sing_box_install_probes() {
                                               /*capture_stderr=*/false);
         if (result.exit_code != 0 || result.truncated) return {};
         return result.stdout_output;
+    };
+    probes.read_managed_marker =
+        [](const std::string& marker) -> std::optional<std::string> {
+        const int descriptor =
+            ::open(marker.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        if (descriptor < 0) return std::nullopt;
+
+        const auto close_descriptor = [&]() { (void)::close(descriptor); };
+        struct stat status {};
+        if (::fstat(descriptor, &status) != 0 || !S_ISREG(status.st_mode) ||
+            !sing_box_managed_marker_metadata_is_trusted(
+                static_cast<std::uintmax_t>(status.st_uid),
+                static_cast<std::uintmax_t>(status.st_nlink),
+                static_cast<std::uint32_t>(status.st_mode))) {
+            close_descriptor();
+            return std::nullopt;
+        }
+        constexpr std::uintmax_t kMaximumMarkerBytes = 4096U;
+        if (status.st_size <= 0 ||
+            static_cast<std::uintmax_t>(status.st_size) >
+                kMaximumMarkerBytes) {
+            close_descriptor();
+            return std::nullopt;
+        }
+
+        std::string contents(static_cast<std::size_t>(status.st_size), '\0');
+        std::size_t consumed = 0U;
+        while (consumed < contents.size()) {
+            const auto count = ::read(descriptor, contents.data() + consumed,
+                                      contents.size() - consumed);
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) {
+                close_descriptor();
+                return std::nullopt;
+            }
+            consumed += static_cast<std::size_t>(count);
+        }
+        char extra = '\0';
+        const auto trailing = ::read(descriptor, &extra, 1U);
+        close_descriptor();
+        if (trailing != 0) return std::nullopt;
+        return contents;
     };
     probes.path_exists = [](const std::string& path) {
         std::error_code error;

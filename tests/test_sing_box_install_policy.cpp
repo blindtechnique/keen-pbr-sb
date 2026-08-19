@@ -86,12 +86,12 @@ TEST_CASE("a binary this daemon did not install is never replaced silently") {
     // overwriting it is their decision to make explicitly.
     auto observation = ready();
     observation.binary_present = true;
-    observation.managed_marker_present = false;
+    observation.managed_marker_matches_binary = false;
     const auto policy = evaluate_sing_box_install(observation, kPinned);
     CHECK_FALSE(policy.available);
     CHECK(blocked_by(policy, Blocker::foreign_binary_present));
 
-    observation.managed_marker_present = true;
+    observation.managed_marker_matches_binary = true;
     observation.installed_version = "1.12.0";
     const auto ours = evaluate_sing_box_install(observation, kPinned);
     CHECK(ours.available);
@@ -133,7 +133,7 @@ TEST_CASE("a target that cannot be written to is a blocker, not a surprise") {
 TEST_CASE("reinstalling the pinned version is not called an upgrade") {
     auto observation = ready();
     observation.binary_present = true;
-    observation.managed_marker_present = true;
+    observation.managed_marker_matches_binary = true;
     observation.installed_version = kPinned;
     const auto policy = evaluate_sing_box_install(observation, kPinned);
     CHECK(policy.available);
@@ -146,7 +146,7 @@ TEST_CASE("a binary that will not say its version is not the pinned one") {
     // one there is "replace".
     auto observation = ready();
     observation.binary_present = true;
-    observation.managed_marker_present = true;
+    observation.managed_marker_matches_binary = true;
     observation.installed_version.clear();
     const auto policy = evaluate_sing_box_install(observation, kPinned);
     CHECK(policy.available);
@@ -244,7 +244,7 @@ TEST_CASE("a blocked install still says what installing would do") {
     // have" - and offered an Update button that had nothing to do.
     auto observation = ready();
     observation.binary_present = true;
-    observation.managed_marker_present = true;
+    observation.managed_marker_matches_binary = true;
     observation.installed_version = kPinned;
     observation.running_transports = 1U;
 
@@ -262,7 +262,7 @@ TEST_CASE("consent is not asked for an install that would change nothing") {
     // already on the router is a question whose honest answer is always no.
     auto observation = ready();
     observation.binary_present = true;
-    observation.managed_marker_present = true;
+    observation.managed_marker_matches_binary = true;
     observation.installed_version = kPinned;
     observation.running_transports = 2U;
     CHECK_FALSE(sing_box_install_awaits_transport_consent(

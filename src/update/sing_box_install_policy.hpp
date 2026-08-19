@@ -72,9 +72,11 @@ struct SingBoxInstallObservation {
     bool target_directory_writable{false};
     // A binary exists at the configured path.
     bool binary_present{false};
-    // The marker this daemon writes when it installed that binary. Absent with
-    // a present binary means the binary is the operator's.
-    bool managed_marker_present{false};
+    // The marker this daemon writes names the exact binary path it owns.
+    // Missing, unreadable, malformed, or naming another path all mean a
+    // present binary is the operator's. Mere marker-file existence is not
+    // ownership: the configured target can change while a stale marker stays.
+    bool managed_marker_matches_binary{false};
     // A byte-exact copy of the binary an earlier install replaced, kept beside
     // the target. Its presence is what makes an undo possible, so the
     // capability reports the measurement rather than a promise.

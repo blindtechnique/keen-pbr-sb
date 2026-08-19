@@ -90,7 +90,8 @@ SingBoxInstallPolicy evaluate_sing_box_install(
             SingBoxInstallBlocker::target_not_writable);
     }
 
-    if (observation.binary_present && !observation.managed_marker_present) {
+    if (observation.binary_present &&
+        !observation.managed_marker_matches_binary) {
         policy.blockers.push_back(
             SingBoxInstallBlocker::foreign_binary_present);
     }

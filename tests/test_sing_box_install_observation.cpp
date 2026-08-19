@@ -22,6 +22,9 @@ SingBoxInstallProbes silent_probes() {
     probes.read_binary_version = [](const std::string&) {
         return std::string{};
     };
+    probes.read_managed_marker = [](const std::string&) {
+        return std::optional<std::string>{};
+    };
     probes.path_exists = [](const std::string&) { return false; };
     probes.directory_writable = [](const std::string&) { return false; };
     return probes;
@@ -71,6 +74,36 @@ TEST_CASE("a version is read only from output shaped like a version") {
     }
 }
 
+TEST_CASE("only the exact ownership marker names the managed binary") {
+    CHECK(sing_box_managed_marker_matches("/opt/bin/sing-box\n",
+                                          "/opt/bin/sing-box"));
+    CHECK_FALSE(sing_box_managed_marker_matches("/opt/bin/other\n",
+                                                "/opt/bin/sing-box"));
+    CHECK_FALSE(sing_box_managed_marker_matches("/opt/bin/sing-box",
+                                                "/opt/bin/sing-box"));
+    CHECK_FALSE(sing_box_managed_marker_matches(
+        "/opt/bin/sing-box\n/opt/bin/other\n", "/opt/bin/sing-box"));
+    CHECK_FALSE(sing_box_managed_marker_matches("relative/sing-box\n",
+                                                "relative/sing-box"));
+}
+
+TEST_CASE("only protected root marker metadata grants ownership") {
+    constexpr std::uint32_t owner_read_write = 0600U;
+    constexpr std::uint32_t conventional_marker = 0644U;
+    CHECK(sing_box_managed_marker_metadata_is_trusted(
+        0U, 1U, owner_read_write));
+    CHECK(sing_box_managed_marker_metadata_is_trusted(
+        0U, 1U, conventional_marker));
+    CHECK_FALSE(sing_box_managed_marker_metadata_is_trusted(
+        1000U, 1U, conventional_marker));
+    CHECK_FALSE(sing_box_managed_marker_metadata_is_trusted(
+        0U, 2U, conventional_marker));
+    CHECK_FALSE(sing_box_managed_marker_metadata_is_trusted(
+        0U, 1U, 0664U));
+    CHECK_FALSE(sing_box_managed_marker_metadata_is_trusted(
+        0U, 1U, 0646U));
+}
+
 TEST_CASE("a router that answers nothing is unknown, never assumed empty") {
     // Every probe fails. The observation must carry that through as absence
     // of knowledge, and the policy must refuse - which is the whole point of
@@ -113,7 +146,7 @@ TEST_CASE("a working router is measured into a usable observation") {
     CHECK(observation.entware_architecture == "aarch64-3.10");
     CHECK(observation.binary_present);
     // The marker does not exist, so this binary is the operator's.
-    CHECK_FALSE(observation.managed_marker_present);
+    CHECK_FALSE(observation.managed_marker_matches_binary);
     CHECK(observation.installed_version == "1.12.0");
     CHECK(observation.target_directory_writable);
     REQUIRE(observation.running_transports.has_value());
@@ -121,6 +154,36 @@ TEST_CASE("a working router is measured into a usable observation") {
 
     const auto policy = evaluate_sing_box_install(observation, "1.13.14");
     CHECK_FALSE(policy.available);
+}
+
+TEST_CASE("a stale marker does not claim a different binary") {
+    SingBoxInstallProbes probes = silent_probes();
+    probes.read_opkg_architectures = []() {
+        return std::string(kRealOpkgOutput);
+    };
+    probes.path_exists = [](const std::string& path) {
+        return path == "/opt/bin/sing-box";
+    };
+    probes.read_managed_marker = [](const std::string&) {
+        return std::optional<std::string>{"/opt/bin/sing-box-old\n"};
+    };
+    probes.directory_writable = [](const std::string&) { return true; };
+    probes.count_running_transports = []() { return std::size_t{0U}; };
+
+    const auto stale = observe_sing_box_install(
+        probes, "/opt/bin/sing-box",
+        "/opt/etc/keen-pbr/sing-box-managed.path");
+    CHECK_FALSE(stale.managed_marker_matches_binary);
+    CHECK_FALSE(evaluate_sing_box_install(stale, "1.13.14").available);
+
+    probes.read_managed_marker = [](const std::string&) {
+        return std::optional<std::string>{"/opt/bin/sing-box\n"};
+    };
+    const auto exact = observe_sing_box_install(
+        probes, "/opt/bin/sing-box",
+        "/opt/etc/keen-pbr/sing-box-managed.path");
+    CHECK(exact.managed_marker_matches_binary);
+    CHECK(evaluate_sing_box_install(exact, "1.13.14").available);
 }
 
 TEST_CASE("the version is not read from a binary that is not there") {

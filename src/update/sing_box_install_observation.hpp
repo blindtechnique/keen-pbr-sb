@@ -2,6 +2,7 @@
 
 #include "sing_box_install_policy.hpp"
 
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <string>
@@ -26,6 +27,11 @@ struct SingBoxInstallProbes {
     std::function<std::string()> read_opkg_architectures;
     // stdout of `<binary> version`, empty when absent or it would not run.
     std::function<std::string(const std::string& binary)> read_binary_version;
+    // Exact contents of a regular, non-symlink ownership marker. Missing,
+    // unreadable, oversized, or non-regular files are nullopt so none can be
+    // mistaken for authority to replace a binary.
+    std::function<std::optional<std::string>(const std::string& marker)>
+        read_managed_marker;
     std::function<bool(const std::string& path)> path_exists;
     std::function<bool(const std::string& directory)> directory_writable;
     // Managed sing-box transports currently running, or nullopt when the
@@ -54,6 +60,18 @@ std::string select_entware_architecture(const std::string& opkg_output);
 // `sing-box version` ("sing-box version 1.13.14"). Empty when the output is
 // not that shape, which includes a binary that did not run at all.
 std::string parse_sing_box_version(const std::string& version_output);
+
+// The writer's complete on-disk format is one absolute binary path followed
+// by one LF. Comparing the whole record prevents a stale marker for a former
+// target, a prefix match, or appended data from granting ownership.
+bool sing_box_managed_marker_matches(const std::string& marker_contents,
+                                     const std::string& binary_path) noexcept;
+
+// Ownership metadata is authority too: only a root-owned, single-link marker
+// that unprivileged users cannot rewrite may permit replacing the binary.
+bool sing_box_managed_marker_metadata_is_trusted(
+    std::uintmax_t owner_uid, std::uintmax_t hard_link_count,
+    std::uint32_t mode) noexcept;
 
 SingBoxInstallObservation observe_sing_box_install(
     const SingBoxInstallProbes& probes,
