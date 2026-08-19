@@ -41,4 +41,11 @@ std::optional<std::string> chacha20poly1305_open(
     std::string_view aad,
     std::string_view sealed);
 
+#ifdef KEEN_PBR3_TESTING
+// Counts completed non-optimizable wipes of cipher-internal key-derived
+// scratch state. This is deliberately unavailable to production callers.
+void reset_chacha20poly1305_sensitive_wipe_count_for_testing() noexcept;
+std::size_t chacha20poly1305_sensitive_wipe_count_for_testing() noexcept;
+#endif
+
 } // namespace keen_pbr3

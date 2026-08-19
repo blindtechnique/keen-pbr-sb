@@ -1,6 +1,7 @@
 #include "ndms_native_import_request.hpp"
 
 #include "ndms_native_import_identity.hpp"
+#include "ndms_native_panel_delete_snapshot.hpp"
 
 #include <array>
 #include <cerrno>
@@ -25,6 +26,8 @@ constexpr std::string_view kBodyFilenamePrefix =
 constexpr std::string_view kBodySuffix = "\"}}}}]";
 constexpr std::size_t kMarkerRandomBytes = 16U;
 constexpr std::size_t kBase64ScratchBytes = 4096U;
+constexpr std::string_view kPanelDeleteSnapshotMagic =
+    "keen-pbr-panel-delete-snapshot-v1\n";
 
 static_assert(kBase64ScratchBytes % 4U == 0U);
 
@@ -181,16 +184,6 @@ struct CanonicalNumberText {
     std::string s4;
 };
 
-bool has_extended_awg_parameters(
-    const NdmsNativeTunnelImportAwgParameters& awg) noexcept {
-    return awg.s3.has_value() || awg.s4.has_value() ||
-           (awg.i1 && !awg.i1->empty()) ||
-           (awg.i2 && !awg.i2->empty()) ||
-           (awg.i3 && !awg.i3->empty()) ||
-           (awg.i4 && !awg.i4->empty()) ||
-           (awg.i5 && !awg.i5->empty());
-}
-
 using AwgSignatureView = std::pair<
     std::string_view, const std::optional<std::string>*>;
 
@@ -216,9 +209,9 @@ CanonicalNumberText number_text(
         result.jmax = std::to_string(imported.awg->jmax);
         result.s1 = std::to_string(imported.awg->s1);
         result.s2 = std::to_string(imported.awg->s2);
-        if (has_extended_awg_parameters(*imported.awg)) {
-            result.s3 = std::to_string(imported.awg->s3.value_or(0U));
-            result.s4 = std::to_string(imported.awg->s4.value_or(0U));
+        if (imported.awg->s3) {
+            result.s3 = std::to_string(*imported.awg->s3);
+            result.s4 = std::to_string(*imported.awg->s4);
         }
     }
     result.persistent_keepalive.reserve(imported.peers.size());
@@ -264,15 +257,14 @@ std::size_t canonical_conf_size(
         size = checked_add(size, line_size("H2 = ", awg.h2));
         size = checked_add(size, line_size("H3 = ", awg.h3));
         size = checked_add(size, line_size("H4 = ", awg.h4));
-        if (has_extended_awg_parameters(awg)) {
+        if (awg.s3) {
             size = checked_add(size, line_size("S3 = ", numbers.s3));
             size = checked_add(size, line_size("S4 = ", numbers.s4));
-            for (const auto& signature : awg_signatures(awg)) {
-                if (*signature.second &&
-                    !signature.second->value().empty()) {
-                    size = checked_add(size, line_size(
-                        signature.first, signature.second->value()));
-                }
+        }
+        for (const auto& signature : awg_signatures(awg)) {
+            if (*signature.second) {
+                size = checked_add(size, line_size(
+                    signature.first, signature.second->value()));
             }
         }
     }
@@ -353,14 +345,14 @@ std::string build_canonical_conf(
         append_line(output, "H2 = ", awg.h2);
         append_line(output, "H3 = ", awg.h3);
         append_line(output, "H4 = ", awg.h4);
-        if (has_extended_awg_parameters(awg)) {
+        if (awg.s3) {
             append_line(output, "S3 = ", numbers.s3);
             append_line(output, "S4 = ", numbers.s4);
-            for (const auto& signature : awg_signatures(awg)) {
-                if (*signature.second && !signature.second->value().empty()) {
-                    append_line(
-                        output, signature.first, signature.second->value());
-                }
+        }
+        for (const auto& signature : awg_signatures(awg)) {
+            if (*signature.second) {
+                append_line(
+                    output, signature.first, signature.second->value());
             }
         }
     }
@@ -493,6 +485,11 @@ NdmsNativeWireguardImportRequest::operator=(
 std::string_view NdmsNativeWireguardImportRequest::operation()
     const noexcept {
     return kOperation;
+}
+
+bool valid_panel_delete_marker(const std::string_view marker) noexcept {
+    return ndms_native_import_transaction_id_from_marker(marker)
+        .has_value();
 }
 
 NdmsNativeTunnelImportKind NdmsNativeWireguardImportRequest::kind()
@@ -633,6 +630,171 @@ make_ndms_native_wireguard_import_request(std::string&& raw_conf) {
         std::move(marker),
         std::move(filename),
         std::move(candidate_revision));
+}
+
+NdmsNativePanelDeleteSnapshot::NdmsNativePanelDeleteSnapshot(
+    const NdmsNativeTunnelImportKind kind,
+    std::string marker,
+    std::string canonical_revision,
+    const std::size_t preshared_key_count,
+    const bool has_complete_awg_parameters,
+    std::string sealed_payload) noexcept
+    : kind_(kind),
+      marker_(std::move(marker)),
+      canonical_revision_(std::move(canonical_revision)),
+      preshared_key_count_(preshared_key_count),
+      has_complete_awg_parameters_(has_complete_awg_parameters) {
+    sealed_payload_.swap(sealed_payload);
+    secure_wipe(sealed_payload);
+}
+
+NdmsNativePanelDeleteSnapshot::NdmsNativePanelDeleteSnapshot(
+    NdmsNativePanelDeleteSnapshot&& other) noexcept
+    : kind_(other.kind_),
+      marker_(std::move(other.marker_)),
+      canonical_revision_(std::move(other.canonical_revision_)),
+      preshared_key_count_(other.preshared_key_count_),
+      has_complete_awg_parameters_(
+          other.has_complete_awg_parameters_) {
+    sealed_payload_.swap(other.sealed_payload_);
+    other.wipe();
+}
+
+NdmsNativePanelDeleteSnapshot&
+NdmsNativePanelDeleteSnapshot::operator=(
+    NdmsNativePanelDeleteSnapshot&& other) noexcept {
+    if (this == &other) {
+        wipe();
+        return *this;
+    }
+    wipe();
+    kind_ = other.kind_;
+    marker_ = std::move(other.marker_);
+    canonical_revision_ = std::move(other.canonical_revision_);
+    preshared_key_count_ = other.preshared_key_count_;
+    has_complete_awg_parameters_ =
+        other.has_complete_awg_parameters_;
+    sealed_payload_.swap(other.sealed_payload_);
+    other.wipe();
+    return *this;
+}
+
+NdmsNativePanelDeleteSnapshot::~NdmsNativePanelDeleteSnapshot() {
+    wipe();
+}
+
+NdmsNativeTunnelImportKind
+NdmsNativePanelDeleteSnapshot::kind() const noexcept {
+    return kind_;
+}
+
+std::string_view
+NdmsNativePanelDeleteSnapshot::marker() const noexcept {
+    return marker_;
+}
+
+std::string_view
+NdmsNativePanelDeleteSnapshot::canonical_revision() const noexcept {
+    return canonical_revision_;
+}
+
+std::size_t
+NdmsNativePanelDeleteSnapshot::sealed_payload_bytes() const noexcept {
+    return sealed_payload_.size();
+}
+
+std::size_t
+NdmsNativePanelDeleteSnapshot::preshared_key_count() const noexcept {
+    return preshared_key_count_;
+}
+
+bool NdmsNativePanelDeleteSnapshot::
+has_complete_awg_parameters() const noexcept {
+    return has_complete_awg_parameters_;
+}
+
+std::string_view
+NdmsNativePanelDeleteSnapshot::sealed_payload_for_store() const noexcept {
+    return sealed_payload_;
+}
+
+void NdmsNativePanelDeleteSnapshot::wipe() noexcept {
+    secure_wipe(sealed_payload_);
+    secure_wipe(marker_);
+    secure_wipe(canonical_revision_);
+    preshared_key_count_ = 0U;
+    has_complete_awg_parameters_ = false;
+}
+
+NdmsNativePanelDeleteSnapshot make_ndms_native_panel_delete_snapshot(
+    std::string&& raw_configuration,
+    const std::string& ownership_marker) {
+    WipeStringGuard raw_guard(raw_configuration);
+    if (!valid_panel_delete_marker(ownership_marker)) {
+        throw NdmsNativePanelDeleteSnapshotError(
+            "panel delete snapshot ownership marker is invalid");
+    }
+    if (raw_configuration.size() >
+        kNdmsNativeWireguardImportRequestMaximumBytes) {
+        throw NdmsNativePanelDeleteSnapshotError(
+            "panel delete snapshot configuration is too large");
+    }
+
+    auto imported =
+        parse_ndms_native_tunnel_import(raw_configuration);
+    if (imported.source !=
+        NdmsNativeTunnelImportSource::wireguard_conf) {
+        throw NdmsNativePanelDeleteSnapshotError(
+            "panel delete snapshot must be a WG/AWG configuration");
+    }
+    const auto preview =
+        build_ndms_native_tunnel_import_preview(imported);
+    auto canonical =
+        build_canonical_conf(imported, ownership_marker);
+    WipeStringGuard canonical_guard(canonical);
+
+    std::string payload;
+    payload.reserve(
+        kPanelDeleteSnapshotMagic.size() + canonical.size());
+    payload.append(kPanelDeleteSnapshotMagic.data(),
+                   kPanelDeleteSnapshotMagic.size());
+    payload.append(canonical);
+    WipeStringGuard payload_guard(payload);
+    return NdmsNativePanelDeleteSnapshot{
+        imported.kind,
+        ownership_marker,
+        preview.revision,
+        preview.preshared_key_count,
+        imported.kind ==
+            NdmsNativeTunnelImportKind::amnezia_wireguard &&
+            imported.awg.has_value(),
+        std::move(payload)};
+}
+
+NdmsNativePanelDeleteSnapshot
+NdmsNativePanelDeleteSnapshot::from_sealed_payload(
+    std::string&& payload,
+    const std::string& expected_marker) {
+    WipeStringGuard payload_guard(payload);
+    if (payload.size() <= kPanelDeleteSnapshotMagic.size() ||
+        payload.size() >
+            kPanelDeleteSnapshotMagic.size() +
+                kNdmsNativeWireguardImportRequestMaximumBytes ||
+        std::string_view(payload).substr(
+            0U, kPanelDeleteSnapshotMagic.size()) !=
+            kPanelDeleteSnapshotMagic) {
+        throw NdmsNativePanelDeleteSnapshotError(
+            "encrypted panel delete snapshot schema is invalid");
+    }
+    auto configuration = payload.substr(kPanelDeleteSnapshotMagic.size());
+    WipeStringGuard configuration_guard(configuration);
+    auto decoded = make_ndms_native_panel_delete_snapshot(
+        std::move(configuration), expected_marker);
+    if (decoded.sealed_payload_ != payload) {
+        throw NdmsNativePanelDeleteSnapshotError(
+            "encrypted panel delete snapshot is not canonical");
+    }
+    return decoded;
 }
 
 } // namespace keen_pbr3

@@ -1,10 +1,41 @@
 #include "chacha20poly1305.hpp"
 
+#include <atomic>
 #include <cstring>
 
 namespace keen_pbr3 {
 
 namespace {
+
+#ifdef KEEN_PBR3_TESTING
+std::atomic<std::size_t> sensitive_wipe_count{0U};
+#endif
+
+void secure_wipe_memory(void* pointer, const std::size_t size) noexcept {
+    // Volatile stores are observable side effects and therefore cannot be
+    // deleted as a dead memset by an optimizing compiler.
+    volatile unsigned char* bytes =
+        static_cast<volatile unsigned char*>(pointer);
+    for (std::size_t index = 0U; index < size; ++index) {
+        bytes[index] = 0U;
+    }
+#ifdef KEEN_PBR3_TESTING
+    sensitive_wipe_count.fetch_add(1U, std::memory_order_relaxed);
+#endif
+}
+
+class SensitiveWipeGuard final {
+public:
+    SensitiveWipeGuard(void* pointer, const std::size_t size) noexcept
+        : pointer_(pointer), size_(size) {}
+    ~SensitiveWipeGuard() { secure_wipe_memory(pointer_, size_); }
+    SensitiveWipeGuard(const SensitiveWipeGuard&) = delete;
+    SensitiveWipeGuard& operator=(const SensitiveWipeGuard&) = delete;
+
+private:
+    void* pointer_;
+    std::size_t size_;
+};
 
 // --- ChaCha20 (RFC 8439 §2.3) ---
 
@@ -40,7 +71,8 @@ void chacha20_block(
     const std::uint32_t counter,
     const unsigned char (&nonce)[kChaCha20Poly1305NonceBytes],
     unsigned char (&out)[64]) {
-    std::uint32_t state[16];
+    std::uint32_t state[16]{};
+    SensitiveWipeGuard state_guard(state, sizeof(state));
     state[0] = 0x61707865U;
     state[1] = 0x3320646eU;
     state[2] = 0x79622d32U;
@@ -51,7 +83,8 @@ void chacha20_block(
     for (unsigned i = 0U; i < 3U; ++i)
         state[13U + i] = load_le32(nonce + i * 4U);
 
-    std::uint32_t working[16];
+    std::uint32_t working[16]{};
+    SensitiveWipeGuard working_guard(working, sizeof(working));
     std::memcpy(working, state, sizeof(state));
     for (unsigned round = 0U; round < 10U; ++round) {
         quarter_round(working[0], working[4], working[8], working[12]);
@@ -73,7 +106,8 @@ std::string chacha20_xor(
     const unsigned char (&nonce)[kChaCha20Poly1305NonceBytes],
     const std::string_view input) {
     std::string output(input.size(), '\0');
-    unsigned char block[64];
+    unsigned char block[64]{};
+    SensitiveWipeGuard block_guard(block, sizeof(block));
     std::size_t offset = 0U;
     while (offset < input.size()) {
         chacha20_block(key, counter++, nonce, block);
@@ -97,44 +131,54 @@ std::string chacha20_xor(
 // 26-bit limbs stay far inside 64 bits, and the fold uses 2^130 ≡ 5.
 
 struct Poly1305 {
-    std::uint32_t r[5];
+    std::uint32_t r[5]{};
     std::uint32_t h[5]{};
-    std::uint32_t pad[4];
+    std::uint32_t pad[4]{};
+
+    Poly1305(const Poly1305&) = delete;
+    Poly1305& operator=(const Poly1305&) = delete;
+    ~Poly1305() { secure_wipe_memory(this, sizeof(*this)); }
 
     explicit Poly1305(const unsigned char (&otk)[32]) {
         // r, clamped per the RFC, split into 26-bit limbs.
-        const std::uint32_t t0 = load_le32(otk + 0) & 0x0fffffffU;
-        const std::uint32_t t1 = load_le32(otk + 4) & 0x0ffffffcU;
-        const std::uint32_t t2 = load_le32(otk + 8) & 0x0ffffffcU;
-        const std::uint32_t t3 = load_le32(otk + 12) & 0x0ffffffcU;
-        r[0] = t0 & 0x3ffffffU;
-        r[1] = ((t0 >> 26U) | (t1 << 6U)) & 0x3ffffffU;
-        r[2] = ((t1 >> 20U) | (t2 << 12U)) & 0x3ffffffU;
-        r[3] = ((t2 >> 14U) | (t3 << 18U)) & 0x3ffffffU;
-        r[4] = t3 >> 8U;
+        std::uint32_t words[4]{
+            load_le32(otk + 0) & 0x0fffffffU,
+            load_le32(otk + 4) & 0x0ffffffcU,
+            load_le32(otk + 8) & 0x0ffffffcU,
+            load_le32(otk + 12) & 0x0ffffffcU,
+        };
+        SensitiveWipeGuard words_guard(words, sizeof(words));
+        r[0] = words[0] & 0x3ffffffU;
+        r[1] = ((words[0] >> 26U) | (words[1] << 6U)) & 0x3ffffffU;
+        r[2] = ((words[1] >> 20U) | (words[2] << 12U)) & 0x3ffffffU;
+        r[3] = ((words[2] >> 14U) | (words[3] << 18U)) & 0x3ffffffU;
+        r[4] = words[3] >> 8U;
         for (unsigned i = 0U; i < 4U; ++i)
             pad[i] = load_le32(otk + 16U + i * 4U);
     }
 
     void block(const unsigned char* bytes, const std::size_t size) {
         unsigned char buffer[17] = {};
+        SensitiveWipeGuard buffer_guard(buffer, sizeof(buffer));
         std::memcpy(buffer, bytes, size);
         buffer[size] = 1U;  // the RFC's high bit, byte-positioned
 
-        const std::uint32_t t0 = load_le32(buffer + 0);
-        const std::uint32_t t1 = load_le32(buffer + 4);
-        const std::uint32_t t2 = load_le32(buffer + 8);
-        const std::uint32_t t3 = load_le32(buffer + 12);
-        h[0] += t0 & 0x3ffffffU;
-        h[1] += ((t0 >> 26U) | (t1 << 6U)) & 0x3ffffffU;
-        h[2] += ((t1 >> 20U) | (t2 << 12U)) & 0x3ffffffU;
-        h[3] += ((t2 >> 14U) | (t3 << 18U)) & 0x3ffffffU;
-        h[4] += (t3 >> 8U) |
+        std::uint32_t words[4]{
+            load_le32(buffer + 0), load_le32(buffer + 4),
+            load_le32(buffer + 8), load_le32(buffer + 12),
+        };
+        SensitiveWipeGuard words_guard(words, sizeof(words));
+        h[0] += words[0] & 0x3ffffffU;
+        h[1] += ((words[0] >> 26U) | (words[1] << 6U)) & 0x3ffffffU;
+        h[2] += ((words[1] >> 20U) | (words[2] << 12U)) & 0x3ffffffU;
+        h[3] += ((words[2] >> 14U) | (words[3] << 18U)) & 0x3ffffffU;
+        h[4] += (words[3] >> 8U) |
                 (static_cast<std::uint32_t>(buffer[16]) << 24U);
 
         // h *= r (mod 2^130-5): limb products fit 64 bits; the i>=5 terms
         // wrap through 2^130 ≡ 5.
-        std::uint64_t d[5];
+        std::uint64_t d[5]{};
+        SensitiveWipeGuard products_guard(d, sizeof(d));
         for (unsigned i = 0U; i < 5U; ++i) {
             d[i] = 0U;
             for (unsigned j = 0U; j < 5U; ++j) {
@@ -145,6 +189,7 @@ struct Poly1305 {
             }
         }
         std::uint64_t carry = 0U;
+        SensitiveWipeGuard carry_guard(&carry, sizeof(carry));
         for (unsigned i = 0U; i < 5U; ++i) {
             d[i] += carry;
             carry = d[i] >> 26U;
@@ -186,6 +231,7 @@ struct Poly1305 {
         }
         // Full carry, then the constant-time select of h vs h - p.
         std::uint32_t carry = h[1] >> 26U;
+        SensitiveWipeGuard carry_guard(&carry, sizeof(carry));
         h[1] &= 0x3ffffffU;
         for (unsigned i = 2U; i < 5U; ++i) {
             h[i] += carry;
@@ -197,20 +243,24 @@ struct Poly1305 {
         h[0] &= 0x3ffffffU;
         h[1] += carry;
 
-        std::uint32_t g[5];
+        std::uint32_t g[5]{};
+        SensitiveWipeGuard reduced_guard(g, sizeof(g));
         std::uint32_t borrow = 5U;
+        SensitiveWipeGuard borrow_guard(&borrow, sizeof(borrow));
         for (unsigned i = 0U; i < 5U; ++i) {
             g[i] = h[i] + borrow;
             borrow = g[i] >> 26U;
             g[i] &= 0x3ffffffU;
         }
         // borrow==1 means h+5 overflowed 2^130, i.e. h >= p: take g.
-        const std::uint32_t mask = borrow == 0U ? 0U : 0xffffffffU;
+        std::uint32_t mask = borrow == 0U ? 0U : 0xffffffffU;
+        SensitiveWipeGuard mask_guard(&mask, sizeof(mask));
         for (unsigned i = 0U; i < 5U; ++i)
             h[i] = (h[i] & ~mask) | (g[i] & mask);
 
         // Serialize to four 32-bit words and add the pad with carry.
-        std::uint64_t words[4];
+        std::uint64_t words[4]{};
+        SensitiveWipeGuard words_guard(words, sizeof(words));
         words[0] = (static_cast<std::uint64_t>(h[0]) |
                     (static_cast<std::uint64_t>(h[1]) << 26U)) &
                    0xffffffffU;
@@ -224,8 +274,11 @@ struct Poly1305 {
                     (static_cast<std::uint64_t>(h[4]) << 8U)) &
                    0xffffffffU;
         std::uint64_t sum_carry = 0U;
+        SensitiveWipeGuard sum_carry_guard(
+            &sum_carry, sizeof(sum_carry));
         for (unsigned i = 0U; i < 4U; ++i) {
-            const std::uint64_t sum = words[i] + pad[i] + sum_carry;
+            std::uint64_t sum = words[i] + pad[i] + sum_carry;
+            SensitiveWipeGuard sum_guard(&sum, sizeof(sum));
             store_le32(out + i * 4U,
                        static_cast<std::uint32_t>(sum));
             sum_carry = sum >> 32U;
@@ -239,7 +292,8 @@ void poly1305_pad16(Poly1305& mac, const std::size_t size) {
 }
 
 void poly1305_le64(Poly1305& mac, const std::uint64_t value) {
-    unsigned char bytes[8];
+    unsigned char bytes[8]{};
+    SensitiveWipeGuard bytes_guard(bytes, sizeof(bytes));
     for (unsigned i = 0U; i < 8U; ++i)
         bytes[i] = static_cast<unsigned char>(value >> (8U * i));
     mac.update(bytes, 8U);
@@ -250,9 +304,11 @@ void aead_tag(const unsigned char (&key)[kChaCha20Poly1305KeyBytes],
               const std::string_view aad,
               const std::string_view ciphertext,
               unsigned char (&tag)[kChaCha20Poly1305TagBytes]) {
-    unsigned char block[64];
+    unsigned char block[64]{};
+    SensitiveWipeGuard block_guard(block, sizeof(block));
     chacha20_block(key, 0U, nonce, block);
-    unsigned char otk[32];
+    unsigned char otk[32]{};
+    SensitiveWipeGuard otk_guard(otk, sizeof(otk));
     std::memcpy(otk, block, 32U);
 
     Poly1305 mac(otk);
@@ -276,7 +332,8 @@ std::string chacha20poly1305_seal(
     const std::string_view aad,
     const std::string_view plaintext) {
     auto sealed = chacha20_xor(key, 1U, nonce, plaintext);
-    unsigned char tag[kChaCha20Poly1305TagBytes];
+    unsigned char tag[kChaCha20Poly1305TagBytes]{};
+    SensitiveWipeGuard tag_guard(tag, sizeof(tag));
     aead_tag(key, nonce, aad, sealed, tag);
     sealed.append(reinterpret_cast<const char*>(tag), sizeof(tag));
     return sealed;
@@ -290,17 +347,30 @@ std::optional<std::string> chacha20poly1305_open(
     if (sealed.size() < kChaCha20Poly1305TagBytes) return std::nullopt;
     const auto ciphertext =
         sealed.substr(0U, sealed.size() - kChaCha20Poly1305TagBytes);
-    unsigned char expected[kChaCha20Poly1305TagBytes];
+    unsigned char expected[kChaCha20Poly1305TagBytes]{};
+    SensitiveWipeGuard expected_guard(expected, sizeof(expected));
     aead_tag(key, nonce, aad, ciphertext, expected);
 
     const auto* supplied = reinterpret_cast<const unsigned char*>(
         sealed.data() + ciphertext.size());
     unsigned char difference = 0U;
+    SensitiveWipeGuard difference_guard(
+        &difference, sizeof(difference));
     for (unsigned i = 0U; i < kChaCha20Poly1305TagBytes; ++i)
         difference = static_cast<unsigned char>(
             difference | (expected[i] ^ supplied[i]));
     if (difference != 0U) return std::nullopt;
     return chacha20_xor(key, 1U, nonce, ciphertext);
 }
+
+#ifdef KEEN_PBR3_TESTING
+void reset_chacha20poly1305_sensitive_wipe_count_for_testing() noexcept {
+    sensitive_wipe_count.store(0U, std::memory_order_relaxed);
+}
+
+std::size_t chacha20poly1305_sensitive_wipe_count_for_testing() noexcept {
+    return sensitive_wipe_count.load(std::memory_order_relaxed);
+}
+#endif
 
 } // namespace keen_pbr3

@@ -102,4 +102,41 @@ TEST_CASE("sizes at and around the block boundary round-trip") {
     }
 }
 
+TEST_CASE("every sensitive cipher path retires its key-derived scratch") {
+    unsigned char key[kChaCha20Poly1305KeyBytes];
+    unsigned char nonce[kChaCha20Poly1305NonceBytes];
+    rfc_key(key);
+    rfc_nonce(nonce);
+
+    reset_chacha20poly1305_sensitive_wipe_count_for_testing();
+    const auto sealed =
+        chacha20poly1305_seal(key, nonce, kAad, kPlaintext);
+    const auto after_seal =
+        chacha20poly1305_sensitive_wipe_count_for_testing();
+    CHECK(after_seal >= 20U);
+
+    const auto opened =
+        chacha20poly1305_open(key, nonce, kAad, sealed);
+    REQUIRE(opened.has_value());
+    const auto after_open =
+        chacha20poly1305_sensitive_wipe_count_for_testing();
+    CHECK(after_open >= after_seal + 20U);
+
+    auto tampered = sealed;
+    tampered.back() = static_cast<char>(tampered.back() ^ 0x01);
+    CHECK_FALSE(chacha20poly1305_open(
+                    key, nonce, kAad, tampered)
+                    .has_value());
+    const auto after_refusal =
+        chacha20poly1305_sensitive_wipe_count_for_testing();
+    CHECK(after_refusal >= after_open + 10U);
+
+    // The short-input exit has not derived any scratch from the key and must
+    // return before allocating any of the guarded state.
+    CHECK_FALSE(chacha20poly1305_open(key, nonce, kAad, "short")
+                    .has_value());
+    CHECK(chacha20poly1305_sensitive_wipe_count_for_testing() ==
+          after_refusal);
+}
+
 } // namespace keen_pbr3

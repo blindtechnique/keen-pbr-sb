@@ -352,7 +352,7 @@ TEST_CASE("native AWG request emits complete base and extended parameters") {
     CHECK_FALSE(request.has_pending_secret_body());
 }
 
-TEST_CASE("native AWG request fills extended S3 and S4 when signatures need them") {
+TEST_CASE("native AWG request preserves absent S3 and S4 with signatures") {
     auto request =
         make_ndms_native_wireguard_import_request(zero_base_awg_conf());
     std::string canonical =
@@ -366,7 +366,6 @@ TEST_CASE("native AWG request fills extended S3 and S4 when signatures need them
         "Jc = 0\nJmin = 0\nJmax = 0\n"
         "S1 = 0\nS2 = 0\n"
         "H1 = \nH2 = \nH3 = \nH4 = \n"
-        "S3 = 0\nS4 = 0\n"
         "I1 = <b 0x0102>\n"
         "\n[Peer]\n"
         "PublicKey = " + key('K') + "\n"
