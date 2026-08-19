@@ -154,7 +154,8 @@ TEST_CASE("exact mutation authority is one-shot across moves") {
 TEST_CASE("exact mutation authority self-move poisons the authority") {
     auto authority =
         NdmsNativeExactMutationDispatchAuthorityTestIssuer::issue();
-    authority = std::move(authority);
+    auto* same_authority = &authority;
+    authority = std::move(*same_authority);
 
     CHECK_FALSE(
         NdmsNativeExactMutationDispatchAuthorityTestIssuer::
