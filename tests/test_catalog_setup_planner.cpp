@@ -5,6 +5,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <map>
 #include <set>
 #include <string>
@@ -2107,6 +2108,135 @@ TEST_CASE(
     CHECK(
         repeated.candidate_revision ==
         first.candidate_revision);
+}
+
+TEST_CASE(
+    "catalog planner migrates only exact previous package-managed URLs") {
+    struct Migration {
+        const char* preset_id;
+        const char* previous_rule_set;
+        const char* current_geosite;
+    };
+    constexpr std::array<Migration, 16U> migrations{{
+        {"anthropic", "claude", "anthropic"},
+        {"copilot", "copilot", "github-copilot"},
+        {"gemini", "gemini", "google-gemini"},
+        {"grok", "grok", "xai"},
+        {"openai", "openai", "openai"},
+        {"linkedin", "linkedin", "linkedin"},
+        {"nintendo", "nintendo", "nintendo"},
+        {"roblox", "roblox", "roblox"},
+        {"netflix", "netflix", "netflix"},
+        {"discord", "discord-full", "discord"},
+        {"instagram", "instagram", "instagram"},
+        {"telegram", "telegram", "telegram"},
+        {"tiktok", "tiktok", "tiktok"},
+        {"whatsapp", "whatsapp", "whatsapp"},
+        {"x", "x", "x"},
+        {"youtube", "youtube", "youtube"},
+    }};
+
+    for (const auto& migration : migrations) {
+        CAPTURE(migration.preset_id);
+        const auto previous =
+            std::string("https://repo.hoaxisr.ru/rulesets/srs/") +
+            migration.previous_rule_set + ".srs";
+        const auto current =
+            std::string(
+                "https://raw.githubusercontent.com/SagerNet/sing-geosite/"
+                "rule-set/geosite-") +
+            migration.current_geosite + ".srs";
+        const nlohmann::json catalog = {
+            {"catalog_id", "test:managed-url-migration"},
+            {"presets",
+             nlohmann::json::array({routing_preset(
+                 migration.preset_id, "Managed list", current)})},
+        };
+        CatalogSetupIntent intent;
+        intent.selections = {{migration.preset_id, std::nullopt}};
+        intent.mode = CatalogSetupMode::none;
+        intent.dns_mode = CatalogDnsMode::none;
+
+        auto active = base_config();
+        ListConfig managed;
+        managed.display_name = "Пользовательское имя";
+        managed.catalog_identity = catalog_preset_identity(
+            catalog, migration.preset_id);
+        managed.url = previous;
+        managed.domains = std::vector<std::string>{"kept.example"};
+        managed.ip_cidrs =
+            std::vector<std::string>{"203.0.113.0/24"};
+        managed.refresh_detour_mode =
+            ListRefreshDetourMode::OVERRIDE;
+        managed.detour = "proxy";
+        active.lists = std::map<std::string, ListConfig>{
+            {"kept_technical_id", managed},
+        };
+        validate_config(active);
+
+        const auto migrated =
+            plan_catalog_setup(intent, catalog, active);
+        REQUIRE(migrated.summary.lists.size() == 1U);
+        CHECK(migrated.summary.lists.front().already_installed);
+        CHECK(
+            migrated.summary.lists.front().technical_id ==
+            "kept_technical_id");
+        const auto& migrated_list =
+            migrated.candidate.lists->at("kept_technical_id");
+        CHECK(migrated_list.url == current);
+        CHECK(migrated_list.display_name == managed.display_name);
+        CHECK(migrated_list.domains == managed.domains);
+        CHECK(migrated_list.ip_cidrs == managed.ip_cidrs);
+        CHECK(migrated_list.detour == managed.detour);
+
+        auto customized = active;
+        customized.lists->at("kept_technical_id").url =
+            "https://mirror.example/user-edited.srs";
+        validate_config(customized);
+        const auto preserved =
+            plan_catalog_setup(intent, catalog, customized);
+        CHECK(
+            preserved.candidate.lists->at("kept_technical_id").url ==
+            customized.lists->at("kept_technical_id").url);
+        CHECK(
+            nlohmann::json(preserved.candidate) ==
+            nlohmann::json(customized));
+    }
+}
+
+TEST_CASE(
+    "routing companion reconciliation preserves a user-edited primary URL") {
+    auto preset = whatsapp_preset();
+    preset["engines"]["singbox"]["ruleSets"][0]["url"] =
+        "https://raw.githubusercontent.com/SagerNet/sing-geosite/"
+        "rule-set/geosite-whatsapp.srs";
+    const nlohmann::json catalog = {
+        {"catalog_id", "test:managed-companion-custom-source"},
+        {"presets",
+         nlohmann::json::array(
+             {preset, whatsapp_ip_source_preset()})},
+    };
+    auto active = base_config();
+    ListConfig customized;
+    customized.catalog_identity =
+        catalog_preset_identity(catalog, "whatsapp");
+    customized.url = "https://mirror.example/custom-whatsapp.srs";
+    customized.domains = whatsapp_domains();
+    customized.ip_cidrs = whatsapp_ipv4_cidrs();
+    active.lists = std::map<std::string, ListConfig>{
+        {"whatsapp", customized},
+    };
+    validate_config(active);
+
+    auto intent = outbound_intent();
+    intent.selections = {{"whatsapp", std::nullopt}};
+    const auto plan = plan_catalog_setup(intent, catalog, active);
+    CHECK(
+        plan.candidate.lists->at("whatsapp").url ==
+        customized.url);
+    CHECK_FALSE(
+        plan.candidate.lists->at("whatsapp").ip_cidrs.has_value());
+    CHECK(plan.candidate.lists->count("whatsapp_ip") == 1U);
 }
 
 TEST_CASE(

@@ -43,6 +43,36 @@ constexpr std::array<AutomaticDnsEndpoint, 10U>
         {"yandex", "Yandex", "77.88.8.1"},
     }};
 
+struct ManagedCatalogUrlMigration {
+    const char* preset_id;
+    const char* previous_rule_set;
+    const char* current_geosite;
+};
+
+// These are the package-owned URL moves shipped in sb.12. Provenance alone is
+// not permission to replace a source: an operator may have edited that list
+// after installing it. Only the exact old managed URL is eligible, and the
+// exact new packaged URL must still be present in the authoritative snapshot.
+constexpr std::array<ManagedCatalogUrlMigration, 16U>
+    kManagedCatalogUrlMigrations{{
+        {"anthropic", "claude", "anthropic"},
+        {"copilot", "copilot", "github-copilot"},
+        {"gemini", "gemini", "google-gemini"},
+        {"grok", "grok", "xai"},
+        {"openai", "openai", "openai"},
+        {"linkedin", "linkedin", "linkedin"},
+        {"nintendo", "nintendo", "nintendo"},
+        {"roblox", "roblox", "roblox"},
+        {"netflix", "netflix", "netflix"},
+        {"discord", "discord-full", "discord"},
+        {"instagram", "instagram", "instagram"},
+        {"telegram", "telegram", "telegram"},
+        {"tiktok", "tiktok", "tiktok"},
+        {"whatsapp", "whatsapp", "whatsapp"},
+        {"x", "x", "x"},
+        {"youtube", "youtube", "youtube"},
+    }};
+
 // What a catalogue preset says should happen to the traffic it matches. Three
 // destinations, and each decides the plan's shape: `tunnel` needs an outbound
 // from the operator, `reject` needs a blackhole, `direct` needs the main
@@ -96,6 +126,28 @@ std::string trim_ascii(std::string value) {
     if (first == std::string::npos) return {};
     const auto last = value.find_last_not_of(" \t\n\r\f\v");
     return value.substr(first, last - first + 1U);
+}
+
+bool is_known_managed_catalog_url_migration(
+    const ParsedPreset& preset,
+    const ListConfig& installed) {
+    if (!preset.url.has_value() || !installed.url.has_value()) return false;
+
+    constexpr const char* previous_prefix =
+        "https://repo.hoaxisr.ru/rulesets/srs/";
+    constexpr const char* current_prefix =
+        "https://raw.githubusercontent.com/SagerNet/sing-geosite/"
+        "rule-set/geosite-";
+    for (const auto& migration : kManagedCatalogUrlMigrations) {
+        if (preset.catalog_identity_id != migration.preset_id) continue;
+        const auto previous = std::string(previous_prefix) +
+                              migration.previous_rule_set + ".srs";
+        const auto current = std::string(current_prefix) +
+                             migration.current_geosite + ".srs";
+        return trim_ascii(*installed.url) == previous &&
+               trim_ascii(*preset.url) == current;
+    }
+    return false;
 }
 
 std::string lower_ascii(std::string value) {
@@ -1810,7 +1862,18 @@ CatalogSetupPlan plan_catalog_setup(
                 // atomically. Otherwise old inline CIDRs would be routed both
                 // by the parent and by its new shared IP companion.
                 managed.catalog_identity = item.catalog_identity;
-                managed.url = preset.url;
+                const bool managed_url_is_unchanged =
+                    active_list.url.has_value() ==
+                        preset.url.has_value() &&
+                    (!active_list.url.has_value() ||
+                     trim_ascii(*active_list.url) ==
+                         trim_ascii(*preset.url));
+                if (!active_list.catalog_identity.has_value() ||
+                    managed_url_is_unchanged ||
+                    is_known_managed_catalog_url_migration(
+                        preset, active_list)) {
+                    managed.url = preset.url;
+                }
                 managed.domains =
                     preset.domains.empty()
                         ? std::optional<std::vector<std::string>>{}
@@ -1821,6 +1884,13 @@ CatalogSetupPlan plan_catalog_setup(
                         ? std::optional<std::vector<std::string>>{}
                         : std::optional<std::vector<std::string>>{
                               preset.ip_cidrs};
+            } else if (
+                active_list.catalog_identity == item.catalog_identity &&
+                is_known_managed_catalog_url_migration(
+                    preset, active_list)) {
+                // Preserve aliases, refresh routing and every other source
+                // field. The allowlist above proves only this URL transition.
+                lists.at(*item.existing_technical_id).url = preset.url;
             }
             const auto& list =
                 lists.at(*item.existing_technical_id);

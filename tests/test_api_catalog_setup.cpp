@@ -9,6 +9,7 @@
 #include "../src/api/sse_broadcaster.hpp"
 #include "../src/config/config_writer.hpp"
 #include "../src/daemon/config_store.hpp"
+#include "../src/setup/catalog_setup_planner.hpp"
 
 #include <algorithm>
 #include <condition_variable>
@@ -987,6 +988,107 @@ TEST_CASE(
     CHECK(
         store.active_config().dns->rules->front().list ==
         std::vector<std::string>{"existing_ai"});
+}
+
+TEST_CASE(
+    "catalog setup applies a source-only managed URL migration") {
+    constexpr int api_port = 18484;
+    constexpr const char* previous_url =
+        "https://repo.hoaxisr.ru/rulesets/srs/openai.srs";
+    constexpr const char* current_url =
+        "https://raw.githubusercontent.com/SagerNet/sing-geosite/"
+        "rule-set/geosite-openai.srs";
+    CatalogSetupTempDir directory;
+    const auto config_path = directory.path / "config.json";
+
+    auto snapshot = catalog_snapshot(current_url);
+    snapshot["presets"][0]["id"] = "openai";
+    snapshot["presets"][0]["name"] = "OpenAI";
+    auto initial = catalog_base_config();
+    ListConfig installed;
+    installed.display_name = "Мой OpenAI";
+    installed.catalog_identity =
+        setup::catalog_preset_identity(snapshot, "openai");
+    installed.url = previous_url;
+    installed.domains =
+        std::vector<std::string>{"user-kept.example"};
+    initial.lists = std::map<std::string, ListConfig>{
+        {"my_openai", installed},
+    };
+    RouteRule route;
+    route.enabled = true;
+    route.list = std::vector<std::string>{"my_openai"};
+    route.outbound = "proxy";
+    initial.route->rules = std::vector<RouteRule>{route};
+    DnsRule dns;
+    dns.enabled = true;
+    dns.list = std::vector<std::string>{"my_openai"};
+    dns.server = "proxy_dns";
+    initial.dns->rules = std::vector<DnsRule>{dns};
+    validate_config(initial);
+    write_text(
+        config_path,
+        serialize_config_for_persistence(initial));
+
+    ConfigStore store(initial);
+    SseBroadcaster broadcaster;
+    ConfigOperationGate operation_gate;
+    std::size_t apply_calls = 0;
+    auto context = make_catalog_context(
+        config_path.string(),
+        broadcaster,
+        store,
+        operation_gate,
+        apply_calls);
+
+    ApiConfig api_config;
+    api_config.listen =
+        "127.0.0.1:" + std::to_string(api_port);
+    ApiServer server(api_config);
+    register_catalog_test_handler(
+        server,
+        context,
+        [snapshot] { return snapshot; },
+        directory);
+    server.start();
+
+    auto intent = catalog_intent();
+    intent["selections"][0]["preset_id"] = "openai";
+    httplib::Client client("127.0.0.1", api_port);
+    const auto preview_response = client.Post(
+        "/api/setup/catalog/preview",
+        nlohmann::json{{"intent", intent}}.dump(),
+        "application/json");
+    REQUIRE(preview_response != nullptr);
+    REQUIRE(preview_response->status == 200);
+    const auto preview =
+        nlohmann::json::parse(preview_response->body);
+    CHECK(
+        preview.at("summary")
+                .at("lists")
+                .at(0)
+                .at("already_installed") == true);
+    CHECK_FALSE(preview.at("summary").contains("route_rule"));
+    CHECK_FALSE(preview.at("summary").contains("dns_rule"));
+    CHECK(
+        preview.at("candidate_revision") !=
+        preview.at("base_revision"));
+
+    const auto apply_response = client.Post(
+        "/api/setup/catalog/apply",
+        apply_request(intent, preview, false).dump(),
+        "application/json");
+    server.stop();
+
+    REQUIRE(apply_response != nullptr);
+    CHECK(apply_response->status == 200);
+    CHECK(apply_calls == 1U);
+    REQUIRE(store.active_config().lists.has_value());
+    const auto& migrated =
+        store.active_config().lists->at("my_openai");
+    CHECK(migrated.url == current_url);
+    CHECK(migrated.display_name == installed.display_name);
+    CHECK(migrated.domains == installed.domains);
 }
 
 TEST_CASE(

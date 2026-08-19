@@ -400,23 +400,12 @@ nlohmann::json warnings_json(const CatalogSetupPlan& plan) {
     return warnings;
 }
 
-bool catalog_plan_has_changes(const CatalogSetupPlan& plan) {
-    return std::any_of(
-               plan.summary.lists.begin(),
-               plan.summary.lists.end(),
-               [](const setup::CatalogListPlanSummary& list) {
-                   return !list.already_installed;
-               }) ||
-           plan.summary.route_rule.has_value() ||
-           plan.summary.dns_rule.has_value() ||
-           !plan.summary.route_rules.empty() ||
-           !plan.summary.dns_rules.empty() ||
-           (plan.summary.dns_server.has_value() &&
-            plan.summary.dns_server->created) ||
-           (plan.summary.blackhole.has_value() &&
-            plan.summary.blackhole->created) ||
-           (plan.summary.direct_outbound.has_value() &&
-            plan.summary.direct_outbound->created);
+bool catalog_plan_has_changes(const CatalogSetupPlan& plan,
+                              const std::string& base_revision) {
+    // Both revisions hash nlohmann::json(Config). A source-only migration is
+    // a real candidate change even when every list remains "installed" and no
+    // policy summary entry is added.
+    return plan.candidate_revision != base_revision;
 }
 
 struct CatalogSetupPreview {
@@ -619,7 +608,8 @@ void register_catalog_setup_handler_impl(
                             "preview_token_mismatch",
                             preview);
                     }
-                    if (!catalog_plan_has_changes(preview.plan)) {
+                    if (!catalog_plan_has_changes(
+                            preview.plan, preview.base_revision)) {
                         throw ApiError(
                             "Selected catalog presets and requested policies "
                             "are already configured",
