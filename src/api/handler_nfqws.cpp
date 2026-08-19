@@ -555,10 +555,18 @@ bool newer_version(const std::string& latest, const std::string& current) {
     return semantic_version(latest) > semantic_version(current);
 }
 
+#ifdef KEEN_PBR3_TESTING
+// The published package_metadata_verified is decided by
+// nfqws_snapshot_allows_optimistic_publish, which compares the snapshot taken
+// before the slow reads with the one taken after. This single-state form is
+// the same rule stated over one snapshot, and exists so the suite can pin what
+// an abandoned transaction means without staging two of them. Guarding it
+// keeps the -Werror build from carrying a function no shipped path calls.
 bool nfqws_package_metadata_verified(
     ComponentTransactionState transaction_state) noexcept {
     return transaction_state == ComponentTransactionState::none;
 }
+#endif
 
 bool should_clear_nfqws_upgrade_journal(
     bool component_broken,
