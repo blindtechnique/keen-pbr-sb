@@ -24,7 +24,7 @@ HttpTransportRequest request_for(const std::string& url, std::chrono::seconds ti
     request.user_agent = user_agent;
     request.fwmark = options.fwmark;
     request.bind_interface = options.bind_interface;
-    request.max_redirects = 5;
+    request.max_redirects = options.max_redirects;
     request.max_response_size = max_size;
     request.cancellation = options.cancellation;
     request.destination_filter = options.destination_filter;

@@ -43,6 +43,10 @@ struct HttpRequestOptions {
     // preference, and an answer that arrived after falling through to main is
     // not evidence about the outbound the mark named.
     std::string bind_interface;
+    // Redirects are allowed for existing remote-download callers by default.
+    // Fixed loopback control-plane reads set this to zero so an RCI response
+    // cannot move the request to a different local service or port.
+    long max_redirects{5};
 };
 
 class HttpError : public std::runtime_error {

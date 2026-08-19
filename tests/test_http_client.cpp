@@ -1,10 +1,14 @@
 #include <doctest/doctest.h>
+#include <httplib.h>
 
 #include "../src/http/http_client.hpp"
 #include "../src/http/curl_runtime.hpp"
 #include "../src/health/url_tester.hpp"
 
+#include <atomic>
+#include <chrono>
 #include <string>
+#include <thread>
 #include <vector>
 #include <cstdlib>
 #include <optional>
@@ -49,6 +53,31 @@ public:
 private:
     std::string name_;
     std::optional<std::string> previous_;
+};
+
+class BoundHttpServer {
+public:
+    explicit BoundHttpServer(httplib::Server& server)
+        : server_(server)
+        , port_(server_.bind_to_any_port("127.0.0.1")) {
+        REQUIRE(port_ > 0);
+        thread_ = std::thread([this] { server_.listen_after_bind(); });
+        while (!server_.is_running()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+
+    ~BoundHttpServer() {
+        server_.stop();
+        if (thread_.joinable()) thread_.join();
+    }
+
+    int port() const noexcept { return port_; }
+
+private:
+    httplib::Server& server_;
+    int port_;
+    std::thread thread_;
 };
 
 constexpr const char* kReadmeUrl =
@@ -150,6 +179,7 @@ TEST_CASE("a destination filter reaches the transport on both download paths") {
 
     (void)client.download("https://example.test/a", options);
     CHECK(static_cast<bool>(transport->request.destination_filter));
+    CHECK(transport->request.max_redirects == 5);
 
     transport->request = {};
     (void)client.download_conditional(
@@ -162,6 +192,53 @@ TEST_CASE("a destination filter reaches the transport on both download paths") {
     transport->request = {};
     (void)client.download("https://example.test/a");
     CHECK_FALSE(static_cast<bool>(transport->request.destination_filter));
+
+    options.max_redirects = 0;
+    (void)client.download("http://127.0.0.1/control", options);
+    CHECK(transport->request.max_redirects == 0);
+}
+
+TEST_CASE("privileged loopback reads reject redirects without changing the default") {
+    keen_pbr3::CurlRuntime curl_runtime;
+    EnvironmentVariableGuard no_proxy("NO_PROXY", "127.0.0.1");
+    httplib::Server server;
+    std::atomic<int> redirect_calls{0};
+    std::atomic<int> target_calls{0};
+    server.Get(
+        "/redirect",
+        [&redirect_calls](const httplib::Request&,
+                          httplib::Response& response) {
+            redirect_calls.fetch_add(1, std::memory_order_relaxed);
+            response.set_redirect("/target");
+        });
+    server.Get(
+        "/target",
+        [&target_calls](const httplib::Request&,
+                        httplib::Response& response) {
+            target_calls.fetch_add(1, std::memory_order_relaxed);
+            response.set_content("target", "text/plain");
+        });
+    BoundHttpServer bound(server);
+    const auto origin =
+        "http://127.0.0.1:" + std::to_string(bound.port());
+
+    keen_pbr3::HttpClient client;
+    client.set_timeout(std::chrono::seconds(5));
+    keen_pbr3::HttpRequestOptions privileged;
+    privileged.destination_filter = [](const std::string& address) {
+        return address == "127.0.0.1";
+    };
+    privileged.max_redirects = 0;
+
+    CHECK_THROWS_AS(
+        client.download(origin + "/redirect", privileged),
+        keen_pbr3::HttpError);
+    CHECK(redirect_calls.load(std::memory_order_relaxed) == 1);
+    CHECK(target_calls.load(std::memory_order_relaxed) == 0);
+
+    CHECK(client.download(origin + "/redirect") == "target");
+    CHECK(redirect_calls.load(std::memory_order_relaxed) == 2);
+    CHECK(target_calls.load(std::memory_order_relaxed) == 1);
 }
 
 TEST_CASE("http client preserves a typed interface bind failure") {

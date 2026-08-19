@@ -1540,6 +1540,7 @@ struct ApiServer::Impl {
                 // turn this privileged read into a non-loopback connection.
                 return address == "127.0.0.1";
             };
+            options.max_redirects = 0;
             document = client.download(
                 ndms_user_document_endpoint(), options);
         } catch (const std::exception&) {
