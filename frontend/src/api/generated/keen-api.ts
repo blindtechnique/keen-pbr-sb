@@ -33,6 +33,8 @@ import type {
   BackupDocument,
   BackupReadRequest,
   BackupRollbackAvailability,
+  CatalogRefreshRequest,
+  CatalogRefreshResult,
   CatalogSetupApplyRequest,
   CatalogSetupApplyResponse,
   CatalogSetupPreviewRequest,
@@ -45,6 +47,8 @@ import type {
   DependencyAnalysisRequest,
   DependencyAnalysisResponse,
   ErrorResponse,
+  GeoLookupRequest,
+  GeoLookupResult,
   GetAuthStatusParams,
   GetLogsParams,
   GrantedResponse,
@@ -62,11 +66,15 @@ import type {
   NaiveComponentState,
   NdmsInterfaceInventoryResponse,
   NdmsVpnServerServiceInventoryResponse,
+  NfqwsActionRequest,
   OkResponse,
   PeriodicTaskMetricsResponse,
+  PostNfqws200,
   PostSingBoxInstallCancel200,
   RecommendedListSetupRequest,
   ReloadResponse,
+  RemoteAccessRequest,
+  RemoteAccessResult,
   RouterInfo,
   RoutingHealthErrorResponse,
   RoutingHealthResponse,
@@ -92,6 +100,8 @@ import type {
   TransportConfigResponse,
   TransportExitCheckRequest,
   TransportExitCheckResponse,
+  TransportManagerSettings,
+  TransportProcessModeRequest,
   TransportSpec,
   TransportStatus,
   TransportsEnvironment,
@@ -4396,6 +4406,299 @@ export function useGetSystemRouter<TData = Awaited<ReturnType<typeof getSystemRo
 
 
 /**
+ * Dispatches on `action`. The set is closed and listed below, and it is worth knowing that this is one route rather than seventeen: it mixes reads the panel performs constantly with operations that replace the installed package.
+
+Three actions therefore need step-up reauthentication - `upgrade`, `capture_restore_point` and `restore_component` - and the rest do not. Guarding the whole path instead once put a password prompt in front of opening a list, which is why the unit of privilege here is the action, not the path. An action nobody listed needs no step-up, deliberately: the alternative is prompting for a password on everything unknown.
+
+Note the step-up window, because it is not what a per-operation confirmation would give you: a successful step-up opens **every** protected route and action for up to 300 seconds, and using it does not consume it or extend it.
+
+Per-action request and response bodies are not described here yet; this documents the envelope, the action set and the failures they share.
+
+ * @summary One endpoint, seventeen nfqws2 actions
+ */
+export type postNfqwsResponse200 = {
+  data: PostNfqws200
+  status: 200
+}
+
+export type postNfqwsResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postNfqwsResponse403 = {
+  data: ErrorResponse
+  status: 403
+}
+
+export type postNfqwsResponse409 = {
+  data: ErrorResponse
+  status: 409
+}
+
+export type postNfqwsResponse500 = {
+  data: ErrorResponse
+  status: 500
+}
+
+export type postNfqwsResponseSuccess = (postNfqwsResponse200) & {
+  headers: Headers;
+};
+export type postNfqwsResponseError = (postNfqwsResponse400 | postNfqwsResponse403 | postNfqwsResponse409 | postNfqwsResponse500) & {
+  headers: Headers;
+};
+
+export type postNfqwsResponse = (postNfqwsResponseSuccess | postNfqwsResponseError)
+
+export const getPostNfqwsUrl = () => {
+
+
+
+
+  return `/api/nfqws`
+}
+
+export const postNfqws = async (nfqwsActionRequest: NfqwsActionRequest, options?: RequestInit): Promise<postNfqwsResponse> => {
+
+  return apiFetch<postNfqwsResponse>(getPostNfqwsUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      nfqwsActionRequest,)
+  }
+);}
+
+
+
+
+export const getPostNfqwsMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postNfqws>>, TError,{data: NfqwsActionRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postNfqws>>, TError,{data: NfqwsActionRequest}, TContext> => {
+
+const mutationKey = ['postNfqws'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postNfqws>>, {data: NfqwsActionRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postNfqws(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostNfqwsMutationResult = NonNullable<Awaited<ReturnType<typeof postNfqws>>>
+    export type PostNfqwsMutationBody = NfqwsActionRequest
+    export type PostNfqwsMutationError = ErrorResponse
+
+    /**
+ * @summary One endpoint, seventeen nfqws2 actions
+ */
+export const usePostNfqws = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postNfqws>>, TError,{data: NfqwsActionRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postNfqws>>,
+        TError,
+        {data: NfqwsActionRequest},
+        TContext
+      > => {
+      return useMutation(getPostNfqwsMutationOptions(options), queryClient);
+    }
+
+/**
+ * Always refreshes - staleness is not consulted. `updated` says whether the fetch produced new content, not whether it ran.
+
+Sending `detour` does two things, and the second is easy to miss: it routes this refresh, and it is **persisted** as the catalogue's source setting for every later refresh. A caller that meant "just this once" has changed a stored preference.
+
+The tag is resolved against the *visible* configuration, which is the staged draft whenever one exists rather than the running config. So a refresh started while an unsaved edit is open can route through an outbound that is not active yet - or fail to find one that is.
+
+The body is optional; an empty body refreshes through the stored setting. A `detour` that is not a string is read as "no detour" rather than refused.
+
+ * @summary Refresh the catalogue now, optionally through a different outbound
+ */
+export type postCatalogRefreshResponse200 = {
+  data: CatalogRefreshResult
+  status: 200
+}
+
+export type postCatalogRefreshResponseSuccess = (postCatalogRefreshResponse200) & {
+  headers: Headers;
+};
+;
+
+export type postCatalogRefreshResponse = (postCatalogRefreshResponseSuccess)
+
+export const getPostCatalogRefreshUrl = () => {
+
+
+
+
+  return `/api/catalog/refresh`
+}
+
+export const postCatalogRefresh = async (catalogRefreshRequest?: CatalogRefreshRequest, options?: RequestInit): Promise<postCatalogRefreshResponse> => {
+
+  return apiFetch<postCatalogRefreshResponse>(getPostCatalogRefreshUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      catalogRefreshRequest,)
+  }
+);}
+
+
+
+
+export const getPostCatalogRefreshMutationOptions = <TError = unknown,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postCatalogRefresh>>, TError,{data: CatalogRefreshRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postCatalogRefresh>>, TError,{data: CatalogRefreshRequest}, TContext> => {
+
+const mutationKey = ['postCatalogRefresh'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postCatalogRefresh>>, {data: CatalogRefreshRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postCatalogRefresh(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostCatalogRefreshMutationResult = NonNullable<Awaited<ReturnType<typeof postCatalogRefresh>>>
+    export type PostCatalogRefreshMutationBody = CatalogRefreshRequest
+    export type PostCatalogRefreshMutationError = unknown
+
+    /**
+ * @summary Refresh the catalogue now, optionally through a different outbound
+ */
+export const usePostCatalogRefresh = <TError = unknown,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postCatalogRefresh>>, TError,{data: CatalogRefreshRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postCatalogRefresh>>,
+        TError,
+        {data: CatalogRefreshRequest},
+        TContext
+      > => {
+      return useMutation(getPostCatalogRefreshMutationOptions(options), queryClient);
+    }
+
+/**
+ * `allow_external_lookup` defaults to **false**, and that default is the point: without it nothing leaves the router, and the answer is whatever the local cache already knows. A panel that wants country flags must ask for the lookup explicitly rather than have one happen because it rendered a list.
+
+With the lookup allowed, this returns what is cached now and schedules the rest in the background - at most 6 per request, at most 12 in flight overall. `pending` true means an answer is being fetched and this response does not contain it; ask again.
+
+Hosts are filtered silently: empty ones, ones longer than 253 characters, and everything past 256 are dropped rather than rejected, because a list that is partly unusable is still worth answering.
+
+ * @summary Where these hosts are, from cache and optionally from outside
+ */
+export type postSystemGeoResponse200 = {
+  data: GeoLookupResult
+  status: 200
+}
+
+export type postSystemGeoResponseSuccess = (postSystemGeoResponse200) & {
+  headers: Headers;
+};
+;
+
+export type postSystemGeoResponse = (postSystemGeoResponseSuccess)
+
+export const getPostSystemGeoUrl = () => {
+
+
+
+
+  return `/api/system/geo`
+}
+
+export const postSystemGeo = async (geoLookupRequest: GeoLookupRequest, options?: RequestInit): Promise<postSystemGeoResponse> => {
+
+  return apiFetch<postSystemGeoResponse>(getPostSystemGeoUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      geoLookupRequest,)
+  }
+);}
+
+
+
+
+export const getPostSystemGeoMutationOptions = <TError = unknown,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSystemGeo>>, TError,{data: GeoLookupRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postSystemGeo>>, TError,{data: GeoLookupRequest}, TContext> => {
+
+const mutationKey = ['postSystemGeo'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postSystemGeo>>, {data: GeoLookupRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postSystemGeo(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostSystemGeoMutationResult = NonNullable<Awaited<ReturnType<typeof postSystemGeo>>>
+    export type PostSystemGeoMutationBody = GeoLookupRequest
+    export type PostSystemGeoMutationError = unknown
+
+    /**
+ * @summary Where these hosts are, from cache and optionally from outside
+ */
+export const usePostSystemGeo = <TError = unknown,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSystemGeo>>, TError,{data: GeoLookupRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postSystemGeo>>,
+        TError,
+        {data: GeoLookupRequest},
+        TContext
+      > => {
+      return useMutation(getPostSystemGeoMutationOptions(options), queryClient);
+    }
+
+/**
  * `available` is true only when the firmware answered AND the cached catalogue is fresh - a stale catalogue is offered as data with `catalog_status: stale`, but not as something to rely on for naming.
 
  * @summary Human names the firmware gives its interfaces
@@ -4507,6 +4810,106 @@ export function useGetSystemInterfaceNames<TData = Awaited<ReturnType<typeof get
 
 
 
+
+/**
+ * Requires step-up reauthentication. Note what that window is: one successful step-up opens every protected route for up to 300 seconds, and using it neither consumes nor extends it.
+
+**`enabled` defaults to false.** An empty body therefore disables remote access rather than doing nothing - the safe direction, but not the one a caller would guess.
+
+Enabling is refused rather than warned about, because the point of the check is that the panel never reaches the internet unprotected. It is refused when the authentication state cannot be read, when authentication is off entirely, when the provider is the router account (those credentials must not cross plaintext WAN HTTP), when the API is bound to loopback and so would publish nothing, and for any port other than 12121 - a translated port cannot yet be verified without also exposing the direct one.
+
+No firewall command runs on this request. The desired state is written and a reconciliation generation is queued; `pending` and `generation` say so, and `retry_after_ms` says when the next attempt is due. A caller wanting to know the outcome polls `GET /api/system/remote-access`.
+
+**Every outcome is HTTP 200**, including each refusal above; read `ok` and `error`.
+
+ * @summary Publish the panel to the internet, or take it back
+ */
+export type postSystemRemoteAccessResponse200 = {
+  data: RemoteAccessResult
+  status: 200
+}
+
+export type postSystemRemoteAccessResponse403 = {
+  data: ErrorResponse
+  status: 403
+}
+
+export type postSystemRemoteAccessResponseSuccess = (postSystemRemoteAccessResponse200) & {
+  headers: Headers;
+};
+export type postSystemRemoteAccessResponseError = (postSystemRemoteAccessResponse403) & {
+  headers: Headers;
+};
+
+export type postSystemRemoteAccessResponse = (postSystemRemoteAccessResponseSuccess | postSystemRemoteAccessResponseError)
+
+export const getPostSystemRemoteAccessUrl = () => {
+
+
+
+
+  return `/api/system/remote-access`
+}
+
+export const postSystemRemoteAccess = async (remoteAccessRequest: RemoteAccessRequest, options?: RequestInit): Promise<postSystemRemoteAccessResponse> => {
+
+  return apiFetch<postSystemRemoteAccessResponse>(getPostSystemRemoteAccessUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      remoteAccessRequest,)
+  }
+);}
+
+
+
+
+export const getPostSystemRemoteAccessMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSystemRemoteAccess>>, TError,{data: RemoteAccessRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postSystemRemoteAccess>>, TError,{data: RemoteAccessRequest}, TContext> => {
+
+const mutationKey = ['postSystemRemoteAccess'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postSystemRemoteAccess>>, {data: RemoteAccessRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postSystemRemoteAccess(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostSystemRemoteAccessMutationResult = NonNullable<Awaited<ReturnType<typeof postSystemRemoteAccess>>>
+    export type PostSystemRemoteAccessMutationBody = RemoteAccessRequest
+    export type PostSystemRemoteAccessMutationError = ErrorResponse
+
+    /**
+ * @summary Publish the panel to the internet, or take it back
+ */
+export const usePostSystemRemoteAccess = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postSystemRemoteAccess>>, TError,{data: RemoteAccessRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postSystemRemoteAccess>>,
+        TError,
+        {data: RemoteAccessRequest},
+        TContext
+      > => {
+      return useMutation(getPostSystemRemoteAccessMutationOptions(options), queryClient);
+    }
 
 /**
  * @summary Whether the naive component is installed
@@ -4703,6 +5106,117 @@ export const usePostSystemNaiveComponent = <TError = unknown,
         TContext
       > => {
       return useMutation(getPostSystemNaiveComponentMutationOptions(options), queryClient);
+    }
+
+/**
+ * The body must carry exactly one field. An extra key is refused rather than ignored - unusually for this API, and deliberately: this request restarts things, and a caller who sent a field this build does not understand did not ask for what it is about to do.
+
+**This can restart the transport manager**, and every managed transport with it. It does so only when the staged mode needs it - when the requested mode is already running, ready and needs no restart, the current settings are returned and nothing is touched.
+
+Failure restores the previous mode: transports.json is written back and the manager restarted onto it. The two 500s differ in exactly one way that matters - whether that restoration itself worked.
+
+ * @summary Switch how sing-box runs its transports
+ */
+export type postTransportsSettingsResponse200 = {
+  data: TransportManagerSettings
+  status: 200
+}
+
+export type postTransportsSettingsResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postTransportsSettingsResponse409 = {
+  data: ErrorResponse
+  status: 409
+}
+
+export type postTransportsSettingsResponse500 = {
+  data: ErrorResponse
+  status: 500
+}
+
+export type postTransportsSettingsResponse503 = {
+  data: ErrorResponse
+  status: 503
+}
+
+export type postTransportsSettingsResponseSuccess = (postTransportsSettingsResponse200) & {
+  headers: Headers;
+};
+export type postTransportsSettingsResponseError = (postTransportsSettingsResponse400 | postTransportsSettingsResponse409 | postTransportsSettingsResponse500 | postTransportsSettingsResponse503) & {
+  headers: Headers;
+};
+
+export type postTransportsSettingsResponse = (postTransportsSettingsResponseSuccess | postTransportsSettingsResponseError)
+
+export const getPostTransportsSettingsUrl = () => {
+
+
+
+
+  return `/api/transports/settings`
+}
+
+export const postTransportsSettings = async (transportProcessModeRequest: TransportProcessModeRequest, options?: RequestInit): Promise<postTransportsSettingsResponse> => {
+
+  return apiFetch<postTransportsSettingsResponse>(getPostTransportsSettingsUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      transportProcessModeRequest,)
+  }
+);}
+
+
+
+
+export const getPostTransportsSettingsMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postTransportsSettings>>, TError,{data: TransportProcessModeRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postTransportsSettings>>, TError,{data: TransportProcessModeRequest}, TContext> => {
+
+const mutationKey = ['postTransportsSettings'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postTransportsSettings>>, {data: TransportProcessModeRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postTransportsSettings(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostTransportsSettingsMutationResult = NonNullable<Awaited<ReturnType<typeof postTransportsSettings>>>
+    export type PostTransportsSettingsMutationBody = TransportProcessModeRequest
+    export type PostTransportsSettingsMutationError = ErrorResponse
+
+    /**
+ * @summary Switch how sing-box runs its transports
+ */
+export const usePostTransportsSettings = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postTransportsSettings>>, TError,{data: TransportProcessModeRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postTransportsSettings>>,
+        TError,
+        {data: TransportProcessModeRequest},
+        TContext
+      > => {
+      return useMutation(getPostTransportsSettingsMutationOptions(options), queryClient);
     }
 
 /**

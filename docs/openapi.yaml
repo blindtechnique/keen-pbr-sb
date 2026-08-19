@@ -1083,6 +1083,160 @@ paths:
               schema:
                 $ref: "#/components/schemas/RouterInfo"
 
+  /api/nfqws:
+    post:
+      summary: One endpoint, seventeen nfqws2 actions
+      description: >
+        Dispatches on `action`. The set is closed and listed below, and it is
+        worth knowing that this is one route rather than seventeen: it mixes
+        reads the panel performs constantly with operations that replace the
+        installed package.
+
+
+        Three actions therefore need step-up reauthentication -
+        `upgrade`, `capture_restore_point` and `restore_component` - and the
+        rest do not. Guarding the whole path instead once put a password
+        prompt in front of opening a list, which is why the unit of privilege
+        here is the action, not the path. An action nobody listed needs no
+        step-up, deliberately: the alternative is prompting for a password on
+        everything unknown.
+
+
+        Note the step-up window, because it is not what a per-operation
+        confirmation would give you: a successful step-up opens **every**
+        protected route and action for up to 300 seconds, and using it does
+        not consume it or extend it.
+
+
+        Per-action request and response bodies are not described here yet;
+        this documents the envelope, the action set and the failures they
+        share.
+      operationId: postNfqws
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NfqwsActionRequest"
+      responses:
+        "200":
+          description: >
+            The action's own result. Shape depends on `action`.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "400":
+          description: >
+            Not JSON, an unsupported service command, a file that may not be
+            deleted, an attempt to create a log, or clearing something that is
+            not one.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: >
+            `step_up_required` - the action is one of the three privileged
+            ones and no grant is live.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: >
+            nfqws2 is not installed, or the file this action would create
+            already exists.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: The action failed while touching the filesystem.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/catalog/refresh:
+    post:
+      summary: Refresh the catalogue now, optionally through a different outbound
+      description: >
+        Always refreshes - staleness is not consulted. `updated` says whether
+        the fetch produced new content, not whether it ran.
+
+
+        Sending `detour` does two things, and the second is easy to miss: it
+        routes this refresh, and it is **persisted** as the catalogue's source
+        setting for every later refresh. A caller that meant "just this once"
+        has changed a stored preference.
+
+
+        The tag is resolved against the *visible* configuration, which is the
+        staged draft whenever one exists rather than the running config. So a
+        refresh started while an unsaved edit is open can route through an
+        outbound that is not active yet - or fail to find one that is.
+
+
+        The body is optional; an empty body refreshes through the stored
+        setting. A `detour` that is not a string is read as "no detour"
+        rather than refused.
+      operationId: postCatalogRefresh
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CatalogRefreshRequest"
+      responses:
+        "200":
+          description: >
+            The outcome. Also carries `error` instead of the rest when the
+            settings file could not be written - the status stays 200.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogRefreshResult"
+
+  /api/system/geo:
+    post:
+      summary: Where these hosts are, from cache and optionally from outside
+      description: >
+        `allow_external_lookup` defaults to **false**, and that default is the
+        point: without it nothing leaves the router, and the answer is
+        whatever the local cache already knows. A panel that wants country
+        flags must ask for the lookup explicitly rather than have one happen
+        because it rendered a list.
+
+
+        With the lookup allowed, this returns what is cached now and schedules
+        the rest in the background - at most 6 per request, at most 12 in
+        flight overall. `pending` true means an answer is being fetched and
+        this response does not contain it; ask again.
+
+
+        Hosts are filtered silently: empty ones, ones longer than 253
+        characters, and everything past 256 are dropped rather than rejected,
+        because a list that is partly unusable is still worth answering.
+      operationId: postSystemGeo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GeoLookupRequest"
+      responses:
+        "200":
+          description: >
+            Cached locations and whether more are on the way. A malformed body
+            also arrives here, as `{"error":"invalid_request"}` - the status is
+            200 either way.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GeoLookupResult"
+
   /api/system/interface-names:
     get:
       summary: Human names the firmware gives its interfaces
@@ -1098,6 +1252,63 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/InterfaceNames"
+
+  /api/system/remote-access:
+    post:
+      summary: Publish the panel to the internet, or take it back
+      description: >
+        Requires step-up reauthentication. Note what that window is: one
+        successful step-up opens every protected route for up to 300 seconds,
+        and using it neither consumes nor extends it.
+
+
+        **`enabled` defaults to false.** An empty body therefore disables
+        remote access rather than doing nothing - the safe direction, but not
+        the one a caller would guess.
+
+
+        Enabling is refused rather than warned about, because the point of the
+        check is that the panel never reaches the internet unprotected. It is
+        refused when the authentication state cannot be read, when
+        authentication is off entirely, when the provider is the router
+        account (those credentials must not cross plaintext WAN HTTP), when
+        the API is bound to loopback and so would publish nothing, and for any
+        port other than 12121 - a translated port cannot yet be verified
+        without also exposing the direct one.
+
+
+        No firewall command runs on this request. The desired state is
+        written and a reconciliation generation is queued; `pending` and
+        `generation` say so, and `retry_after_ms` says when the next attempt
+        is due. A caller wanting to know the outcome polls
+        `GET /api/system/remote-access`.
+
+
+        **Every outcome is HTTP 200**, including each refusal above; read
+        `ok` and `error`.
+      operationId: postSystemRemoteAccess
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RemoteAccessRequest"
+      responses:
+        "200":
+          description: >
+            Queued, applied, or refused - all of them here. `error` names the
+            refusal; `ok` marks the accepted ones.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RemoteAccessResult"
+        "403":
+          description: >
+            `step_up_required` - no live step-up grant for this session.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /api/system/naive-component:
     get:
@@ -1133,6 +1344,78 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/NaiveComponentInstallResult"
+
+  /api/transports/settings:
+    post:
+      summary: Switch how sing-box runs its transports
+      description: >
+        The body must carry exactly one field. An extra key is refused rather
+        than ignored - unusually for this API, and deliberately: this request
+        restarts things, and a caller who sent a field this build does not
+        understand did not ask for what it is about to do.
+
+
+        **This can restart the transport manager**, and every managed
+        transport with it. It does so only when the staged mode needs it -
+        when the requested mode is already running, ready and needs no
+        restart, the current settings are returned and nothing is touched.
+
+
+        Failure restores the previous mode: transports.json is written back
+        and the manager restarted onto it. The two 500s differ in exactly one
+        way that matters - whether that restoration itself worked.
+      operationId: postTransportsSettings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransportProcessModeRequest"
+      responses:
+        "200":
+          description: >
+            The active settings after the switch, verified: the mode is the
+            requested one, it is the running one, no restart is outstanding
+            and the runtime is ready. Anything less is an error, not a 200.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransportManagerSettings"
+        "400":
+          description: >
+            Not JSON, not an object, more than one field, missing
+            `sing_box_process_mode`, or a value outside the two allowed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: >
+            Another maintenance operation holds the lease, or the generation
+            moved underneath this one.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: >
+            The switch failed. The message says whether the previous mode was
+            restored - `the previous mode was restored` carries the original
+            failure in `error`, while `rollback also failed` carries both
+            `apply_error` and `rollback_error` and means the router is on
+            neither mode cleanly.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: >
+            The transport manager's configuration is missing, or the
+            maintenance helper is in an unsafe state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /api/transports/environment:
     get:
@@ -2096,6 +2379,250 @@ components:
     # One named enum rather than two inline copies. Two identical inline enums
     # make the generator invent a shared type of its own choosing, and a third
     # use elsewhere would rename it under everyone.
+    RemoteAccessRequest:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+          default: false
+          description: >
+            Absent counts as false, so an empty body disables remote access.
+        port:
+          type: integer
+          default: 12121
+          description: >
+            Only 12121 is accepted while enabling. The range check runs before
+            the enabling checks, so an out-of-range port is refused even on a
+            request that would have disabled remote access.
+
+    RemoteAccessSettings:
+      type: object
+      required: [enabled, port]
+      properties:
+        enabled:
+          type: boolean
+        port:
+          type: integer
+
+    RemoteAccessResult:
+      type: object
+      description: >
+        One shape for accepted, queued and refused outcomes; all arrive as
+        HTTP 200.
+      properties:
+        ok:
+          type: boolean
+          description: Absent on every refusal.
+        error:
+          type: string
+          description: >
+            `auth_state_unavailable`, `login_disabled`,
+            `keenetic_auth_plaintext_wan`, `listen_loopback`,
+            `custom_port_not_supported_safely`, a port-range message,
+            `cannot write remote-access.json`, or - when reconciliation is
+            degraded and nothing owns its recovery - `cannot apply
+            remote-access firewall rules`.
+        detail:
+          type: string
+          description: >
+            Why the refusal, or what the queued reconciliation is waiting for.
+        listen:
+          type: string
+          description: >
+            The configured bind address, returned with `listen_loopback` so
+            the caller can see what made it unreachable.
+        supported_port:
+          type: integer
+          description: Returned with `custom_port_not_supported_safely`.
+        settings:
+          $ref: "#/components/schemas/RemoteAccessSettings"
+        durable:
+          type: boolean
+        warning:
+          type: string
+          description: Present only when `durable` is false.
+        pending:
+          type: boolean
+          description: >
+            The firewall state is queued, not applied. No firewall command
+            runs on this request.
+        generation:
+          type: integer
+          format: int64
+        phase:
+          type: string
+        degraded:
+          type: boolean
+        retry_scheduled:
+          type: boolean
+        recovery_owned:
+          type: boolean
+        maintenance:
+          type: boolean
+        retry_after_ms:
+          type: integer
+          format: int64
+          description: Present only when a retry is scheduled.
+
+    NfqwsActionRequest:
+      type: object
+      required: [action]
+      additionalProperties: true
+      description: >
+        Carries `action` plus that action's own fields, which are not
+        enumerated here. Unknown members are ignored rather than refused.
+      properties:
+        action:
+          type: string
+          description: >
+            `upgrade`, `capture_restore_point` and `restore_component` require
+            a live step-up grant; the rest do not.
+          enum:
+            - apply_strategy
+            - capture_restore_point
+            - check_update
+            - check_url
+            - clear_log
+            - create_file
+            - delete_file
+            - delete_strategy
+            - import_bundle
+            - import_lists
+            - read_file
+            - restore_component
+            - save_file
+            - save_files
+            - save_strategy
+            - service
+            - upgrade
+
+    CatalogRefreshRequest:
+      type: object
+      properties:
+        detour:
+          type: string
+          description: >
+            Outbound tag to fetch through, stored as the catalogue's source
+            setting. Empty means the system default route. A non-string value
+            is treated as empty rather than refused.
+
+    CatalogRefreshResult:
+      type: object
+      properties:
+        updated:
+          type: boolean
+          description: >
+            New content arrived. False means the fetch ran and changed
+            nothing - not that it was skipped.
+        detour:
+          type: string
+          description: What this refresh actually used, and what is now stored.
+        settings_durable:
+          type: boolean
+          description: >
+            False when the stored setting is visible but its durability could
+            not be confirmed.
+        warning:
+          type: string
+          description: Present only when settings_durable is false.
+        error:
+          type: string
+          description: >
+            Present instead of the rest when catalog-source.json could not be
+            written. Nothing was refreshed in that case.
+
+    GeoLookupRequest:
+      type: object
+      properties:
+        hosts:
+          type: array
+          items:
+            type: string
+          description: >
+            Silently filtered: empty entries, entries over 253 characters and
+            everything past the 256th are dropped.
+        allow_external_lookup:
+          type: boolean
+          default: false
+          description: >
+            False means cache only - nothing leaves the router. Absent counts
+            as false.
+
+    GeoLocation:
+      type: object
+      properties:
+        country:
+          type: string
+        country_code:
+          type: string
+        emoji:
+          type: string
+        checked_at:
+          type: integer
+          format: int64
+
+    GeoLookupResult:
+      type: object
+      properties:
+        locations:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/GeoLocation"
+          description: >
+            Only hosts with a known country appear. A cached entry whose
+            country is empty is omitted rather than returned blank.
+        pending:
+          type: boolean
+          description: >
+            An external lookup is under way for at least one host, so this
+            answer is incomplete. Never true when allow_external_lookup was
+            false.
+        error:
+          type: string
+          enum: [invalid_request]
+          description: Present instead of the other fields when the body was unusable.
+
+    SingBoxProcessMode:
+      type: string
+      description: >
+        `isolated` runs one sing-box per transport; `shared` runs one for all
+        of them.
+      enum: [isolated, shared]
+
+    TransportProcessModeRequest:
+      type: object
+      required: [sing_box_process_mode]
+      additionalProperties: false
+      description: >
+        Exactly one field. An extra key is refused, not ignored: the request
+        restarts transports, and a caller sending something this build does
+        not understand did not ask for that.
+      properties:
+        sing_box_process_mode:
+          $ref: "#/components/schemas/SingBoxProcessMode"
+
+    TransportManagerSettings:
+      type: object
+      required:
+        - sing_box_process_mode
+        - running_sing_box_process_mode
+        - restart_required
+        - runtime_ready
+      properties:
+        sing_box_process_mode:
+          $ref: "#/components/schemas/SingBoxProcessMode"
+        running_sing_box_process_mode:
+          allOf:
+            - $ref: "#/components/schemas/SingBoxProcessMode"
+            - description: >
+                What is actually running. It differs from the configured mode
+                between staging a change and the restart that applies it,
+                which is why both are published rather than one.
+        restart_required:
+          type: boolean
+        runtime_ready:
+          type: boolean
+
     LogLevel:
       type: string
       enum: [error, warn, info, verbose, debug]

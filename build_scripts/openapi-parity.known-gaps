@@ -18,15 +18,10 @@
 # описать один эндпоинт из пяти — значит закрепить половину контракта, по
 # которой фронтенд всё равно не сможет работать без остальных.
 GET  /api/nfqws
-POST /api/nfqws
 GET  /api/system/remote-access
-POST /api/system/remote-access
 GET  /api/transports/settings
-POST /api/transports/settings
 
 # --- Очередь 2: read-only --------------------------------------------------
 GET  /api/catalog
-POST /api/catalog/refresh
 GET  /api/connections
 GET  /api/connections/active
-POST /api/system/geo

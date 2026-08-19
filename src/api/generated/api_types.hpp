@@ -16,6 +16,8 @@
 #include <optional>
 #include <nlohmann/json.hpp>
 
+#include <unordered_map>
+
 #ifndef NLOHMANN_OPT_HELPER
 #define NLOHMANN_OPT_HELPER
 namespace nlohmann {
@@ -208,6 +210,18 @@ namespace api {
     struct CatalogPresetSelection {
         std::optional<std::string> display_name;
         std::string preset_id;
+    };
+
+    struct CatalogRefreshRequest {
+        std::optional<std::string> detour;
+    };
+
+    struct CatalogRefreshResult {
+        std::optional<std::string> detour;
+        std::optional<std::string> error;
+        std::optional<bool> settings_durable;
+        std::optional<bool> updated;
+        std::optional<std::string> warning;
     };
 
     enum class DnsMode : int { AUTOMATIC, EXPLICIT_SERVER, NONE };
@@ -649,6 +663,26 @@ namespace api {
         CheckStatus status;
     };
 
+    struct GeoLocation {
+        std::optional<int64_t> checked_at;
+        std::optional<std::string> country;
+        std::optional<std::string> country_code;
+        std::optional<std::string> emoji;
+    };
+
+    struct GeoLookupRequest {
+        std::optional<bool> allow_external_lookup;
+        std::optional<std::vector<std::string>> hosts;
+    };
+
+    enum class GeoLookupResultError : int { INVALID_REQUEST };
+
+    struct GeoLookupResult {
+        std::optional<GeoLookupResultError> error;
+        std::optional<std::map<std::string, GeoLocation>> locations;
+        std::optional<bool> pending;
+    };
+
     struct GrantedResponse {
         bool granted = false;
     };
@@ -782,10 +816,10 @@ namespace api {
         int64_t size_bytes = 0;
     };
 
-    enum class Error : int { INSTALL_FAILED, SCRIPT_MISSING };
+    enum class NaiveComponentInstallResultError : int { INSTALL_FAILED, SCRIPT_MISSING };
 
     struct NaiveComponentInstallResult {
-        std::optional<Error> error;
+        std::optional<NaiveComponentInstallResultError> error;
         bool installed = false;
         std::optional<std::string> log;
         std::optional<int64_t> size;
@@ -897,6 +931,12 @@ namespace api {
         std::vector<NdmsVpnServerService> services;
     };
 
+    enum class NfqwsActionRequestAction : int { APPLY_STRATEGY, CAPTURE_RESTORE_POINT, CHECK_UPDATE, CHECK_URL, CLEAR_LOG, CREATE_FILE, DELETE_FILE, DELETE_STRATEGY, IMPORT_BUNDLE, IMPORT_LISTS, READ_FILE, RESTORE_COMPONENT, SAVE_FILE, SAVE_FILES, SAVE_STRATEGY, SERVICE, UPGRADE };
+
+    struct NfqwsActionRequest {
+        NfqwsActionRequestAction action;
+    };
+
     struct OkResponse {
         bool ok = false;
     };
@@ -979,6 +1019,35 @@ namespace api {
     struct ReloadResponse {
         std::string message;
         ConfigUpdateResponseStatus status;
+    };
+
+    struct RemoteAccessRequest {
+        std::optional<bool> enabled;
+        std::optional<int64_t> port;
+    };
+
+    struct Settings {
+        bool enabled = false;
+        int64_t port = 0;
+    };
+
+    struct RemoteAccessResult {
+        std::optional<bool> degraded;
+        std::optional<std::string> detail;
+        std::optional<bool> durable;
+        std::optional<std::string> error;
+        std::optional<int64_t> generation;
+        std::optional<std::string> listen;
+        std::optional<bool> maintenance;
+        std::optional<bool> ok;
+        std::optional<bool> pending;
+        std::optional<std::string> phase;
+        std::optional<bool> recovery_owned;
+        std::optional<int64_t> retry_after_ms;
+        std::optional<bool> retry_scheduled;
+        std::optional<Settings> settings;
+        std::optional<int64_t> supported_port;
+        std::optional<std::string> warning;
     };
 
     struct RouteTableCheck {
@@ -1220,6 +1289,8 @@ namespace api {
         std::optional<std::vector<std::string>> transports_left_down;
     };
 
+    enum class SingBoxProcessMode : int { ISOLATED, SHARED };
+
     enum class StatusEventConnectionsType : int { CONNECTIONS };
 
     struct StatusEventConnections {
@@ -1344,10 +1415,10 @@ namespace api {
         std::string release_url;
     };
 
-    enum class Action : int { DOWN, RESTART, UP };
+    enum class TransportActionRequestAction : int { DOWN, RESTART, UP };
 
     struct TransportActionRequest {
-        Action action;
+        TransportActionRequestAction action;
         std::string tag;
     };
 
@@ -1460,6 +1531,13 @@ namespace api {
         Verdict verdict;
     };
 
+    struct TransportManagerSettings {
+        bool restart_required = false;
+        SingBoxProcessMode running_sing_box_process_mode;
+        bool runtime_ready = false;
+        SingBoxProcessMode sing_box_process_mode;
+    };
+
     enum class Confidence : int { AMBIGUOUS, DECLARED, DERIVED, UNKNOWN };
 
     enum class Framing : int { GRPC, HTTP, HTTP2, HTTP_UPGRADE, QUIC, RAW, UNKNOWN, WEBSOCKET, WIREGUARD };
@@ -1473,6 +1551,10 @@ namespace api {
         Framing framing;
         std::optional<std::vector<PayloadNetwork>> payload_networks;
         WireTransport wire_transport;
+    };
+
+    struct TransportProcessModeRequest {
+        SingBoxProcessMode sing_box_process_mode;
     };
 
     enum class Security : int { REALITY, TLS };
@@ -1527,6 +1609,8 @@ namespace api {
         std::optional<CacheGeneration> cache_generation;
         std::optional<CacheMetadata> cache_metadata;
         std::optional<CatalogPresetSelection> catalog_preset_selection;
+        std::optional<CatalogRefreshRequest> catalog_refresh_request;
+        std::optional<CatalogRefreshResult> catalog_refresh_result;
         std::optional<CatalogSetupApplyRequest> catalog_setup_apply_request;
         std::optional<CatalogSetupApplyResponse> catalog_setup_apply_response;
         std::optional<CatalogSetupBlackholeSummary> catalog_setup_blackhole_summary;
@@ -1572,6 +1656,9 @@ namespace api {
         std::optional<FirewallChain> firewall_chain;
         std::optional<FirewallRuleCheck> firewall_rule_check;
         std::optional<Fwmark> fwmark_config;
+        std::optional<GeoLocation> geo_location;
+        std::optional<GeoLookupRequest> geo_lookup_request;
+        std::optional<GeoLookupResult> geo_lookup_result;
         std::optional<GrantedResponse> granted_response;
         std::optional<HealthResponse> health_response;
         std::optional<InterfaceNames> interface_names;
@@ -1611,6 +1698,7 @@ namespace api {
         std::optional<NdmsVpnServerKind> ndms_vpn_server_kind;
         std::optional<NdmsVpnServerService> ndms_vpn_server_service;
         std::optional<NdmsVpnServerServiceInventoryResponse> ndms_vpn_server_service_inventory_response;
+        std::optional<NfqwsActionRequest> nfqws_action_request;
         std::optional<OkResponse> ok_response;
         std::optional<OutboundElement> outbound;
         std::optional<OutboundGroupElement> outbound_group;
@@ -1626,6 +1714,9 @@ namespace api {
         std::optional<PpeDeoffloadProtocolHealth> ppe_deoffload_protocol_health;
         std::optional<RecommendedListSetupRequest> recommended_list_setup_request;
         std::optional<ReloadResponse> reload_response;
+        std::optional<RemoteAccessRequest> remote_access_request;
+        std::optional<RemoteAccessResult> remote_access_result;
+        std::optional<Settings> remote_access_settings;
         std::optional<ResolverConfigProbeStatus> resolver_config_probe_status;
         std::optional<ResolverConfigSyncState> resolver_config_sync_state;
         std::optional<Retry> retry_config;
@@ -1660,6 +1751,7 @@ namespace api {
         std::optional<SingBoxInstallCapability> sing_box_install_capability;
         std::optional<SingBoxInstallRequest> sing_box_install_request;
         std::optional<SingBoxInstallResult> sing_box_install_result;
+        std::optional<SingBoxProcessMode> sing_box_process_mode;
         std::optional<SortOrder> sort_order;
         std::optional<StatusEventConnections> status_event_connections;
         std::optional<StatusEventInterfaces> status_event_interfaces;
@@ -1686,7 +1778,9 @@ namespace api {
         std::optional<TransportExitCheckRequest> transport_exit_check_request;
         std::optional<TransportExitCheckResponse> transport_exit_check_response;
         std::optional<LinkedOutbound> transport_linked_outbound_ensure;
+        std::optional<TransportManagerSettings> transport_manager_settings;
         std::optional<TransportPath> transport_path;
+        std::optional<TransportProcessModeRequest> transport_process_mode_request;
         std::optional<TransportsEnvironment> transports_environment;
         std::optional<Transport> transport_spec;
         std::optional<TransportStatus> transport_status;
@@ -1741,6 +1835,12 @@ namespace api {
 
     void from_json(const json & j, CatalogPresetSelection & x);
     void to_json(json & j, const CatalogPresetSelection & x);
+
+    void from_json(const json & j, CatalogRefreshRequest & x);
+    void to_json(json & j, const CatalogRefreshRequest & x);
+
+    void from_json(const json & j, CatalogRefreshResult & x);
+    void to_json(json & j, const CatalogRefreshResult & x);
 
     void from_json(const json & j, Intent & x);
     void to_json(json & j, const Intent & x);
@@ -1895,6 +1995,15 @@ namespace api {
     void from_json(const json & j, FirewallRuleCheck & x);
     void to_json(json & j, const FirewallRuleCheck & x);
 
+    void from_json(const json & j, GeoLocation & x);
+    void to_json(json & j, const GeoLocation & x);
+
+    void from_json(const json & j, GeoLookupRequest & x);
+    void to_json(json & j, const GeoLookupRequest & x);
+
+    void from_json(const json & j, GeoLookupResult & x);
+    void to_json(json & j, const GeoLookupResult & x);
+
     void from_json(const json & j, GrantedResponse & x);
     void to_json(json & j, const GrantedResponse & x);
 
@@ -1970,6 +2079,9 @@ namespace api {
     void from_json(const json & j, NdmsVpnServerServiceInventoryResponse & x);
     void to_json(json & j, const NdmsVpnServerServiceInventoryResponse & x);
 
+    void from_json(const json & j, NfqwsActionRequest & x);
+    void to_json(json & j, const NfqwsActionRequest & x);
+
     void from_json(const json & j, OkResponse & x);
     void to_json(json & j, const OkResponse & x);
 
@@ -1996,6 +2108,15 @@ namespace api {
 
     void from_json(const json & j, ReloadResponse & x);
     void to_json(json & j, const ReloadResponse & x);
+
+    void from_json(const json & j, RemoteAccessRequest & x);
+    void to_json(json & j, const RemoteAccessRequest & x);
+
+    void from_json(const json & j, Settings & x);
+    void to_json(json & j, const Settings & x);
+
+    void from_json(const json & j, RemoteAccessResult & x);
+    void to_json(json & j, const RemoteAccessResult & x);
 
     void from_json(const json & j, RouteTableCheck & x);
     void to_json(json & j, const RouteTableCheck & x);
@@ -2147,8 +2268,14 @@ namespace api {
     void from_json(const json & j, TransportExitCheckResponse & x);
     void to_json(json & j, const TransportExitCheckResponse & x);
 
+    void from_json(const json & j, TransportManagerSettings & x);
+    void to_json(json & j, const TransportManagerSettings & x);
+
     void from_json(const json & j, TransportPath & x);
     void to_json(json & j, const TransportPath & x);
+
+    void from_json(const json & j, TransportProcessModeRequest & x);
+    void to_json(json & j, const TransportProcessModeRequest & x);
 
     void from_json(const json & j, TransportStatus & x);
     void to_json(json & j, const TransportStatus & x);
@@ -2225,6 +2352,9 @@ namespace api {
     void from_json(const json & j, DependencyRelation & x);
     void to_json(json & j, const DependencyRelation & x);
 
+    void from_json(const json & j, GeoLookupResultError & x);
+    void to_json(json & j, const GeoLookupResultError & x);
+
     void from_json(const json & j, LifecycleOperationStageStatus & x);
     void to_json(json & j, const LifecycleOperationStageStatus & x);
 
@@ -2255,8 +2385,8 @@ namespace api {
     void from_json(const json & j, LogLevel & x);
     void to_json(json & j, const LogLevel & x);
 
-    void from_json(const json & j, Error & x);
-    void to_json(json & j, const Error & x);
+    void from_json(const json & j, NaiveComponentInstallResultError & x);
+    void to_json(json & j, const NaiveComponentInstallResultError & x);
 
     void from_json(const json & j, Kind & x);
     void to_json(json & j, const Kind & x);
@@ -2290,6 +2420,9 @@ namespace api {
 
     void from_json(const json & j, NdmsVpnServerKind & x);
     void to_json(json & j, const NdmsVpnServerKind & x);
+
+    void from_json(const json & j, NfqwsActionRequestAction & x);
+    void to_json(json & j, const NfqwsActionRequestAction & x);
 
     void from_json(const json & j, LastOutcome & x);
     void to_json(json & j, const LastOutcome & x);
@@ -2345,6 +2478,9 @@ namespace api {
     void from_json(const json & j, ReleaseVerdict & x);
     void to_json(json & j, const ReleaseVerdict & x);
 
+    void from_json(const json & j, SingBoxProcessMode & x);
+    void to_json(json & j, const SingBoxProcessMode & x);
+
     void from_json(const json & j, StatusEventConnectionsType & x);
     void to_json(json & j, const StatusEventConnectionsType & x);
 
@@ -2375,8 +2511,8 @@ namespace api {
     void from_json(const json & j, PackageRollbackState & x);
     void to_json(json & j, const PackageRollbackState & x);
 
-    void from_json(const json & j, Action & x);
-    void to_json(json & j, const Action & x);
+    void from_json(const json & j, TransportActionRequestAction & x);
+    void to_json(json & j, const TransportActionRequestAction & x);
 
     void from_json(const json & j, TransportActionResponseStatus & x);
     void to_json(json & j, const TransportActionResponseStatus & x);
@@ -2670,6 +2806,32 @@ namespace api {
         j = json::object();
         j["display_name"] = x.display_name;
         j["preset_id"] = x.preset_id;
+    }
+
+    inline void from_json(const json & j, CatalogRefreshRequest& x) {
+        x.detour = get_stack_optional<std::string>(j, "detour");
+    }
+
+    inline void to_json(json & j, const CatalogRefreshRequest & x) {
+        j = json::object();
+        j["detour"] = x.detour;
+    }
+
+    inline void from_json(const json & j, CatalogRefreshResult& x) {
+        x.detour = get_stack_optional<std::string>(j, "detour");
+        x.error = get_stack_optional<std::string>(j, "error");
+        x.settings_durable = get_stack_optional<bool>(j, "settings_durable");
+        x.updated = get_stack_optional<bool>(j, "updated");
+        x.warning = get_stack_optional<std::string>(j, "warning");
+    }
+
+    inline void to_json(json & j, const CatalogRefreshResult & x) {
+        j = json::object();
+        j["detour"] = x.detour;
+        j["error"] = x.error;
+        j["settings_durable"] = x.settings_durable;
+        j["updated"] = x.updated;
+        j["warning"] = x.warning;
     }
 
     inline void from_json(const json & j, Intent& x) {
@@ -3525,6 +3687,45 @@ namespace api {
         j["status"] = x.status;
     }
 
+    inline void from_json(const json & j, GeoLocation& x) {
+        x.checked_at = get_stack_optional<int64_t>(j, "checked_at");
+        x.country = get_stack_optional<std::string>(j, "country");
+        x.country_code = get_stack_optional<std::string>(j, "country_code");
+        x.emoji = get_stack_optional<std::string>(j, "emoji");
+    }
+
+    inline void to_json(json & j, const GeoLocation & x) {
+        j = json::object();
+        j["checked_at"] = x.checked_at;
+        j["country"] = x.country;
+        j["country_code"] = x.country_code;
+        j["emoji"] = x.emoji;
+    }
+
+    inline void from_json(const json & j, GeoLookupRequest& x) {
+        x.allow_external_lookup = get_stack_optional<bool>(j, "allow_external_lookup");
+        x.hosts = get_stack_optional<std::vector<std::string>>(j, "hosts");
+    }
+
+    inline void to_json(json & j, const GeoLookupRequest & x) {
+        j = json::object();
+        j["allow_external_lookup"] = x.allow_external_lookup;
+        j["hosts"] = x.hosts;
+    }
+
+    inline void from_json(const json & j, GeoLookupResult& x) {
+        x.error = get_stack_optional<GeoLookupResultError>(j, "error");
+        x.locations = get_stack_optional<std::map<std::string, GeoLocation>>(j, "locations");
+        x.pending = get_stack_optional<bool>(j, "pending");
+    }
+
+    inline void to_json(json & j, const GeoLookupResult & x) {
+        j = json::object();
+        j["error"] = x.error;
+        j["locations"] = x.locations;
+        j["pending"] = x.pending;
+    }
+
     inline void from_json(const json & j, GrantedResponse& x) {
         x.granted = j.at("granted").get<bool>();
     }
@@ -3767,7 +3968,7 @@ namespace api {
     }
 
     inline void from_json(const json & j, NaiveComponentInstallResult& x) {
-        x.error = get_stack_optional<Error>(j, "error");
+        x.error = get_stack_optional<NaiveComponentInstallResultError>(j, "error");
         x.installed = j.at("installed").get<bool>();
         x.log = get_stack_optional<std::string>(j, "log");
         x.size = get_stack_optional<int64_t>(j, "size");
@@ -3958,6 +4159,15 @@ namespace api {
         j["services"] = x.services;
     }
 
+    inline void from_json(const json & j, NfqwsActionRequest& x) {
+        x.action = j.at("action").get<NfqwsActionRequestAction>();
+    }
+
+    inline void to_json(json & j, const NfqwsActionRequest & x) {
+        j = json::object();
+        j["action"] = x.action;
+    }
+
     inline void from_json(const json & j, OkResponse& x) {
         x.ok = j.at("ok").get<bool>();
     }
@@ -4121,6 +4331,67 @@ namespace api {
         j = json::object();
         j["message"] = x.message;
         j["status"] = x.status;
+    }
+
+    inline void from_json(const json & j, RemoteAccessRequest& x) {
+        x.enabled = get_stack_optional<bool>(j, "enabled");
+        x.port = get_stack_optional<int64_t>(j, "port");
+    }
+
+    inline void to_json(json & j, const RemoteAccessRequest & x) {
+        j = json::object();
+        j["enabled"] = x.enabled;
+        j["port"] = x.port;
+    }
+
+    inline void from_json(const json & j, Settings& x) {
+        x.enabled = j.at("enabled").get<bool>();
+        x.port = j.at("port").get<int64_t>();
+    }
+
+    inline void to_json(json & j, const Settings & x) {
+        j = json::object();
+        j["enabled"] = x.enabled;
+        j["port"] = x.port;
+    }
+
+    inline void from_json(const json & j, RemoteAccessResult& x) {
+        x.degraded = get_stack_optional<bool>(j, "degraded");
+        x.detail = get_stack_optional<std::string>(j, "detail");
+        x.durable = get_stack_optional<bool>(j, "durable");
+        x.error = get_stack_optional<std::string>(j, "error");
+        x.generation = get_stack_optional<int64_t>(j, "generation");
+        x.listen = get_stack_optional<std::string>(j, "listen");
+        x.maintenance = get_stack_optional<bool>(j, "maintenance");
+        x.ok = get_stack_optional<bool>(j, "ok");
+        x.pending = get_stack_optional<bool>(j, "pending");
+        x.phase = get_stack_optional<std::string>(j, "phase");
+        x.recovery_owned = get_stack_optional<bool>(j, "recovery_owned");
+        x.retry_after_ms = get_stack_optional<int64_t>(j, "retry_after_ms");
+        x.retry_scheduled = get_stack_optional<bool>(j, "retry_scheduled");
+        x.settings = get_stack_optional<Settings>(j, "settings");
+        x.supported_port = get_stack_optional<int64_t>(j, "supported_port");
+        x.warning = get_stack_optional<std::string>(j, "warning");
+    }
+
+    inline void to_json(json & j, const RemoteAccessResult & x) {
+        j = json::object();
+        j["degraded"] = x.degraded;
+        j["detail"] = x.detail;
+        j["durable"] = x.durable;
+        j["error"] = x.error;
+        j["generation"] = x.generation;
+        j["listen"] = x.listen;
+        j["maintenance"] = x.maintenance;
+        j["ok"] = x.ok;
+        j["pending"] = x.pending;
+        j["phase"] = x.phase;
+        j["recovery_owned"] = x.recovery_owned;
+        j["retry_after_ms"] = x.retry_after_ms;
+        j["retry_scheduled"] = x.retry_scheduled;
+        j["settings"] = x.settings;
+        j["supported_port"] = x.supported_port;
+        j["warning"] = x.warning;
     }
 
     inline void from_json(const json & j, RouteTableCheck& x) {
@@ -4788,7 +5059,7 @@ namespace api {
     }
 
     inline void from_json(const json & j, TransportActionRequest& x) {
-        x.action = j.at("action").get<Action>();
+        x.action = j.at("action").get<TransportActionRequestAction>();
         x.tag = j.at("tag").get<std::string>();
     }
 
@@ -4987,6 +5258,21 @@ namespace api {
         j["verdict"] = x.verdict;
     }
 
+    inline void from_json(const json & j, TransportManagerSettings& x) {
+        x.restart_required = j.at("restart_required").get<bool>();
+        x.running_sing_box_process_mode = j.at("running_sing_box_process_mode").get<SingBoxProcessMode>();
+        x.runtime_ready = j.at("runtime_ready").get<bool>();
+        x.sing_box_process_mode = j.at("sing_box_process_mode").get<SingBoxProcessMode>();
+    }
+
+    inline void to_json(json & j, const TransportManagerSettings & x) {
+        j = json::object();
+        j["restart_required"] = x.restart_required;
+        j["running_sing_box_process_mode"] = x.running_sing_box_process_mode;
+        j["runtime_ready"] = x.runtime_ready;
+        j["sing_box_process_mode"] = x.sing_box_process_mode;
+    }
+
     inline void from_json(const json & j, TransportPath& x) {
         x.confidence = j.at("confidence").get<Confidence>();
         x.framing = j.at("framing").get<Framing>();
@@ -5000,6 +5286,15 @@ namespace api {
         j["framing"] = x.framing;
         j["payload_networks"] = x.payload_networks;
         j["wire_transport"] = x.wire_transport;
+    }
+
+    inline void from_json(const json & j, TransportProcessModeRequest& x) {
+        x.sing_box_process_mode = j.at("sing_box_process_mode").get<SingBoxProcessMode>();
+    }
+
+    inline void to_json(json & j, const TransportProcessModeRequest & x) {
+        j = json::object();
+        j["sing_box_process_mode"] = x.sing_box_process_mode;
     }
 
     inline void from_json(const json & j, TransportStatus& x) {
@@ -5087,6 +5382,8 @@ namespace api {
         x.cache_generation = get_stack_optional<CacheGeneration>(j, "CacheGeneration");
         x.cache_metadata = get_stack_optional<CacheMetadata>(j, "CacheMetadata");
         x.catalog_preset_selection = get_stack_optional<CatalogPresetSelection>(j, "CatalogPresetSelection");
+        x.catalog_refresh_request = get_stack_optional<CatalogRefreshRequest>(j, "CatalogRefreshRequest");
+        x.catalog_refresh_result = get_stack_optional<CatalogRefreshResult>(j, "CatalogRefreshResult");
         x.catalog_setup_apply_request = get_stack_optional<CatalogSetupApplyRequest>(j, "CatalogSetupApplyRequest");
         x.catalog_setup_apply_response = get_stack_optional<CatalogSetupApplyResponse>(j, "CatalogSetupApplyResponse");
         x.catalog_setup_blackhole_summary = get_stack_optional<CatalogSetupBlackholeSummary>(j, "CatalogSetupBlackholeSummary");
@@ -5132,6 +5429,9 @@ namespace api {
         x.firewall_chain = get_stack_optional<FirewallChain>(j, "FirewallChain");
         x.firewall_rule_check = get_stack_optional<FirewallRuleCheck>(j, "FirewallRuleCheck");
         x.fwmark_config = get_stack_optional<Fwmark>(j, "FwmarkConfig");
+        x.geo_location = get_stack_optional<GeoLocation>(j, "GeoLocation");
+        x.geo_lookup_request = get_stack_optional<GeoLookupRequest>(j, "GeoLookupRequest");
+        x.geo_lookup_result = get_stack_optional<GeoLookupResult>(j, "GeoLookupResult");
         x.granted_response = get_stack_optional<GrantedResponse>(j, "GrantedResponse");
         x.health_response = get_stack_optional<HealthResponse>(j, "HealthResponse");
         x.interface_names = get_stack_optional<InterfaceNames>(j, "InterfaceNames");
@@ -5171,6 +5471,7 @@ namespace api {
         x.ndms_vpn_server_kind = get_stack_optional<NdmsVpnServerKind>(j, "NdmsVpnServerKind");
         x.ndms_vpn_server_service = get_stack_optional<NdmsVpnServerService>(j, "NdmsVpnServerService");
         x.ndms_vpn_server_service_inventory_response = get_stack_optional<NdmsVpnServerServiceInventoryResponse>(j, "NdmsVpnServerServiceInventoryResponse");
+        x.nfqws_action_request = get_stack_optional<NfqwsActionRequest>(j, "NfqwsActionRequest");
         x.ok_response = get_stack_optional<OkResponse>(j, "OkResponse");
         x.outbound = get_stack_optional<OutboundElement>(j, "Outbound");
         x.outbound_group = get_stack_optional<OutboundGroupElement>(j, "OutboundGroup");
@@ -5186,6 +5487,9 @@ namespace api {
         x.ppe_deoffload_protocol_health = get_stack_optional<PpeDeoffloadProtocolHealth>(j, "PpeDeoffloadProtocolHealth");
         x.recommended_list_setup_request = get_stack_optional<RecommendedListSetupRequest>(j, "RecommendedListSetupRequest");
         x.reload_response = get_stack_optional<ReloadResponse>(j, "ReloadResponse");
+        x.remote_access_request = get_stack_optional<RemoteAccessRequest>(j, "RemoteAccessRequest");
+        x.remote_access_result = get_stack_optional<RemoteAccessResult>(j, "RemoteAccessResult");
+        x.remote_access_settings = get_stack_optional<Settings>(j, "RemoteAccessSettings");
         x.resolver_config_probe_status = get_stack_optional<ResolverConfigProbeStatus>(j, "ResolverConfigProbeStatus");
         x.resolver_config_sync_state = get_stack_optional<ResolverConfigSyncState>(j, "ResolverConfigSyncState");
         x.retry_config = get_stack_optional<Retry>(j, "RetryConfig");
@@ -5220,6 +5524,7 @@ namespace api {
         x.sing_box_install_capability = get_stack_optional<SingBoxInstallCapability>(j, "SingBoxInstallCapability");
         x.sing_box_install_request = get_stack_optional<SingBoxInstallRequest>(j, "SingBoxInstallRequest");
         x.sing_box_install_result = get_stack_optional<SingBoxInstallResult>(j, "SingBoxInstallResult");
+        x.sing_box_process_mode = get_stack_optional<SingBoxProcessMode>(j, "SingBoxProcessMode");
         x.sort_order = get_stack_optional<SortOrder>(j, "SortOrder");
         x.status_event_connections = get_stack_optional<StatusEventConnections>(j, "StatusEventConnections");
         x.status_event_interfaces = get_stack_optional<StatusEventInterfaces>(j, "StatusEventInterfaces");
@@ -5246,7 +5551,9 @@ namespace api {
         x.transport_exit_check_request = get_stack_optional<TransportExitCheckRequest>(j, "TransportExitCheckRequest");
         x.transport_exit_check_response = get_stack_optional<TransportExitCheckResponse>(j, "TransportExitCheckResponse");
         x.transport_linked_outbound_ensure = get_stack_optional<LinkedOutbound>(j, "TransportLinkedOutboundEnsure");
+        x.transport_manager_settings = get_stack_optional<TransportManagerSettings>(j, "TransportManagerSettings");
         x.transport_path = get_stack_optional<TransportPath>(j, "TransportPath");
+        x.transport_process_mode_request = get_stack_optional<TransportProcessModeRequest>(j, "TransportProcessModeRequest");
         x.transports_environment = get_stack_optional<TransportsEnvironment>(j, "TransportsEnvironment");
         x.transport_spec = get_stack_optional<Transport>(j, "TransportSpec");
         x.transport_status = get_stack_optional<TransportStatus>(j, "TransportStatus");
@@ -5271,6 +5578,8 @@ namespace api {
         j["CacheGeneration"] = x.cache_generation;
         j["CacheMetadata"] = x.cache_metadata;
         j["CatalogPresetSelection"] = x.catalog_preset_selection;
+        j["CatalogRefreshRequest"] = x.catalog_refresh_request;
+        j["CatalogRefreshResult"] = x.catalog_refresh_result;
         j["CatalogSetupApplyRequest"] = x.catalog_setup_apply_request;
         j["CatalogSetupApplyResponse"] = x.catalog_setup_apply_response;
         j["CatalogSetupBlackholeSummary"] = x.catalog_setup_blackhole_summary;
@@ -5316,6 +5625,9 @@ namespace api {
         j["FirewallChain"] = x.firewall_chain;
         j["FirewallRuleCheck"] = x.firewall_rule_check;
         j["FwmarkConfig"] = x.fwmark_config;
+        j["GeoLocation"] = x.geo_location;
+        j["GeoLookupRequest"] = x.geo_lookup_request;
+        j["GeoLookupResult"] = x.geo_lookup_result;
         j["GrantedResponse"] = x.granted_response;
         j["HealthResponse"] = x.health_response;
         j["InterfaceNames"] = x.interface_names;
@@ -5355,6 +5667,7 @@ namespace api {
         j["NdmsVpnServerKind"] = x.ndms_vpn_server_kind;
         j["NdmsVpnServerService"] = x.ndms_vpn_server_service;
         j["NdmsVpnServerServiceInventoryResponse"] = x.ndms_vpn_server_service_inventory_response;
+        j["NfqwsActionRequest"] = x.nfqws_action_request;
         j["OkResponse"] = x.ok_response;
         j["Outbound"] = x.outbound;
         j["OutboundGroup"] = x.outbound_group;
@@ -5370,6 +5683,9 @@ namespace api {
         j["PpeDeoffloadProtocolHealth"] = x.ppe_deoffload_protocol_health;
         j["RecommendedListSetupRequest"] = x.recommended_list_setup_request;
         j["ReloadResponse"] = x.reload_response;
+        j["RemoteAccessRequest"] = x.remote_access_request;
+        j["RemoteAccessResult"] = x.remote_access_result;
+        j["RemoteAccessSettings"] = x.remote_access_settings;
         j["ResolverConfigProbeStatus"] = x.resolver_config_probe_status;
         j["ResolverConfigSyncState"] = x.resolver_config_sync_state;
         j["RetryConfig"] = x.retry_config;
@@ -5404,6 +5720,7 @@ namespace api {
         j["SingBoxInstallCapability"] = x.sing_box_install_capability;
         j["SingBoxInstallRequest"] = x.sing_box_install_request;
         j["SingBoxInstallResult"] = x.sing_box_install_result;
+        j["SingBoxProcessMode"] = x.sing_box_process_mode;
         j["SortOrder"] = x.sort_order;
         j["StatusEventConnections"] = x.status_event_connections;
         j["StatusEventInterfaces"] = x.status_event_interfaces;
@@ -5430,7 +5747,9 @@ namespace api {
         j["TransportExitCheckRequest"] = x.transport_exit_check_request;
         j["TransportExitCheckResponse"] = x.transport_exit_check_response;
         j["TransportLinkedOutboundEnsure"] = x.transport_linked_outbound_ensure;
+        j["TransportManagerSettings"] = x.transport_manager_settings;
         j["TransportPath"] = x.transport_path;
+        j["TransportProcessModeRequest"] = x.transport_process_mode_request;
         j["TransportsEnvironment"] = x.transports_environment;
         j["TransportSpec"] = x.transport_spec;
         j["TransportStatus"] = x.transport_status;
@@ -5784,6 +6103,18 @@ namespace api {
         }
     }
 
+    inline void from_json(const json & j, GeoLookupResultError & x) {
+        if (j == "invalid_request") x = GeoLookupResultError::INVALID_REQUEST;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"GeoLookupResultError\""); }
+    }
+
+    inline void to_json(json & j, const GeoLookupResultError & x) {
+        switch (x) {
+            case GeoLookupResultError::INVALID_REQUEST: j = "invalid_request"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"GeoLookupResultError\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
     inline void from_json(const json & j, LifecycleOperationStageStatus & x) {
         if (j == "failed") x = LifecycleOperationStageStatus::FAILED;
         else if (j == "pending") x = LifecycleOperationStageStatus::PENDING;
@@ -5968,17 +6299,17 @@ namespace api {
         }
     }
 
-    inline void from_json(const json & j, Error & x) {
-        if (j == "install_failed") x = Error::INSTALL_FAILED;
-        else if (j == "script_missing") x = Error::SCRIPT_MISSING;
-        else { throw std::runtime_error("Cannot deserialize to enumeration \"Error\""); }
+    inline void from_json(const json & j, NaiveComponentInstallResultError & x) {
+        if (j == "install_failed") x = NaiveComponentInstallResultError::INSTALL_FAILED;
+        else if (j == "script_missing") x = NaiveComponentInstallResultError::SCRIPT_MISSING;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NaiveComponentInstallResultError\""); }
     }
 
-    inline void to_json(json & j, const Error & x) {
+    inline void to_json(json & j, const NaiveComponentInstallResultError & x) {
         switch (x) {
-            case Error::INSTALL_FAILED: j = "install_failed"; break;
-            case Error::SCRIPT_MISSING: j = "script_missing"; break;
-            default: throw std::runtime_error("Unexpected value in enumeration \"Error\": " + std::to_string(static_cast<int>(x)));
+            case NaiveComponentInstallResultError::INSTALL_FAILED: j = "install_failed"; break;
+            case NaiveComponentInstallResultError::SCRIPT_MISSING: j = "script_missing"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NaiveComponentInstallResultError\": " + std::to_string(static_cast<int>(x)));
         }
     }
 
@@ -6177,6 +6508,56 @@ namespace api {
             case NdmsVpnServerKind::OPENCONNECT: j = "openconnect"; break;
             case NdmsVpnServerKind::SSTP: j = "sstp"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"NdmsVpnServerKind\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, NfqwsActionRequestAction & x) {
+        static std::unordered_map<std::string, NfqwsActionRequestAction> enumValues {
+            {"apply_strategy", NfqwsActionRequestAction::APPLY_STRATEGY},
+            {"capture_restore_point", NfqwsActionRequestAction::CAPTURE_RESTORE_POINT},
+            {"check_update", NfqwsActionRequestAction::CHECK_UPDATE},
+            {"check_url", NfqwsActionRequestAction::CHECK_URL},
+            {"clear_log", NfqwsActionRequestAction::CLEAR_LOG},
+            {"create_file", NfqwsActionRequestAction::CREATE_FILE},
+            {"delete_file", NfqwsActionRequestAction::DELETE_FILE},
+            {"delete_strategy", NfqwsActionRequestAction::DELETE_STRATEGY},
+            {"import_bundle", NfqwsActionRequestAction::IMPORT_BUNDLE},
+            {"import_lists", NfqwsActionRequestAction::IMPORT_LISTS},
+            {"read_file", NfqwsActionRequestAction::READ_FILE},
+            {"restore_component", NfqwsActionRequestAction::RESTORE_COMPONENT},
+            {"save_file", NfqwsActionRequestAction::SAVE_FILE},
+            {"save_files", NfqwsActionRequestAction::SAVE_FILES},
+            {"save_strategy", NfqwsActionRequestAction::SAVE_STRATEGY},
+            {"service", NfqwsActionRequestAction::SERVICE},
+            {"upgrade", NfqwsActionRequestAction::UPGRADE},
+        };
+        auto iter = enumValues.find(j.get<std::string>());
+        if (iter != enumValues.end()) {
+            x = iter->second;
+        }
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NfqwsActionRequestAction\""); }
+    }
+
+    inline void to_json(json & j, const NfqwsActionRequestAction & x) {
+        switch (x) {
+            case NfqwsActionRequestAction::APPLY_STRATEGY: j = "apply_strategy"; break;
+            case NfqwsActionRequestAction::CAPTURE_RESTORE_POINT: j = "capture_restore_point"; break;
+            case NfqwsActionRequestAction::CHECK_UPDATE: j = "check_update"; break;
+            case NfqwsActionRequestAction::CHECK_URL: j = "check_url"; break;
+            case NfqwsActionRequestAction::CLEAR_LOG: j = "clear_log"; break;
+            case NfqwsActionRequestAction::CREATE_FILE: j = "create_file"; break;
+            case NfqwsActionRequestAction::DELETE_FILE: j = "delete_file"; break;
+            case NfqwsActionRequestAction::DELETE_STRATEGY: j = "delete_strategy"; break;
+            case NfqwsActionRequestAction::IMPORT_BUNDLE: j = "import_bundle"; break;
+            case NfqwsActionRequestAction::IMPORT_LISTS: j = "import_lists"; break;
+            case NfqwsActionRequestAction::READ_FILE: j = "read_file"; break;
+            case NfqwsActionRequestAction::RESTORE_COMPONENT: j = "restore_component"; break;
+            case NfqwsActionRequestAction::SAVE_FILE: j = "save_file"; break;
+            case NfqwsActionRequestAction::SAVE_FILES: j = "save_files"; break;
+            case NfqwsActionRequestAction::SAVE_STRATEGY: j = "save_strategy"; break;
+            case NfqwsActionRequestAction::SERVICE: j = "service"; break;
+            case NfqwsActionRequestAction::UPGRADE: j = "upgrade"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NfqwsActionRequestAction\": " + std::to_string(static_cast<int>(x)));
         }
     }
 
@@ -6522,6 +6903,20 @@ namespace api {
         }
     }
 
+    inline void from_json(const json & j, SingBoxProcessMode & x) {
+        if (j == "isolated") x = SingBoxProcessMode::ISOLATED;
+        else if (j == "shared") x = SingBoxProcessMode::SHARED;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"SingBoxProcessMode\""); }
+    }
+
+    inline void to_json(json & j, const SingBoxProcessMode & x) {
+        switch (x) {
+            case SingBoxProcessMode::ISOLATED: j = "isolated"; break;
+            case SingBoxProcessMode::SHARED: j = "shared"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"SingBoxProcessMode\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
     inline void from_json(const json & j, StatusEventConnectionsType & x) {
         if (j == "connections") x = StatusEventConnectionsType::CONNECTIONS;
         else { throw std::runtime_error("Cannot deserialize to enumeration \"StatusEventConnectionsType\""); }
@@ -6678,19 +7073,19 @@ namespace api {
         }
     }
 
-    inline void from_json(const json & j, Action & x) {
-        if (j == "down") x = Action::DOWN;
-        else if (j == "restart") x = Action::RESTART;
-        else if (j == "up") x = Action::UP;
-        else { throw std::runtime_error("Cannot deserialize to enumeration \"Action\""); }
+    inline void from_json(const json & j, TransportActionRequestAction & x) {
+        if (j == "down") x = TransportActionRequestAction::DOWN;
+        else if (j == "restart") x = TransportActionRequestAction::RESTART;
+        else if (j == "up") x = TransportActionRequestAction::UP;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"TransportActionRequestAction\""); }
     }
 
-    inline void to_json(json & j, const Action & x) {
+    inline void to_json(json & j, const TransportActionRequestAction & x) {
         switch (x) {
-            case Action::DOWN: j = "down"; break;
-            case Action::RESTART: j = "restart"; break;
-            case Action::UP: j = "up"; break;
-            default: throw std::runtime_error("Unexpected value in enumeration \"Action\": " + std::to_string(static_cast<int>(x)));
+            case TransportActionRequestAction::DOWN: j = "down"; break;
+            case TransportActionRequestAction::RESTART: j = "restart"; break;
+            case TransportActionRequestAction::UP: j = "up"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"TransportActionRequestAction\": " + std::to_string(static_cast<int>(x)));
         }
     }
 
