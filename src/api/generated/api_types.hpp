@@ -552,6 +552,23 @@ namespace api {
         ConfigUpdateResponseStatus status;
     };
 
+    struct ConnectionEntry {
+        std::optional<bool> active;
+        std::optional<std::string> destination;
+        std::optional<std::vector<std::string>> destination_domains;
+        std::optional<int64_t> destination_port;
+        std::optional<std::string> device;
+        std::optional<int64_t> first_seen;
+        std::optional<std::string> id;
+        std::optional<int64_t> last_seen;
+        std::optional<int64_t> mark;
+        std::optional<std::string> protocol;
+        std::optional<std::string> route;
+        std::optional<std::string> source;
+        std::optional<int64_t> source_port;
+        std::optional<std::string> state;
+    };
+
     struct ConnectionEventState {
         bool available = false;
         int64_t changed_at = 0;
@@ -937,6 +954,23 @@ namespace api {
         NfqwsActionRequestAction action;
     };
 
+    struct NfqwsStatus {
+        std::optional<std::map<std::string, nlohmann::json>> active_strategy;
+        std::optional<std::vector<std::map<std::string, nlohmann::json>>> files;
+        bool installed = false;
+        std::optional<bool> package_metadata_verified;
+        bool process_running = false;
+        bool queue_active = false;
+        std::optional<std::map<std::string, nlohmann::json>> restore_capability;
+        std::optional<std::string> restore_point;
+        std::optional<std::map<std::string, nlohmann::json>> rotator_state;
+        bool running = false;
+        std::optional<std::vector<std::map<std::string, nlohmann::json>>> strategies;
+        std::optional<std::string> transaction_state;
+        std::optional<std::map<std::string, nlohmann::json>> upgrade_capability;
+        std::optional<std::string> version;
+    };
+
     struct OkResponse {
         bool ok = false;
     };
@@ -1048,6 +1082,37 @@ namespace api {
         std::optional<Settings> settings;
         std::optional<int64_t> supported_port;
         std::optional<std::string> warning;
+    };
+
+    struct RemoteAccessRuntime {
+        std::optional<int64_t> applied_generation;
+        std::optional<int64_t> attempt;
+        std::optional<int64_t> command_exit_code;
+        std::optional<int64_t> desired_generation;
+        std::optional<std::string> error;
+        std::optional<bool> incident_active;
+        std::optional<std::string> interface;
+        std::optional<bool> maintenance;
+        std::optional<std::string> phase;
+        std::optional<bool> recovery_owned;
+        std::optional<std::string> state;
+    };
+
+    enum class BlockedReason : int { AUTH_STATE_UNAVAILABLE, KEENETIC_AUTH_PLAINTEXT_WAN, LISTEN_LOOPBACK, LOGIN_DISABLED };
+
+    struct RemoteAccessState {
+        std::optional<std::string> auth_provider;
+        std::optional<BlockedReason> blocked_reason;
+        std::optional<bool> custom_port_supported;
+        std::optional<bool> enabled;
+        std::optional<int64_t> internal_port;
+        std::optional<bool> keenetic_auth_switch_allowed;
+        std::optional<std::string> listen;
+        std::optional<bool> listen_reachable;
+        std::optional<bool> login_required;
+        std::optional<int64_t> port;
+        std::optional<RemoteAccessRuntime> runtime;
+        std::optional<int64_t> supported_port;
     };
 
     struct RouteTableCheck {
@@ -1631,6 +1696,7 @@ namespace api {
         std::optional<ConfigObject> config_object;
         std::optional<ConfigStateResponse> config_state_response;
         std::optional<ConfigUpdateResponse> config_update_response;
+        std::optional<ConnectionEntry> connection_entry;
         std::optional<ConnectionEventState> connection_event_state;
         std::optional<ConnectionPage> connection_page;
         std::optional<ConnectionQueryRequest> connection_query_request;
@@ -1699,6 +1765,7 @@ namespace api {
         std::optional<NdmsVpnServerService> ndms_vpn_server_service;
         std::optional<NdmsVpnServerServiceInventoryResponse> ndms_vpn_server_service_inventory_response;
         std::optional<NfqwsActionRequest> nfqws_action_request;
+        std::optional<NfqwsStatus> nfqws_status;
         std::optional<OkResponse> ok_response;
         std::optional<OutboundElement> outbound;
         std::optional<OutboundGroupElement> outbound_group;
@@ -1716,7 +1783,9 @@ namespace api {
         std::optional<ReloadResponse> reload_response;
         std::optional<RemoteAccessRequest> remote_access_request;
         std::optional<RemoteAccessResult> remote_access_result;
+        std::optional<RemoteAccessRuntime> remote_access_runtime;
         std::optional<Settings> remote_access_settings;
+        std::optional<RemoteAccessState> remote_access_state;
         std::optional<ResolverConfigProbeStatus> resolver_config_probe_status;
         std::optional<ResolverConfigSyncState> resolver_config_sync_state;
         std::optional<Retry> retry_config;
@@ -1956,6 +2025,9 @@ namespace api {
     void from_json(const json & j, ConfigUpdateResponse & x);
     void to_json(json & j, const ConfigUpdateResponse & x);
 
+    void from_json(const json & j, ConnectionEntry & x);
+    void to_json(json & j, const ConnectionEntry & x);
+
     void from_json(const json & j, ConnectionEventState & x);
     void to_json(json & j, const ConnectionEventState & x);
 
@@ -2082,6 +2154,9 @@ namespace api {
     void from_json(const json & j, NfqwsActionRequest & x);
     void to_json(json & j, const NfqwsActionRequest & x);
 
+    void from_json(const json & j, NfqwsStatus & x);
+    void to_json(json & j, const NfqwsStatus & x);
+
     void from_json(const json & j, OkResponse & x);
     void to_json(json & j, const OkResponse & x);
 
@@ -2117,6 +2192,12 @@ namespace api {
 
     void from_json(const json & j, RemoteAccessResult & x);
     void to_json(json & j, const RemoteAccessResult & x);
+
+    void from_json(const json & j, RemoteAccessRuntime & x);
+    void to_json(json & j, const RemoteAccessRuntime & x);
+
+    void from_json(const json & j, RemoteAccessState & x);
+    void to_json(json & j, const RemoteAccessState & x);
 
     void from_json(const json & j, RouteTableCheck & x);
     void to_json(json & j, const RouteTableCheck & x);
@@ -2432,6 +2513,9 @@ namespace api {
 
     void from_json(const json & j, PpeDeoffloadHealthState & x);
     void to_json(json & j, const PpeDeoffloadHealthState & x);
+
+    void from_json(const json & j, BlockedReason & x);
+    void to_json(json & j, const BlockedReason & x);
 
     void from_json(const json & j, RoutingHealthErrorResponseOverall & x);
     void to_json(json & j, const RoutingHealthErrorResponseOverall & x);
@@ -3476,6 +3560,41 @@ namespace api {
         j["status"] = x.status;
     }
 
+    inline void from_json(const json & j, ConnectionEntry& x) {
+        x.active = get_stack_optional<bool>(j, "active");
+        x.destination = get_stack_optional<std::string>(j, "destination");
+        x.destination_domains = get_stack_optional<std::vector<std::string>>(j, "destination_domains");
+        x.destination_port = get_stack_optional<int64_t>(j, "destination_port");
+        x.device = get_stack_optional<std::string>(j, "device");
+        x.first_seen = get_stack_optional<int64_t>(j, "first_seen");
+        x.id = get_stack_optional<std::string>(j, "id");
+        x.last_seen = get_stack_optional<int64_t>(j, "last_seen");
+        x.mark = get_stack_optional<int64_t>(j, "mark");
+        x.protocol = get_stack_optional<std::string>(j, "protocol");
+        x.route = get_stack_optional<std::string>(j, "route");
+        x.source = get_stack_optional<std::string>(j, "source");
+        x.source_port = get_stack_optional<int64_t>(j, "source_port");
+        x.state = get_stack_optional<std::string>(j, "state");
+    }
+
+    inline void to_json(json & j, const ConnectionEntry & x) {
+        j = json::object();
+        j["active"] = x.active;
+        j["destination"] = x.destination;
+        j["destination_domains"] = x.destination_domains;
+        j["destination_port"] = x.destination_port;
+        j["device"] = x.device;
+        j["first_seen"] = x.first_seen;
+        j["id"] = x.id;
+        j["last_seen"] = x.last_seen;
+        j["mark"] = x.mark;
+        j["protocol"] = x.protocol;
+        j["route"] = x.route;
+        j["source"] = x.source;
+        j["source_port"] = x.source_port;
+        j["state"] = x.state;
+    }
+
     inline void from_json(const json & j, ConnectionEventState& x) {
         x.available = j.at("available").get<bool>();
         x.changed_at = j.at("changed_at").get<int64_t>();
@@ -4168,6 +4287,41 @@ namespace api {
         j["action"] = x.action;
     }
 
+    inline void from_json(const json & j, NfqwsStatus& x) {
+        x.active_strategy = get_stack_optional<std::map<std::string, nlohmann::json>>(j, "active_strategy");
+        x.files = get_stack_optional<std::vector<std::map<std::string, nlohmann::json>>>(j, "files");
+        x.installed = j.at("installed").get<bool>();
+        x.package_metadata_verified = get_stack_optional<bool>(j, "package_metadata_verified");
+        x.process_running = j.at("process_running").get<bool>();
+        x.queue_active = j.at("queue_active").get<bool>();
+        x.restore_capability = get_stack_optional<std::map<std::string, nlohmann::json>>(j, "restore_capability");
+        x.restore_point = get_stack_optional<std::string>(j, "restore_point");
+        x.rotator_state = get_stack_optional<std::map<std::string, nlohmann::json>>(j, "rotator_state");
+        x.running = j.at("running").get<bool>();
+        x.strategies = get_stack_optional<std::vector<std::map<std::string, nlohmann::json>>>(j, "strategies");
+        x.transaction_state = get_stack_optional<std::string>(j, "transaction_state");
+        x.upgrade_capability = get_stack_optional<std::map<std::string, nlohmann::json>>(j, "upgrade_capability");
+        x.version = get_stack_optional<std::string>(j, "version");
+    }
+
+    inline void to_json(json & j, const NfqwsStatus & x) {
+        j = json::object();
+        j["active_strategy"] = x.active_strategy;
+        j["files"] = x.files;
+        j["installed"] = x.installed;
+        j["package_metadata_verified"] = x.package_metadata_verified;
+        j["process_running"] = x.process_running;
+        j["queue_active"] = x.queue_active;
+        j["restore_capability"] = x.restore_capability;
+        j["restore_point"] = x.restore_point;
+        j["rotator_state"] = x.rotator_state;
+        j["running"] = x.running;
+        j["strategies"] = x.strategies;
+        j["transaction_state"] = x.transaction_state;
+        j["upgrade_capability"] = x.upgrade_capability;
+        j["version"] = x.version;
+    }
+
     inline void from_json(const json & j, OkResponse& x) {
         x.ok = j.at("ok").get<bool>();
     }
@@ -4392,6 +4546,66 @@ namespace api {
         j["settings"] = x.settings;
         j["supported_port"] = x.supported_port;
         j["warning"] = x.warning;
+    }
+
+    inline void from_json(const json & j, RemoteAccessRuntime& x) {
+        x.applied_generation = get_stack_optional<int64_t>(j, "applied_generation");
+        x.attempt = get_stack_optional<int64_t>(j, "attempt");
+        x.command_exit_code = get_stack_optional<int64_t>(j, "command_exit_code");
+        x.desired_generation = get_stack_optional<int64_t>(j, "desired_generation");
+        x.error = get_stack_optional<std::string>(j, "error");
+        x.incident_active = get_stack_optional<bool>(j, "incident_active");
+        x.interface = get_stack_optional<std::string>(j, "interface");
+        x.maintenance = get_stack_optional<bool>(j, "maintenance");
+        x.phase = get_stack_optional<std::string>(j, "phase");
+        x.recovery_owned = get_stack_optional<bool>(j, "recovery_owned");
+        x.state = get_stack_optional<std::string>(j, "state");
+    }
+
+    inline void to_json(json & j, const RemoteAccessRuntime & x) {
+        j = json::object();
+        j["applied_generation"] = x.applied_generation;
+        j["attempt"] = x.attempt;
+        j["command_exit_code"] = x.command_exit_code;
+        j["desired_generation"] = x.desired_generation;
+        j["error"] = x.error;
+        j["incident_active"] = x.incident_active;
+        j["interface"] = x.interface;
+        j["maintenance"] = x.maintenance;
+        j["phase"] = x.phase;
+        j["recovery_owned"] = x.recovery_owned;
+        j["state"] = x.state;
+    }
+
+    inline void from_json(const json & j, RemoteAccessState& x) {
+        x.auth_provider = get_stack_optional<std::string>(j, "auth_provider");
+        x.blocked_reason = get_stack_optional<BlockedReason>(j, "blocked_reason");
+        x.custom_port_supported = get_stack_optional<bool>(j, "custom_port_supported");
+        x.enabled = get_stack_optional<bool>(j, "enabled");
+        x.internal_port = get_stack_optional<int64_t>(j, "internal_port");
+        x.keenetic_auth_switch_allowed = get_stack_optional<bool>(j, "keenetic_auth_switch_allowed");
+        x.listen = get_stack_optional<std::string>(j, "listen");
+        x.listen_reachable = get_stack_optional<bool>(j, "listen_reachable");
+        x.login_required = get_stack_optional<bool>(j, "login_required");
+        x.port = get_stack_optional<int64_t>(j, "port");
+        x.runtime = get_stack_optional<RemoteAccessRuntime>(j, "runtime");
+        x.supported_port = get_stack_optional<int64_t>(j, "supported_port");
+    }
+
+    inline void to_json(json & j, const RemoteAccessState & x) {
+        j = json::object();
+        j["auth_provider"] = x.auth_provider;
+        j["blocked_reason"] = x.blocked_reason;
+        j["custom_port_supported"] = x.custom_port_supported;
+        j["enabled"] = x.enabled;
+        j["internal_port"] = x.internal_port;
+        j["keenetic_auth_switch_allowed"] = x.keenetic_auth_switch_allowed;
+        j["listen"] = x.listen;
+        j["listen_reachable"] = x.listen_reachable;
+        j["login_required"] = x.login_required;
+        j["port"] = x.port;
+        j["runtime"] = x.runtime;
+        j["supported_port"] = x.supported_port;
     }
 
     inline void from_json(const json & j, RouteTableCheck& x) {
@@ -5404,6 +5618,7 @@ namespace api {
         x.config_object = get_stack_optional<ConfigObject>(j, "ConfigObject");
         x.config_state_response = get_stack_optional<ConfigStateResponse>(j, "ConfigStateResponse");
         x.config_update_response = get_stack_optional<ConfigUpdateResponse>(j, "ConfigUpdateResponse");
+        x.connection_entry = get_stack_optional<ConnectionEntry>(j, "ConnectionEntry");
         x.connection_event_state = get_stack_optional<ConnectionEventState>(j, "ConnectionEventState");
         x.connection_page = get_stack_optional<ConnectionPage>(j, "ConnectionPage");
         x.connection_query_request = get_stack_optional<ConnectionQueryRequest>(j, "ConnectionQueryRequest");
@@ -5472,6 +5687,7 @@ namespace api {
         x.ndms_vpn_server_service = get_stack_optional<NdmsVpnServerService>(j, "NdmsVpnServerService");
         x.ndms_vpn_server_service_inventory_response = get_stack_optional<NdmsVpnServerServiceInventoryResponse>(j, "NdmsVpnServerServiceInventoryResponse");
         x.nfqws_action_request = get_stack_optional<NfqwsActionRequest>(j, "NfqwsActionRequest");
+        x.nfqws_status = get_stack_optional<NfqwsStatus>(j, "NfqwsStatus");
         x.ok_response = get_stack_optional<OkResponse>(j, "OkResponse");
         x.outbound = get_stack_optional<OutboundElement>(j, "Outbound");
         x.outbound_group = get_stack_optional<OutboundGroupElement>(j, "OutboundGroup");
@@ -5489,7 +5705,9 @@ namespace api {
         x.reload_response = get_stack_optional<ReloadResponse>(j, "ReloadResponse");
         x.remote_access_request = get_stack_optional<RemoteAccessRequest>(j, "RemoteAccessRequest");
         x.remote_access_result = get_stack_optional<RemoteAccessResult>(j, "RemoteAccessResult");
+        x.remote_access_runtime = get_stack_optional<RemoteAccessRuntime>(j, "RemoteAccessRuntime");
         x.remote_access_settings = get_stack_optional<Settings>(j, "RemoteAccessSettings");
+        x.remote_access_state = get_stack_optional<RemoteAccessState>(j, "RemoteAccessState");
         x.resolver_config_probe_status = get_stack_optional<ResolverConfigProbeStatus>(j, "ResolverConfigProbeStatus");
         x.resolver_config_sync_state = get_stack_optional<ResolverConfigSyncState>(j, "ResolverConfigSyncState");
         x.retry_config = get_stack_optional<Retry>(j, "RetryConfig");
@@ -5600,6 +5818,7 @@ namespace api {
         j["ConfigObject"] = x.config_object;
         j["ConfigStateResponse"] = x.config_state_response;
         j["ConfigUpdateResponse"] = x.config_update_response;
+        j["ConnectionEntry"] = x.connection_entry;
         j["ConnectionEventState"] = x.connection_event_state;
         j["ConnectionPage"] = x.connection_page;
         j["ConnectionQueryRequest"] = x.connection_query_request;
@@ -5668,6 +5887,7 @@ namespace api {
         j["NdmsVpnServerService"] = x.ndms_vpn_server_service;
         j["NdmsVpnServerServiceInventoryResponse"] = x.ndms_vpn_server_service_inventory_response;
         j["NfqwsActionRequest"] = x.nfqws_action_request;
+        j["NfqwsStatus"] = x.nfqws_status;
         j["OkResponse"] = x.ok_response;
         j["Outbound"] = x.outbound;
         j["OutboundGroup"] = x.outbound_group;
@@ -5685,7 +5905,9 @@ namespace api {
         j["ReloadResponse"] = x.reload_response;
         j["RemoteAccessRequest"] = x.remote_access_request;
         j["RemoteAccessResult"] = x.remote_access_result;
+        j["RemoteAccessRuntime"] = x.remote_access_runtime;
         j["RemoteAccessSettings"] = x.remote_access_settings;
+        j["RemoteAccessState"] = x.remote_access_state;
         j["ResolverConfigProbeStatus"] = x.resolver_config_probe_status;
         j["ResolverConfigSyncState"] = x.resolver_config_sync_state;
         j["RetryConfig"] = x.retry_config;
@@ -6616,6 +6838,24 @@ namespace api {
             case PpeDeoffloadHealthState::OFF: j = "off"; break;
             case PpeDeoffloadHealthState::UNKNOWN: j = "unknown"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"PpeDeoffloadHealthState\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, BlockedReason & x) {
+        if (j == "auth_state_unavailable") x = BlockedReason::AUTH_STATE_UNAVAILABLE;
+        else if (j == "keenetic_auth_plaintext_wan") x = BlockedReason::KEENETIC_AUTH_PLAINTEXT_WAN;
+        else if (j == "listen_loopback") x = BlockedReason::LISTEN_LOOPBACK;
+        else if (j == "login_disabled") x = BlockedReason::LOGIN_DISABLED;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"BlockedReason\""); }
+    }
+
+    inline void to_json(json & j, const BlockedReason & x) {
+        switch (x) {
+            case BlockedReason::AUTH_STATE_UNAVAILABLE: j = "auth_state_unavailable"; break;
+            case BlockedReason::KEENETIC_AUTH_PLAINTEXT_WAN: j = "keenetic_auth_plaintext_wan"; break;
+            case BlockedReason::LISTEN_LOOPBACK: j = "listen_loopback"; break;
+            case BlockedReason::LOGIN_DISABLED: j = "login_disabled"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"BlockedReason\": " + std::to_string(static_cast<int>(x)));
         }
     }
 

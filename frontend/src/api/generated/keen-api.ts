@@ -42,6 +42,7 @@ import type {
   ConfigObject,
   ConfigStateResponse,
   ConfigUpdateResponse,
+  ConnectionEntry,
   ConnectionPage,
   ConnectionQueryRequest,
   DependencyAnalysisRequest,
@@ -50,6 +51,7 @@ import type {
   GeoLookupRequest,
   GeoLookupResult,
   GetAuthStatusParams,
+  GetCatalog200,
   GetLogsParams,
   GrantedResponse,
   HealthResponse,
@@ -67,6 +69,7 @@ import type {
   NdmsInterfaceInventoryResponse,
   NdmsVpnServerServiceInventoryResponse,
   NfqwsActionRequest,
+  NfqwsStatus,
   OkResponse,
   PeriodicTaskMetricsResponse,
   PostNfqws200,
@@ -75,6 +78,7 @@ import type {
   ReloadResponse,
   RemoteAccessRequest,
   RemoteAccessResult,
+  RemoteAccessState,
   RouterInfo,
   RoutingHealthErrorResponse,
   RoutingHealthResponse,
@@ -4406,6 +4410,460 @@ export function useGetSystemRouter<TData = Awaited<ReturnType<typeof getSystemRo
 
 
 /**
+ * Served from the snapshot on disk; this never fetches. Use `POST /api/catalog/refresh` to make it fetch, and note that doing so also stores the detour it used.
+
+ * @summary The stored preset catalogue
+ */
+export type getCatalogResponse200 = {
+  data: GetCatalog200
+  status: 200
+}
+
+export type getCatalogResponseSuccess = (getCatalogResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getCatalogResponse = (getCatalogResponseSuccess)
+
+export const getGetCatalogUrl = () => {
+
+
+
+
+  return `/api/catalog`
+}
+
+export const getCatalog = async ( options?: RequestInit): Promise<getCatalogResponse> => {
+
+  return apiFetch<getCatalogResponse>(getGetCatalogUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetCatalogQueryKey = () => {
+    return [
+    `/api/catalog`
+    ] as const;
+    }
+
+
+export const getGetCatalogQueryOptions = <TData = Awaited<ReturnType<typeof getCatalog>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getCatalog>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetCatalogQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getCatalog>>> = ({ signal }) => getCatalog({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getCatalog>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetCatalogQueryResult = NonNullable<Awaited<ReturnType<typeof getCatalog>>>
+export type GetCatalogQueryError = unknown
+
+
+export function useGetCatalog<TData = Awaited<ReturnType<typeof getCatalog>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getCatalog>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getCatalog>>,
+          TError,
+          Awaited<ReturnType<typeof getCatalog>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetCatalog<TData = Awaited<ReturnType<typeof getCatalog>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getCatalog>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getCatalog>>,
+          TError,
+          Awaited<ReturnType<typeof getCatalog>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetCatalog<TData = Awaited<ReturnType<typeof getCatalog>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getCatalog>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary The stored preset catalogue
+ */
+
+export function useGetCatalog<TData = Awaited<ReturnType<typeof getCatalog>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getCatalog>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetCatalogQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * Everything in the current snapshot, including connections that have finished. `/api/connections/active` is the same list filtered to the live ones - a separate path rather than a query flag, so a caller cannot get the wrong half by forgetting a parameter.
+
+`route` and `mark` say which policy carried the connection, which is what makes this useful for answering "did that actually go through the tunnel".
+
+ * @summary Connections the router has seen
+ */
+export type getConnectionsResponse200 = {
+  data: ConnectionEntry[]
+  status: 200
+}
+
+export type getConnectionsResponseSuccess = (getConnectionsResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getConnectionsResponse = (getConnectionsResponseSuccess)
+
+export const getGetConnectionsUrl = () => {
+
+
+
+
+  return `/api/connections`
+}
+
+export const getConnections = async ( options?: RequestInit): Promise<getConnectionsResponse> => {
+
+  return apiFetch<getConnectionsResponse>(getGetConnectionsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetConnectionsQueryKey = () => {
+    return [
+    `/api/connections`
+    ] as const;
+    }
+
+
+export const getGetConnectionsQueryOptions = <TData = Awaited<ReturnType<typeof getConnections>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getConnections>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetConnectionsQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getConnections>>> = ({ signal }) => getConnections({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getConnections>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetConnectionsQueryResult = NonNullable<Awaited<ReturnType<typeof getConnections>>>
+export type GetConnectionsQueryError = unknown
+
+
+export function useGetConnections<TData = Awaited<ReturnType<typeof getConnections>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getConnections>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getConnections>>,
+          TError,
+          Awaited<ReturnType<typeof getConnections>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetConnections<TData = Awaited<ReturnType<typeof getConnections>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getConnections>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getConnections>>,
+          TError,
+          Awaited<ReturnType<typeof getConnections>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetConnections<TData = Awaited<ReturnType<typeof getConnections>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getConnections>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Connections the router has seen
+ */
+
+export function useGetConnections<TData = Awaited<ReturnType<typeof getConnections>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getConnections>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetConnectionsQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * @summary Only the connections that are still live
+ */
+export type getActiveConnectionsResponse200 = {
+  data: ConnectionEntry[]
+  status: 200
+}
+
+export type getActiveConnectionsResponseSuccess = (getActiveConnectionsResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getActiveConnectionsResponse = (getActiveConnectionsResponseSuccess)
+
+export const getGetActiveConnectionsUrl = () => {
+
+
+
+
+  return `/api/connections/active`
+}
+
+export const getActiveConnections = async ( options?: RequestInit): Promise<getActiveConnectionsResponse> => {
+
+  return apiFetch<getActiveConnectionsResponse>(getGetActiveConnectionsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetActiveConnectionsQueryKey = () => {
+    return [
+    `/api/connections/active`
+    ] as const;
+    }
+
+
+export const getGetActiveConnectionsQueryOptions = <TData = Awaited<ReturnType<typeof getActiveConnections>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getActiveConnections>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetActiveConnectionsQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getActiveConnections>>> = ({ signal }) => getActiveConnections({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getActiveConnections>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetActiveConnectionsQueryResult = NonNullable<Awaited<ReturnType<typeof getActiveConnections>>>
+export type GetActiveConnectionsQueryError = unknown
+
+
+export function useGetActiveConnections<TData = Awaited<ReturnType<typeof getActiveConnections>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getActiveConnections>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getActiveConnections>>,
+          TError,
+          Awaited<ReturnType<typeof getActiveConnections>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetActiveConnections<TData = Awaited<ReturnType<typeof getActiveConnections>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getActiveConnections>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getActiveConnections>>,
+          TError,
+          Awaited<ReturnType<typeof getActiveConnections>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetActiveConnections<TData = Awaited<ReturnType<typeof getActiveConnections>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getActiveConnections>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Only the connections that are still live
+ */
+
+export function useGetActiveConnections<TData = Awaited<ReturnType<typeof getActiveConnections>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getActiveConnections>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetActiveConnectionsQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * `running` is deliberately the conjunction of two measurements: a process exists AND the NFQUEUE is active. A live process whose queue is gone is not circumventing anything, and reporting it as running would be the comfortable answer rather than the true one - both halves are published separately so the difference is visible.
+
+`package_metadata_verified` false means the panel cannot tell which version is installed, which is what blocks updates after a file restore.
+
+ * @summary nfqws2 status, files and strategies
+ */
+export type getNfqwsResponse200 = {
+  data: NfqwsStatus
+  status: 200
+}
+
+export type getNfqwsResponseSuccess = (getNfqwsResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getNfqwsResponse = (getNfqwsResponseSuccess)
+
+export const getGetNfqwsUrl = () => {
+
+
+
+
+  return `/api/nfqws`
+}
+
+export const getNfqws = async ( options?: RequestInit): Promise<getNfqwsResponse> => {
+
+  return apiFetch<getNfqwsResponse>(getGetNfqwsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetNfqwsQueryKey = () => {
+    return [
+    `/api/nfqws`
+    ] as const;
+    }
+
+
+export const getGetNfqwsQueryOptions = <TData = Awaited<ReturnType<typeof getNfqws>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNfqws>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetNfqwsQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getNfqws>>> = ({ signal }) => getNfqws({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getNfqws>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetNfqwsQueryResult = NonNullable<Awaited<ReturnType<typeof getNfqws>>>
+export type GetNfqwsQueryError = unknown
+
+
+export function useGetNfqws<TData = Awaited<ReturnType<typeof getNfqws>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNfqws>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getNfqws>>,
+          TError,
+          Awaited<ReturnType<typeof getNfqws>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetNfqws<TData = Awaited<ReturnType<typeof getNfqws>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNfqws>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getNfqws>>,
+          TError,
+          Awaited<ReturnType<typeof getNfqws>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetNfqws<TData = Awaited<ReturnType<typeof getNfqws>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNfqws>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary nfqws2 status, files and strategies
+ */
+
+export function useGetNfqws<TData = Awaited<ReturnType<typeof getNfqws>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNfqws>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetNfqwsQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
  * Dispatches on `action`. The set is closed and listed below, and it is worth knowing that this is one route rather than seventeen: it mixes reads the panel performs constantly with operations that replace the installed package.
 
 Three actions therefore need step-up reauthentication - `upgrade`, `capture_restore_point` and `restore_component` - and the rest do not. Guarding the whole path instead once put a password prompt in front of opening a list, which is why the unit of privilege here is the action, not the path. An action nobody listed needs no step-up, deliberately: the alternative is prompting for a password on everything unknown.
@@ -4812,6 +5270,123 @@ export function useGetSystemInterfaceNames<TData = Awaited<ReturnType<typeof get
 
 
 /**
+ * Reports the stored intent, why enabling is currently refused, and how the queued reconciliation is going.
+
+`blocked_reason` is the same verdict `POST` would give, computed before anyone presses anything - so a panel can grey the switch and say why instead of letting the operator discover it. Null means nothing stands in the way.
+
+`runtime` describes the reconciler, not the request that started it: `desired_generation` against `applied_generation` says whether the firewall has caught up, and `incident_active` distinguishes a transient retry from a failure someone should look at.
+
+ * @summary Whether the panel is published, and what would stop it
+ */
+export type getSystemRemoteAccessResponse200 = {
+  data: RemoteAccessState
+  status: 200
+}
+
+export type getSystemRemoteAccessResponseSuccess = (getSystemRemoteAccessResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getSystemRemoteAccessResponse = (getSystemRemoteAccessResponseSuccess)
+
+export const getGetSystemRemoteAccessUrl = () => {
+
+
+
+
+  return `/api/system/remote-access`
+}
+
+export const getSystemRemoteAccess = async ( options?: RequestInit): Promise<getSystemRemoteAccessResponse> => {
+
+  return apiFetch<getSystemRemoteAccessResponse>(getGetSystemRemoteAccessUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetSystemRemoteAccessQueryKey = () => {
+    return [
+    `/api/system/remote-access`
+    ] as const;
+    }
+
+
+export const getGetSystemRemoteAccessQueryOptions = <TData = Awaited<ReturnType<typeof getSystemRemoteAccess>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemRemoteAccess>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetSystemRemoteAccessQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getSystemRemoteAccess>>> = ({ signal }) => getSystemRemoteAccess({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getSystemRemoteAccess>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetSystemRemoteAccessQueryResult = NonNullable<Awaited<ReturnType<typeof getSystemRemoteAccess>>>
+export type GetSystemRemoteAccessQueryError = unknown
+
+
+export function useGetSystemRemoteAccess<TData = Awaited<ReturnType<typeof getSystemRemoteAccess>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemRemoteAccess>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getSystemRemoteAccess>>,
+          TError,
+          Awaited<ReturnType<typeof getSystemRemoteAccess>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetSystemRemoteAccess<TData = Awaited<ReturnType<typeof getSystemRemoteAccess>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemRemoteAccess>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getSystemRemoteAccess>>,
+          TError,
+          Awaited<ReturnType<typeof getSystemRemoteAccess>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetSystemRemoteAccess<TData = Awaited<ReturnType<typeof getSystemRemoteAccess>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemRemoteAccess>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Whether the panel is published, and what would stop it
+ */
+
+export function useGetSystemRemoteAccess<TData = Awaited<ReturnType<typeof getSystemRemoteAccess>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSystemRemoteAccess>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetSystemRemoteAccessQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
  * Requires step-up reauthentication. Note what that window is: one successful step-up opens every protected route for up to 300 seconds, and using it neither consumes nor extends it.
 
 **`enabled` defaults to false.** An empty body therefore disables remote access rather than doing nothing - the safe direction, but not the one a caller would guess.
@@ -5107,6 +5682,119 @@ export const usePostSystemNaiveComponent = <TError = unknown,
       > => {
       return useMutation(getPostSystemNaiveComponentMutationOptions(options), queryClient);
     }
+
+/**
+ * Proxied from the transport manager. The configured and running modes are published separately because they differ between staging a change and the restart that applies it.
+
+ * @summary How sing-box is configured to run, and how it is running
+ */
+export type getTransportsSettingsResponse200 = {
+  data: TransportManagerSettings
+  status: 200
+}
+
+export type getTransportsSettingsResponseSuccess = (getTransportsSettingsResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getTransportsSettingsResponse = (getTransportsSettingsResponseSuccess)
+
+export const getGetTransportsSettingsUrl = () => {
+
+
+
+
+  return `/api/transports/settings`
+}
+
+export const getTransportsSettings = async ( options?: RequestInit): Promise<getTransportsSettingsResponse> => {
+
+  return apiFetch<getTransportsSettingsResponse>(getGetTransportsSettingsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetTransportsSettingsQueryKey = () => {
+    return [
+    `/api/transports/settings`
+    ] as const;
+    }
+
+
+export const getGetTransportsSettingsQueryOptions = <TData = Awaited<ReturnType<typeof getTransportsSettings>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTransportsSettings>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetTransportsSettingsQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getTransportsSettings>>> = ({ signal }) => getTransportsSettings({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getTransportsSettings>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetTransportsSettingsQueryResult = NonNullable<Awaited<ReturnType<typeof getTransportsSettings>>>
+export type GetTransportsSettingsQueryError = unknown
+
+
+export function useGetTransportsSettings<TData = Awaited<ReturnType<typeof getTransportsSettings>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTransportsSettings>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getTransportsSettings>>,
+          TError,
+          Awaited<ReturnType<typeof getTransportsSettings>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetTransportsSettings<TData = Awaited<ReturnType<typeof getTransportsSettings>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTransportsSettings>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getTransportsSettings>>,
+          TError,
+          Awaited<ReturnType<typeof getTransportsSettings>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetTransportsSettings<TData = Awaited<ReturnType<typeof getTransportsSettings>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTransportsSettings>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary How sing-box is configured to run, and how it is running
+ */
+
+export function useGetTransportsSettings<TData = Awaited<ReturnType<typeof getTransportsSettings>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTransportsSettings>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetTransportsSettingsQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
 
 /**
  * The body must carry exactly one field. An extra key is refused rather than ignored - unusually for this API, and deliberately: this request restarts things, and a caller who sent a field this build does not understand did not ask for what it is about to do.

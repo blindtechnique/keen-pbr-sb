@@ -1083,7 +1083,85 @@ paths:
               schema:
                 $ref: "#/components/schemas/RouterInfo"
 
+  /api/catalog:
+    get:
+      summary: The stored preset catalogue
+      description: >
+        Served from the snapshot on disk; this never fetches. Use
+        `POST /api/catalog/refresh` to make it fetch, and note that doing so
+        also stores the detour it used.
+      operationId: getCatalog
+      responses:
+        "200":
+          description: >
+            The catalogue document as stored. Its inner structure is the
+            catalogue's own and is not described here.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /api/connections:
+    get:
+      summary: Connections the router has seen
+      description: >
+        Everything in the current snapshot, including connections that have
+        finished. `/api/connections/active` is the same list filtered to the
+        live ones - a separate path rather than a query flag, so a caller
+        cannot get the wrong half by forgetting a parameter.
+
+
+        `route` and `mark` say which policy carried the connection, which is
+        what makes this useful for answering "did that actually go through
+        the tunnel".
+      operationId: getConnections
+      responses:
+        "200":
+          description: The snapshot, newest state included
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ConnectionEntry"
+
+  /api/connections/active:
+    get:
+      summary: Only the connections that are still live
+      operationId: getActiveConnections
+      responses:
+        "200":
+          description: The same entries, filtered to active ones
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ConnectionEntry"
+
   /api/nfqws:
+    get:
+      summary: nfqws2 status, files and strategies
+      description: >
+        `running` is deliberately the conjunction of two measurements: a
+        process exists AND the NFQUEUE is active. A live process whose queue
+        is gone is not circumventing anything, and reporting it as running
+        would be the comfortable answer rather than the true one - both halves
+        are published separately so the difference is visible.
+
+
+        `package_metadata_verified` false means the panel cannot tell which
+        version is installed, which is what blocks updates after a file
+        restore.
+      operationId: getNfqws
+      responses:
+        "200":
+          description: Status, file inventory, strategies and capabilities
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NfqwsStatus"
     post:
       summary: One endpoint, seventeen nfqws2 actions
       description: >
@@ -1254,6 +1332,31 @@ paths:
                 $ref: "#/components/schemas/InterfaceNames"
 
   /api/system/remote-access:
+    get:
+      summary: Whether the panel is published, and what would stop it
+      description: >
+        Reports the stored intent, why enabling is currently refused, and how
+        the queued reconciliation is going.
+
+
+        `blocked_reason` is the same verdict `POST` would give, computed
+        before anyone presses anything - so a panel can grey the switch and
+        say why instead of letting the operator discover it. Null means
+        nothing stands in the way.
+
+
+        `runtime` describes the reconciler, not the request that started it:
+        `desired_generation` against `applied_generation` says whether the
+        firewall has caught up, and `incident_active` distinguishes a
+        transient retry from a failure someone should look at.
+      operationId: getSystemRemoteAccess
+      responses:
+        "200":
+          description: Stored intent, blockers and reconciliation state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RemoteAccessState"
     post:
       summary: Publish the panel to the internet, or take it back
       description: >
@@ -1346,6 +1449,20 @@ paths:
                 $ref: "#/components/schemas/NaiveComponentInstallResult"
 
   /api/transports/settings:
+    get:
+      summary: How sing-box is configured to run, and how it is running
+      description: >
+        Proxied from the transport manager. The configured and running modes
+        are published separately because they differ between staging a change
+        and the restart that applies it.
+      operationId: getTransportsSettings
+      responses:
+        "200":
+          description: The manager's runtime settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransportManagerSettings"
     post:
       summary: Switch how sing-box runs its transports
       description: >
@@ -2379,6 +2496,180 @@ components:
     # One named enum rather than two inline copies. Two identical inline enums
     # make the generator invent a shared type of its own choosing, and a third
     # use elsewhere would rename it under everyone.
+    ConnectionEntry:
+      type: object
+      properties:
+        id:
+          type: string
+        protocol:
+          type: string
+        state:
+          type: string
+        source:
+          type: string
+        source_port:
+          type: integer
+        destination:
+          type: string
+        destination_port:
+          type: integer
+        route:
+          type: string
+          description: The policy that carried it, empty when none did.
+        mark:
+          type: integer
+          format: int64
+        active:
+          type: boolean
+        device:
+          type: string
+          description: >
+            The LAN device this came from, empty when it could not be
+            attributed to one.
+        destination_domains:
+          type: array
+          items:
+            type: string
+          description: >
+            Names known for the destination address. Empty when the address
+            was never resolved through this router.
+        first_seen:
+          type: integer
+          format: int64
+        last_seen:
+          type: integer
+          format: int64
+
+    NfqwsStatus:
+      type: object
+      required: [installed, running, process_running, queue_active]
+      description: >
+        The nested `files`, `strategies`, `rotator_state` and capability
+        objects are returned as they are built; their inner shapes are not
+        enumerated here.
+      properties:
+        installed:
+          type: boolean
+        running:
+          type: boolean
+          description: >
+            process_running AND queue_active. Both halves are also published,
+            because a process without its NFQUEUE circumvents nothing and
+            calling that "running" would be the comfortable answer rather
+            than the true one.
+        process_running:
+          type: boolean
+        queue_active:
+          type: boolean
+        version:
+          type: string
+        package_metadata_verified:
+          type: boolean
+          description: >
+            False means the panel cannot tell which version is installed -
+            the state a file restore leaves behind, and what blocks updates
+            until the package is repaired by hand.
+        files:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        strategies:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        active_strategy:
+          type: object
+          additionalProperties: true
+        rotator_state:
+          type: object
+          additionalProperties: true
+        transaction_state:
+          type: string
+        restore_point:
+          type: string
+        upgrade_capability:
+          type: object
+          additionalProperties: true
+        restore_capability:
+          type: object
+          additionalProperties: true
+
+    RemoteAccessRuntime:
+      type: object
+      properties:
+        state:
+          type: string
+        desired_generation:
+          type: integer
+          format: int64
+        applied_generation:
+          type: integer
+          format: int64
+          description: >
+            Behind `desired_generation` while the firewall has not caught up.
+        attempt:
+          type: integer
+        interface:
+          type: string
+        phase:
+          type: string
+        command_exit_code:
+          type: integer
+        error:
+          type: string
+        incident_active:
+          type: boolean
+          description: >
+            Distinguishes a failure worth looking at from a retry still
+            inside its budget.
+        recovery_owned:
+          type: boolean
+        maintenance:
+          type: boolean
+
+    RemoteAccessState:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        port:
+          type: integer
+        internal_port:
+          type: integer
+        listen:
+          type: string
+        listen_reachable:
+          type: boolean
+          description: False when the API is bound to loopback.
+        login_required:
+          type: boolean
+        auth_provider:
+          type: string
+          description: >
+            `unavailable` when the authentication state could not be read at
+            all - which is itself a blocker.
+        custom_port_supported:
+          type: boolean
+        supported_port:
+          type: integer
+        keenetic_auth_switch_allowed:
+          type: boolean
+        blocked_reason:
+          type: string
+          nullable: true
+          description: >
+            Why enabling would be refused right now, or null when nothing
+            stands in the way. Same verdict POST would give.
+          enum:
+            - auth_state_unavailable
+            - login_disabled
+            - keenetic_auth_plaintext_wan
+            - listen_loopback
+        runtime:
+          $ref: "#/components/schemas/RemoteAccessRuntime"
+
     RemoteAccessRequest:
       type: object
       properties:

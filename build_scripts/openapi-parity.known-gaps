@@ -9,7 +9,6 @@
 #
 # Порядок разбора задан roadmap: сначала необратимые и state-changing
 # update/backup/restore/auth/nfqws/remote-access, затем read-only.
-
 # --- Очередь 1: необратимые и state-changing -------------------------------
 # Bodyless, route-bound grant preflight used before the browser constructs an
 # auth-settings credential body; it shares the same pending auth schema slice.
@@ -17,11 +16,4 @@
 # описан по отдельности, чтобы весь блок auth получил схему одним срезом:
 # описать один эндпоинт из пяти — значит закрепить половину контракта, по
 # которой фронтенд всё равно не сможет работать без остальных.
-GET  /api/nfqws
-GET  /api/system/remote-access
-GET  /api/transports/settings
-
 # --- Очередь 2: read-only --------------------------------------------------
-GET  /api/catalog
-GET  /api/connections
-GET  /api/connections/active
