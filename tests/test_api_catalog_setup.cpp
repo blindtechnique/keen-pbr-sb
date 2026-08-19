@@ -1083,9 +1083,9 @@ TEST_CASE(
     REQUIRE(apply_response != nullptr);
     CHECK(apply_response->status == 200);
     CHECK(apply_calls == 1U);
-    REQUIRE(store.active_config().lists.has_value());
-    const auto& migrated =
-        store.active_config().lists->at("my_openai");
+    const auto active = store.active_config();
+    REQUIRE(active.lists.has_value());
+    const auto& migrated = active.lists->at("my_openai");
     CHECK(migrated.url == current_url);
     CHECK(migrated.display_name == installed.display_name);
     CHECK(migrated.domains == installed.domains);
