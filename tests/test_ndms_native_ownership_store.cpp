@@ -9,6 +9,8 @@
 #include <system_error>
 #include <vector>
 
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 namespace keen_pbr3 {
@@ -42,8 +44,41 @@ NdmsNativeOwnershipRecord record_fixture() {
     record.interface_name = "Wireguard5";
     record.transaction_id = std::string(32U, 'a');
     record.marker = "kpbr-ni-v1-" + record.transaction_id;
-    record.target_full_revision = std::string(64U, 'b');
+    record.target_full_revision =
+        "ndms-rci-full-v1-" + std::string(64U, 'b');
     return record;
+}
+
+std::string ownership_body(const NdmsNativeOwnershipRecord& record) {
+    const char* kind = record.kind ==
+                               NdmsNativeTunnelImportKind::amnezia_wireguard
+                           ? "amnezia_wireguard"
+                           : "wireguard";
+    return std::string("keen-pbr-native-ownership-v1\n") +
+           record.interface_name + "\n" + record.transaction_id + "\n" +
+           record.marker + "\n" + kind + "\n" +
+           record.target_full_revision + "\n";
+}
+
+bool has_ownership_temporary(const fs::path& directory) {
+    for (const auto& entry : fs::directory_iterator(directory)) {
+        if (entry.path().filename().string().rfind(
+                ".keen-pbr-ownership-tmp-", 0U) == 0U) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int exited_child_status(const pid_t child) {
+    int status = 0;
+    pid_t waited = -1;
+    do {
+        waited = ::waitpid(child, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    REQUIRE(waited == child);
+    REQUIRE(WIFEXITED(status));
+    return WEXITSTATUS(status);
 }
 
 } // namespace
@@ -66,7 +101,8 @@ TEST_CASE("a published claim reads back exactly, with a stable revision") {
     // digest that survived a field change would let a swapped claim pass the
     // ownership_record_matches comparison.
     auto other = record;
-    other.target_full_revision = std::string(64U, 'c');
+    other.target_full_revision =
+        "ndms-rci-full-v1-" + std::string(64U, 'c');
     CHECK(ndms_native_ownership_revision(other) != revision);
 }
 
@@ -124,7 +160,8 @@ TEST_CASE("remove_exact removes only the claim it was shown") {
     store.publish(record);
 
     auto different = record;
-    different.target_full_revision = std::string(64U, 'c');
+    different.target_full_revision =
+        "ndms-rci-full-v1-" + std::string(64U, 'c');
     CHECK_FALSE(store.remove_exact(different));
     CHECK(store.read("Wireguard5").state ==
           NdmsNativeOwnershipReadState::valid);
@@ -151,6 +188,265 @@ TEST_CASE("the published revision satisfies the recovery observation") {
     const auto read = store.read("Wireguard5");
     REQUIRE(read.revision.has_value());
     CHECK(*read.revision == *record.ownership_revision);
+}
+
+TEST_CASE("claims are immutable and an exact retry repairs publication durability") {
+    TempDirectory directory;
+    const auto state = directory.path / "ownership";
+    const auto record = record_fixture();
+
+    NdmsNativeOwnershipStoreTestHooks hooks;
+    hooks.allow_current_process_owner = true;
+    hooks.fault_injector = [](const auto stage) {
+        if (stage == NdmsNativeOwnershipStoreFaultStage::
+                         post_rename_directory_fsync) {
+            throw std::runtime_error("injected directory fsync failure");
+        }
+    };
+    NdmsNativeOwnershipStore interrupted(state, hooks);
+    CHECK_THROWS(interrupted.publish(record));
+    CHECK(fs::exists(state / "Wireguard5"));
+
+    NdmsNativeOwnershipStore retry(state);
+    const auto revision = retry.publish(record);
+    CHECK(revision == ndms_native_ownership_revision(record));
+
+    auto different = record;
+    different.target_full_revision =
+        "ndms-rci-full-v1-" + std::string(64U, 'c');
+    CHECK_THROWS(retry.publish(different));
+    const auto read = retry.read("Wireguard5");
+    REQUIRE(read.record.has_value());
+    CHECK(*read.record == record);
+}
+
+TEST_CASE("portable no-replace publication recovers both crash windows") {
+    SUBCASE("dead pre-publish temporary is retired") {
+        TempDirectory directory;
+        const auto state = directory.path / "ownership";
+        const auto record = record_fixture();
+        const pid_t child = ::fork();
+        REQUIRE(child >= 0);
+        if (child == 0) {
+            NdmsNativeOwnershipStoreTestHooks hooks;
+            hooks.allow_current_process_owner = true;
+            hooks.force_portable_linkat = true;
+            hooks.fault_injector = [](const auto stage) {
+                if (stage == NdmsNativeOwnershipStoreFaultStage::
+                                 pre_publish_after_file_fsync) {
+                    ::_exit(81);
+                }
+            };
+            try {
+                NdmsNativeOwnershipStore store(state, hooks);
+                (void)store.publish(record);
+            } catch (...) {
+                ::_exit(91);
+            }
+            ::_exit(92);
+        }
+        CHECK(exited_child_status(child) == 81);
+        REQUIRE(has_ownership_temporary(state));
+
+        NdmsNativeOwnershipStore retry(state);
+        CHECK_NOTHROW(retry.publish(record));
+        CHECK_FALSE(has_ownership_temporary(state));
+        const auto read = retry.read("Wireguard5");
+        REQUIRE(read.record.has_value());
+        CHECK(*read.record == record);
+    }
+
+    SUBCASE("linked nlink-two temporary is completed without replay") {
+        TempDirectory directory;
+        const auto state = directory.path / "ownership";
+        const auto record = record_fixture();
+        const pid_t child = ::fork();
+        REQUIRE(child >= 0);
+        if (child == 0) {
+            NdmsNativeOwnershipStoreTestHooks hooks;
+            hooks.allow_current_process_owner = true;
+            hooks.force_portable_linkat = true;
+            hooks.fault_injector = [](const auto stage) {
+                if (stage == NdmsNativeOwnershipStoreFaultStage::
+                                 post_link_before_unlink) {
+                    ::_exit(82);
+                }
+            };
+            try {
+                NdmsNativeOwnershipStore store(state, hooks);
+                (void)store.publish(record);
+            } catch (...) {
+                ::_exit(93);
+            }
+            ::_exit(94);
+        }
+        CHECK(exited_child_status(child) == 82);
+        CHECK(has_ownership_temporary(state));
+        CHECK(fs::exists(state / "Wireguard5"));
+
+        NdmsNativeOwnershipStore retry(state);
+        CHECK_NOTHROW(retry.publish(record));
+        CHECK_FALSE(has_ownership_temporary(state));
+        const auto read = retry.read("Wireguard5");
+        REQUIRE(read.record.has_value());
+        CHECK(*read.record == record);
+    }
+}
+
+TEST_CASE("listing cleans a dead temporary and repeats the same sorted inventory") {
+    TempDirectory directory;
+    const auto state = directory.path / "ownership";
+    NdmsNativeOwnershipStore store(state);
+    auto five = record_fixture();
+    auto six = five;
+    six.interface_name = "Wireguard6";
+    store.publish(six);
+    store.publish(five);
+
+    auto seven = five;
+    seven.interface_name = "Wireguard7";
+    const pid_t child = ::fork();
+    REQUIRE(child >= 0);
+    if (child == 0) {
+        NdmsNativeOwnershipStoreTestHooks hooks;
+        hooks.allow_current_process_owner = true;
+        hooks.force_portable_linkat = true;
+        hooks.fault_injector = [](const auto stage) {
+            if (stage == NdmsNativeOwnershipStoreFaultStage::
+                             pre_publish_after_file_fsync) {
+                ::_exit(83);
+            }
+        };
+        try {
+            NdmsNativeOwnershipStore child_store(state, hooks);
+            (void)child_store.publish(seven);
+        } catch (...) {
+            ::_exit(95);
+        }
+        ::_exit(96);
+    }
+    CHECK(exited_child_status(child) == 83);
+    REQUIRE(has_ownership_temporary(state));
+
+    const auto first = store.list_claimed_interfaces();
+    REQUIRE(first.readable);
+    CHECK(first.interface_names ==
+          (std::vector<std::string>{"Wireguard5", "Wireguard6"}));
+    CHECK_FALSE(has_ownership_temporary(state));
+    const auto second = store.list_claimed_interfaces();
+    CHECK(second.readable);
+    CHECK(second.interface_names == first.interface_names);
+}
+
+TEST_CASE("remove_exact is content-bound even across an in-place inode mutation") {
+    TempDirectory directory;
+    const auto state = directory.path / "ownership";
+    const auto record = record_fixture();
+    auto replacement = record;
+    replacement.target_full_revision =
+        "ndms-rci-full-v1-" + std::string(64U, 'c');
+
+    bool replaced = false;
+    NdmsNativeOwnershipStoreTestHooks hooks;
+    hooks.allow_current_process_owner = true;
+    hooks.fault_injector = [&](const auto stage) {
+        if (!replaced &&
+            stage == NdmsNativeOwnershipStoreFaultStage::
+                         before_remove_inode_recheck) {
+            replaced = true;
+            std::ofstream output(state / "Wireguard5",
+                                 std::ios::binary | std::ios::trunc);
+            output << ownership_body(replacement);
+            output.close();
+        }
+    };
+    NdmsNativeOwnershipStore store(state, hooks);
+    store.publish(record);
+    CHECK_FALSE(store.remove_exact(record));
+    CHECK(replaced);
+    const auto read = store.read("Wireguard5");
+    REQUIRE(read.record.has_value());
+    CHECK(*read.record == replacement);
+}
+
+TEST_CASE("a visible ownership unlink is repaired before absence is trusted") {
+    TempDirectory directory;
+    const auto state = directory.path / "ownership";
+    const auto record = record_fixture();
+    NdmsNativeOwnershipStoreTestHooks hooks;
+    hooks.allow_current_process_owner = true;
+    hooks.fault_injector = [](const auto stage) {
+        if (stage == NdmsNativeOwnershipStoreFaultStage::
+                         post_unlink_directory_fsync) {
+            throw std::runtime_error("injected unlink fsync failure");
+        }
+    };
+    NdmsNativeOwnershipStore interrupted(state, hooks);
+    interrupted.publish(record);
+    CHECK_FALSE(interrupted.remove_exact(record));
+    CHECK_FALSE(fs::exists(state / "Wireguard5"));
+
+    NdmsNativeOwnershipStore retry(state);
+    CHECK(retry.ensure_absence_durable("Wireguard5"));
+    CHECK(retry.read("Wireguard5").state ==
+          NdmsNativeOwnershipReadState::absent);
+}
+
+TEST_CASE("unsafe ownership metadata and foreign inventory fail closed") {
+    TempDirectory directory;
+    const auto state = directory.path / "ownership";
+    const auto file = state / "Wireguard5";
+    NdmsNativeOwnershipStore store(state);
+    const auto record = record_fixture();
+    store.publish(record);
+
+    REQUIRE(::chmod(file.c_str(), 0644) == 0);
+    CHECK(store.read("Wireguard5").state ==
+          NdmsNativeOwnershipReadState::unreadable);
+    REQUIRE(::chmod(file.c_str(), 0600) == 0);
+
+    const auto hardlink = state / "Wireguard6";
+    REQUIRE(::link(file.c_str(), hardlink.c_str()) == 0);
+    CHECK(store.read("Wireguard5").state ==
+          NdmsNativeOwnershipReadState::unreadable);
+    REQUIRE(::unlink(hardlink.c_str()) == 0);
+
+    if (::geteuid() == 0) {
+        REQUIRE(::chown(file.c_str(), 65534, 65534) == 0);
+        CHECK(store.read("Wireguard5").state ==
+              NdmsNativeOwnershipReadState::unreadable);
+        REQUIRE(::chown(file.c_str(), ::geteuid(), ::getegid()) == 0);
+    }
+
+    {
+        std::ofstream foreign(state / "notes.txt", std::ios::binary);
+        foreign << "foreign";
+    }
+    const auto listing = store.list_claimed_interfaces();
+    CHECK_FALSE(listing.readable);
+    CHECK(listing.interface_names.empty());
+    CHECK(store.read("Wireguard5").state ==
+          NdmsNativeOwnershipReadState::unreadable);
+}
+
+TEST_CASE("ownership records require exact kind and RCI revision domains") {
+    TempDirectory directory;
+    NdmsNativeOwnershipStore store(directory.path / "ownership");
+    auto invalid = record_fixture();
+
+    invalid.kind = static_cast<NdmsNativeTunnelImportKind>(99);
+    CHECK_THROWS(ndms_native_ownership_revision(invalid));
+    CHECK_THROWS(store.publish(invalid));
+
+    for (const auto& revision : {
+             std::string(64U, 'b'),
+             std::string("other-v1-") + std::string(64U, 'b'),
+             std::string("ndms-rci-full-v1-") + std::string(64U, 'A')}) {
+        invalid = record_fixture();
+        invalid.target_full_revision = revision;
+        CHECK_THROWS(ndms_native_ownership_revision(invalid));
+        CHECK_THROWS(store.publish(invalid));
+    }
 }
 
 } // namespace keen_pbr3
