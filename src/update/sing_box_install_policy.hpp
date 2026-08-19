@@ -77,9 +77,9 @@ struct SingBoxInstallObservation {
     // present binary is the operator's. Mere marker-file existence is not
     // ownership: the configured target can change while a stale marker stays.
     bool managed_marker_matches_binary{false};
-    // A byte-exact copy of the binary an earlier install replaced, kept beside
-    // the target. Its presence is what makes an undo possible, so the
-    // capability reports the measurement rather than a promise.
+    // An entry exists at the best-effort backup path beside the target. Mere
+    // presence does not prove that it is regular, complete, durable, or equal
+    // to the replaced binary, so it is not exact rollback authority.
     bool previous_binary_present{false};
     // `sing-box version` as reported by the installed binary, empty when it is
     // absent or would not run. An installed binary we cannot interrogate is
@@ -103,19 +103,16 @@ struct SingBoxInstallPolicy {
     // than prose so a client cannot render a capability it does not have, and
     // so that turning one true is a visible change.
     //
-    // True since the installer refuses a release that publishes no checksums
-    // file, rather than downgrading to an unverified install the way the shell
-    // installer does. The archive is verified against the published digest
-    // before anything is unpacked, and the unpacked binary must report the
-    // pinned version before it replaces anything.
+    // True since the installer refuses a release without either a published
+    // checksums-file digest or GitHub's per-asset sha256 digest. The archive is
+    // verified before anything is unpacked, and the unpacked binary must report
+    // the pinned version before it replaces anything.
     bool verified_archive_checksum{true};
     // Nothing signs these archives. GitHub release assets carry no signature
     // this daemon can check, so "pinned+signed" is currently pinned-only.
     bool signed_release{false};
-    // Whether a byte-exact copy of the replaced binary is on the router right
-    // now. Measured, not declared: the first install has nothing to preserve,
-    // and preserving it is best effort - a full filesystem is a reason to have
-    // no rollback, not a reason to refuse an install the operator asked for.
+    // Reserved for an implemented, integrity-checked rollback action. A
+    // best-effort `.previous` path is not enough to make this promise.
     bool exact_rollback{false};
 };
 

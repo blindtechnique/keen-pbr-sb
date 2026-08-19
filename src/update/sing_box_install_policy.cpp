@@ -126,7 +126,6 @@ SingBoxInstallPolicy evaluate_sing_box_install(
         // release, and replacing it is the honest description.
         policy.operation = SingBoxInstallOperation::replace;
     }
-    policy.exact_rollback = observation.previous_binary_present;
     policy.available = policy.blockers.empty();
     return policy;
 }
