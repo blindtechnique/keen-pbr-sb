@@ -262,26 +262,12 @@ void publish_sing_box_install_progress(
     }
 }
 
-// The one install this daemon may be running, and whether stopping it is still
-// free.
-//
-// Process-wide because the thing being protected is process-wide: there is one
-// binary at one path, and the maintenance lease already means there is at most
-// one install. This only has to answer "is there one, and may it still be
-// stopped".
-struct SingBoxInstallCancellation {
-    std::mutex mutex;
-    std::shared_ptr<std::atomic<bool>> token;
-    // Cleared the moment the install reaches a phase that changes the router.
-    // From then on a cancel is refused rather than queued: there is no version
-    // of stopping a binary swap that leaves an operator better off than
-    // letting it finish.
-    bool reversible{false};
-};
-
-SingBoxInstallCancellation& sing_box_install_cancellation() {
-    static SingBoxInstallCancellation state;
-    return state;
+SingBoxInstallCancellationCoordinator& sing_box_install_cancellation() {
+    // Process-wide because the thing being protected is process-wide: there is
+    // one binary at one path, and the maintenance lease already means there is
+    // at most one install.
+    static SingBoxInstallCancellationCoordinator coordinator;
+    return coordinator;
 }
 
 // Guarantees every page watching is told the install ended, on every path out.
@@ -312,13 +298,6 @@ public:
         const SingBoxInstallProgressReporter&) = delete;
 
     void phase(const SingBoxInstallPhase phase) {
-        {
-            // The point of no return is the phase list itself, so a phase
-            // added later cannot quietly become cancellable.
-            auto& state = sing_box_install_cancellation();
-            const std::lock_guard<std::mutex> lock(state.mutex);
-            state.reversible = sing_box_install_phase_is_reversible(phase);
-        }
         current_phase_ = sing_box_install_phase_name(phase);
         cancellable_ = sing_box_install_phase_is_reversible(phase);
         last_published_ = std::chrono::steady_clock::time_point{};
@@ -985,19 +964,12 @@ static void register_transports_handler_impl(
                 // cannot abort the next one.
                 auto cancellation = std::make_shared<std::atomic<bool>>(false);
                 struct CancellationScope {
+                    std::shared_ptr<std::atomic<bool>> token;
                     ~CancellationScope() {
-                        auto& state = sing_box_install_cancellation();
-                        const std::lock_guard<std::mutex> lock(state.mutex);
-                        state.token.reset();
-                        state.reversible = false;
+                        sing_box_install_cancellation().finish(token);
                     }
-                } cancellation_scope;
-                {
-                    auto& state = sing_box_install_cancellation();
-                    const std::lock_guard<std::mutex> lock(state.mutex);
-                    state.token = cancellation;
-                    state.reversible = true;
-                }
+                } cancellation_scope{cancellation};
+                sing_box_install_cancellation().begin(cancellation);
 
                 // Anything a previous run left behind is removed first: the
                 // run that failed to clean up is by definition the one that
@@ -1016,6 +988,10 @@ static void register_transports_handler_impl(
                     policy.asset_architecture,
                     [&progress](const SingBoxInstallPhase phase) {
                         progress.phase(phase);
+                    },
+                    [cancellation](const SingBoxInstallPhase phase) {
+                        return sing_box_install_cancellation().enter_phase(
+                            cancellation, phase);
                     });
                 discard_sing_box_staging(paths);
 
@@ -1069,10 +1045,18 @@ static void register_transports_handler_impl(
                 progress.finish(
                     sing_box_install_outcome_name(report.outcome));
                 if (report.outcome == SingBoxInstallOutcome::installed) {
-                    Logger::instance().info(
-                        "sing-box {} installed at {}",
-                        KEEN_PBR3_SING_BOX_PINNED_VERSION,
-                        paths.binary_path);
+                    if (report.binary_durable) {
+                        Logger::instance().info(
+                            "sing-box {} installed at {}",
+                            KEEN_PBR3_SING_BOX_PINNED_VERSION,
+                            paths.binary_path);
+                    } else {
+                        Logger::instance().warn(
+                            "sing-box {} installed at {}, but the target "
+                            "directory could not be synced",
+                            KEEN_PBR3_SING_BOX_PINNED_VERSION,
+                            paths.binary_path);
+                    }
                 } else {
                     Logger::instance().warn(
                         "sing-box install did not complete: {}",
@@ -1093,9 +1077,8 @@ static void register_transports_handler_impl(
     // running" and "too late" are different facts about their router.
     server.post("/api/transports/sing-box/install/cancel",
                 []() -> std::string {
-        auto& state = sing_box_install_cancellation();
-        const std::lock_guard<std::mutex> lock(state.mutex);
-        if (!state.token) {
+        const auto verdict = sing_box_install_cancellation().cancel();
+        if (verdict == SingBoxInstallCancelVerdict::not_running) {
             throw ApiError(
                 "no sing-box install is running",
                 409,
@@ -1103,7 +1086,8 @@ static void register_transports_handler_impl(
                                {"reason", "not_running"}}
                     .dump());
         }
-        if (!state.reversible) {
+        if (verdict ==
+            SingBoxInstallCancelVerdict::past_point_of_no_return) {
             throw ApiError(
                 "the sing-box install can no longer be stopped",
                 409,
@@ -1112,7 +1096,6 @@ static void register_transports_handler_impl(
                     {"reason", "past_point_of_no_return"}}
                     .dump());
         }
-        state.token->store(true, std::memory_order_relaxed);
         return nlohmann::json{{"cancelling", true}}.dump();
     });
 

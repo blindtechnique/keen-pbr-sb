@@ -59,7 +59,9 @@ TEST_CASE("the install replaces the target and leaves it executable") {
     const auto staged = directory.path / "staged-sing-box";
     { std::ofstream(staged) << "new-binary-bytes"; }
 
-    REQUIRE(steps.install_atomically(staged.string()));
+    const auto result = steps.install_atomically(staged.string());
+    REQUIRE(result.committed);
+    CHECK(result.durable);
     CHECK(read_file(paths.binary_path) == "new-binary-bytes");
 
     struct stat metadata {};
@@ -79,8 +81,10 @@ TEST_CASE("a staged file that is not there leaves the target alone") {
     const auto steps = production_sing_box_install_steps(paths);
     { std::ofstream(paths.binary_path) << "old"; }
 
-    CHECK_FALSE(steps.install_atomically(
-        (directory.path / "absent").string()));
+    const auto result = steps.install_atomically(
+        (directory.path / "absent").string());
+    CHECK_FALSE(result.committed);
+    CHECK_FALSE(result.durable);
     CHECK(read_file(paths.binary_path) == "old");
     CHECK_FALSE(fs::exists(paths.binary_path + ".new"));
 }
@@ -95,7 +99,9 @@ TEST_CASE("an empty staged file is refused before the rename") {
     const auto empty = directory.path / "empty";
     { std::ofstream(empty); }
 
-    CHECK_FALSE(steps.install_atomically(empty.string()));
+    const auto result = steps.install_atomically(empty.string());
+    CHECK_FALSE(result.committed);
+    CHECK_FALSE(result.durable);
     CHECK(read_file(paths.binary_path) == "old");
 }
 
@@ -243,7 +249,9 @@ TEST_CASE("the install keeps the binary it replaced") {
     const auto staged = directory.path / "staged-sing-box";
     { std::ofstream(staged) << "the-new-binary"; }
 
-    REQUIRE(steps.install_atomically(staged.string()));
+    const auto result = steps.install_atomically(staged.string());
+    REQUIRE(result.committed);
+    CHECK(result.durable);
     CHECK(read_file(paths.binary_path) == "the-new-binary");
     CHECK(read_file(paths.binary_path + ".previous") == "the-old-binary");
 }
@@ -258,9 +266,32 @@ TEST_CASE("a first install has nothing to keep and still installs") {
     const auto staged = directory.path / "staged-sing-box";
     { std::ofstream(staged) << "the-first-binary"; }
 
-    REQUIRE(steps.install_atomically(staged.string()));
+    const auto result = steps.install_atomically(staged.string());
+    REQUIRE(result.committed);
+    CHECK(result.durable);
     CHECK(read_file(paths.binary_path) == "the-first-binary");
     CHECK_FALSE(fs::exists(paths.binary_path + ".previous"));
+}
+
+TEST_CASE("a failed directory sync reports committed but not durable") {
+    StepsTempDir directory;
+    const auto paths = paths_in(directory);
+    std::string synced_directory;
+    const auto steps = production_sing_box_install_steps(
+        paths, {}, {}, [&synced_directory](const std::string& candidate) {
+            synced_directory = candidate;
+            return false;
+        });
+    { std::ofstream(paths.binary_path) << "old"; }
+    const auto staged = directory.path / "staged-sing-box";
+    { std::ofstream(staged) << "new"; }
+
+    const auto result = steps.install_atomically(staged.string());
+    CHECK(result.committed);
+    CHECK_FALSE(result.durable);
+    CHECK(read_file(paths.binary_path) == "new");
+    CHECK(synced_directory ==
+          fs::path(paths.binary_path).parent_path().string());
 }
 
 } // namespace keen_pbr3

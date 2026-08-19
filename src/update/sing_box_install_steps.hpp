@@ -38,13 +38,19 @@ inline constexpr std::size_t kSingBoxArchiveMaximumBytes =
 using SingBoxDownloadProgress =
     std::function<void(std::uint64_t received, std::uint64_t total)>;
 
+// Injected so the post-rename durability failure is testable without making a
+// real filesystem refuse fsync. Empty selects the production directory fsync.
+using SingBoxInstallDirectorySync =
+    std::function<bool(const std::string& directory)>;
+
 SingBoxInstallSteps production_sing_box_install_steps(
     const SingBoxInstallPaths& paths,
     SingBoxDownloadProgress download_progress = {},
-    // Aborts the transfers. Only the fetches take it, and deliberately: a
-    // cancel is only ever honoured while nothing on the router has changed,
-    // and by the time anything has, there is no transfer left to abort.
-    HttpCancellationToken cancellation = {});
+    // Aborts in-flight transfers. The installer's phase-admission callback
+    // observes the same token between local verify/unpack/version steps; this
+    // parameter is only the transport half of that coordinated cancellation.
+    HttpCancellationToken cancellation = {},
+    SingBoxInstallDirectorySync install_directory_sync = {});
 
 // Removes anything a previous run left behind in the staging directory. Called
 // before staging rather than only after it, because the process that failed to

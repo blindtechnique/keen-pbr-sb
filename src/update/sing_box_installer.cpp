@@ -50,6 +50,45 @@ bool sing_box_install_phase_is_reversible(
     return false;
 }
 
+void SingBoxInstallCancellationCoordinator::begin(const Token& token) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    token_ = token;
+    reversible_ = token_ != nullptr;
+}
+
+void SingBoxInstallCancellationCoordinator::finish(
+    const Token& token) noexcept {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (token_ != token) return;
+    token_.reset();
+    reversible_ = false;
+}
+
+bool SingBoxInstallCancellationCoordinator::enter_phase(
+    const Token& token,
+    const SingBoxInstallPhase phase) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (!token || token_ != token ||
+        token->load(std::memory_order_relaxed)) {
+        return false;
+    }
+    // This assignment and cancel() are under the same mutex. In particular,
+    // entering `installing` closes cancellation before the rename can start.
+    reversible_ = sing_box_install_phase_is_reversible(phase);
+    return true;
+}
+
+SingBoxInstallCancelVerdict
+SingBoxInstallCancellationCoordinator::cancel() {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (!token_) return SingBoxInstallCancelVerdict::not_running;
+    if (!reversible_) {
+        return SingBoxInstallCancelVerdict::past_point_of_no_return;
+    }
+    token_->store(true, std::memory_order_relaxed);
+    return SingBoxInstallCancelVerdict::accepted;
+}
+
 const char* sing_box_install_phase_name(
     const SingBoxInstallPhase phase) noexcept {
     switch (phase) {
@@ -78,11 +117,15 @@ SingBoxInstallReport install_pinned_sing_box(
     const std::string& release_json_url,
     const std::string& pinned_version,
     const std::string& asset_architecture,
-    const SingBoxInstallProgress& progress) {
+    const SingBoxInstallProgress& progress,
+    const SingBoxInstallPhaseAdmission& phase_admission) {
     SingBoxInstallReport report;
 
-    const auto entering = [&progress](const SingBoxInstallPhase phase) {
+    const auto entering = [&progress, &phase_admission](
+                              const SingBoxInstallPhase phase) {
+        if (phase_admission && !phase_admission(phase)) return false;
         if (progress) progress(phase);
+        return true;
     };
 
     // A missing step is a caller error, and the safe reading of "this
@@ -96,7 +139,10 @@ SingBoxInstallReport install_pinned_sing_box(
         return report;
     }
 
-    entering(SingBoxInstallPhase::reading_release);
+    if (!entering(SingBoxInstallPhase::reading_release)) {
+        report.outcome = SingBoxInstallOutcome::cancelled;
+        return report;
+    }
     const auto release = steps.fetch(release_json_url);
     if (!release.has_value()) {
         report.outcome = SingBoxInstallOutcome::download_failed;
@@ -113,7 +159,10 @@ SingBoxInstallReport install_pinned_sing_box(
         return report;
     }
 
-    entering(SingBoxInstallPhase::downloading_archive);
+    if (!entering(SingBoxInstallPhase::downloading_archive)) {
+        report.outcome = SingBoxInstallOutcome::cancelled;
+        return report;
+    }
     const auto archive = steps.fetch(plan.archive_url);
     if (!archive.has_value()) {
         report.outcome = SingBoxInstallOutcome::download_failed;
@@ -121,7 +170,10 @@ SingBoxInstallReport install_pinned_sing_box(
     }
     const auto actual_digest = steps.digest(*archive);
     if (!plan.checksums_url.empty()) {
-        entering(SingBoxInstallPhase::downloading_checksums);
+        if (!entering(SingBoxInstallPhase::downloading_checksums)) {
+            report.outcome = SingBoxInstallOutcome::cancelled;
+            return report;
+        }
         const auto checksums = steps.fetch(plan.checksums_url);
         if (!checksums.has_value()) {
             // The checksums file being unreachable is not a reason to install
@@ -131,7 +183,10 @@ SingBoxInstallReport install_pinned_sing_box(
             report.outcome = SingBoxInstallOutcome::download_failed;
             return report;
         }
-        entering(SingBoxInstallPhase::verifying_archive);
+        if (!entering(SingBoxInstallPhase::verifying_archive)) {
+            report.outcome = SingBoxInstallOutcome::cancelled;
+            return report;
+        }
         report.release_verdict = verify_sing_box_archive(
             *checksums, plan.archive_name, actual_digest);
     } else {
@@ -139,7 +194,10 @@ SingBoxInstallReport install_pinned_sing_box(
         // is what the download is compared against - measured on the pinned
         // release, sing-box publishes no checksums file at all, so without
         // this the install would refuse every time.
-        entering(SingBoxInstallPhase::verifying_archive);
+        if (!entering(SingBoxInstallPhase::verifying_archive)) {
+            report.outcome = SingBoxInstallOutcome::cancelled;
+            return report;
+        }
         report.release_verdict =
             plan.asset_digest == actual_digest
                 ? SingBoxReleaseVerdict::ready
@@ -152,14 +210,20 @@ SingBoxInstallReport install_pinned_sing_box(
 
     // Only now are the bytes unpacked. Everything above happened in memory,
     // so a release that fails verification never reaches the filesystem.
-    entering(SingBoxInstallPhase::unpacking);
+    if (!entering(SingBoxInstallPhase::unpacking)) {
+        report.outcome = SingBoxInstallOutcome::cancelled;
+        return report;
+    }
     const auto staged = steps.stage_archive(*archive);
     if (staged.empty()) {
         report.outcome = SingBoxInstallOutcome::archive_unusable;
         return report;
     }
 
-    entering(SingBoxInstallPhase::checking_staged_version);
+    if (!entering(SingBoxInstallPhase::checking_staged_version)) {
+        report.outcome = SingBoxInstallOutcome::cancelled;
+        return report;
+    }
     report.staged_version = steps.read_staged_version(staged);
     if (report.staged_version != pinned_version) {
         // The archive verified against its published digest and still does not
@@ -171,13 +235,25 @@ SingBoxInstallReport install_pinned_sing_box(
         return report;
     }
 
-    entering(SingBoxInstallPhase::installing);
-    if (!steps.install_atomically(staged)) {
+    if (!entering(SingBoxInstallPhase::installing)) {
+        report.outcome = SingBoxInstallOutcome::cancelled;
+        return report;
+    }
+    const auto commit = steps.install_atomically(staged);
+    report.binary_committed = commit.committed;
+    report.binary_durable = commit.committed && commit.durable;
+    if (!commit.committed) {
         report.outcome = SingBoxInstallOutcome::install_failed;
         return report;
     }
 
-    entering(SingBoxInstallPhase::recording_marker);
+    // Once committed, cancellation stays closed even when the caller supplied
+    // an inconsistent custom admission callback. The production coordinator
+    // already made this transition non-reversible under its mutex.
+    if (!entering(SingBoxInstallPhase::recording_marker)) {
+        report.outcome = SingBoxInstallOutcome::marker_not_written;
+        return report;
+    }
     if (!steps.write_managed_marker()) {
         // The binary is in place and correct; only its provenance record is
         // missing. Not a failure of the install, and not a success either:

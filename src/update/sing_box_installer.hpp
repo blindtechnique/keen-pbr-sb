@@ -2,8 +2,11 @@
 
 #include "sing_box_release_plan.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 
@@ -98,6 +101,46 @@ bool sing_box_install_phase_is_reversible(SingBoxInstallPhase phase) noexcept;
 // the previous step while the stuck one is invisible.
 using SingBoxInstallProgress = std::function<void(SingBoxInstallPhase)>;
 
+// Called immediately before a phase is announced or attempted. False means
+// the attempt was cancelled while that phase transition was still reversible.
+// In production the transition into `installing` and the cancel endpoint use
+// the same mutex, so exactly one can win the point-of-no-return race.
+using SingBoxInstallPhaseAdmission =
+    std::function<bool(SingBoxInstallPhase)>;
+
+enum class SingBoxInstallCancelVerdict : std::uint8_t {
+    accepted,
+    not_running,
+    past_point_of_no_return,
+};
+
+// Coordinates the process-wide cancel endpoint with one install attempt.
+// The token also aborts an in-flight HTTP transfer; phase admission makes the
+// same request effective during verify, unpack, and staged-version checks.
+class SingBoxInstallCancellationCoordinator {
+public:
+    using Token = std::shared_ptr<std::atomic<bool>>;
+
+    void begin(const Token& token);
+    void finish(const Token& token) noexcept;
+    bool enter_phase(const Token& token,
+                     SingBoxInstallPhase phase);
+    SingBoxInstallCancelVerdict cancel();
+
+private:
+    std::mutex mutex_;
+    Token token_;
+    bool reversible_{false};
+};
+
+struct SingBoxInstallCommitResult {
+    // True from the successful rename onward. Once true, callers must never
+    // report that the old binary is still installed.
+    bool committed{false};
+    // True only when the target directory was synced after that rename.
+    bool durable{false};
+};
+
 struct SingBoxInstallReport {
     SingBoxInstallOutcome outcome{SingBoxInstallOutcome::release_refused};
     // Set when `outcome` is release_refused or checksum_mismatch, so the
@@ -106,6 +149,11 @@ struct SingBoxInstallReport {
         SingBoxReleaseVerdict::release_unreadable};
     // What the staged binary reported, when it was asked and answered.
     std::string staged_version;
+    // Kept separate because directory fsync can fail after rename committed
+    // the visible target. That state is installed-now but not crash-durable,
+    // not an install failure that left the old binary in place.
+    bool binary_committed{false};
+    bool binary_durable{false};
 };
 
 struct SingBoxInstallSteps {
@@ -124,7 +172,8 @@ struct SingBoxInstallSteps {
         read_staged_version;
     // Puts the staged binary at the target path, atomically enough that a
     // crash leaves either the old file or the new one.
-    std::function<bool(const std::string& staged_binary)> install_atomically;
+    std::function<SingBoxInstallCommitResult(
+        const std::string& staged_binary)> install_atomically;
     std::function<bool()> write_managed_marker;
 };
 
@@ -143,6 +192,7 @@ SingBoxInstallReport install_pinned_sing_box(
     const std::string& release_json_url,
     const std::string& pinned_version,
     const std::string& asset_architecture,
-    const SingBoxInstallProgress& progress = {});
+    const SingBoxInstallProgress& progress = {},
+    const SingBoxInstallPhaseAdmission& phase_admission = {});
 
 } // namespace keen_pbr3

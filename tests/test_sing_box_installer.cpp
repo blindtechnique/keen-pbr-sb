@@ -2,8 +2,11 @@
 
 #include "../src/update/sing_box_installer.hpp"
 
+#include <atomic>
 #include <map>
+#include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -48,10 +51,13 @@ struct Harness {
         {kChecksumsUrl, checksums_text()},
     };
     std::vector<std::string> performed;
-    bool install_succeeds{true};
+    SingBoxInstallCommitResult install_result{/*committed=*/true,
+                                              /*durable=*/true};
     bool marker_succeeds{true};
     std::string staged_version{kVersion};
     std::string staged_path{"/tmp/staged/sing-box"};
+    std::function<void(SingBoxInstallPhase)> on_phase;
+    SingBoxInstallPhaseAdmission phase_admission;
 
     SingBoxInstallSteps steps() {
         SingBoxInstallSteps steps;
@@ -76,7 +82,7 @@ struct Harness {
         };
         steps.install_atomically = [this](const std::string&) {
             performed.push_back("install");
-            return install_succeeds;
+            return install_result;
         };
         steps.write_managed_marker = [this]() {
             performed.push_back("marker");
@@ -97,7 +103,9 @@ struct Harness {
                 performed.push_back(
                     std::string("phase:") +
                     sing_box_install_phase_name(phase));
-            });
+                if (on_phase) on_phase(phase);
+            },
+            phase_admission);
     }
 
     bool did(const std::string& step) const {
@@ -115,6 +123,8 @@ TEST_CASE("a good release installs and records itself as ours") {
     const auto report = harness.run();
     CHECK(report.outcome == Outcome::installed);
     CHECK(report.staged_version == kVersion);
+    CHECK(report.binary_committed);
+    CHECK(report.binary_durable);
     CHECK(harness.did("install"));
     CHECK(harness.did("marker"));
 }
@@ -202,10 +212,21 @@ TEST_CASE("a failed install leaves the marker unwritten") {
     // never put in place would make the next capability read offer to replace
     // a file this daemon does not own.
     Harness harness;
-    harness.install_succeeds = false;
+    harness.install_result = {};
     const auto report = harness.run();
     CHECK(report.outcome == Outcome::install_failed);
     CHECK_FALSE(harness.did("marker"));
+}
+
+TEST_CASE("a committed rename with failed directory sync is not rolled back in the report") {
+    Harness harness;
+    harness.install_result = {/*committed=*/true, /*durable=*/false};
+    const auto report = harness.run();
+
+    CHECK(report.outcome == Outcome::installed);
+    CHECK(report.binary_committed);
+    CHECK_FALSE(report.binary_durable);
+    CHECK(harness.did("marker"));
 }
 
 TEST_CASE("an installed binary without its marker is neither success nor failure") {
@@ -277,6 +298,84 @@ TEST_CASE("progress stops at the phase that failed") {
           });
 }
 
+TEST_CASE("cancel during every reversible local phase prevents the install") {
+    for (const auto cancel_phase :
+         {SingBoxInstallPhase::verifying_archive,
+          SingBoxInstallPhase::unpacking,
+          SingBoxInstallPhase::checking_staged_version}) {
+        const std::string cancel_phase_name =
+            sing_box_install_phase_name(cancel_phase);
+        CAPTURE(cancel_phase_name);
+        Harness harness;
+        SingBoxInstallCancellationCoordinator coordinator;
+        auto token = std::make_shared<std::atomic<bool>>(false);
+        coordinator.begin(token);
+        bool accepted = false;
+        harness.on_phase = [&](const SingBoxInstallPhase phase) {
+            if (phase == cancel_phase) {
+                accepted = coordinator.cancel() ==
+                           SingBoxInstallCancelVerdict::accepted;
+            }
+        };
+        harness.phase_admission = [&](const SingBoxInstallPhase phase) {
+            return coordinator.enter_phase(token, phase);
+        };
+
+        const auto report = harness.run();
+        coordinator.finish(token);
+        CHECK(accepted);
+        CHECK(report.outcome == Outcome::cancelled);
+        CHECK_FALSE(report.binary_committed);
+        CHECK_FALSE(harness.did("install"));
+        CHECK_FALSE(harness.did("marker"));
+    }
+}
+
+TEST_CASE("cancel and the final reversible transition have exactly one winner") {
+    for (unsigned int iteration = 0U; iteration < 256U; ++iteration) {
+        CAPTURE(iteration);
+        SingBoxInstallCancellationCoordinator coordinator;
+        auto token = std::make_shared<std::atomic<bool>>(false);
+        coordinator.begin(token);
+
+        std::atomic<unsigned int> ready{0U};
+        std::atomic<bool> start{false};
+        bool admitted = false;
+        auto verdict = SingBoxInstallCancelVerdict::not_running;
+        std::thread entering([&]() {
+            ready.fetch_add(1U, std::memory_order_release);
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            admitted = coordinator.enter_phase(
+                token, SingBoxInstallPhase::installing);
+        });
+        std::thread cancelling([&]() {
+            ready.fetch_add(1U, std::memory_order_release);
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            verdict = coordinator.cancel();
+        });
+        while (ready.load(std::memory_order_acquire) != 2U) {
+            std::this_thread::yield();
+        }
+        start.store(true, std::memory_order_release);
+        entering.join();
+        cancelling.join();
+
+        if (admitted) {
+            CHECK(verdict ==
+                  SingBoxInstallCancelVerdict::past_point_of_no_return);
+            CHECK_FALSE(token->load(std::memory_order_relaxed));
+        } else {
+            CHECK(verdict == SingBoxInstallCancelVerdict::accepted);
+            CHECK(token->load(std::memory_order_relaxed));
+        }
+        coordinator.finish(token);
+    }
+}
+
 TEST_CASE("an install with nobody listening still installs") {
     // The observer is optional and observing must never be load-bearing. This
     // is the default-argument path every existing caller took before progress
@@ -311,7 +410,8 @@ TEST_CASE("every outcome has a name") {
          {Outcome::installed, Outcome::release_refused,
           Outcome::download_failed, Outcome::checksum_mismatch,
           Outcome::archive_unusable, Outcome::staged_version_mismatch,
-          Outcome::install_failed, Outcome::marker_not_written}) {
+          Outcome::install_failed, Outcome::marker_not_written,
+          Outcome::cancelled}) {
         CHECK(std::string(sing_box_install_outcome_name(outcome)).size() >
               0U);
     }

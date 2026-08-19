@@ -76,7 +76,8 @@ void discard_sing_box_staging(const SingBoxInstallPaths& paths) {
 SingBoxInstallSteps production_sing_box_install_steps(
     const SingBoxInstallPaths& paths,
     SingBoxDownloadProgress download_progress,
-    HttpCancellationToken cancellation) {
+    HttpCancellationToken cancellation,
+    SingBoxInstallDirectorySync install_directory_sync) {
     SingBoxInstallSteps steps;
 
     steps.fetch =
@@ -182,7 +183,8 @@ SingBoxInstallSteps production_sing_box_install_steps(
     };
 
     steps.install_atomically =
-        [paths](const std::string& staged_binary) -> bool {
+        [paths, install_directory_sync = std::move(install_directory_sync)](
+            const std::string& staged_binary) -> SingBoxInstallCommitResult {
         const fs::path target(paths.binary_path);
         const auto directory = target.parent_path();
         const auto pending = directory / (target.filename().string() + ".new");
@@ -193,12 +195,12 @@ SingBoxInstallSteps production_sing_box_install_steps(
         // removed afterwards either way, and a copy leaves the verified file
         // untouched if this fails partway.
         std::ifstream input(staged_binary, std::ios::binary);
-        if (!input) return false;
+        if (!input) return {};
         const std::string bytes(
             (std::istreambuf_iterator<char>(input)),
             std::istreambuf_iterator<char>());
-        if (bytes.empty()) return false;
-        if (!write_file(pending, bytes, 0755)) return false;
+        if (bytes.empty()) return {};
+        if (!write_file(pending, bytes, 0755)) return {};
 
         // Keep the binary being replaced, byte for byte, beside the target.
         // Without it "undo this install" means "download the old release and
@@ -223,11 +225,16 @@ SingBoxInstallSteps production_sing_box_install_steps(
         fs::rename(pending, target, error);
         if (error) {
             fs::remove(pending, error);
-            return false;
+            return {};
         }
         // Without this the rename can be lost while the new file's contents
         // survive, which on the next boot is a target that points nowhere.
-        return fsync_directory(directory);
+        const bool durable =
+            install_directory_sync
+                ? install_directory_sync(directory.string())
+                : fsync_directory(directory);
+        return SingBoxInstallCommitResult{/*committed=*/true,
+                                          /*durable=*/durable};
     };
 
     steps.write_managed_marker = [paths]() -> bool {
