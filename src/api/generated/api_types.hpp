@@ -1397,6 +1397,7 @@ namespace api {
     enum class ReleaseVerdict : int { ARCHIVE_MISSING, CHECKSUMS_MISSING, CHECKSUM_MISMATCH, CHECKSUM_UNUSABLE, READY, RELEASE_UNREADABLE };
 
     struct SingBoxInstallResult {
+        std::optional<bool> durable;
         InstallOutcome install_outcome;
         std::string pinned_version;
         std::optional<ReleaseVerdict> release_verdict;
@@ -5200,6 +5201,7 @@ namespace api {
     }
 
     inline void from_json(const json & j, SingBoxInstallResult& x) {
+        x.durable = get_stack_optional<bool>(j, "durable");
         x.install_outcome = j.at("install_outcome").get<InstallOutcome>();
         x.pinned_version = j.at("pinned_version").get<std::string>();
         x.release_verdict = get_stack_optional<ReleaseVerdict>(j, "release_verdict");
@@ -5210,6 +5212,7 @@ namespace api {
 
     inline void to_json(json & j, const SingBoxInstallResult & x) {
         j = json::object();
+        j["durable"] = x.durable;
         j["install_outcome"] = x.install_outcome;
         j["pinned_version"] = x.pinned_version;
         j["release_verdict"] = x.release_verdict;

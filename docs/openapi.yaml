@@ -4446,6 +4446,14 @@ components:
         pinned_version:
           type: string
           description: The release that was installed, or would have been.
+        durable:
+          type: boolean
+          description: >
+            Present only after the binary replacement committed. `true` means
+            the target directory was synced after the rename. `false` means
+            the new binary is already visible and may be running, but a crash
+            or power loss can still lose that rename; it must not be reported
+            as an ordinary durable success.
         release_verdict:
           type: string
           enum:

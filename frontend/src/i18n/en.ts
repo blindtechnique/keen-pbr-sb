@@ -1039,6 +1039,8 @@ export const enTranslation = {
         "VPN and proxy connections need it. Installing takes about a minute.",
       leftDown:
         "These connections did not start again and need to be started by hand: {{tags}}.",
+      notDurable:
+        "sing-box is running from the new binary, but its directory could not be synced. A sudden reboot or power loss may undo this install; check the installed version after the router starts.",
       runningPlain: "Installing…",
       stop: "Stop",
       tipStop:

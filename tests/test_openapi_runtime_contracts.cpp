@@ -72,6 +72,12 @@ TEST_CASE("OpenAPI response schemas match runtime body shapes") {
     const auto outbounds = backup.find("outbounds:");
     REQUIRE(outbounds != std::string_view::npos);
     CHECK(backup.find("type: array", outbounds) != std::string_view::npos);
+
+    const auto sing_box_install = yaml_block(
+        document, "    SingBoxInstallResult:\n", "\n    SingBoxProcessMode:");
+    CHECK(sing_box_install.find("durable:") != std::string_view::npos);
+    CHECK(sing_box_install.find("Present only after the binary replacement committed") !=
+          std::string_view::npos);
 }
 
 TEST_CASE("generated auth settings response accepts the runtime body") {
@@ -111,6 +117,23 @@ TEST_CASE("generated step-up response keeps the runtime grant TTL") {
     CHECK(response.granted);
     REQUIRE(response.expires_in_seconds.has_value());
     CHECK(*response.expires_in_seconds == 300);
+}
+
+TEST_CASE("generated sing-box install result keeps a non-durable commit") {
+    const nlohmann::json runtime_body{
+        {"install_outcome", "installed"},
+        {"pinned_version", "1.13.14"},
+        {"durable", false},
+    };
+
+    const auto response = runtime_body.get<api::SingBoxInstallResult>();
+    CHECK(response.install_outcome == api::InstallOutcome::INSTALLED);
+    REQUIRE(response.durable.has_value());
+    CHECK_FALSE(*response.durable);
+
+    const nlohmann::json round_trip = response;
+    REQUIRE(round_trip.contains("durable"));
+    CHECK_FALSE(round_trip.at("durable").get<bool>());
 }
 
 TEST_CASE("generated backup response accepts runtime outbound arrays") {

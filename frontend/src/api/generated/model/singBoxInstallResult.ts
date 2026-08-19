@@ -20,6 +20,9 @@ export interface SingBoxInstallResult {
   install_outcome: SingBoxInstallResultInstallOutcome;
   /** The release that was installed, or would have been. */
   pinned_version: string;
+  /** Present only after the binary replacement committed. `true` means the target directory was synced after the rename. `false` means the new binary is already visible and may be running, but a crash or power loss can still lose that rename; it must not be reported as an ordinary durable success.
+   */
+  durable?: boolean;
   /** Why the release was refused, when it was. `checksums_missing` means the release published no checksums file and was therefore not installed.
    */
   release_verdict?: SingBoxInstallResultReleaseVerdict;

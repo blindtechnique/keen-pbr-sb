@@ -34,6 +34,7 @@ import {
   singBoxDownloadLabel,
   singBoxInstallBlockerKey,
   singBoxInstallButton,
+  singBoxInstallDurabilityKey,
   singBoxInstallFailureTitleKey,
   singBoxInstallLeftDown,
   singBoxInstallMayHaveApplied,
@@ -121,11 +122,16 @@ export function SingBoxInstallButton({
   })
 
   const report = (result: SingBoxInstallResult) => {
-    const tone = singBoxInstallResultTone(result.install_outcome)
+    const tone = singBoxInstallResultTone(
+      result.install_outcome,
+      result.durable
+    )
     const message = t(singBoxInstallOutcomeKey(result.install_outcome))
 
     // Everything the operator needs to act on, in the order they need it.
     const lines: string[] = []
+    const durabilityKey = singBoxInstallDurabilityKey(result)
+    if (durabilityKey) lines.push(t(durabilityKey))
     const verdictKey = singBoxInstallVerdictKey(result)
     // Why the release was refused, when the outcome alone does not say -
     // "no checksums published" and "the digest did not match" are different

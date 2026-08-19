@@ -1846,6 +1846,22 @@ TEST_CASE("the sing-box install capability reports every blocker it found") {
     CHECK_FALSE(body.at("exact_rollback").get<bool>());
 }
 
+TEST_CASE("sing-box install durability exists only after a committed rename") {
+    const auto committed_durable =
+        sing_box_install_result_body_for_test(true, true);
+    REQUIRE(committed_durable.contains("durable"));
+    CHECK(committed_durable.at("durable").get<bool>());
+
+    const auto committed_not_durable =
+        sing_box_install_result_body_for_test(true, false);
+    REQUIRE(committed_not_durable.contains("durable"));
+    CHECK_FALSE(committed_not_durable.at("durable").get<bool>());
+
+    const auto not_committed =
+        sing_box_install_result_body_for_test(false, false);
+    CHECK_FALSE(not_committed.contains("durable"));
+}
+
 
 TEST_CASE("the install refuses when the capability says it may not") {
     // The capability is re-taken by the install itself rather than trusted

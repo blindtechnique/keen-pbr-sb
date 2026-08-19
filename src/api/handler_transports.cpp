@@ -183,6 +183,25 @@ api::ReleaseVerdict api_release_verdict(
     return api::ReleaseVerdict::RELEASE_UNREADABLE;
 }
 
+nlohmann::json sing_box_install_result_body(
+    const api::SingBoxInstallResult& result,
+    const bool binary_committed,
+    const bool binary_durable) {
+    auto body = nlohmann::json(result);
+    if (binary_committed) {
+        // A failed directory fsync does not undo a successful rename. The
+        // response has to say both truths: the new binary is live now, and it
+        // is not yet crash-durable.
+        body["durable"] = binary_durable;
+    } else {
+        // quicktype serialises an empty optional as null. The contract is
+        // stricter here: durability is knowable only after a committed
+        // rename, so before that the member is absent.
+        body.erase("durable");
+    }
+    return body;
+}
+
 api::SingBoxInstallCapabilityOperation api_install_operation(
     const SingBoxInstallOperation operation) {
     switch (operation) {
@@ -828,6 +847,18 @@ nlohmann::json restart_transport_manager_and_wait_for_runtime(
 
 } // namespace
 
+#ifdef KEEN_PBR3_TESTING
+nlohmann::json sing_box_install_result_body_for_test(
+    const bool binary_committed,
+    const bool binary_durable) {
+    api::SingBoxInstallResult result;
+    result.install_outcome = api::InstallOutcome::INSTALLED;
+    result.pinned_version = KEEN_PBR3_SING_BOX_PINNED_VERSION;
+    return sing_box_install_result_body(
+        result, binary_committed, binary_durable);
+}
+#endif
+
 using CompositeConfigCommit = std::function<std::string(
     ApiContext&,
     std::string,
@@ -1071,7 +1102,11 @@ static void register_transports_handler_impl(
                         "sing-box install did not complete: {}",
                         sing_box_install_outcome_name(report.outcome));
                 }
-                return nlohmann::json(result).dump();
+                return sing_box_install_result_body(
+                           result,
+                           report.binary_committed,
+                           report.binary_durable)
+                    .dump();
             } catch (const MaintenanceLockError& error) {
                 throw_maintenance_api_error(error);
             }

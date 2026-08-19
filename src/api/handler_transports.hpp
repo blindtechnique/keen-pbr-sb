@@ -19,6 +19,10 @@ void register_transports_handler_for_test(
     ApiContext& ctx,
     ConfigFileWriterForTest write_config_file,
     ConfigSaveTestOptions options = {});
+
+nlohmann::json sing_box_install_result_body_for_test(
+    bool binary_committed,
+    bool binary_durable);
 #endif
 
 } // namespace keen_pbr3

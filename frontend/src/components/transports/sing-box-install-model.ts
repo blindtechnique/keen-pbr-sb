@@ -169,15 +169,24 @@ export function singBoxInstallButton(
 export type ResultTone = "success" | "warning" | "failure" | "info"
 
 export function singBoxInstallResultTone(
-  outcome: SingBoxInstallResultInstallOutcome
+  outcome: SingBoxInstallResultInstallOutcome,
+  durable?: boolean
 ): ResultTone {
-  if (outcome === "installed") return "success"
+  if (outcome === "installed") return durable === false ? "warning" : "success"
   if (outcome === "marker_not_written") return "warning"
   // The operator stopped it. Reporting their own decision back to them in red
   // would teach them to distrust red, which is the one habit an install report
   // must not build.
   if (outcome === "cancelled") return "info"
   return "failure"
+}
+
+export function singBoxInstallDurabilityKey(
+  result: SingBoxInstallResult
+): string | null {
+  return result.durable === false
+    ? "transports.singBoxInstall.notDurable"
+    : null
 }
 
 export function singBoxInstallOutcomeKey(

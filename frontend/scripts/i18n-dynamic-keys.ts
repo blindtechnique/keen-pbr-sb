@@ -504,6 +504,13 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
   },
   {
     file: "src/components/transports/sing-box-install-button.tsx",
+    argument: "durabilityKey",
+    keys: ["transports.singBoxInstall.notDurable"],
+    reason:
+      "singBoxInstallDurabilityKey returns this one warning only for a committed rename whose target directory did not sync.",
+  },
+  {
+    file: "src/components/transports/sing-box-install-button.tsx",
     argument: "phaseKey",
     keys: ["transports.singBoxInstall.phase*"],
     reason:

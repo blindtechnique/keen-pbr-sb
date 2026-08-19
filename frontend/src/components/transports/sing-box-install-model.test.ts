@@ -14,6 +14,7 @@ import {
   singBoxInstallBlockerKey,
   singBoxInstallButton,
   singBoxInstallDisplayableBlockers,
+  singBoxInstallDurabilityKey,
   singBoxInstallFailureTitleKey,
   singBoxInstallLeftDown,
   singBoxInstallMayHaveApplied,
@@ -209,6 +210,21 @@ describe("sing-box install messages", () => {
     expect(singBoxInstallResultTone("installed")).toBe("success")
     expect(singBoxInstallResultTone("marker_not_written")).toBe("warning")
     expect(singBoxInstallResultTone("install_failed")).toBe("failure")
+  })
+
+  it("warns when the committed binary is not crash-durable", () => {
+    const result = {
+      install_outcome: "installed" as const,
+      pinned_version: "1.13.14",
+      durable: false,
+    }
+    expect(singBoxInstallResultTone("installed", false)).toBe("warning")
+    expect(singBoxInstallResultTone("installed", true)).toBe("success")
+    expect(singBoxInstallDurabilityKey(result)).toBe(
+      "transports.singBoxInstall.notDurable"
+    )
+    expect(singBoxInstallDurabilityKey({ ...result, durable: true })).toBeNull()
+    bothLocales("transports.singBoxInstall.notDurable")
   })
 
   it("shows a verdict only where one was actually reached", () => {
