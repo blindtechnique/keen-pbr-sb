@@ -166,6 +166,7 @@ NdmsNativeCooperativeImportResult completed_result() {
     result.transaction_id = std::string(32U, 'a');
     result.expected_interface = "Wireguard5";
     result.created_interface = "Wireguard5";
+    result.created_kernel_interface = "nwg5";
     result.kind = NdmsNativeTunnelImportKind::wireguard;
     result.delete_wal_readiness = NdmsNativeDeleteWalReadiness::clean;
     result.import_wal_readiness =
@@ -217,6 +218,7 @@ TEST_CASE("native import API maps only redacted typed evidence") {
     CHECK(response.at("transaction_id") == std::string(32U, 'a'));
     CHECK(response.at("expected_interface") == "Wireguard5");
     CHECK(response.at("created_interface") == "Wireguard5");
+    CHECK(response.at("created_kernel_interface") == "nwg5");
     CHECK(response.at("kind") == "wireguard");
     CHECK(response.at("delete_wal_readiness") == "clean");
     CHECK(response.at("import_wal_readiness") == "clean");
@@ -231,14 +233,59 @@ TEST_CASE("native import API maps only redacted typed evidence") {
     result.transaction_id = "PrivateKey=must-not-escape";
     result.expected_interface = "Wireguard5/revision/private";
     result.created_interface = "marker-secret";
+    result.created_kernel_interface = "nwg5/private";
     const auto refused_strings = ndms_native_import_api_response(result);
     CHECK_FALSE(refused_strings.contains("transaction_id"));
     CHECK_FALSE(refused_strings.contains("expected_interface"));
     CHECK_FALSE(refused_strings.contains("created_interface"));
+    CHECK_FALSE(refused_strings.contains("created_kernel_interface"));
     const auto serialized = refused_strings.dump();
     CHECK(serialized.find("PrivateKey") == std::string::npos);
     CHECK(serialized.find("revision/private") == std::string::npos);
     CHECK(serialized.find("marker-secret") == std::string::npos);
+    CHECK(serialized.find("nwg5/private") == std::string::npos);
+}
+
+TEST_CASE("native import API exposes only a complete proved created identity") {
+    auto result = completed_result();
+    result.status = NdmsNativeCooperativeImportStatus::recovery_required;
+    result.stop = NdmsNativeCooperativeImportStop::executor_blocked;
+    result.wal_may_require_recovery = true;
+
+    SUBCASE("paired safe firmware and kernel identities are mapped") {
+        const auto response = ndms_native_import_api_response(result);
+        CHECK(response.at("created_interface") == "Wireguard5");
+        CHECK(response.at("created_kernel_interface") == "nwg5");
+    }
+
+    SUBCASE("firmware identity without kernel proof is redacted as a pair") {
+        result.created_kernel_interface.reset();
+        const auto response = ndms_native_import_api_response(result);
+        CHECK_FALSE(response.contains("created_interface"));
+        CHECK_FALSE(response.contains("created_kernel_interface"));
+    }
+
+    SUBCASE("kernel identity without firmware proof is redacted as a pair") {
+        result.created_interface.reset();
+        const auto response = ndms_native_import_api_response(result);
+        CHECK_FALSE(response.contains("created_interface"));
+        CHECK_FALSE(response.contains("created_kernel_interface"));
+    }
+
+    SUBCASE("unsafe kernel identity is redacted as a pair") {
+        result.created_kernel_interface = "nwg5/private";
+        const auto response = ndms_native_import_api_response(result);
+        CHECK_FALSE(response.contains("created_interface"));
+        CHECK_FALSE(response.contains("created_kernel_interface"));
+        CHECK(response.dump().find("nwg5/private") == std::string::npos);
+    }
+
+    SUBCASE("overlong kernel identity is redacted as a pair") {
+        result.created_kernel_interface = std::string(16U, 'n');
+        const auto response = ndms_native_import_api_response(result);
+        CHECK_FALSE(response.contains("created_interface"));
+        CHECK_FALSE(response.contains("created_kernel_interface"));
+    }
 }
 
 TEST_CASE("native import rejects incoherent or unknown callback results") {
@@ -290,6 +337,18 @@ TEST_CASE("native import rejects incoherent or unknown callback results") {
                     NdmsNativeCooperativeImportWalReadiness::unsafe;
                 break;
             case 12U:
+                result.created_kernel_interface.reset();
+                break;
+            case 13U:
+                result.created_kernel_interface = "nwg5/private";
+                break;
+            case 14U:
+                result.created_kernel_interface = std::string(16U, 'n');
+                break;
+            case 15U:
+                result.created_interface.reset();
+                break;
+            case 16U:
                 result.request_may_have_been_dispatched = false;
                 break;
             default:
@@ -302,7 +361,7 @@ TEST_CASE("native import rejects incoherent or unknown callback results") {
     fixture.grant_step_up(session);
     const auto headers = fixture.accepted_headers(session);
 
-    for (std::size_t index = 0U; index < 14U; ++index) {
+    for (std::size_t index = 0U; index < 18U; ++index) {
         const auto response = fixture.client().Post(
             std::string{kNdmsNativeImportApiPath},
             headers,
@@ -314,8 +373,10 @@ TEST_CASE("native import rejects incoherent or unknown callback results") {
               "sensitive_request_failed");
         CHECK(response->body.find("Wireguard5/private") ==
               std::string::npos);
+        CHECK(response->body.find("nwg5/private") ==
+              std::string::npos);
     }
-    CHECK(callback_count == 14U);
+    CHECK(callback_count == 18U);
 }
 
 TEST_CASE("native import authentication and step-up reject before streaming") {

@@ -88,6 +88,32 @@ bool public_interface_name(const std::string& value) {
            identity->canonical_name() == value;
 }
 
+bool public_kernel_interface_name(const std::string_view value) noexcept {
+    if (value.empty() || value.size() > 15U || value == "." ||
+        value == "..") {
+        return false;
+    }
+    return std::all_of(
+        value.begin(), value.end(), [](const unsigned char character) {
+            const bool ascii_alnum =
+                (character >= 'a' && character <= 'z') ||
+                (character >= 'A' && character <= 'Z') ||
+                (character >= '0' && character <= '9');
+            return ascii_alnum || character == '_' ||
+                   character == '-' || character == '.' ||
+                   character == ':';
+        });
+}
+
+bool public_created_identity(
+    const NdmsNativeCooperativeImportResult& result) {
+    return result.created_interface.has_value() &&
+           public_interface_name(*result.created_interface) &&
+           result.created_kernel_interface.has_value() &&
+           public_kernel_interface_name(
+               *result.created_kernel_interface);
+}
+
 template <typename Enum>
 bool known_enum_value(const Enum value,
                       const Enum first,
@@ -175,8 +201,7 @@ void validate_public_import_result(
             *result.transaction_id) ||
         !result.expected_interface.has_value() ||
         !public_interface_name(*result.expected_interface) ||
-        !result.created_interface.has_value() ||
-        !public_interface_name(*result.created_interface) ||
+        !public_created_identity(result) ||
         *result.expected_interface != *result.created_interface ||
         !result.kind.has_value() ||
         result.delete_wal_readiness !=
@@ -246,9 +271,10 @@ nlohmann::json ndms_native_import_api_response(
         public_interface_name(*result.expected_interface)) {
         response["expected_interface"] = *result.expected_interface;
     }
-    if (result.created_interface.has_value() &&
-        public_interface_name(*result.created_interface)) {
+    if (public_created_identity(result)) {
         response["created_interface"] = *result.created_interface;
+        response["created_kernel_interface"] =
+            *result.created_kernel_interface;
     }
     if (result.kind.has_value()) {
         response["kind"] = ndms_native_tunnel_import_kind_name(
