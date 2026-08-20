@@ -4,6 +4,7 @@
 #include "ndms_wireguard_identity.hpp"
 
 #include <algorithm>
+#include <tuple>
 
 namespace keen_pbr3 {
 
@@ -22,35 +23,67 @@ bool catalog_digest_well_formed(const std::string& value) {
 
 bool probe_internally_valid(
     const NdmsNativeImportRecoveryCatalogProbe& probe) {
-    if (probe.observation_generation == 0U ||
+    if (!valid_ndms_native_observation_stamp(
+            probe.durable_observation) ||
+        probe.measured_catalog_revision !=
+            probe.durable_observation.catalog_revision ||
         !probe.marker_scan_complete ||
         !catalog_digest_well_formed(probe.protected_catalog_sha256)) {
         return false;
     }
+    std::vector<std::string> interface_names;
+    interface_names.reserve(probe.marker_sightings.size());
     for (const auto& sighting : probe.marker_sightings) {
-        if (sighting.interface_name.empty()) return false;
+        if (sighting.interface_name.empty() ||
+            !ndms_native_import_prefixed_sha256(
+                sighting.full_revision, "ndms-rci-full-v1-")) {
+            return false;
+        }
+        interface_names.push_back(sighting.interface_name);
     }
+    std::sort(interface_names.begin(), interface_names.end());
+    if (std::adjacent_find(
+            interface_names.begin(), interface_names.end()) !=
+        interface_names.end()) return false;
     return true;
+}
+
+bool probe_matches_wal_binding(
+    const NdmsNativeObservationBinding& binding,
+    const NdmsNativeImportRecoveryCatalogProbe& probe) noexcept {
+    const auto& stamp = probe.durable_observation;
+    return stamp.authority_id == binding.authority_id &&
+           stamp.mutation_epoch == binding.mutation_epoch &&
+           stamp.sequence > binding.baseline_sequence;
 }
 
 bool sightings_agree(
     const std::vector<NdmsNativeImportRecoveryMarkerSighting>& earlier,
     const std::vector<NdmsNativeImportRecoveryMarkerSighting>& later) {
     if (earlier.size() != later.size()) return false;
-    // Order-insensitive: two scans of the same catalog may enumerate slots
-    // differently without the world having moved.
-    for (const auto& sighting : earlier) {
-        const auto match = std::find_if(
-            later.begin(), later.end(),
-            [&sighting](
-                const NdmsNativeImportRecoveryMarkerSighting& other) {
-                return other.interface_name == sighting.interface_name &&
-                       other.link_down == sighting.link_down &&
-                       other.full_revision == sighting.full_revision;
-            });
-        if (match == later.end()) return false;
-    }
-    return true;
+    const auto ordering = [](
+        const NdmsNativeImportRecoveryMarkerSighting& left,
+        const NdmsNativeImportRecoveryMarkerSighting& right) {
+        return std::tie(
+                   left.interface_name, left.link_down,
+                   left.full_revision) <
+               std::tie(
+                   right.interface_name, right.link_down,
+                   right.full_revision);
+    };
+    auto sorted_earlier = earlier;
+    auto sorted_later = later;
+    std::sort(sorted_earlier.begin(), sorted_earlier.end(), ordering);
+    std::sort(sorted_later.begin(), sorted_later.end(), ordering);
+    return std::equal(
+        sorted_earlier.begin(), sorted_earlier.end(),
+        sorted_later.begin(),
+        [](const NdmsNativeImportRecoveryMarkerSighting& left,
+           const NdmsNativeImportRecoveryMarkerSighting& right) {
+            return left.interface_name == right.interface_name &&
+                   left.link_down == right.link_down &&
+                   left.full_revision == right.full_revision;
+        });
 }
 
 // The baseline recorded which slots were occupied before the import ran. A
@@ -103,32 +136,36 @@ build_ndms_native_import_recovery_observation(
     // Every exit below this point that is not the final assembly returns the
     // default observation: authoritative=false, everything else at its safe
     // value. The classifier answers that with a read-only retry.
-    if (!probe_internally_valid(earlier) || !probe_internally_valid(later)) {
+    if (!valid_ndms_native_observation_binding(
+            record.observation_binding) ||
+        !probe_internally_valid(earlier) ||
+        !probe_internally_valid(later) ||
+        !probe_matches_wal_binding(record.observation_binding, earlier) ||
+        !probe_matches_wal_binding(record.observation_binding, later)) {
         return observation;
     }
-    // Same epoch as each other and as the baseline: a generation number from
-    // another epoch is a number, not a successor.
-    if (earlier.observation_epoch != later.observation_epoch ||
-        earlier.observation_epoch != record.baseline.observation_epoch) {
-        return observation;
-    }
-    // Strictly advancing: the same read handed in twice proves nothing about
-    // stability, however far apart the calls were.
-    if (later.observation_generation <= earlier.observation_generation) {
+    // Strictly advancing durable observations: the same stamp handed in twice
+    // proves nothing about stability, however far apart the calls were.
+    if (later.durable_observation.sequence <=
+        earlier.durable_observation.sequence) {
         return observation;
     }
     // The two reads must describe the same world. Disagreement - a marker
     // that appeared, a link that came up, a revision that moved - means the
     // world is still moving, and a moving world is observed again, not acted
     // on.
-    if (earlier.protected_catalog_sha256 != later.protected_catalog_sha256 ||
+    if (earlier.measured_catalog_revision !=
+            later.measured_catalog_revision ||
+        earlier.protected_catalog_sha256 != later.protected_catalog_sha256 ||
         !sightings_agree(earlier.marker_sightings, later.marker_sightings)) {
         return observation;
     }
 
-    observation.generation_advanced =
-        earlier.observation_generation >
-        record.baseline.observation_generation;
+    // Reaching assembly means both durable sequences were newer than the WAL
+    // baseline and later was newer than earlier. Retain the classifier's
+    // established field name while changing its evidence to restart-safe
+    // sequence ordering.
+    observation.generation_advanced = true;
     observation.protected_catalog_unchanged =
         earlier.protected_catalog_sha256 ==
         record.baseline.protected_catalog_sha256;

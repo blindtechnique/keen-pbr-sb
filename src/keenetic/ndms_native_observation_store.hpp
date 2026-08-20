@@ -141,6 +141,15 @@ public:
         const NdmsNativeMutationEpoch& mutation,
         std::string catalog_revision);
 
+    // Restart-safe issuer boundary for an integrity-validated WAL record.
+    // The binding must still name the ledger's exact authority and current
+    // mutation epoch, and the ledger sequence may never be behind its durable
+    // baseline. Callers must invoke this only after one complete direct read.
+    NdmsNativeObservationStamp record_recovery_observation(
+        NdmsNativeWriterLease& writer,
+        const NdmsNativeObservationBinding& wal_binding,
+        std::string catalog_revision);
+
     const std::filesystem::path& state_directory() const noexcept;
 
 private:
@@ -154,6 +163,11 @@ private:
 
 bool valid_ndms_native_observation_catalog_revision(
     const std::string& revision) noexcept;
+// Verifies the complete self-contained durable stamp, including the ledger
+// integrity over authority, sequence, epoch and catalog revision. This is a
+// corruption/mix-up check, not a replacement for matching a WAL binding.
+bool valid_ndms_native_observation_stamp(
+    const NdmsNativeObservationStamp& stamp) noexcept;
 bool valid_ndms_native_observation_binding(
     const NdmsNativeObservationBinding& binding) noexcept;
 NdmsNativeObservationBinding ndms_native_observation_binding(

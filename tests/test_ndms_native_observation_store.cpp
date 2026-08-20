@@ -132,6 +132,7 @@ TEST_CASE("observation authority provisions once and survives reconstruction") {
 TEST_CASE("observation sequence and mutation epoch remain authoritative across restart") {
     TempDirectory directory;
     NdmsNativeMutationEpoch mutation;
+    NdmsNativeObservationBinding binding;
     NdmsNativeObservationStamp earlier;
     {
         RuntimeMutationAdmission first_runtime;
@@ -147,9 +148,10 @@ TEST_CASE("observation sequence and mutation epoch remain authoritative across r
         CHECK(mutation.authority_id == kAuthority);
         CHECK(mutation.baseline_sequence == 1U);
         CHECK(mutation.mutation_epoch == 1U);
+        binding = ndms_native_observation_binding(mutation);
 
-        earlier = first.record_mutation_observation(
-            first_writer.lease, mutation, catalog_revision('b'));
+        earlier = first.record_recovery_observation(
+            first_writer.lease, binding, catalog_revision('b'));
         CHECK(earlier.sequence == 2U);
         CHECK(earlier.mutation_epoch == 1U);
     }
@@ -168,12 +170,34 @@ TEST_CASE("observation sequence and mutation epoch remain authoritative across r
     CHECK(loaded.ledger->sequence == earlier.sequence);
     CHECK(loaded.ledger->mutation_epoch == mutation.mutation_epoch);
 
-    const auto later = restarted.record_mutation_observation(
-        restarted_writer.lease, mutation, catalog_revision('b'));
+    const auto later = restarted.record_recovery_observation(
+        restarted_writer.lease, binding, catalog_revision('b'));
     CHECK(later.sequence == 3U);
     CHECK(later.sequence > earlier.sequence);
     CHECK(later.mutation_epoch == earlier.mutation_epoch);
     CHECK(later.catalog_revision == earlier.catalog_revision);
+
+    auto foreign_authority = binding;
+    foreign_authority.authority_id = std::string(32U, '9');
+    CHECK_THROWS_AS(
+        restarted.record_recovery_observation(
+            restarted_writer.lease, foreign_authority,
+            catalog_revision('c')),
+        NdmsNativeObservationStoreError);
+    auto foreign_epoch = binding;
+    ++foreign_epoch.mutation_epoch;
+    CHECK_THROWS_AS(
+        restarted.record_recovery_observation(
+            restarted_writer.lease, foreign_epoch,
+            catalog_revision('c')),
+        NdmsNativeObservationStoreError);
+    auto future_baseline = binding;
+    future_baseline.baseline_sequence = later.sequence + 1U;
+    CHECK_THROWS_AS(
+        restarted.record_recovery_observation(
+            restarted_writer.lease, future_baseline,
+            catalog_revision('c')),
+        NdmsNativeObservationStoreError);
 }
 
 TEST_CASE("begin mutation is an exact CAS over the baseline stamp") {

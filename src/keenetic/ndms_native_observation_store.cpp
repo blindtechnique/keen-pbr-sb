@@ -748,6 +748,35 @@ bool valid_ndms_native_observation_catalog_revision(
         revision, kNdmsNativeObservationCatalogRevisionPrefix);
 }
 
+bool valid_ndms_native_observation_stamp(
+    const NdmsNativeObservationStamp& stamp) noexcept {
+    const NdmsNativeObservationBinding shape{
+        stamp.authority_id,
+        stamp.mutation_epoch,
+        stamp.sequence,
+    };
+    if (!valid_ndms_native_observation_binding(shape) ||
+        !valid_ndms_native_observation_catalog_revision(
+            stamp.catalog_revision)) {
+        return false;
+    }
+    try {
+        NdmsNativeObservationLedger ledger;
+        ledger.authority_id = stamp.authority_id;
+        ledger.sequence = stamp.sequence;
+        ledger.mutation_epoch = stamp.mutation_epoch;
+        ledger.last_catalog_revision = stamp.catalog_revision;
+        ledger.integrity = stamp.ledger_integrity;
+        return prefixed_digest(
+                   stamp.ledger_integrity,
+                   kNdmsNativeObservationIntegrityPrefix) &&
+               stamp.ledger_integrity ==
+                   ndms_native_observation_integrity(ledger);
+    } catch (...) {
+        return false;
+    }
+}
+
 bool valid_ndms_native_observation_binding(
     const NdmsNativeObservationBinding& binding) noexcept {
     return lower_hex(binding.authority_id, 32U) &&
@@ -1029,6 +1058,57 @@ NdmsNativeObservationStore::record_mutation_observation(
         !(*verified.ledger == next)) {
         throw NdmsNativeObservationStoreError(
             "native mutation observation failed durable verification");
+    }
+    writer.verify_held();
+    return stamp_from(next);
+}
+
+NdmsNativeObservationStamp
+NdmsNativeObservationStore::record_recovery_observation(
+    NdmsNativeWriterLease& writer,
+    const NdmsNativeObservationBinding& wal_binding,
+    std::string catalog_revision) {
+    require_valid_catalog_revision(catalog_revision);
+    if (!valid_ndms_native_observation_binding(wal_binding)) {
+        throw NdmsNativeObservationStoreError(
+            "native recovery observation binding is invalid");
+    }
+    verify_writer(writer);
+    const auto policy = writer_policy(
+        static_cast<uid_t>(writer.owner_),
+        static_cast<gid_t>(writer.group_)
+#ifdef KEEN_PBR3_TESTING
+        , test_hooks_
+#endif
+    );
+    std::lock_guard<std::mutex> process_lock(observation_store_mutex);
+    if (!cleanup_temporaries(writer.directory_descriptor_, policy)) {
+        throw NdmsNativeObservationStoreError(
+            "native observation temporary inventory is unsafe");
+    }
+    const auto current = read_locked(writer.directory_descriptor_, policy);
+    if (current.state != LockedReadState::valid || !current.ledger ||
+        wal_binding.authority_id != current.ledger->authority_id ||
+        wal_binding.mutation_epoch != current.ledger->mutation_epoch ||
+        current.ledger->sequence < wal_binding.baseline_sequence) {
+        throw NdmsNativeObservationStoreError(
+            "native recovery observation binding is stale or mismatched");
+    }
+    if (current.ledger->sequence ==
+        std::numeric_limits<std::uint64_t>::max()) {
+        throw NdmsNativeObservationStoreError(
+            "native observation sequence is exhausted");
+    }
+    auto next = *current.ledger;
+    ++next.sequence;
+    next.last_catalog_revision = std::move(catalog_revision);
+    next.integrity = ndms_native_observation_integrity(next);
+    publish_locked(writer.directory_descriptor_, next, false, policy);
+    const auto verified = read_locked(writer.directory_descriptor_, policy);
+    if (verified.state != LockedReadState::valid || !verified.ledger ||
+        !(*verified.ledger == next)) {
+        throw NdmsNativeObservationStoreError(
+            "native recovery observation failed durable verification");
     }
     writer.verify_held();
     return stamp_from(next);

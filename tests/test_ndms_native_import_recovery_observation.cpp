@@ -20,11 +20,45 @@ namespace {
 const std::string kBaselineCatalog =
     std::string(kNdmsNativeImportProtectedCatalogDigestPrefix) +
     std::string(64U, 'a');
-const std::string kRevision(64U, 'b');
+const std::string kRevision =
+    "ndms-rci-full-v1-" + std::string(64U, 'b');
+const std::string kAuthority(32U, '1');
+const std::string kMeasuredCatalog =
+    std::string(kNdmsNativeObservationCatalogRevisionPrefix) +
+    std::string(64U, '2');
+constexpr std::uint64_t kMutationEpoch = 17U;
+constexpr std::uint64_t kBaselineSequence = 40U;
+
+NdmsNativeObservationStamp stamp_fixture(
+    const std::uint64_t sequence,
+    const std::string& catalog_revision = kMeasuredCatalog,
+    const std::string& authority = kAuthority,
+    const std::uint64_t mutation_epoch = kMutationEpoch) {
+    NdmsNativeObservationLedger ledger;
+    ledger.authority_id = authority;
+    ledger.sequence = sequence;
+    ledger.mutation_epoch = mutation_epoch;
+    ledger.last_catalog_revision = catalog_revision;
+    ledger.integrity = ndms_native_observation_integrity(ledger);
+    return {
+        authority,
+        sequence,
+        mutation_epoch,
+        catalog_revision,
+        ledger.integrity,
+    };
+}
 
 // Wireguard5 occupied-free baseline: all slots free.
 NdmsNativeImportWalRecord record_fixture() {
     NdmsNativeImportWalRecord record;
+    record.observation_binding = {
+        kAuthority,
+        kMutationEpoch,
+        kBaselineSequence,
+    };
+    // Deliberately unrelated process-local counters. Recovery ordering must
+    // come only from the durable binding/stamps and survive their reset.
     record.baseline.observation_generation = 40U;
     record.baseline.observation_epoch = 7U;
     record.baseline.protected_catalog_sha256 = kBaselineCatalog;
@@ -34,10 +68,10 @@ NdmsNativeImportWalRecord record_fixture() {
 }
 
 NdmsNativeImportRecoveryCatalogProbe probe_fixture(
-    std::uint64_t generation) {
+    const std::uint64_t sequence) {
     NdmsNativeImportRecoveryCatalogProbe probe;
-    probe.observation_generation = generation;
-    probe.observation_epoch = 7U;
+    probe.durable_observation = stamp_fixture(sequence);
+    probe.measured_catalog_revision = kMeasuredCatalog;
     probe.protected_catalog_sha256 = kBaselineCatalog;
     probe.marker_scan_complete = true;
     return probe;
@@ -137,7 +171,7 @@ TEST_CASE("a moving world is observed again, not acted on") {
                     .authoritative);
 }
 
-TEST_CASE("an incomplete scan or foreign epoch never gains authority") {
+TEST_CASE("an incomplete scan or foreign durable identity never gains authority") {
     auto incomplete = probe_fixture(41U);
     incomplete.marker_scan_complete = false;
     CHECK_FALSE(build_ndms_native_import_recovery_observation(
@@ -145,11 +179,22 @@ TEST_CASE("an incomplete scan or foreign epoch never gains authority") {
                     std::nullopt)
                     .authoritative);
 
-    // A generation from another epoch is a number, not a successor.
+    // A sequence from another durable epoch is a number, not a successor.
     auto foreign_earlier = probe_fixture(41U);
     auto foreign_later = probe_fixture(42U);
-    foreign_earlier.observation_epoch = 8U;
-    foreign_later.observation_epoch = 8U;
+    foreign_earlier.durable_observation = stamp_fixture(
+        41U, kMeasuredCatalog, kAuthority, kMutationEpoch + 1U);
+    foreign_later.durable_observation = stamp_fixture(
+        42U, kMeasuredCatalog, kAuthority, kMutationEpoch + 1U);
+    CHECK_FALSE(build_ndms_native_import_recovery_observation(
+                    record_fixture(), foreign_earlier, foreign_later,
+                    std::nullopt)
+                    .authoritative);
+
+    foreign_earlier.durable_observation = stamp_fixture(
+        41U, kMeasuredCatalog, std::string(32U, '9'));
+    foreign_later.durable_observation = stamp_fixture(
+        42U, kMeasuredCatalog, std::string(32U, '9'));
     CHECK_FALSE(build_ndms_native_import_recovery_observation(
                     record_fixture(), foreign_earlier, foreign_later,
                     std::nullopt)
@@ -170,16 +215,75 @@ TEST_CASE("catalog drift against the baseline is reported, not hidden") {
     CHECK_FALSE(observation.protected_catalog_unchanged);
 }
 
-TEST_CASE("no generation advance is authoritative and says so") {
-    // Generations equal to the baseline: the catalog was never re-observed
-    // after the import may have run. The classifier turns this into a
-    // read-only retry via generation_advanced, not via lost authority.
+TEST_CASE("both durable sequences must be newer than the WAL baseline") {
     auto record = record_fixture();
-    record.baseline.observation_generation = 41U;
+    record.observation_binding.baseline_sequence = 41U;
+    CHECK_FALSE(build_ndms_native_import_recovery_observation(
+                    record, probe_fixture(41U), probe_fixture(42U),
+                    std::nullopt)
+                    .authoritative);
+
+    CHECK_FALSE(build_ndms_native_import_recovery_observation(
+                    record_fixture(), probe_fixture(43U),
+                    probe_fixture(42U), std::nullopt)
+                    .authoritative);
+
+    auto invalid_binding = record_fixture();
+    invalid_binding.observation_binding.baseline_sequence = 0U;
+    CHECK_FALSE(build_ndms_native_import_recovery_observation(
+                    invalid_binding, probe_fixture(41U),
+                    probe_fixture(42U), std::nullopt)
+                    .authoritative);
+}
+
+TEST_CASE("restart ordering accepts high durable sequences and ignores cache reset") {
+    auto record = record_fixture();
+    record.observation_binding.baseline_sequence =
+        (std::uint64_t{1} << 48U) + 7U;
+    record.baseline.observation_generation = 1U;
+    record.baseline.observation_epoch = 0U;
     const auto observation = build_ndms_native_import_recovery_observation(
-        record, probe_fixture(41U), probe_fixture(42U), std::nullopt);
+        record,
+        probe_fixture(record.observation_binding.baseline_sequence + 1U),
+        probe_fixture(record.observation_binding.baseline_sequence + 9U),
+        std::nullopt);
     CHECK(observation.authoritative);
-    CHECK_FALSE(observation.generation_advanced);
+    CHECK(observation.generation_advanced);
+}
+
+TEST_CASE("mixed or reused durable stamps fail closed") {
+    auto mixed_payload = probe_fixture(41U);
+    mixed_payload.durable_observation = stamp_fixture(
+        41U,
+        std::string(kNdmsNativeObservationCatalogRevisionPrefix) +
+            std::string(64U, '8'));
+    CHECK_FALSE(build_ndms_native_import_recovery_observation(
+                    record_fixture(), mixed_payload, probe_fixture(42U),
+                    std::nullopt)
+                    .authoritative);
+
+    auto mixed_integrity = probe_fixture(41U);
+    ++mixed_integrity.durable_observation.sequence;
+    CHECK_FALSE(build_ndms_native_import_recovery_observation(
+                    record_fixture(), mixed_integrity, probe_fixture(43U),
+                    std::nullopt)
+                    .authoritative);
+
+    auto other_world = probe_fixture(42U);
+    other_world.measured_catalog_revision =
+        std::string(kNdmsNativeObservationCatalogRevisionPrefix) +
+        std::string(64U, '7');
+    other_world.durable_observation = stamp_fixture(
+        42U, other_world.measured_catalog_revision);
+    CHECK_FALSE(build_ndms_native_import_recovery_observation(
+                    record_fixture(), probe_fixture(41U), other_world,
+                    std::nullopt)
+                    .authoritative);
+
+    CHECK_FALSE(build_ndms_native_import_recovery_observation(
+                    record_fixture(), probe_fixture(42U),
+                    probe_fixture(42U), std::nullopt)
+                    .authoritative);
 }
 
 TEST_CASE("a slot occupied at baseline is not this transaction's to own") {
@@ -258,6 +362,18 @@ TEST_CASE("two markers are counted, and counted is all they need to be") {
     CHECK_FALSE(observation.marker_target.has_value());
 }
 
+TEST_CASE("duplicate sightings cannot masquerade as an agreeing multiset") {
+    auto earlier = probe_fixture(41U);
+    auto later = probe_fixture(42U);
+    auto second = sighting_fixture();
+    second.interface_name = "Wireguard6";
+    earlier.marker_sightings = {sighting_fixture(), sighting_fixture()};
+    later.marker_sightings = {sighting_fixture(), second};
+    CHECK_FALSE(build_ndms_native_import_recovery_observation(
+                    record_fixture(), earlier, later, std::nullopt)
+                    .authoritative);
+}
+
 TEST_CASE("probes built by the real producer are accepted by this checker") {
     // The test that was missing, and whose absence let this module reject
     // every probe production could ever hand it. Nothing here is hand-built:
@@ -277,19 +393,23 @@ TEST_CASE("probes built by the real producer are accepted by this checker") {
     snapshot.catalog = parse_ndms_interface_catalog(payload);
     snapshot.status = NdmsCatalogCacheStatus::fresh;
     snapshot.refreshed = true;
-    snapshot.observation_epoch = 7U;
-    snapshot.invalidation_epoch = 7U;
+    snapshot.observed_at = std::chrono::steady_clock::now();
 
     const std::string marker = "kpbr-ni-v1-" + std::string(32U, 'a');
-    const auto build_probe = [&](const std::uint64_t generation) {
-        snapshot.observation_generation = generation;
-        return build_ndms_native_import_recovery_probe(snapshot, 5U, marker,
-                                                       {});
+    const auto measured_revision =
+        ndms_native_import_recovery_catalog_revision(snapshot.catalog, {});
+    const auto build_probe = [&](const std::uint64_t sequence) {
+        return build_ndms_native_import_recovery_probe(
+            snapshot, stamp_fixture(sequence, measured_revision), 5U,
+            marker, {});
     };
 
     NdmsNativeImportWalRecord record;
-    record.baseline.observation_generation = 40U;
-    record.baseline.observation_epoch = 7U;
+    record.observation_binding = {
+        kAuthority,
+        kMutationEpoch,
+        kBaselineSequence,
+    };
     record.baseline.protected_catalog_sha256 =
         ndms_native_import_protected_catalog_digest(snapshot.catalog, 5U);
     record.baseline.occupancy_hex = std::string(32U, '0');

@@ -18,15 +18,19 @@ struct NdmsNativeImportRecoveryMarkerSighting {
     std::string full_revision;
 };
 
-// One complete, bounded read of the live WireGuard catalog. The reader that
-// fills this must set marker_scan_complete only when every slot of the
-// measured Wireguard0..Wireguard126 namespace was actually inspected; a scan
-// that gave up half way is a scan that can miss a second marker, and a missed
-// second marker is how a rollback deletes the wrong interface.
+// One complete, bounded direct read of the live WireGuard catalog, paired with
+// the restart-stable stamp durably issued for those exact measured bytes.
+// Process-local cache generation/epoch counters deliberately do not cross this
+// seam: they restart at zero and cannot prove post-crash ordering.
 struct NdmsNativeImportRecoveryCatalogProbe {
-    std::uint64_t observation_generation{0};
-    std::uint64_t observation_epoch{0};
+    NdmsNativeObservationStamp durable_observation;
+    // Independently derived from the catalog and direct per-target evidence.
+    // It must equal durable_observation.catalog_revision, preventing a stamp
+    // from one read from being attached to another read's payload.
+    std::string measured_catalog_revision;
     std::string protected_catalog_sha256;
+    // True only when every Wireguard0..Wireguard126 slot was safe and the
+    // direct evidence for every marker sighting was present and unambiguous.
     bool marker_scan_complete{false};
     std::vector<NdmsNativeImportRecoveryMarkerSighting> marker_sightings;
 };
@@ -41,12 +45,13 @@ struct NdmsNativeImportRecoveryCatalogProbe {
 // judgement was never the defect, the inputs handed to it were, so the inputs
 // get their own tested seam.
 //
-// Two probes, not one, and the later must carry a strictly greater catalog
-// generation: absence observed once is a moment, absence observed twice
-// across an advancing generation is a state. Any internal inconsistency, any
-// disagreement between the probes, an incomplete scan, an epoch that does not
-// match the baseline's - all of it degrades to a default observation whose
-// `authoritative` is false, which the classifier answers with
+// Two probes, not one. Both durable sequences must be strictly newer than the
+// WAL baseline, carry the WAL's exact authority+mutation epoch, and the later
+// sequence must be strictly newer than the earlier one. Absence observed once
+// is a moment; absence observed twice across advancing durable observations is
+// a state. Any internal inconsistency, disagreement, incomplete scan, mixed
+// authority/epoch or reused/stale sequence degrades to a default observation
+// whose `authoritative` is false, which the classifier answers with
 // retry_read_only_observation. Degrading to a retry can stall recovery;
 // guessing can delete an interface the operator owns. The builder never
 // guesses.

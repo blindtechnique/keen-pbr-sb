@@ -19,6 +19,15 @@ struct NdmsNativeImportRecoveryTargetEvidence {
     std::string full_revision;
 };
 
+// Canonical secret-independent revision of exactly the full slot scan and the
+// direct target evidence that will form a recovery probe. The caller records
+// this revision in NdmsNativeObservationStore before attaching the returned
+// durable stamp to the same measured data.
+std::string ndms_native_import_recovery_catalog_revision(
+    const NdmsInterfaceCatalog& catalog,
+    const std::vector<NdmsNativeImportRecoveryTargetEvidence>&
+        target_evidence);
+
 // Builds one typed catalog probe from one catalog snapshot plus the direct
 // per-target reads. The last unwired seam of the recovery chain: everything
 // downstream - observation, classification, lease, plan, dispatch - consumes
@@ -34,6 +43,7 @@ struct NdmsNativeImportRecoveryTargetEvidence {
 NdmsNativeImportRecoveryCatalogProbe
 build_ndms_native_import_recovery_probe(
     const NdmsCatalogSnapshot& snapshot,
+    const NdmsNativeObservationStamp& durable_observation,
     std::uint8_t expected_target_slot,
     const std::string& marker,
     const std::vector<NdmsNativeImportRecoveryTargetEvidence>&
