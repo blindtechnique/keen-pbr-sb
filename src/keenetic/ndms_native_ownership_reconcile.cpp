@@ -43,18 +43,31 @@ InterfacePresence presence_of(
 
 } // namespace
 
+bool ndms_native_ownership_reconciliation_permitted(
+    const bool import_wal_transaction_in_flight,
+    const NdmsNativeDeleteWalReadiness delete_wal_readiness) noexcept {
+    return !import_wal_transaction_in_flight &&
+           delete_wal_readiness == NdmsNativeDeleteWalReadiness::clean;
+}
+
 NdmsNativeOwnershipReconcileResult reconcile_ndms_native_ownership_claims(
     NdmsNativeOwnershipStore& ownership_store,
     const bool wal_transaction_in_flight,
-    const NdmsNativeInterfaceReadDependencies& read_dependencies) {
+    const NdmsNativeInterfaceReadDependencies& read_dependencies,
+    const NdmsNativeDeleteWalReadiness delete_wal_readiness) {
     NdmsNativeOwnershipReconcileResult result;
     if (!read_dependencies.read_document) return result;
-    if (wal_transaction_in_flight) {
+    if (!ndms_native_ownership_reconciliation_permitted(
+            wal_transaction_in_flight, delete_wal_readiness)) {
         // The dispatcher owns every claim while its transaction is live, and
         // it retracts them itself. A second remover racing it would turn its
         // retirement into a `removed_claim_survived` for no reason.
         result.store_readable = true;
-        result.skipped_transaction_in_flight = true;
+        result.skipped_transaction_in_flight =
+            wal_transaction_in_flight;
+        result.skipped_delete_wal_not_clean =
+            delete_wal_readiness !=
+            NdmsNativeDeleteWalReadiness::clean;
         return result;
     }
 
@@ -70,6 +83,10 @@ NdmsNativeOwnershipReconcileResult reconcile_ndms_native_ownership_claims(
             // A torn claim is not evidence that the interface is gone, and it
             // cannot be removed exactly because its bytes will not parse.
             result.unresolved.push_back(interface_name);
+            continue;
+        }
+        if (ndms_native_ownership_is_delete_tombstone(*claim.record)) {
+            result.retained_tombstones.push_back(interface_name);
             continue;
         }
         switch (presence_of(interface_name, read_dependencies)) {

@@ -2,6 +2,7 @@
 
 #include "ndms_native_import_wal.hpp"
 
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -13,6 +14,33 @@
 
 namespace keen_pbr3 {
 
+inline constexpr std::uint32_t kNdmsNativeOwnershipSchemaVersion = 3U;
+
+enum class NdmsNativeOwnershipLifecycle : std::uint8_t {
+    // The interface is known to exist in running configuration. No claim is
+    // made that `system configuration save` persisted it to startup state.
+    active_running_only,
+    // A save was acknowledged, but Keenetic exposes no exact saved-state/CAS
+    // proof. The interface remains active and panel-owned.
+    active_save_acknowledged_unverified,
+    // Exact delete and running absence were observed, then save was
+    // acknowledged without saved-state proof. Identity and encrypted rollback
+    // snapshot remain durable so a reboot resurrection is never foreign.
+    deleted_save_acknowledged_unverified,
+};
+
+struct NdmsNativeOwnershipLifecycleEvidence final {
+    std::string transaction_id;
+    NdmsNativeObservationBinding observation_binding;
+    std::string runtime_catalog_revision;
+    std::uint64_t runtime_sequence{0U};
+    std::string running_config_catalog_revision;
+    std::uint64_t running_config_sequence{0U};
+
+    bool operator==(
+        const NdmsNativeOwnershipLifecycleEvidence& other) const noexcept;
+};
+
 // The durable claim that keen-pbr created a native interface.
 //
 // The WAL record dies with its transaction; ownership must not. After the
@@ -22,6 +50,7 @@ namespace keen_pbr3 {
 // interface on a guess is the one mistake this whole pipeline exists to make
 // impossible.
 struct NdmsNativeOwnershipRecord {
+    std::uint32_t schema_version{kNdmsNativeOwnershipSchemaVersion};
     std::string interface_name;
     std::string transaction_id;
     std::string marker;
@@ -29,6 +58,10 @@ struct NdmsNativeOwnershipRecord {
         NdmsNativeTunnelImportKind::wireguard};
     std::string snapshot_revision;
     std::string target_full_revision;
+    NdmsNativeOwnershipLifecycle lifecycle{
+        NdmsNativeOwnershipLifecycle::active_running_only};
+    std::optional<NdmsNativeOwnershipLifecycleEvidence>
+        lifecycle_evidence;
 
     bool operator==(const NdmsNativeOwnershipRecord& other) const noexcept;
 };
@@ -94,7 +127,10 @@ public:
     // Atomically replaces one byte-exact claim with its validated successor.
     // There is no unlink window: a fsynced temporary is renamed over the
     // expected inode and then the directory is fsynced. Identity, kind and
-    // snapshot binding are immutable; only target evidence may advance.
+    // snapshot binding and target evidence are immutable. The lifecycle may
+    // only advance running -> save-ack or active -> deleted tombstone and can
+    // never move backwards; within one lifecycle only byte-identical retry is
+    // accepted.
     // A retry after a post-rename durability fault is idempotent. Nullopt
     // means the exact predecessor was not current or the transition failed.
     std::optional<std::string> replace_exact(
@@ -138,5 +174,11 @@ private:
 
 const char* ndms_native_ownership_read_state_name(
     NdmsNativeOwnershipReadState state) noexcept;
+const char* ndms_native_ownership_lifecycle_name(
+    NdmsNativeOwnershipLifecycle lifecycle) noexcept;
+bool ndms_native_ownership_is_active(
+    const NdmsNativeOwnershipRecord& record) noexcept;
+bool ndms_native_ownership_is_delete_tombstone(
+    const NdmsNativeOwnershipRecord& record) noexcept;
 
 } // namespace keen_pbr3

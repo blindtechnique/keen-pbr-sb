@@ -51,16 +51,64 @@ NdmsNativeOwnershipRecord record_fixture() {
     return record;
 }
 
+NdmsNativeOwnershipLifecycleEvidence lifecycle_evidence_fixture() {
+    NdmsNativeOwnershipLifecycleEvidence evidence;
+    evidence.transaction_id = std::string(32U, 'd');
+    evidence.observation_binding = {std::string(32U, 'e'), 9U, 7U};
+    evidence.runtime_catalog_revision =
+        "ndms-native-catalog-v1-" + std::string(64U, 'f');
+    evidence.runtime_sequence = 8U;
+    evidence.running_config_catalog_revision =
+        "ndms-native-catalog-v1-" + std::string(64U, '1');
+    evidence.running_config_sequence = 9U;
+    return evidence;
+}
+
+NdmsNativeOwnershipRecord lifecycle_record(
+    NdmsNativeOwnershipRecord record,
+    const NdmsNativeOwnershipLifecycle lifecycle) {
+    record.schema_version = kNdmsNativeOwnershipSchemaVersion;
+    record.lifecycle = lifecycle;
+    if (lifecycle ==
+        NdmsNativeOwnershipLifecycle::active_running_only) {
+        record.lifecycle_evidence.reset();
+    } else {
+        record.lifecycle_evidence = lifecycle_evidence_fixture();
+    }
+    return record;
+}
+
 std::string ownership_body(const NdmsNativeOwnershipRecord& record) {
     const char* kind = record.kind ==
                                NdmsNativeTunnelImportKind::amnezia_wireguard
                            ? "amnezia_wireguard"
                            : "wireguard";
-    return std::string("keen-pbr-native-ownership-v2\n") +
-           record.interface_name + "\n" + record.transaction_id + "\n" +
-           record.marker + "\n" + kind + "\n" +
-           record.snapshot_revision + "\n" +
-           record.target_full_revision + "\n";
+    std::string body = std::string(
+        record.schema_version == 2U
+            ? "keen-pbr-native-ownership-v2\n"
+            : "keen-pbr-native-ownership-v3\n") +
+        record.interface_name + "\n" + record.transaction_id + "\n" +
+        record.marker + "\n" + kind + "\n" +
+        record.snapshot_revision + "\n" +
+        record.target_full_revision + "\n";
+    if (record.schema_version == 2U) return body;
+    body += std::string{ndms_native_ownership_lifecycle_name(
+                record.lifecycle)} + "\n";
+    if (!record.lifecycle_evidence) {
+        for (std::size_t index = 0U; index < 8U; ++index) body += "-\n";
+        return body;
+    }
+    const auto& evidence = *record.lifecycle_evidence;
+    body += evidence.transaction_id + "\n" +
+            evidence.observation_binding.authority_id + "\n" +
+            std::to_string(evidence.observation_binding.mutation_epoch) +
+            "\n" +
+            std::to_string(evidence.observation_binding.baseline_sequence) +
+            "\n" + evidence.runtime_catalog_revision + "\n" +
+            std::to_string(evidence.runtime_sequence) + "\n" +
+            evidence.running_config_catalog_revision + "\n" +
+            std::to_string(evidence.running_config_sequence) + "\n";
+    return body;
 }
 
 bool has_ownership_temporary(const fs::path& directory) {
@@ -255,9 +303,10 @@ TEST_CASE("replace_exact has no unlink gap and is crash-idempotent") {
     TempDirectory directory;
     const auto state = directory.path / "ownership";
     const auto expected = record_fixture();
-    auto replacement = expected;
-    replacement.target_full_revision =
-        "ndms-rci-full-v1-" + std::string(64U, 'd');
+    const auto replacement = lifecycle_record(
+        expected,
+        NdmsNativeOwnershipLifecycle::
+            active_save_acknowledged_unverified);
 
     NdmsNativeOwnershipStore initial(state);
     initial.publish(expected);
@@ -295,6 +344,15 @@ TEST_CASE("replace_exact has no unlink gap and is crash-idempotent") {
         "ndms-native-import-v1-" + std::string(64U, 'e');
     CHECK_FALSE(
         retry.replace_exact(replacement, rebound_snapshot).has_value());
+    auto rebound_target = replacement;
+    rebound_target.target_full_revision =
+        "ndms-rci-full-v1-" + std::string(64U, 'f');
+    CHECK_FALSE(
+        retry.replace_exact(replacement, rebound_target).has_value());
+    auto rebound_evidence = replacement;
+    ++rebound_evidence.lifecycle_evidence->runtime_sequence;
+    CHECK_FALSE(
+        retry.replace_exact(replacement, rebound_evidence).has_value());
     const auto final_read = retry.read("Wireguard5");
     REQUIRE(final_read.record.has_value());
     CHECK(*final_read.record == replacement);
@@ -422,9 +480,10 @@ TEST_CASE("remove_exact is content-bound even across an in-place inode mutation"
     TempDirectory directory;
     const auto state = directory.path / "ownership";
     const auto record = record_fixture();
-    auto replacement = record;
-    replacement.target_full_revision =
-        "ndms-rci-full-v1-" + std::string(64U, 'c');
+    const auto replacement = lifecycle_record(
+        record,
+        NdmsNativeOwnershipLifecycle::
+            active_save_acknowledged_unverified);
 
     bool replaced = false;
     NdmsNativeOwnershipStoreTestHooks hooks;
@@ -447,6 +506,113 @@ TEST_CASE("remove_exact is content-bound even across an in-place inode mutation"
     const auto read = store.read("Wireguard5");
     REQUIRE(read.record.has_value());
     CHECK(*read.record == replacement);
+}
+
+TEST_CASE("legacy v2 bytes transition exactly to v3 lifecycle evidence") {
+    TempDirectory directory;
+    const auto state = directory.path / "ownership";
+    NdmsNativeOwnershipStore seed(state);
+    const auto current = record_fixture();
+    seed.publish(current);
+
+    auto legacy = current;
+    legacy.schema_version = 2U;
+    {
+        std::ofstream output(
+            state / "Wireguard5", std::ios::binary | std::ios::trunc);
+        output << ownership_body(legacy);
+    }
+    REQUIRE(::chmod((state / "Wireguard5").c_str(), 0600) == 0);
+
+    const auto read = seed.read("Wireguard5");
+    REQUIRE(read.state == NdmsNativeOwnershipReadState::valid);
+    REQUIRE(read.record.has_value());
+    REQUIRE(read.revision.has_value());
+    CHECK(read.record->schema_version == 2U);
+    CHECK(read.record->lifecycle ==
+          NdmsNativeOwnershipLifecycle::active_running_only);
+    CHECK_FALSE(read.record->lifecycle_evidence.has_value());
+    CHECK(read.revision->rfind("ndms-native-owner-v2-", 0U) == 0U);
+
+    const auto tombstone = lifecycle_record(
+        *read.record,
+        NdmsNativeOwnershipLifecycle::
+            deleted_save_acknowledged_unverified);
+    const auto transitioned = seed.replace_exact(*read.record, tombstone);
+    REQUIRE(transitioned.has_value());
+    CHECK(transitioned->rfind(
+              "ndms-native-owner-tombstone-v1-", 0U) == 0U);
+    const auto final_read = seed.read("Wireguard5");
+    REQUIRE(final_read.record.has_value());
+    CHECK(*final_read.record == tombstone);
+    CHECK_FALSE(seed.remove_exact(tombstone));
+}
+
+TEST_CASE("a v2 to v3 replacement race preserves the replacement bytes") {
+    TempDirectory directory;
+    const auto state = directory.path / "ownership";
+    auto expected = record_fixture();
+    NdmsNativeOwnershipStore seed(state);
+    seed.publish(expected);
+    expected.schema_version = 2U;
+    {
+        std::ofstream output(
+            state / "Wireguard5", std::ios::binary | std::ios::trunc);
+        output << ownership_body(expected);
+    }
+    REQUIRE(::chmod((state / "Wireguard5").c_str(), 0600) == 0);
+
+    auto raced = expected;
+    raced.target_full_revision =
+        "ndms-rci-full-v1-" + std::string(64U, '9');
+    const auto replacement = lifecycle_record(
+        expected,
+        NdmsNativeOwnershipLifecycle::
+            deleted_save_acknowledged_unverified);
+    bool injected = false;
+    NdmsNativeOwnershipStoreTestHooks hooks;
+    hooks.allow_current_process_owner = true;
+    hooks.fault_injector = [&](const auto stage) {
+        if (!injected &&
+            stage == NdmsNativeOwnershipStoreFaultStage::
+                         pre_publish_after_file_fsync) {
+            injected = true;
+            std::ofstream output(
+                state / "Wireguard5",
+                std::ios::binary | std::ios::trunc);
+            output << ownership_body(raced);
+        }
+    };
+    NdmsNativeOwnershipStore store(state, hooks);
+    CHECK_FALSE(store.replace_exact(expected, replacement).has_value());
+    CHECK(injected);
+    const auto final_read = store.read("Wireguard5");
+    REQUIRE(final_read.record.has_value());
+    CHECK(*final_read.record == raced);
+}
+
+TEST_CASE("v3 lifecycle numeric evidence must use canonical decimal text") {
+    TempDirectory directory;
+    const auto state = directory.path / "ownership";
+    const auto record = lifecycle_record(
+        record_fixture(),
+        NdmsNativeOwnershipLifecycle::
+            active_save_acknowledged_unverified);
+    NdmsNativeOwnershipStore store(state);
+    store.publish(record);
+    auto body = ownership_body(record);
+    const auto needle = std::string{"\n9\n7\n"};
+    const auto position = body.find(needle);
+    REQUIRE(position != std::string::npos);
+    body.replace(position, needle.size(), "\n09\n7\n");
+    {
+        std::ofstream output(
+            state / "Wireguard5", std::ios::binary | std::ios::trunc);
+        output << body;
+    }
+    REQUIRE(::chmod((state / "Wireguard5").c_str(), 0600) == 0);
+    CHECK(store.read("Wireguard5").state ==
+          NdmsNativeOwnershipReadState::unreadable);
 }
 
 TEST_CASE("a visible ownership unlink is repaired before absence is trusted") {

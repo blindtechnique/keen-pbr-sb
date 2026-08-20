@@ -13,6 +13,7 @@ namespace keen_pbr3 {
 struct NdmsNativePanelDeleteExecutionPlan;
 struct NdmsNativePanelDeleteExecutionResult;
 class NdmsNativePanelDeleteExecutorDependencies;
+class NdmsNativeCooperativeDeleteCoordinator;
 #ifdef KEEN_PBR3_TESTING
 class NdmsNativeExactMutationDispatchAuthorityTestIssuer;
 #endif
@@ -111,9 +112,10 @@ struct NdmsNativeExactMutationBackendTrace final {
 class NdmsNativeExactMutationDispatchCapability;
 struct NdmsNativeExactMutationTransportResult;
 
-// Opaque, move-only production authority required by the one exact panel
-// delete transaction entry point. This slice intentionally has no production
-// issuer: wiring it requires the still-unproven global NDMS writer lease.
+// Opaque, move-only authority required by the one exact panel-delete
+// transport entry point. The sole production friend is the dormant, unwired
+// cooperative delete coordinator. Its held lease serializes keen-pbr writers
+// only; it cannot exclude Keenetic Web UI, ndmc or third-party writers.
 class NdmsNativeExactMutationDispatchAuthority final {
 public:
     NdmsNativeExactMutationDispatchAuthority(
@@ -139,6 +141,7 @@ private:
         const NdmsNativePanelDeleteExecutionPlan&,
         NdmsNativeExactMutationDispatchAuthority&&,
         const NdmsNativePanelDeleteExecutorDependencies&);
+    friend class NdmsNativeCooperativeDeleteCoordinator;
 #ifdef KEEN_PBR3_TESTING
     friend class NdmsNativeExactMutationDispatchAuthorityTestIssuer;
 #endif
@@ -189,10 +192,9 @@ private:
 class NdmsNativeExactMutationDispatchCapabilityTestIssuer;
 #endif
 
-// One-shot callsite barrier. Production construction is deliberately limited
-// to one exact free-function signature that also consumes the opaque writer
-// authority above. There is no extensible named-class friend that another
-// translation unit could define to mint this capability.
+// One-shot callsite barrier. Production construction is limited to the
+// existing exact executor entry point and the dormant, unwired cooperative
+// delete coordinator named above; neither exposes a public issuer.
 class NdmsNativeExactMutationDispatchCapability final {
 public:
     NdmsNativeExactMutationDispatchCapability(
@@ -218,6 +220,7 @@ private:
         const NdmsNativePanelDeleteExecutionPlan&,
         NdmsNativeExactMutationDispatchAuthority&&,
         const NdmsNativePanelDeleteExecutorDependencies&);
+    friend class NdmsNativeCooperativeDeleteCoordinator;
 #ifdef KEEN_PBR3_TESTING
     friend class NdmsNativeExactMutationDispatchCapabilityTestIssuer;
 #endif

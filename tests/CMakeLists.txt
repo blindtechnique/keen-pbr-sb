@@ -59,6 +59,7 @@ add_executable(keen-pbr-tests
   test_ndms_native_import_forward_plan.cpp
   test_ndms_native_import_recovery_probe.cpp
   test_ndms_native_direct_observation.cpp
+  test_ndms_native_delete_wal.cpp
   test_chacha20poly1305.cpp
   test_ndms_native_secret_snapshot.cpp
   test_ndms_native_secret_redaction.cpp
@@ -286,6 +287,8 @@ add_executable(keen-pbr-tests
   ../src/keenetic/ndms_native_import_recovery_probe.cpp
   ../src/keenetic/ndms_native_import_recovery_revision.cpp
   ../src/keenetic/ndms_native_direct_observation.cpp
+  ../src/keenetic/ndms_native_delete_wal.cpp
+  ../src/keenetic/ndms_native_delete_wal_store.cpp
   ../src/crypto/chacha20poly1305.cpp
   ../src/keenetic/ndms_native_secret_snapshot.cpp
   ../src/keenetic/ndms_native_secret_redaction.cpp
@@ -445,6 +448,7 @@ add_executable(keen-pbr-native-tunnel-import-tests
   test_ndms_native_import_forward_plan.cpp
   test_ndms_native_import_recovery_probe.cpp
   test_ndms_native_direct_observation.cpp
+  test_ndms_native_delete_wal.cpp
   test_chacha20poly1305.cpp
   test_ndms_native_secret_snapshot.cpp
   test_ndms_native_secret_redaction.cpp
@@ -479,6 +483,8 @@ add_executable(keen-pbr-native-tunnel-import-tests
   ../src/keenetic/ndms_native_import_recovery_probe.cpp
   ../src/keenetic/ndms_native_import_recovery_revision.cpp
   ../src/keenetic/ndms_native_direct_observation.cpp
+  ../src/keenetic/ndms_native_delete_wal.cpp
+  ../src/keenetic/ndms_native_delete_wal_store.cpp
   ../src/crypto/chacha20poly1305.cpp
   ../src/keenetic/ndms_native_secret_snapshot.cpp
   ../src/keenetic/ndms_native_secret_redaction.cpp

@@ -34,6 +34,8 @@ constexpr std::string_view kTargetRevisionPrefix{
     "ndms-rci-full-v1-"};
 constexpr std::string_view kOwnershipRevisionPrefix{
     "ndms-native-owner-v2-"};
+constexpr std::string_view kOwnershipRevisionV3Prefix{
+    "ndms-native-owner-v3-"};
 
 bool lower_hex(const std::string_view value) noexcept {
     return std::all_of(
@@ -79,6 +81,11 @@ bool known_phase(const NdmsNativeImportWalPhase phase) noexcept {
         return true;
     }
     return false;
+}
+
+bool active_ownership_revision(const std::string& value) noexcept {
+    return prefixed_digest(value, kOwnershipRevisionPrefix) ||
+           prefixed_digest(value, kOwnershipRevisionV3Prefix);
 }
 
 bool known_kind(const NdmsNativeTunnelImportKind kind) noexcept {
@@ -214,8 +221,7 @@ void validate_record(const NdmsNativeImportWalRecord& record) {
     }
     if (record.ownership_revision.has_value()) {
         require(
-            prefixed_digest(
-                *record.ownership_revision, kOwnershipRevisionPrefix),
+            active_ownership_revision(*record.ownership_revision),
             "native import WAL ownership revision is invalid");
     }
 

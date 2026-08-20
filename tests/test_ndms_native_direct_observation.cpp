@@ -259,6 +259,37 @@ TEST_CASE("one marker yields one exact redacted target measurement") {
     }
 }
 
+TEST_CASE("recovery completeness binds requested and observed catalog scope") {
+    auto transport = std::make_shared<QueueTransport>();
+    transport->responses.push_back(response(nlohmann::json{
+        {"Wireguard5", tunnel("Wireguard5", std::string{kMarker})},
+    }.dump()));
+    enqueue_target(*transport, "Wireguard5");
+
+    auto measured = gateway_for(transport).observe_recovery(
+        NdmsNativeDirectCatalogScope::running_config,
+        kMarker,
+        std::optional<std::string>{"Wireguard5"});
+    REQUIRE(measured.complete());
+    CHECK(measured.requested_catalog_scope ==
+          NdmsNativeDirectCatalogScope::running_config);
+    CHECK(measured.catalog_scope ==
+          NdmsNativeDirectCatalogScope::running_config);
+    REQUIRE_FALSE(transport->requests.empty());
+    CHECK(transport->requests.front().url ==
+          kNdmsNativeDirectRunningConfigCatalogEndpoint);
+
+    // An injected/adapted gateway cannot combine a runtime request with a
+    // complete running-config payload (or the inverse) and retain complete.
+    measured.requested_catalog_scope =
+        NdmsNativeDirectCatalogScope::runtime_state;
+    CHECK_FALSE(measured.complete());
+    measured.requested_catalog_scope =
+        NdmsNativeDirectCatalogScope::running_config;
+    measured.catalog_scope = NdmsNativeDirectCatalogScope::runtime_state;
+    CHECK_FALSE(measured.complete());
+}
+
 TEST_CASE("ASC is measured directly rather than inferred from a name") {
     auto transport = std::make_shared<QueueTransport>();
     transport->responses.push_back(response(nlohmann::json{

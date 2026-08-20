@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ndms_native_interface_read.hpp"
+#include "ndms_native_delete_wal_store.hpp"
 #include "ndms_native_ownership_store.hpp"
 
 #include <cstddef>
@@ -23,8 +24,12 @@ struct NdmsNativeOwnershipReconcileResult {
     // therefore skipped entirely - the dispatcher owns those claims, and a
     // second remover racing it would turn its retirement into a failure.
     bool skipped_transaction_in_flight{false};
+    bool skipped_delete_wal_not_clean{false};
     std::size_t claims_examined{0U};
     std::vector<std::string> retired;
+    // Lifecycle tombstones are durable attribution, not stale active claims.
+    // They are never removed by startup absence reconciliation.
+    std::vector<std::string> retained_tombstones;
     // A claim whose interface is gone but whose file would not go away, or
     // whose bytes could not be parsed. Kept separate from `retired`: these
     // still assert ownership and an operator has to know.
@@ -37,6 +42,15 @@ struct NdmsNativeOwnershipReconcileResult {
 NdmsNativeOwnershipReconcileResult reconcile_ndms_native_ownership_claims(
     NdmsNativeOwnershipStore& ownership_store,
     bool wal_transaction_in_flight,
-    const NdmsNativeInterfaceReadDependencies& read_dependencies);
+    const NdmsNativeInterfaceReadDependencies& read_dependencies,
+    NdmsNativeDeleteWalReadiness delete_wal_readiness =
+        NdmsNativeDeleteWalReadiness::clean);
+
+// Pure cross-kind interlock. Import WAL activity and every delete-WAL state
+// except authoritative clean suppress all retirement before store inventory or
+// per-interface reads begin.
+bool ndms_native_ownership_reconciliation_permitted(
+    bool import_wal_transaction_in_flight,
+    NdmsNativeDeleteWalReadiness delete_wal_readiness) noexcept;
 
 } // namespace keen_pbr3

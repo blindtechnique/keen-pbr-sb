@@ -64,17 +64,36 @@ NdmsNativeOwnershipRecord claim_for(const std::string& name) {
     return claim;
 }
 
+NdmsNativeOwnershipRecord tombstone_for(
+    NdmsNativeOwnershipRecord claim) {
+    claim.lifecycle = NdmsNativeOwnershipLifecycle::
+        deleted_save_acknowledged_unverified;
+    NdmsNativeOwnershipLifecycleEvidence evidence;
+    evidence.transaction_id = std::string(32U, 'b');
+    evidence.observation_binding = {std::string(32U, 'c'), 2U, 1U};
+    evidence.runtime_catalog_revision =
+        "ndms-native-catalog-v1-" + std::string(64U, 'd');
+    evidence.runtime_sequence = 2U;
+    evidence.running_config_catalog_revision =
+        "ndms-native-catalog-v1-" + std::string(64U, 'e');
+    evidence.running_config_sequence = 3U;
+    claim.lifecycle_evidence = std::move(evidence);
+    return claim;
+}
+
 // Present interfaces answer with a document; absent ones with a null json,
 // which is how the firmware's zero-byte body arrives.
 struct FakeRouter {
     std::map<std::string, bool> present;
     bool reads_fail{false};
+    std::size_t reads{0U};
     std::optional<nlohmann::json> forced_document;
 
     NdmsNativeInterfaceReadDependencies dependencies() {
         NdmsNativeInterfaceReadDependencies deps;
         deps.read_document =
             [this](const std::string& path) -> std::optional<nlohmann::json> {
+            ++reads;
             if (reads_fail) return std::nullopt;
             if (forced_document.has_value()) return forced_document;
             for (const auto& [name, is_present] : present) {
@@ -159,6 +178,60 @@ TEST_CASE("a read that failed is never treated as absence") {
     CHECK(result.unresolved == std::vector<std::string>{"Wireguard5"});
     CHECK(store.read("Wireguard5").state ==
           NdmsNativeOwnershipReadState::valid);
+}
+
+TEST_CASE("every non-clean delete WAL state suppresses all retirement") {
+    CHECK(ndms_native_ownership_reconciliation_permitted(
+        false, NdmsNativeDeleteWalReadiness::clean));
+    CHECK_FALSE(ndms_native_ownership_reconciliation_permitted(
+        false, NdmsNativeDeleteWalReadiness::unfinished));
+    CHECK_FALSE(ndms_native_ownership_reconciliation_permitted(
+        false, NdmsNativeDeleteWalReadiness::unsafe));
+
+    for (const auto readiness : {
+             NdmsNativeDeleteWalReadiness::unfinished,
+             NdmsNativeDeleteWalReadiness::unsafe}) {
+        CAPTURE(ndms_native_delete_wal_readiness_name(readiness));
+        ReconcileTempDirectory directory;
+        NdmsNativeOwnershipStore store(directory.path / "ownership");
+        store.publish(claim_for("Wireguard5"));
+        FakeRouter router;
+        router.present["Wireguard5"] = false;
+
+        const auto result = reconcile_ndms_native_ownership_claims(
+            store, false, router.dependencies(), readiness);
+        CHECK(result.store_readable);
+        CHECK(result.skipped_delete_wal_not_clean);
+        CHECK_FALSE(result.skipped_transaction_in_flight);
+        CHECK(result.claims_examined == 0U);
+        CHECK(router.reads == 0U);
+        CHECK(store.read("Wireguard5").state ==
+              NdmsNativeOwnershipReadState::valid);
+    }
+}
+
+TEST_CASE("delete tombstones are retained without router reads") {
+    ReconcileTempDirectory directory;
+    NdmsNativeOwnershipStore store(directory.path / "ownership");
+    const auto active = claim_for("Wireguard5");
+    store.publish(active);
+    const auto tombstone = tombstone_for(active);
+    REQUIRE(store.replace_exact(active, tombstone).has_value());
+    FakeRouter router;
+    router.present["Wireguard5"] = false;
+
+    const auto result = reconcile_ndms_native_ownership_claims(
+        store, false, router.dependencies());
+    CHECK(result.store_readable);
+    CHECK(result.claims_examined == 1U);
+    CHECK(result.retained_tombstones ==
+          std::vector<std::string>{"Wireguard5"});
+    CHECK(result.retired.empty());
+    CHECK(result.unresolved.empty());
+    CHECK(router.reads == 0U);
+    const auto read = store.read("Wireguard5");
+    REQUIRE(read.record.has_value());
+    CHECK(ndms_native_ownership_is_delete_tombstone(*read.record));
 }
 
 TEST_CASE("noncanonical RCI documents never prove interface absence") {

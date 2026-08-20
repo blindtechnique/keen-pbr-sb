@@ -348,7 +348,8 @@ TargetReadResult read_target(
 
 bool NdmsNativeDirectRecoveryObservation::complete() const noexcept {
     return failure == NdmsNativeDirectObservationFailure::none &&
-           snapshot.has_value() && !catalog_revision.empty();
+           snapshot.has_value() && !catalog_revision.empty() &&
+           catalog_scope == requested_catalog_scope;
 }
 
 NdmsNativeDirectObservationGateway::NdmsNativeDirectObservationGateway()
@@ -418,7 +419,19 @@ NdmsNativeDirectRecoveryObservation
 NdmsNativeDirectObservationGateway::observe_recovery(
     const std::string_view marker,
     const std::optional<std::string>& expected_target) const noexcept {
+    return observe_recovery(
+        NdmsNativeDirectCatalogScope::runtime_state,
+        marker,
+        expected_target);
+}
+
+NdmsNativeDirectRecoveryObservation
+NdmsNativeDirectObservationGateway::observe_recovery(
+    const NdmsNativeDirectCatalogScope scope,
+    const std::string_view marker,
+    const std::optional<std::string>& expected_target) const noexcept {
     NdmsNativeDirectRecoveryObservation result;
+    result.requested_catalog_scope = scope;
     try {
         if (!ndms_native_import_transaction_id_from_marker(marker)) {
             result.failure =
@@ -440,8 +453,8 @@ NdmsNativeDirectObservationGateway::observe_recovery(
             }
         }
 
-        auto catalog_read = observe_catalog(
-            NdmsNativeDirectCatalogScope::runtime_state);
+        auto catalog_read = observe_catalog(scope);
+        result.catalog_scope = catalog_read.scope;
         if (!catalog_read.snapshot) {
             result.failure = catalog_read.failure;
             result.failed_document =

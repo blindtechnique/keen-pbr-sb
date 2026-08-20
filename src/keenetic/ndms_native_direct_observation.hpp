@@ -106,6 +106,10 @@ struct NdmsNativeDirectRecoveryObservation final {
         target_evidence_failure;
     NdmsNativeDirectCatalogScope catalog_scope{
         NdmsNativeDirectCatalogScope::runtime_state};
+    // Kept separately so injected/adapted gateways cannot attach a complete
+    // running-config payload to a runtime-state request (or vice versa).
+    NdmsNativeDirectCatalogScope requested_catalog_scope{
+        NdmsNativeDirectCatalogScope::runtime_state};
 
     bool complete() const noexcept;
 };
@@ -133,6 +137,15 @@ public:
     // one permitted marker sighting this is bounded to two unique targets,
     // each with the exact config/runtime/ASC triple.
     NdmsNativeDirectRecoveryObservation observe_recovery(
+        std::string_view marker,
+        const std::optional<std::string>& expected_target =
+            std::nullopt) const noexcept;
+
+    // Delete admission needs two separately measured catalog scopes. Target
+    // config/runtime/ASC evidence remains the same bounded exact triple; only
+    // the complete catalog endpoint selected here differs.
+    NdmsNativeDirectRecoveryObservation observe_recovery(
+        NdmsNativeDirectCatalogScope scope,
         std::string_view marker,
         const std::optional<std::string>& expected_target =
             std::nullopt) const noexcept;
