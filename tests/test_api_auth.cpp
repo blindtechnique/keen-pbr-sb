@@ -261,6 +261,21 @@ struct RawHttpResult {
     std::chrono::milliseconds elapsed{};
 };
 
+class CountingSensitiveRequestReservation final
+    : public SensitiveRequestReservation {
+public:
+    explicit CountingSensitiveRequestReservation(
+        std::atomic<unsigned int>& destroyed) noexcept
+        : destroyed_(destroyed) {}
+
+    ~CountingSensitiveRequestReservation() noexcept override {
+        destroyed_.fetch_add(1U, std::memory_order_release);
+    }
+
+private:
+    std::atomic<unsigned int>& destroyed_;
+};
+
 RawHttpResult post_headers_without_body(
     const int port,
     const std::string_view path,
@@ -310,6 +325,72 @@ RawHttpResult post_headers_without_body(
         REQUIRE(count > 0);
         sent += static_cast<std::size_t>(count);
     }
+
+    const auto started = std::chrono::steady_clock::now();
+    RawHttpResult result;
+    std::array<char, 4096> buffer{};
+    while (true) {
+        const auto count = ::recv(
+            socket_fd, buffer.data(), buffer.size(), 0);
+        if (count > 0) {
+            result.response.append(
+                buffer.data(), static_cast<std::size_t>(count));
+            continue;
+        }
+        result.peer_closed = count == 0;
+        break;
+    }
+    result.elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started);
+    return result;
+}
+
+RawHttpResult post_truncated_body(
+    const int port,
+    const std::string_view path,
+    const std::string_view cookie) {
+    const int socket_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    REQUIRE(socket_fd >= 0);
+    struct SocketCloser {
+        int fd;
+        ~SocketCloser() {
+            if (fd >= 0) {
+                (void)::shutdown(fd, SHUT_RDWR);
+                (void)::close(fd);
+            }
+        }
+    } closer{socket_fd};
+
+    const timeval timeout{2, 0};
+    REQUIRE(::setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO,
+                         &timeout, sizeof(timeout)) == 0);
+    REQUIRE(::setsockopt(socket_fd, SOL_SOCKET, SO_SNDTIMEO,
+                         &timeout, sizeof(timeout)) == 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(static_cast<std::uint16_t>(port));
+    REQUIRE(::inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) == 1);
+    REQUIRE(::connect(socket_fd,
+                      reinterpret_cast<const sockaddr*>(&address),
+                      sizeof(address)) == 0);
+
+    const std::string partial_body{"part"};
+    const std::string request =
+        "POST " + std::string{path} + " HTTP/1.1\r\n" +
+        "Host: 127.0.0.1\r\n" +
+        "Content-Type: text/plain\r\n" +
+        "Content-Length: 16\r\n" +
+        "Connection: close\r\n" +
+        "Cookie: " + std::string{cookie} + "\r\n\r\n" +
+        partial_body;
+    std::size_t sent = 0U;
+    while (sent < request.size()) {
+        const auto count = ::send(
+            socket_fd, request.data() + sent, request.size() - sent, 0);
+        REQUIRE(count > 0);
+        sent += static_cast<std::size_t>(count);
+    }
+    REQUIRE(::shutdown(socket_fd, SHUT_WR) == 0);
 
     const auto started = std::chrono::steady_clock::now();
     RawHttpResult result;
@@ -2201,6 +2282,12 @@ TEST_CASE("native secret imports are admitted before bounded body streaming") {
     ApiServer server(config);
     std::atomic<unsigned int> handled{0U};
     std::atomic<bool> throw_before_consume{false};
+    std::atomic<unsigned int> reservations_created{0U};
+    std::atomic<unsigned int> reservations_destroyed{0U};
+    std::atomic<unsigned int> live_reservations_seen_by_handler{0U};
+    std::atomic<const SensitiveRequestReservation*> last_reservation{nullptr};
+    std::atomic<unsigned int> null_admissions{0U};
+    std::atomic<unsigned int> null_route_handled{0U};
     CHECK_THROWS_AS(
         server.post_sensitive(
             "/api/unprotected-sensitive-route",
@@ -2210,9 +2297,47 @@ TEST_CASE("native secret imports are admitted before bounded body streaming") {
             }),
         std::invalid_argument);
     server.post_sensitive(
+        "/api/system/ndms/interfaces/import/preflight",
+        32U,
+        [&](const httplib::Request&)
+            -> ApiServer::SensitiveRequestReservationPtr {
+            null_admissions.fetch_add(1U, std::memory_order_relaxed);
+            return {};
+        },
+        [&](const httplib::Request&,
+            SensitiveRequestBody,
+            const ApiServer::SensitiveRequestReservationPtr&) {
+            null_route_handled.fetch_add(1U, std::memory_order_relaxed);
+            return std::string{"{}"};
+        });
+    server.post_sensitive(
         "/api/system/ndms/interfaces/import",
         32U,
-        [&](const httplib::Request&, SensitiveRequestBody body) {
+        [&](const httplib::Request&)
+            -> ApiServer::SensitiveRequestReservationPtr {
+            auto reservation = std::make_shared<
+                CountingSensitiveRequestReservation>(
+                    reservations_destroyed);
+            last_reservation.store(
+                reservation.get(), std::memory_order_release);
+            reservations_created.fetch_add(
+                1U, std::memory_order_release);
+            return reservation;
+        },
+        [&](const httplib::Request&,
+            SensitiveRequestBody body,
+            const ApiServer::SensitiveRequestReservationPtr& reservation) {
+            const auto created = reservations_created.load(
+                std::memory_order_acquire);
+            const auto destroyed = reservations_destroyed.load(
+                std::memory_order_acquire);
+            if (reservation &&
+                reservation.get() == last_reservation.load(
+                    std::memory_order_acquire) &&
+                created == destroyed + 1U) {
+                live_reservations_seen_by_handler.fetch_add(
+                    1U, std::memory_order_relaxed);
+            }
             handled.fetch_add(1U, std::memory_order_relaxed);
             if (throw_before_consume.load(std::memory_order_relaxed)) {
                 throw std::runtime_error("synthetic sensitive handler failure");
@@ -2239,6 +2364,8 @@ TEST_CASE("native secret imports are admitted before bounded body streaming") {
     CHECK(unauthenticated->get_header_value("Cache-Control") == "no-store");
     CHECK(handled.load(std::memory_order_relaxed) == 0U);
     CHECK(sensitive_request_body_wipe_count_for_testing() == 0U);
+    CHECK(reservations_created.load(std::memory_order_acquire) == 0U);
+    CHECK(reservations_destroyed.load(std::memory_order_acquire) == 0U);
 
     const auto login = client.Post(
         "/api/auth/login",
@@ -2246,7 +2373,8 @@ TEST_CASE("native secret imports are admitted before bounded body streaming") {
         "application/json");
     REQUIRE(login != nullptr);
     REQUIRE(login->status == 200);
-    const httplib::Headers session{{"Cookie", session_cookie(*login)}};
+    const auto cookie = session_cookie(*login);
+    const httplib::Headers session{{"Cookie", cookie}};
 
     reset_sensitive_request_body_wipe_count_for_testing();
     const auto denied = client.Post(
@@ -2259,8 +2387,27 @@ TEST_CASE("native secret imports are admitted before bounded body streaming") {
     CHECK(denied->get_header_value("Cache-Control") == "no-store");
     CHECK(handled.load(std::memory_order_relaxed) == 0U);
     CHECK(sensitive_request_body_wipe_count_for_testing() == 0U);
+    CHECK(reservations_created.load(std::memory_order_acquire) == 0U);
+    CHECK(reservations_destroyed.load(std::memory_order_acquire) == 0U);
 
     grant_local_step_up(client, session, "admin", "secret");
+
+    reset_sensitive_request_body_stream_count_for_testing();
+    const auto null_reservation = post_headers_without_body(
+        configured_port(config),
+        "/api/system/ndms/interfaces/import/preflight",
+        cookie);
+    CHECK(null_reservation.response.find(" 503 ") != std::string::npos);
+    CHECK(null_reservation.response.find(
+              R"({"error":"sensitive_request_rejected"})") !=
+          std::string::npos);
+    CHECK(null_reservation.response.find("Connection: close") !=
+          std::string::npos);
+    CHECK(null_reservation.peer_closed);
+    CHECK(null_admissions.load(std::memory_order_relaxed) == 1U);
+    CHECK(null_route_handled.load(std::memory_order_relaxed) == 0U);
+    CHECK(sensitive_request_body_stream_count_for_testing() == 0U);
+
     const auto accepted = client.Post(
         "/api/system/ndms/interfaces/import",
         session,
@@ -2273,6 +2420,10 @@ TEST_CASE("native secret imports are admitted before bounded body streaming") {
           15U);
     CHECK(handled.load(std::memory_order_relaxed) == 1U);
     CHECK(sensitive_request_body_wipe_count_for_testing() >= 1U);
+    CHECK(reservations_created.load(std::memory_order_acquire) == 1U);
+    CHECK(reservations_destroyed.load(std::memory_order_acquire) == 1U);
+    CHECK(live_reservations_seen_by_handler.load(
+              std::memory_order_relaxed) == 1U);
 
     throw_before_consume.store(true, std::memory_order_relaxed);
     reset_sensitive_request_body_wipe_count_for_testing();
@@ -2291,6 +2442,10 @@ TEST_CASE("native secret imports are admitted before bounded body streaming") {
           "sensitive_request_failed");
     CHECK(handled.load(std::memory_order_relaxed) == 2U);
     CHECK(sensitive_request_body_wipe_count_for_testing() >= 1U);
+    CHECK(reservations_created.load(std::memory_order_acquire) == 2U);
+    CHECK(reservations_destroyed.load(std::memory_order_acquire) == 2U);
+    CHECK(live_reservations_seen_by_handler.load(
+              std::memory_order_relaxed) == 2U);
     throw_before_consume.store(false, std::memory_order_relaxed);
 
     reset_sensitive_request_body_wipe_count_for_testing();
@@ -2307,6 +2462,27 @@ TEST_CASE("native secret imports are admitted before bounded body streaming") {
     // route rejected it before copying even one byte into its own buffer, so
     // there is deliberately nothing owned here to wipe.
     CHECK(sensitive_request_body_wipe_count_for_testing() == 0U);
+    CHECK(reservations_created.load(std::memory_order_acquire) == 3U);
+    CHECK(reservations_destroyed.load(std::memory_order_acquire) == 3U);
+    CHECK(live_reservations_seen_by_handler.load(
+              std::memory_order_relaxed) == 2U);
+
+    reset_sensitive_request_body_wipe_count_for_testing();
+    const auto truncated = post_truncated_body(
+        configured_port(config),
+        "/api/system/ndms/interfaces/import",
+        cookie);
+    CHECK(truncated.response.find(" 400 ") != std::string::npos);
+    CHECK(truncated.response.find(
+              R"({"error":"sensitive_request_read_failed"})") !=
+          std::string::npos);
+    CHECK(truncated.peer_closed);
+    CHECK(handled.load(std::memory_order_relaxed) == 2U);
+    CHECK(sensitive_request_body_wipe_count_for_testing() >= 1U);
+    CHECK(reservations_created.load(std::memory_order_acquire) == 4U);
+    CHECK(reservations_destroyed.load(std::memory_order_acquire) == 4U);
+    CHECK(live_reservations_seen_by_handler.load(
+              std::memory_order_relaxed) == 2U);
 
     protected_transport.store(false, std::memory_order_relaxed);
     reset_sensitive_request_body_wipe_count_for_testing();
@@ -2320,6 +2496,8 @@ TEST_CASE("native secret imports are admitted before bounded body streaming") {
     CHECK(unprotected->get_header_value("Cache-Control") == "no-store");
     CHECK(handled.load(std::memory_order_relaxed) == 2U);
     CHECK(sensitive_request_body_wipe_count_for_testing() == 0U);
+    CHECK(reservations_created.load(std::memory_order_acquire) == 4U);
+    CHECK(reservations_destroyed.load(std::memory_order_acquire) == 4U);
 }
 
 TEST_CASE("sing-box install requires step-up before its handler runs") {

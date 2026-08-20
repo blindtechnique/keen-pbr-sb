@@ -55,6 +55,9 @@ std::atomic<std::size_t> sensitive_request_body_stream_count{0U};
 
 constexpr std::size_t kMaximumSensitiveRequestBodyBytes = 512U * 1024U;
 
+class NoopSensitiveRequestReservation final
+    : public SensitiveRequestReservation {};
+
 void wipe_sensitive_bytes(std::vector<char>& bytes) noexcept {
     if (bytes.empty()) return;
     volatile char* cursor = bytes.data();
@@ -3036,8 +3039,18 @@ void ApiServer::post_sensitive(
     post_sensitive(
         path,
         maximum_body_bytes,
-        SensitivePreBodyAdmission{},
-        std::move(handler));
+        SensitivePreBodyReservation{
+            [](const httplib::Request&) {
+                return std::make_shared<
+                    NoopSensitiveRequestReservation>();
+            }},
+        ReservedSensitiveBodyRouteHandler{
+            [h = std::move(handler)](
+                const httplib::Request& request,
+                SensitiveRequestBody body,
+                const SensitiveRequestReservationPtr&) {
+                return h(request, std::move(body));
+            }});
 }
 
 void ApiServer::post_sensitive(
@@ -3045,6 +3058,30 @@ void ApiServer::post_sensitive(
     const std::size_t maximum_body_bytes,
     SensitivePreBodyAdmission pre_body_admission,
     SensitiveBodyRouteHandler handler) {
+    post_sensitive(
+        path,
+        maximum_body_bytes,
+        SensitivePreBodyReservation{
+            [admission = std::move(pre_body_admission)](
+                const httplib::Request& request) {
+                if (admission) admission(request);
+                return std::make_shared<
+                    NoopSensitiveRequestReservation>();
+            }},
+        ReservedSensitiveBodyRouteHandler{
+            [h = std::move(handler)](
+                const httplib::Request& request,
+                SensitiveRequestBody body,
+                const SensitiveRequestReservationPtr&) {
+                return h(request, std::move(body));
+            }});
+}
+
+void ApiServer::post_sensitive(
+    const std::string& path,
+    const std::size_t maximum_body_bytes,
+    SensitivePreBodyReservation pre_body_reservation,
+    ReservedSensitiveBodyRouteHandler handler) {
     if (!requires_step_up("POST", path)) {
         throw std::invalid_argument(
             "sensitive route must be registered for step-up");
@@ -3060,7 +3097,7 @@ void ApiServer::post_sensitive(
     impl_->server.Post(
         path,
         [state = impl_.get(),
-         admission = std::move(pre_body_admission),
+         reservation_admission = std::move(pre_body_reservation),
          h = std::move(handler),
          maximum_body_bytes](
             const httplib::Request& req,
@@ -3072,6 +3109,10 @@ void ApiServer::post_sensitive(
             log_request_start(req, "api-sensitive");
             res.set_header("Cache-Control", "no-store");
 
+            // This variable deliberately outlives the try block. In
+            // particular, a handler exception must not release the authority
+            // before the redacted error response has been rendered/logged.
+            SensitiveRequestReservationPtr reservation;
             try {
                 if (!state->evaluate_protected_secret_transport(req, true)
                          .protected_transport) {
@@ -3084,16 +3125,21 @@ void ApiServer::post_sensitive(
                     return;
                 }
 
-                if (admission) {
-                    try {
-                        admission(req);
-                    } catch (...) {
-                        // A pre-body refusal deliberately leaves the request
-                        // payload unread. Never let those bytes become the
-                        // next request on a persistent connection.
-                        res.set_header("Connection", "close");
-                        throw;
+                try {
+                    reservation = reservation_admission
+                        ? reservation_admission(req)
+                        : SensitiveRequestReservationPtr{};
+                    if (!reservation) {
+                        throw ApiError(
+                            "sensitive request reservation unavailable",
+                            503);
                     }
+                } catch (...) {
+                    // A pre-body refusal deliberately leaves the request
+                    // payload unread. Never let those bytes become the next
+                    // request on a persistent connection.
+                    res.set_header("Connection", "close");
+                    throw;
                 }
 
                 SensitiveRequestBody body{std::vector<char>{}};
@@ -3129,7 +3175,8 @@ void ApiServer::post_sensitive(
                     return;
                 }
 
-                std::string result = h(req, std::move(body));
+                std::string result = h(
+                    req, std::move(body), reservation);
                 res.set_content(result, "application/json");
                 log_request_end(
                     req, "api-sensitive",

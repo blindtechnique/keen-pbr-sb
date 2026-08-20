@@ -42,6 +42,21 @@ private:
     std::optional<std::string> body_;
 };
 
+// Type-erased RAII authority acquired before a sensitive request body is
+// streamed. Concrete routes keep their lease/reservation in a derived object;
+// the server owns the shared lifetime until response/error handling finishes.
+class SensitiveRequestReservation {
+public:
+    SensitiveRequestReservation(
+        const SensitiveRequestReservation&) = delete;
+    SensitiveRequestReservation& operator=(
+        const SensitiveRequestReservation&) = delete;
+    virtual ~SensitiveRequestReservation() noexcept = default;
+
+protected:
+    SensitiveRequestReservation() = default;
+};
+
 // Move-only storage for a credential-bearing request body.  Sensitive routes
 // are streamed into this buffer only after authentication and step-up have
 // been admitted.  The bytes are overwritten both when the application takes
@@ -102,6 +117,14 @@ public:
         SensitiveRequestBody body)>;
     using SensitivePreBodyAdmission =
         std::function<void(const httplib::Request& request)>;
+    using SensitiveRequestReservationPtr =
+        std::shared_ptr<SensitiveRequestReservation>;
+    using SensitivePreBodyReservation = std::function<
+        SensitiveRequestReservationPtr(const httplib::Request& request)>;
+    using ReservedSensitiveBodyRouteHandler = std::function<std::string(
+        const httplib::Request& request,
+        SensitiveRequestBody body,
+        const SensitiveRequestReservationPtr& reservation)>;
     using StreamRouteHandler = std::function<void(const httplib::Request&,
                                                   httplib::Response&)>;
 
@@ -129,6 +152,14 @@ public:
                         std::size_t maximum_body_bytes,
                         SensitivePreBodyAdmission pre_body_admission,
                         SensitiveBodyRouteHandler handler);
+
+    // Reservation admission runs before ContentReader. A null result is a
+    // fail-closed refusal. The server retains the token through body buffering,
+    // handler execution and all response/error logging paths.
+    void post_sensitive(const std::string& path,
+                        std::size_t maximum_body_bytes,
+                        SensitivePreBodyReservation pre_body_reservation,
+                        ReservedSensitiveBodyRouteHandler handler);
 
     // Register a GET handler that streams a non-JSON response.
     void get_stream(const std::string& path, StreamRouteHandler handler);
