@@ -750,12 +750,10 @@ bool valid_ndms_native_observation_catalog_revision(
 
 bool valid_ndms_native_observation_stamp(
     const NdmsNativeObservationStamp& stamp) noexcept {
-    const NdmsNativeObservationBinding shape{
-        stamp.authority_id,
-        stamp.mutation_epoch,
-        stamp.sequence,
-    };
-    if (!valid_ndms_native_observation_binding(shape) ||
+    // Unlike a mutation/WAL binding, a complete baseline observation is
+    // valid in epoch zero. Reusing binding validation here silently rejected
+    // the first durable observation on a newly provisioned authority.
+    if (!lower_hex(stamp.authority_id, 32U) || stamp.sequence == 0U ||
         !valid_ndms_native_observation_catalog_revision(
             stamp.catalog_revision)) {
         return false;

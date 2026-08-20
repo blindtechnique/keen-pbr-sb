@@ -596,6 +596,7 @@ void validate_update(const NdmsNativeImportWalRecord& before,
             "Native import WAL update skips, rewinds or rewrites a phase");
     }
     if (before.transaction_id != after.transaction_id ||
+        before.execution_mode != after.execution_mode ||
         before.kind != after.kind || before.marker != after.marker ||
         before.candidate_revision != after.candidate_revision ||
         before.request_binding_sha256 !=

@@ -209,6 +209,8 @@ TEST_CASE("begin mutation is an exact CAS over the baseline stamp") {
     store.provision(writer.lease);
     const auto stale = store.record_observation(
         writer.lease, catalog_revision('a'));
+    CHECK(stale.mutation_epoch == 0U);
+    CHECK(valid_ndms_native_observation_stamp(stale));
     const auto current = store.record_observation(
         writer.lease, catalog_revision('b'));
 

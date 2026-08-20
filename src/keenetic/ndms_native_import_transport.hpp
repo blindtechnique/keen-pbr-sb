@@ -17,6 +17,7 @@ struct NdmsNativeImportExecutionPlan;
 struct NdmsNativeImportExecutionResult;
 class NdmsNativeImportExecutorDependencies;
 class NdmsNativeImportBaselineEvidence;
+class NdmsNativeCooperativeImportWriter;
 
 // Fifteen seconds of bounded curl execution plus a two-second setup margin.
 // Allocator receipts must retain at least this much monotonic lifetime at the
@@ -159,6 +160,14 @@ private:
         const NdmsNativeImportExecutionPlan&,
         const NdmsNativeImportBaselineEvidence&,
         std::optional<NdmsNativeAllocatorFenceReceipt>,
+        const NdmsNativeImportExecutorDependencies&);
+    friend NdmsNativeImportExecutionResult
+    execute_ndms_native_import_transaction(
+        NdmsNativePreparedImport,
+        const NdmsNativeImportExecutionPlan&,
+        const NdmsNativeImportBaselineEvidence&,
+        std::optional<NdmsNativeAllocatorFenceReceipt>,
+        std::optional<NdmsNativeCooperativeImportWriter>,
         const NdmsNativeImportExecutorDependencies&);
 #ifdef KEEN_PBR3_TESTING
     friend class NdmsNativeImportDispatchCapabilityTestIssuer;

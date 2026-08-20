@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ndms_catalog_cache.hpp"
+#include "ndms_native_observation_store.hpp"
 
 #include <array>
 #include <cstddef>
@@ -21,7 +22,12 @@ inline constexpr char
     kNdmsNativeImportProtectedCatalogDigestPrefix[] =
         "ndms-protected-wg-catalog-v1-";
 inline constexpr char kNdmsNativeImportBaselineDigestPrefix[] =
-    "ndms-native-import-baseline-v1-";
+    "ndms-native-import-baseline-v2-";
+
+enum class NdmsNativeImportExecutionMode : std::uint8_t {
+    allocator_fenced,
+    cooperative_stock_import,
+};
 
 // Exported for every consumer that has to CHECK one of the digests above.
 // The digests are emitted prefixed; a checker that tests for a bare 64-hex
@@ -56,6 +62,8 @@ enum class NdmsNativeImportBaselineBuildError : std::uint8_t {
     expected_target_not_first_free,
     maintenance_generation_exhausted,
     allocator_generation_invalid,
+    durable_observation_invalid,
+    durable_observation_mismatch,
 };
 
 class NdmsNativeImportBaselineEvidence;
@@ -68,6 +76,8 @@ struct NdmsNativeImportBaselineBuildResult;
 // obtains its value only by projecting immutable Evidence; the WAL parser
 // revalidates every field and recomputes baseline_sha256 on load.
 struct NdmsNativeImportPersistedBaseline final {
+    NdmsNativeImportExecutionMode execution_mode{
+        NdmsNativeImportExecutionMode::allocator_fenced};
     std::string expected_created_interface;
     std::uint8_t expected_target_slot{0U};
     std::string occupancy_hex;
@@ -77,6 +87,9 @@ struct NdmsNativeImportPersistedBaseline final {
     std::uint64_t invalidation_epoch{0U};
     std::uint32_t maintenance_base_generation{0U};
     std::uint64_t allocator_generation{0U};
+    std::optional<NdmsNativeObservationStamp> durable_observation_stamp;
+    std::optional<NdmsNativeObservationBinding>
+        durable_observation_binding;
     std::string baseline_sha256;
 
     bool operator==(
@@ -89,10 +102,26 @@ NdmsNativeImportBaselineBuildResult build_ndms_native_import_baseline(
     std::uint32_t maintenance_base_generation,
     std::uint64_t allocator_generation);
 
+// Dedicated baseline for a direct full catalog read. Process-local cache
+// counters and an allocator generation are deliberately not accepted as
+// authority. The complete durable stamp must name this exact catalog and the
+// binding returned by the immediately following begin_mutation transition.
+NdmsNativeImportBaselineBuildResult
+build_ndms_native_cooperative_import_baseline(
+    const NdmsCatalogSnapshot& snapshot,
+    std::string_view expected_created_interface,
+    std::uint32_t maintenance_base_generation,
+    const NdmsNativeObservationStamp& durable_observation,
+    const NdmsNativeObservationBinding& durable_binding);
+
+std::string ndms_native_import_baseline_catalog_revision(
+    const NdmsInterfaceCatalog& catalog);
+
 // Immutable, bounded and non-secret evidence captured before an import. Raw
 // RCI ids, labels, endpoint material and per-slot revisions are deliberately
-// absent. Observation counters bind one accepted in-process catalog snapshot;
-// they are provenance, not a clock that may be compared across restarts.
+// absent. Fenced evidence retains one accepted in-process observation;
+// cooperative evidence instead binds the direct catalog to a restart-stable
+// durable stamp and deliberately stores all process-local counters as zero.
 class NdmsNativeImportBaselineEvidence final {
 public:
     NdmsNativeImportBaselineEvidence(
@@ -117,6 +146,11 @@ public:
     std::uint64_t invalidation_epoch() const noexcept;
     std::uint32_t maintenance_base_generation() const noexcept;
     std::uint64_t allocator_generation() const noexcept;
+    NdmsNativeImportExecutionMode execution_mode() const noexcept;
+    const std::optional<NdmsNativeObservationStamp>&
+    durable_observation_stamp() const noexcept;
+    const std::optional<NdmsNativeObservationBinding>&
+    durable_observation_binding() const noexcept;
     const std::string& baseline_sha256() const noexcept;
 
 private:
@@ -126,6 +160,13 @@ private:
         std::string_view,
         std::uint32_t,
         std::uint64_t);
+    friend NdmsNativeImportBaselineBuildResult
+    build_ndms_native_cooperative_import_baseline(
+        const NdmsCatalogSnapshot&,
+        std::string_view,
+        std::uint32_t,
+        const NdmsNativeObservationStamp&,
+        const NdmsNativeObservationBinding&);
     friend class NdmsNativeImportBaselineComparison;
     friend NdmsNativeImportBaselineComparison
     compare_ndms_native_import_baseline(
@@ -133,6 +174,7 @@ private:
         const NdmsCatalogSnapshot&);
 
     NdmsNativeImportBaselineEvidence(
+        NdmsNativeImportExecutionMode execution_mode,
         std::string expected_created_interface,
         std::uint8_t expected_target_slot,
         std::array<
@@ -145,8 +187,14 @@ private:
         std::uint64_t invalidation_epoch,
         std::uint32_t maintenance_base_generation,
         std::uint64_t allocator_generation,
+        std::optional<NdmsNativeObservationStamp>
+            durable_observation_stamp,
+        std::optional<NdmsNativeObservationBinding>
+            durable_observation_binding,
         std::string baseline_sha256);
 
+    NdmsNativeImportExecutionMode execution_mode_{
+        NdmsNativeImportExecutionMode::allocator_fenced};
     std::string expected_created_interface_;
     std::uint8_t expected_target_slot_{0U};
     std::array<
@@ -159,6 +207,10 @@ private:
     std::uint64_t invalidation_epoch_{0U};
     std::uint32_t maintenance_base_generation_{0U};
     std::uint64_t allocator_generation_{0U};
+    std::optional<NdmsNativeObservationStamp>
+        durable_observation_stamp_;
+    std::optional<NdmsNativeObservationBinding>
+        durable_observation_binding_;
     std::string baseline_sha256_;
 };
 
@@ -234,5 +286,9 @@ bool valid_ndms_native_import_persisted_baseline(
 
 const char* ndms_native_import_baseline_build_error_name(
     NdmsNativeImportBaselineBuildError error) noexcept;
+bool valid_ndms_native_import_execution_mode(
+    NdmsNativeImportExecutionMode mode) noexcept;
+const char* ndms_native_import_execution_mode_name(
+    NdmsNativeImportExecutionMode mode) noexcept;
 
 } // namespace keen_pbr3

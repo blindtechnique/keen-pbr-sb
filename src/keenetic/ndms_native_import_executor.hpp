@@ -19,6 +19,8 @@ struct NdmsNativeImportExecutionPlan final {
     std::string firmware_identity;
     std::string allocator_implementation_digest;
     NdmsNativeObservationBinding observation_binding;
+    NdmsNativeImportExecutionMode execution_mode{
+        NdmsNativeImportExecutionMode::allocator_fenced};
     NdmsNativeAllocatorFenceMode fence_mode{
         NdmsNativeAllocatorFenceMode::bounded_atomic_import};
 };
@@ -44,6 +46,15 @@ public:
         const std::string& transaction_id,
         const std::string& generation_ticket,
         std::uint32_t maintenance_base_generation) = 0;
+
+    // Cooperative stock import has no allocator-fence receipt. Its exact-next
+    // maintenance reservation is delegated to the already held composite
+    // writer, whose MaintenanceLease performs the authoritative CAS.
+    virtual std::optional<std::uint32_t> reserve_next_cooperative(
+        const std::string& transaction_id,
+        const std::string& generation_ticket,
+        std::uint32_t maintenance_base_generation,
+        NdmsNativeWriterLease& writer);
 };
 
 class NdmsNativeImportExecutorClock {
@@ -102,8 +113,99 @@ public:
 };
 
 struct NdmsNativeImportExecutionResult;
+class NdmsNativeCooperativeImportWriter;
+class NdmsNativeImportExecutorDependencies;
+class NdmsNativeCooperativeImportCoordinator;
+struct NdmsNativeCooperativeImportAdmission;
 #ifdef KEEN_PBR3_TESTING
 class NdmsNativeImportExecutorTestIssuer;
+class NdmsNativeCooperativeImportWriterTestIssuer;
+#endif
+
+enum class NdmsNativeCooperativeImportAdmissionState : std::uint8_t {
+    admitted,
+    writer_missing,
+    writer_lost,
+    wrong_scope,
+    observation_binding_invalid,
+    observation_binding_not_durable,
+};
+
+// A narrow, non-owning admission for the measured stock empty-name import.
+// It is explicitly cooperative: it excludes keen-pbr writers only and is
+// never an NDMS-global allocator fence. The durable observation ledger is
+// rechecked at admission and immediately before dispatch.
+class NdmsNativeCooperativeImportWriter final {
+public:
+    NdmsNativeCooperativeImportWriter(
+        NdmsNativeCooperativeImportWriter&& other) noexcept;
+    NdmsNativeCooperativeImportWriter& operator=(
+        NdmsNativeCooperativeImportWriter&& other) noexcept;
+    NdmsNativeCooperativeImportWriter(
+        const NdmsNativeCooperativeImportWriter&) = delete;
+    NdmsNativeCooperativeImportWriter& operator=(
+        const NdmsNativeCooperativeImportWriter&) = delete;
+
+private:
+    NdmsNativeCooperativeImportWriter(
+        NdmsNativeWriterLease* writer,
+        const NdmsNativeObservationStore* observations,
+        NdmsNativeObservationBinding binding,
+        NdmsNativeWriterLeaseScope scope) noexcept;
+
+    void poison_after_move() noexcept;
+
+    NdmsNativeWriterLease* writer_{nullptr};
+    const NdmsNativeObservationStore* observations_{nullptr};
+    NdmsNativeObservationBinding binding_;
+    NdmsNativeWriterLeaseScope scope_{
+        NdmsNativeWriterLeaseScope::keen_pbr_cooperative};
+
+    friend struct NdmsNativeCooperativeImportAdmission;
+    friend NdmsNativeCooperativeImportAdmission
+    admit_ndms_native_cooperative_import_writer(
+        NdmsNativeWriterLease&,
+        const NdmsNativeObservationStore&,
+        const NdmsNativeObservationBinding&) noexcept;
+#ifdef KEEN_PBR3_TESTING
+    friend class NdmsNativeCooperativeImportWriterTestIssuer;
+#endif
+    friend NdmsNativeImportExecutionResult
+    execute_ndms_native_import_transaction(
+        NdmsNativePreparedImport,
+        const NdmsNativeImportExecutionPlan&,
+        const NdmsNativeImportBaselineEvidence&,
+        std::optional<NdmsNativeAllocatorFenceReceipt>,
+        std::optional<NdmsNativeCooperativeImportWriter>,
+        const NdmsNativeImportExecutorDependencies&);
+};
+
+struct NdmsNativeCooperativeImportAdmission final {
+    NdmsNativeCooperativeImportAdmissionState state{
+        NdmsNativeCooperativeImportAdmissionState::writer_missing};
+    std::optional<NdmsNativeCooperativeImportWriter> writer;
+
+    bool admitted() const noexcept {
+        return state == NdmsNativeCooperativeImportAdmissionState::admitted &&
+               writer.has_value();
+    }
+};
+
+NdmsNativeCooperativeImportAdmission
+admit_ndms_native_cooperative_import_writer(
+    NdmsNativeWriterLease& writer,
+    const NdmsNativeObservationStore& observations,
+    const NdmsNativeObservationBinding& binding) noexcept;
+
+#ifdef KEEN_PBR3_TESTING
+class NdmsNativeCooperativeImportWriterTestIssuer final {
+public:
+    static NdmsNativeCooperativeImportWriter issue_unchecked(
+        NdmsNativeWriterLease* writer,
+        const NdmsNativeObservationStore* observations,
+        NdmsNativeObservationBinding binding,
+        NdmsNativeWriterLeaseScope scope) noexcept;
+};
 #endif
 
 // Dependency injection is intentionally opaque in production. A caller
@@ -135,6 +237,9 @@ private:
     NdmsNativeLoopbackRciPostBackend* transport_{nullptr};
     NdmsNativeImportExecutorClock* clock_{nullptr};
 
+    // The production issuer remains one dormant, import-only coordinator;
+    // there is no public dependency factory and no API/daemon wiring here.
+    friend class NdmsNativeCooperativeImportCoordinator;
 #ifdef KEEN_PBR3_TESTING
     friend class NdmsNativeImportExecutorTestIssuer;
 #endif
@@ -144,6 +249,14 @@ private:
         const NdmsNativeImportExecutionPlan&,
         const NdmsNativeImportBaselineEvidence&,
         std::optional<NdmsNativeAllocatorFenceReceipt>,
+        const NdmsNativeImportExecutorDependencies&);
+    friend NdmsNativeImportExecutionResult
+    execute_ndms_native_import_transaction(
+        NdmsNativePreparedImport,
+        const NdmsNativeImportExecutionPlan&,
+        const NdmsNativeImportBaselineEvidence&,
+        std::optional<NdmsNativeAllocatorFenceReceipt>,
+        std::optional<NdmsNativeCooperativeImportWriter>,
         const NdmsNativeImportExecutorDependencies&);
 };
 
@@ -175,6 +288,11 @@ enum class NdmsNativeImportExecutionStop : std::uint8_t {
     baseline_mismatch,
     incompatible_fence_mode,
     fence_required,
+    authority_conflict,
+    cooperative_writer_required,
+    cooperative_writer_invalid,
+    cooperative_writer_lost,
+    cooperative_observation_changed,
     request_binding_failed,
     generation_observation_failed,
     fence_invalid,
@@ -235,8 +353,18 @@ NdmsNativeImportExecutionResult execute_ndms_native_import_transaction(
     std::optional<NdmsNativeAllocatorFenceReceipt> receipt,
     const NdmsNativeImportExecutorDependencies& dependencies);
 
+NdmsNativeImportExecutionResult execute_ndms_native_import_transaction(
+    NdmsNativePreparedImport prepared,
+    const NdmsNativeImportExecutionPlan& plan,
+    const NdmsNativeImportBaselineEvidence& baseline,
+    std::optional<NdmsNativeAllocatorFenceReceipt> receipt,
+    std::optional<NdmsNativeCooperativeImportWriter> cooperative_writer,
+    const NdmsNativeImportExecutorDependencies& dependencies);
+
 const char* ndms_native_import_execution_status_name(
     NdmsNativeImportExecutionStatus status) noexcept;
+const char* ndms_native_cooperative_import_admission_state_name(
+    NdmsNativeCooperativeImportAdmissionState state) noexcept;
 const char* ndms_native_import_execution_stop_name(
     NdmsNativeImportExecutionStop stop) noexcept;
 

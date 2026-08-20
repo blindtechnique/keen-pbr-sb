@@ -41,7 +41,7 @@ void update_tagged_field(
     const std::uint8_t tag,
     const void* data,
     const std::size_t size) {
-    // Canonical v1 framing: one tag octet, an unsigned 64-bit big-endian
+    // Canonical v2 framing: one tag octet, an unsigned 64-bit big-endian
     // payload length, then the exact payload bytes. Every digest below walks
     // fixed fields or the fixed slot array; it never hashes JSON, an object
     // representation, a native-endian integer or std::hash output.
@@ -201,6 +201,7 @@ std::string protected_catalog_digest(
 }
 
 std::string baseline_digest(
+    const NdmsNativeImportExecutionMode execution_mode,
     const std::string_view expected_target,
     const std::array<
         std::uint8_t,
@@ -210,23 +211,76 @@ std::string baseline_digest(
     const std::uint64_t observation_epoch,
     const std::uint64_t invalidation_epoch,
     const std::uint32_t maintenance_base_generation,
-    const std::uint64_t allocator_generation) {
+    const std::uint64_t allocator_generation,
+    const std::optional<NdmsNativeObservationStamp>& durable_stamp,
+    const std::optional<NdmsNativeObservationBinding>& durable_binding) {
     constexpr std::string_view domain{
-        "keen-pbr.ndms-native-import.baseline.v1"};
+        "keen-pbr.ndms-native-import.baseline.v2"};
     Sha256 hasher;
     update_tagged_field(hasher, 0U, domain);
-    update_tagged_field(hasher, 1U, expected_target);
-    update_tagged_field(hasher, 2U, occupancy);
-    update_tagged_field(hasher, 3U, protected_digest);
+    const std::string_view mode =
+        execution_mode == NdmsNativeImportExecutionMode::allocator_fenced
+            ? "allocator_fenced"
+            : "cooperative_stock_import";
+    update_tagged_field(hasher, 1U, mode);
+    update_tagged_field(hasher, 2U, expected_target);
+    update_tagged_field(hasher, 3U, occupancy);
+    update_tagged_field(hasher, 4U, protected_digest);
     update_unsigned_field(
-        hasher, 4U, observation_generation);
-    update_unsigned_field(hasher, 5U, observation_epoch);
-    update_unsigned_field(hasher, 6U, invalidation_epoch);
+        hasher, 5U, observation_generation);
+    update_unsigned_field(hasher, 6U, observation_epoch);
+    update_unsigned_field(hasher, 7U, invalidation_epoch);
     update_unsigned_field(
-        hasher, 7U, maintenance_base_generation);
-    update_unsigned_field(hasher, 8U, allocator_generation);
+        hasher, 8U, maintenance_base_generation);
+    update_unsigned_field(hasher, 9U, allocator_generation);
+    update_unsigned_field(
+        hasher, 10U, static_cast<std::uint8_t>(durable_stamp.has_value()));
+    if (durable_stamp.has_value()) {
+        update_tagged_field(hasher, 11U, durable_stamp->authority_id);
+        update_unsigned_field(hasher, 12U, durable_stamp->sequence);
+        update_unsigned_field(hasher, 13U, durable_stamp->mutation_epoch);
+        update_tagged_field(hasher, 14U, durable_stamp->catalog_revision);
+        update_tagged_field(hasher, 15U, durable_stamp->ledger_integrity);
+    }
+    update_unsigned_field(
+        hasher, 16U,
+        static_cast<std::uint8_t>(durable_binding.has_value()));
+    if (durable_binding.has_value()) {
+        update_tagged_field(hasher, 17U, durable_binding->authority_id);
+        update_unsigned_field(hasher, 18U, durable_binding->mutation_epoch);
+        update_unsigned_field(hasher, 19U, durable_binding->baseline_sequence);
+    }
     return std::string{kNdmsNativeImportBaselineDigestPrefix} +
            hasher.hex_digest();
+}
+
+bool durable_observation_pair_valid(
+    const NdmsNativeObservationStamp& stamp,
+    const NdmsNativeObservationBinding& binding) noexcept {
+    return valid_ndms_native_observation_stamp(stamp) &&
+           valid_ndms_native_observation_binding(binding) &&
+           stamp.authority_id == binding.authority_id &&
+           stamp.sequence == binding.baseline_sequence &&
+           stamp.mutation_epoch !=
+               std::numeric_limits<std::uint64_t>::max() &&
+           binding.mutation_epoch == stamp.mutation_epoch + 1U;
+}
+
+bool durable_stamp_equal(
+    const NdmsNativeObservationStamp& left,
+    const NdmsNativeObservationStamp& right) noexcept {
+    return left.authority_id == right.authority_id &&
+           left.sequence == right.sequence &&
+           left.mutation_epoch == right.mutation_epoch &&
+           left.catalog_revision == right.catalog_revision &&
+           left.ledger_integrity == right.ledger_integrity;
+}
+
+bool optional_durable_stamp_equal(
+    const std::optional<NdmsNativeObservationStamp>& left,
+    const std::optional<NdmsNativeObservationStamp>& right) noexcept {
+    if (left.has_value() != right.has_value()) return false;
+    return !left.has_value() || durable_stamp_equal(*left, *right);
 }
 
 NdmsNativeImportBaselineBuildResult failure(
@@ -301,9 +355,37 @@ std::string ndms_native_import_protected_catalog_digest(
     return protected_catalog_digest(catalog, expected_target_slot);
 }
 
+std::string ndms_native_import_baseline_catalog_revision(
+    const NdmsInterfaceCatalog& catalog) {
+    constexpr std::string_view domain{
+        "keen-pbr.ndms-native-import.baseline-catalog.v1"};
+    Sha256 hasher;
+    update_tagged_field(hasher, 0U, domain);
+    update_unsigned_field(
+        hasher, 1U,
+        static_cast<std::uint8_t>(catalog.firmware_available));
+    update_unsigned_field(
+        hasher, 2U,
+        static_cast<std::uint8_t>(
+            catalog.wireguard_slot_evidence_complete));
+    for (std::size_t slot = 0U;
+         slot < catalog.wireguard_slots.size(); ++slot) {
+        const auto& evidence = catalog.wireguard_slots[slot];
+        update_unsigned_field(
+            hasher, 3U, static_cast<std::uint8_t>(slot));
+        update_unsigned_field(
+            hasher, 4U, static_cast<std::uint8_t>(evidence.state));
+        update_tagged_field(
+            hasher, 5U, evidence.structural_revision);
+    }
+    return std::string{kNdmsNativeObservationCatalogRevisionPrefix} +
+           hasher.hex_digest();
+}
+
 bool NdmsNativeImportPersistedBaseline::operator==(
     const NdmsNativeImportPersistedBaseline& other) const noexcept {
-    return expected_created_interface ==
+    return execution_mode == other.execution_mode &&
+           expected_created_interface ==
                other.expected_created_interface &&
            expected_target_slot == other.expected_target_slot &&
            occupancy_hex == other.occupancy_hex &&
@@ -315,10 +397,16 @@ bool NdmsNativeImportPersistedBaseline::operator==(
            maintenance_base_generation ==
                other.maintenance_base_generation &&
            allocator_generation == other.allocator_generation &&
+           optional_durable_stamp_equal(
+               durable_observation_stamp,
+               other.durable_observation_stamp) &&
+           durable_observation_binding ==
+               other.durable_observation_binding &&
            baseline_sha256 == other.baseline_sha256;
 }
 
 NdmsNativeImportBaselineEvidence::NdmsNativeImportBaselineEvidence(
+    const NdmsNativeImportExecutionMode execution_mode,
     std::string expected_created_interface,
     const std::uint8_t expected_target_slot,
     std::array<
@@ -331,8 +419,13 @@ NdmsNativeImportBaselineEvidence::NdmsNativeImportBaselineEvidence(
     const std::uint64_t invalidation_epoch,
     const std::uint32_t maintenance_base_generation,
     const std::uint64_t allocator_generation,
+    std::optional<NdmsNativeObservationStamp>
+        durable_observation_stamp,
+    std::optional<NdmsNativeObservationBinding>
+        durable_observation_binding,
     std::string baseline_sha256)
-    : expected_created_interface_(
+    : execution_mode_(execution_mode),
+      expected_created_interface_(
           std::move(expected_created_interface)),
       expected_target_slot_(expected_target_slot),
       occupancy_(occupancy),
@@ -344,6 +437,10 @@ NdmsNativeImportBaselineEvidence::NdmsNativeImportBaselineEvidence(
       invalidation_epoch_(invalidation_epoch),
       maintenance_base_generation_(maintenance_base_generation),
       allocator_generation_(allocator_generation),
+      durable_observation_stamp_(
+          std::move(durable_observation_stamp)),
+      durable_observation_binding_(
+          std::move(durable_observation_binding)),
       baseline_sha256_(std::move(baseline_sha256)) {}
 
 const std::string&
@@ -402,6 +499,23 @@ std::uint64_t NdmsNativeImportBaselineEvidence::allocator_generation()
     return allocator_generation_;
 }
 
+NdmsNativeImportExecutionMode
+NdmsNativeImportBaselineEvidence::execution_mode() const noexcept {
+    return execution_mode_;
+}
+
+const std::optional<NdmsNativeObservationStamp>&
+NdmsNativeImportBaselineEvidence::durable_observation_stamp()
+    const noexcept {
+    return durable_observation_stamp_;
+}
+
+const std::optional<NdmsNativeObservationBinding>&
+NdmsNativeImportBaselineEvidence::durable_observation_binding()
+    const noexcept {
+    return durable_observation_binding_;
+}
+
 const std::string& NdmsNativeImportBaselineEvidence::baseline_sha256()
     const noexcept {
     return baseline_sha256_;
@@ -410,6 +524,7 @@ const std::string& NdmsNativeImportBaselineEvidence::baseline_sha256()
 NdmsNativeImportPersistedBaseline persist_ndms_native_import_baseline(
     const NdmsNativeImportBaselineEvidence& baseline) {
     return {
+        baseline.execution_mode(),
         baseline.expected_created_interface(),
         baseline.expected_target_slot(),
         baseline.occupancy_hex(),
@@ -419,6 +534,8 @@ NdmsNativeImportPersistedBaseline persist_ndms_native_import_baseline(
         baseline.invalidation_epoch(),
         baseline.maintenance_base_generation(),
         baseline.allocator_generation(),
+        baseline.durable_observation_stamp(),
+        baseline.durable_observation_binding(),
         baseline.baseline_sha256(),
     };
 }
@@ -426,6 +543,10 @@ NdmsNativeImportPersistedBaseline persist_ndms_native_import_baseline(
 bool valid_ndms_native_import_persisted_baseline(
     const NdmsNativeImportPersistedBaseline& baseline) noexcept {
     try {
+        if (!valid_ndms_native_import_execution_mode(
+                baseline.execution_mode)) {
+            return false;
+        }
         const auto identity = parse_ndms_wireguard_identity(
             baseline.expected_created_interface);
         if (!identity.has_value() ||
@@ -459,15 +580,37 @@ bool valid_ndms_native_import_persisted_baseline(
             !prefixed_sha256(
                 baseline.baseline_sha256,
                 kNdmsNativeImportBaselineDigestPrefix) ||
-            baseline.observation_generation == 0U ||
-            baseline.observation_epoch != baseline.invalidation_epoch ||
             baseline.maintenance_base_generation ==
-                std::numeric_limits<std::uint32_t>::max() ||
-            baseline.allocator_generation == 0U) {
+                std::numeric_limits<std::uint32_t>::max()) {
             return false;
         }
 
+        if (baseline.execution_mode ==
+            NdmsNativeImportExecutionMode::allocator_fenced) {
+            if (baseline.observation_generation == 0U ||
+                baseline.observation_epoch !=
+                    baseline.invalidation_epoch ||
+                baseline.allocator_generation == 0U ||
+                baseline.durable_observation_stamp.has_value() ||
+                baseline.durable_observation_binding.has_value()) {
+                return false;
+            }
+        } else {
+            if (baseline.observation_generation != 0U ||
+                baseline.observation_epoch != 0U ||
+                baseline.invalidation_epoch != 0U ||
+                baseline.allocator_generation != 0U ||
+                !baseline.durable_observation_stamp.has_value() ||
+                !baseline.durable_observation_binding.has_value() ||
+                !durable_observation_pair_valid(
+                    *baseline.durable_observation_stamp,
+                    *baseline.durable_observation_binding)) {
+                return false;
+            }
+        }
+
         return baseline.baseline_sha256 == baseline_digest(
+            baseline.execution_mode,
             baseline.expected_created_interface,
             *occupancy,
             baseline.protected_catalog_sha256,
@@ -475,7 +618,9 @@ bool valid_ndms_native_import_persisted_baseline(
             baseline.observation_epoch,
             baseline.invalidation_epoch,
             baseline.maintenance_base_generation,
-            baseline.allocator_generation);
+            baseline.allocator_generation,
+            baseline.durable_observation_stamp,
+            baseline.durable_observation_binding);
     } catch (...) {
         return false;
     }
@@ -578,6 +723,7 @@ NdmsNativeImportBaselineBuildResult build_ndms_native_import_baseline(
     auto protected_digest = protected_catalog_digest(
         snapshot.catalog, expected_identity->slot);
     auto complete_digest = baseline_digest(
+        NdmsNativeImportExecutionMode::allocator_fenced,
         expected_created_interface,
         occupancy,
         protected_digest,
@@ -585,11 +731,14 @@ NdmsNativeImportBaselineBuildResult build_ndms_native_import_baseline(
         snapshot.observation_epoch,
         snapshot.invalidation_epoch,
         maintenance_base_generation,
-        allocator_generation);
+        allocator_generation,
+        std::nullopt,
+        std::nullopt);
 
     return {
         NdmsNativeImportBaselineBuildError::none,
         NdmsNativeImportBaselineEvidence{
+            NdmsNativeImportExecutionMode::allocator_fenced,
             std::string{expected_created_interface},
             expected_identity->slot,
             occupancy,
@@ -600,6 +749,143 @@ NdmsNativeImportBaselineBuildResult build_ndms_native_import_baseline(
             snapshot.invalidation_epoch,
             maintenance_base_generation,
             allocator_generation,
+            std::nullopt,
+            std::nullopt,
+            std::move(complete_digest)},
+    };
+}
+
+NdmsNativeImportBaselineBuildResult
+build_ndms_native_cooperative_import_baseline(
+    const NdmsCatalogSnapshot& snapshot,
+    const std::string_view expected_created_interface,
+    const std::uint32_t maintenance_base_generation,
+    const NdmsNativeObservationStamp& durable_observation,
+    const NdmsNativeObservationBinding& durable_binding) {
+    if (!snapshot.catalog.firmware_available) {
+        return failure(
+            NdmsNativeImportBaselineBuildError::firmware_unavailable);
+    }
+    if (snapshot.status != NdmsCatalogCacheStatus::fresh) {
+        return failure(
+            NdmsNativeImportBaselineBuildError::catalog_not_fresh);
+    }
+    if (!snapshot.refreshed) {
+        return failure(
+            NdmsNativeImportBaselineBuildError::catalog_not_refreshed);
+    }
+    if (!snapshot.observed_at.has_value()) {
+        return failure(
+            NdmsNativeImportBaselineBuildError::
+                catalog_observation_missing);
+    }
+    if (!snapshot.catalog.wireguard_slot_evidence_complete) {
+        return failure(
+            NdmsNativeImportBaselineBuildError::
+                slot_evidence_incomplete);
+    }
+    if (!all_slot_evidence_is_valid(snapshot.catalog)) {
+        return failure(
+            NdmsNativeImportBaselineBuildError::slot_evidence_invalid);
+    }
+    if (!valid_ndms_native_observation_stamp(durable_observation) ||
+        !valid_ndms_native_observation_binding(durable_binding)) {
+        return failure(
+            NdmsNativeImportBaselineBuildError::
+                durable_observation_invalid);
+    }
+    if (!durable_observation_pair_valid(
+            durable_observation, durable_binding) ||
+        durable_observation.catalog_revision !=
+            ndms_native_import_baseline_catalog_revision(
+                snapshot.catalog)) {
+        return failure(
+            NdmsNativeImportBaselineBuildError::
+                durable_observation_mismatch);
+    }
+
+    const auto expected_identity =
+        parse_ndms_wireguard_identity(expected_created_interface);
+    if (!expected_identity.has_value() ||
+        !ndms_wireguard_identity_is_managed_candidate(
+            *expected_identity)) {
+        return failure(
+            NdmsNativeImportBaselineBuildError::expected_target_invalid);
+    }
+
+    const auto first_free = first_free_slot(snapshot.catalog);
+    if (!first_free.has_value()) {
+        return failure(
+            NdmsNativeImportBaselineBuildError::
+                allocator_namespace_full);
+    }
+    const auto first_free_identity = NdmsWireguardIdentity{
+        *first_free,
+        *first_free <= 4U
+            ? NdmsWireguardSlotClass::protected_system
+            : (*first_free <= 98U
+                   ? NdmsWireguardSlotClass::managed_candidate
+                   : NdmsWireguardSlotClass::protected_sentinel)};
+    if (ndms_wireguard_identity_is_protected(first_free_identity)) {
+        return failure(
+            NdmsNativeImportBaselineBuildError::
+                first_free_target_protected);
+    }
+    if (snapshot.catalog.wireguard_slots[expected_identity->slot].state !=
+        NdmsWireguardCatalogSlotState::absent) {
+        return failure(
+            NdmsNativeImportBaselineBuildError::
+                expected_target_occupied);
+    }
+    if (*first_free != expected_identity->slot) {
+        return failure(
+            NdmsNativeImportBaselineBuildError::
+                expected_target_not_first_free);
+    }
+    if (maintenance_base_generation ==
+        std::numeric_limits<std::uint32_t>::max()) {
+        return failure(
+            NdmsNativeImportBaselineBuildError::
+                maintenance_generation_exhausted);
+    }
+
+    const auto occupancy = build_occupancy(snapshot.catalog);
+    auto occupancy_hex_value = occupancy_hex(occupancy);
+    auto protected_digest = protected_catalog_digest(
+        snapshot.catalog, expected_identity->slot);
+    const std::optional<NdmsNativeObservationStamp> persisted_stamp{
+        durable_observation};
+    const std::optional<NdmsNativeObservationBinding> persisted_binding{
+        durable_binding};
+    auto complete_digest = baseline_digest(
+        NdmsNativeImportExecutionMode::cooperative_stock_import,
+        expected_created_interface,
+        occupancy,
+        protected_digest,
+        0U,
+        0U,
+        0U,
+        maintenance_base_generation,
+        0U,
+        persisted_stamp,
+        persisted_binding);
+
+    return {
+        NdmsNativeImportBaselineBuildError::none,
+        NdmsNativeImportBaselineEvidence{
+            NdmsNativeImportExecutionMode::cooperative_stock_import,
+            std::string{expected_created_interface},
+            expected_identity->slot,
+            occupancy,
+            std::move(occupancy_hex_value),
+            std::move(protected_digest),
+            0U,
+            0U,
+            0U,
+            maintenance_base_generation,
+            0U,
+            persisted_stamp,
+            persisted_binding,
             std::move(complete_digest)},
     };
 }
@@ -715,8 +1001,35 @@ const char* ndms_native_import_baseline_build_error_name(
     case NdmsNativeImportBaselineBuildError::
             allocator_generation_invalid:
         return "allocator_generation_invalid";
+    case NdmsNativeImportBaselineBuildError::
+            durable_observation_invalid:
+        return "durable_observation_invalid";
+    case NdmsNativeImportBaselineBuildError::
+            durable_observation_mismatch:
+        return "durable_observation_mismatch";
     }
     return "slot_evidence_invalid";
+}
+
+bool valid_ndms_native_import_execution_mode(
+    const NdmsNativeImportExecutionMode mode) noexcept {
+    switch (mode) {
+    case NdmsNativeImportExecutionMode::allocator_fenced:
+    case NdmsNativeImportExecutionMode::cooperative_stock_import:
+        return true;
+    }
+    return false;
+}
+
+const char* ndms_native_import_execution_mode_name(
+    const NdmsNativeImportExecutionMode mode) noexcept {
+    switch (mode) {
+    case NdmsNativeImportExecutionMode::allocator_fenced:
+        return "allocator_fenced";
+    case NdmsNativeImportExecutionMode::cooperative_stock_import:
+        return "cooperative_stock_import";
+    }
+    return "invalid";
 }
 
 } // namespace keen_pbr3

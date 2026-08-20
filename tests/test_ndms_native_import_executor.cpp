@@ -7,11 +7,17 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <functional>
+#include <limits>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <type_traits>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -43,6 +49,122 @@ const auto kIssuedAt = NdmsNativeAllocatorMonotonicTime{
 const auto kNow = kIssuedAt + std::chrono::seconds{5};
 const auto kExpiresAt = kIssuedAt + std::chrono::seconds{30};
 
+constexpr char kCooperativeAuthority[] =
+    "0123456789abcdef0123456789abcdef";
+
+class CooperativeTempDirectory final {
+public:
+    CooperativeTempDirectory() {
+        std::string pattern =
+            (std::filesystem::temp_directory_path() /
+             "keen-pbr-cooperative-import-XXXXXX")
+                .string();
+        std::vector<char> writable(pattern.begin(), pattern.end());
+        writable.push_back('\0');
+        const auto* created = ::mkdtemp(writable.data());
+        REQUIRE(created != nullptr);
+        root = created;
+        state = root / "state";
+    }
+
+    ~CooperativeTempDirectory() {
+        std::error_code error;
+        std::filesystem::remove_all(root, error);
+    }
+
+    std::filesystem::path root;
+    std::filesystem::path state;
+};
+
+struct CooperativeMaintenanceState final {
+    bool held{true};
+    std::uint32_t generation{41U};
+    std::size_t reserve_calls{0U};
+    std::size_t verify_calls{0U};
+};
+
+class CooperativeMaintenanceLease final : public MaintenanceLease {
+public:
+    explicit CooperativeMaintenanceLease(
+        std::shared_ptr<CooperativeMaintenanceState> state)
+        : state_(std::move(state)), base_generation_(state_->generation) {}
+
+    std::uint32_t base_generation() const noexcept override {
+        return base_generation_;
+    }
+
+    std::uint32_t reserve(const std::uint32_t expected) override {
+        ++state_->reserve_calls;
+        if (!state_->held || expected != state_->generation ||
+            state_->generation ==
+                std::numeric_limits<std::uint32_t>::max()) {
+            throw std::runtime_error(
+                "cooperative maintenance generation mismatch");
+        }
+        return ++state_->generation;
+    }
+
+    void verify_held() override {
+        ++state_->verify_calls;
+        if (!state_->held) {
+            throw std::runtime_error(
+                "cooperative maintenance lease lost");
+        }
+    }
+
+private:
+    std::shared_ptr<CooperativeMaintenanceState> state_;
+    std::uint32_t base_generation_{0U};
+};
+
+NdmsNativeWriterLeaseTestHooks cooperative_writer_hooks() {
+    NdmsNativeWriterLeaseTestHooks hooks;
+    hooks.allow_current_process_owner = true;
+    return hooks;
+}
+
+NdmsNativeObservationStoreTestHooks cooperative_observation_hooks() {
+    NdmsNativeObservationStoreTestHooks hooks;
+    hooks.allow_current_process_owner = true;
+    hooks.authority_id_factory = [] {
+        return std::string{kCooperativeAuthority};
+    };
+    return hooks;
+}
+
+NdmsNativeWriterAdmission acquire_cooperative_writer(
+    const std::filesystem::path& state_directory,
+    RuntimeMutationAdmission& runtime,
+    const std::shared_ptr<CooperativeMaintenanceState>& maintenance) {
+    auto runtime_lease = runtime.try_acquire(
+        "cooperative-stock-import-test");
+    REQUIRE(runtime_lease.has_value());
+    return admit_ndms_native_writer(
+        state_directory,
+        std::make_unique<CooperativeMaintenanceLease>(maintenance),
+        std::move(*runtime_lease),
+        cooperative_writer_hooks());
+}
+
+struct CooperativeObservationEpoch final {
+    NdmsNativeObservationStamp stamp;
+    NdmsNativeObservationBinding binding;
+};
+
+CooperativeObservationEpoch begin_cooperative_observation_epoch(
+    NdmsNativeObservationStore& observations,
+    NdmsNativeWriterLease& writer,
+    std::string catalog_revision) {
+    observations.provision(writer);
+    const auto baseline = observations.record_observation(
+        writer, std::move(catalog_revision));
+    return {
+        baseline,
+        ndms_native_observation_binding(
+            observations.begin_mutation(writer, baseline)),
+    };
+}
+
 std::string plain_wireguard_config() {
     return std::string{"[Interface]\nPrivateKey = "} + kPrivateKey +
            "\nAddress = 10.7.0.2/32\n\n[Peer]\nPublicKey = " +
@@ -68,9 +190,9 @@ std::string digest(const std::string& prefix, const char digit) {
     return prefix + std::string(64U, digit);
 }
 
-NdmsNativeImportBaselineEvidence authoritative_baseline(
-    const std::uint32_t maintenance_generation,
-    const std::uint64_t allocator_generation) {
+NdmsCatalogSnapshot authoritative_snapshot(
+    const std::uint64_t observation_generation,
+    const std::uint64_t observation_epoch) {
     auto payload = nlohmann::json::object();
     for (const std::uint8_t slot : {0U, 1U, 2U, 3U, 4U, 6U}) {
         const auto name = "Wireguard" + std::to_string(slot);
@@ -85,9 +207,16 @@ NdmsNativeImportBaselineEvidence authoritative_baseline(
     snapshot.status = NdmsCatalogCacheStatus::fresh;
     snapshot.refreshed = true;
     snapshot.observed_at = kIssuedAt;
-    snapshot.observation_generation = 7U;
-    snapshot.observation_epoch = 3U;
-    snapshot.invalidation_epoch = 3U;
+    snapshot.observation_generation = observation_generation;
+    snapshot.observation_epoch = observation_epoch;
+    snapshot.invalidation_epoch = observation_epoch;
+    return snapshot;
+}
+
+NdmsNativeImportBaselineEvidence authoritative_baseline(
+    const std::uint32_t maintenance_generation,
+    const std::uint64_t allocator_generation) {
+    const auto snapshot = authoritative_snapshot(7U, 3U);
     auto built = build_ndms_native_import_baseline(
         snapshot,
         "Wireguard5",
@@ -182,12 +311,41 @@ public:
         return reservation;
     }
 
+    std::optional<std::uint32_t> reserve_next_cooperative(
+        const std::string& transaction_id,
+        const std::string& generation_ticket,
+        const std::uint32_t base,
+        NdmsNativeWriterLease& writer) override {
+        if (events != nullptr) {
+            events->push_back("generation.reserve_cooperative");
+        }
+        ++cooperative_reserve_calls;
+        reserved_transaction_id = transaction_id;
+        reserved_generation_ticket = generation_ticket;
+        reserved_base = base;
+        if (throw_on_reserve) {
+            throw std::runtime_error("synthetic generation reservation");
+        }
+        const auto reserved =
+            NdmsNativeImportGenerationCoordinator::
+                reserve_next_cooperative(
+                    transaction_id,
+                    generation_ticket,
+                    base,
+                    writer);
+        if (reserved.has_value()) {
+            maintenance_generation = *reserved;
+        }
+        return reserved;
+    }
+
     std::vector<std::string>* events{nullptr};
     std::uint32_t maintenance_generation{41U};
     std::uint64_t allocator_generation{77U};
     std::optional<std::uint32_t> reservation{42U};
     std::size_t observe_calls{0U};
     std::size_t reserve_calls{0U};
+    std::size_t cooperative_reserve_calls{0U};
     std::size_t throw_on_observe{0U};
     bool throw_on_reserve{false};
     std::string reserved_transaction_id;
@@ -230,7 +388,11 @@ private:
             throw std::runtime_error("synthetic WAL failure");
         }
         records.push_back(record);
+        if (after_publish) after_publish(calls);
     }
+
+public:
+    std::function<void(std::size_t)> after_publish;
 };
 
 class FakeSnapshotPublisher final
@@ -252,6 +414,7 @@ public:
         if (throw_on_publish) {
             throw std::runtime_error("synthetic snapshot publish failure");
         }
+        if (after_publish) after_publish(calls);
     }
 
     std::vector<std::string>* events{nullptr};
@@ -263,6 +426,7 @@ public:
     std::string published_revision;
     NdmsNativeTunnelImportKind published_kind{
         NdmsNativeTunnelImportKind::wireguard};
+    std::function<void(std::size_t)> after_publish;
 };
 
 class FakeBackend final : public NdmsNativeLoopbackRciPostBackend {
@@ -279,6 +443,7 @@ private:
         }
         NdmsNativeImportRawTransportResponse response;
         trace.pre_dispatch_guard_evaluated = true;
+        if (before_guard) before_guard();
         if (!guard.authorize_dispatch()) return response;
         trace.pre_dispatch_guard_passed = true;
         trace.perform_started = true;
@@ -302,6 +467,7 @@ public:
     bool may_have_dispatched{true};
     bool transport_ok{true};
     int status_code{200};
+    std::function<void()> before_guard;
     std::string response_body{
         R"([{"interface":{"wireguard":{"import":{"created":"Wireguard5","intersects":""}}}}])"};
 };
@@ -330,6 +496,62 @@ struct Fixture final {
     FakeBackend backend;
     FakeClock clock;
     NdmsNativeImportExecutorDependencies dependencies;
+};
+
+struct CooperativeFixture final {
+    CooperativeFixture()
+        : maintenance(
+              std::make_shared<CooperativeMaintenanceState>()),
+          writer(acquire_cooperative_writer(
+              directory.state, runtime, maintenance)),
+          observations(
+              directory.state, cooperative_observation_hooks()),
+          direct_snapshot(authoritative_snapshot(0U, 0U)),
+          epoch(begin_cooperative_observation_epoch(
+              observations,
+              writer.lease,
+              ndms_native_import_baseline_catalog_revision(
+                  direct_snapshot.catalog))),
+          binding(epoch.binding) {
+        REQUIRE(writer.state == NdmsNativeWriterAdmissionState::admitted);
+    }
+
+    NdmsNativeImportBaselineEvidence baseline() const {
+        auto built = build_ndms_native_cooperative_import_baseline(
+            direct_snapshot,
+            "Wireguard5",
+            executor.generations.maintenance_generation,
+            epoch.stamp,
+            binding);
+        if (!built.success() || !built.evidence.has_value()) {
+            throw std::runtime_error(
+                "cannot build cooperative executor baseline fixture");
+        }
+        return *built.evidence;
+    }
+
+    NdmsNativeImportExecutionPlan plan() const {
+        auto value = execution_plan();
+        value.execution_mode =
+            NdmsNativeImportExecutionMode::cooperative_stock_import;
+        value.observation_binding = binding;
+        return value;
+    }
+
+    NdmsNativeCooperativeImportAdmission admit() {
+        return admit_ndms_native_cooperative_import_writer(
+            writer.lease, observations, binding);
+    }
+
+    CooperativeTempDirectory directory;
+    RuntimeMutationAdmission runtime;
+    std::shared_ptr<CooperativeMaintenanceState> maintenance;
+    NdmsNativeWriterAdmission writer;
+    NdmsNativeObservationStore observations;
+    NdmsCatalogSnapshot direct_snapshot;
+    CooperativeObservationEpoch epoch;
+    NdmsNativeObservationBinding binding;
+    Fixture executor;
 };
 
 } // namespace
@@ -1029,4 +1251,327 @@ TEST_CASE("response WAL failure cannot authorize forward progress") {
     CHECK_FALSE(result.response_wal_published);
     CHECK(result.recovery_action ==
           NdmsNativeImportRecoveryAction::retry_read_only_observation);
+}
+
+TEST_CASE("cooperative stock import executes WG and AWG without a fence receipt") {
+    for (const auto kind : {
+             NdmsNativeTunnelImportKind::wireguard,
+             NdmsNativeTunnelImportKind::amnezia_wireguard}) {
+        CAPTURE(ndms_native_tunnel_import_kind_name(kind));
+        CooperativeFixture fixture;
+        const auto plan = fixture.plan();
+        auto admission = fixture.admit();
+        REQUIRE(admission.admitted());
+        auto prepared = prepare_ndms_native_import(
+            kind == NdmsNativeTunnelImportKind::wireguard
+                ? plain_wireguard_config()
+                : amnezia_wireguard_config());
+
+        const auto result = execute_ndms_native_import_transaction(
+            std::move(prepared),
+            plan,
+            fixture.baseline(),
+            std::nullopt,
+            std::move(admission.writer),
+            fixture.executor.dependencies);
+
+        CHECK(result.status == NdmsNativeImportExecutionStatus::
+              response_recorded_needs_verification);
+        CHECK(result.stop == NdmsNativeImportExecutionStop::none);
+        CHECK(result.prepared_wal_published);
+        CHECK(result.snapshot_published);
+        CHECK(result.inflight_wal_published);
+        CHECK(result.response_wal_published);
+        CHECK(result.dispatch_perform_started);
+        CHECK(fixture.executor.generations.reserve_calls == 0U);
+        CHECK(fixture.executor.generations.cooperative_reserve_calls == 1U);
+        CHECK(fixture.maintenance->reserve_calls == 1U);
+        CHECK(fixture.executor.backend.perform_calls == 1U);
+        REQUIRE(result.response_manifest.has_value());
+        CHECK(result.response_manifest->request_kind == kind);
+        REQUIRE(fixture.executor.wal.records.size() == 3U);
+        CHECK(fixture.executor.wal.records.back().kind == kind);
+        CHECK(fixture.executor.wal.records.back().created_interface ==
+              std::optional<std::string>{"Wireguard5"});
+    }
+}
+
+TEST_CASE("cooperative stock import rejects missing conflicting or invalid writers") {
+    SUBCASE("missing writer") {
+        CooperativeFixture fixture;
+        const auto plan = fixture.plan();
+        auto prepared = prepare_ndms_native_import(
+            plain_wireguard_config());
+
+        const auto result = execute_ndms_native_import_transaction(
+            std::move(prepared),
+            plan,
+            fixture.baseline(),
+            std::nullopt,
+            std::nullopt,
+            fixture.executor.dependencies);
+
+        CHECK(result.stop == NdmsNativeImportExecutionStop::
+              cooperative_writer_required);
+        CHECK(fixture.executor.wal.calls == 0U);
+        CHECK(fixture.executor.backend.calls == 0U);
+    }
+
+    SUBCASE("lost writer") {
+        CooperativeFixture fixture;
+        const auto plan = fixture.plan();
+        auto admission = fixture.admit();
+        REQUIRE(admission.admitted());
+        fixture.maintenance->held = false;
+
+        const auto result = execute_ndms_native_import_transaction(
+            prepare_ndms_native_import(plain_wireguard_config()),
+            plan,
+            fixture.baseline(),
+            std::nullopt,
+            std::move(admission.writer),
+            fixture.executor.dependencies);
+
+        CHECK(result.stop == NdmsNativeImportExecutionStop::
+              cooperative_writer_lost);
+        CHECK(fixture.executor.wal.calls == 0U);
+        CHECK(fixture.executor.backend.calls == 0U);
+    }
+
+    SUBCASE("wrong scope") {
+        CooperativeFixture fixture;
+        const auto plan = fixture.plan();
+        auto unchecked =
+            NdmsNativeCooperativeImportWriterTestIssuer::issue_unchecked(
+                &fixture.writer.lease,
+                &fixture.observations,
+                fixture.binding,
+                static_cast<NdmsNativeWriterLeaseScope>(255U));
+
+        const auto result = execute_ndms_native_import_transaction(
+            prepare_ndms_native_import(plain_wireguard_config()),
+            plan,
+            fixture.baseline(),
+            std::nullopt,
+            std::optional<NdmsNativeCooperativeImportWriter>{
+                std::move(unchecked)},
+            fixture.executor.dependencies);
+
+        CHECK(result.stop == NdmsNativeImportExecutionStop::
+              cooperative_writer_invalid);
+        CHECK(fixture.executor.wal.calls == 0U);
+        CHECK(fixture.executor.backend.calls == 0U);
+    }
+
+    SUBCASE("receipt and cooperative writer are mutually exclusive") {
+        CooperativeFixture fixture;
+        const auto plan = fixture.plan();
+        auto admission = fixture.admit();
+        REQUIRE(admission.admitted());
+        auto prepared = prepare_ndms_native_import(
+            plain_wireguard_config());
+        auto receipt = fence_receipt(
+            plan, prepared.request_identity());
+
+        const auto result = execute_ndms_native_import_transaction(
+            std::move(prepared),
+            plan,
+            fixture.baseline(),
+            std::optional<NdmsNativeAllocatorFenceReceipt>{
+                std::move(receipt)},
+            std::move(admission.writer),
+            fixture.executor.dependencies);
+
+        CHECK(result.stop ==
+              NdmsNativeImportExecutionStop::authority_conflict);
+        CHECK(fixture.executor.wal.calls == 0U);
+        CHECK(fixture.executor.backend.calls == 0U);
+    }
+
+    SUBCASE("syntactically valid but foreign binding is not durable") {
+        CooperativeFixture fixture;
+        auto foreign = fixture.binding;
+        foreign.authority_id = std::string(32U, 'f');
+
+        const auto admission =
+            admit_ndms_native_cooperative_import_writer(
+                fixture.writer.lease,
+                fixture.observations,
+                foreign);
+
+        CHECK_FALSE(admission.admitted());
+        CHECK(admission.state ==
+              NdmsNativeCooperativeImportAdmissionState::
+                  observation_binding_not_durable);
+    }
+
+    SUBCASE("plan cannot reinterpret a fenced baseline as cooperative") {
+        CooperativeFixture fixture;
+        const auto plan = fixture.plan();
+        auto admission = fixture.admit();
+        REQUIRE(admission.admitted());
+
+        const auto result = execute_ndms_native_import_transaction(
+            prepare_ndms_native_import(plain_wireguard_config()),
+            plan,
+            fixture.executor.baseline(),
+            std::nullopt,
+            std::move(admission.writer),
+            fixture.executor.dependencies);
+
+        CHECK(result.stop ==
+              NdmsNativeImportExecutionStop::baseline_mismatch);
+        CHECK(fixture.executor.wal.calls == 0U);
+        CHECK(fixture.executor.backend.calls == 0U);
+    }
+}
+
+TEST_CASE("cooperative stock import stops before backend after every durable intent boundary") {
+    SUBCASE("writer lost after prepared WAL") {
+        CooperativeFixture fixture;
+        const auto plan = fixture.plan();
+        auto admission = fixture.admit();
+        REQUIRE(admission.admitted());
+        fixture.executor.wal.after_publish =
+            [state = fixture.maintenance](const std::size_t call) {
+                if (call == 1U) state->held = false;
+            };
+
+        const auto result = execute_ndms_native_import_transaction(
+            prepare_ndms_native_import(plain_wireguard_config()),
+            plan,
+            fixture.baseline(),
+            std::nullopt,
+            std::move(admission.writer),
+            fixture.executor.dependencies);
+
+        CHECK(result.status ==
+              NdmsNativeImportExecutionStatus::recovery_required);
+        CHECK(result.stop == NdmsNativeImportExecutionStop::
+              cooperative_writer_lost);
+        CHECK(result.prepared_wal_published);
+        CHECK_FALSE(result.snapshot_published);
+        CHECK(fixture.executor.backend.calls == 0U);
+        CHECK(fixture.executor.backend.perform_calls == 0U);
+    }
+
+    SUBCASE("writer lost after rollback snapshot") {
+        CooperativeFixture fixture;
+        const auto plan = fixture.plan();
+        auto admission = fixture.admit();
+        REQUIRE(admission.admitted());
+        fixture.executor.snapshots.after_publish =
+            [state = fixture.maintenance](const std::size_t) {
+                state->held = false;
+            };
+
+        const auto result = execute_ndms_native_import_transaction(
+            prepare_ndms_native_import(plain_wireguard_config()),
+            plan,
+            fixture.baseline(),
+            std::nullopt,
+            std::move(admission.writer),
+            fixture.executor.dependencies);
+
+        CHECK(result.status ==
+              NdmsNativeImportExecutionStatus::recovery_required);
+        CHECK(result.stop == NdmsNativeImportExecutionStop::
+              cooperative_writer_lost);
+        CHECK(result.snapshot_published);
+        CHECK(fixture.executor.generations.cooperative_reserve_calls == 0U);
+        CHECK(fixture.executor.backend.calls == 0U);
+        CHECK(fixture.executor.backend.perform_calls == 0U);
+    }
+
+    SUBCASE("writer lost after inflight WAL") {
+        CooperativeFixture fixture;
+        const auto plan = fixture.plan();
+        auto admission = fixture.admit();
+        REQUIRE(admission.admitted());
+        fixture.executor.wal.after_publish =
+            [state = fixture.maintenance](const std::size_t call) {
+                if (call == 2U) state->held = false;
+            };
+
+        const auto result = execute_ndms_native_import_transaction(
+            prepare_ndms_native_import(plain_wireguard_config()),
+            plan,
+            fixture.baseline(),
+            std::nullopt,
+            std::move(admission.writer),
+            fixture.executor.dependencies);
+
+        CHECK(result.status ==
+              NdmsNativeImportExecutionStatus::recovery_required);
+        CHECK(result.stop == NdmsNativeImportExecutionStop::
+              cooperative_writer_lost);
+        CHECK(result.inflight_wal_published);
+        CHECK(fixture.executor.backend.calls == 0U);
+        CHECK(fixture.executor.backend.perform_calls == 0U);
+    }
+}
+
+TEST_CASE("cooperative pre-dispatch guard revalidates writer before perform") {
+    CooperativeFixture fixture;
+    const auto plan = fixture.plan();
+    auto admission = fixture.admit();
+    REQUIRE(admission.admitted());
+    fixture.executor.backend.before_guard =
+        [state = fixture.maintenance] { state->held = false; };
+
+    const auto result = execute_ndms_native_import_transaction(
+        prepare_ndms_native_import(plain_wireguard_config()),
+        plan,
+        fixture.baseline(),
+        std::nullopt,
+        std::move(admission.writer),
+        fixture.executor.dependencies);
+
+    CHECK(result.status ==
+          NdmsNativeImportExecutionStatus::recovery_required);
+    CHECK(result.stop ==
+          NdmsNativeImportExecutionStop::cooperative_writer_lost);
+    CHECK(result.inflight_wal_published);
+    CHECK(fixture.executor.backend.calls == 1U);
+    CHECK(fixture.executor.backend.perform_calls == 0U);
+    CHECK_FALSE(result.dispatch_perform_started);
+    CHECK_FALSE(result.request_may_have_been_dispatched);
+}
+
+TEST_CASE("cooperative external race mismatch is redacted and never claimed") {
+    CooperativeFixture fixture;
+    const auto plan = fixture.plan();
+    auto admission = fixture.admit();
+    REQUIRE(admission.admitted());
+    fixture.executor.backend.response_body =
+        R"([{"interface":{"wireguard":{"import":{"created":"Wireguard1","intersects":""}}}}])";
+
+    const auto result = execute_ndms_native_import_transaction(
+        prepare_ndms_native_import(plain_wireguard_config()),
+        plan,
+        fixture.baseline(),
+        std::nullopt,
+        std::move(admission.writer),
+        fixture.executor.dependencies);
+
+    CHECK(result.status ==
+          NdmsNativeImportExecutionStatus::recovery_required);
+    CHECK(result.stop ==
+          NdmsNativeImportExecutionStop::ambiguous_response);
+    CHECK(result.response_wal_published);
+    REQUIRE(result.response_manifest.has_value());
+    CHECK_FALSE(result.response_manifest->success());
+    CHECK(result.response_manifest->outcome ==
+          NdmsNativeImportResponseOutcome::shape_mismatch);
+    REQUIRE(fixture.executor.wal.records.size() == 3U);
+    const auto& recorded = fixture.executor.wal.records.back();
+    CHECK_FALSE(recorded.created_interface.has_value());
+    const auto safe_wal = serialize_ndms_native_import_wal(recorded);
+    const auto safe_manifest =
+        serialize_ndms_native_import_response_manifest_v3(
+            *result.response_manifest);
+    CHECK(safe_wal.find("Wireguard1") == std::string::npos);
+    CHECK(safe_manifest.find("Wireguard1") == std::string::npos);
+    CHECK(safe_wal.find(kPrivateKey) == std::string::npos);
+    CHECK(safe_manifest.find(kPrivateKey) == std::string::npos);
 }

@@ -22,6 +22,70 @@ bool compatible_empty_name_fence_mode(
            mode == NdmsNativeAllocatorFenceMode::global_ndms_writer_lease;
 }
 
+NdmsNativeCooperativeImportAdmissionState cooperative_writer_state(
+    NdmsNativeWriterLease* writer,
+    const NdmsNativeObservationStore* observations,
+    const NdmsNativeObservationBinding& binding,
+    const NdmsNativeWriterLeaseScope declared_scope) noexcept {
+    if (writer == nullptr) {
+        return NdmsNativeCooperativeImportAdmissionState::writer_missing;
+    }
+    if (declared_scope !=
+            NdmsNativeWriterLeaseScope::keen_pbr_cooperative ||
+        writer->scope() !=
+            NdmsNativeWriterLeaseScope::keen_pbr_cooperative) {
+        return NdmsNativeCooperativeImportAdmissionState::wrong_scope;
+    }
+    if (!writer->held()) {
+        return NdmsNativeCooperativeImportAdmissionState::writer_lost;
+    }
+    if (!valid_ndms_native_observation_binding(binding)) {
+        return NdmsNativeCooperativeImportAdmissionState::
+            observation_binding_invalid;
+    }
+    if (observations == nullptr ||
+        writer->state_directory() != observations->state_directory()) {
+        return NdmsNativeCooperativeImportAdmissionState::
+            observation_binding_not_durable;
+    }
+    const auto durable = observations->read();
+    if (durable.state != NdmsNativeObservationReadState::valid ||
+        !durable.ledger.has_value() ||
+        durable.ledger->authority_id != binding.authority_id ||
+        durable.ledger->mutation_epoch != binding.mutation_epoch ||
+        durable.ledger->sequence != binding.baseline_sequence) {
+        return NdmsNativeCooperativeImportAdmissionState::
+            observation_binding_not_durable;
+    }
+    try {
+        writer->verify_held();
+    } catch (...) {
+        return NdmsNativeCooperativeImportAdmissionState::writer_lost;
+    }
+    return NdmsNativeCooperativeImportAdmissionState::admitted;
+}
+
+NdmsNativeImportExecutionStop cooperative_stop(
+    const NdmsNativeCooperativeImportAdmissionState state) noexcept {
+    switch (state) {
+    case NdmsNativeCooperativeImportAdmissionState::admitted:
+        return NdmsNativeImportExecutionStop::none;
+    case NdmsNativeCooperativeImportAdmissionState::writer_missing:
+        return NdmsNativeImportExecutionStop::cooperative_writer_required;
+    case NdmsNativeCooperativeImportAdmissionState::writer_lost:
+        return NdmsNativeImportExecutionStop::cooperative_writer_lost;
+    case NdmsNativeCooperativeImportAdmissionState::wrong_scope:
+    case NdmsNativeCooperativeImportAdmissionState::
+            observation_binding_invalid:
+        return NdmsNativeImportExecutionStop::cooperative_writer_invalid;
+    case NdmsNativeCooperativeImportAdmissionState::
+            observation_binding_not_durable:
+        return NdmsNativeImportExecutionStop::
+            cooperative_observation_changed;
+    }
+    return NdmsNativeImportExecutionStop::cooperative_writer_invalid;
+}
+
 NdmsNativeAllocatorFenceExpectation fence_expectation(
     const NdmsNativeImportExecutionPlan& plan,
     const std::string& request_binding_digest,
@@ -164,7 +228,143 @@ private:
         NdmsNativeAllocatorFenceValidationError::none};
 };
 
+class CooperativeExecutorPreDispatchGuard final
+    : public NdmsNativeImportPreDispatchGuard {
+public:
+    CooperativeExecutorPreDispatchGuard(
+        NdmsNativeWriterLease& writer,
+        const NdmsNativeObservationStore& observations,
+        const NdmsNativeObservationBinding& binding,
+        const NdmsNativeWriterLeaseScope scope,
+        NdmsNativeImportGenerationCoordinator& generations,
+        const std::uint32_t reserved_generation) noexcept
+        : writer_(writer),
+          observations_(observations),
+          binding_(binding),
+          scope_(scope),
+          generations_(generations),
+          reserved_generation_(reserved_generation) {}
+
+    bool authorize_dispatch() noexcept override {
+        try {
+            const auto generation = generations_.observe();
+            if (generation.maintenance_generation !=
+                reserved_generation_) {
+                stop_ = NdmsNativeImportExecutionStop::generation_changed;
+                return false;
+            }
+            const auto state = cooperative_writer_state(
+                &writer_, &observations_, binding_, scope_);
+            if (state !=
+                NdmsNativeCooperativeImportAdmissionState::admitted) {
+                stop_ = cooperative_stop(state);
+                return false;
+            }
+
+            // This is deliberately the final authority operation in the
+            // transport guard. The backend may enter only after this exact
+            // composite lease revalidation returns successfully.
+            writer_.verify_held();
+            return true;
+        } catch (...) {
+            stop_ = NdmsNativeImportExecutionStop::cooperative_writer_lost;
+            return false;
+        }
+    }
+
+    NdmsNativeImportExecutionStop stop() const noexcept { return stop_; }
+
+private:
+    NdmsNativeWriterLease& writer_;
+    const NdmsNativeObservationStore& observations_;
+    const NdmsNativeObservationBinding& binding_;
+    NdmsNativeWriterLeaseScope scope_;
+    NdmsNativeImportGenerationCoordinator& generations_;
+    std::uint32_t reserved_generation_{0U};
+    NdmsNativeImportExecutionStop stop_{
+        NdmsNativeImportExecutionStop::cooperative_writer_lost};
+};
+
 } // namespace
+
+std::optional<std::uint32_t>
+NdmsNativeImportGenerationCoordinator::reserve_next_cooperative(
+    const std::string&,
+    const std::string&,
+    const std::uint32_t maintenance_base_generation,
+    NdmsNativeWriterLease& writer) {
+    return writer.reserve_maintenance_generation(
+        maintenance_base_generation);
+}
+
+NdmsNativeCooperativeImportWriter::NdmsNativeCooperativeImportWriter(
+    NdmsNativeWriterLease* writer,
+    const NdmsNativeObservationStore* observations,
+    NdmsNativeObservationBinding binding,
+    const NdmsNativeWriterLeaseScope scope) noexcept
+    : writer_(writer),
+      observations_(observations),
+      binding_(std::move(binding)),
+      scope_(scope) {}
+
+NdmsNativeCooperativeImportWriter::NdmsNativeCooperativeImportWriter(
+    NdmsNativeCooperativeImportWriter&& other) noexcept
+    : writer_(other.writer_),
+      observations_(other.observations_),
+      binding_(std::move(other.binding_)),
+      scope_(other.scope_) {
+    other.poison_after_move();
+}
+
+NdmsNativeCooperativeImportWriter&
+NdmsNativeCooperativeImportWriter::operator=(
+    NdmsNativeCooperativeImportWriter&& other) noexcept {
+    if (this != &other) {
+        writer_ = other.writer_;
+        observations_ = other.observations_;
+        binding_ = std::move(other.binding_);
+        scope_ = other.scope_;
+        other.poison_after_move();
+    }
+    return *this;
+}
+
+void NdmsNativeCooperativeImportWriter::poison_after_move() noexcept {
+    writer_ = nullptr;
+    observations_ = nullptr;
+    binding_ = {};
+}
+
+NdmsNativeCooperativeImportAdmission
+admit_ndms_native_cooperative_import_writer(
+    NdmsNativeWriterLease& writer,
+    const NdmsNativeObservationStore& observations,
+    const NdmsNativeObservationBinding& binding) noexcept {
+    NdmsNativeCooperativeImportAdmission result;
+    result.state = cooperative_writer_state(
+        &writer,
+        &observations,
+        binding,
+        writer.scope());
+    if (result.state ==
+        NdmsNativeCooperativeImportAdmissionState::admitted) {
+        result.writer = NdmsNativeCooperativeImportWriter{
+            &writer, &observations, binding, writer.scope()};
+    }
+    return result;
+}
+
+#ifdef KEEN_PBR3_TESTING
+NdmsNativeCooperativeImportWriter
+NdmsNativeCooperativeImportWriterTestIssuer::issue_unchecked(
+    NdmsNativeWriterLease* writer,
+    const NdmsNativeObservationStore* observations,
+    NdmsNativeObservationBinding binding,
+    const NdmsNativeWriterLeaseScope scope) noexcept {
+    return NdmsNativeCooperativeImportWriter{
+        writer, observations, std::move(binding), scope};
+}
+#endif
 
 NdmsNativeAllocatorMonotonicTime
 NdmsNativeImportSteadyClock::now() const noexcept {
@@ -229,6 +429,22 @@ NdmsNativeImportExecutionResult execute_ndms_native_import_transaction(
     const NdmsNativeImportBaselineEvidence& baseline,
     std::optional<NdmsNativeAllocatorFenceReceipt> receipt,
     const NdmsNativeImportExecutorDependencies& dependencies) {
+    return execute_ndms_native_import_transaction(
+        std::move(prepared),
+        plan,
+        baseline,
+        std::move(receipt),
+        std::nullopt,
+        dependencies);
+}
+
+NdmsNativeImportExecutionResult execute_ndms_native_import_transaction(
+    NdmsNativePreparedImport prepared,
+    const NdmsNativeImportExecutionPlan& plan,
+    const NdmsNativeImportBaselineEvidence& baseline,
+    std::optional<NdmsNativeAllocatorFenceReceipt> receipt,
+    std::optional<NdmsNativeCooperativeImportWriter> cooperative_writer,
+    const NdmsNativeImportExecutorDependencies& dependencies) {
     if (dependencies.wal_ == nullptr ||
         dependencies.snapshots_ == nullptr ||
         dependencies.generations_ == nullptr ||
@@ -273,17 +489,60 @@ NdmsNativeImportExecutionResult execute_ndms_native_import_transaction(
     }
     if (!valid_ndms_native_import_persisted_baseline(
             persisted_baseline) ||
+        persisted_baseline.execution_mode != plan.execution_mode ||
         persisted_baseline.expected_created_interface !=
             plan.expected_created_interface) {
         return blocked(
             NdmsNativeImportExecutionStop::baseline_mismatch);
     }
-    if (!compatible_empty_name_fence_mode(plan.fence_mode)) {
+    if (!valid_ndms_native_import_execution_mode(
+            plan.execution_mode)) {
         return blocked(
-            NdmsNativeImportExecutionStop::incompatible_fence_mode);
+            NdmsNativeImportExecutionStop::cooperative_writer_invalid);
     }
-    if (!receipt.has_value()) {
-        return blocked(NdmsNativeImportExecutionStop::fence_required);
+    if (receipt.has_value() && cooperative_writer.has_value()) {
+        return blocked(
+            NdmsNativeImportExecutionStop::authority_conflict);
+    }
+    if (plan.execution_mode ==
+        NdmsNativeImportExecutionMode::allocator_fenced) {
+        if (cooperative_writer.has_value()) {
+            return blocked(
+                NdmsNativeImportExecutionStop::authority_conflict);
+        }
+        if (!compatible_empty_name_fence_mode(plan.fence_mode)) {
+            return blocked(
+                NdmsNativeImportExecutionStop::incompatible_fence_mode);
+        }
+        if (!receipt.has_value()) {
+            return blocked(NdmsNativeImportExecutionStop::fence_required);
+        }
+    } else {
+        if (receipt.has_value()) {
+            return blocked(
+                NdmsNativeImportExecutionStop::authority_conflict);
+        }
+        if (!cooperative_writer.has_value()) {
+            return blocked(NdmsNativeImportExecutionStop::
+                cooperative_writer_required);
+        }
+        if (!(cooperative_writer->binding_ ==
+                  plan.observation_binding) ||
+            !persisted_baseline.durable_observation_binding.has_value() ||
+            !(*persisted_baseline.durable_observation_binding ==
+              plan.observation_binding)) {
+            return blocked(NdmsNativeImportExecutionStop::
+                cooperative_writer_invalid);
+        }
+        const auto state = cooperative_writer_state(
+            cooperative_writer->writer_,
+            cooperative_writer->observations_,
+            cooperative_writer->binding_,
+            cooperative_writer->scope_);
+        if (state !=
+            NdmsNativeCooperativeImportAdmissionState::admitted) {
+            return blocked(cooperative_stop(state));
+        }
     }
 
     std::string request_binding_digest;
@@ -305,34 +564,41 @@ NdmsNativeImportExecutionResult execute_ndms_native_import_transaction(
     }
     if (persisted_baseline.maintenance_base_generation !=
             initial_generation.maintenance_generation ||
-        persisted_baseline.allocator_generation !=
-            initial_generation.allocator_generation) {
+        (plan.execution_mode ==
+             NdmsNativeImportExecutionMode::allocator_fenced &&
+         persisted_baseline.allocator_generation !=
+             initial_generation.allocator_generation)) {
         return blocked(
             NdmsNativeImportExecutionStop::baseline_mismatch);
     }
 
     NdmsNativeAllocatorFenceExpectation expectation;
-    try {
-        expectation = fence_expectation(
-            plan,
-            request_binding_digest,
-            initial_generation,
-            dependencies.clock_->now());
-    } catch (...) {
-        return blocked(
-            NdmsNativeImportExecutionStop::request_binding_failed);
-    }
-    auto validation = validate_ndms_native_allocator_fence(
-        *receipt, expectation);
-    if (!validation.authorizes()) {
-        auto result = blocked(
-            NdmsNativeImportExecutionStop::fence_invalid);
-        result.fence_error = validation.error;
-        return result;
+    NdmsNativeAllocatorFenceValidation validation;
+    if (plan.execution_mode ==
+        NdmsNativeImportExecutionMode::allocator_fenced) {
+        try {
+            expectation = fence_expectation(
+                plan,
+                request_binding_digest,
+                initial_generation,
+                dependencies.clock_->now());
+        } catch (...) {
+            return blocked(
+                NdmsNativeImportExecutionStop::request_binding_failed);
+        }
+        validation = validate_ndms_native_allocator_fence(
+            *receipt, expectation);
+        if (!validation.authorizes()) {
+            auto result = blocked(
+                NdmsNativeImportExecutionStop::fence_invalid);
+            result.fence_error = validation.error;
+            return result;
+        }
     }
 
     NdmsNativeImportWalRecord record;
     record.transaction_id = std::string(request.transaction_id());
+    record.execution_mode = plan.execution_mode;
     record.phase = NdmsNativeImportWalPhase::prepared;
     record.kind = request.kind();
     record.marker = std::string(request.marker());
@@ -373,6 +639,20 @@ NdmsNativeImportExecutionResult execute_ndms_native_import_transaction(
             std::move(result));
     }
 
+    if (plan.execution_mode ==
+        NdmsNativeImportExecutionMode::cooperative_stock_import) {
+        const auto state = cooperative_writer_state(
+            cooperative_writer->writer_,
+            cooperative_writer->observations_,
+            cooperative_writer->binding_,
+            cooperative_writer->scope_);
+        if (state !=
+            NdmsNativeCooperativeImportAdmissionState::admitted) {
+            return recovery_required(
+                cooperative_stop(state), record, std::move(result));
+        }
+    }
+
     try {
         dependencies.snapshots_->publish(
             plan.expected_created_interface,
@@ -391,12 +671,36 @@ NdmsNativeImportExecutionResult execute_ndms_native_import_transaction(
             std::move(result));
     }
 
+    if (plan.execution_mode ==
+        NdmsNativeImportExecutionMode::cooperative_stock_import) {
+        const auto state = cooperative_writer_state(
+            cooperative_writer->writer_,
+            cooperative_writer->observations_,
+            cooperative_writer->binding_,
+            cooperative_writer->scope_);
+        if (state !=
+            NdmsNativeCooperativeImportAdmissionState::admitted) {
+            return recovery_required(
+                cooperative_stop(state), record, std::move(result));
+        }
+    }
+
     std::optional<std::uint32_t> reserved;
     try {
-        reserved = dependencies.generations_->reserve_next(
-            record.transaction_id,
-            record.generation_ticket,
-            record.maintenance_base_generation);
+        if (plan.execution_mode ==
+            NdmsNativeImportExecutionMode::cooperative_stock_import) {
+            reserved = dependencies.generations_->
+                reserve_next_cooperative(
+                    record.transaction_id,
+                    record.generation_ticket,
+                    record.maintenance_base_generation,
+                    *cooperative_writer->writer_);
+        } else {
+            reserved = dependencies.generations_->reserve_next(
+                record.transaction_id,
+                record.generation_ticket,
+                record.maintenance_base_generation);
+        }
     } catch (...) {
         return recovery_required(
             NdmsNativeImportExecutionStop::generation_reservation_failed,
@@ -426,17 +730,31 @@ NdmsNativeImportExecutionResult execute_ndms_native_import_transaction(
             record,
             std::move(result));
     }
-    expectation.current_generation =
-        reserved_generation.allocator_generation;
-    expectation.now = dependencies.clock_->now();
-    validation = validate_ndms_native_allocator_fence(
-        *receipt, expectation);
-    if (!validation.authorizes()) {
-        result.fence_error = validation.error;
-        return recovery_required(
-            NdmsNativeImportExecutionStop::fence_invalid,
-            record,
-            std::move(result));
+    if (plan.execution_mode ==
+        NdmsNativeImportExecutionMode::allocator_fenced) {
+        expectation.current_generation =
+            reserved_generation.allocator_generation;
+        expectation.now = dependencies.clock_->now();
+        validation = validate_ndms_native_allocator_fence(
+            *receipt, expectation);
+        if (!validation.authorizes()) {
+            result.fence_error = validation.error;
+            return recovery_required(
+                NdmsNativeImportExecutionStop::fence_invalid,
+                record,
+                std::move(result));
+        }
+    } else {
+        const auto state = cooperative_writer_state(
+            cooperative_writer->writer_,
+            cooperative_writer->observations_,
+            cooperative_writer->binding_,
+            cooperative_writer->scope_);
+        if (state !=
+            NdmsNativeCooperativeImportAdmissionState::admitted) {
+            return recovery_required(
+                cooperative_stop(state), record, std::move(result));
+        }
     }
 
     record.phase = NdmsNativeImportWalPhase::import_may_be_inflight;
@@ -466,35 +784,74 @@ NdmsNativeImportExecutionResult execute_ndms_native_import_transaction(
             record,
             std::move(result));
     }
-    expectation.current_generation =
-        dispatch_generation.allocator_generation;
-    expectation.now = dependencies.clock_->now();
-    validation = validate_ndms_native_allocator_fence(
-        *receipt, expectation);
-    if (!validation.authorizes()) {
-        result.fence_error = validation.error;
-        return recovery_required(
-            NdmsNativeImportExecutionStop::fence_lost_after_intent,
-            record,
-            std::move(result));
+    if (plan.execution_mode ==
+        NdmsNativeImportExecutionMode::allocator_fenced) {
+        expectation.current_generation =
+            dispatch_generation.allocator_generation;
+        expectation.now = dependencies.clock_->now();
+        validation = validate_ndms_native_allocator_fence(
+            *receipt, expectation);
+        if (!validation.authorizes()) {
+            result.fence_error = validation.error;
+            return recovery_required(
+                NdmsNativeImportExecutionStop::fence_lost_after_intent,
+                record,
+                std::move(result));
+        }
+    } else {
+        const auto state = cooperative_writer_state(
+            cooperative_writer->writer_,
+            cooperative_writer->observations_,
+            cooperative_writer->binding_,
+            cooperative_writer->scope_);
+        if (state !=
+            NdmsNativeCooperativeImportAdmissionState::admitted) {
+            return recovery_required(
+                cooperative_stop(state), record, std::move(result));
+        }
     }
 
     NdmsNativeImportTransportResult transport_result;
-    ExecutorPreDispatchGuard pre_dispatch_guard{
-        expectation,
-        *receipt,
-        *dependencies.generations_,
-        *dependencies.clock_,
-        *reserved};
+    NdmsNativeImportExecutionStop pre_dispatch_stop{
+        NdmsNativeImportExecutionStop::fence_lost_after_intent};
+    NdmsNativeAllocatorFenceValidationError pre_dispatch_fence_error{
+        NdmsNativeAllocatorFenceValidationError::none};
     try {
         auto capability = NdmsNativeImportDispatchCapability{
             NdmsNativeImportDispatchCapability::ConstructionKey{}};
-        transport_result = post_ndms_native_import_once(
-            std::move(capability),
-            std::move(request),
-            plan.expected_created_interface,
-            pre_dispatch_guard,
-            *dependencies.transport_);
+        if (plan.execution_mode ==
+            NdmsNativeImportExecutionMode::cooperative_stock_import) {
+            CooperativeExecutorPreDispatchGuard pre_dispatch_guard{
+                *cooperative_writer->writer_,
+                *cooperative_writer->observations_,
+                cooperative_writer->binding_,
+                cooperative_writer->scope_,
+                *dependencies.generations_,
+                *reserved};
+            transport_result = post_ndms_native_import_once(
+                std::move(capability),
+                std::move(request),
+                plan.expected_created_interface,
+                pre_dispatch_guard,
+                *dependencies.transport_);
+            pre_dispatch_stop = pre_dispatch_guard.stop();
+        } else {
+            ExecutorPreDispatchGuard pre_dispatch_guard{
+                expectation,
+                *receipt,
+                *dependencies.generations_,
+                *dependencies.clock_,
+                *reserved};
+            transport_result = post_ndms_native_import_once(
+                std::move(capability),
+                std::move(request),
+                plan.expected_created_interface,
+                pre_dispatch_guard,
+                *dependencies.transport_);
+            pre_dispatch_stop = pre_dispatch_guard.stop();
+            pre_dispatch_fence_error =
+                pre_dispatch_guard.fence_error();
+        }
     } catch (...) {
         // The helper collapses every exception from backend entry onward
         // into a transport result. Therefore an exception escaping it is
@@ -533,17 +890,17 @@ NdmsNativeImportExecutionResult execute_ndms_native_import_transaction(
 
     if (!transport_result.pre_dispatch_guard_passed) {
         result.request_may_have_been_dispatched = false;
-        result.fence_error = pre_dispatch_guard.fence_error();
+        result.fence_error = pre_dispatch_fence_error;
         try {
             result.response_manifest = transport_result.response_manifest;
         } catch (...) {
             return recovery_required(
-                pre_dispatch_guard.stop(),
+                pre_dispatch_stop,
                 record,
                 std::move(result));
         }
         return recovery_required(
-            pre_dispatch_guard.stop(),
+            pre_dispatch_stop,
             record,
             std::move(result));
     }
@@ -604,6 +961,27 @@ const char* ndms_native_import_execution_status_name(
     return "blocked";
 }
 
+const char* ndms_native_cooperative_import_admission_state_name(
+    const NdmsNativeCooperativeImportAdmissionState state) noexcept {
+    switch (state) {
+    case NdmsNativeCooperativeImportAdmissionState::admitted:
+        return "admitted";
+    case NdmsNativeCooperativeImportAdmissionState::writer_missing:
+        return "writer_missing";
+    case NdmsNativeCooperativeImportAdmissionState::writer_lost:
+        return "writer_lost";
+    case NdmsNativeCooperativeImportAdmissionState::wrong_scope:
+        return "wrong_scope";
+    case NdmsNativeCooperativeImportAdmissionState::
+            observation_binding_invalid:
+        return "observation_binding_invalid";
+    case NdmsNativeCooperativeImportAdmissionState::
+            observation_binding_not_durable:
+        return "observation_binding_not_durable";
+    }
+    return "writer_missing";
+}
+
 const char* ndms_native_import_execution_stop_name(
     const NdmsNativeImportExecutionStop stop) noexcept {
     switch (stop) {
@@ -625,6 +1003,16 @@ const char* ndms_native_import_execution_stop_name(
         return "incompatible_fence_mode";
     case NdmsNativeImportExecutionStop::fence_required:
         return "fence_required";
+    case NdmsNativeImportExecutionStop::authority_conflict:
+        return "authority_conflict";
+    case NdmsNativeImportExecutionStop::cooperative_writer_required:
+        return "cooperative_writer_required";
+    case NdmsNativeImportExecutionStop::cooperative_writer_invalid:
+        return "cooperative_writer_invalid";
+    case NdmsNativeImportExecutionStop::cooperative_writer_lost:
+        return "cooperative_writer_lost";
+    case NdmsNativeImportExecutionStop::cooperative_observation_changed:
+        return "cooperative_observation_changed";
     case NdmsNativeImportExecutionStop::request_binding_failed:
         return "request_binding_failed";
     case NdmsNativeImportExecutionStop::generation_observation_failed:

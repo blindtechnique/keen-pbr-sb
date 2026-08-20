@@ -82,6 +82,30 @@ NdmsCatalogSnapshot baseline_snapshot() {
         occupied_slots({0U, 1U, 2U, 3U, 4U, 6U}));
 }
 
+struct DurableBaselineObservation final {
+    NdmsNativeObservationStamp stamp;
+    NdmsNativeObservationBinding binding;
+};
+
+DurableBaselineObservation durable_baseline_observation(
+    const NdmsCatalogSnapshot& snapshot) {
+    NdmsNativeObservationLedger ledger;
+    ledger.authority_id = "0123456789abcdef0123456789abcdef";
+    ledger.sequence = 1U;
+    ledger.mutation_epoch = 0U;
+    ledger.last_catalog_revision =
+        ndms_native_import_baseline_catalog_revision(snapshot.catalog);
+    ledger.integrity = ndms_native_observation_integrity(ledger);
+    return {
+        {ledger.authority_id,
+         ledger.sequence,
+         ledger.mutation_epoch,
+         *ledger.last_catalog_revision,
+         ledger.integrity},
+        {ledger.authority_id, 1U, ledger.sequence},
+    };
+}
+
 NdmsNativeImportBaselineBuildResult build_valid(
     const NdmsCatalogSnapshot& snapshot,
     const std::string_view expected = "Wireguard5",
@@ -148,8 +172,8 @@ TEST_CASE("native import baseline is fixed bounded and generation bound") {
           "ndms-protected-wg-catalog-v1-"
           "eb6b0a8fa4ba4e56d9dfd5ad81ebf1c85480aed648aedf4e650b49d92fee79cb");
     CHECK(evidence.baseline_sha256() ==
-          "ndms-native-import-baseline-v1-"
-          "1ca209cefdf70f825d4605fc0b87a541c3c7e88a2e4abf1f0648d003c2d7232f");
+          "ndms-native-import-baseline-v2-"
+          "59722f246e945be7d77d291a1e59004a70776a94bb387496eb51616d9de6a4ce");
 
     const auto persisted =
         persist_ndms_native_import_baseline(evidence);
@@ -177,6 +201,69 @@ TEST_CASE("native import baseline is fixed bounded and generation bound") {
           evidence.protected_catalog_sha256());
     CHECK(rebound.evidence->baseline_sha256() !=
           evidence.baseline_sha256());
+}
+
+TEST_CASE("cooperative baseline uses durable observation instead of synthetic counters") {
+    auto direct = authoritative_snapshot(
+        occupied_slots({0U, 1U, 2U, 3U, 4U, 6U}), 0U, 0U);
+    const auto durable = durable_baseline_observation(direct);
+
+    const auto built = build_ndms_native_cooperative_import_baseline(
+        direct, "Wireguard5", 41U, durable.stamp, durable.binding);
+    REQUIRE(built.success());
+    REQUIRE(built.evidence.has_value());
+    const auto& evidence = *built.evidence;
+    CHECK(evidence.execution_mode() ==
+          NdmsNativeImportExecutionMode::cooperative_stock_import);
+    CHECK(evidence.observation_generation() == 0U);
+    CHECK(evidence.observation_epoch() == 0U);
+    CHECK(evidence.invalidation_epoch() == 0U);
+    CHECK(evidence.allocator_generation() == 0U);
+    REQUIRE(evidence.durable_observation_stamp().has_value());
+    REQUIRE(evidence.durable_observation_binding().has_value());
+    CHECK(*evidence.durable_observation_binding() == durable.binding);
+    const auto persisted =
+        persist_ndms_native_import_baseline(evidence);
+    CHECK(valid_ndms_native_import_persisted_baseline(persisted));
+
+    auto invalid_binding = durable.binding;
+    invalid_binding.authority_id.clear();
+    check_error(
+        build_ndms_native_cooperative_import_baseline(
+            direct,
+            "Wireguard5",
+            41U,
+            durable.stamp,
+            invalid_binding),
+        NdmsNativeImportBaselineBuildError::
+            durable_observation_invalid);
+
+    auto synthetic = direct;
+    synthetic.observation_generation = 91U;
+    synthetic.observation_epoch = 12U;
+    synthetic.invalidation_epoch = 12U;
+    const auto still_durable =
+        build_ndms_native_cooperative_import_baseline(
+            synthetic,
+            "Wireguard5",
+            41U,
+            durable.stamp,
+            durable.binding);
+    REQUIRE(still_durable.success());
+    CHECK(still_durable.evidence->observation_generation() == 0U);
+    CHECK(still_durable.evidence->allocator_generation() == 0U);
+
+    check_error(
+        build_ndms_native_import_baseline(
+            synthetic, "Wireguard5", 41U, 0U),
+        NdmsNativeImportBaselineBuildError::
+            allocator_generation_invalid);
+
+    check_error(
+        build_ndms_native_import_baseline(
+            direct, "Wireguard5", 41U, 0U),
+        NdmsNativeImportBaselineBuildError::
+            observation_generation_invalid);
 }
 
 TEST_CASE("persisted native import baseline fails closed on alternate encodings") {

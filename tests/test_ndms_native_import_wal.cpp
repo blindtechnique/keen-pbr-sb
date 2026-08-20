@@ -51,6 +51,46 @@ NdmsNativeImportPersistedBaseline persisted_baseline(
     return persist_ndms_native_import_baseline(*built.evidence);
 }
 
+NdmsNativeImportPersistedBaseline cooperative_persisted_baseline() {
+    auto payload = nlohmann::json::object();
+    for (const std::uint8_t slot : {0U, 1U, 2U, 3U, 4U, 6U}) {
+        const auto name = "Wireguard" + std::to_string(slot);
+        payload[name] = {
+            {"type", "Bridge"},
+            {"interface-name", name},
+            {"description", "occupied-slot"},
+        };
+    }
+    NdmsCatalogSnapshot snapshot;
+    snapshot.catalog = parse_ndms_interface_catalog(payload);
+    snapshot.status = NdmsCatalogCacheStatus::fresh;
+    snapshot.refreshed = true;
+    snapshot.observed_at = std::chrono::steady_clock::time_point{
+        std::chrono::seconds{123}};
+    NdmsNativeObservationLedger ledger;
+    ledger.authority_id = std::string(32U, 'd');
+    ledger.sequence = 7U;
+    ledger.mutation_epoch = 8U;
+    ledger.last_catalog_revision =
+        ndms_native_import_baseline_catalog_revision(snapshot.catalog);
+    ledger.integrity = ndms_native_observation_integrity(ledger);
+    const NdmsNativeObservationStamp stamp{
+        ledger.authority_id,
+        ledger.sequence,
+        ledger.mutation_epoch,
+        *ledger.last_catalog_revision,
+        ledger.integrity};
+    const NdmsNativeObservationBinding binding{
+        ledger.authority_id, 9U, ledger.sequence};
+    auto built = build_ndms_native_cooperative_import_baseline(
+        snapshot, "Wireguard5", 41U, stamp, binding);
+    if (!built.success() || !built.evidence.has_value()) {
+        throw std::runtime_error(
+            "cannot build cooperative WAL baseline fixture");
+    }
+    return persist_ndms_native_import_baseline(*built.evidence);
+}
+
 NdmsNativeImportWalRecord prepared_record(
     const NdmsNativeTunnelImportKind kind =
         NdmsNativeTunnelImportKind::wireguard) {
@@ -201,7 +241,7 @@ TEST_CASE("native import WAL codec is exact integrity-bound and non-secret") {
     CHECK(serialized.find("Endpoint") == std::string::npos);
     CHECK(serialized.find("AllowedIPs") == std::string::npos);
     CHECK(serialized.find("Address") == std::string::npos);
-    CHECK(serialized.find("\"schema_version\": 3") !=
+    CHECK(serialized.find("\"schema_version\": 4") !=
           std::string::npos);
     CHECK(serialized.find("\"baseline\"") != std::string::npos);
     CHECK(serialized.find("\"occupancy_hex\"") !=
@@ -243,7 +283,7 @@ TEST_CASE("native import WAL codec is exact integrity-bound and non-secret") {
 
     auto legacy = nlohmann::json::parse(serialized);
     legacy.erase("integrity_sha256");
-    legacy["schema_version"] = 2;
+    legacy["schema_version"] = 3;
     legacy["integrity_sha256"] = Sha256::hex(legacy.dump());
     CHECK(parse_rejected(legacy.dump()));
 }
@@ -300,7 +340,7 @@ TEST_CASE("native import WAL rejects malformed or forged v2 baseline evidence") 
         NdmsNativeImportWalError);
 }
 
-TEST_CASE("native import WAL v3 rejects protected and non-first-free baselines") {
+TEST_CASE("native import WAL v4 rejects protected and non-first-free baselines") {
     auto protected_target = prepared_record();
     protected_target.baseline.expected_created_interface = "Wireguard4";
     protected_target.baseline.expected_target_slot = 4U;
@@ -324,7 +364,7 @@ TEST_CASE("native import WAL v3 rejects protected and non-first-free baselines")
         NdmsNativeImportWalError);
 }
 
-TEST_CASE("native import WAL v3 binds both measured WG and AWG kinds") {
+TEST_CASE("native import WAL v4 binds both measured WG and AWG kinds") {
     const auto wg = prepared_record(
         NdmsNativeTunnelImportKind::wireguard);
     const auto awg = prepared_record(
@@ -400,6 +440,41 @@ TEST_CASE("native import WAL rejects protected targets and phase evidence leaks"
     CHECK_THROWS_AS(
         serialize_ndms_native_import_wal(legacy_manifest_digest),
         NdmsNativeImportWalError);
+}
+
+TEST_CASE("native import WAL v4 binds execution mode to its baseline") {
+    auto cooperative = prepared_record();
+    cooperative.execution_mode =
+        NdmsNativeImportExecutionMode::cooperative_stock_import;
+    cooperative.baseline = cooperative_persisted_baseline();
+    cooperative.observation_binding =
+        *cooperative.baseline.durable_observation_binding;
+    cooperative.request_binding_sha256 =
+        ndms_native_import_request_binding_digest(
+            cooperative.transaction_id,
+            cooperative.marker,
+            cooperative.candidate_revision,
+            cooperative.kind,
+            cooperative.baseline.expected_created_interface);
+    const auto serialized =
+        serialize_ndms_native_import_wal(cooperative);
+    CHECK(parse_ndms_native_import_wal(serialized) == cooperative);
+    CHECK(serialized.find(
+              "\"execution_mode\": \"cooperative_stock_import\"") !=
+          std::string::npos);
+
+    auto mismatched = cooperative;
+    mismatched.execution_mode =
+        NdmsNativeImportExecutionMode::allocator_fenced;
+    CHECK_THROWS_AS(
+        serialize_ndms_native_import_wal(mismatched),
+        NdmsNativeImportWalError);
+
+    auto forged = nlohmann::json::parse(serialized);
+    forged.erase("integrity_sha256");
+    forged["execution_mode"] = "allocator_fenced";
+    forged["integrity_sha256"] = Sha256::hex(forged.dump());
+    CHECK(parse_rejected(forged.dump()));
 }
 
 TEST_CASE("native import WAL transitions are idempotent but never skip or rewind") {

@@ -501,6 +501,10 @@ TEST_CASE("native import WAL store advances only exact monotonic evidence") {
     CHECK_THROWS_AS(
         store.publish(changed_baseline),
         NdmsNativeImportWalStoreError);
+    auto changed_mode = inflight;
+    changed_mode.execution_mode =
+        NdmsNativeImportExecutionMode::cooperative_stock_import;
+    CHECK_THROWS(store.publish(changed_mode));
     auto changed_observation = inflight;
     ++changed_observation.observation_binding.mutation_epoch;
     CHECK_NOTHROW(serialize_ndms_native_import_wal(changed_observation));
@@ -519,7 +523,7 @@ TEST_CASE("native import WAL store advances only exact monotonic evidence") {
     CHECK(store.load(prepared.transaction_id).record == response);
 }
 
-TEST_CASE("prepared native import WAL v3 survives the published crash boundary") {
+TEST_CASE("prepared native import WAL v4 survives the published crash boundary") {
     WalStoreTempDirectory temporary;
     const auto state = temporary.path / "state";
     auto hooks = unprivileged_test_hooks();
@@ -561,9 +565,9 @@ TEST_CASE("native import WAL load classifies corruption without records") {
         const auto record = store_prepared_record();
         admit_prepared(store, record);
         auto body = read_file(record_path(state, record.transaction_id));
-        const auto version = body.find("\"schema_version\": 3");
+        const auto version = body.find("\"schema_version\": 4");
         REQUIRE(version != std::string::npos);
-        body[version + std::string{"\"schema_version\": "}.size()] = '1';
+        body[version + std::string{"\"schema_version\": "}.size()] = '3';
         write_private_file(record_path(state, record.transaction_id), body);
 
         const auto loaded = store.load(record.transaction_id);

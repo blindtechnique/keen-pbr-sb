@@ -21,7 +21,7 @@ namespace {
 
 using Json = nlohmann::json;
 
-constexpr int kSchemaVersion = 3;
+constexpr int kSchemaVersion = 4;
 constexpr std::string_view kCandidateRevisionPrefix{
     "ndms-native-import-v1-"};
 constexpr std::string_view kRequestBindingDigestPrefix{
@@ -104,6 +104,9 @@ void require(bool condition, const char* message) {
 
 void validate_record(const NdmsNativeImportWalRecord& record) {
     require(
+        valid_ndms_native_import_execution_mode(record.execution_mode),
+        "native import WAL execution mode is invalid");
+    require(
         known_phase(record.phase),
         "native import WAL phase is invalid");
     require(
@@ -133,6 +136,9 @@ void validate_record(const NdmsNativeImportWalRecord& record) {
         valid_ndms_native_import_persisted_baseline(record.baseline),
         "native import WAL baseline is invalid");
     require(
+        record.execution_mode == record.baseline.execution_mode,
+        "native import WAL execution mode differs from baseline");
+    require(
         record.baseline.maintenance_base_generation ==
             record.maintenance_base_generation,
         "native import WAL baseline generation is inconsistent");
@@ -140,6 +146,14 @@ void validate_record(const NdmsNativeImportWalRecord& record) {
         valid_ndms_native_observation_binding(
             record.observation_binding),
         "native import WAL observation binding is invalid");
+    if (record.execution_mode ==
+        NdmsNativeImportExecutionMode::cooperative_stock_import) {
+        require(
+            record.baseline.durable_observation_binding.has_value() &&
+                *record.baseline.durable_observation_binding ==
+                    record.observation_binding,
+            "cooperative native import WAL observation binding differs from baseline");
+    }
     require(
         record.request_binding_sha256 ==
             ndms_native_import_request_binding_digest(
@@ -282,6 +296,18 @@ NdmsNativeTunnelImportKind parse_kind(const std::string& value) {
         "native import WAL kind is invalid");
 }
 
+NdmsNativeImportExecutionMode parse_execution_mode(
+    const std::string& value) {
+    if (value == "allocator_fenced") {
+        return NdmsNativeImportExecutionMode::allocator_fenced;
+    }
+    if (value == "cooperative_stock_import") {
+        return NdmsNativeImportExecutionMode::cooperative_stock_import;
+    }
+    throw NdmsNativeImportWalError(
+        "native import WAL execution mode is invalid");
+}
+
 NdmsNativeImportWalPhase parse_phase(const std::string& value) {
     if (value == "prepared") {
         return NdmsNativeImportWalPhase::prepared;
@@ -320,9 +346,34 @@ Json optional_generation_json(
     return value ? Json(*value) : Json(nullptr);
 }
 
+Json durable_observation_stamp_json(
+    const std::optional<NdmsNativeObservationStamp>& stamp) {
+    if (!stamp.has_value()) return Json(nullptr);
+    return {
+        {"authority_id", stamp->authority_id},
+        {"sequence", stamp->sequence},
+        {"mutation_epoch", stamp->mutation_epoch},
+        {"catalog_revision", stamp->catalog_revision},
+        {"ledger_integrity", stamp->ledger_integrity},
+    };
+}
+
+Json durable_observation_binding_json(
+    const std::optional<NdmsNativeObservationBinding>& binding) {
+    if (!binding.has_value()) return Json(nullptr);
+    return {
+        {"authority_id", binding->authority_id},
+        {"mutation_epoch", binding->mutation_epoch},
+        {"baseline_sequence", binding->baseline_sequence},
+    };
+}
+
 Json baseline_json(
     const NdmsNativeImportPersistedBaseline& baseline) {
     return {
+        {"execution_mode",
+         ndms_native_import_execution_mode_name(
+             baseline.execution_mode)},
         {"expected_created_interface",
          baseline.expected_created_interface},
         {"expected_target_slot", baseline.expected_target_slot},
@@ -336,6 +387,12 @@ Json baseline_json(
         {"maintenance_base_generation",
          baseline.maintenance_base_generation},
         {"allocator_generation", baseline.allocator_generation},
+        {"durable_observation_stamp",
+         durable_observation_stamp_json(
+             baseline.durable_observation_stamp)},
+        {"durable_observation_binding",
+         durable_observation_binding_json(
+             baseline.durable_observation_binding)},
         {"baseline_sha256", baseline.baseline_sha256},
     };
 }
@@ -355,6 +412,9 @@ Json document_without_integrity(
     return {
         {"schema_version", kSchemaVersion},
         {"transaction_id", record.transaction_id},
+        {"execution_mode",
+         ndms_native_import_execution_mode_name(
+             record.execution_mode)},
         {"phase", ndms_native_import_wal_phase_name(record.phase)},
         {"kind", kind_name(record.kind)},
         {"marker", record.marker},
@@ -428,11 +488,50 @@ NdmsNativeObservationBinding parse_observation_binding(
     return binding;
 }
 
+std::optional<NdmsNativeObservationBinding>
+parse_optional_observation_binding(const Json& value) {
+    if (value.is_null()) return std::nullopt;
+    return parse_observation_binding(value);
+}
+
+std::optional<NdmsNativeObservationStamp>
+parse_optional_observation_stamp(const Json& value) {
+    if (value.is_null()) return std::nullopt;
+    require_exact_keys(
+        value,
+        {"authority_id", "sequence", "mutation_epoch",
+         "catalog_revision", "ledger_integrity"});
+    for (const char* field :
+         {"authority_id", "catalog_revision", "ledger_integrity"}) {
+        require(
+            value.at(field).is_string(),
+            "native import WAL durable observation stamp type is invalid");
+    }
+    NdmsNativeObservationStamp stamp;
+    stamp.authority_id =
+        value.at("authority_id").get<std::string>();
+    stamp.sequence = parse_unsigned_u64(
+        value.at("sequence"),
+        "native import WAL durable observation sequence is invalid");
+    stamp.mutation_epoch = parse_unsigned_u64(
+        value.at("mutation_epoch"),
+        "native import WAL durable observation epoch is invalid");
+    stamp.catalog_revision =
+        value.at("catalog_revision").get<std::string>();
+    stamp.ledger_integrity =
+        value.at("ledger_integrity").get<std::string>();
+    require(
+        valid_ndms_native_observation_stamp(stamp),
+        "native import WAL durable observation stamp verification failed");
+    return stamp;
+}
+
 NdmsNativeImportPersistedBaseline parse_baseline(
     const Json& value) {
     require_exact_keys(
         value,
-        {"expected_created_interface",
+        {"execution_mode",
+         "expected_created_interface",
          "expected_target_slot",
          "occupancy_hex",
          "protected_catalog_sha256",
@@ -441,9 +540,11 @@ NdmsNativeImportPersistedBaseline parse_baseline(
          "invalidation_epoch",
          "maintenance_base_generation",
          "allocator_generation",
+         "durable_observation_stamp",
+         "durable_observation_binding",
          "baseline_sha256"});
     for (const char* field :
-         {"expected_created_interface", "occupancy_hex",
+         {"execution_mode", "expected_created_interface", "occupancy_hex",
           "protected_catalog_sha256", "baseline_sha256"}) {
         require(
             value.at(field).is_string(),
@@ -464,6 +565,8 @@ NdmsNativeImportPersistedBaseline parse_baseline(
         "native import WAL baseline maintenance generation is too large");
 
     NdmsNativeImportPersistedBaseline baseline;
+    baseline.execution_mode = parse_execution_mode(
+        value.at("execution_mode").get<std::string>());
     baseline.expected_created_interface =
         value.at("expected_created_interface").get<std::string>();
     baseline.expected_target_slot =
@@ -486,6 +589,12 @@ NdmsNativeImportPersistedBaseline parse_baseline(
     baseline.allocator_generation = parse_unsigned_u64(
         value.at("allocator_generation"),
         "native import WAL baseline allocator generation type is invalid");
+    baseline.durable_observation_stamp =
+        parse_optional_observation_stamp(
+            value.at("durable_observation_stamp"));
+    baseline.durable_observation_binding =
+        parse_optional_observation_binding(
+            value.at("durable_observation_binding"));
     baseline.baseline_sha256 =
         value.at("baseline_sha256").get<std::string>();
     require(
@@ -619,6 +728,7 @@ std::string ndms_native_import_request_binding_digest(
 bool NdmsNativeImportWalRecord::operator==(
     const NdmsNativeImportWalRecord& other) const noexcept {
     return transaction_id == other.transaction_id &&
+           execution_mode == other.execution_mode &&
            phase == other.phase && kind == other.kind &&
            marker == other.marker &&
            candidate_revision == other.candidate_revision &&
@@ -660,6 +770,7 @@ NdmsNativeImportWalRecord parse_ndms_native_import_wal(
         document,
         {"schema_version",
          "transaction_id",
+         "execution_mode",
          "phase",
          "kind",
          "marker",
@@ -682,7 +793,7 @@ NdmsNativeImportWalRecord parse_ndms_native_import_wal(
             document.at("schema_version").get<int>() == kSchemaVersion,
         "native import WAL schema version is invalid");
     for (const char* field :
-         {"transaction_id", "phase", "kind", "marker",
+         {"transaction_id", "execution_mode", "phase", "kind", "marker",
           "candidate_revision", "request_binding_sha256",
           "generation_ticket",
           "integrity_sha256"}) {
@@ -704,6 +815,8 @@ NdmsNativeImportWalRecord parse_ndms_native_import_wal(
     NdmsNativeImportWalRecord record;
     record.transaction_id =
         document.at("transaction_id").get<std::string>();
+    record.execution_mode = parse_execution_mode(
+        document.at("execution_mode").get<std::string>());
     record.phase = parse_phase(
         document.at("phase").get<std::string>());
     record.kind = parse_kind(

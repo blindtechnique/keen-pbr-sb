@@ -37,6 +37,8 @@ enum class NdmsNativeImportWalPhase {
 // integrated merely because this type exists.
 struct NdmsNativeImportWalRecord {
     std::string transaction_id;
+    NdmsNativeImportExecutionMode execution_mode{
+        NdmsNativeImportExecutionMode::allocator_fenced};
     NdmsNativeImportWalPhase phase{
         NdmsNativeImportWalPhase::prepared};
     NdmsNativeTunnelImportKind kind{
@@ -66,7 +68,7 @@ struct NdmsNativeImportWalRecord {
     bool operator==(const NdmsNativeImportWalRecord& other) const noexcept;
 };
 
-// Shared non-secret binding primitive used by both the executor and WAL v3
+// Shared non-secret binding primitive used by both the executor and WAL v4
 // validation. This overload never accepts or retains raw configuration.
 std::string ndms_native_import_request_binding_digest(
     std::string_view transaction_id,
