@@ -30,6 +30,7 @@
 #include "../keenetic/ndms_native_cooperative_import.hpp"
 #include "../keenetic/ndms_native_fresh_import_preflight.hpp"
 #include "../keenetic/ndms_native_inventory_projection.hpp"
+#include "../keenetic/ndms_native_tombstone_forget.hpp"
 #include "../keenetic/ndms_native_writer_lease.hpp"
 #include "../health/runtime_outbound_state.hpp"
 #include "../api/handler_runtime_inventory.hpp"
@@ -103,11 +104,21 @@ NdmsNativeCooperativeDeleteResult blocked_native_delete(
     return result;
 }
 
+NdmsNativeTombstoneForgetResult blocked_native_tombstone_forget(
+    const NdmsNativeTombstoneForgetStop stop,
+    const std::string& interface_name) noexcept {
+    NdmsNativeTombstoneForgetResult result;
+    result.stop = stop;
+    result.interface_name = interface_name;
+    return result;
+}
+
 enum class NativeMutationReservationPurpose : std::uint8_t {
     new_import,
     import_recovery,
     new_delete,
     delete_recovery,
+    tombstone_forget,
 };
 
 class NativeMutationRequestReservation final
@@ -1475,6 +1486,48 @@ void Daemon::setup_api() {
             } catch (...) {
                 return blocked_native_delete(
                     NdmsNativeCooperativeDeleteStop::unexpected_failure);
+            }
+        };
+    api_ctx_->reserve_ndms_native_tombstone_forget_fn =
+        [reserve_native_mutation]() {
+            return reserve_native_mutation(
+                "ndms-native-tombstone-forget",
+                NativeMutationReservationPurpose::tombstone_forget,
+                false);
+        };
+    api_ctx_->run_ndms_native_tombstone_forget_fn =
+        [this, read_native_dependency_snapshot](
+            const NdmsNativeTombstoneForgetRequest& request,
+            const std::shared_ptr<SensitiveRequestReservation>&
+                opaque_reservation) {
+            auto* reservation = dynamic_cast<
+                NativeMutationRequestReservation*>(
+                    opaque_reservation.get());
+            if (reservation == nullptr ||
+                !reservation->owned_by(
+                    this,
+                    NativeMutationReservationPurpose::
+                        tombstone_forget)) {
+                return blocked_native_tombstone_forget(
+                    NdmsNativeTombstoneForgetStop::writer_missing,
+                    request.interface_name);
+            }
+            try {
+                reservation->writer().verify_held();
+                NdmsNativeConfigDependencyProvider dependencies{
+                    read_native_dependency_snapshot};
+                NdmsNativeTombstoneForgetCoordinator coordinator{
+                    ndms_native_import_wal_store_,
+                    ndms_native_delete_wal_store_,
+                    ndms_native_secret_snapshot_store_,
+                    ndms_native_ownership_store_,
+                    dependencies};
+                return coordinator.forget_once(
+                    reservation->writer(), request);
+            } catch (...) {
+                return blocked_native_tombstone_forget(
+                    NdmsNativeTombstoneForgetStop::unexpected_failure,
+                    request.interface_name);
             }
         };
 #endif
