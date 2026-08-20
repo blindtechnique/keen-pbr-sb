@@ -159,6 +159,51 @@ TEST_CASE("a published claim reads back exactly, with a stable revision") {
     other.target_full_revision =
         "ndms-rci-full-v1-" + std::string(64U, 'c');
     CHECK(ndms_native_ownership_revision(other) != revision);
+
+    const auto inspection = store.inspect_bounded_read_only();
+    REQUIRE(inspection.readable);
+    REQUIRE(inspection.claims.size() == 1U);
+    CHECK(inspection.claims.front() ==
+          NdmsNativeOwnershipInspectionItem{
+              record.interface_name,
+              record.kind,
+              record.lifecycle,
+              revision,
+          });
+}
+
+TEST_CASE("read-only ownership inspection does not create an absent store") {
+    TempDirectory directory;
+    const auto state_directory = directory.path / "ownership";
+    NdmsNativeOwnershipStore store(state_directory);
+    REQUIRE_FALSE(fs::exists(state_directory));
+
+    const auto inspection = store.inspect_bounded_read_only();
+
+    CHECK(inspection.readable);
+    CHECK(inspection.claims.empty());
+    CHECK_FALSE(fs::exists(state_directory));
+}
+
+TEST_CASE("read-only ownership inspection fails closed and leaves a temporary untouched") {
+    TempDirectory directory;
+    NdmsNativeOwnershipStore store(directory.path / "ownership");
+    store.publish(record_fixture());
+    const auto temporary =
+        directory.path / "ownership" /
+        ".keen-pbr-ownership-tmp-123.456.Wireguard6";
+    {
+        std::ofstream output(temporary);
+        REQUIRE(output.good());
+        output << "incomplete";
+    }
+    REQUIRE(::chmod(temporary.c_str(), 0600) == 0);
+
+    const auto inspection = store.inspect_bounded_read_only();
+
+    CHECK_FALSE(inspection.readable);
+    CHECK(inspection.claims.empty());
+    CHECK(fs::exists(temporary));
 }
 
 TEST_CASE("a protected slot cannot even be claimed") {

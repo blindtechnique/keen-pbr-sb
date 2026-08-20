@@ -974,6 +974,13 @@ bool NdmsNativeOwnershipRecord::operator==(
            lifecycle_evidence == other.lifecycle_evidence;
 }
 
+bool NdmsNativeOwnershipInspectionItem::operator==(
+    const NdmsNativeOwnershipInspectionItem& other) const noexcept {
+    return interface_name == other.interface_name && kind == other.kind &&
+           lifecycle == other.lifecycle &&
+           ownership_revision == other.ownership_revision;
+}
+
 std::string ndms_native_ownership_revision(
     const NdmsNativeOwnershipRecord& record) {
     if (!record_fields_valid(record)) {
@@ -1240,6 +1247,89 @@ NdmsNativeOwnershipReadResult NdmsNativeOwnershipStore::read(
     } catch (...) {
     }
     return result;
+}
+
+NdmsNativeOwnershipInspection
+NdmsNativeOwnershipStore::inspect_bounded_read_only() const {
+    NdmsNativeOwnershipInspection inspection;
+    const auto policy = ownership_policy(
+#ifdef KEEN_PBR3_TESTING
+        test_hooks_
+#endif
+    );
+    std::lock_guard<std::mutex> process_lock(ownership_store_mutex);
+    try {
+        auto directory = open_directory(
+            state_directory_, false, policy);
+        OwnershipDirectoryLock directory_lock(directory.get(), LOCK_SH);
+        const int duplicate = ::dup(directory.get());
+        if (duplicate < 0) return inspection;
+        DIR* stream = ::fdopendir(duplicate);
+        if (stream == nullptr) {
+            (void)::close(duplicate);
+            return inspection;
+        }
+        ::rewinddir(stream);
+        bool safe = true;
+        std::size_t entries = 0U;
+        try {
+            while (true) {
+                errno = 0;
+                const auto* item = ::readdir(stream);
+                if (item == nullptr) {
+                    if (errno != 0) safe = false;
+                    break;
+                }
+                const std::string name(item->d_name);
+                if (name == "." || name == "..") continue;
+                if (++entries > 128U || !claimable_interface(name)) {
+                    safe = false;
+                    break;
+                }
+                const auto current = read_locked(
+                    directory.get(), name, policy);
+                if (current.state != OwnershipReadState::valid ||
+                    !current.record || !current.revision) {
+                    safe = false;
+                    break;
+                }
+                inspection.claims.push_back(
+                    NdmsNativeOwnershipInspectionItem{
+                        name,
+                        current.record->kind,
+                        current.record->lifecycle,
+                        *current.revision,
+                    });
+            }
+        } catch (...) {
+            safe = false;
+        }
+        if (::closedir(stream) != 0) safe = false;
+        if (!safe) {
+            inspection.claims.clear();
+            return inspection;
+        }
+        std::sort(
+            inspection.claims.begin(),
+            inspection.claims.end(),
+            [](const auto& left, const auto& right) {
+                return left.interface_name < right.interface_name;
+            });
+        if (std::adjacent_find(
+                inspection.claims.begin(),
+                inspection.claims.end(),
+                [](const auto& left, const auto& right) {
+                    return left.interface_name == right.interface_name;
+                }) != inspection.claims.end()) {
+            inspection.claims.clear();
+            return inspection;
+        }
+        inspection.readable = true;
+    } catch (const OwnershipDirectoryAbsent&) {
+        inspection.readable = true;
+    } catch (...) {
+    }
+    return inspection;
 }
 
 bool NdmsNativeOwnershipStore::remove_exact(

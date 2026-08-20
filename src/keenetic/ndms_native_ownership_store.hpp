@@ -90,6 +90,30 @@ struct NdmsNativeOwnershipReadResult {
     std::optional<std::string> revision;
 };
 
+// Redacted claim metadata for status surfaces.  The full ownership record
+// also binds the import marker, encrypted-snapshot revision and exact target
+// revision; none of those values are needed by an inventory card and they
+// deliberately do not cross this boundary.
+struct NdmsNativeOwnershipInspectionItem final {
+    std::string interface_name;
+    NdmsNativeTunnelImportKind kind{
+        NdmsNativeTunnelImportKind::wireguard};
+    NdmsNativeOwnershipLifecycle lifecycle{
+        NdmsNativeOwnershipLifecycle::active_running_only};
+    std::string ownership_revision;
+
+    bool operator==(
+        const NdmsNativeOwnershipInspectionItem& other) const noexcept;
+};
+
+struct NdmsNativeOwnershipInspection final {
+    // False means the complete bounded directory could not be attributed.
+    // Callers must not treat an empty `claims` vector as absence in that
+    // state.
+    bool readable{false};
+    std::vector<NdmsNativeOwnershipInspectionItem> claims;
+};
+
 #ifdef KEEN_PBR3_TESTING
 enum class NdmsNativeOwnershipStoreFaultStage {
     pre_publish_after_file_fsync,
@@ -139,6 +163,13 @@ public:
 
     NdmsNativeOwnershipReadResult read(
         const std::string& interface_name) const;
+
+    // Strictly read-only, bounded inventory for status projection.  Unlike
+    // read() and list_claimed_interfaces(), this method never sweeps orphaned
+    // temporaries or fsyncs anything.  Any temporary, unexpected name,
+    // unsafe metadata, invalid record or directory larger than 128 entries
+    // makes the whole result unreadable; no partial claim set is returned.
+    NdmsNativeOwnershipInspection inspect_bounded_read_only() const;
 
     // Removes only a claim whose current bytes parse to exactly `expected`.
     // False means the claim survived - because it differs, or because the
