@@ -803,6 +803,61 @@ TEST_CASE("NDMS read-only endpoints share the cache and safety contract") {
 }
 
 TEST_CASE(
+    "NDMS public inventories redact exact native import marker labels") {
+    const auto private_transaction_id = std::string(32U, 'c');
+    const auto private_marker =
+        "kpbr-ni-v1-" + private_transaction_id;
+    NdmsCatalogCache cache([&] {
+        return nlohmann::json{
+            {"Wireguard5",
+             {{"type", "Wireguard"},
+              {"interface-name", "Wireguard5"},
+              {"description", private_marker},
+              {"role", "client"}}},
+            {"Wireguard6",
+             {{"type", "Wireguard"},
+              {"interface-name", "Wireguard6"},
+              {"description", "Normal VPN"},
+              {"role", "client"}}},
+        }.dump();
+    });
+
+    ApiConfig config;
+    config.listen = std::string("127.0.0.1:18201");
+    ApiServer server(config);
+    register_ndms_names_handler_for_tests(
+        server, cache, {"nwg5", "nwg6"});
+    server.start();
+
+    httplib::Client client("127.0.0.1", 18201);
+    const auto names_response =
+        client.Get("/api/system/interface-names");
+    const auto inventory_response =
+        client.Get("/api/system/ndms/interfaces");
+    server.stop();
+
+    REQUIRE(names_response != nullptr);
+    REQUIRE(inventory_response != nullptr);
+    REQUIRE(names_response->status == 200);
+    REQUIRE(inventory_response->status == 200);
+    const auto names = nlohmann::json::parse(names_response->body);
+    const auto inventory = nlohmann::json::parse(inventory_response->body);
+    CHECK(names["names"]["nwg5"]["label"] == "Wireguard5");
+    CHECK(names["names"]["nwg6"]["label"] == "Normal VPN");
+    CHECK(inventory_row(inventory, "Wireguard5")["label"] ==
+          "Wireguard5");
+    CHECK(inventory_row(inventory, "Wireguard6")["label"] ==
+          "Normal VPN");
+    CHECK(names_response->body.find(private_marker) == std::string::npos);
+    CHECK(names_response->body.find(private_transaction_id) ==
+          std::string::npos);
+    CHECK(inventory_response->body.find(private_marker) ==
+          std::string::npos);
+    CHECK(inventory_response->body.find(private_transaction_id) ==
+          std::string::npos);
+}
+
+TEST_CASE(
     "NDMS native mutation inventory distinguishes active tombstone and foreign advisory rows") {
     bool fail_fetch = false;
     int fetch_count = 0;

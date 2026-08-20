@@ -6,6 +6,7 @@
 #include "../keenetic/ndms_interface_inventory.hpp"
 #include "../keenetic/ndms_interface_management.hpp"
 #include "../keenetic/ndms_native_create_policy.hpp"
+#include "../keenetic/ndms_native_import_identity.hpp"
 #include "../keenetic/ndms_native_import_readiness.hpp"
 #include "../keenetic/ndms_vpn_server_service_cache.hpp"
 #include "../keenetic/ndms_wireguard_identity.hpp"
@@ -692,6 +693,45 @@ api::NativeMutation unavailable_native_mutation(
     return result;
 }
 
+bool private_native_import_marker_label(
+    const std::string_view label) noexcept {
+    return ndms_native_import_transaction_id_from_marker(label).has_value();
+}
+
+const std::string& public_tunnel_label(
+    const NdmsTunnelInterface& tunnel) noexcept {
+    // The stock importer persists its internal ownership marker as the NDMS
+    // description. That marker contains the private crash-recovery
+    // transaction id and must never become a public inventory label.
+    return private_native_import_marker_label(tunnel.label)
+               ? tunnel.firmware_interface_name
+               : tunnel.label;
+}
+
+nlohmann::json public_interface_names(
+    const NdmsInterfaceCatalog& catalog) {
+    if (!catalog.names.is_object()) return nlohmann::json::object();
+
+    auto names = catalog.names;
+    for (auto& [unused, entry] : names.items()) {
+        static_cast<void>(unused);
+        if (!entry.is_object()) continue;
+        const auto label = entry.find("label");
+        const auto firmware_name =
+            entry.find("firmware_interface_name");
+        if (label == entry.end() || !label->is_string() ||
+            firmware_name == entry.end() ||
+            !firmware_name->is_string()) {
+            continue;
+        }
+        if (private_native_import_marker_label(
+                label->get_ref<const std::string&>())) {
+            *label = *firmware_name;
+        }
+    }
+    return names;
+}
+
 api::ObservedDeleteJournalState api_delete_journal_state(
     const NdmsNativeDeleteWalReadiness state) {
     switch (state) {
@@ -762,7 +802,7 @@ api::NdmsInterfaceInventoryResponse typed_inventory(
         item.id = tunnel.id;
         item.firmware_interface_name = tunnel.firmware_interface_name;
         item.kernel_name = tunnel.kernel_name;
-        item.label = tunnel.label;
+        item.label = public_tunnel_label(tunnel);
         item.firmware_type = tunnel.firmware_type;
         item.kind = api_tunnel_kind(tunnel.kind);
         item.owner = api::Owner::KEENETIC;
@@ -862,10 +902,7 @@ void register_ndms_names_routes(
             const auto response =
                 catalog_for_response(cache, runtime_interface_names_fn);
             return nlohmann::json{
-                {"names",
-                 response.catalog.names.is_object()
-                     ? response.catalog.names
-                     : nlohmann::json::object()},
+                {"names", public_interface_names(response.catalog)},
                 {"available",
                  response.catalog.firmware_available &&
                      response.status == NdmsCatalogCacheStatus::fresh},
