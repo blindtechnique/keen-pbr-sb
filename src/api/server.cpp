@@ -20,6 +20,7 @@
 #include "../util/traced_mutex.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cerrno>
 #include <chrono>
@@ -29,7 +30,6 @@
 #include <filesystem>
 #include <fstream>
 #include <httplib.h>
-#include <atomic>
 #include <cctype>
 #include <cstdlib>
 #include <optional>
@@ -45,6 +45,87 @@
 #include <utility>
 
 namespace keen_pbr3 {
+
+namespace {
+
+#ifdef KEEN_PBR3_TESTING
+std::atomic<std::size_t> sensitive_request_body_wipe_count{0U};
+#endif
+
+constexpr std::size_t kMaximumSensitiveRequestBodyBytes = 256U * 1024U;
+
+void wipe_sensitive_bytes(std::vector<char>& bytes) noexcept {
+    if (bytes.empty()) return;
+    volatile char* cursor = bytes.data();
+    for (std::size_t index = 0U; index < bytes.size(); ++index) {
+        cursor[index] = 0;
+    }
+#ifdef KEEN_PBR3_TESTING
+    sensitive_request_body_wipe_count.fetch_add(
+        1U, std::memory_order_relaxed);
+#endif
+    bytes.clear();
+}
+
+} // namespace
+
+SensitiveRequestBody::SensitiveRequestBody(
+    std::vector<char> bytes) noexcept
+    : bytes_(std::move(bytes)) {}
+
+SensitiveRequestBody::SensitiveRequestBody(
+    SensitiveRequestBody&& other) noexcept
+    : bytes_(std::move(other.bytes_)),
+      consumed_(std::exchange(other.consumed_, true)) {}
+
+SensitiveRequestBody& SensitiveRequestBody::operator=(
+    SensitiveRequestBody&& other) noexcept {
+    if (this == &other) return *this;
+    wipe();
+    bytes_ = std::move(other.bytes_);
+    consumed_ = std::exchange(other.consumed_, true);
+    return *this;
+}
+
+SensitiveRequestBody::~SensitiveRequestBody() noexcept {
+    wipe();
+}
+
+std::size_t SensitiveRequestBody::size() const noexcept {
+    return bytes_.size();
+}
+
+bool SensitiveRequestBody::empty() const noexcept {
+    return bytes_.empty();
+}
+
+std::string SensitiveRequestBody::take_string_once() {
+    if (consumed_) {
+        throw std::runtime_error(
+            "sensitive request body was already consumed");
+    }
+    consumed_ = true;
+    std::string result(bytes_.begin(), bytes_.end());
+    wipe_sensitive_bytes(bytes_);
+    return result;
+}
+
+void SensitiveRequestBody::wipe() noexcept {
+    wipe_sensitive_bytes(bytes_);
+    consumed_ = true;
+}
+
+#ifdef KEEN_PBR3_TESTING
+void reset_sensitive_request_body_wipe_count_for_testing() noexcept {
+    sensitive_request_body_wipe_count.store(
+        0U, std::memory_order_relaxed);
+}
+
+std::size_t sensitive_request_body_wipe_count_for_testing() noexcept {
+    return sensitive_request_body_wipe_count.load(
+        std::memory_order_relaxed);
+}
+#endif
 
 namespace {
 
@@ -2622,11 +2703,12 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
             req.path == "/api/auth/settings/step-up-preflight" ||
             req.path == "/api/auth/logout" ||
             req.path == "/api/routing/registry-consent";
-        if (no_store_sensitive_path) {
+        if (no_store_sensitive_path ||
+            requires_step_up(req.method, req.path)) {
             // This classification is independent of the eventual auth
             // verdict. A 401/403/503 response at any early boundary must not
-            // leave authentication/session or consent metadata in a browser
-            // or proxy cache.
+            // leave authentication/session, consent, or privileged mutation
+            // metadata in a browser or proxy cache.
             res.set_header("Cache-Control", "no-store");
         }
 
@@ -2742,6 +2824,7 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
             if (requires_step_up(req.method, req.path) &&
                 !state->step_up_grants.contains(token)) {
                 res.status = 403;
+                res.set_header("Cache-Control", "no-store");
                 res.set_content(
                     R"({"error":"step_up_required"})", "application/json");
                 return httplib::Server::HandlerResponse::Handled;
@@ -2933,6 +3016,104 @@ void ApiServer::post(const std::string& path, BodyRouteHandler handler) {
             log_request_end(req, "api", res.status, started_at);
         }
     });
+}
+
+void ApiServer::post_sensitive(
+    const std::string& path,
+    const std::size_t maximum_body_bytes,
+    SensitiveBodyRouteHandler handler) {
+    if (!requires_step_up("POST", path)) {
+        throw std::invalid_argument(
+            "sensitive route must be registered for step-up");
+    }
+    if (maximum_body_bytes == 0U) {
+        throw std::invalid_argument(
+            "sensitive route body limit must be positive");
+    }
+    if (maximum_body_bytes > kMaximumSensitiveRequestBodyBytes) {
+        throw std::invalid_argument(
+            "sensitive route body limit exceeds the hard maximum");
+    }
+    impl_->server.Post(
+        path,
+        [state = impl_.get(), h = std::move(handler), maximum_body_bytes](
+            const httplib::Request& req,
+            httplib::Response& res,
+            const httplib::ContentReader& content_reader) {
+            const auto trace_id = allocate_trace_id();
+            ScopedTraceContext trace_scope(trace_id);
+            const auto started_at = std::chrono::steady_clock::now();
+            log_request_start(req, "api-sensitive");
+            res.set_header("Cache-Control", "no-store");
+
+            try {
+                if (!state->evaluate_protected_secret_transport(req, true)
+                         .protected_transport) {
+                    res.status = 403;
+                    res.set_content(
+                        R"({"error":"protected_secret_transport_unavailable"})",
+                        "application/json");
+                    log_request_end(
+                        req, "api-sensitive", res.status, started_at);
+                    return;
+                }
+
+                SensitiveRequestBody body{std::vector<char>{}};
+                // Allocate once before receiving credentials. Reallocation
+                // after the first chunk would release an unwiped old buffer.
+                body.bytes_.reserve(maximum_body_bytes);
+                bool too_large = false;
+                const bool read_ok = content_reader(
+                    [&](const char* data, const std::size_t size) {
+                        if (size >
+                            maximum_body_bytes - body.bytes_.size()) {
+                            too_large = true;
+                            return false;
+                        }
+                        if (size == 0U) return true;
+                        body.bytes_.insert(
+                            body.bytes_.end(), data, data + size);
+                        return true;
+                    });
+                if (!read_ok || too_large) {
+                    res.status = too_large ? 413 : 400;
+                    res.set_content(
+                        too_large
+                            ? R"({"error":"sensitive_request_too_large"})"
+                            : R"({"error":"sensitive_request_read_failed"})",
+                        "application/json");
+                    log_request_end(
+                        req, "api-sensitive", res.status, started_at);
+                    return;
+                }
+
+                std::string result = h(req, std::move(body));
+                res.set_content(result, "application/json");
+                log_request_end(
+                    req, "api-sensitive",
+                    res.status == 0 ? 200 : res.status, started_at);
+            } catch (const ApiError& error) {
+                res.status = error.status();
+                res.set_content(
+                    R"({"error":"sensitive_request_rejected"})",
+                    "application/json");
+                log_request_error(
+                    req, "api-sensitive", "sensitive request rejected",
+                    started_at);
+                log_request_end(
+                    req, "api-sensitive", res.status, started_at);
+            } catch (const std::exception&) {
+                res.status = 500;
+                res.set_content(
+                    R"({"error":"sensitive_request_failed"})",
+                    "application/json");
+                log_request_error(
+                    req, "api-sensitive", "sensitive request failed",
+                    started_at);
+                log_request_end(
+                    req, "api-sensitive", res.status, started_at);
+            }
+        });
 }
 
 void ApiServer::get_stream(const std::string& path, StreamRouteHandler handler) {

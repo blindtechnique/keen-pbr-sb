@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace httplib {
 class Request;
@@ -41,6 +42,40 @@ private:
     std::optional<std::string> body_;
 };
 
+// Move-only storage for a credential-bearing request body.  Sensitive routes
+// are streamed into this buffer only after authentication and step-up have
+// been admitted.  The bytes are overwritten both when the application takes
+// them and when an error path destroys the unread body.
+class SensitiveRequestBody final {
+public:
+    SensitiveRequestBody(const SensitiveRequestBody&) = delete;
+    SensitiveRequestBody& operator=(const SensitiveRequestBody&) = delete;
+    SensitiveRequestBody(SensitiveRequestBody&& other) noexcept;
+    SensitiveRequestBody& operator=(SensitiveRequestBody&& other) noexcept;
+    ~SensitiveRequestBody() noexcept;
+
+    std::size_t size() const noexcept;
+    bool empty() const noexcept;
+
+    // Materializes the one parser-owned std::string. The streaming buffer is
+    // wiped before this returns; the recipient must in turn consume a parser
+    // whose contract wipes the returned string on every path.
+    std::string take_string_once();
+
+private:
+    friend class ApiServer;
+    explicit SensitiveRequestBody(std::vector<char> bytes) noexcept;
+    void wipe() noexcept;
+
+    std::vector<char> bytes_;
+    bool consumed_{false};
+};
+
+#ifdef KEEN_PBR3_TESTING
+void reset_sensitive_request_body_wipe_count_for_testing() noexcept;
+std::size_t sensitive_request_body_wipe_count_for_testing() noexcept;
+#endif
+
 // HTTP REST API server using cpp-httplib.
 // Runs in a background thread and integrates with the Daemon event loop
 // for shutdown coordination.
@@ -60,6 +95,9 @@ public:
     // Register route handlers before calling start().
     using RouteHandler = std::function<std::string()>;
     using BodyRouteHandler = std::function<std::string(const std::string& body)>;
+    using SensitiveBodyRouteHandler = std::function<std::string(
+        const httplib::Request& request,
+        SensitiveRequestBody body)>;
     using StreamRouteHandler = std::function<void(const httplib::Request&,
                                                   httplib::Response&)>;
 
@@ -71,6 +109,13 @@ public:
 
     // Register a POST handler that receives the request body and returns a JSON string.
     void post(const std::string& path, BodyRouteHandler handler);
+
+    // Register a bounded, no-store POST whose body is read only after the
+    // request has passed authentication, step-up and the protected-secret
+    // transport check. ContentReader avoids retaining a second req.body copy.
+    void post_sensitive(const std::string& path,
+                        std::size_t maximum_body_bytes,
+                        SensitiveBodyRouteHandler handler);
 
     // Register a GET handler that streams a non-JSON response.
     void get_stream(const std::string& path, StreamRouteHandler handler);

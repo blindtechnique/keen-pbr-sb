@@ -2182,6 +2182,146 @@ TEST_CASE("nfqws action step-up runs after body read and before its handler") {
     CHECK(handled.load(std::memory_order_relaxed) == 5U);
 }
 
+TEST_CASE("native secret imports are admitted before bounded body streaming") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    write_text(
+        auth_path,
+        R"({"enabled":true,"provider":"local","username":"admin","password":"secret"})");
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+
+    std::atomic<bool> protected_transport{true};
+    TrustedLocalConnectionEvaluatorGuard trusted_local_transport(
+        [&](std::string_view, std::string_view, bool) {
+            return protected_transport.load(std::memory_order_relaxed);
+        });
+
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    std::atomic<unsigned int> handled{0U};
+    std::atomic<bool> throw_before_consume{false};
+    CHECK_THROWS_AS(
+        server.post_sensitive(
+            "/api/unprotected-sensitive-route",
+            32U,
+            [](const httplib::Request&, SensitiveRequestBody) {
+                return std::string{"{}"};
+            }),
+        std::invalid_argument);
+    server.post_sensitive(
+        "/api/system/ndms/interfaces/import",
+        32U,
+        [&](const httplib::Request&, SensitiveRequestBody body) {
+            handled.fetch_add(1U, std::memory_order_relaxed);
+            if (throw_before_consume.load(std::memory_order_relaxed)) {
+                throw std::runtime_error("synthetic sensitive handler failure");
+            }
+            auto secret = body.take_string_once();
+            const auto size = secret.size();
+            volatile char* cursor = secret.data();
+            for (std::size_t index = 0U; index < secret.size(); ++index) {
+                cursor[index] = 0;
+            }
+            secret.clear();
+            return nlohmann::json{{"accepted_bytes", size}}.dump();
+        });
+    server.start();
+    httplib::Client client("127.0.0.1", configured_port(config));
+
+    reset_sensitive_request_body_wipe_count_for_testing();
+    const auto unauthenticated = client.Post(
+        "/api/system/ndms/interfaces/import",
+        "must-not-enter-memory",
+        "text/plain");
+    REQUIRE(unauthenticated != nullptr);
+    CHECK(unauthenticated->status == 401);
+    CHECK(unauthenticated->get_header_value("Cache-Control") == "no-store");
+    CHECK(handled.load(std::memory_order_relaxed) == 0U);
+    CHECK(sensitive_request_body_wipe_count_for_testing() == 0U);
+
+    const auto login = client.Post(
+        "/api/auth/login",
+        R"({"username":"admin","password":"secret"})",
+        "application/json");
+    REQUIRE(login != nullptr);
+    REQUIRE(login->status == 200);
+    const httplib::Headers session{{"Cookie", session_cookie(*login)}};
+
+    reset_sensitive_request_body_wipe_count_for_testing();
+    const auto denied = client.Post(
+        "/api/system/ndms/interfaces/import",
+        session,
+        "never-read-secret",
+        "text/plain");
+    REQUIRE(denied != nullptr);
+    CHECK(denied->status == 403);
+    CHECK(denied->get_header_value("Cache-Control") == "no-store");
+    CHECK(handled.load(std::memory_order_relaxed) == 0U);
+    CHECK(sensitive_request_body_wipe_count_for_testing() == 0U);
+
+    grant_local_step_up(client, session, "admin", "secret");
+    const auto accepted = client.Post(
+        "/api/system/ndms/interfaces/import",
+        session,
+        "one-shot-secret",
+        "text/plain");
+    REQUIRE(accepted != nullptr);
+    CHECK(accepted->status == 200);
+    CHECK(accepted->get_header_value("Cache-Control") == "no-store");
+    CHECK(nlohmann::json::parse(accepted->body).at("accepted_bytes") ==
+          15U);
+    CHECK(handled.load(std::memory_order_relaxed) == 1U);
+    CHECK(sensitive_request_body_wipe_count_for_testing() >= 1U);
+
+    throw_before_consume.store(true, std::memory_order_relaxed);
+    reset_sensitive_request_body_wipe_count_for_testing();
+    const auto failed = client.Post(
+        "/api/system/ndms/interfaces/import",
+        session,
+        "erase-on-throw",
+        "text/plain");
+    REQUIRE(failed != nullptr);
+    CHECK(failed->status == 500);
+    CHECK(failed->get_header_value("Cache-Control") == "no-store");
+    CHECK(failed->body.find("erase-on-throw") == std::string::npos);
+    CHECK(failed->body.find("synthetic sensitive handler failure") ==
+          std::string::npos);
+    CHECK(nlohmann::json::parse(failed->body).at("error") ==
+          "sensitive_request_failed");
+    CHECK(handled.load(std::memory_order_relaxed) == 2U);
+    CHECK(sensitive_request_body_wipe_count_for_testing() >= 1U);
+    throw_before_consume.store(false, std::memory_order_relaxed);
+
+    reset_sensitive_request_body_wipe_count_for_testing();
+    const auto oversized = client.Post(
+        "/api/system/ndms/interfaces/import",
+        session,
+        std::string(33U, 'x'),
+        "text/plain");
+    REQUIRE(oversized != nullptr);
+    CHECK(oversized->status == 413);
+    CHECK(oversized->get_header_value("Cache-Control") == "no-store");
+    CHECK(handled.load(std::memory_order_relaxed) == 2U);
+    // cpp-httplib delivered this small request as one oversized chunk. The
+    // route rejected it before copying even one byte into its own buffer, so
+    // there is deliberately nothing owned here to wipe.
+    CHECK(sensitive_request_body_wipe_count_for_testing() == 0U);
+
+    protected_transport.store(false, std::memory_order_relaxed);
+    reset_sensitive_request_body_wipe_count_for_testing();
+    const auto unprotected = client.Post(
+        "/api/system/ndms/interfaces/import",
+        session,
+        "must-not-be-streamed",
+        "text/plain");
+    REQUIRE(unprotected != nullptr);
+    CHECK(unprotected->status == 403);
+    CHECK(unprotected->get_header_value("Cache-Control") == "no-store");
+    CHECK(handled.load(std::memory_order_relaxed) == 2U);
+    CHECK(sensitive_request_body_wipe_count_for_testing() == 0U);
+}
+
 TEST_CASE("sing-box install requires step-up before its handler runs") {
     AuthTempDir directory;
     const auto auth_path = directory.path / "auth.json";
