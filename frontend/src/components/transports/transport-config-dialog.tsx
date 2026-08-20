@@ -1,7 +1,9 @@
 import { BracesIcon, FileUpIcon, LinkIcon } from "lucide-react"
 import {
+  useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type FormEvent,
   type ReactNode,
@@ -41,7 +43,10 @@ import {
 } from "@/lib/hidden-native-interfaces"
 import { isSemanticallyDirty } from "@/lib/semantic-dirty"
 import { semanticJsonEqual } from "@/lib/semantic-json"
-import { NativeWireGuardImportFields } from "@/components/transports/native-wireguard-import-card"
+import {
+  NativeWireGuardImportFields,
+  type NativeWireGuardImportedIdentity,
+} from "@/components/transports/native-wireguard-import-card"
 import { SubscriptionImportDialog } from "@/components/transports/subscription-import-dialog"
 import { classifyPastedLink } from "@/components/transports/subscription-import-model"
 import {
@@ -102,6 +107,33 @@ export function nativeImportFieldsStateBoundaryKey(
   sourceMode: Extract<SourceMode, "link" | "file">
 ): string {
   return `native-import-${sourceMode}`
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function selectImportedNativeInterface(
+  current: TransportSpec,
+  identity: NativeWireGuardImportedIdentity
+): TransportSpec {
+  return {
+    ...current,
+    type: TransportSpecType.native,
+    interface: identity.kernelInterface,
+    link: undefined,
+    outbound_json: undefined,
+  }
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function importedNativeInterfaceSelectionIsValid({
+  inventoryCandidateSelectable,
+  importedProofMatches,
+}: {
+  readonly inventoryCandidateSelectable: boolean | undefined
+  readonly importedProofMatches: boolean
+}): boolean {
+  // The one-shot proof bridges only the short inventory-refresh gap. Once a
+  // fresh candidate exists, its current selectable verdict is authoritative.
+  return inventoryCandidateSelectable ?? importedProofMatches
 }
 
 /** Та же трёхпозиционная шкала, что у маршрута в расширенном редакторе. */
@@ -339,6 +371,10 @@ export function TransportConfigForm({
   const [sourceMode, setSourceMode] = useState<SourceMode>(baseline.sourceMode)
   const [displayNameTouched, setDisplayNameTouched] = useState(false)
   const [nativeUriActive, setNativeUriActive] = useState(false)
+  const [importedNativeIdentity, setImportedNativeIdentity] =
+    useState<NativeWireGuardImportedIdentity | null>(null)
+  const importedNativeFocusPendingRef = useRef(false)
+  const nativeInterfaceTriggerRef = useRef<HTMLButtonElement>(null)
   // What the operator handed over that turned out to be a subscription rather
   // than one connection. Null until then, so the import UI does not exist for
   // the ordinary case.
@@ -366,20 +402,27 @@ export function TransportConfigForm({
           (candidate) => candidate.interfaceName === spec.interface
         )
       : undefined
+  const selectedImportedNativeIdentity =
+    spec.type === TransportSpecType.native &&
+    importedNativeIdentity?.kernelInterface === spec.interface
+      ? importedNativeIdentity
+      : undefined
   const nativeSelectionInvalid =
     spec.type === TransportSpecType.native &&
     !initial &&
-    (!selectedNativeCandidate || !selectedNativeCandidate.selectable)
-  const nativeImportPreviewOnly = isNativeImportPreviewOnlyMode(
-    sourceMode,
-    nativeUriActive
-  )
+    !importedNativeInterfaceSelectionIsValid({
+      inventoryCandidateSelectable: selectedNativeCandidate?.selectable,
+      importedProofMatches: Boolean(selectedImportedNativeIdentity),
+    })
+  const nativeImportPreviewOnly =
+    isSingBox && isNativeImportPreviewOnlyMode(sourceMode, nativeUriActive)
   // Списки для выпадающих полей считаем здесь: `Select` показывает выбранное
   // значение по этому же списку, поэтому он должен быть один и тот же для
   // кнопки и для меню.
   const typeOptions = [
     ...(initial?.type === TransportSpecType.native ||
-    nativeCandidates.length > 0
+    nativeCandidates.length > 0 ||
+    importedNativeIdentity
       ? [
           {
             value: TransportSpecType.native as TransportSpec["type"],
@@ -407,6 +450,23 @@ export function TransportConfigForm({
     // строки поле показало бы пустоту вместо того, что там записано.
     ...(initial?.type === TransportSpecType.native && !selectedNativeCandidate
       ? [{ value: spec.interface, label: spec.interface, disabled: false }]
+      : []),
+    ...(selectedImportedNativeIdentity &&
+    !nativeCandidates.some(
+      (candidate) =>
+        candidate.interfaceName ===
+        selectedImportedNativeIdentity.kernelInterface
+    )
+      ? [
+          {
+            value: selectedImportedNativeIdentity.kernelInterface,
+            label: t("transports.nativeImport.results.panelCandidate", {
+              firmware: selectedImportedNativeIdentity.firmwareInterface,
+              kernel: selectedImportedNativeIdentity.kernelInterface,
+            }),
+            disabled: false,
+          },
+        ]
       : []),
     ...nativeCandidates.map((candidate) => ({
       value: candidate.interfaceName ?? `unresolved:${candidate.id}`,
@@ -466,6 +526,42 @@ export function TransportConfigForm({
       tag: identity.tag,
     }
   }
+
+  const useImportedNativeIdentity = useCallback(
+    (identity: NativeWireGuardImportedIdentity | null) => {
+      setImportedNativeIdentity(identity)
+      if (!identity) return
+
+      // This callback runs only from the explicit post-create action in the
+      // result card. It selects the exact kernel identity proved by the
+      // backend, but deliberately does not save the panel form or accept the
+      // local alias suggestion. The ordinary Save action remains the sole
+      // persistence boundary for the panel transport/outbound.
+      importedNativeFocusPendingRef.current = true
+      setTechnicalIdentityAutomatic(false)
+      setNativeUriActive(false)
+      setSourceMode("link")
+      setSpec((current) => selectImportedNativeInterface(current, identity))
+    },
+    [
+      setImportedNativeIdentity,
+      setNativeUriActive,
+      setSourceMode,
+      setSpec,
+      setTechnicalIdentityAutomatic,
+    ]
+  )
+
+  useEffect(() => {
+    if (
+      !importedNativeFocusPendingRef.current ||
+      spec.type !== TransportSpecType.native
+    ) {
+      return
+    }
+    importedNativeFocusPendingRef.current = false
+    queueMicrotask(() => nativeInterfaceTriggerRef.current?.focus())
+  }, [spec.interface, spec.type])
 
   const selectSourceMode = (nextSourceMode: SourceMode) => {
     setNativeUriActive(false)
@@ -582,7 +678,7 @@ export function TransportConfigForm({
               }
               value={spec.interface}
             >
-              <SelectTrigger>
+              <SelectTrigger ref={nativeInterfaceTriggerRef}>
                 <SelectValue
                   placeholder={t("transports.form.nativeInterfacePlaceholder")}
                 />
@@ -853,45 +949,46 @@ export function TransportConfigForm({
             />
             {sourceMode === "link" ? (
               <>
-              <NativeWireGuardImportFields
-                existingInterfaces={nativeImportInterfaces}
-                key={nativeImportFieldsStateBoundaryKey("link")}
-                linkRequired={!initial}
-                linkValue={spec.link ?? ""}
-                mode="link"
-                onLinkChange={(value) =>
-                  setSpec((current) =>
-                    withAutomaticTechnicalIdentity({
-                      ...current,
-                      link: value,
-                    })
-                  )
-                }
-                onNativeUriActiveChange={setNativeUriActive}
-                readiness={nativeImportReadiness}
-                requiredGuards={nativeImportRequiredGuards}
-              />
-              {/* A share link carries its protocol in the scheme; a
+                <NativeWireGuardImportFields
+                  existingInterfaces={nativeImportInterfaces}
+                  key={nativeImportFieldsStateBoundaryKey("link")}
+                  linkRequired={!initial}
+                  linkValue={spec.link ?? ""}
+                  mode="link"
+                  onLinkChange={(value) =>
+                    setSpec((current) =>
+                      withAutomaticTechnicalIdentity({
+                        ...current,
+                        link: value,
+                      })
+                    )
+                  }
+                  onNativeUriActiveChange={setNativeUriActive}
+                  onImportedIdentityChange={useImportedNativeIdentity}
+                  readiness={nativeImportReadiness}
+                  requiredGuards={nativeImportRequiredGuards}
+                />
+                {/* A share link carries its protocol in the scheme; a
                   subscription is an ordinary web address. That is the whole
                   difference, so the field takes either and this offer appears
                   when the operator has pasted the second kind. */}
-              {classifyPastedLink(spec.link ?? "") === "subscription" ? (
-                <div className="flex flex-wrap items-center gap-2 rounded-md border border-dashed p-3">
-                  <p className="text-sm text-muted-foreground">
-                    {t("transports.form.subscriptionDetected")}
-                  </p>
-                  <Button
-                    onClick={() =>
-                      setSubscriptionSeed({ url: (spec.link ?? "").trim() })
-                    }
-                    size="sm"
-                    type="button"
-                    variant="outline"
-                  >
-                    {t("transports.subscriptionImport.open")}
-                  </Button>
-                </div>
-              ) : null}
+                {classifyPastedLink(spec.link ?? "") === "subscription" ? (
+                  <div className="flex flex-wrap items-center gap-2 rounded-md border border-dashed p-3">
+                    <p className="text-sm text-muted-foreground">
+                      {t("transports.form.subscriptionDetected")}
+                    </p>
+                    <Button
+                      onClick={() =>
+                        setSubscriptionSeed({ url: (spec.link ?? "").trim() })
+                      }
+                      size="sm"
+                      type="button"
+                      variant="outline"
+                    >
+                      {t("transports.subscriptionImport.open")}
+                    </Button>
+                  </div>
+                ) : null}
               </>
             ) : sourceMode === "file" ? (
               <NativeWireGuardImportFields
@@ -901,6 +998,7 @@ export function TransportConfigForm({
                 onSubscriptionDocument={(text) =>
                   setSubscriptionSeed({ document: text })
                 }
+                onImportedIdentityChange={useImportedNativeIdentity}
                 readiness={nativeImportReadiness}
                 requiredGuards={nativeImportRequiredGuards}
               />
@@ -1017,7 +1115,7 @@ export function TransportConfigForm({
           </Button>
         ) : null}
       </div>
-          {/* Seeded, so the operator is not asked for the subscription a second
+      {/* Seeded, so the operator is not asked for the subscription a second
           time: the modal already has what they gave it. */}
       <SubscriptionImportDialog
         onOpenChange={(next) => {
@@ -1026,7 +1124,7 @@ export function TransportConfigForm({
         open={subscriptionSeed !== null}
         {...(subscriptionSeed ? { seed: subscriptionSeed } : {})}
       />
-</form>
+    </form>
   )
 }
 

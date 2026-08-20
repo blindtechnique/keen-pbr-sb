@@ -615,8 +615,11 @@ paths:
       description: >
         Returns a strictly filtered, read-only inventory from NDMS RCI.
         Bridges, switch ports, VLANs and Wi-Fi interfaces are excluded.
-        Mutation remains disabled until typed RCI commands, ownership checks,
-        optimistic revision checks and an automatic backup are all available.
+        Its `read_only`, `mutation_mode` and `native_import_readiness` fields
+        describe the legacy inventory/preview surface only; their fixed
+        preview-only values do not authorize or deny the dedicated one-shot
+        import. The bodyless `/import/preflight` endpoint is the sole current
+        import admission authority and repeats admission on the secret request.
       operationId: getNdmsInterfaceInventory
       responses:
         "200":
@@ -625,6 +628,139 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/NdmsInterfaceInventoryResponse"
+
+  /api/system/ndms/interfaces/import/preflight:
+    post:
+      tags: [Native interface import]
+      summary: Admit a native WireGuard import without sending its secret
+      description: >
+        Performs the replay-safe, bodyless authentication, step-up and native
+        mutation admission phase. The request body must be empty. A successful
+        response reports only that the one-shot import may be attempted; it
+        neither reserves nor authorizes the later secret-bearing request, whose
+        admission is checked again. It does not claim that other NDMS writers
+        are excluded. Both successful and error responses are served with
+        `Cache-Control: no-store`.
+      operationId: postNdmsNativeImportPreflight
+      responses:
+        "200":
+          description: The one-shot secret request may be attempted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NdmsNativeImportPreflightResponse"
+        "400":
+          description: The preflight request was not bodyless
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Authentication is required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Protected transport or step-up authentication is required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Native mutation is unavailable or recovery must run first
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/system/ndms/interfaces/import:
+    post:
+      tags: [Native secret transport]
+      summary: Import one WireGuard or AmneziaWG client into running KeeneticOS
+      description: >
+        Consumes one secret-bearing WireGuard `.conf`, Amnezia `.vpn` or
+        official `vpn://` payload after a separate successful bodyless
+        preflight. The owner-risk header is mandatory and its only accepted
+        value records explicit acceptance that another tool may change NDMS
+        during the operation; it does not exclude that race. The endpoint must
+        be called exactly once and must never be retried by a generated client.
+        A completed result proves a newly created runtime interface, but never
+        claims that `system configuration save` was performed. The response is
+        redacted and all responses are served with `Cache-Control: no-store`.
+      operationId: postNdmsNativeImportSecret
+      parameters:
+        - name: X-Keen-Pbr-External-Ndms-Writer-Race-Acceptance
+          in: header
+          required: true
+          description: >
+            Exact owner acknowledgement. Multiple header instances, surrounding
+            whitespace and every value other than `owner-accepted` are refused
+            before the request body is read.
+          schema:
+            type: string
+            enum: [owner-accepted]
+      requestBody:
+        required: true
+        content:
+          text/plain:
+            schema:
+              type: string
+              minLength: 1
+              maxLength: 524288
+              description: >
+                Secret native client configuration. It is consumed once,
+                wiped by the server-side sensitive request path and never
+                echoed in the response.
+      responses:
+        "200":
+          description: Redacted terminal or recovery-required import result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NdmsNativeImportResponse"
+        "400":
+          description: Empty, oversized or malformed sensitive request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Authentication is required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Protected transport or step-up authentication is required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "415":
+          description: Exactly one `text/plain` content type is required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "428":
+          description: Exact owner-risk acceptance header is required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Import failed without a trustworthy redacted result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Native mutation is unavailable or recovery must run first
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /api/system/ndms/vpn-server-services:
     get:
@@ -6912,6 +7048,189 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/NdmsVpnServerService"
+
+    NdmsNativeImportPreflightResponse:
+      title: NdmsNativeImportPreflightResponse
+      type: object
+      additionalProperties: false
+      required:
+        - admitted
+        - owner_risk_acceptance_required
+        - external_ndms_writer_race_excluded
+      properties:
+        admitted:
+          type: boolean
+          enum: [true]
+        owner_risk_acceptance_required:
+          type: boolean
+          enum: [true]
+        external_ndms_writer_race_excluded:
+          type: boolean
+          enum: [false]
+          description: >
+            Always false. The owner acknowledgement accepts this risk; it does
+            not create a global NDMS fence against other tools.
+
+    NdmsNativeImportStatus:
+      title: NdmsNativeImportStatus
+      type: string
+      enum: [blocked, recovery_required, completed]
+
+    NdmsNativeImportStop:
+      title: NdmsNativeImportStop
+      type: string
+      enum:
+        - none
+        - external_writer_race_not_accepted
+        - writer_missing
+        - writer_lost
+        - delete_wal_not_clean
+        - import_wal_not_clean
+        - request_invalid
+        - runtime_catalog_failed
+        - running_config_catalog_failed
+        - prewrite_catalog_unsafe
+        - prewrite_catalog_diverged
+        - marker_collision
+        - first_free_target_not_managed
+        - ownership_target_not_available
+        - snapshot_target_not_available
+        - durable_observation_failed
+        - cooperative_baseline_failed
+        - cooperative_writer_admission_failed
+        - executor_blocked
+        - wal_record_unavailable
+        - first_post_observation_failed
+        - second_post_observation_failed
+        - post_observation_kind_mismatch
+        - post_observation_unstable
+        - forward_completion_blocked
+        - forward_admission_failed
+        - target_verified_wal_publish_failed
+        - ownership_publish_failed
+        - ownership_wal_publish_failed
+        - wal_cleanup_failed
+        - unexpected_failure
+
+    NdmsNativeImportResponse:
+      title: NdmsNativeImportResponse
+      type: object
+      additionalProperties: false
+      required:
+        - status
+        - stop
+        - external_ndms_writer_race_excluded
+        - external_ndms_writer_race_accepted
+        - system_configuration_save_performed
+        - request_may_have_been_dispatched
+        - wal_may_require_recovery
+        - rollback_snapshot_may_be_retained
+        - ownership_published
+      properties:
+        status:
+          $ref: "#/components/schemas/NdmsNativeImportStatus"
+        stop:
+          $ref: "#/components/schemas/NdmsNativeImportStop"
+        external_ndms_writer_race_excluded:
+          type: boolean
+          enum: [false]
+        external_ndms_writer_race_accepted:
+          type: boolean
+        system_configuration_save_performed:
+          type: boolean
+          enum: [false]
+          description: >
+            Always false for import. A completed interface exists only in the
+            running KeeneticOS configuration until the owner deliberately
+            performs a global system configuration save elsewhere.
+        request_may_have_been_dispatched:
+          type: boolean
+        wal_may_require_recovery:
+          type: boolean
+        rollback_snapshot_may_be_retained:
+          type: boolean
+        ownership_published:
+          type: boolean
+        transaction_id:
+          type: string
+          pattern: "^[0-9a-f]{32}$"
+        expected_interface:
+          type: string
+          pattern: "^Wireguard(?:[0-9]|[1-9][0-9]|1[01][0-9]|12[0-6])$"
+        created_interface:
+          type: string
+          pattern: "^Wireguard(?:[0-9]|[1-9][0-9]|1[01][0-9]|12[0-6])$"
+          description: >
+            Firmware interface identity. Returned only as a proved pair with
+            created_kernel_interface.
+        created_kernel_interface:
+          type: string
+          minLength: 1
+          maxLength: 15
+          pattern: "^(?!\\.{1,2}$)[A-Za-z0-9_.:-]+$"
+          description: >
+            Safe Linux interface identity observed in both required scopes.
+            Returned only as a proved pair with created_interface.
+        kind:
+          type: string
+          enum: [wireguard, amnezia_wireguard]
+        delete_wal_readiness:
+          type: string
+          enum: [clean, unfinished, unsafe]
+        import_wal_readiness:
+          type: string
+          enum: [clean, unfinished, unsafe]
+        request_error:
+          type: string
+          enum:
+            - input_too_large
+            - invalid_encoding
+            - unsupported_uri
+            - invalid_base64
+            - invalid_compression
+            - invalid_json
+            - unsupported_json_schema
+            - malformed_line
+            - unknown_section
+            - duplicate_section
+            - duplicate_field
+            - duplicate_peer
+            - unknown_field
+            - dangerous_directive
+            - missing_required_field
+            - invalid_field
+            - limit_exceeded
+        direct_observation_failure:
+          type: string
+          maxLength: 96
+          description: Redacted typed direct-observation stop, when available.
+        baseline_error:
+          type: string
+          maxLength: 96
+          description: Redacted typed baseline-build stop, when available.
+        executor_stop:
+          type: string
+          maxLength: 96
+          description: Redacted typed executor stop, when available.
+        forward_admission_state:
+          type: string
+          maxLength: 96
+          description: Redacted typed recovery admission state, when available.
+        forward_dispatch_state:
+          type: string
+          maxLength: 96
+          description: Redacted typed recovery dispatch state, when available.
+        forward_failed_step:
+          type: string
+          maxLength: 96
+          description: Redacted typed recovery step, when available.
+      description: >
+        A `completed` response is coherent only when stop is `none`, both WAL
+        readiness fields are `clean`, request dispatch and ownership publication
+        are true, recovery is false, the rollback snapshot retention flag is
+        true, and the expected/created firmware and kernel identities form a
+        proved safe pair. `recovery_required` and any ambiguous non-schema
+        response must never be blindly retried.
 
     NdmsNativeImportTargetRange:
       title: NdmsNativeImportTargetRange

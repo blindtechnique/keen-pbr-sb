@@ -2,6 +2,7 @@ import type {
   NativeWireGuardSecretTicket,
   NativeWireGuardSecretVault,
 } from "@/lib/native-wireguard-secret-vault"
+import { fetchWithStepUp } from "@/lib/step-up"
 
 export type NativeSecretPreflightVerdict = "admitted" | "denied"
 
@@ -9,6 +10,10 @@ export const NDMS_NATIVE_IMPORT_SECRET_ENDPOINT =
   "/api/system/ndms/interfaces/import" as const
 export const NDMS_NATIVE_IMPORT_PREFLIGHT_ENDPOINT =
   "/api/system/ndms/interfaces/import/preflight" as const
+export const NDMS_NATIVE_IMPORT_OWNER_RISK_HEADER =
+  "X-Keen-Pbr-External-Ndms-Writer-Race-Acceptance" as const
+export const NDMS_NATIVE_IMPORT_OWNER_RISK_ACCEPTANCE =
+  "owner-accepted" as const
 
 export type NdmsNativeImportSecretEndpoint =
   typeof NDMS_NATIVE_IMPORT_SECRET_ENDPOINT
@@ -44,6 +49,58 @@ export type NativeSecretFetch = (
   input: RequestInfo | URL,
   init?: RequestInit
 ) => Promise<Response>
+
+export type PreflightNdmsNativeImportOptions = Readonly<{
+  binding: NdmsNativeImportPreflightBinding
+  fetchImpl?: typeof fetch
+  signal?: AbortSignal
+}>
+
+/**
+ * Runs the replay-safe half of native import before the one-shot vault is
+ * opened. A 403 may therefore be replayed once by the shared step-up flow;
+ * there is no request body to duplicate and no secret has left the vault.
+ */
+export async function preflightNdmsNativeImport({
+  binding,
+  fetchImpl = fetch,
+  signal,
+}: PreflightNdmsNativeImportOptions): Promise<NativeSecretPreflightVerdict> {
+  if (
+    binding.preflightEndpoint !== NDMS_NATIVE_IMPORT_PREFLIGHT_ENDPOINT ||
+    binding.secretEndpoint !== NDMS_NATIVE_IMPORT_SECRET_ENDPOINT
+  ) {
+    return "denied"
+  }
+
+  const response = await fetchWithStepUp(
+    NDMS_NATIVE_IMPORT_PREFLIGHT_ENDPOINT,
+    {
+      method: "POST",
+      credentials: "same-origin",
+      mode: "same-origin",
+      cache: "no-store",
+      redirect: "error",
+      referrerPolicy: "no-referrer",
+      keepalive: false,
+      headers: { Accept: "application/json" },
+      signal,
+    },
+    fetchImpl
+  )
+  if (!response.ok) return "denied"
+
+  const payload = await response.json().catch(() => null)
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return "denied"
+  }
+  const value = payload as Record<string, unknown>
+  return value.admitted === true &&
+    value.owner_risk_acceptance_required === true &&
+    value.external_ndms_writer_race_excluded === false
+    ? "admitted"
+    : "denied"
+}
 
 export type PostNdmsNativeImportSecretOnceOptions = {
   vault: NativeWireGuardSecretVault
@@ -111,6 +168,8 @@ export async function postNdmsNativeImportSecretOnce({
       headers: {
         Accept: "application/json",
         "Content-Type": "text/plain; charset=utf-8",
+        [NDMS_NATIVE_IMPORT_OWNER_RISK_HEADER]:
+          NDMS_NATIVE_IMPORT_OWNER_RISK_ACCEPTANCE,
       },
       body: secret,
       signal,

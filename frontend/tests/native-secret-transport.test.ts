@@ -2,9 +2,12 @@ import { describe, expect, mock, test } from "bun:test"
 
 import {
   NDMS_NATIVE_IMPORT_PREFLIGHT_ENDPOINT,
+  NDMS_NATIVE_IMPORT_OWNER_RISK_ACCEPTANCE,
+  NDMS_NATIVE_IMPORT_OWNER_RISK_HEADER,
   NDMS_NATIVE_IMPORT_SECRET_ENDPOINT,
   NativeSecretTransportError,
   nativeSecretEndpointIsAllowed,
+  preflightNdmsNativeImport,
   postNdmsNativeImportSecretOnce,
   type NdmsNativeImportPreflightBinding,
   type NativeSecretFetch,
@@ -58,9 +61,94 @@ describe("native secret endpoint confinement", () => {
       expect(nativeSecretEndpointIsAllowed(endpoint)).toBe(false)
     }
   })
+
+  test("codegen keeps the secret POST out while retaining preflight and models", async () => {
+    const generatedClient = await Bun.file(
+      new URL("../src/api/generated/keen-api.ts", import.meta.url)
+    ).text()
+    const generatedModelIndex = await Bun.file(
+      new URL("../src/api/generated/model/index.ts", import.meta.url)
+    ).text()
+
+    expect(generatedClient).not.toContain("postNdmsNativeImportSecret")
+    expect(generatedClient).not.toContain(
+      "return `/api/system/ndms/interfaces/import`"
+    )
+    expect(generatedClient).toContain("postNdmsNativeImportPreflight")
+    expect(generatedClient).toContain(NDMS_NATIVE_IMPORT_PREFLIGHT_ENDPOINT)
+    expect(generatedModelIndex).toContain("./ndmsNativeImportResponse")
+    expect(generatedModelIndex).toContain("./ndmsNativeImportPreflightResponse")
+  })
 })
 
 describe("one-shot native secret transport", () => {
+  test("preflights its exact bodyless no-store route before vault consumption", async () => {
+    const fetchImpl = mock((input: RequestInfo | URL, init?: RequestInit) => {
+      expect(input).toBe(NDMS_NATIVE_IMPORT_PREFLIGHT_ENDPOINT)
+      expect(init).toEqual(
+        expect.objectContaining({
+          method: "POST",
+          credentials: "same-origin",
+          mode: "same-origin",
+          cache: "no-store",
+          redirect: "error",
+          referrerPolicy: "no-referrer",
+          keepalive: false,
+          headers: { Accept: "application/json" },
+        })
+      )
+      expect(init?.body).toBeUndefined()
+      return Promise.resolve(
+        Response.json({
+          admitted: true,
+          owner_risk_acceptance_required: true,
+          external_ndms_writer_race_excluded: false,
+        })
+      )
+    }) as typeof fetch
+
+    expect(
+      await preflightNdmsNativeImport({
+        binding: {
+          preflightEndpoint: NDMS_NATIVE_IMPORT_PREFLIGHT_ENDPOINT,
+          secretEndpoint: NDMS_NATIVE_IMPORT_SECRET_ENDPOINT,
+        },
+        fetchImpl,
+      })
+    ).toBe("admitted")
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
+  test("does not admit a false or malformed capability response", async () => {
+    for (const payload of [
+      null,
+      { admitted: false },
+      {
+        admitted: true,
+        owner_risk_acceptance_required: false,
+        external_ndms_writer_race_excluded: false,
+      },
+      {
+        admitted: true,
+        owner_risk_acceptance_required: true,
+        external_ndms_writer_race_excluded: true,
+      },
+    ]) {
+      const fetchImpl = mock(() =>
+        Promise.resolve(Response.json(payload))
+      ) as unknown as typeof fetch
+      expect(
+        await preflightNdmsNativeImport({
+          binding: {
+            preflightEndpoint: NDMS_NATIVE_IMPORT_PREFLIGHT_ENDPOINT,
+            secretEndpoint: NDMS_NATIVE_IMPORT_SECRET_ENDPOINT,
+          },
+          fetchImpl,
+        })
+      ).toBe("denied")
+    }
+  })
+
   test("does not consume the secret when preflight denies or fails", async () => {
     const denied = selectedSecret()
     expect(
@@ -171,6 +259,8 @@ describe("one-shot native secret transport", () => {
       expect(init?.headers).toEqual({
         Accept: "application/json",
         "Content-Type": "text/plain; charset=utf-8",
+        [NDMS_NATIVE_IMPORT_OWNER_RISK_HEADER]:
+          NDMS_NATIVE_IMPORT_OWNER_RISK_ACCEPTANCE,
       })
       body = init?.body as Uint8Array
       expect(new TextDecoder().decode(body)).toBe("private-key")

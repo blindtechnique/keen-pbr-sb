@@ -55,12 +55,15 @@ describe("native Keenetic interface wording", () => {
     ).toContain("disabled")
   })
 
-  test("keeps secret-bearing import local until a protected channel exists", () => {
+  test("previews locally and sends once only after protected explicit consent", () => {
     expect(ruTranslation.transports.nativeImport.description).toContain(
-      "только в этом браузере"
+      "превью строится локально"
     )
     expect(ruTranslation.transports.nativeImport.description).toContain(
-      "приложение не отправляет"
+      "один раз отправляет"
+    )
+    expect(ruTranslation.transports.nativeImport.description).toContain(
+      "автоматические повторы"
     )
     expect(ruTranslation.transports.nativeImport.description).toContain(
       "подтверждённое роутером"
@@ -72,17 +75,20 @@ describe("native Keenetic interface wording", () => {
       ruTranslation.transports.nativeImport.transportBlockedDescription
     ).toContain("HTTP заблокирован")
     expect(ruTranslation.transports.nativeImport.redactedNotice).toContain(
-      "предварительное"
+      "локальное структурное превью"
     )
     expect(ruTranslation.transports.nativeImport.redactedNotice).not.toContain(
       "backend"
     )
 
     expect(enTranslation.transports.nativeImport.description).toContain(
-      "only in this browser"
+      "structural preview is local"
     )
     expect(enTranslation.transports.nativeImport.description).toContain(
-      "application does not send"
+      "send the source once"
+    )
+    expect(enTranslation.transports.nativeImport.description).toContain(
+      "automatic retries"
     )
     expect(enTranslation.transports.nativeImport.description).toContain(
       "verified by the router"
@@ -94,14 +100,14 @@ describe("native Keenetic interface wording", () => {
       enTranslation.transports.nativeImport.transportBlockedDescription
     ).toContain("HTTP is blocked")
     expect(enTranslation.transports.nativeImport.redactedNotice).toContain(
-      "preliminary"
+      "local structural preview"
     )
     expect(enTranslation.transports.nativeImport.redactedNotice).not.toContain(
       "backend"
     )
   })
 
-  test("describes every preview-only native import blocker", () => {
+  test("describes every typed readiness blocker and the live owner boundary", () => {
     for (const blocker of Object.values(
       NdmsNativeImportReadinessBlockersItem
     )) {
@@ -109,11 +115,17 @@ describe("native Keenetic interface wording", () => {
       expect(enTranslation.transports.nativeImport.blockers[blocker]).toBeTruthy()
     }
 
-    expect(ruTranslation.transports.nativeImport.applyBlockedDescription).toContain(
-      "ключи никуда не отправляются"
+    expect(ruTranslation.transports.nativeImport.ownerRiskConsent).toContain(
+      "другим инструментом"
     )
-    expect(enTranslation.transports.nativeImport.applyBlockedDescription).toContain(
-      "no keys are sent"
+    expect(enTranslation.transports.nativeImport.ownerRiskConsent).toContain(
+      "another tool"
+    )
+    expect(ruTranslation.transports.nativeImport.results.runningOnly).toContain(
+      "system configuration save"
+    )
+    expect(enTranslation.transports.nativeImport.results.runningOnly).toContain(
+      "system configuration save"
     )
   })
 })

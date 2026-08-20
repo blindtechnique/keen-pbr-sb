@@ -8,11 +8,13 @@ import {
   TRANSPORT_SOURCE_MODE_ORDER,
   createTransportFormValue,
   inferTransportAliasSuggestion,
+  importedNativeInterfaceSelectionIsValid,
   isNativeImportPreviewOnlyMode,
   isTransportGeoSelectionInvalid,
   nativeImportFieldsStateBoundaryKey,
   normalizeTransportFormComparable,
   normalizeTransportFormValue,
+  selectImportedNativeInterface,
 } from "../src/components/transports/transport-config-dialog"
 import { isSemanticallyDirty } from "../src/lib/semantic-dirty"
 import { semanticJsonEqual } from "../src/lib/semantic-json"
@@ -48,6 +50,49 @@ describe("transport form semantics", () => {
     expect(fileKey).not.toBe(linkKey)
     expect(nativeImportFieldsStateBoundaryKey("file")).toBe(fileKey)
     expect(nativeImportFieldsStateBoundaryKey("link")).toBe(linkKey)
+  })
+
+  test("selects a proved created kernel interface without saving or accepting an alias", () => {
+    const current = {
+      ...singBoxTransport,
+      display_name: "Owner chosen name",
+      link: "vless://stale.example",
+      outbound_json: '{"type":"vless"}',
+    }
+
+    const selected = selectImportedNativeInterface(current, {
+      firmwareInterface: "Wireguard5",
+      kernelInterface: "nwg5",
+      kind: "wireguard",
+    })
+
+    expect(selected.type).toBe(TransportSpecType.native)
+    expect(selected.interface).toBe("nwg5")
+    expect(selected.display_name).toBe("Owner chosen name")
+    expect(selected.link).toBeUndefined()
+    expect(selected.outbound_json).toBeUndefined()
+    expect(current.type).toBe(TransportSpecType["sing-box"])
+  })
+
+  test("lets fresh inventory override the temporary imported proof", () => {
+    expect(
+      importedNativeInterfaceSelectionIsValid({
+        inventoryCandidateSelectable: undefined,
+        importedProofMatches: true,
+      })
+    ).toBe(true)
+    expect(
+      importedNativeInterfaceSelectionIsValid({
+        inventoryCandidateSelectable: false,
+        importedProofMatches: true,
+      })
+    ).toBe(false)
+    expect(
+      importedNativeInterfaceSelectionIsValid({
+        inventoryCandidateSelectable: true,
+        importedProofMatches: false,
+      })
+    ).toBe(true)
   })
 
   test("uses the preallocated technical identity for a new transport", () => {

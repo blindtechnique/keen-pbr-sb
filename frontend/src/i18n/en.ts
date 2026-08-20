@@ -917,9 +917,9 @@ export const enTranslation = {
     nativeImport: {
       title: "Import WireGuard / AmneziaWG",
       description:
-        "Import is available after sign-in over a protected Keenetic HTTPS domain or a direct local connection verified by the router. A preliminary structural check runs only in this browser: the application does not send or store the source text, URI, or keys. Key values stay hidden in the preview, but the endpoint may be shown. Creating the Keenetic interface is still disabled.",
+        "Import is available after sign-in over a protected Keenetic HTTPS domain or a direct local connection verified by the router. The structural preview is local. Only after your explicit risk acceptance does the application send the source once to the dedicated Keenetic import endpoint; it is never placed in page state, storage, query caches, URLs, logs, or automatic retries.",
       fileDescription:
-        "Select or drop a WireGuard/AmneziaWG client file. It is parsed only in this browser; the source file and keys are not sent over the network.",
+        "Select or drop a WireGuard/AmneziaWG client .conf or .vpn file. It is previewed locally and retained only in a one-shot in-memory vault until you explicitly start import.",
       transportBlockedTitle: "A protected sign-in is required for import",
       transportBlockedDescription:
         "Open the panel through a protected Keenetic HTTPS domain or the router's local management address, then sign in. External or proxied HTTP is blocked; the local network must still be trusted against interception.",
@@ -936,16 +936,55 @@ export const enTranslation = {
       clear: "Remove the selected file",
       errorTitle: "Input was not accepted",
       redactedNotice:
-        "This is a local preliminary structural preview, not confirmation that the configuration is ready. Key values stay hidden, but the endpoint may be shown. The suggested name is not written anywhere and must be explicitly accepted or changed during a future save. Apply remains disabled.",
+        "This is a local structural preview, not confirmation that the router will accept the configuration. Key values stay hidden, but the endpoint may be shown. The suggested name is never accepted automatically.",
       aliasConflictTitle: "The suggested name is already in use",
       aliasConflictDescription:
         "KeeneticOS already has an interface with this display or technical name. A different name must be explicitly chosen before a future save; the existing interface was not changed.",
       apply: "Create interface in Keenetic",
+      ownerRiskConsent:
+        "Keenetic can be changed by another tool during this operation; by continuing, I accept this risk.",
+      ownerRiskExplanation:
+        "The operation excludes other keen-pbr writers only. It cannot lock every Keenetic tool. A bodyless admission and step-up check runs before the one-shot secret is consumed.",
+      preflighting: "Checking…",
+      sending: "Creating…",
+      preflightStatus: "Checking access without sending the configuration…",
+      sendingStatus:
+        "The configuration was sent once. Waiting for the redacted result; do not repeat the request.",
+      preflightFailedTitle: "Import was not admitted",
+      preflightFailedDescription:
+        "The configuration was not sent and remains in this page's one-shot vault. Check authentication or pending recovery, then you may run the bodyless check again.",
+      selectionExpiredTitle: "Select the configuration again",
+      selectionExpiredDescription:
+        "Authentication, locality, or the selection revision changed before the one-shot request. No secret request was sent; the old in-memory copy was wiped.",
+      unknownTitle: "The import result is unknown",
+      unknownDescription:
+        "The panel can no longer prove whether the one-shot request reached Keenetic or completed. Any selected in-memory copy is unavailable and the controls are locked.",
+      noBlindRetry:
+        "Do not import the same profile again. Complete the native-import recovery check before any new write.",
+      results: {
+        completedTitle: "Interface created in running KeeneticOS",
+        completedDescription:
+          "Both the firmware and Linux interface identities were proved after creation. Nothing has been saved to the panel yet.",
+        blockedTitle: "Import stopped without confirmed completion",
+        blockedDescription:
+          "The server refused or stopped the operation. Review the typed stop below before selecting the profile again.",
+        recovery_requiredTitle: "Native import recovery is required",
+        recovery_requiredDescription:
+          "Durable recovery information was retained because the operation cannot be declared complete or safely absent.",
+        firmwareInterface: "KeeneticOS interface",
+        kernelInterface: "Linux interface",
+        runningOnly:
+          "Running configuration only: the global Keenetic ‘system configuration save’ was not performed.",
+        useInPanel:
+          "Use this created interface in the panel form (does not save)",
+        panelCandidate: "{{firmware}} · Linux {{kernel}} · newly created",
+        stop: "Stop: {{stop}}",
+      },
       applyBlockedTitle: "Interface creation is disabled for now",
       applyBlockedDescription:
         "The panel checks the file or URI safely in this browser only. The server now describes the future create-only flow, but no keys are sent and the Keenetic write API remains disabled.",
       createOnlyRange:
-        "A future import may create only a new interface in the {{first}}–{{last}} range; existing and protected interfaces must remain unchanged.",
+        "This import may create only a new interface in the {{first}}–{{last}} range; existing and protected interfaces must remain unchanged.",
       readinessBlockers: "Why apply is not available yet",
       blockers: {
         writer_disabled: "the apply API and Keenetic writes are disabled",
@@ -990,6 +1029,8 @@ export const enTranslation = {
         "file-too-large": "The file exceeds the size limit.",
         "not-text": "The file is not a valid text .conf.",
         "read-failed": "The browser could not read the file.",
+        "secret-buffer-failed":
+          "The browser could not retain the one-shot secret safely. Select the file again after freeing memory.",
         input_too_large: "The configuration exceeds the size limit.",
         invalid_encoding: "The configuration contains invalid text.",
         unsupported_uri:
@@ -1043,8 +1084,7 @@ export const enTranslation = {
         "sing-box is running from the new binary, but its directory could not be synced. A sudden reboot or power loss may undo this install; check the installed version after the router starts.",
       runningPlain: "Installing…",
       stop: "Stop",
-      tipStop:
-        "Stops the install. Nothing on the router has changed yet.",
+      tipStop: "Stops the install. Nothing on the router has changed yet.",
       cancelRefused: "The install could not be stopped",
       received: "Downloaded {{megabytes}} MB…",
       requestRefused: "The install did not start",
@@ -1109,16 +1149,12 @@ export const enTranslation = {
       fetch: "Fetch",
       apply: "Import selected ({{count}})",
       done: "Done",
-      discardConfirm:
-        "Close the import and discard the current selection?",
-      expired:
-        "The preview has expired - the daemon keeps it for ten minutes.",
+      discardConfirm: "Close the import and discard the current selection?",
+      expired: "The preview has expired - the daemon keeps it for ten minutes.",
       expiredRefetch: "Fetch again",
-      problemsSummary:
-        "Entries marked in the list need attention: {{count}}.",
+      problemsSummary: "Entries marked in the list need attention: {{count}}.",
       urlRefused: {
-        scheme_not_allowed:
-          "Only http and https subscriptions can be fetched.",
+        scheme_not_allowed: "Only http and https subscriptions can be fetched.",
         credentials_in_url:
           "The URL carries credentials before the host name. They would end up in logs and history; ask the provider for a link without them.",
         destination_not_permitted:
@@ -1494,7 +1530,8 @@ export const enTranslation = {
       loadErrorDescription:
         "The dashboard could not read the current interface inventory.",
       idleCounters: "Used interfaces with zero counters: {{count}}.",
-      unavailableCounters: "Used interfaces without available counters: {{count}}.",
+      unavailableCounters:
+        "Used interfaces without available counters: {{count}}.",
     },
     outbounds: {
       liveTraffic: "Traffic through used VPN and proxies",
@@ -1724,8 +1761,10 @@ export const enTranslation = {
       nfqwsTitle: "nfqws",
       nfqws: {
         busy: "Another nfqws coverage check is already running. This routing result is still valid; try the check again.",
-        unknown: "The nfqws configuration or an active list could not be read safely, so coverage is unknown.",
-        covered: "This target is in an nfqws list, so DPI circumvention applies to it.",
+        unknown:
+          "The nfqws configuration or an active list could not be read safely, so coverage is unknown.",
+        covered:
+          "This target is in an nfqws list, so DPI circumvention applies to it.",
         excluded:
           "This target is on an nfqws exclude list, so circumvention does not apply - even though another list also matches it.",
         uncovered: "This target is in no active nfqws list.",

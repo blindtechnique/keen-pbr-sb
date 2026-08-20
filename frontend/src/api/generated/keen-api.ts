@@ -67,6 +67,7 @@ import type {
   NaiveComponentInstallResult,
   NaiveComponentState,
   NdmsInterfaceInventoryResponse,
+  NdmsNativeImportPreflightResponse,
   NdmsVpnServerServiceInventoryResponse,
   NfqwsActionRequest,
   NfqwsActionResult,
@@ -2368,7 +2369,7 @@ export const useQueryConnections = <TError = ErrorResponse,
     }
 
 /**
- * Returns a strictly filtered, read-only inventory from NDMS RCI. Bridges, switch ports, VLANs and Wi-Fi interfaces are excluded. Mutation remains disabled until typed RCI commands, ownership checks, optimistic revision checks and an automatic backup are all available.
+ * Returns a strictly filtered, read-only inventory from NDMS RCI. Bridges, switch ports, VLANs and Wi-Fi interfaces are excluded. Its `read_only`, `mutation_mode` and `native_import_readiness` fields describe the legacy inventory/preview surface only; their fixed preview-only values do not authorize or deny the dedicated one-shot import. The bodyless `/import/preflight` endpoint is the sole current import admission authority and repeats admission on the secret request.
 
  * @summary List native Keenetic tunnel and proxy interfaces
  */
@@ -2479,6 +2480,112 @@ export function useGetNdmsInterfaceInventory<TData = Awaited<ReturnType<typeof g
 
 
 
+
+/**
+ * Performs the replay-safe, bodyless authentication, step-up and native mutation admission phase. The request body must be empty. A successful response reports only that the one-shot import may be attempted; it neither reserves nor authorizes the later secret-bearing request, whose admission is checked again. It does not claim that other NDMS writers are excluded. Both successful and error responses are served with `Cache-Control: no-store`.
+
+ * @summary Admit a native WireGuard import without sending its secret
+ */
+export type postNdmsNativeImportPreflightResponse200 = {
+  data: NdmsNativeImportPreflightResponse
+  status: 200
+}
+
+export type postNdmsNativeImportPreflightResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postNdmsNativeImportPreflightResponse401 = {
+  data: ErrorResponse
+  status: 401
+}
+
+export type postNdmsNativeImportPreflightResponse403 = {
+  data: ErrorResponse
+  status: 403
+}
+
+export type postNdmsNativeImportPreflightResponse503 = {
+  data: ErrorResponse
+  status: 503
+}
+
+export type postNdmsNativeImportPreflightResponseSuccess = (postNdmsNativeImportPreflightResponse200) & {
+  headers: Headers;
+};
+export type postNdmsNativeImportPreflightResponseError = (postNdmsNativeImportPreflightResponse400 | postNdmsNativeImportPreflightResponse401 | postNdmsNativeImportPreflightResponse403 | postNdmsNativeImportPreflightResponse503) & {
+  headers: Headers;
+};
+
+export type postNdmsNativeImportPreflightResponse = (postNdmsNativeImportPreflightResponseSuccess | postNdmsNativeImportPreflightResponseError)
+
+export const getPostNdmsNativeImportPreflightUrl = () => {
+
+
+
+
+  return `/api/system/ndms/interfaces/import/preflight`
+}
+
+export const postNdmsNativeImportPreflight = async ( options?: RequestInit): Promise<postNdmsNativeImportPreflightResponse> => {
+
+  return apiFetch<postNdmsNativeImportPreflightResponse>(getPostNdmsNativeImportPreflightUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+export const getPostNdmsNativeImportPreflightMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postNdmsNativeImportPreflight>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postNdmsNativeImportPreflight>>, TError,void, TContext> => {
+
+const mutationKey = ['postNdmsNativeImportPreflight'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postNdmsNativeImportPreflight>>, void> = () => {
+
+
+          return  postNdmsNativeImportPreflight(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostNdmsNativeImportPreflightMutationResult = NonNullable<Awaited<ReturnType<typeof postNdmsNativeImportPreflight>>>
+
+    export type PostNdmsNativeImportPreflightMutationError = ErrorResponse
+
+    /**
+ * @summary Admit a native WireGuard import without sending its secret
+ */
+export const usePostNdmsNativeImportPreflight = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postNdmsNativeImportPreflight>>, TError,void, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postNdmsNativeImportPreflight>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getPostNdmsNativeImportPreflightMutationOptions(options), queryClient);
+    }
 
 /**
  * Returns a strictly parsed, read-only inventory of enabled or configured L2TP, IKEv1/IKEv2, SSTP and OpenConnect server services. These services do not have a stable Linux ingress interface while idle, so their client traffic is identified by the address pools reported by NDMS. Secrets and credentials from the running configuration are never returned.
