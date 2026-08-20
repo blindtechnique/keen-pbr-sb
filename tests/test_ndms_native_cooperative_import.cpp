@@ -349,7 +349,9 @@ public:
 };
 
 struct FaultControl final {
+    bool fail_wal_directory_fsync{false};
     bool fail_snapshot_before_publish{false};
+    bool fail_snapshot_after_rename{false};
     bool fail_snapshot_absence_fsync{false};
     bool fail_ownership_after_publish{false};
     bool fail_ownership_absence_fsync{false};
@@ -371,6 +373,12 @@ NdmsNativeImportWalStoreTestHooks wal_hooks(
     hooks.allow_current_process_owner = true;
     hooks.fault_injector = [faults](
         const NdmsNativeImportWalStoreFaultStage stage) {
+        if (faults->fail_wal_directory_fsync &&
+            stage ==
+                NdmsNativeImportWalStoreFaultStage::directory_fsync) {
+            throw std::runtime_error(
+                "synthetic WAL directory fsync crash");
+        }
         if (faults->fail_wal_remove &&
             stage == NdmsNativeImportWalStoreFaultStage::remove) {
             throw std::runtime_error("synthetic WAL remove crash");
@@ -395,6 +403,12 @@ NdmsNativeSecretSnapshotStoreTestHooks snapshot_hooks(
             stage == NdmsNativeSecretSnapshotStoreFaultStage::
                 pre_publish_after_file_fsync) {
             throw std::runtime_error("synthetic snapshot crash");
+        }
+        if (faults->fail_snapshot_after_rename &&
+            stage == NdmsNativeSecretSnapshotStoreFaultStage::
+                post_rename_directory_fsync) {
+            throw std::runtime_error(
+                "synthetic snapshot directory fsync crash");
         }
     };
     return hooks;
@@ -1261,6 +1275,28 @@ TEST_CASE("cooperative import requires exact post-import proof in both RCI scope
 }
 
 TEST_CASE("cooperative import failure matrix retains exact recovery phase") {
+    SUBCASE("prepared WAL fsync ambiguity does not claim a snapshot") {
+        Fixture fixture;
+        fixture.faults->fail_wal_directory_fsync = true;
+        const auto result = fixture.run();
+
+        REQUIRE(result.status ==
+                NdmsNativeCooperativeImportStatus::recovery_required);
+        CHECK(result.stop ==
+              NdmsNativeCooperativeImportStop::executor_blocked);
+        CHECK(result.executor_stop ==
+              std::optional<NdmsNativeImportExecutionStop>{
+                  NdmsNativeImportExecutionStop::
+                      prepared_wal_publish_failed});
+        CHECK_FALSE(result.rollback_snapshot_may_be_retained);
+        CHECK_FALSE(result.request_may_have_been_dispatched);
+        CHECK(fixture.backend.calls == 0U);
+        REQUIRE(result.transaction_id.has_value());
+        const auto loaded = fixture.wal.load(*result.transaction_id);
+        REQUIRE(loaded.record.has_value());
+        CHECK(loaded.record->phase == NdmsNativeImportWalPhase::prepared);
+    }
+
     SUBCASE("snapshot crash leaves prepared WAL and performs no POST") {
         Fixture fixture;
         fixture.faults->fail_snapshot_before_publish = true;
@@ -1273,6 +1309,28 @@ TEST_CASE("cooperative import failure matrix retains exact recovery phase") {
         CHECK(result.expected_interface ==
               std::optional<std::string>{"Wireguard5"});
         CHECK_FALSE(result.created_interface.has_value());
+        CHECK(result.rollback_snapshot_may_be_retained);
+        CHECK(fixture.backend.calls == 0U);
+        REQUIRE(result.transaction_id.has_value());
+        const auto loaded = fixture.wal.load(*result.transaction_id);
+        REQUIRE(loaded.record.has_value());
+        CHECK(loaded.record->phase == NdmsNativeImportWalPhase::prepared);
+    }
+
+    SUBCASE("snapshot rename ambiguity truthfully reports retained material") {
+        Fixture fixture;
+        fixture.faults->fail_snapshot_after_rename = true;
+        const auto result = fixture.run();
+
+        REQUIRE(result.status ==
+                NdmsNativeCooperativeImportStatus::recovery_required);
+        CHECK(result.stop ==
+              NdmsNativeCooperativeImportStop::executor_blocked);
+        CHECK(result.executor_stop ==
+              std::optional<NdmsNativeImportExecutionStop>{
+                  NdmsNativeImportExecutionStop::snapshot_publish_failed});
+        CHECK(result.rollback_snapshot_may_be_retained);
+        CHECK_FALSE(result.request_may_have_been_dispatched);
         CHECK(fixture.backend.calls == 0U);
         REQUIRE(result.transaction_id.has_value());
         const auto loaded = fixture.wal.load(*result.transaction_id);

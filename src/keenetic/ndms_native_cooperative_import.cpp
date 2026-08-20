@@ -1020,8 +1020,7 @@ NdmsNativeCooperativeImportCoordinator::import_once(
         result.request_may_have_been_dispatched =
             executed.request_may_have_been_dispatched;
         result.rollback_snapshot_may_be_retained =
-            executed.snapshot_published ||
-            executed.prepared_wal_published;
+            executed.snapshot_may_be_retained;
         result.executor_stop = executed.stop;
         if (executed.status != NdmsNativeImportExecutionStatus::
                 response_recorded_needs_verification) {

@@ -654,6 +654,10 @@ NdmsNativeImportExecutionResult execute_ndms_native_import_transaction(
     }
 
     try {
+        // From publisher entry onward a throw can be post-rename or
+        // post-directory-fsync. Record uncertainty before the call; the
+        // stronger snapshot_published fact is set only after normal return.
+        result.snapshot_may_be_retained = true;
         dependencies.snapshots_->publish(
             plan.expected_created_interface,
             record.transaction_id,

@@ -254,6 +254,11 @@ NdmsNativeCooperativeImportResult completed_result() {
     result.delete_wal_readiness = NdmsNativeDeleteWalReadiness::clean;
     result.import_wal_readiness =
         NdmsNativeCooperativeImportWalReadiness::clean;
+    result.executor_stop = NdmsNativeImportExecutionStop::none;
+    result.forward_admission_state =
+        NdmsNativeImportRecoveryAdmissionState::admitted;
+    result.forward_dispatch_state =
+        NdmsNativeImportRecoveryDispatchState::completed;
     return result;
 }
 
@@ -315,25 +320,14 @@ TEST_CASE("native import API maps only redacted typed evidence") {
     auto result = completed_result();
     result.status = NdmsNativeCooperativeImportStatus::recovery_required;
     result.stop = NdmsNativeCooperativeImportStop::executor_blocked;
-    // These two claims are not delegated to the callback. The import-only
-    // HTTP contract always tells the narrower public truth even if a faulty
-    // embedder attempts to overclaim either capability.
-    result.external_ndms_writer_race_excluded = true;
-    result.system_configuration_save_performed = true;
     result.request_may_have_been_dispatched = true;
     result.wal_may_require_recovery = true;
-    result.request_error = NdmsNativeTunnelImportErrorCode::invalid_encoding;
-    result.direct_observation_failure =
-        NdmsNativeDirectObservationFailure::transport_failed;
-    result.baseline_error =
-        NdmsNativeImportBaselineBuildError::catalog_not_fresh;
     result.executor_stop = NdmsNativeImportExecutionStop::transport_failed;
-    result.forward_admission_state =
-        NdmsNativeImportRecoveryAdmissionState::lease_busy;
-    result.forward_dispatch_state =
-        NdmsNativeImportRecoveryDispatchState::step_failed;
-    result.forward_failed_step =
-        NdmsNativeImportRecoveryStep::publish_ownership;
+    result.created_interface.reset();
+    result.created_kernel_interface.reset();
+    result.ownership_published = false;
+    result.forward_admission_state.reset();
+    result.forward_dispatch_state.reset();
 
     const auto response = ndms_native_import_api_response(result);
     CHECK(response.at("status") == "recovery_required");
@@ -344,52 +338,25 @@ TEST_CASE("native import API maps only redacted typed evidence") {
     CHECK(response.at("request_may_have_been_dispatched") == true);
     CHECK(response.at("wal_may_require_recovery") == true);
     CHECK(response.at("rollback_snapshot_may_be_retained") == true);
-    CHECK(response.at("ownership_published") == true);
-    CHECK(response.at("transaction_id") == std::string(32U, 'a'));
+    CHECK(response.at("ownership_published") == false);
+    CHECK_FALSE(response.contains("transaction_id"));
+    CHECK(response.dump().find(std::string(32U, 'a')) == std::string::npos);
     CHECK(response.at("expected_interface") == "Wireguard5");
-    CHECK(response.at("created_interface") == "Wireguard5");
-    CHECK(response.at("created_kernel_interface") == "nwg5");
+    CHECK_FALSE(response.contains("created_interface"));
+    CHECK_FALSE(response.contains("created_kernel_interface"));
     CHECK(response.at("kind") == "wireguard");
     CHECK(response.at("delete_wal_readiness") == "clean");
     CHECK(response.at("import_wal_readiness") == "clean");
-    CHECK(response.at("request_error") == "invalid_encoding");
-    CHECK(response.at("direct_observation_failure") == "transport_failed");
-    CHECK(response.at("baseline_error") == "catalog_not_fresh");
     CHECK(response.at("executor_stop") == "transport_failed");
-    CHECK(response.at("forward_admission_state") == "lease_busy");
-    CHECK(response.at("forward_dispatch_state") == "step_failed");
-    CHECK(response.at("forward_failed_step") == "publish_ownership");
-
-    result.transaction_id = "PrivateKey=must-not-escape";
-    result.expected_interface = "Wireguard5/revision/private";
-    result.created_interface = "marker-secret";
-    result.created_kernel_interface = "nwg5/private";
-    const auto refused_strings = ndms_native_import_api_response(result);
-    CHECK_FALSE(refused_strings.contains("transaction_id"));
-    CHECK_FALSE(refused_strings.contains("expected_interface"));
-    CHECK_FALSE(refused_strings.contains("created_interface"));
-    CHECK_FALSE(refused_strings.contains("created_kernel_interface"));
-    const auto serialized = refused_strings.dump();
-    CHECK(serialized.find("PrivateKey") == std::string::npos);
-    CHECK(serialized.find("revision/private") == std::string::npos);
-    CHECK(serialized.find("marker-secret") == std::string::npos);
-    CHECK(serialized.find("nwg5/private") == std::string::npos);
-
-    result.stop = NdmsNativeCooperativeImportStop::
-        ownership_target_not_available;
-    CHECK(ndms_native_import_api_response(result).at("stop") ==
-          "ownership_target_not_available");
-    result.stop = NdmsNativeCooperativeImportStop::
-        snapshot_target_not_available;
-    CHECK(ndms_native_import_api_response(result).at("stop") ==
-          "snapshot_target_not_available");
 }
 
-TEST_CASE("native import API exposes only a complete proved created identity") {
+TEST_CASE("native import API requires a complete proved created identity") {
     auto result = completed_result();
     result.status = NdmsNativeCooperativeImportStatus::recovery_required;
-    result.stop = NdmsNativeCooperativeImportStop::executor_blocked;
+    result.stop = NdmsNativeCooperativeImportStop::unexpected_failure;
     result.wal_may_require_recovery = true;
+    result.forward_admission_state.reset();
+    result.forward_dispatch_state.reset();
 
     SUBCASE("paired safe firmware and kernel identities are mapped") {
         const auto response = ndms_native_import_api_response(result);
@@ -397,33 +364,241 @@ TEST_CASE("native import API exposes only a complete proved created identity") {
         CHECK(response.at("created_kernel_interface") == "nwg5");
     }
 
-    SUBCASE("firmware identity without kernel proof is redacted as a pair") {
+    SUBCASE("firmware identity without kernel proof is rejected") {
         result.created_kernel_interface.reset();
-        const auto response = ndms_native_import_api_response(result);
-        CHECK_FALSE(response.contains("created_interface"));
-        CHECK_FALSE(response.contains("created_kernel_interface"));
+        CHECK_THROWS(ndms_native_import_api_response(result));
     }
 
-    SUBCASE("kernel identity without firmware proof is redacted as a pair") {
+    SUBCASE("kernel identity without firmware proof is rejected") {
         result.created_interface.reset();
-        const auto response = ndms_native_import_api_response(result);
-        CHECK_FALSE(response.contains("created_interface"));
-        CHECK_FALSE(response.contains("created_kernel_interface"));
+        CHECK_THROWS(ndms_native_import_api_response(result));
     }
 
-    SUBCASE("unsafe kernel identity is redacted as a pair") {
+    SUBCASE("unsafe kernel identity is rejected") {
         result.created_kernel_interface = "nwg5/private";
-        const auto response = ndms_native_import_api_response(result);
-        CHECK_FALSE(response.contains("created_interface"));
-        CHECK_FALSE(response.contains("created_kernel_interface"));
-        CHECK(response.dump().find("nwg5/private") == std::string::npos);
+        CHECK_THROWS(ndms_native_import_api_response(result));
     }
 
-    SUBCASE("overlong kernel identity is redacted as a pair") {
+    SUBCASE("overlong kernel identity is rejected") {
         result.created_kernel_interface = std::string(16U, 'n');
-        const auto response = ndms_native_import_api_response(result);
-        CHECK_FALSE(response.contains("created_interface"));
-        CHECK_FALSE(response.contains("created_kernel_interface"));
+        CHECK_THROWS(ndms_native_import_api_response(result));
+    }
+}
+
+TEST_CASE("native import API rejects incoherent nonterminal evidence") {
+    NdmsNativeCooperativeImportResult blocked;
+    blocked.stop = NdmsNativeCooperativeImportStop::writer_missing;
+    blocked.external_ndms_writer_race_accepted = true;
+    CHECK(ndms_native_import_api_response(blocked).at("status") ==
+          "blocked");
+
+    SUBCASE("blocked cannot hide dispatched or durable work") {
+        blocked.request_may_have_been_dispatched = true;
+        blocked.rollback_snapshot_may_be_retained = true;
+        CHECK_THROWS(ndms_native_import_api_response(blocked));
+    }
+
+    SUBCASE("blocked cannot claim a dirty WAL") {
+        blocked.wal_may_require_recovery = true;
+        CHECK_THROWS(ndms_native_import_api_response(blocked));
+    }
+
+    SUBCASE("fixed false authority claims are validated") {
+        blocked.external_ndms_writer_race_excluded = true;
+        CHECK_THROWS(ndms_native_import_api_response(blocked));
+        blocked.external_ndms_writer_race_excluded = false;
+        blocked.system_configuration_save_performed = true;
+        CHECK_THROWS(ndms_native_import_api_response(blocked));
+    }
+
+    SUBCASE("private WAL identity cannot smuggle arbitrary text") {
+        blocked.transaction_id = "PrivateKey=must-not-escape";
+        blocked.kind = NdmsNativeTunnelImportKind::wireguard;
+        CHECK_THROWS(ndms_native_import_api_response(blocked));
+    }
+
+    SUBCASE("recovery requires a coherent durable identity") {
+        auto recovery = completed_result();
+        recovery.status =
+            NdmsNativeCooperativeImportStatus::recovery_required;
+        recovery.stop = NdmsNativeCooperativeImportStop::executor_blocked;
+        recovery.wal_may_require_recovery = true;
+        recovery.executor_stop =
+            NdmsNativeImportExecutionStop::transport_failed;
+        recovery.created_interface.reset();
+        recovery.created_kernel_interface.reset();
+        recovery.ownership_published = false;
+        recovery.forward_admission_state.reset();
+        recovery.forward_dispatch_state.reset();
+        CHECK_NOTHROW(ndms_native_import_api_response(recovery));
+
+        recovery.transaction_id.reset();
+        CHECK_THROWS(ndms_native_import_api_response(recovery));
+    }
+}
+
+TEST_CASE("native import API enforces the fresh import stop matrix") {
+    const auto executor_recovery = [](
+        const NdmsNativeImportExecutionStop stop,
+        const bool snapshot_may_be_retained) {
+        auto result = completed_result();
+        result.status =
+            NdmsNativeCooperativeImportStatus::recovery_required;
+        result.stop = NdmsNativeCooperativeImportStop::executor_blocked;
+        result.request_may_have_been_dispatched = false;
+        result.wal_may_require_recovery = true;
+        result.rollback_snapshot_may_be_retained =
+            snapshot_may_be_retained;
+        result.ownership_published = false;
+        result.created_interface.reset();
+        result.created_kernel_interface.reset();
+        result.executor_stop = stop;
+        result.forward_admission_state.reset();
+        result.forward_dispatch_state.reset();
+        return result;
+    };
+
+    SUBCASE("prepared WAL ambiguity has no snapshot claim") {
+        auto result = executor_recovery(
+            NdmsNativeImportExecutionStop::prepared_wal_publish_failed,
+            false);
+        CHECK_NOTHROW(ndms_native_import_api_response(result));
+        result.rollback_snapshot_may_be_retained = true;
+        CHECK_THROWS(ndms_native_import_api_response(result));
+
+        result.executor_stop =
+            NdmsNativeImportExecutionStop::unfinished_transaction_present;
+        result.rollback_snapshot_may_be_retained = false;
+        CHECK_THROWS(ndms_native_import_api_response(result));
+    }
+
+    SUBCASE("writer loss can straddle snapshot publication") {
+        auto result = executor_recovery(
+            NdmsNativeImportExecutionStop::cooperative_writer_lost,
+            false);
+        CHECK_NOTHROW(ndms_native_import_api_response(result));
+        result.rollback_snapshot_may_be_retained = true;
+        CHECK_NOTHROW(ndms_native_import_api_response(result));
+    }
+
+    SUBCASE("snapshot publisher failure starts retention uncertainty") {
+        auto result = executor_recovery(
+            NdmsNativeImportExecutionStop::snapshot_publish_failed,
+            true);
+        CHECK_NOTHROW(ndms_native_import_api_response(result));
+        result.rollback_snapshot_may_be_retained = false;
+        CHECK_THROWS(ndms_native_import_api_response(result));
+    }
+
+    SUBCASE("an early stop cannot be forged as recovery") {
+        auto result = executor_recovery(
+            NdmsNativeImportExecutionStop::transport_failed,
+            true);
+        result.stop =
+            NdmsNativeCooperativeImportStop::delete_wal_not_clean;
+        CHECK_THROWS(ndms_native_import_api_response(result));
+
+        NdmsNativeCooperativeImportResult blocked;
+        blocked.stop =
+            NdmsNativeCooperativeImportStop::wal_record_unavailable;
+        blocked.external_ndms_writer_race_accepted = true;
+        CHECK_THROWS(ndms_native_import_api_response(blocked));
+    }
+
+    SUBCASE("blocked WAL stops require their exact readiness evidence") {
+        NdmsNativeCooperativeImportResult result;
+        result.stop =
+            NdmsNativeCooperativeImportStop::import_wal_not_clean;
+        result.external_ndms_writer_race_accepted = true;
+        result.delete_wal_readiness = NdmsNativeDeleteWalReadiness::clean;
+        result.import_wal_readiness =
+            NdmsNativeCooperativeImportWalReadiness::unfinished;
+        CHECK_NOTHROW(ndms_native_import_api_response(result));
+
+        result.import_wal_readiness =
+            NdmsNativeCooperativeImportWalReadiness::clean;
+        CHECK_THROWS(ndms_native_import_api_response(result));
+        result.import_wal_readiness.reset();
+        CHECK_THROWS(ndms_native_import_api_response(result));
+
+        result.stop =
+            NdmsNativeCooperativeImportStop::delete_wal_not_clean;
+        result.delete_wal_readiness = NdmsNativeDeleteWalReadiness::clean;
+        CHECK_THROWS(ndms_native_import_api_response(result));
+        result.delete_wal_readiness =
+            NdmsNativeDeleteWalReadiness::unsafe;
+        CHECK_NOTHROW(ndms_native_import_api_response(result));
+    }
+
+    SUBCASE("blocked stage stops bind their identity prefix") {
+        NdmsNativeCooperativeImportResult result;
+        result.stop = NdmsNativeCooperativeImportStop::writer_missing;
+        result.external_ndms_writer_race_accepted = true;
+        CHECK_NOTHROW(ndms_native_import_api_response(result));
+        result.delete_wal_readiness = NdmsNativeDeleteWalReadiness::clean;
+        CHECK_THROWS(ndms_native_import_api_response(result));
+
+        result.stop =
+            NdmsNativeCooperativeImportStop::prewrite_catalog_unsafe;
+        result.import_wal_readiness =
+            NdmsNativeCooperativeImportWalReadiness::clean;
+        result.transaction_id = std::string(32U, 'a');
+        result.kind = NdmsNativeTunnelImportKind::wireguard;
+        CHECK_NOTHROW(ndms_native_import_api_response(result));
+        result.expected_interface = "Wireguard5";
+        CHECK_THROWS(ndms_native_import_api_response(result));
+    }
+
+    SUBCASE("observation failure never serializes the none sentinel") {
+        NdmsNativeCooperativeImportResult result;
+        result.stop =
+            NdmsNativeCooperativeImportStop::runtime_catalog_failed;
+        result.external_ndms_writer_race_accepted = true;
+        result.transaction_id = std::string(32U, 'a');
+        result.kind = NdmsNativeTunnelImportKind::wireguard;
+        result.delete_wal_readiness = NdmsNativeDeleteWalReadiness::clean;
+        result.import_wal_readiness =
+            NdmsNativeCooperativeImportWalReadiness::clean;
+        result.direct_observation_failure =
+            NdmsNativeDirectObservationFailure::none;
+        CHECK_THROWS(ndms_native_import_api_response(result));
+        result.direct_observation_failure =
+            NdmsNativeDirectObservationFailure::transport_failed;
+        CHECK_NOTHROW(ndms_native_import_api_response(result));
+    }
+
+    SUBCASE("post-observation ledger failure needs no direct error") {
+        auto result = completed_result();
+        result.status =
+            NdmsNativeCooperativeImportStatus::recovery_required;
+        result.stop = NdmsNativeCooperativeImportStop::
+            first_post_observation_failed;
+        result.wal_may_require_recovery = true;
+        result.ownership_published = false;
+        result.created_interface.reset();
+        result.created_kernel_interface.reset();
+        result.forward_admission_state.reset();
+        result.forward_dispatch_state.reset();
+        CHECK_NOTHROW(ndms_native_import_api_response(result));
+        result.direct_observation_failure =
+            NdmsNativeDirectObservationFailure::none;
+        CHECK_THROWS(ndms_native_import_api_response(result));
+    }
+
+    SUBCASE("forward stop must name its exact failed step") {
+        auto result = completed_result();
+        result.status =
+            NdmsNativeCooperativeImportStatus::recovery_required;
+        result.stop = NdmsNativeCooperativeImportStop::wal_cleanup_failed;
+        result.wal_may_require_recovery = true;
+        result.forward_dispatch_state =
+            NdmsNativeImportRecoveryDispatchState::step_failed;
+        result.forward_failed_step =
+            NdmsNativeImportRecoveryStep::publish_ownership;
+        CHECK_THROWS(ndms_native_import_api_response(result));
+        result.forward_failed_step =
+            NdmsNativeImportRecoveryStep::remove_wal_record;
+        CHECK_NOTHROW(ndms_native_import_api_response(result));
     }
 }
 
@@ -459,7 +634,7 @@ TEST_CASE("native import rejects incoherent or unknown callback results") {
                     NdmsNativeTunnelImportKind>(255U);
                 break;
             case 7U:
-                result.transaction_id = "not-a-transaction";
+                result.transaction_id = "PrivateKey=must-not-escape";
                 break;
             case 8U:
                 result.expected_interface = "Wireguard6";
@@ -514,6 +689,7 @@ TEST_CASE("native import rejects incoherent or unknown callback results") {
               std::string::npos);
         CHECK(response->body.find("nwg5/private") ==
               std::string::npos);
+        CHECK(response->body.find("PrivateKey") == std::string::npos);
     }
     CHECK(callback_count == 18U);
 }

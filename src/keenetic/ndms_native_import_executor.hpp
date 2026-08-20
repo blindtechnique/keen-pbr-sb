@@ -316,6 +316,10 @@ struct NdmsNativeImportExecutionResult final {
     NdmsNativeAllocatorFenceValidationError fence_error{
         NdmsNativeAllocatorFenceValidationError::none};
     bool prepared_wal_published{false};
+    // Set immediately before entering the snapshot publisher. Unlike
+    // snapshot_published, this remains true when the publisher throws after
+    // making encrypted rollback material visible.
+    bool snapshot_may_be_retained{false};
     bool snapshot_published{false};
     bool inflight_wal_published{false};
     bool response_wal_published{false};

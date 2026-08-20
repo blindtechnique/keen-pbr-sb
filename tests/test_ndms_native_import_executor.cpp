@@ -717,6 +717,8 @@ TEST_CASE("native import executor publishes prepared WAL before reservation") {
           NdmsNativeImportExecutionStatus::recovery_required);
     CHECK(result.stop ==
           NdmsNativeImportExecutionStop::prepared_wal_publish_failed);
+    CHECK_FALSE(result.snapshot_may_be_retained);
+    CHECK_FALSE(result.snapshot_published);
     CHECK(fixture.events == std::vector<std::string>{
           "generation.observe", "wal.prepared"});
     CHECK(fixture.generations.reserve_calls == 0U);
@@ -748,6 +750,7 @@ TEST_CASE("native import seals the exact snapshot after WAL and before reservati
     CHECK(result.stop ==
           NdmsNativeImportExecutionStop::snapshot_publish_failed);
     CHECK(result.prepared_wal_published);
+    CHECK(result.snapshot_may_be_retained);
     CHECK_FALSE(result.snapshot_published);
     CHECK(fixture.events == std::vector<std::string>{
           "generation.observe", "wal.prepared", "snapshot.publish"});
@@ -969,6 +972,7 @@ TEST_CASE("ambiguous native import response is recorded and never replayed") {
           NdmsNativeImportExecutionStatus::recovery_required);
     CHECK(second.stop ==
           NdmsNativeImportExecutionStop::unfinished_transaction_present);
+    CHECK_FALSE(second.snapshot_may_be_retained);
     CHECK(second.recovery_action ==
           NdmsNativeImportRecoveryAction::retry_read_only_observation);
     CHECK(fixture.wal.exclusive_rejections == 1U);
@@ -1450,6 +1454,7 @@ TEST_CASE("cooperative stock import stops before backend after every durable int
         CHECK(result.stop == NdmsNativeImportExecutionStop::
               cooperative_writer_lost);
         CHECK(result.prepared_wal_published);
+        CHECK_FALSE(result.snapshot_may_be_retained);
         CHECK_FALSE(result.snapshot_published);
         CHECK(fixture.executor.backend.calls == 0U);
         CHECK(fixture.executor.backend.perform_calls == 0U);
@@ -1477,6 +1482,7 @@ TEST_CASE("cooperative stock import stops before backend after every durable int
               NdmsNativeImportExecutionStatus::recovery_required);
         CHECK(result.stop == NdmsNativeImportExecutionStop::
               cooperative_writer_lost);
+        CHECK(result.snapshot_may_be_retained);
         CHECK(result.snapshot_published);
         CHECK(fixture.executor.generations.cooperative_reserve_calls == 0U);
         CHECK(fixture.executor.backend.calls == 0U);
