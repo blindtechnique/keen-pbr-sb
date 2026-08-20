@@ -35,6 +35,7 @@ const std::vector<StepUpProtectedRoute>& registered_privileged_routes() {
         {"POST", "/api/system/ndms/interfaces/import/recovery/retry"},
         {"POST", "/api/system/ndms/interfaces/remove"},
         {"POST", "/api/system/ndms/interfaces/remove/recovery/retry"},
+        {"POST", "/api/system/ndms/interfaces/retained-deletions/forget"},
         {"POST", "/api/system/remote-access"},
         {"GET", "/api/system/remote-access"},
         {"POST", "/api/system/update"},
@@ -84,6 +85,7 @@ const std::vector<std::string>& registered_routes() {
         "/api/system/ndms/interfaces/import/recovery/retry",
         "/api/system/ndms/interfaces/remove",
         "/api/system/ndms/interfaces/remove/recovery/retry",
+        "/api/system/ndms/interfaces/retained-deletions/forget",
         "/api/system/remote-access",
         "/api/system/router",
         "/api/system/update",
@@ -154,6 +156,9 @@ TEST_CASE("the package and access operations require a step-up") {
         "POST", "/api/system/ndms/interfaces/remove"));
     CHECK(requires_step_up(
         "POST", "/api/system/ndms/interfaces/remove/recovery/retry"));
+    CHECK(requires_step_up(
+        "POST",
+        "/api/system/ndms/interfaces/retained-deletions/forget"));
     CHECK_FALSE(requires_step_up(
         "POST", "/api/system/ndms/recovery/retry"));
     CHECK_FALSE(requires_step_up(

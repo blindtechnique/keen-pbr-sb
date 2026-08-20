@@ -115,6 +115,7 @@ add_executable(keen-pbr-tests
   test_api_ndms_names.cpp
   test_api_ndms_native_delete.cpp
   test_api_ndms_native_import.cpp
+  test_api_ndms_native_tombstone_forget.cpp
   test_api_runtime_interfaces.cpp
   test_api_runtime_inventory.cpp
   test_api_diagnostic_tasks.cpp
@@ -1020,6 +1021,7 @@ if(WITH_API)
     ../src/api/handler_ndms_names.cpp
     ../src/api/handler_ndms_native_delete.cpp
     ../src/api/handler_ndms_native_import.cpp
+    ../src/api/handler_ndms_native_tombstone_forget.cpp
     ../src/api/handler_runtime_interfaces.cpp
     ../src/api/handler_runtime_inventory.cpp
     ../src/api/handler_runtime_outbounds.cpp

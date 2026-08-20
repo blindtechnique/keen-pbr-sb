@@ -613,6 +613,7 @@ if(WITH_API)
     src/api/handler_ndms_names.cpp
     src/api/handler_ndms_native_delete.cpp
     src/api/handler_ndms_native_import.cpp
+    src/api/handler_ndms_native_tombstone_forget.cpp
     src/api/handler_remote_access.cpp
     src/api/handler_backup.cpp
     src/runtime/lifecycle_operation.cpp
