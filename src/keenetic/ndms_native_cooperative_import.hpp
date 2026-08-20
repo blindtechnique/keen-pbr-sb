@@ -2,6 +2,7 @@
 
 #include "ndms_native_delete_wal_store.hpp"
 #include "ndms_native_direct_observation.hpp"
+#include "ndms_native_exact_mutation_transport.hpp"
 #include "ndms_native_import_baseline.hpp"
 #include "ndms_native_import_executor.hpp"
 #include "ndms_native_import_recovery_dispatch.hpp"
@@ -73,14 +74,14 @@ enum class NdmsNativeCooperativeImportStop : std::uint8_t {
 enum class NdmsNativeCooperativeImportResumeStatus : std::uint8_t {
     no_work,
     blocked,
+    recovery_required,
     completed,
 };
 
-// `resume_once()` is deliberately narrower than the general recovery
-// classifier.  It may finish only the forward bookkeeping of a cooperative
-// import whose stock POST has already returned.  Any phase or observation
-// that would authorize abort, rollback or delete is reported and left
-// untouched for a separately authorized recovery path.
+// `resume_once()` executes only classifier-authorized bounded work. It may
+// finish forward bookkeeping, retire a stable-absence record without router
+// mutation, or run one exact rollback delete after fresh invocation-scoped
+// external-writer-risk acceptance. Unknown/divergent evidence stays blocked.
 enum class NdmsNativeCooperativeImportResumeStop : std::uint8_t {
     none,
     writer_missing,
@@ -89,6 +90,7 @@ enum class NdmsNativeCooperativeImportResumeStop : std::uint8_t {
     import_wal_not_single_safe,
     record_not_cooperative,
     phase_not_forward_only,
+    external_writer_race_not_accepted,
     expected_target_not_managed,
     first_observation_failed,
     second_observation_failed,
@@ -96,11 +98,21 @@ enum class NdmsNativeCooperativeImportResumeStop : std::uint8_t {
     durable_observation_failed,
     observation_unstable,
     ownership_not_exact,
+    snapshot_not_exact,
     recovery_action_not_forward_only,
+    recovery_action_not_actionable,
     forward_admission_failed,
+    recovery_admission_failed,
     target_verified_wal_publish_failed,
     ownership_publish_failed,
     ownership_wal_publish_failed,
+    rollback_wal_publish_failed,
+    ownership_retract_failed,
+    delete_wal_publish_failed,
+    delete_guard_rejected,
+    delete_transport_ambiguous,
+    absence_wal_publish_failed,
+    snapshot_retirement_failed,
     wal_cleanup_failed,
     unexpected_failure,
 };
@@ -142,9 +154,10 @@ struct NdmsNativeCooperativeImportResult final {
     std::optional<NdmsNativeImportRecoveryStep> forward_failed_step;
 };
 
-// Redacted result for one bounded recovery pass.  The fixed false router
-// mutation flags are part of the production contract: this path never
-// repeats the secret POST, deletes an interface or performs a global save.
+// Redacted result for one bounded recovery pass.  The import POST and global
+// save flags are permanently false.  A delete can run only for an exact
+// rollback action after fresh invocation-scoped owner acceptance; that
+// acceptance is never persisted as reusable authority.
 // `created_interface` and `created_kernel_interface` are populated only after
 // two fresh, stable, authoritative observations prove the exact marker,
 // firmware target, same safe kernel identity, kind and full revision.
@@ -157,8 +170,12 @@ struct NdmsNativeCooperativeImportResumeResult final {
     bool ndms_delete_dispatched{false};
     bool system_configuration_save_performed{false};
     bool external_ndms_writer_race_excluded{false};
+    bool external_ndms_writer_race_accepted{false};
+    bool delete_perform_started{false};
+    bool request_may_have_been_dispatched{false};
     bool wal_may_require_recovery{false};
     bool ownership_published{false};
+    bool rollback_snapshot_retired{false};
     bool wal_removed{false};
     std::optional<std::string> transaction_id;
     std::optional<std::string> expected_interface;
@@ -177,6 +194,13 @@ struct NdmsNativeCooperativeImportResumeResult final {
     std::optional<NdmsNativeImportRecoveryDispatchState>
         forward_dispatch_state;
     std::optional<NdmsNativeImportRecoveryStep> forward_failed_step;
+    std::optional<NdmsNativeImportRecoveryAdmissionState>
+        recovery_admission_state;
+    std::optional<NdmsNativeImportRecoveryDispatchState>
+        recovery_dispatch_state;
+    std::optional<NdmsNativeImportRecoveryStep> recovery_failed_step;
+    std::optional<NdmsNativeExactMutationResponseOutcome>
+        delete_transport_outcome;
 };
 
 // Narrow read-only seam. Production wraps the fixed-loopback direct gateway;
@@ -232,16 +256,24 @@ public:
         std::string&& raw_configuration,
         NdmsNativeExternalWriterRaceAcceptance race_acceptance) noexcept;
 
-    // Completes at most one already-durable cooperative import.  The caller
-    // supplies the same already-ordered writer lease as import_once(); no
-    // secret body or owner-controlled target enters this boundary.
+    // Completes at most one already-durable cooperative import. The default
+    // bodyless/unconfirmed entrance can forward-complete or retire an exact
+    // snapshot plus WAL after authoritative stable absence. It cannot delete.
+    // An exact-present rollback additionally requires fresh owner acceptance
+    // for this invocation; the WAL never stores it.
     NdmsNativeCooperativeImportResumeResult resume_once(
-        NdmsNativeWriterLease& writer) noexcept;
+        NdmsNativeWriterLease& writer,
+        NdmsNativeExternalWriterRaceAcceptance race_acceptance =
+            NdmsNativeExternalWriterRaceAcceptance::not_accepted) noexcept;
 
 private:
     struct Impl;
     explicit NdmsNativeCooperativeImportCoordinator(
         std::unique_ptr<Impl> impl) noexcept;
+
+    NdmsNativeExactMutationTransportResult dispatch_delete_once(
+        NdmsNativeExactMutationRequest request,
+        NdmsNativeExactMutationPreDispatchGuard& guard);
 
     std::unique_ptr<Impl> impl_;
 
@@ -261,6 +293,7 @@ public:
         NdmsNativeOwnershipStore& ownership,
         NdmsNativeCooperativeImportObservationGateway& gateway,
         NdmsNativeLoopbackRciPostBackend& transport,
+        NdmsNativeExactMutationBackend& delete_transport,
         NdmsNativeImportExecutorClock& clock);
 };
 #endif

@@ -5,6 +5,7 @@
 
 #include "runtime/runtime_mutation_admission.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -109,6 +110,7 @@ private:
 struct MaintenanceState final {
     bool held{true};
     bool fail_reserve{false};
+    std::size_t fail_verify_call{0U};
     std::uint32_t generation{41U};
     std::size_t reserve_calls{0U};
     std::size_t verify_calls{0U};
@@ -137,7 +139,8 @@ public:
 
     void verify_held() override {
         ++state_->verify_calls;
-        if (!state_->held) {
+        if (!state_->held ||
+            state_->fail_verify_call == state_->verify_calls) {
             throw std::runtime_error("synthetic writer loss");
         }
     }
@@ -165,19 +168,26 @@ NdmsNativeWriterAdmission acquire_writer(
 nlohmann::json catalog_payload(
     const std::vector<std::uint8_t>& occupied,
     const std::optional<std::string>& marker = std::nullopt,
-    const bool wireguard5_without_marker = false) {
+    const bool target_without_marker = false,
+    const std::uint8_t marker_slot = 5U,
+    const std::optional<std::uint8_t> second_marker_slot =
+        std::nullopt) {
     auto payload = nlohmann::json::object();
     for (const auto slot : occupied) {
         const auto name = "Wireguard" + std::to_string(slot);
+        const bool carries_marker =
+            slot == marker_slot ||
+            (second_marker_slot.has_value() &&
+             slot == *second_marker_slot);
         payload[name] = {
             {"type",
-             slot == 5U &&
-                     (marker.has_value() || wireguard5_without_marker)
+             carries_marker &&
+                     (marker.has_value() || target_without_marker)
                  ? "Wireguard"
                  : "Bridge"},
             {"interface-name", name},
             {"description",
-             marker.has_value() && slot == 5U
+             marker.has_value() && carries_marker
                  ? *marker
                  : "occupied-slot-" + std::to_string(slot)},
             {"connected", false},
@@ -190,10 +200,18 @@ nlohmann::json catalog_payload(
 NdmsCatalogSnapshot snapshot_for(
     const std::vector<std::uint8_t>& occupied,
     const std::optional<std::string>& marker = std::nullopt,
-    const bool wireguard5_without_marker = false) {
+    const bool target_without_marker = false,
+    const std::uint8_t marker_slot = 5U,
+    const std::optional<std::uint8_t> second_marker_slot =
+        std::nullopt) {
     NdmsCatalogSnapshot snapshot;
     snapshot.catalog = parse_ndms_interface_catalog(
-        catalog_payload(occupied, marker, wireguard5_without_marker));
+        catalog_payload(
+            occupied,
+            marker,
+            target_without_marker,
+            marker_slot,
+            second_marker_slot));
     snapshot.status = NdmsCatalogCacheStatus::fresh;
     snapshot.refreshed = true;
     snapshot.observed_at = std::chrono::steady_clock::time_point{
@@ -243,8 +261,39 @@ public:
              omit_runtime_marker) ||
             (scope == NdmsNativeDirectCatalogScope::running_config &&
              omit_running_marker);
-        const std::vector<std::uint8_t> default_recovery_occupied{
-            0U, 1U, 2U, 3U, 4U, 5U, 6U};
+        const auto marker_identity = parse_ndms_wireguard_identity(
+            recovery_marker_target);
+        const auto second_marker_identity =
+            recovery_second_marker_target.has_value()
+                ? parse_ndms_wireguard_identity(
+                      *recovery_second_marker_target)
+                : std::optional<NdmsWireguardIdentity>{};
+        if (!marker_identity.has_value() ||
+            (recovery_second_marker_target.has_value() &&
+             !second_marker_identity.has_value())) {
+            result.failure =
+                NdmsNativeDirectObservationFailure::transport_failed;
+            return result;
+        }
+        std::vector<std::uint8_t> default_recovery_occupied{
+            0U, 1U, 2U, 3U, 4U, 6U};
+        if (recovery_target_present) {
+            default_recovery_occupied.push_back(marker_identity->slot);
+            if (second_marker_identity.has_value()) {
+                default_recovery_occupied.push_back(
+                    second_marker_identity->slot);
+            }
+            if (extra_recovery_slot.has_value()) {
+                default_recovery_occupied.push_back(
+                    *extra_recovery_slot);
+            }
+            std::sort(default_recovery_occupied.begin(),
+                      default_recovery_occupied.end());
+            default_recovery_occupied.erase(
+                std::unique(default_recovery_occupied.begin(),
+                            default_recovery_occupied.end()),
+                default_recovery_occupied.end());
+        }
         const auto& recovery_occupied =
             scope == NdmsNativeDirectCatalogScope::running_config &&
                     running_recovery_occupied.has_value()
@@ -252,17 +301,37 @@ public:
                 : default_recovery_occupied;
         result.snapshot = snapshot_for(
             recovery_occupied,
-            omit_marker
+            omit_marker || !recovery_target_present
                 ? std::optional<std::string>{}
                 : std::optional<std::string>{marker},
-            omit_marker);
+            omit_marker && recovery_target_present,
+            marker_identity->slot,
+            second_marker_identity.has_value()
+                ? std::optional<std::uint8_t>{
+                      second_marker_identity->slot}
+                : std::nullopt);
+        if ((running_extra_structural_drift &&
+             scope == NdmsNativeDirectCatalogScope::running_config) ||
+            (runtime_extra_structural_drift &&
+             scope == NdmsNativeDirectCatalogScope::runtime_state)) {
+            result.snapshot->catalog.wireguard_slots[4U]
+                .structural_revision =
+                "ndms-wg-slot-v1-" + std::string(64U, 'c');
+        }
+        const auto& observed_target = recovery_target_present
+            ? recovery_marker_target
+            : *expected_target;
         const auto& kernel_interface =
             scope == NdmsNativeDirectCatalogScope::runtime_state
                 ? runtime_kernel_interface
                 : running_kernel_interface;
         if (kernel_interface.has_value()) {
             for (auto& tunnel : result.snapshot->catalog.tunnels) {
-                if (tunnel.firmware_interface_name == *expected_target) {
+                if (tunnel.firmware_interface_name == observed_target) {
+                    tunnel.kernel_name = kernel_interface;
+                } else if (recovery_second_marker_target.has_value() &&
+                           tunnel.firmware_interface_name ==
+                               *recovery_second_marker_target) {
                     tunnel.kernel_name = kernel_interface;
                 }
             }
@@ -275,16 +344,29 @@ public:
                 ? 'b'
                 : 'a';
         result.target_evidence.push_back(
-            {*expected_target,
-             true,
+            {observed_target,
+             recovery_target_down,
              "ndms-rci-full-v1-" +
                  std::string(64U, revision_digit)});
         result.target_protocols.push_back(
-            {*expected_target, protocol});
+            {observed_target, protocol});
+        if (recovery_target_present &&
+            recovery_second_marker_target.has_value()) {
+            result.target_evidence.push_back(
+                {*recovery_second_marker_target,
+                 recovery_target_down,
+                 "ndms-rci-full-v1-" +
+                     std::string(64U, revision_digit)});
+            result.target_protocols.push_back(
+                {*recovery_second_marker_target, protocol});
+        }
         result.catalog_revision =
             ndms_native_import_recovery_catalog_revision(
                 result.snapshot->catalog, result.target_evidence);
         result.failure = NdmsNativeDirectObservationFailure::none;
+        if (after_recovery_observation) {
+            after_recovery_observation(recovery_calls);
+        }
         return result;
     }
 
@@ -299,6 +381,13 @@ public:
     bool running_revision_mismatch{false};
     bool omit_runtime_marker{false};
     bool omit_running_marker{false};
+    bool recovery_target_present{true};
+    bool recovery_target_down{true};
+    bool running_extra_structural_drift{false};
+    bool runtime_extra_structural_drift{false};
+    std::string recovery_marker_target{"Wireguard5"};
+    std::optional<std::string> recovery_second_marker_target;
+    std::optional<std::uint8_t> extra_recovery_slot;
     std::optional<std::string> runtime_kernel_interface{"nwg5"};
     std::optional<std::string> running_kernel_interface{"nwg5"};
     std::optional<std::vector<std::uint8_t>>
@@ -307,6 +396,7 @@ public:
     std::size_t recovery_calls{0U};
     std::vector<NdmsNativeDirectCatalogScope> catalog_scopes;
     std::vector<NdmsNativeDirectCatalogScope> recovery_scopes;
+    std::function<void(std::size_t)> after_recovery_observation;
 };
 
 class FakeBackend final : public NdmsNativeLoopbackRciPostBackend {
@@ -330,7 +420,7 @@ private:
         response.content_type_seen = true;
         response.content_type_is_json = true;
         CHECK(response.body.write_secret_body_chunk(
-            R"([{"interface":{"wireguard":{"import":{"created":"Wireguard5","intersects":""}}}}])"));
+            response_body));
         return response;
     }
 
@@ -338,6 +428,57 @@ public:
     std::size_t calls{0U};
     std::size_t perform_calls{0U};
     bool saw_secret_body{false};
+    std::string response_body{
+        R"([{"interface":{"wireguard":{"import":{"created":"Wireguard5","intersects":""}}}}])"};
+};
+
+class FakeDeleteBackend final : public NdmsNativeExactMutationBackend {
+private:
+    NdmsNativeExactMutationRawResponse post_fixed_loopback_once(
+        NdmsNativeExactMutationDispatchCapability&&,
+        NdmsNativeSecretBuffer&& request_body,
+        NdmsNativeExactMutationPreDispatchGuard& guard,
+        NdmsNativeExactMutationBackendTrace& trace) override {
+        ++calls;
+        bodies.emplace_back(
+            request_body.view().data(), request_body.view().size());
+        trace.pre_dispatch_guard_evaluated = true;
+        if (before_guard) before_guard(calls);
+        if (!guard.authorize_dispatch()) {
+            return NdmsNativeExactMutationRawResponse{};
+        }
+        trace.pre_dispatch_guard_passed = true;
+        trace.perform_started = true;
+        ++perform_calls;
+        if (apply_effect && gateway != nullptr) {
+            gateway->recovery_target_present = false;
+        }
+        if (after_perform) after_perform(calls);
+        if (throw_after_perform) {
+            throw std::runtime_error("synthetic recovery delete crash");
+        }
+        NdmsNativeExactMutationRawResponse response;
+        response.request_may_have_been_dispatched = true;
+        response.transport_ok = transport_ok;
+        response.status_code = 200;
+        response.content_type_seen = true;
+        response.content_type_is_json = true;
+        CHECK(response.body.write_secret_body_chunk(
+            acknowledged ? "{}" : R"({"status":"error"})"));
+        return response;
+    }
+
+public:
+    FakeObservationGateway* gateway{nullptr};
+    std::size_t calls{0U};
+    std::size_t perform_calls{0U};
+    bool apply_effect{true};
+    bool acknowledged{true};
+    bool transport_ok{true};
+    bool throw_after_perform{false};
+    std::function<void(std::size_t)> before_guard;
+    std::function<void(std::size_t)> after_perform;
+    std::vector<std::string> bodies;
 };
 
 class FakeClock final : public NdmsNativeImportExecutorClock {
@@ -353,6 +494,7 @@ struct FaultControl final {
     bool fail_snapshot_before_publish{false};
     bool fail_snapshot_after_rename{false};
     bool fail_snapshot_absence_fsync{false};
+    bool fail_snapshot_remove_fsync{false};
     bool fail_ownership_after_publish{false};
     bool fail_ownership_absence_fsync{false};
     bool fail_wal_remove{false};
@@ -398,6 +540,12 @@ NdmsNativeSecretSnapshotStoreTestHooks snapshot_hooks(
                 absence_directory_fsync) {
             throw std::runtime_error(
                 "synthetic snapshot absence fsync failure");
+        }
+        if (faults->fail_snapshot_remove_fsync &&
+            stage == NdmsNativeSecretSnapshotStoreFaultStage::
+                post_unlink_directory_fsync) {
+            throw std::runtime_error(
+                "synthetic snapshot remove fsync failure");
         }
         if (faults->fail_snapshot_before_publish &&
             stage == NdmsNativeSecretSnapshotStoreFaultStage::
@@ -508,8 +656,10 @@ struct Fixture final {
                   ownership,
                   gateway,
                   backend,
+                  delete_backend,
                   clock)) {
         REQUIRE(writer.state == NdmsNativeWriterAdmissionState::admitted);
+        delete_backend.gateway = &gateway;
     }
 
     NdmsNativeCooperativeImportResult run(
@@ -532,6 +682,7 @@ struct Fixture final {
     NdmsNativeOwnershipStore ownership;
     FakeObservationGateway gateway;
     FakeBackend backend;
+    FakeDeleteBackend delete_backend;
     FakeClock clock;
     NdmsNativeCooperativeImportCoordinator coordinator;
 };
@@ -624,11 +775,90 @@ NdmsNativeCooperativeImportResult leave_response_recorded(
     return result;
 }
 
-void check_resume_is_router_read_only(
+NdmsNativeCooperativeImportResult leave_ambiguous_response_recorded(
+    Fixture& fixture) {
+    fixture.backend.response_body =
+        R"([{"interface":{"wireguard":{"import":{"created":"Wireguard7","intersects":""}}}}])";
+    const auto result = fixture.run();
+    REQUIRE(result.status ==
+            NdmsNativeCooperativeImportStatus::recovery_required);
+    REQUIRE(result.executor_stop ==
+            NdmsNativeImportExecutionStop::ambiguous_response);
+    REQUIRE(result.transaction_id.has_value());
+    const auto loaded = fixture.wal.load(*result.transaction_id);
+    REQUIRE(loaded.record.has_value());
+    REQUIRE(loaded.record->phase ==
+            NdmsNativeImportWalPhase::response_recorded);
+    REQUIRE_FALSE(loaded.record->created_interface.has_value());
+    fixture.gateway.recovery_calls = 0U;
+    fixture.gateway.recovery_scopes.clear();
+    return result;
+}
+
+NdmsNativeCooperativeImportResult leave_prepared(
+    Fixture& fixture,
+    const bool snapshot_may_be_visible) {
+    fixture.faults->fail_snapshot_before_publish =
+        !snapshot_may_be_visible;
+    fixture.faults->fail_snapshot_after_rename =
+        snapshot_may_be_visible;
+    const auto result = fixture.run();
+    REQUIRE(result.status ==
+            NdmsNativeCooperativeImportStatus::recovery_required);
+    REQUIRE(result.transaction_id.has_value());
+    const auto loaded = fixture.wal.load(*result.transaction_id);
+    REQUIRE(loaded.record.has_value());
+    REQUIRE(loaded.record->phase ==
+            NdmsNativeImportWalPhase::prepared);
+    fixture.faults->fail_snapshot_before_publish = false;
+    fixture.faults->fail_snapshot_after_rename = false;
+    fixture.gateway.recovery_calls = 0U;
+    fixture.gateway.recovery_scopes.clear();
+    return result;
+}
+
+NdmsNativeCooperativeImportResult leave_import_may_be_inflight(
+    Fixture& fixture) {
+    fixture.maintenance->fail_reserve = true;
+    const auto result = fixture.run();
+    fixture.maintenance->fail_reserve = false;
+    REQUIRE(result.status ==
+            NdmsNativeCooperativeImportStatus::recovery_required);
+    REQUIRE(result.executor_stop ==
+            NdmsNativeImportExecutionStop::generation_reservation_failed);
+    REQUIRE(result.transaction_id.has_value());
+    auto loaded = fixture.wal.load(*result.transaction_id);
+    REQUIRE(loaded.record.has_value());
+    REQUIRE(loaded.record->phase ==
+            NdmsNativeImportWalPhase::prepared);
+    const auto snapshot = fixture.snapshots.read_panel_delete_snapshot(
+        loaded.record->baseline.expected_created_interface,
+        loaded.record->transaction_id,
+        loaded.record->marker);
+    REQUIRE(snapshot.state == NdmsNativeSecretReadState::valid);
+    REQUIRE(snapshot.snapshot.has_value());
+    REQUIRE(snapshot.snapshot->canonical_revision() ==
+            loaded.record->snapshot_revision);
+    auto inflight = *loaded.record;
+    inflight.phase = NdmsNativeImportWalPhase::import_may_be_inflight;
+    inflight.reserved_generation =
+        inflight.maintenance_base_generation + 1U;
+    fixture.wal.publish(inflight);
+    fixture.gateway.recovery_calls = 0U;
+    fixture.gateway.recovery_scopes.clear();
+    return result;
+}
+
+void check_resume_never_imports_or_saves(
     const NdmsNativeCooperativeImportResumeResult& result) {
     CHECK_FALSE(result.ndms_import_request_dispatched);
-    CHECK_FALSE(result.ndms_delete_dispatched);
     CHECK_FALSE(result.system_configuration_save_performed);
+}
+
+void check_resume_is_router_read_only(
+    const NdmsNativeCooperativeImportResumeResult& result) {
+    check_resume_never_imports_or_saves(result);
+    CHECK_FALSE(result.ndms_delete_dispatched);
     CHECK_FALSE(result.external_ndms_writer_race_excluded);
 }
 
@@ -1814,7 +2044,760 @@ TEST_CASE("cooperative import resume fails closed before reads on cross-kind and
     }
 }
 
-TEST_CASE("cooperative import resume never dispatches rollback phases") {
+TEST_CASE("cooperative import recovery retires stable-absence startup records without router writes") {
+    SUBCASE("prepared record with no visible snapshot") {
+        Fixture fixture;
+        const auto interrupted = leave_prepared(fixture, false);
+        fixture.gateway.recovery_target_present = false;
+
+        const auto result = fixture.coordinator.resume_once(
+            fixture.writer.lease);
+
+        REQUIRE(result.status ==
+                NdmsNativeCooperativeImportResumeStatus::completed);
+        CHECK(result.stop == NdmsNativeCooperativeImportResumeStop::none);
+        CHECK(result.phase ==
+              std::optional<NdmsNativeImportWalPhase>{
+                  NdmsNativeImportWalPhase::prepared});
+        CHECK(result.recovery_action ==
+              std::optional<NdmsNativeImportRecoveryAction>{
+                  NdmsNativeImportRecoveryAction::
+                      abort_without_mutation});
+        CHECK(result.recovery_admission_state ==
+              std::optional<NdmsNativeImportRecoveryAdmissionState>{
+                  NdmsNativeImportRecoveryAdmissionState::admitted});
+        CHECK(result.recovery_dispatch_state ==
+              std::optional<NdmsNativeImportRecoveryDispatchState>{
+                  NdmsNativeImportRecoveryDispatchState::completed});
+        CHECK(result.rollback_snapshot_retired);
+        CHECK(result.wal_removed);
+        CHECK_FALSE(result.wal_may_require_recovery);
+        CHECK_FALSE(result.external_ndms_writer_race_accepted);
+        CHECK(fixture.delete_backend.calls == 0U);
+        check_resume_is_router_read_only(result);
+        CHECK(fixture.wal.load(*interrupted.transaction_id).state ==
+              NdmsNativeImportWalLoadState::absent);
+        CHECK(fixture.snapshots.read_panel_delete_snapshot(
+                  "Wireguard5",
+                  *interrupted.transaction_id,
+                  std::string{kNdmsNativeImportMarkerPrefix} +
+                      *interrupted.transaction_id)
+                  .state == NdmsNativeSecretReadState::absent);
+    }
+
+    SUBCASE("import-may-be-inflight record with retained snapshot") {
+        Fixture fixture;
+        const auto interrupted = leave_import_may_be_inflight(fixture);
+        fixture.gateway.recovery_target_present = false;
+
+        const auto result = fixture.coordinator.resume_once(
+            fixture.writer.lease);
+
+        REQUIRE(result.status ==
+                NdmsNativeCooperativeImportResumeStatus::completed);
+        CHECK(result.phase ==
+              std::optional<NdmsNativeImportWalPhase>{
+                  NdmsNativeImportWalPhase::import_may_be_inflight});
+        CHECK(result.recovery_action ==
+              std::optional<NdmsNativeImportRecoveryAction>{
+                  NdmsNativeImportRecoveryAction::
+                      abort_without_mutation});
+        CHECK(result.rollback_snapshot_retired);
+        CHECK(result.wal_removed);
+        CHECK_FALSE(result.wal_may_require_recovery);
+        CHECK(fixture.delete_backend.calls == 0U);
+        check_resume_is_router_read_only(result);
+        CHECK(fixture.wal.load(*interrupted.transaction_id).state ==
+              NdmsNativeImportWalLoadState::absent);
+    }
+
+    SUBCASE("response-recorded stable absence aborts without deletion") {
+        Fixture fixture;
+        const auto interrupted = leave_response_recorded(fixture);
+        fixture.gateway.recovery_target_present = false;
+
+        const auto result = fixture.coordinator.resume_once(
+            fixture.writer.lease);
+
+        REQUIRE(result.status ==
+                NdmsNativeCooperativeImportResumeStatus::completed);
+        CHECK(result.phase ==
+              std::optional<NdmsNativeImportWalPhase>{
+                  NdmsNativeImportWalPhase::response_recorded});
+        CHECK(result.recovery_action ==
+              std::optional<NdmsNativeImportRecoveryAction>{
+                  NdmsNativeImportRecoveryAction::
+                      abort_without_mutation});
+        CHECK(result.rollback_snapshot_retired);
+        CHECK(result.wal_removed);
+        CHECK_FALSE(result.external_ndms_writer_race_accepted);
+        CHECK(fixture.delete_backend.calls == 0U);
+        check_resume_is_router_read_only(result);
+        CHECK(fixture.wal.load(*interrupted.transaction_id).state ==
+              NdmsNativeImportWalLoadState::absent);
+    }
+}
+
+TEST_CASE("cooperative import recovery never deletes a target from a prepared record") {
+    Fixture fixture;
+    const auto interrupted = leave_prepared(fixture, true);
+
+    const auto result = fixture.coordinator.resume_once(
+        fixture.writer.lease,
+        NdmsNativeExternalWriterRaceAcceptance::owner_accepted);
+
+    CHECK(result.status ==
+          NdmsNativeCooperativeImportResumeStatus::blocked);
+    CHECK(result.stop == NdmsNativeCooperativeImportResumeStop::
+          recovery_action_not_actionable);
+    CHECK(result.recovery_action ==
+          std::optional<NdmsNativeImportRecoveryAction>{
+              NdmsNativeImportRecoveryAction::block_unknown});
+    CHECK_FALSE(result.wal_removed);
+    CHECK(result.wal_may_require_recovery);
+    CHECK(fixture.delete_backend.calls == 0U);
+    CHECK(fixture.wal.load(*interrupted.transaction_id).state ==
+          NdmsNativeImportWalLoadState::valid);
+    check_resume_is_router_read_only(result);
+}
+
+TEST_CASE("cooperative import recovery retires snapshots durably before WAL-last cleanup") {
+    SUBCASE("absent snapshot directory fsync failure keeps the prepared WAL") {
+        Fixture fixture;
+        const auto interrupted = leave_prepared(fixture, false);
+        fixture.gateway.recovery_target_present = false;
+        fixture.faults->fail_snapshot_absence_fsync = true;
+
+        const auto failed = fixture.coordinator.resume_once(
+            fixture.writer.lease);
+
+        REQUIRE(failed.status ==
+                NdmsNativeCooperativeImportResumeStatus::
+                    recovery_required);
+        CHECK(failed.stop ==
+              NdmsNativeCooperativeImportResumeStop::
+                  snapshot_retirement_failed);
+        CHECK(failed.recovery_failed_step ==
+              std::optional<NdmsNativeImportRecoveryStep>{
+                  NdmsNativeImportRecoveryStep::remove_wal_record});
+        CHECK_FALSE(failed.rollback_snapshot_retired);
+        CHECK_FALSE(failed.wal_removed);
+        CHECK(fixture.wal.load(*interrupted.transaction_id).state ==
+              NdmsNativeImportWalLoadState::valid);
+        CHECK(fixture.delete_backend.calls == 0U);
+
+        fixture.faults->fail_snapshot_absence_fsync = false;
+        const auto recovered = fixture.coordinator.resume_once(
+            fixture.writer.lease);
+        CHECK(recovered.status ==
+              NdmsNativeCooperativeImportResumeStatus::completed);
+        CHECK(recovered.rollback_snapshot_retired);
+        CHECK(recovered.wal_removed);
+        CHECK(fixture.wal.load(*interrupted.transaction_id).state ==
+              NdmsNativeImportWalLoadState::absent);
+    }
+
+    SUBCASE("visible unlink without directory fsync keeps the inflight WAL") {
+        Fixture fixture;
+        const auto interrupted = leave_import_may_be_inflight(fixture);
+        fixture.gateway.recovery_target_present = false;
+        fixture.faults->fail_snapshot_remove_fsync = true;
+
+        const auto failed = fixture.coordinator.resume_once(
+            fixture.writer.lease);
+
+        REQUIRE(failed.status ==
+                NdmsNativeCooperativeImportResumeStatus::
+                    recovery_required);
+        CHECK(failed.stop ==
+              NdmsNativeCooperativeImportResumeStop::
+                  snapshot_retirement_failed);
+        CHECK_FALSE(failed.rollback_snapshot_retired);
+        CHECK_FALSE(failed.wal_removed);
+        CHECK(fixture.wal.load(*interrupted.transaction_id).state ==
+              NdmsNativeImportWalLoadState::valid);
+        CHECK(fixture.snapshots.read_panel_delete_snapshot(
+                  "Wireguard5",
+                  *interrupted.transaction_id,
+                  std::string{kNdmsNativeImportMarkerPrefix} +
+                      *interrupted.transaction_id)
+                  .state == NdmsNativeSecretReadState::absent);
+        CHECK(fixture.delete_backend.calls == 0U);
+
+        fixture.faults->fail_snapshot_remove_fsync = false;
+        const auto recovered = fixture.coordinator.resume_once(
+            fixture.writer.lease);
+        CHECK(recovered.status ==
+              NdmsNativeCooperativeImportResumeStatus::completed);
+        CHECK(recovered.rollback_snapshot_retired);
+        CHECK(recovered.wal_removed);
+        CHECK(fixture.wal.load(*interrupted.transaction_id).state ==
+              NdmsNativeImportWalLoadState::absent);
+    }
+
+    SUBCASE("response snapshot retirement failure keeps WAL-last") {
+        Fixture fixture;
+        const auto interrupted = leave_response_recorded(fixture);
+        fixture.gateway.recovery_target_present = false;
+        fixture.faults->fail_snapshot_remove_fsync = true;
+
+        const auto failed = fixture.coordinator.resume_once(
+            fixture.writer.lease);
+
+        REQUIRE(failed.status ==
+                NdmsNativeCooperativeImportResumeStatus::
+                    recovery_required);
+        CHECK(failed.stop ==
+              NdmsNativeCooperativeImportResumeStop::
+                  snapshot_retirement_failed);
+        CHECK(failed.recovery_action ==
+              std::optional<NdmsNativeImportRecoveryAction>{
+                  NdmsNativeImportRecoveryAction::
+                      abort_without_mutation});
+        CHECK_FALSE(failed.rollback_snapshot_retired);
+        CHECK_FALSE(failed.wal_removed);
+        CHECK(fixture.delete_backend.calls == 0U);
+        CHECK(fixture.wal.load(*interrupted.transaction_id).state ==
+              NdmsNativeImportWalLoadState::valid);
+
+        fixture.faults->fail_snapshot_remove_fsync = false;
+        const auto recovered = fixture.coordinator.resume_once(
+            fixture.writer.lease);
+        CHECK(recovered.status ==
+              NdmsNativeCooperativeImportResumeStatus::completed);
+        CHECK(recovered.rollback_snapshot_retired);
+        CHECK(recovered.wal_removed);
+    }
+}
+
+TEST_CASE("cooperative import recovery requires fresh acceptance before exact rollback delete") {
+    Fixture fixture;
+    const auto interrupted = leave_import_may_be_inflight(fixture);
+
+    const auto unconfirmed = fixture.coordinator.resume_once(
+        fixture.writer.lease);
+
+    REQUIRE(unconfirmed.status ==
+            NdmsNativeCooperativeImportResumeStatus::recovery_required);
+    CHECK(unconfirmed.stop ==
+          NdmsNativeCooperativeImportResumeStop::
+              external_writer_race_not_accepted);
+    CHECK(unconfirmed.recovery_action ==
+          std::optional<NdmsNativeImportRecoveryAction>{
+              NdmsNativeImportRecoveryAction::
+                  rollback_delete_exact_owned});
+    CHECK_FALSE(unconfirmed.recovery_admission_state.has_value());
+    CHECK_FALSE(unconfirmed.recovery_dispatch_state.has_value());
+    CHECK_FALSE(unconfirmed.wal_removed);
+    CHECK(fixture.delete_backend.calls == 0U);
+    check_resume_is_router_read_only(unconfirmed);
+
+    const auto confirmed = fixture.coordinator.resume_once(
+        fixture.writer.lease,
+        NdmsNativeExternalWriterRaceAcceptance::owner_accepted);
+
+    REQUIRE(confirmed.status ==
+            NdmsNativeCooperativeImportResumeStatus::completed);
+    CHECK(confirmed.stop == NdmsNativeCooperativeImportResumeStop::none);
+    CHECK(confirmed.external_ndms_writer_race_accepted);
+    CHECK(confirmed.recovery_admission_state ==
+          std::optional<NdmsNativeImportRecoveryAdmissionState>{
+              NdmsNativeImportRecoveryAdmissionState::admitted});
+    CHECK(confirmed.recovery_dispatch_state ==
+          std::optional<NdmsNativeImportRecoveryDispatchState>{
+              NdmsNativeImportRecoveryDispatchState::completed});
+    CHECK_FALSE(confirmed.recovery_failed_step.has_value());
+    CHECK(confirmed.delete_perform_started);
+    CHECK(confirmed.request_may_have_been_dispatched);
+    CHECK(confirmed.ndms_delete_dispatched);
+    CHECK(confirmed.delete_transport_outcome ==
+          std::optional<NdmsNativeExactMutationResponseOutcome>{
+              NdmsNativeExactMutationResponseOutcome::
+                  acknowledged_needs_observation});
+    CHECK(confirmed.rollback_snapshot_retired);
+    CHECK(confirmed.wal_removed);
+    CHECK_FALSE(confirmed.wal_may_require_recovery);
+    CHECK_FALSE(confirmed.ownership_published);
+    check_resume_never_imports_or_saves(confirmed);
+    REQUIRE(fixture.delete_backend.bodies.size() == 1U);
+    CHECK(fixture.delete_backend.bodies.front() ==
+          R"({"interface":{"name":"Wireguard5","no":true}})");
+    CHECK(fixture.wal.load(*interrupted.transaction_id).state ==
+          NdmsNativeImportWalLoadState::absent);
+    CHECK(fixture.ownership.read("Wireguard5").state ==
+          NdmsNativeOwnershipReadState::absent);
+}
+
+TEST_CASE("cooperative import recovery rolls back only an exact divergent response target") {
+    SUBCASE("redacted response still forward-completes the exact expected target") {
+        Fixture fixture;
+        const auto interrupted =
+            leave_ambiguous_response_recorded(fixture);
+
+        const auto result = fixture.coordinator.resume_once(
+            fixture.writer.lease,
+            NdmsNativeExternalWriterRaceAcceptance::owner_accepted);
+
+        REQUIRE(result.status ==
+                NdmsNativeCooperativeImportResumeStatus::completed);
+        CHECK(result.created_interface ==
+              std::optional<std::string>{"Wireguard5"});
+        CHECK(result.created_kernel_interface ==
+              std::optional<std::string>{"nwg5"});
+        CHECK(result.ownership_published);
+        CHECK(result.wal_removed);
+        CHECK(fixture.delete_backend.calls == 0U);
+        CHECK(fixture.delete_backend.perform_calls == 0U);
+        CHECK(fixture.wal.load(*interrupted.transaction_id).state ==
+              NdmsNativeImportWalLoadState::absent);
+        check_resume_is_router_read_only(result);
+    }
+
+    SUBCASE("bodyless entrance is zero-dispatch and fresh acceptance deletes once") {
+        Fixture fixture;
+        const auto interrupted =
+            leave_ambiguous_response_recorded(fixture);
+        fixture.gateway.recovery_marker_target = "Wireguard7";
+
+        const auto unconfirmed = fixture.coordinator.resume_once(
+            fixture.writer.lease);
+
+        REQUIRE(unconfirmed.status ==
+                NdmsNativeCooperativeImportResumeStatus::
+                    recovery_required);
+        CHECK(unconfirmed.stop ==
+              NdmsNativeCooperativeImportResumeStop::
+                  external_writer_race_not_accepted);
+        CHECK(unconfirmed.recovery_action ==
+              std::optional<NdmsNativeImportRecoveryAction>{
+                  NdmsNativeImportRecoveryAction::
+                      rollback_delete_exact_owned});
+        CHECK(fixture.delete_backend.calls == 0U);
+        check_resume_is_router_read_only(unconfirmed);
+
+        const auto accepted = fixture.coordinator.resume_once(
+            fixture.writer.lease,
+            NdmsNativeExternalWriterRaceAcceptance::owner_accepted);
+
+        REQUIRE(accepted.status ==
+                NdmsNativeCooperativeImportResumeStatus::completed);
+        CHECK(accepted.external_ndms_writer_race_accepted);
+        CHECK(accepted.ndms_delete_dispatched);
+        CHECK(accepted.delete_perform_started);
+        CHECK(accepted.rollback_snapshot_retired);
+        CHECK(accepted.wal_removed);
+        REQUIRE(fixture.delete_backend.bodies.size() == 1U);
+        CHECK(fixture.delete_backend.bodies.front() ==
+              R"({"interface":{"name":"Wireguard7","no":true}})");
+        CHECK(fixture.wal.load(*interrupted.transaction_id).state ==
+              NdmsNativeImportWalLoadState::absent);
+        check_resume_never_imports_or_saves(accepted);
+    }
+
+    SUBCASE("ambiguous exact delete remains delete-may with no in-call retry") {
+        Fixture fixture;
+        const auto interrupted =
+            leave_ambiguous_response_recorded(fixture);
+        fixture.gateway.recovery_marker_target = "Wireguard7";
+        fixture.delete_backend.apply_effect = false;
+
+        const auto result = fixture.coordinator.resume_once(
+            fixture.writer.lease,
+            NdmsNativeExternalWriterRaceAcceptance::owner_accepted);
+
+        REQUIRE(result.status ==
+                NdmsNativeCooperativeImportResumeStatus::
+                    recovery_required);
+        CHECK(result.stop ==
+              NdmsNativeCooperativeImportResumeStop::
+                  delete_transport_ambiguous);
+        CHECK(result.phase ==
+              std::optional<NdmsNativeImportWalPhase>{
+                  NdmsNativeImportWalPhase::delete_may_be_inflight});
+        CHECK(result.request_may_have_been_dispatched);
+        CHECK(fixture.delete_backend.calls == 1U);
+        const auto durable = fixture.wal.load(
+            *interrupted.transaction_id);
+        REQUIRE(durable.record.has_value());
+        CHECK(durable.record->phase ==
+              NdmsNativeImportWalPhase::delete_may_be_inflight);
+    }
+
+    SUBCASE("recorded expected target cannot redirect deletion") {
+        Fixture fixture;
+        const auto interrupted = leave_response_recorded(fixture);
+        fixture.gateway.recovery_marker_target = "Wireguard7";
+
+        const auto result = fixture.coordinator.resume_once(
+            fixture.writer.lease,
+            NdmsNativeExternalWriterRaceAcceptance::owner_accepted);
+
+        CHECK(result.status ==
+              NdmsNativeCooperativeImportResumeStatus::blocked);
+        CHECK(fixture.delete_backend.calls == 0U);
+        CHECK(fixture.wal.load(*interrupted.transaction_id).state ==
+              NdmsNativeImportWalLoadState::valid);
+    }
+
+    SUBCASE("up target is never deleted") {
+        Fixture fixture;
+        const auto interrupted =
+            leave_ambiguous_response_recorded(fixture);
+        fixture.gateway.recovery_marker_target = "Wireguard7";
+        fixture.gateway.recovery_target_down = false;
+
+        const auto result = fixture.coordinator.resume_once(
+            fixture.writer.lease,
+            NdmsNativeExternalWriterRaceAcceptance::owner_accepted);
+
+        CHECK(result.status ==
+              NdmsNativeCooperativeImportResumeStatus::blocked);
+        CHECK(fixture.delete_backend.calls == 0U);
+        CHECK(fixture.wal.load(*interrupted.transaction_id).state ==
+              NdmsNativeImportWalLoadState::valid);
+    }
+
+    SUBCASE("foreign ownership on the divergent target blocks deletion") {
+        Fixture fixture;
+        const auto interrupted =
+            leave_ambiguous_response_recorded(fixture);
+        fixture.gateway.recovery_marker_target = "Wireguard7";
+        auto foreign = target_ownership_record();
+        foreign.interface_name = "Wireguard7";
+        (void)fixture.ownership.publish(foreign);
+
+        const auto result = fixture.coordinator.resume_once(
+            fixture.writer.lease,
+            NdmsNativeExternalWriterRaceAcceptance::owner_accepted);
+
+        CHECK(result.stop ==
+              NdmsNativeCooperativeImportResumeStop::
+                  ownership_not_exact);
+        CHECK(fixture.delete_backend.calls == 0U);
+        CHECK(fixture.wal.load(*interrupted.transaction_id).state ==
+              NdmsNativeImportWalLoadState::valid);
+    }
+
+    SUBCASE("one extra occupied slot blocks reconstructed proof") {
+        Fixture fixture;
+        const auto interrupted =
+            leave_ambiguous_response_recorded(fixture);
+        fixture.gateway.recovery_marker_target = "Wireguard7";
+        fixture.gateway.extra_recovery_slot = 8U;
+
+        const auto result = fixture.coordinator.resume_once(
+            fixture.writer.lease,
+            NdmsNativeExternalWriterRaceAcceptance::owner_accepted);
+
+        CHECK(result.status ==
+              NdmsNativeCooperativeImportResumeStatus::blocked);
+        CHECK(fixture.delete_backend.calls == 0U);
+        CHECK(fixture.wal.load(*interrupted.transaction_id).state ==
+              NdmsNativeImportWalLoadState::valid);
+    }
+
+    SUBCASE("benign running-scope structural difference remains actionable") {
+        Fixture fixture;
+        const auto interrupted =
+            leave_ambiguous_response_recorded(fixture);
+        fixture.gateway.recovery_marker_target = "Wireguard7";
+        fixture.gateway.running_extra_structural_drift = true;
+
+        const auto result = fixture.coordinator.resume_once(
+            fixture.writer.lease);
+
+        REQUIRE(result.status ==
+                NdmsNativeCooperativeImportResumeStatus::
+                    recovery_required);
+        CHECK(result.stop ==
+              NdmsNativeCooperativeImportResumeStop::
+                  external_writer_race_not_accepted);
+        CHECK(result.recovery_action ==
+              std::optional<NdmsNativeImportRecoveryAction>{
+                  NdmsNativeImportRecoveryAction::
+                      rollback_delete_exact_owned});
+        CHECK(fixture.delete_backend.calls == 0U);
+        CHECK(fixture.wal.load(*interrupted.transaction_id).state ==
+              NdmsNativeImportWalLoadState::valid);
+    }
+
+    SUBCASE("one extra runtime structural revision blocks reconstructed proof") {
+        Fixture fixture;
+        const auto interrupted =
+            leave_ambiguous_response_recorded(fixture);
+        fixture.gateway.recovery_marker_target = "Wireguard7";
+        fixture.gateway.runtime_extra_structural_drift = true;
+
+        const auto result = fixture.coordinator.resume_once(
+            fixture.writer.lease,
+            NdmsNativeExternalWriterRaceAcceptance::owner_accepted);
+
+        CHECK(result.status ==
+              NdmsNativeCooperativeImportResumeStatus::blocked);
+        CHECK(fixture.delete_backend.calls == 0U);
+        CHECK(fixture.wal.load(*interrupted.transaction_id).state ==
+              NdmsNativeImportWalLoadState::valid);
+    }
+
+    SUBCASE("multiple marker carriers block reconstructed proof") {
+        Fixture fixture;
+        const auto interrupted =
+            leave_ambiguous_response_recorded(fixture);
+        fixture.gateway.recovery_marker_target = "Wireguard7";
+        fixture.gateway.recovery_second_marker_target = "Wireguard8";
+
+        const auto result = fixture.coordinator.resume_once(
+            fixture.writer.lease,
+            NdmsNativeExternalWriterRaceAcceptance::owner_accepted);
+
+        CHECK(result.status ==
+              NdmsNativeCooperativeImportResumeStatus::blocked);
+        CHECK(fixture.delete_backend.calls == 0U);
+        CHECK(fixture.wal.load(*interrupted.transaction_id).state ==
+              NdmsNativeImportWalLoadState::valid);
+    }
+}
+
+TEST_CASE("cooperative import rollback ambiguity remains resumable and never auto-retries") {
+    Fixture fixture;
+    const auto interrupted = leave_import_may_be_inflight(fixture);
+    fixture.delete_backend.apply_effect = false;
+
+    const auto ambiguous = fixture.coordinator.resume_once(
+        fixture.writer.lease,
+        NdmsNativeExternalWriterRaceAcceptance::owner_accepted);
+
+    REQUIRE(ambiguous.status ==
+            NdmsNativeCooperativeImportResumeStatus::recovery_required);
+    CHECK(ambiguous.stop ==
+          NdmsNativeCooperativeImportResumeStop::
+              delete_transport_ambiguous);
+    CHECK(ambiguous.recovery_failed_step ==
+          std::optional<NdmsNativeImportRecoveryStep>{
+              NdmsNativeImportRecoveryStep::delete_exact_owned_target});
+    CHECK(ambiguous.delete_perform_started);
+    CHECK(ambiguous.request_may_have_been_dispatched);
+    CHECK_FALSE(ambiguous.rollback_snapshot_retired);
+    CHECK_FALSE(ambiguous.wal_removed);
+    REQUIRE(fixture.delete_backend.calls == 1U);
+    auto durable = fixture.wal.load(*interrupted.transaction_id);
+    REQUIRE(durable.record.has_value());
+    CHECK(durable.record->phase ==
+          NdmsNativeImportWalPhase::delete_may_be_inflight);
+
+    const auto unconfirmed = fixture.coordinator.resume_once(
+        fixture.writer.lease);
+    CHECK(unconfirmed.status ==
+          NdmsNativeCooperativeImportResumeStatus::recovery_required);
+    CHECK(unconfirmed.stop ==
+          NdmsNativeCooperativeImportResumeStop::
+              external_writer_race_not_accepted);
+    CHECK(fixture.delete_backend.calls == 1U);
+
+    fixture.delete_backend.apply_effect = true;
+    const auto recovered = fixture.coordinator.resume_once(
+        fixture.writer.lease,
+        NdmsNativeExternalWriterRaceAcceptance::owner_accepted);
+    CHECK(recovered.status ==
+          NdmsNativeCooperativeImportResumeStatus::completed);
+    CHECK(recovered.wal_removed);
+    CHECK(recovered.rollback_snapshot_retired);
+    CHECK(fixture.delete_backend.calls == 2U);
+    check_resume_never_imports_or_saves(recovered);
+}
+
+TEST_CASE("cooperative import post-dispatch exceptions preserve recovery truth") {
+    SUBCASE("transport throw after perform leaves delete-may without retry") {
+        Fixture fixture;
+        const auto interrupted = leave_import_may_be_inflight(fixture);
+        fixture.delete_backend.apply_effect = false;
+        fixture.delete_backend.throw_after_perform = true;
+
+        const auto result = fixture.coordinator.resume_once(
+            fixture.writer.lease,
+            NdmsNativeExternalWriterRaceAcceptance::owner_accepted);
+
+        REQUIRE(result.status ==
+                NdmsNativeCooperativeImportResumeStatus::
+                    recovery_required);
+        CHECK(result.phase ==
+              std::optional<NdmsNativeImportWalPhase>{
+                  NdmsNativeImportWalPhase::delete_may_be_inflight});
+        CHECK(result.delete_perform_started);
+        CHECK(result.request_may_have_been_dispatched);
+        CHECK(result.ndms_delete_dispatched);
+        CHECK(result.delete_transport_outcome ==
+              std::optional<NdmsNativeExactMutationResponseOutcome>{
+                  NdmsNativeExactMutationResponseOutcome::
+                      transport_failed});
+        CHECK(fixture.delete_backend.calls == 1U);
+        const auto durable = fixture.wal.load(
+            *interrupted.transaction_id);
+        REQUIRE(durable.record.has_value());
+        CHECK(durable.record->phase ==
+              NdmsNativeImportWalPhase::delete_may_be_inflight);
+        check_resume_never_imports_or_saves(result);
+    }
+
+    SUBCASE("step guard throw after confirmed delete latches recovery-required") {
+        Fixture fixture;
+        const auto interrupted = leave_import_may_be_inflight(fixture);
+        fixture.gateway.after_recovery_observation =
+            [&fixture](const std::size_t recovery_call) {
+                if (recovery_call == 6U) {
+                    fixture.maintenance->fail_verify_call =
+                        fixture.maintenance->verify_calls + 5U;
+                }
+            };
+
+        const auto result = fixture.coordinator.resume_once(
+            fixture.writer.lease,
+            NdmsNativeExternalWriterRaceAcceptance::owner_accepted);
+
+        REQUIRE(result.status ==
+                NdmsNativeCooperativeImportResumeStatus::
+                    recovery_required);
+        CHECK(result.stop ==
+              NdmsNativeCooperativeImportResumeStop::unexpected_failure);
+        CHECK(result.phase ==
+              std::optional<NdmsNativeImportWalPhase>{
+                  NdmsNativeImportWalPhase::delete_may_be_inflight});
+        CHECK(result.recovery_dispatch_state ==
+              std::optional<NdmsNativeImportRecoveryDispatchState>{
+                  NdmsNativeImportRecoveryDispatchState::step_failed});
+        REQUIRE(result.recovery_failed_step.has_value());
+        CHECK(static_cast<int>(*result.recovery_failed_step) ==
+              static_cast<int>(NdmsNativeImportRecoveryStep::
+                                   advance_wal_absence_verified));
+        CHECK(result.delete_perform_started);
+        CHECK(result.request_may_have_been_dispatched);
+        CHECK(result.ndms_delete_dispatched);
+        CHECK_FALSE(result.wal_removed);
+        CHECK(fixture.delete_backend.calls == 1U);
+        const auto durable = fixture.wal.load(
+            *interrupted.transaction_id);
+        REQUIRE(durable.record.has_value());
+        CHECK(durable.record->phase ==
+              NdmsNativeImportWalPhase::delete_may_be_inflight);
+        check_resume_never_imports_or_saves(result);
+    }
+}
+
+TEST_CASE("cooperative import rollback revalidates exact state at the transport boundary") {
+    SUBCASE("marker drift after admission rejects before perform") {
+        Fixture fixture;
+        const auto interrupted = leave_import_may_be_inflight(fixture);
+        fixture.delete_backend.before_guard = [&fixture](std::size_t) {
+            fixture.gateway.omit_runtime_marker = true;
+        };
+
+        const auto result = fixture.coordinator.resume_once(
+            fixture.writer.lease,
+            NdmsNativeExternalWriterRaceAcceptance::owner_accepted);
+
+        CHECK(result.status ==
+              NdmsNativeCooperativeImportResumeStatus::
+                  recovery_required);
+        CHECK(result.stop ==
+              NdmsNativeCooperativeImportResumeStop::
+                  observation_unstable);
+        CHECK(fixture.delete_backend.calls == 1U);
+        CHECK(fixture.delete_backend.perform_calls == 0U);
+        CHECK_FALSE(result.delete_perform_started);
+        CHECK_FALSE(result.request_may_have_been_dispatched);
+        auto durable = fixture.wal.load(*interrupted.transaction_id);
+        REQUIRE(durable.record.has_value());
+        CHECK(durable.record->phase ==
+              NdmsNativeImportWalPhase::delete_may_be_inflight);
+        check_resume_never_imports_or_saves(result);
+    }
+
+    SUBCASE("foreign ownership appearing after admission rejects before perform") {
+        Fixture fixture;
+        const auto interrupted = leave_import_may_be_inflight(fixture);
+        fixture.delete_backend.before_guard = [&fixture](std::size_t) {
+            (void)fixture.ownership.publish(target_ownership_record());
+        };
+
+        const auto result = fixture.coordinator.resume_once(
+            fixture.writer.lease,
+            NdmsNativeExternalWriterRaceAcceptance::owner_accepted);
+
+        CHECK(result.status ==
+              NdmsNativeCooperativeImportResumeStatus::
+                  recovery_required);
+        CHECK(result.stop ==
+              NdmsNativeCooperativeImportResumeStop::ownership_not_exact);
+        CHECK(fixture.delete_backend.perform_calls == 0U);
+        CHECK_FALSE(result.request_may_have_been_dispatched);
+        auto durable = fixture.wal.load(*interrupted.transaction_id);
+        REQUIRE(durable.record.has_value());
+        CHECK(durable.record->phase ==
+              NdmsNativeImportWalPhase::delete_may_be_inflight);
+        check_resume_never_imports_or_saves(result);
+    }
+
+    SUBCASE("snapshot removal after admission rejects before perform") {
+        Fixture fixture;
+        const auto interrupted = leave_import_may_be_inflight(fixture);
+        const auto loaded = fixture.wal.load(*interrupted.transaction_id);
+        REQUIRE(loaded.record.has_value());
+        fixture.delete_backend.before_guard =
+            [&fixture, record = *loaded.record](std::size_t) {
+                CHECK(fixture.snapshots.remove_panel_delete_snapshot_exact(
+                    record.baseline.expected_created_interface,
+                    record.transaction_id,
+                    record.marker,
+                    record.snapshot_revision));
+            };
+
+        const auto result = fixture.coordinator.resume_once(
+            fixture.writer.lease,
+            NdmsNativeExternalWriterRaceAcceptance::owner_accepted);
+
+        CHECK(result.status ==
+              NdmsNativeCooperativeImportResumeStatus::
+                  recovery_required);
+        CHECK(result.stop ==
+              NdmsNativeCooperativeImportResumeStop::snapshot_not_exact);
+        CHECK(fixture.delete_backend.perform_calls == 0U);
+        CHECK_FALSE(result.request_may_have_been_dispatched);
+        auto durable = fixture.wal.load(*interrupted.transaction_id);
+        REQUIRE(durable.record.has_value());
+        CHECK(durable.record->phase ==
+              NdmsNativeImportWalPhase::delete_may_be_inflight);
+        check_resume_never_imports_or_saves(result);
+    }
+
+    SUBCASE("target reappearing after perform remains ambiguous") {
+        Fixture fixture;
+        const auto interrupted = leave_import_may_be_inflight(fixture);
+        fixture.delete_backend.after_perform = [&fixture](std::size_t) {
+            fixture.gateway.recovery_target_present = true;
+        };
+
+        const auto result = fixture.coordinator.resume_once(
+            fixture.writer.lease,
+            NdmsNativeExternalWriterRaceAcceptance::owner_accepted);
+
+        CHECK(result.status ==
+              NdmsNativeCooperativeImportResumeStatus::
+                  recovery_required);
+        CHECK(result.stop ==
+              NdmsNativeCooperativeImportResumeStop::
+                  delete_transport_ambiguous);
+        CHECK(result.delete_perform_started);
+        CHECK(result.request_may_have_been_dispatched);
+        CHECK_FALSE(result.wal_removed);
+        auto durable = fixture.wal.load(*interrupted.transaction_id);
+        REQUIRE(durable.record.has_value());
+        CHECK(durable.record->phase ==
+              NdmsNativeImportWalPhase::delete_may_be_inflight);
+        check_resume_never_imports_or_saves(result);
+    }
+}
+
+TEST_CASE("cooperative import rollback retracts only its exact ownership claim") {
     Fixture fixture;
     fixture.faults->fail_ownership_after_publish = true;
     const auto interrupted = fixture.run();
@@ -1827,38 +2810,81 @@ TEST_CASE("cooperative import resume never dispatches rollback phases") {
     auto rollback = *loaded.record;
     rollback.phase = NdmsNativeImportWalPhase::rollback_requested;
     fixture.wal.publish(rollback);
-    const auto ownership_before = fixture.ownership.read("Wireguard5");
-    REQUIRE(ownership_before.record.has_value());
-    const auto ledger_before = fixture.observations.read();
-    REQUIRE(ledger_before.ledger.has_value());
+    REQUIRE(fixture.ownership.read("Wireguard5").record.has_value());
     fixture.gateway.recovery_calls = 0U;
     fixture.gateway.recovery_scopes.clear();
-    const auto backend_calls_before = fixture.backend.calls;
+
+    const auto unconfirmed = fixture.coordinator.resume_once(
+        fixture.writer.lease);
+    CHECK(unconfirmed.stop ==
+          NdmsNativeCooperativeImportResumeStop::
+              external_writer_race_not_accepted);
+    CHECK(fixture.delete_backend.calls == 0U);
 
     const auto result = fixture.coordinator.resume_once(
-        fixture.writer.lease);
+        fixture.writer.lease,
+        NdmsNativeExternalWriterRaceAcceptance::owner_accepted);
+    CHECK(result.status ==
+          NdmsNativeCooperativeImportResumeStatus::completed);
+    CHECK(result.recovery_action ==
+          std::optional<NdmsNativeImportRecoveryAction>{
+              NdmsNativeImportRecoveryAction::
+                  retry_exact_owned_delete});
+    CHECK(result.wal_removed);
+    CHECK(fixture.ownership.read("Wireguard5").state ==
+          NdmsNativeOwnershipReadState::absent);
+    CHECK(fixture.wal.load(*interrupted.transaction_id).state ==
+          NdmsNativeImportWalLoadState::absent);
+    check_resume_never_imports_or_saves(result);
+}
 
-    CHECK(result.stop ==
-          NdmsNativeCooperativeImportResumeStop::
-              phase_not_forward_only);
-    CHECK(result.phase ==
-          std::optional<NdmsNativeImportWalPhase>{
-              NdmsNativeImportWalPhase::rollback_requested});
-    CHECK_FALSE(result.created_interface.has_value());
-    CHECK_FALSE(result.wal_removed);
-    CHECK(result.wal_may_require_recovery);
-    CHECK(fixture.gateway.recovery_calls == 0U);
-    CHECK(fixture.backend.calls == backend_calls_before);
-    const auto current = fixture.wal.load(*interrupted.transaction_id);
-    REQUIRE(current.record.has_value());
-    CHECK(*current.record == rollback);
-    const auto ownership_after = fixture.ownership.read("Wireguard5");
-    REQUIRE(ownership_after.record.has_value());
-    CHECK(*ownership_after.record == *ownership_before.record);
-    const auto ledger_after = fixture.observations.read();
-    REQUIRE(ledger_after.ledger.has_value());
-    CHECK(*ledger_after.ledger == *ledger_before.ledger);
-    check_resume_is_router_read_only(result);
+TEST_CASE("cooperative import recovery finishes stable absence from every durable rollback phase") {
+    for (const auto terminal_phase : {
+             NdmsNativeImportWalPhase::rollback_requested,
+             NdmsNativeImportWalPhase::delete_may_be_inflight,
+             NdmsNativeImportWalPhase::absence_verified}) {
+        CAPTURE(ndms_native_import_wal_phase_name(terminal_phase));
+        Fixture fixture;
+        const auto interrupted = leave_import_may_be_inflight(fixture);
+        auto loaded = fixture.wal.load(*interrupted.transaction_id);
+        REQUIRE(loaded.record.has_value());
+        auto current = *loaded.record;
+        current.phase = NdmsNativeImportWalPhase::rollback_requested;
+        fixture.wal.publish(current);
+        if (terminal_phase ==
+                NdmsNativeImportWalPhase::delete_may_be_inflight ||
+            terminal_phase ==
+                NdmsNativeImportWalPhase::absence_verified) {
+            current.phase =
+                NdmsNativeImportWalPhase::delete_may_be_inflight;
+            fixture.wal.publish(current);
+        }
+        if (terminal_phase ==
+            NdmsNativeImportWalPhase::absence_verified) {
+            current.phase = NdmsNativeImportWalPhase::absence_verified;
+            fixture.wal.publish(current);
+        }
+        fixture.gateway.recovery_target_present = false;
+
+        const auto result = fixture.coordinator.resume_once(
+            fixture.writer.lease);
+
+        CHECK(result.status ==
+              NdmsNativeCooperativeImportResumeStatus::completed);
+        CHECK(result.recovery_action ==
+              std::optional<NdmsNativeImportRecoveryAction>{
+                  NdmsNativeImportRecoveryAction::complete_rollback});
+        CHECK(result.recovery_dispatch_state ==
+              std::optional<NdmsNativeImportRecoveryDispatchState>{
+                  NdmsNativeImportRecoveryDispatchState::completed});
+        CHECK(result.rollback_snapshot_retired);
+        CHECK(result.wal_removed);
+        CHECK_FALSE(result.external_ndms_writer_race_accepted);
+        CHECK(fixture.delete_backend.calls == 0U);
+        CHECK(fixture.wal.load(*interrupted.transaction_id).state ==
+              NdmsNativeImportWalLoadState::absent);
+        check_resume_is_router_read_only(result);
+    }
 }
 
 TEST_CASE("cooperative import resume shares the recovery CAS with concurrent recoverers") {
