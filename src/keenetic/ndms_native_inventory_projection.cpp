@@ -205,6 +205,8 @@ NdmsNativeRetainedDeletionProjection project_retained_deletion(
         NdmsNativeRetainedDeletionDeferredCheck::
             encrypted_snapshot_or_absence,
         NdmsNativeRetainedDeletionDeferredCheck::keen_pbr_dependencies,
+        NdmsNativeRetainedDeletionDeferredCheck::
+            retained_kernel_interface_absence,
         NdmsNativeRetainedDeletionDeferredCheck::fresh_dual_scope_absence,
     };
     if (!catalog_fresh) {
@@ -483,6 +485,9 @@ const char* ndms_native_retained_deletion_deferred_check_name(
         return "encrypted_snapshot_or_absence";
     case NdmsNativeRetainedDeletionDeferredCheck::keen_pbr_dependencies:
         return "keen_pbr_dependencies";
+    case NdmsNativeRetainedDeletionDeferredCheck::
+        retained_kernel_interface_absence:
+        return "retained_kernel_interface_absence";
     case NdmsNativeRetainedDeletionDeferredCheck::fresh_dual_scope_absence:
         return "fresh_dual_scope_absence";
     }

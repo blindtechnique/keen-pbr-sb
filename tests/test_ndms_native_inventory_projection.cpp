@@ -158,6 +158,8 @@ TEST_CASE("a kernel-bound tombstone is visible without a firmware row") {
               NdmsNativeRetainedDeletionDeferredCheck::
                   keen_pbr_dependencies,
               NdmsNativeRetainedDeletionDeferredCheck::
+                  retained_kernel_interface_absence,
+              NdmsNativeRetainedDeletionDeferredCheck::
                   fresh_dual_scope_absence,
           });
 }
@@ -386,6 +388,6 @@ TEST_CASE("projection enum names are stable and redacted") {
     CHECK(std::string{
               ndms_native_retained_deletion_deferred_check_name(
                   NdmsNativeRetainedDeletionDeferredCheck::
-                      fresh_dual_scope_absence)} ==
-          "fresh_dual_scope_absence");
+                      retained_kernel_interface_absence)} ==
+          "retained_kernel_interface_absence");
 }

@@ -63,6 +63,7 @@ enum class NdmsNativeRetainedDeletionBlocker : std::uint8_t {
 enum class NdmsNativeRetainedDeletionDeferredCheck : std::uint8_t {
     encrypted_snapshot_or_absence,
     keen_pbr_dependencies,
+    retained_kernel_interface_absence,
     fresh_dual_scope_absence,
 };
 

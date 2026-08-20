@@ -78,6 +78,15 @@ NdmsNativeInventoryProjection valid_native_projection(
             "ndms-native-owner-tombstone-v1-" +
                 std::string(64U, 'b'),
         },
+        NdmsNativeOwnershipInspectionItem{
+            "Wireguard8",
+            NdmsNativeTunnelImportKind::wireguard,
+            NdmsNativeOwnershipLifecycle::
+                deleted_save_acknowledged_unverified,
+            "ndms-native-owner-tombstone-v1-" +
+                std::string(64U, 'c'),
+            true,
+        },
     };
     return project_ndms_native_inventory(
         tunnels,
@@ -719,6 +728,7 @@ TEST_CASE("NDMS read-only endpoints share the cache and safety contract") {
               {"observed_import_journal_state", "unavailable"},
               {"observed_delete_journal_state", "unavailable"},
           });
+    CHECK(inventory["retained_deletions"] == nlohmann::json::array());
     CHECK(inventory["required_guards"] ==
           nlohmann::json::array(
               {"typed_rci",
@@ -904,6 +914,47 @@ TEST_CASE(
               {"observed_import_journal_state", "clean"},
               {"observed_delete_journal_state", "clean"},
           });
+    REQUIRE(fresh["retained_deletions"].size() == 2U);
+    CHECK(fresh["retained_deletions"][0] ==
+          nlohmann::json{
+              {"interface_name", "Wireguard6"},
+              {"ownership_revision",
+               "ndms-native-owner-tombstone-v1-" +
+                   std::string(64U, 'b')},
+              {"forget_candidate", false},
+              {"forget_blockers",
+               nlohmann::json::array(
+                   {"target_present",
+                    "ownership_schema_not_forget_capable"})},
+              {"deferred_authoritative_checks",
+               nlohmann::json::array(
+                   {"encrypted_snapshot_or_absence",
+                    "keen_pbr_dependencies",
+                    "retained_kernel_interface_absence",
+                    "fresh_dual_scope_absence"})},
+          });
+    CHECK(fresh["retained_deletions"][1] ==
+          nlohmann::json{
+              {"interface_name", "Wireguard8"},
+              {"ownership_revision",
+               "ndms-native-owner-tombstone-v1-" +
+                   std::string(64U, 'c')},
+              {"forget_candidate", true},
+              {"forget_blockers", nlohmann::json::array()},
+              {"deferred_authoritative_checks",
+               nlohmann::json::array(
+                   {"encrypted_snapshot_or_absence",
+                    "keen_pbr_dependencies",
+                    "retained_kernel_interface_absence",
+                    "fresh_dual_scope_absence"})},
+          });
+    CHECK_FALSE(fresh["retained_deletions"][1].contains("marker"));
+    CHECK_FALSE(
+        fresh["retained_deletions"][1].contains("transaction_id"));
+    CHECK_FALSE(
+        fresh["retained_deletions"][1].contains("snapshot_revision"));
+    CHECK_FALSE(fresh["retained_deletions"][1].contains("kernel_name"));
+    CHECK(fresh.dump().find("nwg8") == std::string::npos);
 
     const auto active = inventory_row(fresh, "Wireguard5");
     CHECK(active["capabilities"]["can_delete"] == false);
@@ -1024,6 +1075,98 @@ TEST_CASE(
             case 8:
                 throw std::runtime_error(
                     "PRIVATE_CALLBACK_EXCEPTION_MUST_NOT_ESCAPE");
+            case 9:
+                REQUIRE_FALSE(projection.retained_deletions.empty());
+                while (projection.retained_deletions.size() <= 94U) {
+                    projection.retained_deletions.push_back(
+                        projection.retained_deletions.back());
+                }
+                break;
+            case 10:
+                REQUIRE(projection.retained_deletions.size() == 2U);
+                std::swap(
+                    projection.retained_deletions[0],
+                    projection.retained_deletions[1]);
+                break;
+            case 11:
+                REQUIRE(projection.retained_deletions.size() == 2U);
+                projection.retained_deletions[1].interface_name =
+                    projection.retained_deletions[0].interface_name;
+                break;
+            case 12:
+                REQUIRE_FALSE(projection.retained_deletions.empty());
+                projection.retained_deletions[0].interface_name =
+                    "Wireguard4";
+                break;
+            case 13:
+                REQUIRE_FALSE(projection.retained_deletions.empty());
+                projection.retained_deletions[0].ownership_revision =
+                    "PRIVATE_CALLBACK_REVISION_MUST_NOT_ESCAPE";
+                break;
+            case 14:
+                REQUIRE_FALSE(projection.retained_deletions.empty());
+                projection.retained_deletions[0]
+                    .forget_blockers.push_back(
+                        static_cast<
+                            NdmsNativeRetainedDeletionBlocker>(255U));
+                break;
+            case 15:
+                REQUIRE_FALSE(projection.retained_deletions.empty());
+                std::reverse(
+                    projection.retained_deletions[0]
+                        .forget_blockers.begin(),
+                    projection.retained_deletions[0]
+                        .forget_blockers.end());
+                break;
+            case 16:
+                REQUIRE_FALSE(projection.retained_deletions.empty());
+                REQUIRE_FALSE(
+                    projection.retained_deletions[0]
+                        .deferred_authoritative_checks.empty());
+                projection.retained_deletions[0]
+                    .deferred_authoritative_checks[0] =
+                    static_cast<
+                        NdmsNativeRetainedDeletionDeferredCheck>(255U);
+                break;
+            case 17:
+                REQUIRE_FALSE(projection.retained_deletions.empty());
+                std::swap(
+                    projection.retained_deletions[0]
+                        .deferred_authoritative_checks.front(),
+                    projection.retained_deletions[0]
+                        .deferred_authoritative_checks.back());
+                break;
+            case 18:
+                REQUIRE(projection.retained_deletions.size() == 2U);
+                projection.retained_deletions[1].forget_candidate = false;
+                break;
+            case 19:
+                REQUIRE_FALSE(projection.retained_deletions.empty());
+                projection.retained_deletions.erase(
+                    projection.retained_deletions.begin());
+                break;
+            case 20:
+                projection.retained_deletions.clear();
+                break;
+            case 21: {
+                const auto live_tombstone = std::find_if(
+                    projection.interfaces.begin(),
+                    projection.interfaces.end(),
+                    [](const auto& row) {
+                        return row.interface_name == "Wireguard6";
+                    });
+                REQUIRE(live_tombstone != projection.interfaces.end());
+                live_tombstone->ownership_state =
+                    NdmsNativeInventoryOwnershipState::foreign;
+                live_tombstone->ownership_lifecycle.reset();
+                live_tombstone->ownership_revision.reset();
+                live_tombstone->delete_candidate = false;
+                live_tombstone->delete_blockers = {
+                    NdmsNativeInventoryDeleteBlocker::ownership_absent,
+                };
+                live_tombstone->deferred_authoritative_checks.clear();
+                break;
+            }
             default:
                 break;
             }
@@ -1032,7 +1175,7 @@ TEST_CASE(
     server.start();
 
     httplib::Client client("127.0.0.1", 18200);
-    for (mode = 1; mode <= 8; ++mode) {
+    for (mode = 1; mode <= 21; ++mode) {
         const auto response =
             client.Get("/api/system/ndms/interfaces");
         REQUIRE(response != nullptr);
@@ -1046,6 +1189,8 @@ TEST_CASE(
                   {"observed_import_journal_state", "unavailable"},
                   {"observed_delete_journal_state", "unavailable"},
               });
+        CHECK(inventory["retained_deletions"] ==
+              nlohmann::json::array());
         for (const auto* name :
              {"Wireguard5", "Wireguard6", "Wireguard7"}) {
             const auto row = inventory_row(inventory, name);
@@ -1063,7 +1208,7 @@ TEST_CASE(
               std::string::npos);
     }
     server.stop();
-    CHECK(projection_count == 8);
+    CHECK(projection_count == 21);
 }
 
 TEST_CASE("NDMS stale endpoint keeps rows but revokes server-candidate authority") {

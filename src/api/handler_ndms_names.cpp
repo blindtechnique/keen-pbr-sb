@@ -13,6 +13,7 @@
 
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <iterator>
 #include <optional>
 #include <string_view>
 #include <utility>
@@ -302,6 +303,39 @@ bool known_deferred_check(
     return false;
 }
 
+bool known_retained_deletion_blocker(
+    const NdmsNativeRetainedDeletionBlocker blocker) noexcept {
+    switch (blocker) {
+    case NdmsNativeRetainedDeletionBlocker::catalog_not_fresh:
+    case NdmsNativeRetainedDeletionBlocker::target_present:
+    case NdmsNativeRetainedDeletionBlocker::
+        ownership_schema_not_forget_capable:
+    case NdmsNativeRetainedDeletionBlocker::
+        import_journal_not_authoritatively_clean:
+    case NdmsNativeRetainedDeletionBlocker::import_recovery_required:
+    case NdmsNativeRetainedDeletionBlocker::import_journal_unsafe:
+    case NdmsNativeRetainedDeletionBlocker::import_journal_unavailable:
+    case NdmsNativeRetainedDeletionBlocker::delete_recovery_required:
+    case NdmsNativeRetainedDeletionBlocker::delete_journal_unsafe:
+        return true;
+    }
+    return false;
+}
+
+bool known_retained_deletion_deferred_check(
+    const NdmsNativeRetainedDeletionDeferredCheck check) noexcept {
+    switch (check) {
+    case NdmsNativeRetainedDeletionDeferredCheck::
+        encrypted_snapshot_or_absence:
+    case NdmsNativeRetainedDeletionDeferredCheck::keen_pbr_dependencies:
+    case NdmsNativeRetainedDeletionDeferredCheck::
+        retained_kernel_interface_absence:
+    case NdmsNativeRetainedDeletionDeferredCheck::fresh_dual_scope_absence:
+        return true;
+    }
+    return false;
+}
+
 bool known_import_journal_state(
     const NdmsNativeImportJournalReadinessState state) noexcept {
     switch (state) {
@@ -385,6 +419,42 @@ delete_journal_blocker(const NdmsNativeDeleteWalReadiness state) noexcept {
             delete_recovery_required;
     case NdmsNativeDeleteWalReadiness::unsafe:
         return NdmsNativeInventoryDeleteBlocker::delete_journal_unsafe;
+    }
+    return std::nullopt;
+}
+
+std::optional<NdmsNativeRetainedDeletionBlocker>
+retained_import_journal_blocker(
+    const NdmsNativeImportJournalReadinessState state) noexcept {
+    switch (state) {
+    case NdmsNativeImportJournalReadinessState::clean:
+        return std::nullopt;
+    case NdmsNativeImportJournalReadinessState::clean_never_activated:
+        return NdmsNativeRetainedDeletionBlocker::
+            import_journal_not_authoritatively_clean;
+    case NdmsNativeImportJournalReadinessState::recovery_required:
+        return NdmsNativeRetainedDeletionBlocker::
+            import_recovery_required;
+    case NdmsNativeImportJournalReadinessState::unsafe:
+        return NdmsNativeRetainedDeletionBlocker::import_journal_unsafe;
+    case NdmsNativeImportJournalReadinessState::unavailable:
+        return NdmsNativeRetainedDeletionBlocker::
+            import_journal_unavailable;
+    }
+    return std::nullopt;
+}
+
+std::optional<NdmsNativeRetainedDeletionBlocker>
+retained_delete_journal_blocker(
+    const NdmsNativeDeleteWalReadiness state) noexcept {
+    switch (state) {
+    case NdmsNativeDeleteWalReadiness::clean:
+        return std::nullopt;
+    case NdmsNativeDeleteWalReadiness::unfinished:
+        return NdmsNativeRetainedDeletionBlocker::
+            delete_recovery_required;
+    case NdmsNativeDeleteWalReadiness::unsafe:
+        return NdmsNativeRetainedDeletionBlocker::delete_journal_unsafe;
     }
     return std::nullopt;
 }
@@ -523,6 +593,152 @@ bool valid_native_projection_row(
     return false;
 }
 
+bool valid_retained_deletion_projection(
+    const NdmsNativeRetainedDeletionProjection& retained,
+    const std::vector<NdmsTunnelInterface>& tunnels,
+    const bool catalog_fresh,
+    const NdmsNativeImportJournalReadinessState import_journal,
+    const NdmsNativeDeleteWalReadiness delete_journal) {
+    const auto identity =
+        parse_ndms_wireguard_identity(retained.interface_name);
+    if (!identity.has_value() ||
+        identity->canonical_name() != retained.interface_name ||
+        !ndms_wireguard_identity_is_managed_candidate(*identity) ||
+        !revision_with_prefix(
+            retained.ownership_revision,
+            "ndms-native-owner-tombstone-v1-") ||
+        retained.forget_blockers.size() > 9U ||
+        !std::all_of(
+            retained.forget_blockers.begin(),
+            retained.forget_blockers.end(),
+            known_retained_deletion_blocker) ||
+        retained.deferred_authoritative_checks !=
+            std::vector<NdmsNativeRetainedDeletionDeferredCheck>{
+                NdmsNativeRetainedDeletionDeferredCheck::
+                    encrypted_snapshot_or_absence,
+                NdmsNativeRetainedDeletionDeferredCheck::
+                    keen_pbr_dependencies,
+                NdmsNativeRetainedDeletionDeferredCheck::
+                    retained_kernel_interface_absence,
+                NdmsNativeRetainedDeletionDeferredCheck::
+                    fresh_dual_scope_absence,
+            } ||
+        !std::all_of(
+            retained.deferred_authoritative_checks.begin(),
+            retained.deferred_authoritative_checks.end(),
+            known_retained_deletion_deferred_check)) {
+        return false;
+    }
+
+    std::vector<NdmsNativeRetainedDeletionBlocker> expected;
+    if (!catalog_fresh) {
+        expected.push_back(
+            NdmsNativeRetainedDeletionBlocker::catalog_not_fresh);
+    }
+    if (std::any_of(
+            tunnels.begin(), tunnels.end(), [&](const auto& tunnel) {
+                return tunnel.firmware_interface_name ==
+                       retained.interface_name;
+            })) {
+        expected.push_back(
+            NdmsNativeRetainedDeletionBlocker::target_present);
+    }
+    if (std::find(
+            retained.forget_blockers.begin(),
+            retained.forget_blockers.end(),
+            NdmsNativeRetainedDeletionBlocker::
+                ownership_schema_not_forget_capable) !=
+        retained.forget_blockers.end()) {
+        expected.push_back(
+            NdmsNativeRetainedDeletionBlocker::
+                ownership_schema_not_forget_capable);
+    }
+    if (const auto blocker =
+            retained_import_journal_blocker(import_journal)) {
+        expected.push_back(*blocker);
+    }
+    if (const auto blocker =
+            retained_delete_journal_blocker(delete_journal)) {
+        expected.push_back(*blocker);
+    }
+    return retained.forget_blockers == expected &&
+           retained.forget_candidate == expected.empty();
+}
+
+bool valid_retained_deletion_batch(
+    const NdmsNativeInventoryProjection& projection,
+    const std::vector<NdmsTunnelInterface>& tunnels,
+    const bool catalog_fresh) {
+    constexpr std::size_t kMaximumManagedRetainedDeletions = 94U;
+    if (!projection.ownership_inventory_available) {
+        return projection.retained_deletions.empty();
+    }
+    if (projection.retained_deletions.size() >
+        kMaximumManagedRetainedDeletions) {
+        return false;
+    }
+
+    std::string_view previous_name;
+    bool first = true;
+    for (const auto& retained : projection.retained_deletions) {
+        if ((!first && previous_name >= retained.interface_name) ||
+            !valid_retained_deletion_projection(
+                retained,
+                tunnels,
+                catalog_fresh,
+                projection.observed_import_journal_state,
+                projection.observed_delete_journal_state)) {
+            return false;
+        }
+        first = false;
+        previous_name = retained.interface_name;
+
+        const auto tunnel = std::find_if(
+            tunnels.begin(), tunnels.end(), [&](const auto& item) {
+                return item.firmware_interface_name ==
+                       retained.interface_name;
+            });
+        if (tunnel != tunnels.end()) {
+            const auto index = static_cast<std::size_t>(
+                std::distance(tunnels.begin(), tunnel));
+            const auto& row = projection.interfaces[index];
+            if (row.ownership_state !=
+                    NdmsNativeInventoryOwnershipState::
+                        panel_owned_tombstone ||
+                !row.ownership_revision.has_value() ||
+                *row.ownership_revision != retained.ownership_revision) {
+                return false;
+            }
+        }
+    }
+
+    // A tombstone attached to a firmware row and its page-level projection
+    // are two views of the same exact CAS. Reject a provider batch that lets
+    // either direction disagree or omits one of them; genuinely rowless
+    // retained deletions remain valid.
+    for (std::size_t index = 0U; index < tunnels.size(); ++index) {
+        const auto& row = projection.interfaces[index];
+        if (row.ownership_state !=
+            NdmsNativeInventoryOwnershipState::panel_owned_tombstone) {
+            continue;
+        }
+        const auto retained = std::lower_bound(
+            projection.retained_deletions.begin(),
+            projection.retained_deletions.end(),
+            row.interface_name,
+            [](const auto& item, const std::string_view name) {
+                return item.interface_name < name;
+            });
+        if (retained == projection.retained_deletions.end() ||
+            retained->interface_name != row.interface_name ||
+            !row.ownership_revision.has_value() ||
+            retained->ownership_revision != *row.ownership_revision) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool valid_native_inventory_projection(
     const NdmsNativeInventoryProjection& projection,
     const std::vector<NdmsTunnelInterface>& tunnels,
@@ -531,7 +747,9 @@ bool valid_native_inventory_projection(
             projection.observed_import_journal_state) ||
         !known_delete_journal_state(
             projection.observed_delete_journal_state) ||
-        projection.interfaces.size() != tunnels.size()) {
+        projection.interfaces.size() != tunnels.size() ||
+        !valid_retained_deletion_batch(
+            projection, tunnels, catalog_fresh)) {
         return false;
     }
     for (std::size_t index = 0U; index < tunnels.size(); ++index) {
@@ -767,11 +985,38 @@ api::NativeMutationStatus native_mutation_status(
     return result;
 }
 
+nlohmann::json retained_deletions_json(
+    const std::optional<NdmsNativeInventoryProjection>& projection) {
+    auto result = nlohmann::json::array();
+    if (!projection.has_value()) return result;
+
+    for (const auto& retained : projection->retained_deletions) {
+        auto blockers = nlohmann::json::array();
+        for (const auto blocker : retained.forget_blockers) {
+            blockers.push_back(
+                ndms_native_retained_deletion_blocker_name(blocker));
+        }
+        auto deferred = nlohmann::json::array();
+        for (const auto check : retained.deferred_authoritative_checks) {
+            deferred.push_back(
+                ndms_native_retained_deletion_deferred_check_name(check));
+        }
+        result.push_back(nlohmann::json{
+            {"interface_name", retained.interface_name},
+            {"ownership_revision", retained.ownership_revision},
+            {"forget_candidate", retained.forget_candidate},
+            {"forget_blockers", std::move(blockers)},
+            {"deferred_authoritative_checks", std::move(deferred)},
+        });
+    }
+    return result;
+}
+
 api::NdmsInterfaceInventoryResponse typed_inventory(
     const NdmsInterfaceCatalog& catalog,
     NdmsCatalogCacheStatus catalog_status,
     const NdmsNativeImportReadinessProvider& readiness_provider,
-    const NdmsNativeInventoryProjectionProvider& projection_provider) {
+    const std::optional<NdmsNativeInventoryProjection>& native_projection) {
     api::NdmsInterfaceInventoryResponse response{};
     response.available =
         catalog.firmware_available &&
@@ -790,8 +1035,6 @@ api::NdmsInterfaceInventoryResponse typed_inventory(
 
     const bool catalog_is_fresh =
         catalog_status == NdmsCatalogCacheStatus::fresh;
-    const auto native_projection = observe_native_inventory_projection(
-        projection_provider, catalog.tunnels, catalog_is_fresh);
     response.native_mutation_status =
         native_mutation_status(native_projection);
 
@@ -826,6 +1069,39 @@ api::NdmsInterfaceInventoryResponse typed_inventory(
         response.interfaces.push_back(std::move(item));
     }
     return response;
+}
+
+nlohmann::json inventory_json(
+    const NdmsInterfaceCatalog& catalog,
+    const NdmsCatalogCacheStatus catalog_status,
+    const NdmsNativeImportReadinessProvider& readiness_provider,
+    const NdmsNativeInventoryProjectionProvider& projection_provider) {
+    const auto native_projection = observe_native_inventory_projection(
+        projection_provider,
+        catalog.tunnels,
+        catalog_status == NdmsCatalogCacheStatus::fresh);
+    auto result = nlohmann::json(typed_inventory(
+        catalog, catalog_status, readiness_provider, native_projection));
+    // The generated aggregate serializer represents unset optionals as JSON
+    // null, while this endpoint's established public contract omits them.
+    // Keep absent ownership evidence absent instead of manufacturing public
+    // fields that look populated but carry no usable CAS.
+    for (auto& item : result["interfaces"]) {
+        auto& mutation = item["native_mutation"];
+        if (mutation["ownership_lifecycle"].is_null()) {
+            mutation.erase("ownership_lifecycle");
+        }
+        if (mutation["ownership_revision"].is_null()) {
+            mutation.erase("ownership_revision");
+        }
+    }
+    // This page-level list is intentionally injected beside the generated
+    // read-only inventory shape. It contains only the exact opaque ownership
+    // CAS and redacted advisory enums; private recovery records never cross
+    // this boundary.
+    result["retained_deletions"] =
+        retained_deletions_json(native_projection);
+    return result;
 }
 
 api::NdmsVpnServerServiceInventoryResponse typed_vpn_service_inventory(
@@ -930,12 +1206,11 @@ void register_ndms_names_routes(
                 }
                 traffic_interfaces_observer(std::move(interface_names));
             }
-            return nlohmann::json(
-                       typed_inventory(
-                           response.catalog,
-                           response.status,
-                           native_import_readiness_provider,
-                           native_inventory_projection_provider))
+            return inventory_json(
+                       response.catalog,
+                       response.status,
+                       native_import_readiness_provider,
+                       native_inventory_projection_provider)
                 .dump();
         });
 }
