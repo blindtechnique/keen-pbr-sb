@@ -1,13 +1,23 @@
 import { TransportExitCheckButton } from "@/components/transports/exit-check-button"
-import { EyeIcon, EyeOffIcon, WorkflowIcon } from "lucide-react"
+import {
+  AlertTriangleIcon,
+  EyeIcon,
+  EyeOffIcon,
+  Trash2Icon,
+  WorkflowIcon,
+} from "lucide-react"
 import type { ReactNode } from "react"
 import { useTranslation } from "react-i18next"
 
 import type {
   NdmsManagementBlocker,
+  NdmsNativeInventoryDeleteBlocker,
+  NdmsNativeInventoryOwnershipState,
+  NdmsNativeOwnershipLifecycle,
   RuntimeInterfaceUptimeSource,
 } from "@/api/generated/model"
 import { InterfaceTraffic } from "@/components/transports/interface-traffic"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import {
   getNativeRouteActionability,
@@ -36,6 +46,7 @@ export function NativeInterfaceDetails({
   hasConfig,
   hidden,
   onCreateRoute,
+  onDelete,
   onHiddenChange,
   usage,
 }: {
@@ -44,6 +55,7 @@ export function NativeInterfaceDetails({
   readonly hasConfig: boolean
   readonly hidden: boolean
   readonly onCreateRoute: (interfaceName: string) => void
+  readonly onDelete?: () => void
   readonly onHiddenChange: (hidden: boolean) => void
   /** «Кто этим пользуется» — тот же блок категорий, что у своих туннелей. */
   readonly usage?: ReactNode
@@ -56,6 +68,11 @@ export function NativeInterfaceDetails({
     boundOutboundTag,
   })
   const managementReadiness = nativeInterface.source.management_readiness
+  const mutation = nativeInterface.source.native_mutation
+  const deleteEnabled =
+    mutation.delete_candidate &&
+    Boolean(mutation.ownership_revision) &&
+    Boolean(onDelete)
 
   return (
     <div className="space-y-3 text-sm">
@@ -141,6 +158,18 @@ export function NativeInterfaceDetails({
               : t("transports.nativeInterface.managementUnsupported")
           }
         />
+        <NativeInterfaceField
+          label={t("transports.nativeMutation.ownershipLabel")}
+          value={ownershipLabel(mutation.ownership_state, t)}
+        />
+        <NativeInterfaceField
+          label={t("transports.nativeMutation.deleteReadinessLabel")}
+          value={
+            deleteEnabled
+              ? t("transports.nativeMutation.deleteReady")
+              : t("transports.nativeMutation.deleteUnavailable")
+          }
+        />
       </div>
 
       <div className="space-y-1 rounded-md bg-muted/50 p-3 text-xs text-muted-foreground">
@@ -152,6 +181,35 @@ export function NativeInterfaceDetails({
           {managementReadinessTitle(managementReadiness?.blockers, t)}
         </p>
       </div>
+
+      {mutation.delete_blockers.length > 0 ? (
+        <div className="space-y-1 rounded-md bg-muted/50 p-3 text-xs text-muted-foreground">
+          <p className="font-medium break-words text-foreground">
+            {t("transports.nativeMutation.deleteBlockersTitle")}
+          </p>
+          <ul className="list-disc space-y-1 pl-5">
+            {mutation.delete_blockers.map((blocker) => (
+              <li className="break-words" key={blocker}>
+                {deleteBlockerLabel(blocker, t)}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {mutation.ownership_lifecycle === "active_save_acknowledged_unverified" ||
+      mutation.ownership_lifecycle ===
+        "deleted_save_acknowledged_unverified" ? (
+        <Alert variant="warning">
+          <AlertTriangleIcon />
+          <AlertTitle>
+            {t("transports.nativeMutation.unverifiedSave.title")}
+          </AlertTitle>
+          <AlertDescription className="break-words">
+            {ownershipLifecycleDescription(mutation.ownership_lifecycle, t)}
+          </AlertDescription>
+        </Alert>
+      ) : null}
 
       <InterfaceTraffic
         labels={{
@@ -194,6 +252,24 @@ export function NativeInterfaceDetails({
             ? t("transports.nativeInterface.restore")
             : t("transports.nativeInterface.hide")}
         </Button>
+        {mutation.ownership_state !== "not_applicable" ? (
+          <Button
+            className="min-h-11 max-w-full whitespace-normal"
+            disabled={!deleteEnabled}
+            onClick={() => {
+              if (deleteEnabled) onDelete?.()
+            }}
+            title={
+              deleteEnabled
+                ? t("transports.nativeMutation.deleteAction")
+                : t("transports.nativeMutation.deleteUnavailable")
+            }
+            variant="destructive"
+          >
+            <Trash2Icon />
+            {t("transports.nativeMutation.deleteAction")}
+          </Button>
+        ) : null}
         {/* Последней в ряду, как и у своих туннелей. Работает и без маршрута
             keen-pbr: у нативного его обычно нет, а измерение делает
             атрибутируемым привязка к устройству, а не метка. Имя берётся
@@ -249,6 +325,80 @@ function managementReadinessTitle(
       t(`transports.nativeInterface.managementBlockers.${blocker}`)
     )
     .join("; ")
+}
+
+function ownershipLabel(
+  state: NdmsNativeInventoryOwnershipState,
+  t: (key: string) => string
+): string {
+  switch (state) {
+    case "not_applicable":
+      return t("transports.nativeMutation.ownership.not_applicable")
+    case "foreign":
+      return t("transports.nativeMutation.ownership.foreign")
+    case "panel_owned_active":
+      return t("transports.nativeMutation.ownership.panel_owned_active")
+    case "panel_owned_tombstone":
+      return t("transports.nativeMutation.ownership.panel_owned_tombstone")
+    case "unavailable":
+      return t("transports.nativeMutation.ownership.unavailable")
+  }
+}
+
+function deleteBlockerLabel(
+  blocker: NdmsNativeInventoryDeleteBlocker,
+  t: (key: string) => string
+): string {
+  switch (blocker) {
+    case "unsupported_kind":
+      return t("transports.nativeMutation.blockers.unsupported_kind")
+    case "invalid_or_protected_target":
+      return t("transports.nativeMutation.blockers.invalid_or_protected_target")
+    case "catalog_not_fresh":
+      return t("transports.nativeMutation.blockers.catalog_not_fresh")
+    case "ownership_inventory_unavailable":
+      return t(
+        "transports.nativeMutation.blockers.ownership_inventory_unavailable"
+      )
+    case "ownership_absent":
+      return t("transports.nativeMutation.blockers.ownership_absent")
+    case "ownership_not_active":
+      return t("transports.nativeMutation.blockers.ownership_not_active")
+    case "ownership_kind_mismatch":
+      return t("transports.nativeMutation.blockers.ownership_kind_mismatch")
+    case "import_journal_not_authoritatively_clean":
+      return t(
+        "transports.nativeMutation.blockers.import_journal_not_authoritatively_clean"
+      )
+    case "import_recovery_required":
+      return t("transports.nativeMutation.blockers.import_recovery_required")
+    case "import_journal_unsafe":
+      return t("transports.nativeMutation.blockers.import_journal_unsafe")
+    case "import_journal_unavailable":
+      return t("transports.nativeMutation.blockers.import_journal_unavailable")
+    case "delete_recovery_required":
+      return t("transports.nativeMutation.blockers.delete_recovery_required")
+    case "delete_journal_unsafe":
+      return t("transports.nativeMutation.blockers.delete_journal_unsafe")
+  }
+}
+
+function ownershipLifecycleDescription(
+  lifecycle: NdmsNativeOwnershipLifecycle,
+  t: (key: string) => string
+): string {
+  switch (lifecycle) {
+    case "active_save_acknowledged_unverified":
+      return t(
+        "transports.nativeMutation.unverifiedSave.active_save_acknowledged_unverified"
+      )
+    case "deleted_save_acknowledged_unverified":
+      return t(
+        "transports.nativeMutation.unverifiedSave.deleted_save_acknowledged_unverified"
+      )
+    case "active_running_only":
+      return ""
+  }
 }
 
 function booleanState(

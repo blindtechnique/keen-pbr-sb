@@ -852,7 +852,7 @@ export const enTranslation = {
     nativeInterface: {
       keeneticOwner: "KeeneticOS",
       managedByFirmware:
-        "Existing KeeneticOS interface: create, edit, start, restart and delete are not available here yet",
+        "Existing KeeneticOS interface: create, edit, start and restart remain in KeeneticOS; deletion is offered only for an exact panel-owned import",
       logicalName: "Keenetic interface",
       kernelName: "System interface",
       protocol: "Protocol",
@@ -881,7 +881,7 @@ export const enTranslation = {
       managementReadOnly: "Read only",
       managementUnsupported: "Not supported",
       managementReadOnlyDescription:
-        "keen-pbr-sb currently only shows this existing KeeneticOS interface and can create a route to it. Creating, editing and deleting the interface itself are disabled in the panel.",
+        "keen-pbr-sb shows this KeeneticOS interface and can create a route to it. Creating and editing stay in KeeneticOS; only an exact panel-owned import can become a deletion candidate here.",
       managementBlockersTitle: "Why management is disabled",
       managementReady:
         "Candidate checks passed, but operations remain disabled in this version",
@@ -913,6 +913,135 @@ export const enTranslation = {
       restore: "Restore to the panel",
       showHidden: "Show hidden ({{count}})",
       hideHidden: "Stop showing hidden interfaces",
+    },
+    nativeMutation: {
+      ownershipLabel: "Panel ownership",
+      deleteReadinessLabel: "Panel deletion",
+      deleteReady: "Eligible for authoritative check",
+      deleteUnavailable: "Not eligible for panel deletion",
+      deleteAction: "Delete panel-imported VPN",
+      deleteBlockersTitle: "Why panel deletion is unavailable",
+      ownership: {
+        not_applicable: "Not applicable",
+        foreign: "Created outside this panel",
+        panel_owned_active: "Panel-owned active interface",
+        panel_owned_tombstone: "Panel-owned deletion tombstone",
+        unavailable: "Ownership evidence unavailable",
+      },
+      blockers: {
+        unsupported_kind: "This interface type cannot be deleted here",
+        invalid_or_protected_target:
+          "The firmware target is protected or invalid",
+        catalog_not_fresh: "A fresh KeeneticOS interface list is required",
+        ownership_inventory_unavailable:
+          "Panel ownership evidence is unavailable",
+        ownership_absent: "There is no panel ownership claim",
+        ownership_not_active: "The panel ownership claim is not active",
+        ownership_kind_mismatch:
+          "The current interface type differs from the owned snapshot",
+        import_journal_not_authoritatively_clean:
+          "Native import state is not authoritatively clean",
+        import_recovery_required: "Finish native import recovery first",
+        import_journal_unsafe: "The native import journal is unsafe",
+        import_journal_unavailable: "The native import journal is unavailable",
+        delete_recovery_required: "Finish the previous deletion recovery first",
+        delete_journal_unsafe: "The native deletion journal is unsafe",
+      },
+      acknowledgements: {
+        externalWriter:
+          "I accept that another KeeneticOS/NDMS writer could change the interface during this operation.",
+        globalSave:
+          "I understand that the global KeeneticOS save persists every pending router change, not only this VPN deletion.",
+      },
+      unverifiedSave: {
+        title: "KeeneticOS save acknowledged; final persistence unverified",
+        active_save_acknowledged_unverified:
+          "The interface is still active after a global save acknowledgement, but external writers were not excluded and startup persistence is not proved.",
+        deleted_save_acknowledged_unverified:
+          "The panel retained a durable deletion tombstone and rollback snapshot, but external writers were not excluded and startup persistence is not proved.",
+        deleteResult:
+          "KeeneticOS acknowledged the global save. The deletion tombstone and rollback snapshot are durable, but this is intentionally amber: external writers were not excluded and final startup persistence remains unverified.",
+      },
+      deleteDialog: {
+        title: "Delete this panel-imported VPN?",
+        description:
+          "Only the exact panel-owned interface {{name}} will be submitted for authoritative revalidation.",
+        globalSaveWarning:
+          "Deletion may continue with a global KeeneticOS configuration save. That save includes all pending router changes.",
+        staleTitle: "Fresh ownership evidence is required",
+        staleDescription:
+          "The interface or its ownership revision changed. Close this dialog, refresh the inventory and review the new evidence.",
+        typeName: "Type {{name}} exactly",
+        exactNameHelp:
+          "The name is case-sensitive and is never corrected automatically.",
+        blockedTitle: "Deletion was not started",
+        blockedDescription:
+          "The authoritative checks blocked this request. Nothing is retried automatically; close the dialog and review the refreshed evidence.",
+        recoveryLatched:
+          "A durable transaction may remain. Close this dialog and use the page-level recovery check; do not submit another deletion.",
+        deleting: "Submitting once…",
+        delete: "Delete and save",
+      },
+      recovery: {
+        regionLabel: "Native VPN mutation recovery",
+        pendingTitle: "A native VPN operation is pending",
+        pendingDescription:
+          "This tab or another tab has an outstanding one-shot operation. New native writes remain locked until its typed result or a recovery check resolves it.",
+        unsafeTitle: "Native mutation journal cannot be trusted",
+        unsafeDescription:
+          "The router cannot provide a safe journal view. Native writes remain locked; no automatic cleanup or retry is attempted.",
+        importTitle: "Native import recovery is required",
+        importDescription:
+          "Run one bodyless check. It never resends the VPN profile, deletes an interface or performs a global save.",
+        deleteTitle: "Native deletion recovery is required",
+        deleteDescription:
+          "Run one explicit recovery pass for the already-durable exact transaction. It never selects another target and is never repeated automatically.",
+        unknownTitle: "The operation outcome is unknown",
+        unknownDescription:
+          "Do not repeat the import or deletion. Use the matching page-level recovery check after the router is reachable.",
+        reconfirmTitle: "A fresh owner decision is required before global save",
+        checking: "Checking once…",
+        checkImport: "Check import recovery once",
+        checkDelete: "Check deletion recovery once",
+        continueDelete: "Continue deletion recovery once",
+        outcomes: {
+          import_no_work: {
+            title: "No import recovery work remains",
+            description:
+              "The bodyless check proved the import journal clean. The inventory was refreshed.",
+          },
+          import_completed: {
+            title: "Import recovery completed",
+            description:
+              "Forward-only bookkeeping completed and the exact imported identity was proved. The inventory was refreshed.",
+          },
+          import_blocked: {
+            title: "Import recovery remains locked",
+            description:
+              "This single pass could not prove safe completion. Nothing was retried automatically.",
+          },
+          delete_no_work: {
+            title: "No deletion transaction remains",
+            description:
+              "The recovery check found no durable deletion to continue. The inventory was refreshed.",
+          },
+          delete_terminal: {
+            title: "Deletion reached an unverified-save terminal state",
+            description:
+              "The durable result is shown in amber because final KeeneticOS startup persistence is not proved.",
+          },
+          delete_blocked: {
+            title: "Deletion recovery remains locked",
+            description:
+              "This single pass could not prove safe completion. Nothing was retried automatically.",
+          },
+          unknown: {
+            title: "Recovery outcome is unknown",
+            description:
+              "The router response was missing or untrusted. Native writes remain locked; do not repeat the original operation.",
+          },
+        },
+      },
     },
     nativeImport: {
       title: "Import WireGuard / AmneziaWG",

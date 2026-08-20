@@ -5,6 +5,7 @@ import {
   ShieldAlertIcon,
   XIcon,
 } from "lucide-react"
+import { useQueryClient } from "@tanstack/react-query"
 import {
   useEffect,
   useRef,
@@ -21,6 +22,7 @@ import {
   postNdmsNativeImportSecretOnce,
   preflightNdmsNativeImport,
 } from "@/api/native-secret-transport"
+import { queryKeys } from "@/api/query-keys"
 import type {
   NdmsInterfaceInventoryResponseRequiredGuardsItem,
   NdmsNativeImportReadiness,
@@ -206,6 +208,7 @@ function NativeWireGuardImportFieldsContent({
   readonly protectedTransport: boolean
 }) {
   const { t, i18n } = useTranslation()
+  const queryClient = useQueryClient()
   const inputRef = useRef<HTMLInputElement>(null)
   const dropzoneRef = useRef<HTMLDivElement>(null)
   const linkInputRef = useRef<HTMLTextAreaElement>(null)
@@ -655,6 +658,17 @@ function NativeWireGuardImportFieldsContent({
       }
       latchNativeWireGuardImportLock("unknown")
       if (mountedRef.current) setOperation({ status: "unknown" })
+    } finally {
+      if (pendingToken) {
+        await Promise.all([
+          queryClient.invalidateQueries({
+            queryKey: queryKeys.ndmsInterfaceInventory(),
+          }),
+          queryClient.invalidateQueries({
+            queryKey: queryKeys.runtimeInterfaces(),
+          }),
+        ])
+      }
     }
   }
 

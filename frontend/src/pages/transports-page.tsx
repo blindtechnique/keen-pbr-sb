@@ -18,6 +18,7 @@ import { toast } from "sonner"
 import { useLocation } from "wouter"
 
 import type { ApiError } from "@/api/client"
+import type { NdmsNativeDeleteResult } from "@/api/native-mutation"
 import {
   getTransportConfigExport,
   postTransportConfig,
@@ -65,6 +66,8 @@ import { SectionHeading } from "@/components/shared/section-heading"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
 import { NativeInterfaceDetails } from "@/components/transports/native-interface-details"
+import { NativeInterfaceDeleteDialog } from "@/components/transports/native-interface-delete-dialog"
+import { NativeMutationRecovery } from "@/components/transports/native-mutation-recovery"
 import { NativeRouteOffer } from "@/components/transports/native-route-offer"
 import { InterfaceTraffic } from "@/components/transports/interface-traffic"
 import { TransportLatencyPill } from "@/components/transports/transport-latency-pill"
@@ -131,6 +134,11 @@ type ProbeEntry = {
   error?: string
   interface?: string
 }
+
+type NativeDeleteSelection = Readonly<{
+  id: string
+  expectedOwnershipRevision: string
+}>
 
 type ProbesResponse = {
   interval_seconds: number
@@ -229,6 +237,10 @@ export function TransportsPage({
   const [selectedProcessMode, setSelectedProcessMode] =
     useState<SingBoxProcessMode>("isolated")
   const [deleting, setDeleting] = useState<TransportSpec | undefined>()
+  const [nativeDeleteSelection, setNativeDeleteSelection] =
+    useState<NativeDeleteSelection>()
+  const [nativeDeleteTerminal, setNativeDeleteTerminal] =
+    useState<NdmsNativeDeleteResult>()
   const [transportExportPending, setTransportExportPending] = useState(false)
   const [expandedTransportIds, setExpandedTransportIds] = useState(
     () => new Set<string>()
@@ -289,6 +301,25 @@ export function TransportsPage({
       ),
     [ndmsInventoryQuery.data, runtimeInterfacesQuery.data]
   )
+  const nativeMutationStatus =
+    ndmsInventoryQuery.data?.status === 200
+      ? ndmsInventoryQuery.data.data.native_mutation_status
+      : undefined
+  const selectedNativeDeleteTarget = nativeDeleteSelection
+    ? nativeInterfaces.find(
+        (nativeInterface) => nativeInterface.id === nativeDeleteSelection.id
+      )
+    : undefined
+  const refreshNativeMutationInventory = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.ndmsInterfaceInventory(),
+      }),
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.runtimeInterfaces(),
+      }),
+    ])
+  }
   const managedItems = useMemo(
     () => dedupeLegacyNativeTransports(items, nativeInterfaces),
     [items, nativeInterfaces]
@@ -1333,6 +1364,15 @@ export function TransportsPage({
             `/outbounds/create?type=interface&interface=${encodeURIComponent(interfaceName)}`
           )
         }
+        onDelete={() => {
+          const revision =
+            nativeInterface.source.native_mutation.ownership_revision
+          if (!revision) return
+          setNativeDeleteSelection({
+            id: nativeInterface.id,
+            expectedOwnershipRevision: revision,
+          })
+        }}
         onHiddenChange={(hidden) => setNativeHidden(nativeInterface.id, hidden)}
         usage={
           boundOutbound ? (
@@ -1600,6 +1640,28 @@ export function TransportsPage({
         </Button>
       </PageActionBar>
 
+      <NativeMutationRecovery
+        inventoryStatus={nativeMutationStatus}
+        onDeleteTerminal={setNativeDeleteTerminal}
+        onInventoryRefresh={refreshNativeMutationInventory}
+      />
+
+      {nativeDeleteTerminal ? (
+        <Alert
+          aria-atomic="true"
+          aria-live="polite"
+          className="border-warning/50"
+          variant="warning"
+        >
+          <AlertTitle>
+            {t("transports.nativeMutation.unverifiedSave.title")}
+          </AlertTitle>
+          <AlertDescription className="break-words">
+            {t("transports.nativeMutation.unverifiedSave.deleteResult")}
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
       {error ? (
         <Alert variant="destructive">
           <AlertTitle>{t("transports.unavailable")}</AlertTitle>
@@ -1765,6 +1827,18 @@ export function TransportsPage({
           selectedMode={selectedProcessMode}
         />
       ) : null}
+      <NativeInterfaceDeleteDialog
+        expectedOwnershipRevision={
+          nativeDeleteSelection?.expectedOwnershipRevision ?? ""
+        }
+        nativeInterface={selectedNativeDeleteTarget}
+        onInventoryRefresh={refreshNativeMutationInventory}
+        onOpenChange={(open) => {
+          if (!open) setNativeDeleteSelection(undefined)
+        }}
+        onTerminal={setNativeDeleteTerminal}
+        open={Boolean(nativeDeleteSelection)}
+      />
       <DeleteImpactDialog
         confirmLabel={t("common.delete")}
         description={
