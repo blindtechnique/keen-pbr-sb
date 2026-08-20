@@ -67,13 +67,22 @@ NdmsNativeOwnershipLifecycleEvidence lifecycle_evidence_fixture() {
 NdmsNativeOwnershipRecord lifecycle_record(
     NdmsNativeOwnershipRecord record,
     const NdmsNativeOwnershipLifecycle lifecycle) {
-    record.schema_version = kNdmsNativeOwnershipSchemaVersion;
+    record.schema_version = lifecycle ==
+            NdmsNativeOwnershipLifecycle::
+                deleted_save_acknowledged_unverified
+        ? kNdmsNativeOwnershipTombstoneSchemaVersion
+        : kNdmsNativeOwnershipSchemaVersion;
     record.lifecycle = lifecycle;
     if (lifecycle ==
         NdmsNativeOwnershipLifecycle::active_running_only) {
         record.lifecycle_evidence.reset();
     } else {
         record.lifecycle_evidence = lifecycle_evidence_fixture();
+        if (lifecycle == NdmsNativeOwnershipLifecycle::
+                             deleted_save_acknowledged_unverified) {
+            record.lifecycle_evidence->deleted_kernel_interface_name =
+                "nwg5";
+        }
     }
     return record;
 }
@@ -86,6 +95,9 @@ std::string ownership_body(const NdmsNativeOwnershipRecord& record) {
     std::string body = std::string(
         record.schema_version == 2U
             ? "keen-pbr-native-ownership-v2\n"
+        : record.schema_version ==
+                  kNdmsNativeOwnershipTombstoneSchemaVersion
+            ? "keen-pbr-native-ownership-v4\n"
             : "keen-pbr-native-ownership-v3\n") +
         record.interface_name + "\n" + record.transaction_id + "\n" +
         record.marker + "\n" + kind + "\n" +
@@ -95,7 +107,14 @@ std::string ownership_body(const NdmsNativeOwnershipRecord& record) {
     body += std::string{ndms_native_ownership_lifecycle_name(
                 record.lifecycle)} + "\n";
     if (!record.lifecycle_evidence) {
-        for (std::size_t index = 0U; index < 8U; ++index) body += "-\n";
+        const std::size_t evidence_fields =
+            record.schema_version ==
+                    kNdmsNativeOwnershipTombstoneSchemaVersion
+                ? 9U
+                : 8U;
+        for (std::size_t index = 0U; index < evidence_fields; ++index) {
+            body += "-\n";
+        }
         return body;
     }
     const auto& evidence = *record.lifecycle_evidence;
@@ -108,6 +127,10 @@ std::string ownership_body(const NdmsNativeOwnershipRecord& record) {
             std::to_string(evidence.runtime_sequence) + "\n" +
             evidence.running_config_catalog_revision + "\n" +
             std::to_string(evidence.running_config_sequence) + "\n";
+    if (record.schema_version ==
+        kNdmsNativeOwnershipTombstoneSchemaVersion) {
+        body += *evidence.deleted_kernel_interface_name + "\n";
+    }
     return body;
 }
 
@@ -553,7 +576,7 @@ TEST_CASE("remove_exact is content-bound even across an in-place inode mutation"
     CHECK(*read.record == replacement);
 }
 
-TEST_CASE("legacy v2 bytes transition exactly to v3 lifecycle evidence") {
+TEST_CASE("legacy v2 bytes transition exactly to kernel-bound v4 tombstone evidence") {
     TempDirectory directory;
     const auto state = directory.path / "ownership";
     NdmsNativeOwnershipStore seed(state);
@@ -590,10 +613,18 @@ TEST_CASE("legacy v2 bytes transition exactly to v3 lifecycle evidence") {
     const auto final_read = seed.read("Wireguard5");
     REQUIRE(final_read.record.has_value());
     CHECK(*final_read.record == tombstone);
+    REQUIRE(final_read.record->lifecycle_evidence.has_value());
+    CHECK(final_read.record->lifecycle_evidence->
+              deleted_kernel_interface_name ==
+          std::optional<std::string>{"nwg5"});
+    const auto inspection = seed.inspect_bounded_read_only();
+    REQUIRE(inspection.readable);
+    REQUIRE(inspection.claims.size() == 1U);
+    CHECK(inspection.claims.front().retained_deletion_forget_capable);
     CHECK_FALSE(seed.remove_exact(tombstone));
 }
 
-TEST_CASE("a v2 to v3 replacement race preserves the replacement bytes") {
+TEST_CASE("a v2 to v4 replacement race preserves the replacement bytes") {
     TempDirectory directory;
     const auto state = directory.path / "ownership";
     auto expected = record_fixture();
@@ -634,6 +665,74 @@ TEST_CASE("a v2 to v3 replacement race preserves the replacement bytes") {
     const auto final_read = store.read("Wireguard5");
     REQUIRE(final_read.record.has_value());
     CHECK(*final_read.record == raced);
+}
+
+TEST_CASE("legacy v3 tombstone remains readable but is never forget-capable") {
+    TempDirectory directory;
+    const auto state = directory.path / "ownership";
+    NdmsNativeOwnershipStore store(state);
+    const auto active = record_fixture();
+    store.publish(active);
+
+    auto legacy = lifecycle_record(
+        active,
+        NdmsNativeOwnershipLifecycle::
+            deleted_save_acknowledged_unverified);
+    legacy.schema_version = kNdmsNativeOwnershipSchemaVersion;
+    legacy.lifecycle_evidence->deleted_kernel_interface_name.reset();
+    {
+        std::ofstream output(
+            state / "Wireguard5", std::ios::binary | std::ios::trunc);
+        output << ownership_body(legacy);
+    }
+    REQUIRE(::chmod((state / "Wireguard5").c_str(), 0600) == 0);
+
+    const auto read = store.read("Wireguard5");
+    REQUIRE(read.state == NdmsNativeOwnershipReadState::valid);
+    REQUIRE(read.record.has_value());
+    CHECK(*read.record == legacy);
+    const auto inspection = store.inspect_bounded_read_only();
+    REQUIRE(inspection.readable);
+    REQUIRE(inspection.claims.size() == 1U);
+    CHECK_FALSE(
+        inspection.claims.front().retained_deletion_forget_capable);
+}
+
+TEST_CASE("v4 tombstone refuses a missing or guessed kernel identity") {
+    TempDirectory directory;
+    NdmsNativeOwnershipStore store(directory.path / "ownership");
+    const auto active = record_fixture();
+    store.publish(active);
+
+    auto missing = lifecycle_record(
+        active,
+        NdmsNativeOwnershipLifecycle::
+            deleted_save_acknowledged_unverified);
+    missing.lifecycle_evidence->deleted_kernel_interface_name.reset();
+    CHECK_FALSE(store.replace_exact(active, missing).has_value());
+
+    auto rebound = lifecycle_record(
+        active,
+        NdmsNativeOwnershipLifecycle::
+            deleted_save_acknowledged_unverified);
+    rebound.lifecycle_evidence->deleted_kernel_interface_name = "nwg6";
+    CHECK(ndms_native_ownership_revision(rebound) !=
+          ndms_native_ownership_revision(lifecycle_record(
+              active,
+              NdmsNativeOwnershipLifecycle::
+                  deleted_save_acknowledged_unverified)));
+
+    for (const auto& value : {std::string{}, std::string{"."},
+                              std::string{"../nwg5"},
+                              std::string(16U, 'n')}) {
+        auto invalid = lifecycle_record(
+            active,
+            NdmsNativeOwnershipLifecycle::
+                deleted_save_acknowledged_unverified);
+        invalid.lifecycle_evidence->deleted_kernel_interface_name = value;
+        CHECK_FALSE(store.replace_exact(active, invalid).has_value());
+        CHECK_THROWS(ndms_native_ownership_revision(invalid));
+    }
 }
 
 TEST_CASE("v3 lifecycle numeric evidence must use canonical decimal text") {

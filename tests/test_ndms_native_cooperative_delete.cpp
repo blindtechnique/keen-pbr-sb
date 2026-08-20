@@ -957,8 +957,20 @@ TEST_CASE("connected panel-owned WG and AWG delete to a durable tombstone") {
         REQUIRE(claim.record.has_value());
         REQUIRE(claim.revision.has_value());
         CHECK(ndms_native_ownership_is_delete_tombstone(*claim.record));
+        CHECK(claim.record->schema_version ==
+              kNdmsNativeOwnershipTombstoneSchemaVersion);
+        REQUIRE(claim.record->lifecycle_evidence.has_value());
+        CHECK(claim.record->lifecycle_evidence->
+                  deleted_kernel_interface_name ==
+              std::optional<std::string>{"nwg5"});
         CHECK(claim.revision->rfind(
                   kNdmsNativeOwnershipTombstoneRevisionPrefix, 0U) == 0U);
+        const auto inspection =
+            fixture.ownership.inspect_bounded_read_only();
+        REQUIRE(inspection.readable);
+        REQUIRE(inspection.claims.size() == 1U);
+        CHECK(inspection.claims.front().
+                  retained_deletion_forget_capable);
         CHECK(fixture.snapshot_retained());
 
         const auto delete_perform =

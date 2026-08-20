@@ -29,6 +29,8 @@ namespace {
 
 constexpr const char* kLegacyHeader = "keen-pbr-native-ownership-v2";
 constexpr const char* kHeader = "keen-pbr-native-ownership-v3";
+constexpr const char* kTombstoneHeader =
+    "keen-pbr-native-ownership-v4";
 constexpr std::size_t kMaximumRecordBytes = 4096U;
 constexpr mode_t kOwnershipDirectoryMode = 0700;
 constexpr mode_t kOwnershipFileMode = 0600;
@@ -326,6 +328,23 @@ bool snapshot_revision(const std::string_view value) noexcept {
            lower_hex(value.substr(prefix.size()), 64U);
 }
 
+bool kernel_interface_name(const std::string_view value) noexcept {
+    if (value.empty() || value.size() > 15U || value == "." ||
+        value == "..") {
+        return false;
+    }
+    return std::all_of(
+        value.begin(), value.end(), [](const unsigned char character) {
+            const bool ascii_alnum =
+                (character >= 'a' && character <= 'z') ||
+                (character >= 'A' && character <= 'Z') ||
+                (character >= '0' && character <= '9');
+            return ascii_alnum || character == '_' ||
+                   character == '-' || character == '.' ||
+                   character == ':';
+        });
+}
+
 bool observation_catalog_revision(
     const std::string_view value) noexcept {
     constexpr std::string_view prefix{"ndms-native-catalog-v1-"};
@@ -342,8 +361,19 @@ bool claimable_interface(const std::string& name) {
 }
 
 bool lifecycle_evidence_valid(
-    const NdmsNativeOwnershipLifecycleEvidence& evidence) noexcept {
-    return lower_hex(evidence.transaction_id, 32U) &&
+    const NdmsNativeOwnershipLifecycleEvidence& evidence,
+    const NdmsNativeOwnershipLifecycle lifecycle,
+    const std::uint32_t schema_version) noexcept {
+    const bool kernel_binding_valid =
+        schema_version == kNdmsNativeOwnershipTombstoneSchemaVersion
+        ? lifecycle == NdmsNativeOwnershipLifecycle::
+                           deleted_save_acknowledged_unverified &&
+              evidence.deleted_kernel_interface_name.has_value() &&
+              kernel_interface_name(
+                  *evidence.deleted_kernel_interface_name)
+        : !evidence.deleted_kernel_interface_name.has_value();
+    return kernel_binding_valid &&
+           lower_hex(evidence.transaction_id, 32U) &&
            valid_ndms_native_observation_binding(
                evidence.observation_binding) &&
            observation_catalog_revision(
@@ -392,13 +422,22 @@ bool record_fields_valid(const NdmsNativeOwnershipRecord& record) {
                 NdmsNativeOwnershipLifecycle::active_running_only
             ? !record.lifecycle_evidence.has_value()
             : record.lifecycle_evidence.has_value() &&
-                  lifecycle_evidence_valid(*record.lifecycle_evidence);
+                  lifecycle_evidence_valid(
+                      *record.lifecycle_evidence,
+                      record.lifecycle,
+                      record.schema_version);
     return (record.schema_version == 2U ||
-            record.schema_version == kNdmsNativeOwnershipSchemaVersion) &&
+            record.schema_version == kNdmsNativeOwnershipSchemaVersion ||
+            record.schema_version ==
+                kNdmsNativeOwnershipTombstoneSchemaVersion) &&
            (record.schema_version != 2U ||
             (record.lifecycle ==
                  NdmsNativeOwnershipLifecycle::active_running_only &&
              !record.lifecycle_evidence.has_value())) &&
+           (record.schema_version !=
+                    kNdmsNativeOwnershipTombstoneSchemaVersion ||
+            record.lifecycle == NdmsNativeOwnershipLifecycle::
+                                    deleted_save_acknowledged_unverified) &&
            known_lifecycle(record.lifecycle) && lifecycle_fields_valid &&
            (record.kind == NdmsNativeTunnelImportKind::wireguard ||
             record.kind ==
@@ -414,13 +453,23 @@ bool valid_lifecycle_transition(
     const NdmsNativeOwnershipRecord& before,
     const NdmsNativeOwnershipRecord& after) noexcept {
     if (before == after) return true;
-    if (before.schema_version == kNdmsNativeOwnershipSchemaVersion &&
-        after.schema_version != kNdmsNativeOwnershipSchemaVersion) {
+    if (before.schema_version ==
+        kNdmsNativeOwnershipTombstoneSchemaVersion) {
         return false;
     }
-    // Legacy v2 is read-only compatibility input. Every successful replace
-    // crosses an exact physical CAS into the current v3 schema.
-    if (after.schema_version != kNdmsNativeOwnershipSchemaVersion) {
+    const bool deleting =
+        after.lifecycle == NdmsNativeOwnershipLifecycle::
+                               deleted_save_acknowledged_unverified;
+    // Active lifecycle upgrades cross into v3. The production delete path
+    // crosses into v4 and binds the exact historical kernel identity; a v3
+    // tombstone transition remains accepted only for byte-compatible legacy
+    // callers and is projected as not forget-capable.
+    if ((deleting &&
+         after.schema_version !=
+             kNdmsNativeOwnershipTombstoneSchemaVersion &&
+         after.schema_version != kNdmsNativeOwnershipSchemaVersion) ||
+        (!deleting &&
+         after.schema_version != kNdmsNativeOwnershipSchemaVersion)) {
         return false;
     }
     if (before.lifecycle == NdmsNativeOwnershipLifecycle::
@@ -473,7 +522,12 @@ std::string serialize(const NdmsNativeOwnershipRecord& record) {
             "native ownership record is not serializable");
     }
     std::ostringstream body;
-    body << (record.schema_version == 2U ? kLegacyHeader : kHeader)
+    body << (record.schema_version == 2U
+                 ? kLegacyHeader
+                 : (record.schema_version ==
+                            kNdmsNativeOwnershipTombstoneSchemaVersion
+                        ? kTombstoneHeader
+                        : kHeader))
          << '\n'
          << record.interface_name << '\n'
          << record.transaction_id << '\n'
@@ -481,11 +535,16 @@ std::string serialize(const NdmsNativeOwnershipRecord& record) {
          << kind_name(record.kind) << '\n'
          << record.snapshot_revision << '\n'
          << record.target_full_revision << '\n';
-    if (record.schema_version == kNdmsNativeOwnershipSchemaVersion) {
+    if (record.schema_version != 2U) {
         body << ndms_native_ownership_lifecycle_name(record.lifecycle)
              << '\n';
         if (!record.lifecycle_evidence) {
-            for (std::size_t index = 0U; index < 8U; ++index) {
+            const std::size_t evidence_fields =
+                record.schema_version ==
+                        kNdmsNativeOwnershipTombstoneSchemaVersion
+                    ? 9U
+                    : 8U;
+            for (std::size_t index = 0U; index < evidence_fields; ++index) {
                 body << "-\n";
             }
         } else {
@@ -498,6 +557,10 @@ std::string serialize(const NdmsNativeOwnershipRecord& record) {
                  << evidence.runtime_sequence << '\n'
                  << evidence.running_config_catalog_revision << '\n'
                  << evidence.running_config_sequence << '\n';
+            if (record.schema_version ==
+                kNdmsNativeOwnershipTombstoneSchemaVersion) {
+                body << *evidence.deleted_kernel_interface_name << '\n';
+            }
         }
     }
     return body.str();
@@ -510,7 +573,8 @@ std::optional<NdmsNativeOwnershipRecord> parse(const std::string& body) {
     std::string kind;
     std::string extra;
     if (!std::getline(input, header) ||
-        (header != kHeader && header != kLegacyHeader) ||
+        (header != kHeader && header != kLegacyHeader &&
+         header != kTombstoneHeader) ||
         !std::getline(input, record.interface_name) ||
         !std::getline(input, record.transaction_id) ||
         !std::getline(input, record.marker) ||
@@ -532,9 +596,15 @@ std::optional<NdmsNativeOwnershipRecord> parse(const std::string& body) {
             NdmsNativeOwnershipLifecycle::active_running_only;
         if (std::getline(input, extra)) return std::nullopt;
     } else {
-        record.schema_version = kNdmsNativeOwnershipSchemaVersion;
+        record.schema_version = header == kTombstoneHeader
+            ? kNdmsNativeOwnershipTombstoneSchemaVersion
+            : kNdmsNativeOwnershipSchemaVersion;
         std::string lifecycle;
-        std::array<std::string, 8U> evidence_fields;
+        std::vector<std::string> evidence_fields(
+            record.schema_version ==
+                    kNdmsNativeOwnershipTombstoneSchemaVersion
+                ? 9U
+                : 8U);
         if (!std::getline(input, lifecycle)) return std::nullopt;
         for (auto& field : evidence_fields) {
             if (!std::getline(input, field)) return std::nullopt;
@@ -588,6 +658,11 @@ std::optional<NdmsNativeOwnershipRecord> parse(const std::string& body) {
             evidence.runtime_sequence = *runtime_sequence;
             evidence.running_config_catalog_revision = evidence_fields[6];
             evidence.running_config_sequence = *running_sequence;
+            if (record.schema_version ==
+                kNdmsNativeOwnershipTombstoneSchemaVersion) {
+                evidence.deleted_kernel_interface_name =
+                    evidence_fields[8];
+            }
             record.lifecycle_evidence = std::move(evidence);
         }
     }
@@ -959,7 +1034,9 @@ bool NdmsNativeOwnershipLifecycleEvidence::operator==(
            runtime_sequence == other.runtime_sequence &&
            running_config_catalog_revision ==
                other.running_config_catalog_revision &&
-           running_config_sequence == other.running_config_sequence;
+           running_config_sequence == other.running_config_sequence &&
+           deleted_kernel_interface_name ==
+               other.deleted_kernel_interface_name;
 }
 
 bool NdmsNativeOwnershipRecord::operator==(
@@ -978,7 +1055,9 @@ bool NdmsNativeOwnershipInspectionItem::operator==(
     const NdmsNativeOwnershipInspectionItem& other) const noexcept {
     return interface_name == other.interface_name && kind == other.kind &&
            lifecycle == other.lifecycle &&
-           ownership_revision == other.ownership_revision;
+           ownership_revision == other.ownership_revision &&
+           retained_deletion_forget_capable ==
+               other.retained_deletion_forget_capable;
 }
 
 std::string ndms_native_ownership_revision(
@@ -988,12 +1067,14 @@ std::string ndms_native_ownership_revision(
             "native ownership record cannot be revisioned");
     }
     Sha256 hasher;
-    update_field(
-        hasher,
-        record.schema_version == 2U
-            ? "keen-pbr.ndms-native-ownership.revision.v2"
-            : "keen-pbr.ndms-native-ownership.revision.v3");
-    if (record.schema_version == kNdmsNativeOwnershipSchemaVersion) {
+    update_field(hasher,
+                 record.schema_version == 2U
+                     ? "keen-pbr.ndms-native-ownership.revision.v2"
+                 : record.schema_version ==
+                           kNdmsNativeOwnershipTombstoneSchemaVersion
+                     ? "keen-pbr.ndms-native-ownership.revision.v4"
+                     : "keen-pbr.ndms-native-ownership.revision.v3");
+    if (record.schema_version != 2U) {
         update_field(hasher, std::to_string(record.schema_version));
     }
     update_field(hasher, record.interface_name);
@@ -1002,7 +1083,7 @@ std::string ndms_native_ownership_revision(
     update_field(hasher, kind_name(record.kind));
     update_field(hasher, record.snapshot_revision);
     update_field(hasher, record.target_full_revision);
-    if (record.schema_version == kNdmsNativeOwnershipSchemaVersion) {
+    if (record.schema_version != 2U) {
         update_field(
             hasher,
             ndms_native_ownership_lifecycle_name(record.lifecycle));
@@ -1030,6 +1111,11 @@ std::string ndms_native_ownership_revision(
             update_field(
                 hasher,
                 std::to_string(evidence.running_config_sequence));
+            if (record.schema_version ==
+                kNdmsNativeOwnershipTombstoneSchemaVersion) {
+                update_field(
+                    hasher, *evidence.deleted_kernel_interface_name);
+            }
         }
     }
     const auto prefix =
@@ -1299,6 +1385,14 @@ NdmsNativeOwnershipStore::inspect_bounded_read_only() const {
                         current.record->kind,
                         current.record->lifecycle,
                         *current.revision,
+                        current.record->schema_version ==
+                                kNdmsNativeOwnershipTombstoneSchemaVersion &&
+                            current.record->lifecycle ==
+                                NdmsNativeOwnershipLifecycle::
+                                    deleted_save_acknowledged_unverified &&
+                            current.record->lifecycle_evidence.has_value() &&
+                            current.record->lifecycle_evidence->
+                                deleted_kernel_interface_name.has_value(),
                     });
             }
         } catch (...) {

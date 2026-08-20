@@ -25,7 +25,8 @@ NdmsNativeOwnershipInspection ownership(
         NdmsNativeOwnershipLifecycle::active_running_only,
     const NdmsNativeTunnelImportKind kind =
         NdmsNativeTunnelImportKind::wireguard,
-    std::string name = "Wireguard5") {
+    std::string name = "Wireguard5",
+    const bool forget_capable = false) {
     NdmsNativeOwnershipInspection result;
     result.readable = true;
     result.claims.push_back(NdmsNativeOwnershipInspectionItem{
@@ -36,6 +37,7 @@ NdmsNativeOwnershipInspection ownership(
                          deleted_save_acknowledged_unverified
             ? "ndms-native-owner-tombstone-v1-" + std::string(64U, 'b')
             : "ndms-native-owner-v3-" + std::string(64U, 'a'),
+        forget_capable,
     });
     return result;
 }
@@ -47,6 +49,15 @@ bool has_blocker(
                projection.delete_blockers.begin(),
                projection.delete_blockers.end(),
                blocker) != projection.delete_blockers.end();
+}
+
+bool has_forget_blocker(
+    const NdmsNativeRetainedDeletionProjection& projection,
+    const NdmsNativeRetainedDeletionBlocker blocker) {
+    return std::find(
+               projection.forget_blockers.begin(),
+               projection.forget_blockers.end(),
+               blocker) != projection.forget_blockers.end();
 }
 
 } // namespace
@@ -106,6 +117,76 @@ TEST_CASE("a durable tombstone is panel-owned and never becomes foreign") {
     CHECK(has_blocker(
         item, NdmsNativeInventoryDeleteBlocker::ownership_not_active));
     CHECK(item.deferred_authoritative_checks.empty());
+    REQUIRE(projected.retained_deletions.size() == 1U);
+    CHECK_FALSE(projected.retained_deletions.front().forget_candidate);
+    CHECK(has_forget_blocker(
+        projected.retained_deletions.front(),
+        NdmsNativeRetainedDeletionBlocker::target_present));
+    CHECK(has_forget_blocker(
+        projected.retained_deletions.front(),
+        NdmsNativeRetainedDeletionBlocker::
+            ownership_schema_not_forget_capable));
+}
+
+TEST_CASE("a kernel-bound tombstone is visible without a firmware row") {
+    const auto claims = ownership(
+        NdmsNativeOwnershipLifecycle::
+            deleted_save_acknowledged_unverified,
+        NdmsNativeTunnelImportKind::wireguard,
+        "Wireguard5",
+        true);
+    const auto projected = project_ndms_native_inventory(
+        {},
+        true,
+        claims,
+        NdmsNativeImportJournalReadinessState::clean,
+        NdmsNativeDeleteWalReadiness::clean);
+
+    REQUIRE(projected.ownership_inventory_available);
+    CHECK(projected.interfaces.empty());
+    REQUIRE(projected.retained_deletions.size() == 1U);
+    const auto& retained = projected.retained_deletions.front();
+    CHECK(retained.interface_name == "Wireguard5");
+    CHECK(retained.ownership_revision ==
+          "ndms-native-owner-tombstone-v1-" + std::string(64U, 'b'));
+    CHECK(retained.forget_candidate);
+    CHECK(retained.forget_blockers.empty());
+    CHECK(retained.deferred_authoritative_checks ==
+          std::vector<NdmsNativeRetainedDeletionDeferredCheck>{
+              NdmsNativeRetainedDeletionDeferredCheck::
+                  encrypted_snapshot_or_absence,
+              NdmsNativeRetainedDeletionDeferredCheck::
+                  keen_pbr_dependencies,
+              NdmsNativeRetainedDeletionDeferredCheck::
+                  fresh_dual_scope_absence,
+          });
+}
+
+TEST_CASE("retained deletion journal blockers remain exact and advisory") {
+    const auto claims = ownership(
+        NdmsNativeOwnershipLifecycle::
+            deleted_save_acknowledged_unverified,
+        NdmsNativeTunnelImportKind::wireguard,
+        "Wireguard5",
+        true);
+    const auto projected = project_ndms_native_inventory(
+        {},
+        false,
+        claims,
+        NdmsNativeImportJournalReadinessState::recovery_required,
+        NdmsNativeDeleteWalReadiness::unfinished);
+
+    REQUIRE(projected.retained_deletions.size() == 1U);
+    const auto& retained = projected.retained_deletions.front();
+    CHECK_FALSE(retained.forget_candidate);
+    CHECK(has_forget_blocker(
+        retained, NdmsNativeRetainedDeletionBlocker::catalog_not_fresh));
+    CHECK(has_forget_blocker(
+        retained,
+        NdmsNativeRetainedDeletionBlocker::import_recovery_required));
+    CHECK(has_forget_blocker(
+        retained,
+        NdmsNativeRetainedDeletionBlocker::delete_recovery_required));
 }
 
 TEST_CASE("an absent claim is foreign but an unreadable inventory is unknown") {
@@ -134,6 +215,7 @@ TEST_CASE("an absent claim is foreign but an unreadable inventory is unknown") {
         NdmsNativeDeleteWalReadiness::clean);
     REQUIRE(unknown.interfaces.size() == 1U);
     CHECK_FALSE(unknown.ownership_inventory_available);
+    CHECK(unknown.retained_deletions.empty());
     CHECK(unknown.interfaces.front().ownership_state ==
           NdmsNativeInventoryOwnershipState::unavailable);
     CHECK_FALSE(unknown.interfaces.front().ownership_revision.has_value());
@@ -169,6 +251,51 @@ TEST_CASE("malformed or duplicate redacted claims fail the whole view closed") {
     REQUIRE(malformed_projection.interfaces.size() == 1U);
     CHECK(malformed_projection.interfaces.front().ownership_state ==
           NdmsNativeInventoryOwnershipState::unavailable);
+
+    auto forged_capability = ownership();
+    forged_capability.claims.front().retained_deletion_forget_capable = true;
+    const auto forged_projection = project_ndms_native_inventory(
+        {tunnel("Wireguard5")},
+        true,
+        forged_capability,
+        NdmsNativeImportJournalReadinessState::clean,
+        NdmsNativeDeleteWalReadiness::clean);
+    CHECK_FALSE(forged_projection.ownership_inventory_available);
+    CHECK(forged_projection.retained_deletions.empty());
+}
+
+TEST_CASE("retained deletion projection stays bounded and sorted") {
+    NdmsNativeOwnershipInspection claims;
+    claims.readable = true;
+    for (int slot = 98; slot >= 5; --slot) {
+        claims.claims.push_back(NdmsNativeOwnershipInspectionItem{
+            "Wireguard" + std::to_string(slot),
+            NdmsNativeTunnelImportKind::wireguard,
+            NdmsNativeOwnershipLifecycle::
+                deleted_save_acknowledged_unverified,
+            "ndms-native-owner-tombstone-v1-" + std::string(64U, 'b'),
+            true,
+        });
+    }
+    const auto projected = project_ndms_native_inventory(
+        {},
+        true,
+        claims,
+        NdmsNativeImportJournalReadinessState::clean,
+        NdmsNativeDeleteWalReadiness::clean);
+
+    REQUIRE(projected.ownership_inventory_available);
+    REQUIRE(projected.retained_deletions.size() == 94U);
+    CHECK(std::is_sorted(
+        projected.retained_deletions.begin(),
+        projected.retained_deletions.end(),
+        [](const auto& left, const auto& right) {
+            return left.interface_name < right.interface_name;
+        }));
+    CHECK(std::all_of(
+        projected.retained_deletions.begin(),
+        projected.retained_deletions.end(),
+        [](const auto& retained) { return retained.forget_candidate; }));
 }
 
 TEST_CASE("known catalogue and journal blockers prevent candidacy precisely") {
@@ -253,4 +380,12 @@ TEST_CASE("projection enum names are stable and redacted") {
               NdmsNativeInventoryDeferredDeleteCheck::
                   keen_pbr_dependencies)} ==
           "keen_pbr_dependencies");
+    CHECK(std::string{ndms_native_retained_deletion_blocker_name(
+              NdmsNativeRetainedDeletionBlocker::target_present)} ==
+          "target_present");
+    CHECK(std::string{
+              ndms_native_retained_deletion_deferred_check_name(
+                  NdmsNativeRetainedDeletionDeferredCheck::
+                      fresh_dual_scope_absence)} ==
+          "fresh_dual_scope_absence");
 }

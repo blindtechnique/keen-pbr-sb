@@ -759,7 +759,8 @@ NdmsNativeOwnershipRecord make_tombstone(
             "native delete tombstone requires post-save observations");
     }
     auto tombstone = active;
-    tombstone.schema_version = kNdmsNativeOwnershipSchemaVersion;
+    tombstone.schema_version =
+        kNdmsNativeOwnershipTombstoneSchemaVersion;
     tombstone.lifecycle = NdmsNativeOwnershipLifecycle::
         deleted_save_acknowledged_unverified;
     const auto& observed = *record.post_save_absence_observations;
@@ -771,6 +772,7 @@ NdmsNativeOwnershipRecord make_tombstone(
             observed.runtime_sequence,
             observed.running_config_catalog_revision,
             observed.running_config_sequence,
+            record.kernel_interface_name,
         };
     return tombstone;
 }

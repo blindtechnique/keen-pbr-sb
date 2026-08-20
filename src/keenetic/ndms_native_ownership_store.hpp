@@ -15,6 +15,13 @@
 namespace keen_pbr3 {
 
 inline constexpr std::uint32_t kNdmsNativeOwnershipSchemaVersion = 3U;
+// Only a deleted tombstone uses v4. Fresh/active claims remain byte-compatible
+// v3 records; the delete transition upgrades atomically once the exact live
+// kernel identity is known. Legacy v3 tombstones remain readable but are not
+// eligible for metadata retirement because their kernel dependency binding
+// cannot be reconstructed safely after the firmware row disappears.
+inline constexpr std::uint32_t
+    kNdmsNativeOwnershipTombstoneSchemaVersion = 4U;
 
 enum class NdmsNativeOwnershipLifecycle : std::uint8_t {
     // The interface is known to exist in running configuration. No claim is
@@ -36,6 +43,11 @@ struct NdmsNativeOwnershipLifecycleEvidence final {
     std::uint64_t runtime_sequence{0U};
     std::string running_config_catalog_revision;
     std::uint64_t running_config_sequence{0U};
+    // Present only on a v4 deleted tombstone. This is the exact kernel
+    // identity observed and dependency-checked by the delete WAL before the
+    // firmware row disappeared. It never crosses the bounded inspection
+    // boundary; that boundary exposes only a derived capability bit.
+    std::optional<std::string> deleted_kernel_interface_name;
 
     bool operator==(
         const NdmsNativeOwnershipLifecycleEvidence& other) const noexcept;
@@ -101,6 +113,9 @@ struct NdmsNativeOwnershipInspectionItem final {
     NdmsNativeOwnershipLifecycle lifecycle{
         NdmsNativeOwnershipLifecycle::active_running_only};
     std::string ownership_revision;
+    // True only for a validated v4 deleted tombstone carrying a safe retained
+    // kernel identity. The identity itself is deliberately not exposed.
+    bool retained_deletion_forget_capable{false};
 
     bool operator==(
         const NdmsNativeOwnershipInspectionItem& other) const noexcept;

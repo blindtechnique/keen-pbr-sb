@@ -45,6 +45,38 @@ enum class NdmsNativeInventoryDeferredDeleteCheck : std::uint8_t {
     direct_ndms_state,
 };
 
+// Page-level advisory state for a durable deleted tombstone. It is separate
+// from firmware rows because a correctly deleted interface normally has no
+// row left to carry an action.
+enum class NdmsNativeRetainedDeletionBlocker : std::uint8_t {
+    catalog_not_fresh,
+    target_present,
+    ownership_schema_not_forget_capable,
+    import_journal_not_authoritatively_clean,
+    import_recovery_required,
+    import_journal_unsafe,
+    import_journal_unavailable,
+    delete_recovery_required,
+    delete_journal_unsafe,
+};
+
+enum class NdmsNativeRetainedDeletionDeferredCheck : std::uint8_t {
+    encrypted_snapshot_or_absence,
+    keen_pbr_dependencies,
+    fresh_dual_scope_absence,
+};
+
+struct NdmsNativeRetainedDeletionProjection final {
+    std::string interface_name;
+    // Opaque exact tombstone CAS. No marker, transaction, snapshot revision,
+    // historical kernel identity or target fingerprint crosses this boundary.
+    std::string ownership_revision;
+    bool forget_candidate{false};
+    std::vector<NdmsNativeRetainedDeletionBlocker> forget_blockers;
+    std::vector<NdmsNativeRetainedDeletionDeferredCheck>
+        deferred_authoritative_checks;
+};
+
 struct NdmsNativeInterfaceInventoryProjection final {
     std::string interface_name;
     NdmsNativeInventoryOwnershipState ownership_state{
@@ -75,6 +107,10 @@ struct NdmsNativeInventoryProjection final {
     NdmsNativeDeleteWalReadiness observed_delete_journal_state{
         NdmsNativeDeleteWalReadiness::unsafe};
     std::vector<NdmsNativeInterfaceInventoryProjection> interfaces;
+    // Sorted, bounded by the same complete 128-entry ownership inspection.
+    // Includes tombstones whose firmware row is absent.
+    std::vector<NdmsNativeRetainedDeletionProjection>
+        retained_deletions;
 };
 
 // Projects rows in the same order as the supplied catalogue.  Ownership
@@ -95,5 +131,9 @@ const char* ndms_native_inventory_delete_blocker_name(
     NdmsNativeInventoryDeleteBlocker blocker) noexcept;
 const char* ndms_native_inventory_deferred_delete_check_name(
     NdmsNativeInventoryDeferredDeleteCheck check) noexcept;
+const char* ndms_native_retained_deletion_blocker_name(
+    NdmsNativeRetainedDeletionBlocker blocker) noexcept;
+const char* ndms_native_retained_deletion_deferred_check_name(
+    NdmsNativeRetainedDeletionDeferredCheck check) noexcept;
 
 } // namespace keen_pbr3

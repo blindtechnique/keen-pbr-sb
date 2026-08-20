@@ -86,6 +86,9 @@ std::optional<ClaimMap> validated_claims(
             !ndms_wireguard_identity_is_managed_candidate(*identity) ||
             !known_import_kind(claim.kind) ||
             !known_lifecycle(claim.lifecycle) ||
+            (claim.retained_deletion_forget_capable &&
+             claim.lifecycle != NdmsNativeOwnershipLifecycle::
+                                    deleted_save_acknowledged_unverified) ||
             !valid_opaque_revision(claim) ||
             !claims.emplace(claim.interface_name, &claim).second) {
             return std::nullopt;
@@ -140,6 +143,92 @@ void add_delete_journal_blocker(
     }
     projection.delete_blockers.push_back(
         NdmsNativeInventoryDeleteBlocker::delete_journal_unsafe);
+}
+
+void add_retained_import_journal_blocker(
+    NdmsNativeRetainedDeletionProjection& projection,
+    const NdmsNativeImportJournalReadinessState state) {
+    switch (state) {
+    case NdmsNativeImportJournalReadinessState::clean:
+        return;
+    case NdmsNativeImportJournalReadinessState::clean_never_activated:
+        projection.forget_blockers.push_back(
+            NdmsNativeRetainedDeletionBlocker::
+                import_journal_not_authoritatively_clean);
+        return;
+    case NdmsNativeImportJournalReadinessState::recovery_required:
+        projection.forget_blockers.push_back(
+            NdmsNativeRetainedDeletionBlocker::import_recovery_required);
+        return;
+    case NdmsNativeImportJournalReadinessState::unsafe:
+        projection.forget_blockers.push_back(
+            NdmsNativeRetainedDeletionBlocker::import_journal_unsafe);
+        return;
+    case NdmsNativeImportJournalReadinessState::unavailable:
+        projection.forget_blockers.push_back(
+            NdmsNativeRetainedDeletionBlocker::import_journal_unavailable);
+        return;
+    }
+    projection.forget_blockers.push_back(
+        NdmsNativeRetainedDeletionBlocker::import_journal_unavailable);
+}
+
+void add_retained_delete_journal_blocker(
+    NdmsNativeRetainedDeletionProjection& projection,
+    const NdmsNativeDeleteWalReadiness state) {
+    switch (state) {
+    case NdmsNativeDeleteWalReadiness::clean:
+        return;
+    case NdmsNativeDeleteWalReadiness::unfinished:
+        projection.forget_blockers.push_back(
+            NdmsNativeRetainedDeletionBlocker::delete_recovery_required);
+        return;
+    case NdmsNativeDeleteWalReadiness::unsafe:
+        projection.forget_blockers.push_back(
+            NdmsNativeRetainedDeletionBlocker::delete_journal_unsafe);
+        return;
+    }
+    projection.forget_blockers.push_back(
+        NdmsNativeRetainedDeletionBlocker::delete_journal_unsafe);
+}
+
+NdmsNativeRetainedDeletionProjection project_retained_deletion(
+    const NdmsNativeOwnershipInspectionItem& claim,
+    const std::vector<NdmsTunnelInterface>& interfaces,
+    const bool catalog_fresh,
+    const NdmsNativeImportJournalReadinessState import_journal,
+    const NdmsNativeDeleteWalReadiness delete_journal) {
+    NdmsNativeRetainedDeletionProjection projection;
+    projection.interface_name = claim.interface_name;
+    projection.ownership_revision = claim.ownership_revision;
+    projection.deferred_authoritative_checks = {
+        NdmsNativeRetainedDeletionDeferredCheck::
+            encrypted_snapshot_or_absence,
+        NdmsNativeRetainedDeletionDeferredCheck::keen_pbr_dependencies,
+        NdmsNativeRetainedDeletionDeferredCheck::fresh_dual_scope_absence,
+    };
+    if (!catalog_fresh) {
+        projection.forget_blockers.push_back(
+            NdmsNativeRetainedDeletionBlocker::catalog_not_fresh);
+    }
+    if (std::any_of(
+            interfaces.begin(), interfaces.end(),
+            [&claim](const auto& interface) {
+                return interface.firmware_interface_name ==
+                       claim.interface_name;
+            })) {
+        projection.forget_blockers.push_back(
+            NdmsNativeRetainedDeletionBlocker::target_present);
+    }
+    if (!claim.retained_deletion_forget_capable) {
+        projection.forget_blockers.push_back(
+            NdmsNativeRetainedDeletionBlocker::
+                ownership_schema_not_forget_capable);
+    }
+    add_retained_import_journal_blocker(projection, import_journal);
+    add_retained_delete_journal_blocker(projection, delete_journal);
+    projection.forget_candidate = projection.forget_blockers.empty();
+    return projection;
 }
 
 NdmsNativeInterfaceInventoryProjection project_one(
@@ -248,9 +337,27 @@ NdmsNativeInventoryProjection project_ndms_native_inventory(
                 import_journal,
                 delete_journal));
         }
+        if (claims) {
+            result.retained_deletions.reserve(claims->size());
+            for (const auto& [name, claim] : *claims) {
+                static_cast<void>(name);
+                if (claim->lifecycle != NdmsNativeOwnershipLifecycle::
+                                            deleted_save_acknowledged_unverified) {
+                    continue;
+                }
+                result.retained_deletions.push_back(
+                    project_retained_deletion(
+                        *claim,
+                        interfaces,
+                        catalog_fresh,
+                        import_journal,
+                        delete_journal));
+            }
+        }
     } catch (...) {
         result.ownership_inventory_available = false;
         result.interfaces.clear();
+        result.retained_deletions.clear();
         try {
             result.interfaces.reserve(interfaces.size());
             for (const auto& interface : interfaces) {
@@ -339,6 +446,47 @@ const char* ndms_native_inventory_deferred_delete_check_name(
         return "direct_ndms_state";
     }
     return "direct_ndms_state";
+}
+
+const char* ndms_native_retained_deletion_blocker_name(
+    const NdmsNativeRetainedDeletionBlocker blocker) noexcept {
+    switch (blocker) {
+    case NdmsNativeRetainedDeletionBlocker::catalog_not_fresh:
+        return "catalog_not_fresh";
+    case NdmsNativeRetainedDeletionBlocker::target_present:
+        return "target_present";
+    case NdmsNativeRetainedDeletionBlocker::
+        ownership_schema_not_forget_capable:
+        return "ownership_schema_not_forget_capable";
+    case NdmsNativeRetainedDeletionBlocker::
+        import_journal_not_authoritatively_clean:
+        return "import_journal_not_authoritatively_clean";
+    case NdmsNativeRetainedDeletionBlocker::import_recovery_required:
+        return "import_recovery_required";
+    case NdmsNativeRetainedDeletionBlocker::import_journal_unsafe:
+        return "import_journal_unsafe";
+    case NdmsNativeRetainedDeletionBlocker::import_journal_unavailable:
+        return "import_journal_unavailable";
+    case NdmsNativeRetainedDeletionBlocker::delete_recovery_required:
+        return "delete_recovery_required";
+    case NdmsNativeRetainedDeletionBlocker::delete_journal_unsafe:
+        return "delete_journal_unsafe";
+    }
+    return "ownership_schema_not_forget_capable";
+}
+
+const char* ndms_native_retained_deletion_deferred_check_name(
+    const NdmsNativeRetainedDeletionDeferredCheck check) noexcept {
+    switch (check) {
+    case NdmsNativeRetainedDeletionDeferredCheck::
+        encrypted_snapshot_or_absence:
+        return "encrypted_snapshot_or_absence";
+    case NdmsNativeRetainedDeletionDeferredCheck::keen_pbr_dependencies:
+        return "keen_pbr_dependencies";
+    case NdmsNativeRetainedDeletionDeferredCheck::fresh_dual_scope_absence:
+        return "fresh_dual_scope_absence";
+    }
+    return "fresh_dual_scope_absence";
 }
 
 } // namespace keen_pbr3
