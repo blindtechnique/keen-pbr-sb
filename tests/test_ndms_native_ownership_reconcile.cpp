@@ -81,6 +81,23 @@ NdmsNativeOwnershipRecord tombstone_for(
     return claim;
 }
 
+NdmsNativeOwnershipRecord save_acknowledged_active_for(
+    NdmsNativeOwnershipRecord claim) {
+    claim.lifecycle = NdmsNativeOwnershipLifecycle::
+        active_save_acknowledged_unverified;
+    NdmsNativeOwnershipLifecycleEvidence evidence;
+    evidence.transaction_id = std::string(32U, 'b');
+    evidence.observation_binding = {std::string(32U, 'c'), 2U, 1U};
+    evidence.runtime_catalog_revision =
+        "ndms-native-catalog-v1-" + std::string(64U, 'd');
+    evidence.runtime_sequence = 2U;
+    evidence.running_config_catalog_revision =
+        "ndms-native-catalog-v1-" + std::string(64U, 'e');
+    evidence.running_config_sequence = 3U;
+    claim.lifecycle_evidence = std::move(evidence);
+    return claim;
+}
+
 // Present interfaces answer with a document; absent ones with a null json,
 // which is how the firmware's zero-byte body arrives.
 struct FakeRouter {
@@ -113,23 +130,39 @@ struct FakeRouter {
 
 } // namespace
 
-TEST_CASE("a claim whose interface is gone is retired") {
-    // The removal crash window: the delete landed, the process died before the
-    // claim was retired, and nothing but this would ever notice.
-    ReconcileTempDirectory directory;
-    NdmsNativeOwnershipStore store(directory.path / "ownership");
-    store.publish(claim_for("Wireguard5"));
-    FakeRouter router;
-    router.present["Wireguard5"] = false;
+TEST_CASE("startup absence retains every active ownership lifecycle") {
+    for (const bool save_was_acknowledged : {false, true}) {
+        CAPTURE(save_was_acknowledged);
+        ReconcileTempDirectory directory;
+        NdmsNativeOwnershipStore store(directory.path / "ownership");
+        const auto running = claim_for("Wireguard5");
+        store.publish(running);
+        if (save_was_acknowledged) {
+            const auto save_acknowledged =
+                save_acknowledged_active_for(running);
+            REQUIRE(store.replace_exact(
+                        running, save_acknowledged).has_value());
+        }
+        FakeRouter router;
+        router.present["Wireguard5"] = false;
 
-    const auto result = reconcile_ndms_native_ownership_claims(
-        store, false, router.dependencies());
-    CHECK(result.store_readable);
-    CHECK(result.claims_examined == 1U);
-    CHECK(result.retired == std::vector<std::string>{"Wireguard5"});
-    CHECK(result.unresolved.empty());
-    CHECK(store.read("Wireguard5").state ==
-          NdmsNativeOwnershipReadState::absent);
+        const auto result = reconcile_ndms_native_ownership_claims(
+            store, false, router.dependencies());
+        CHECK(result.store_readable);
+        CHECK(result.claims_examined == 1U);
+        CHECK(result.retired.empty());
+        CHECK(result.unresolved ==
+              std::vector<std::string>{"Wireguard5"});
+        const auto retained = store.read("Wireguard5");
+        REQUIRE(retained.record.has_value());
+        CHECK(ndms_native_ownership_is_active(*retained.record));
+        CHECK(retained.record->lifecycle ==
+              (save_was_acknowledged
+                   ? NdmsNativeOwnershipLifecycle::
+                         active_save_acknowledged_unverified
+                   : NdmsNativeOwnershipLifecycle::
+                         active_running_only));
+    }
 }
 
 TEST_CASE("a claim whose interface is still there is left alone") {
@@ -353,10 +386,13 @@ TEST_CASE("several claims are each judged on their own interface") {
     const auto result = reconcile_ndms_native_ownership_claims(
         store, false, router.dependencies());
     CHECK(result.claims_examined == 3U);
-    CHECK(result.retired ==
+    CHECK(result.retired.empty());
+    CHECK(result.unresolved ==
           (std::vector<std::string>{"Wireguard5", "Wireguard7"}));
-    CHECK(store.read("Wireguard6").state ==
-          NdmsNativeOwnershipReadState::valid);
+    for (const char* name : {"Wireguard5", "Wireguard6", "Wireguard7"}) {
+        CHECK(store.read(name).state ==
+              NdmsNativeOwnershipReadState::valid);
+    }
 }
 
 TEST_CASE("missing dependencies report an unreadable store, not a clean one") {

@@ -59,9 +59,8 @@ NdmsNativeOwnershipReconcileResult reconcile_ndms_native_ownership_claims(
     if (!read_dependencies.read_document) return result;
     if (!ndms_native_ownership_reconciliation_permitted(
             wal_transaction_in_flight, delete_wal_readiness)) {
-        // The dispatcher owns every claim while its transaction is live, and
-        // it retracts them itself. A second remover racing it would turn its
-        // retirement into a `removed_claim_survived` for no reason.
+        // A live import/delete transaction owns the interpretation of every
+        // claim. Startup reconciliation must not race that interpretation.
         result.store_readable = true;
         result.skipped_transaction_in_flight =
             wal_transaction_in_flight;
@@ -95,18 +94,18 @@ NdmsNativeOwnershipReconcileResult reconcile_ndms_native_ownership_claims(
             // state of a healthy import.
             continue;
         case InterfacePresence::unknown:
-            // A read we could not complete is not absence. Leaving the claim
-            // costs nothing; retiring it on a guess would forget an interface
-            // the router may still have.
+            // A read we could not complete is not absence.
             result.unresolved.push_back(interface_name);
             continue;
         case InterfacePresence::absent:
-            break;
-        }
-        if (ownership_store.remove_exact(*claim.record)) {
-            result.retired.push_back(interface_name);
-        } else {
+            // Absence after reboot does not prove the interface will not be
+            // resurrected, and a save acknowledgement is explicitly
+            // unverified. Removing only the claim would orphan its encrypted
+            // snapshot and permanently block safe reuse of the slot. A future
+            // explicit purge must remove snapshot and claim together while
+            // holding the cooperative writer.
             result.unresolved.push_back(interface_name);
+            continue;
         }
     }
     return result;

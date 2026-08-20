@@ -10,29 +10,29 @@
 
 namespace keen_pbr3 {
 
-// Retires ownership claims whose interface no longer exists.
-//
-// It only ever removes claims for interfaces whose configuration and runtime
-// documents are both authoritatively absent. It never deletes an interface,
-// never publishes, and never receives a command-execution capability.
+// Audits startup ownership without retiring active claims. Even authoritative
+// dual-scope absence cannot prove that Keenetic will not resurrect an
+// interface after reboot, and unlinking a claim alone would orphan its
+// encrypted snapshot. Explicit future purge must remove both under the writer.
 struct NdmsNativeOwnershipReconcileResult {
     // False when the claim directory could not be enumerated. Distinguished
     // from "nothing to do" because an unreadable store must not be reported
     // as a clean one.
     bool store_readable{false};
     // True when a WAL transaction was in flight and reconciliation was
-    // therefore skipped entirely - the dispatcher owns those claims, and a
-    // second remover racing it would turn its retirement into a failure.
+    // therefore skipped entirely - the dispatcher owns those claims.
     bool skipped_transaction_in_flight{false};
     bool skipped_delete_wal_not_clean{false};
     std::size_t claims_examined{0U};
+    // Reserved for an explicit future snapshot+claim purge. Startup
+    // reconciliation never populates it and never unlinks an active claim.
     std::vector<std::string> retired;
     // Lifecycle tombstones are durable attribution, not stale active claims.
     // They are never removed by startup absence reconciliation.
     std::vector<std::string> retained_tombstones;
-    // A claim whose interface is gone but whose file would not go away, or
-    // whose bytes could not be parsed. Kept separate from `retired`: these
-    // still assert ownership and an operator has to know.
+    // Active claims whose interface is absent/unknown, plus claim bytes that
+    // could not be parsed. These still assert ownership and require operator
+    // review; startup never turns absence into an unlink.
     std::vector<std::string> unresolved;
 };
 
@@ -47,8 +47,8 @@ NdmsNativeOwnershipReconcileResult reconcile_ndms_native_ownership_claims(
         NdmsNativeDeleteWalReadiness::clean);
 
 // Pure cross-kind interlock. Import WAL activity and every delete-WAL state
-// except authoritative clean suppress all retirement before store inventory or
-// per-interface reads begin.
+// except authoritative clean suppress all reconciliation before store
+// inventory or per-interface reads begin.
 bool ndms_native_ownership_reconciliation_permitted(
     bool import_wal_transaction_in_flight,
     NdmsNativeDeleteWalReadiness delete_wal_readiness) noexcept;
