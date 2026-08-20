@@ -58,6 +58,7 @@ add_executable(keen-pbr-tests
   test_ndms_native_import_recovery_dispatch.cpp
   test_ndms_native_import_forward_plan.cpp
   test_ndms_native_import_recovery_probe.cpp
+  test_ndms_native_direct_observation.cpp
   test_chacha20poly1305.cpp
   test_ndms_native_secret_snapshot.cpp
   test_ndms_native_secret_redaction.cpp
@@ -283,6 +284,8 @@ add_executable(keen-pbr-tests
   ../src/keenetic/ndms_native_import_recovery_dispatch.cpp
   ../src/keenetic/ndms_native_import_forward_plan.cpp
   ../src/keenetic/ndms_native_import_recovery_probe.cpp
+  ../src/keenetic/ndms_native_import_recovery_revision.cpp
+  ../src/keenetic/ndms_native_direct_observation.cpp
   ../src/crypto/chacha20poly1305.cpp
   ../src/keenetic/ndms_native_secret_snapshot.cpp
   ../src/keenetic/ndms_native_secret_redaction.cpp
@@ -441,6 +444,7 @@ add_executable(keen-pbr-native-tunnel-import-tests
   test_ndms_native_import_recovery_dispatch.cpp
   test_ndms_native_import_forward_plan.cpp
   test_ndms_native_import_recovery_probe.cpp
+  test_ndms_native_direct_observation.cpp
   test_chacha20poly1305.cpp
   test_ndms_native_secret_snapshot.cpp
   test_ndms_native_secret_redaction.cpp
@@ -473,6 +477,8 @@ add_executable(keen-pbr-native-tunnel-import-tests
   ../src/keenetic/ndms_native_import_recovery_dispatch.cpp
   ../src/keenetic/ndms_native_import_forward_plan.cpp
   ../src/keenetic/ndms_native_import_recovery_probe.cpp
+  ../src/keenetic/ndms_native_import_recovery_revision.cpp
+  ../src/keenetic/ndms_native_direct_observation.cpp
   ../src/crypto/chacha20poly1305.cpp
   ../src/keenetic/ndms_native_secret_snapshot.cpp
   ../src/keenetic/ndms_native_secret_redaction.cpp
@@ -489,6 +495,8 @@ add_executable(keen-pbr-native-tunnel-import-tests
   ../src/keenetic/ndms_native_tunnel_import.cpp
   ../src/keenetic/ndms_wireguard_identity.cpp
   ../src/keenetic/ndms_interface_inventory.cpp
+  ../src/http/http_client.cpp
+  ../src/http/http_transport.cpp
 )
 set_target_properties(keen-pbr-native-tunnel-import-tests PROPERTIES
   CXX_STANDARD 17
@@ -499,6 +507,7 @@ target_compile_definitions(
   keen-pbr-native-tunnel-import-tests PRIVATE KEEN_PBR3_TESTING
 )
 target_include_directories(keen-pbr-native-tunnel-import-tests PRIVATE
+  ${KEEN_PBR_GENERATED_INCLUDE_DIR}
   ${CMAKE_SOURCE_DIR}/include
   ${CMAKE_SOURCE_DIR}/src
   ${CMAKE_SOURCE_DIR}/third_party/doctest
@@ -517,6 +526,47 @@ endif()
 add_test(
   NAME keen-pbr-native-tunnel-import-tests
   COMMAND keen-pbr-native-tunnel-import-tests
+)
+
+# Keep the direct, read-only NDMS mutation observer independently runnable.
+# The larger native target may be intentionally red while another mutation
+# slice is in progress; this target has no daemon, API or mutation backend and
+# performs no real router calls because its only test transport is injected.
+add_executable(keen-pbr-native-direct-observation-tests
+  test_main.cpp
+  test_ndms_native_direct_observation.cpp
+  ../src/keenetic/ndms_native_direct_observation.cpp
+  ../src/keenetic/ndms_native_import_recovery_revision.cpp
+  ../src/keenetic/ndms_native_target_evidence.cpp
+  ../src/keenetic/ndms_native_secret_redaction.cpp
+  ../src/keenetic/ndms_wireguard_identity.cpp
+  ../src/keenetic/ndms_interface_inventory.cpp
+  ../src/http/http_client.cpp
+  ../src/http/http_transport.cpp
+)
+set_target_properties(keen-pbr-native-direct-observation-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_compile_definitions(
+  keen-pbr-native-direct-observation-tests PRIVATE KEEN_PBR3_TESTING
+)
+target_include_directories(keen-pbr-native-direct-observation-tests PRIVATE
+  ${KEEN_PBR_GENERATED_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+)
+target_link_libraries(keen-pbr-native-direct-observation-tests PRIVATE
+  nlohmann_json::nlohmann_json
+  ${KEEN_PBR_CURL_TARGET}
+  PkgConfig::ZLIB
+)
+keen_pbr_apply_project_options(keen-pbr-native-direct-observation-tests)
+add_test(
+  NAME keen-pbr-native-direct-observation-tests
+  COMMAND keen-pbr-native-direct-observation-tests
 )
 
 # Keep runtime mutation admission independently buildable. The contract is
