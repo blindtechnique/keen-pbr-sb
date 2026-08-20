@@ -768,6 +768,270 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/system/ndms/interfaces/import/recovery/retry:
+    post:
+      tags: [Native manual mutation transport]
+      summary: Resume forward-only native import recovery once
+      description: >
+        Performs one bounded, bodyless recovery pass for an already-durable
+        cooperative import record. It can only complete forward bookkeeping:
+        it never repeats the secret import, deletes an interface or saves the
+        system configuration. The endpoint must be called exactly once for an
+        explicit owner action and must never be retried automatically. A
+        `completed` response is the only recovery result that proves the
+        created identity; `no_work` only unlocks a fresh inventory read, and
+        `blocked` remains recovery-locked. The response never exposes a
+        transaction id, ownership revision, marker, raw RCI response or
+        secret. All responses are served with `Cache-Control: no-store`.
+      operationId: postNdmsNativeImportRecoveryRetry
+      responses:
+        "200":
+          description: Redacted result of the single bounded recovery pass
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NdmsNativeImportRecoveryResponse"
+        "400":
+          description: The recovery request contained a non-empty body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Authentication is required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Protected transport or step-up authentication is required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: The body exceeded the one-byte rejection boundary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Recovery returned no trustworthy typed result; outcome is unknown
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: >
+            Recovery reservation or service availability failed before a
+            trustworthy typed result; clients conservatively keep the outcome
+            unknown. The server may close the connection.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/system/ndms/interfaces/remove:
+    post:
+      tags: [Native manual mutation transport]
+      summary: Delete one exact panel-owned native interface
+      description: >
+        Submits one exact compare-and-swap delete for a managed
+        `Wireguard5..98` interface. The ownership revision is an opaque token
+        rendered by the current inventory card, and `confirm_label` must equal
+        `interface_name`. Both owner acknowledgement headers are required and
+        fresh for this invocation: the cooperative lease does not exclude
+        other NDMS writers, and Keenetic's global save persists every pending
+        device change. The endpoint must be called exactly once and must never
+        be retried automatically after an ambiguous response. Even the
+        terminal `save_acknowledged_unverified` result is amber evidence: it
+        does not prove the saved startup configuration. The response never
+        exposes a transaction id, ownership revision, marker, snapshot or raw
+        RCI response. All responses are served with `Cache-Control: no-store`.
+      operationId: postNdmsNativeInterfaceRemove
+      parameters:
+        - name: X-Keen-Pbr-External-Ndms-Writer-Race-Acceptance
+          in: header
+          required: true
+          description: >
+            Exact fresh owner acknowledgement. Multiple instances,
+            surrounding whitespace and every value other than
+            `owner-accepted` are refused before the body is consumed.
+          schema:
+            type: string
+            enum: [owner-accepted]
+        - name: X-Keen-Pbr-Global-Save-Acknowledgement
+          in: header
+          required: true
+          description: >
+            Exact fresh acknowledgement that the global Keenetic save persists
+            all pending device changes, not only this interface. Multiple
+            instances, surrounding whitespace and every other value are
+            refused before the body is consumed.
+          schema:
+            type: string
+            enum:
+              - owner-acknowledges-save-persists-all-pending-keenetic-changes
+      requestBody:
+        required: true
+        description: >
+          Exact non-secret JSON compare-and-swap request, limited to 1024
+          bytes. No additional keys are accepted.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NdmsNativeDeleteRequest"
+      responses:
+        "200":
+          description: Redacted blocked, recovery-required or amber terminal result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NdmsNativeDeleteResponse"
+        "400":
+          description: Empty, malformed or non-exact delete request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Authentication is required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Protected transport or step-up authentication is required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: The request body exceeded 1024 bytes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "415":
+          description: Exactly one `application/json` content type is required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "428":
+          description: Both exact fresh owner acknowledgement headers are required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Delete returned no trustworthy typed result; outcome is unknown
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: >
+            Delete reservation or service availability failed before a
+            trustworthy typed result; clients conservatively keep the outcome
+            unknown. The server may close the connection.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/system/ndms/interfaces/remove/recovery/retry:
+    post:
+      tags: [Native manual mutation transport]
+      summary: Resume one native delete recovery pass
+      description: >
+        Performs one bounded, bodyless recovery pass for the single durable
+        delete record and never accepts a target from the client. The two owner
+        acknowledgement headers must either both be absent or both carry their
+        exact values. They are fresh authority for this invocation only and
+        are required before a recovery pass may dispatch or redispatch
+        Keenetic's global save; the server reports
+        `save_reconfirmation_required` when they are needed. The endpoint must
+        never be retried automatically. A blocked or recovery-required result
+        may legitimately omit phase, interface and kind when the durable WAL
+        cannot be reread, and the UI must retain its page-level recovery lock
+        without inventing a target. The response never exposes a transaction
+        id, ownership revision, marker, snapshot or raw RCI response. All
+        responses are served with `Cache-Control: no-store`.
+      operationId: postNdmsNativeDeleteRecoveryRetry
+      parameters:
+        - name: X-Keen-Pbr-External-Ndms-Writer-Race-Acceptance
+          in: header
+          required: false
+          description: >
+            Must be absent together with the global-save acknowledgement, or
+            supplied once with the exact value `owner-accepted`.
+          schema:
+            type: string
+            enum: [owner-accepted]
+        - name: X-Keen-Pbr-Global-Save-Acknowledgement
+          in: header
+          required: false
+          description: >
+            Must be absent together with the writer-risk acknowledgement, or
+            supplied once with the exact fresh global-save acknowledgement.
+          schema:
+            type: string
+            enum:
+              - owner-acknowledges-save-persists-all-pending-keenetic-changes
+      responses:
+        "200":
+          description: Redacted result of the single bounded recovery pass
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NdmsNativeDeleteResponse"
+        "400":
+          description: The recovery request contained a non-empty body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Authentication is required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Protected transport or step-up authentication is required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: The body exceeded the one-byte rejection boundary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "428":
+          description: Acknowledgements were partial, duplicated or not exact
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Recovery returned no trustworthy typed result; outcome is unknown
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: >
+            Recovery reservation or service availability failed before a
+            trustworthy typed result; clients conservatively keep the outcome
+            unknown. The server may close the connection.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/system/ndms/vpn-server-services:
     get:
       summary: List native Keenetic VPN server services
@@ -6842,6 +7106,7 @@ components:
             $ref: "#/components/schemas/PeriodicTaskMetricsEntry"
 
     NdmsTunnelKind:
+      title: NdmsTunnelKindEnum
       type: string
       enum:
         - amnezia_wireguard
@@ -7143,6 +7408,390 @@ components:
           items:
             $ref: "#/components/schemas/NdmsVpnServerService"
 
+    NdmsNativeManagedInterfaceName:
+      title: NdmsNativeManagedInterfaceName
+      type: string
+      pattern: "^Wireguard(?:[5-9]|[1-8][0-9]|9[0-8])$"
+      description: Exact production-managed native mutation identity.
+
+    NdmsNativeKernelInterfaceName:
+      title: NdmsNativeKernelInterfaceName
+      type: string
+      minLength: 1
+      maxLength: 15
+      pattern: "^(?!\\.{1,2}$)[A-Za-z0-9_.:-]+$"
+      description: Bounded Linux interface identity proved by direct observation.
+
+    NdmsNativeMutationKind:
+      title: NdmsNativeMutationKind
+      type: string
+      enum: [wireguard, amnezia_wireguard]
+
+    NdmsNativeWalReadiness:
+      title: NdmsNativeWalReadiness
+      type: string
+      enum: [clean, unfinished, unsafe]
+
+    NdmsNativeDirectObservationFailure:
+      title: NdmsNativeDirectObservationFailure
+      type: string
+      enum:
+        - none
+        - invalid_marker
+        - invalid_target
+        - transport_failed
+        - response_too_large
+        - empty_response
+        - malformed_json
+        - duplicate_json_key
+        - response_not_object
+        - rci_error_response
+        - catalog_malformed
+        - catalog_unavailable
+        - catalog_unsafe
+        - ambiguous_marker
+        - marker_target_not_managed_wireguard
+        - target_evidence_refused
+
+    NdmsNativeDeleteRequest:
+      title: NdmsNativeDeleteRequest
+      type: object
+      additionalProperties: false
+      required:
+        - interface_name
+        - expected_ownership_revision
+        - confirm_label
+      properties:
+        interface_name:
+          $ref: "#/components/schemas/NdmsNativeManagedInterfaceName"
+        expected_ownership_revision:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9_.:-]+$"
+          description: >
+            Opaque compare-and-swap token copied byte-for-byte from the current
+            inventory projection. The server revalidates it under the writer
+            lease; it is neither an internal transaction id nor authority by
+            itself.
+        confirm_label:
+          allOf:
+            - $ref: "#/components/schemas/NdmsNativeManagedInterfaceName"
+          description: Must exactly equal interface_name.
+
+    NdmsNativeDeleteStatus:
+      title: NdmsNativeDeleteStatus
+      type: string
+      enum: [blocked, recovery_required, save_acknowledged_unverified]
+
+    NdmsNativeDeleteStop:
+      title: NdmsNativeDeleteStop
+      type: string
+      enum:
+        - none
+        - owner_global_save_not_acknowledged
+        - external_writer_race_not_accepted
+        - save_reconfirmation_required
+        - writer_missing
+        - writer_lost
+        - invalid_or_protected_target
+        - import_wal_not_authoritatively_clean
+        - delete_wal_unfinished
+        - delete_wal_unsafe
+        - no_delete_transaction
+        - ownership_absent
+        - ownership_unreadable
+        - ownership_not_active
+        - ownership_changed
+        - snapshot_absent
+        - snapshot_unreadable
+        - snapshot_mismatch
+        - keen_pbr_dependency_scan_incomplete
+        - keen_pbr_dependencies_present
+        - keen_pbr_dependency_changed
+        - runtime_observation_failed
+        - running_config_observation_failed
+        - observation_scope_mismatch
+        - observed_target_mismatch
+        - observed_target_drifted
+        - observed_target_reappeared_after_save
+        - durable_observation_failed
+        - delete_wal_publish_failed
+        - delete_guard_rejected
+        - delete_transport_ambiguous
+        - save_guard_rejected
+        - save_transport_ambiguous
+        - tombstone_publish_failed
+        - tombstone_mismatch
+        - delete_wal_cleanup_failed
+        - unexpected_failure
+
+    NdmsNativeDeletePhase:
+      title: NdmsNativeDeletePhase
+      type: string
+      enum:
+        - prepared
+        - delete_may_be_inflight
+        - running_absence_verified
+        - save_may_be_inflight
+        - save_acknowledged_unverified
+        - cleanup
+
+    NdmsNativeDeleteTransportOutcome:
+      title: NdmsNativeDeleteTransportOutcome
+      type: string
+      enum:
+        - guard_rejected
+        - transport_failed
+        - body_too_large
+        - http_status_not_200
+        - content_type_not_json
+        - body_empty
+        - shape_not_acknowledged
+        - acknowledged_needs_observation
+
+    NdmsNativeDeleteResponse:
+      title: NdmsNativeDeleteResponse
+      type: object
+      additionalProperties: false
+      required:
+        - status
+        - stop
+        - external_writer_race_excluded
+        - external_writer_race_accepted
+        - global_save_scope_acknowledged
+        - delete_perform_started
+        - save_perform_started
+        - request_may_have_been_dispatched
+        - system_configuration_save_acknowledged
+        - ownership_tombstone_durable
+        - rollback_snapshot_retained
+      properties:
+        status:
+          $ref: "#/components/schemas/NdmsNativeDeleteStatus"
+        stop:
+          $ref: "#/components/schemas/NdmsNativeDeleteStop"
+        external_writer_race_excluded:
+          type: boolean
+          enum: [false]
+          description: >
+            Always false. The owner acknowledges the remaining race; the
+            cooperative lease cannot exclude firmware or third-party writers.
+        external_writer_race_accepted:
+          type: boolean
+        global_save_scope_acknowledged:
+          type: boolean
+        delete_perform_started:
+          type: boolean
+          description: Current-invocation transport fact only.
+        save_perform_started:
+          type: boolean
+          description: Current-invocation transport fact only.
+        request_may_have_been_dispatched:
+          type: boolean
+          description: Current-invocation transport fact only.
+        system_configuration_save_acknowledged:
+          type: boolean
+          description: >
+            The running save request was acknowledged; this is not proof of
+            startup/saved configuration.
+        ownership_tombstone_durable:
+          type: boolean
+        rollback_snapshot_retained:
+          type: boolean
+          description: >
+            True only after this invocation reread the exact encrypted full
+            snapshot at the response boundary; false also means unknown.
+        phase:
+          $ref: "#/components/schemas/NdmsNativeDeletePhase"
+        interface_name:
+          $ref: "#/components/schemas/NdmsNativeManagedInterfaceName"
+        kind:
+          $ref: "#/components/schemas/NdmsNativeMutationKind"
+        transport_outcome:
+          $ref: "#/components/schemas/NdmsNativeDeleteTransportOutcome"
+        observation_failure:
+          $ref: "#/components/schemas/NdmsNativeDirectObservationFailure"
+      description: >
+        Phase, interface_name and kind are an all-or-none durable identity
+        projection. A blocked or recovery_required response may omit all three
+        when the WAL cannot be reread; clients must not invent a target.
+        `save_acknowledged_unverified` is coherent only with stop `none`, phase
+        `cleanup`, both original acknowledgements, a durable tombstone and a
+        freshly reread rollback snapshot. It remains amber rather than proof
+        of startup persistence. No response contains an internal transaction
+        id, ownership revision, marker, snapshot contents or raw RCI response.
+
+    NdmsNativeImportRecoveryStatus:
+      title: NdmsNativeImportRecoveryStatus
+      type: string
+      enum: [no_work, blocked, completed]
+
+    NdmsNativeImportRecoveryStop:
+      title: NdmsNativeImportRecoveryStop
+      type: string
+      enum:
+        - none
+        - writer_missing
+        - writer_lost
+        - delete_wal_not_clean
+        - import_wal_not_single_safe
+        - record_not_cooperative
+        - phase_not_forward_only
+        - expected_target_not_managed
+        - first_observation_failed
+        - second_observation_failed
+        - observation_kind_mismatch
+        - durable_observation_failed
+        - observation_unstable
+        - ownership_not_exact
+        - recovery_action_not_forward_only
+        - forward_admission_failed
+        - target_verified_wal_publish_failed
+        - ownership_publish_failed
+        - ownership_wal_publish_failed
+        - wal_cleanup_failed
+        - unexpected_failure
+
+    NdmsNativeImportRecoveryPhase:
+      title: NdmsNativeImportRecoveryPhase
+      type: string
+      enum:
+        - prepared
+        - import_may_be_inflight
+        - response_recorded
+        - target_verified
+        - ownership_published
+        - rollback_requested
+        - delete_may_be_inflight
+        - absence_verified
+
+    NdmsNativeImportRecoveryAction:
+      title: NdmsNativeImportRecoveryAction
+      type: string
+      enum:
+        - retry_read_only_observation
+        - abort_without_mutation
+        - rollback_delete_exact_owned
+        - resume_forward_reconcile
+        - retry_exact_owned_delete
+        - complete_rollback
+        - block_unknown
+
+    NdmsNativeImportRecoveryAdmissionState:
+      title: NdmsNativeImportRecoveryAdmissionState
+      type: string
+      enum:
+        - admitted
+        - lease_busy
+        - lease_io_error
+        - inventory_not_ready
+        - record_missing
+        - record_changed
+        - action_not_actionable
+
+    NdmsNativeImportRecoveryDispatchState:
+      title: NdmsNativeImportRecoveryDispatchState
+      type: string
+      enum:
+        - completed
+        - lease_not_held
+        - plan_empty
+        - target_missing
+        - target_not_eligible
+        - ownership_store_missing
+        - snapshot_retirer_missing
+        - step_failed
+
+    NdmsNativeImportRecoveryStep:
+      title: NdmsNativeImportRecoveryStep
+      type: string
+      enum:
+        - advance_wal_target_verified
+        - publish_ownership
+        - advance_wal_ownership_published
+        - advance_wal_rollback_requested
+        - remove_ownership_claim
+        - advance_wal_delete_may_be_inflight
+        - delete_exact_owned_target
+        - advance_wal_absence_verified
+        - remove_wal_record
+
+    NdmsNativeImportRecoveryResponse:
+      title: NdmsNativeImportRecoveryResponse
+      type: object
+      additionalProperties: false
+      required:
+        - status
+        - stop
+        - ndms_import_request_dispatched
+        - ndms_delete_dispatched
+        - system_configuration_save_performed
+        - external_ndms_writer_race_excluded
+        - wal_may_require_recovery
+        - ownership_published
+        - wal_removed
+      properties:
+        status:
+          $ref: "#/components/schemas/NdmsNativeImportRecoveryStatus"
+        stop:
+          $ref: "#/components/schemas/NdmsNativeImportRecoveryStop"
+        ndms_import_request_dispatched:
+          type: boolean
+          enum: [false]
+        ndms_delete_dispatched:
+          type: boolean
+          enum: [false]
+        system_configuration_save_performed:
+          type: boolean
+          enum: [false]
+        external_ndms_writer_race_excluded:
+          type: boolean
+          enum: [false]
+        wal_may_require_recovery:
+          type: boolean
+        ownership_published:
+          type: boolean
+        wal_removed:
+          type: boolean
+        expected_interface:
+          $ref: "#/components/schemas/NdmsNativeManagedInterfaceName"
+        created_interface:
+          $ref: "#/components/schemas/NdmsNativeManagedInterfaceName"
+        created_kernel_interface:
+          $ref: "#/components/schemas/NdmsNativeKernelInterfaceName"
+        kind:
+          $ref: "#/components/schemas/NdmsNativeMutationKind"
+        phase:
+          $ref: "#/components/schemas/NdmsNativeImportRecoveryPhase"
+        delete_wal_readiness:
+          $ref: "#/components/schemas/NdmsNativeWalReadiness"
+        import_wal_readiness:
+          $ref: "#/components/schemas/NdmsNativeWalReadiness"
+        direct_observation_failure:
+          $ref: "#/components/schemas/NdmsNativeDirectObservationFailure"
+        recovery_action:
+          $ref: "#/components/schemas/NdmsNativeImportRecoveryAction"
+        forward_admission_state:
+          $ref: "#/components/schemas/NdmsNativeImportRecoveryAdmissionState"
+        forward_dispatch_state:
+          $ref: "#/components/schemas/NdmsNativeImportRecoveryDispatchState"
+        forward_failed_step:
+          $ref: "#/components/schemas/NdmsNativeImportRecoveryStep"
+      description: >
+        The optional record projection is all-or-none across expected_interface,
+        kind and phase; its private transaction id is deliberately omitted.
+        created_interface and created_kernel_interface are a proved pair and
+        created_interface equals expected_interface. `no_work` has stop `none`,
+        clean WAL readiness, no identities or forward evidence and every
+        mutation/evidence boolean false. `completed` has a proved identity,
+        clean delete WAL, unfinished import WAL, a forward-only phase,
+        admitted/completed forward evidence, no failed step, ownership true,
+        WAL removal true and wal_may_require_recovery false. `blocked` has a
+        non-none stop and never removes the WAL; a complete durable record
+        makes wal_may_require_recovery true. No response contains an internal
+        transaction id, ownership revision, marker, raw RCI response or secret.
+
     NdmsNativeImportPreflightResponse:
       title: NdmsNativeImportPreflightResponse
       type: object
@@ -7245,35 +7894,24 @@ components:
           type: boolean
         ownership_published:
           type: boolean
-        transaction_id:
-          type: string
-          pattern: "^[0-9a-f]{32}$"
         expected_interface:
-          type: string
-          pattern: "^Wireguard(?:[0-9]|[1-9][0-9]|1[01][0-9]|12[0-6])$"
+          $ref: "#/components/schemas/NdmsNativeManagedInterfaceName"
         created_interface:
-          type: string
-          pattern: "^Wireguard(?:[0-9]|[1-9][0-9]|1[01][0-9]|12[0-6])$"
-          description: >
-            Firmware interface identity. Returned only as a proved pair with
-            created_kernel_interface.
+          allOf:
+            - $ref: "#/components/schemas/NdmsNativeManagedInterfaceName"
+          description: Returned only as a proved pair with created_kernel_interface.
         created_kernel_interface:
-          type: string
-          minLength: 1
-          maxLength: 15
-          pattern: "^(?!\\.{1,2}$)[A-Za-z0-9_.:-]+$"
+          allOf:
+            - $ref: "#/components/schemas/NdmsNativeKernelInterfaceName"
           description: >
             Safe Linux interface identity observed in both required scopes.
             Returned only as a proved pair with created_interface.
         kind:
-          type: string
-          enum: [wireguard, amnezia_wireguard]
+          $ref: "#/components/schemas/NdmsNativeMutationKind"
         delete_wal_readiness:
-          type: string
-          enum: [clean, unfinished, unsafe]
+          $ref: "#/components/schemas/NdmsNativeWalReadiness"
         import_wal_readiness:
-          type: string
-          enum: [clean, unfinished, unsafe]
+          $ref: "#/components/schemas/NdmsNativeWalReadiness"
         request_error:
           type: string
           enum:
@@ -7295,9 +7933,7 @@ components:
             - invalid_field
             - limit_exceeded
         direct_observation_failure:
-          type: string
-          maxLength: 96
-          description: Redacted typed direct-observation stop, when available.
+          $ref: "#/components/schemas/NdmsNativeDirectObservationFailure"
         baseline_error:
           type: string
           maxLength: 96
@@ -7307,24 +7943,19 @@ components:
           maxLength: 96
           description: Redacted typed executor stop, when available.
         forward_admission_state:
-          type: string
-          maxLength: 96
-          description: Redacted typed recovery admission state, when available.
+          $ref: "#/components/schemas/NdmsNativeImportRecoveryAdmissionState"
         forward_dispatch_state:
-          type: string
-          maxLength: 96
-          description: Redacted typed recovery dispatch state, when available.
+          $ref: "#/components/schemas/NdmsNativeImportRecoveryDispatchState"
         forward_failed_step:
-          type: string
-          maxLength: 96
-          description: Redacted typed recovery step, when available.
+          $ref: "#/components/schemas/NdmsNativeImportRecoveryStep"
       description: >
         A `completed` response is coherent only when stop is `none`, both WAL
         readiness fields are `clean`, request dispatch and ownership publication
         are true, recovery is false, the rollback snapshot retention flag is
         true, and the expected/created firmware and kernel identities form a
         proved safe pair. `recovery_required` and any ambiguous non-schema
-        response must never be blindly retried.
+        response must never be blindly retried. The internal WAL transaction
+        id is deliberately never part of the public response.
 
     NdmsNativeImportTargetRange:
       title: NdmsNativeImportTargetRange

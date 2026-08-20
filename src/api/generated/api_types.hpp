@@ -963,15 +963,88 @@ namespace api {
         std::vector<RequiredGuard> required_guards;
     };
 
+    enum class NdmsNativeDeletePhase : int { CLEANUP, DELETE_MAY_BE_INFLIGHT, PREPARED, RUNNING_ABSENCE_VERIFIED, SAVE_ACKNOWLEDGED_UNVERIFIED, SAVE_MAY_BE_INFLIGHT };
+
+    struct NdmsNativeDeleteRequest {
+        std::string confirm_label;
+        std::string expected_ownership_revision;
+        std::string interface_name;
+    };
+
+    enum class NdmsNativeMutationKind : int { AMNEZIA_WIREGUARD, WIREGUARD };
+
+    enum class NdmsNativeDirectObservationFailure : int { AMBIGUOUS_MARKER, CATALOG_MALFORMED, CATALOG_UNAVAILABLE, CATALOG_UNSAFE, DUPLICATE_JSON_KEY, EMPTY_RESPONSE, INVALID_MARKER, INVALID_TARGET, MALFORMED_JSON, MARKER_TARGET_NOT_MANAGED_WIREGUARD, NONE, RCI_ERROR_RESPONSE, RESPONSE_NOT_OBJECT, RESPONSE_TOO_LARGE, TARGET_EVIDENCE_REFUSED, TRANSPORT_FAILED };
+
+    enum class NdmsNativeDeleteStatus : int { BLOCKED, RECOVERY_REQUIRED, SAVE_ACKNOWLEDGED_UNVERIFIED };
+
+    enum class NdmsNativeDeleteStop : int { DELETE_GUARD_REJECTED, DELETE_TRANSPORT_AMBIGUOUS, DELETE_WAL_CLEANUP_FAILED, DELETE_WAL_PUBLISH_FAILED, DELETE_WAL_UNFINISHED, DELETE_WAL_UNSAFE, DURABLE_OBSERVATION_FAILED, EXTERNAL_WRITER_RACE_NOT_ACCEPTED, IMPORT_WAL_NOT_AUTHORITATIVELY_CLEAN, INVALID_OR_PROTECTED_TARGET, KEEN_PBR_DEPENDENCIES_PRESENT, KEEN_PBR_DEPENDENCY_CHANGED, KEEN_PBR_DEPENDENCY_SCAN_INCOMPLETE, NONE, NO_DELETE_TRANSACTION, OBSERVATION_SCOPE_MISMATCH, OBSERVED_TARGET_DRIFTED, OBSERVED_TARGET_MISMATCH, OBSERVED_TARGET_REAPPEARED_AFTER_SAVE, OWNERSHIP_ABSENT, OWNERSHIP_CHANGED, OWNERSHIP_NOT_ACTIVE, OWNERSHIP_UNREADABLE, OWNER_GLOBAL_SAVE_NOT_ACKNOWLEDGED, RUNNING_CONFIG_OBSERVATION_FAILED, RUNTIME_OBSERVATION_FAILED, SAVE_GUARD_REJECTED, SAVE_RECONFIRMATION_REQUIRED, SAVE_TRANSPORT_AMBIGUOUS, SNAPSHOT_ABSENT, SNAPSHOT_MISMATCH, SNAPSHOT_UNREADABLE, TOMBSTONE_MISMATCH, TOMBSTONE_PUBLISH_FAILED, UNEXPECTED_FAILURE, WRITER_LOST, WRITER_MISSING };
+
+    enum class NdmsNativeDeleteTransportOutcome : int { ACKNOWLEDGED_NEEDS_OBSERVATION, BODY_EMPTY, BODY_TOO_LARGE, CONTENT_TYPE_NOT_JSON, GUARD_REJECTED, HTTP_STATUS_NOT_200, SHAPE_NOT_ACKNOWLEDGED, TRANSPORT_FAILED };
+
+    struct NdmsNativeDeleteResponse {
+        bool delete_perform_started = false;
+        bool external_writer_race_accepted = false;
+        bool external_writer_race_excluded = false;
+        bool global_save_scope_acknowledged = false;
+        std::optional<std::string> interface_name;
+        std::optional<NdmsNativeMutationKind> kind;
+        std::optional<NdmsNativeDirectObservationFailure> observation_failure;
+        bool ownership_tombstone_durable = false;
+        std::optional<NdmsNativeDeletePhase> phase;
+        bool request_may_have_been_dispatched = false;
+        bool rollback_snapshot_retained = false;
+        bool save_perform_started = false;
+        NdmsNativeDeleteStatus status;
+        NdmsNativeDeleteStop stop;
+        bool system_configuration_save_acknowledged = false;
+        std::optional<NdmsNativeDeleteTransportOutcome> transport_outcome;
+    };
+
     struct NdmsNativeImportPreflightResponse {
         bool admitted = false;
         bool external_ndms_writer_race_excluded = false;
         bool owner_risk_acceptance_required = false;
     };
 
-    enum class WalReadiness : int { CLEAN, UNFINISHED, UNSAFE };
+    enum class NdmsNativeImportRecoveryAction : int { ABORT_WITHOUT_MUTATION, BLOCK_UNKNOWN, COMPLETE_ROLLBACK, RESUME_FORWARD_RECONCILE, RETRY_EXACT_OWNED_DELETE, RETRY_READ_ONLY_OBSERVATION, ROLLBACK_DELETE_EXACT_OWNED };
 
-    enum class NdmsNativeImportResponseKind : int { AMNEZIA_WIREGUARD, WIREGUARD };
+    enum class NdmsNativeImportRecoveryAdmissionState : int { ACTION_NOT_ACTIONABLE, ADMITTED, INVENTORY_NOT_READY, LEASE_BUSY, LEASE_IO_ERROR, RECORD_CHANGED, RECORD_MISSING };
+
+    enum class NdmsNativeImportRecoveryDispatchState : int { COMPLETED, LEASE_NOT_HELD, OWNERSHIP_STORE_MISSING, PLAN_EMPTY, SNAPSHOT_RETIRER_MISSING, STEP_FAILED, TARGET_MISSING, TARGET_NOT_ELIGIBLE };
+
+    enum class NdmsNativeImportRecoveryPhase : int { ABSENCE_VERIFIED, DELETE_MAY_BE_INFLIGHT, IMPORT_MAY_BE_INFLIGHT, OWNERSHIP_PUBLISHED, PREPARED, RESPONSE_RECORDED, ROLLBACK_REQUESTED, TARGET_VERIFIED };
+
+    enum class NdmsNativeWalReadiness : int { CLEAN, UNFINISHED, UNSAFE };
+
+    enum class NdmsNativeImportRecoveryStep : int { ADVANCE_WAL_ABSENCE_VERIFIED, ADVANCE_WAL_DELETE_MAY_BE_INFLIGHT, ADVANCE_WAL_OWNERSHIP_PUBLISHED, ADVANCE_WAL_ROLLBACK_REQUESTED, ADVANCE_WAL_TARGET_VERIFIED, DELETE_EXACT_OWNED_TARGET, PUBLISH_OWNERSHIP, REMOVE_OWNERSHIP_CLAIM, REMOVE_WAL_RECORD };
+
+    enum class NdmsNativeImportRecoveryStatus : int { BLOCKED, COMPLETED, NO_WORK };
+
+    enum class NdmsNativeImportRecoveryStop : int { DELETE_WAL_NOT_CLEAN, DURABLE_OBSERVATION_FAILED, EXPECTED_TARGET_NOT_MANAGED, FIRST_OBSERVATION_FAILED, FORWARD_ADMISSION_FAILED, IMPORT_WAL_NOT_SINGLE_SAFE, NONE, OBSERVATION_KIND_MISMATCH, OBSERVATION_UNSTABLE, OWNERSHIP_NOT_EXACT, OWNERSHIP_PUBLISH_FAILED, OWNERSHIP_WAL_PUBLISH_FAILED, PHASE_NOT_FORWARD_ONLY, RECORD_NOT_COOPERATIVE, RECOVERY_ACTION_NOT_FORWARD_ONLY, SECOND_OBSERVATION_FAILED, TARGET_VERIFIED_WAL_PUBLISH_FAILED, UNEXPECTED_FAILURE, WAL_CLEANUP_FAILED, WRITER_LOST, WRITER_MISSING };
+
+    struct NdmsNativeImportRecoveryResponse {
+        std::optional<std::string> created_interface;
+        std::optional<std::string> created_kernel_interface;
+        std::optional<NdmsNativeWalReadiness> delete_wal_readiness;
+        std::optional<NdmsNativeDirectObservationFailure> direct_observation_failure;
+        std::optional<std::string> expected_interface;
+        bool external_ndms_writer_race_excluded = false;
+        std::optional<NdmsNativeImportRecoveryAdmissionState> forward_admission_state;
+        std::optional<NdmsNativeImportRecoveryDispatchState> forward_dispatch_state;
+        std::optional<NdmsNativeImportRecoveryStep> forward_failed_step;
+        std::optional<NdmsNativeWalReadiness> import_wal_readiness;
+        std::optional<NdmsNativeMutationKind> kind;
+        bool ndms_delete_dispatched = false;
+        bool ndms_import_request_dispatched = false;
+        bool ownership_published = false;
+        std::optional<NdmsNativeImportRecoveryPhase> phase;
+        std::optional<NdmsNativeImportRecoveryAction> recovery_action;
+        NdmsNativeImportRecoveryStatus status;
+        NdmsNativeImportRecoveryStop stop;
+        bool system_configuration_save_performed = false;
+        bool wal_may_require_recovery = false;
+        bool wal_removed = false;
+    };
 
     enum class RequestError : int { DANGEROUS_DIRECTIVE, DUPLICATE_FIELD, DUPLICATE_PEER, DUPLICATE_SECTION, INPUT_TOO_LARGE, INVALID_BASE64, INVALID_COMPRESSION, INVALID_ENCODING, INVALID_FIELD, INVALID_JSON, LIMIT_EXCEEDED, MALFORMED_LINE, MISSING_REQUIRED_FIELD, UNKNOWN_FIELD, UNKNOWN_SECTION, UNSUPPORTED_JSON_SCHEMA, UNSUPPORTED_URI };
 
@@ -983,17 +1056,17 @@ namespace api {
         std::optional<std::string> baseline_error;
         std::optional<std::string> created_interface;
         std::optional<std::string> created_kernel_interface;
-        std::optional<WalReadiness> delete_wal_readiness;
-        std::optional<std::string> direct_observation_failure;
+        std::optional<NdmsNativeWalReadiness> delete_wal_readiness;
+        std::optional<NdmsNativeDirectObservationFailure> direct_observation_failure;
         std::optional<std::string> executor_stop;
         std::optional<std::string> expected_interface;
         bool external_ndms_writer_race_accepted = false;
         bool external_ndms_writer_race_excluded = false;
-        std::optional<std::string> forward_admission_state;
-        std::optional<std::string> forward_dispatch_state;
-        std::optional<std::string> forward_failed_step;
-        std::optional<WalReadiness> import_wal_readiness;
-        std::optional<NdmsNativeImportResponseKind> kind;
+        std::optional<NdmsNativeImportRecoveryAdmissionState> forward_admission_state;
+        std::optional<NdmsNativeImportRecoveryDispatchState> forward_dispatch_state;
+        std::optional<NdmsNativeImportRecoveryStep> forward_failed_step;
+        std::optional<NdmsNativeWalReadiness> import_wal_readiness;
+        std::optional<NdmsNativeMutationKind> kind;
         bool ownership_published = false;
         std::optional<RequestError> request_error;
         bool request_may_have_been_dispatched = false;
@@ -1001,7 +1074,6 @@ namespace api {
         NdmsNativeImportStatus status;
         NdmsNativeImportStop stop;
         bool system_configuration_save_performed = false;
-        std::optional<std::string> transaction_id;
         bool wal_may_require_recovery = false;
     };
 
@@ -1930,9 +2002,24 @@ namespace api {
         std::optional<NdmsInterfaceRoleEnum> ndms_interface_role;
         std::optional<NdmsManagementBlockerElement> ndms_management_blocker;
         std::optional<ObservedDeleteJournalState> ndms_native_delete_journal_state;
+        std::optional<NdmsNativeDeletePhase> ndms_native_delete_phase;
+        std::optional<NdmsNativeDeleteRequest> ndms_native_delete_request;
+        std::optional<NdmsNativeDeleteResponse> ndms_native_delete_response;
+        std::optional<NdmsNativeDeleteStatus> ndms_native_delete_status;
+        std::optional<NdmsNativeDeleteStop> ndms_native_delete_stop;
+        std::optional<NdmsNativeDeleteTransportOutcome> ndms_native_delete_transport_outcome;
+        std::optional<NdmsNativeDirectObservationFailure> ndms_native_direct_observation_failure;
         std::optional<NdmsNativeImportPreflightResponse> ndms_native_import_preflight_response;
         std::optional<NdmsNativeImportReadiness> ndms_native_import_readiness;
         std::optional<NdmsNativeImportJournalState> ndms_native_import_readiness_journal_state;
+        std::optional<NdmsNativeImportRecoveryAction> ndms_native_import_recovery_action;
+        std::optional<NdmsNativeImportRecoveryAdmissionState> ndms_native_import_recovery_admission_state;
+        std::optional<NdmsNativeImportRecoveryDispatchState> ndms_native_import_recovery_dispatch_state;
+        std::optional<NdmsNativeImportRecoveryPhase> ndms_native_import_recovery_phase;
+        std::optional<NdmsNativeImportRecoveryResponse> ndms_native_import_recovery_response;
+        std::optional<NdmsNativeImportRecoveryStatus> ndms_native_import_recovery_status;
+        std::optional<NdmsNativeImportRecoveryStep> ndms_native_import_recovery_step;
+        std::optional<NdmsNativeImportRecoveryStop> ndms_native_import_recovery_stop;
         std::optional<NdmsNativeImportResponse> ndms_native_import_response;
         std::optional<NdmsNativeImportStatus> ndms_native_import_status;
         std::optional<NdmsNativeImportStop> ndms_native_import_stop;
@@ -1941,8 +2028,12 @@ namespace api {
         std::optional<NdmsNativeInventoryDeferredDeleteCheckElement> ndms_native_inventory_deferred_delete_check;
         std::optional<NdmsNativeInventoryDeleteBlockerElement> ndms_native_inventory_delete_blocker;
         std::optional<OwnershipState> ndms_native_inventory_ownership_state;
+        std::optional<std::string> ndms_native_kernel_interface_name;
+        std::optional<std::string> ndms_native_managed_interface_name;
         std::optional<NativeMutationStatus> ndms_native_mutation_inventory_status;
+        std::optional<NdmsNativeMutationKind> ndms_native_mutation_kind;
         std::optional<OwnershipLifecycle> ndms_native_ownership_lifecycle;
+        std::optional<NdmsNativeWalReadiness> ndms_native_wal_readiness;
         std::optional<NdmsTunnelInterfaceElement> ndms_tunnel_interface;
         std::optional<NdmsTunnelKindEnum> ndms_tunnel_kind;
         std::optional<NdmsVpnServerKind> ndms_vpn_server_kind;
@@ -2346,8 +2437,17 @@ void to_json(json & j, const NativeMutationStatus & x);
 void from_json(const json & j, NdmsInterfaceInventoryResponse & x);
 void to_json(json & j, const NdmsInterfaceInventoryResponse & x);
 
+void from_json(const json & j, NdmsNativeDeleteRequest & x);
+void to_json(json & j, const NdmsNativeDeleteRequest & x);
+
+void from_json(const json & j, NdmsNativeDeleteResponse & x);
+void to_json(json & j, const NdmsNativeDeleteResponse & x);
+
 void from_json(const json & j, NdmsNativeImportPreflightResponse & x);
 void to_json(json & j, const NdmsNativeImportPreflightResponse & x);
+
+void from_json(const json & j, NdmsNativeImportRecoveryResponse & x);
+void to_json(json & j, const NdmsNativeImportRecoveryResponse & x);
 
 void from_json(const json & j, NdmsNativeImportResponse & x);
 void to_json(json & j, const NdmsNativeImportResponse & x);
@@ -2745,11 +2845,47 @@ void to_json(json & j, const ObservedDeleteJournalState & x);
 void from_json(const json & j, RequiredGuard & x);
 void to_json(json & j, const RequiredGuard & x);
 
-void from_json(const json & j, WalReadiness & x);
-void to_json(json & j, const WalReadiness & x);
+void from_json(const json & j, NdmsNativeDeletePhase & x);
+void to_json(json & j, const NdmsNativeDeletePhase & x);
 
-void from_json(const json & j, NdmsNativeImportResponseKind & x);
-void to_json(json & j, const NdmsNativeImportResponseKind & x);
+void from_json(const json & j, NdmsNativeMutationKind & x);
+void to_json(json & j, const NdmsNativeMutationKind & x);
+
+void from_json(const json & j, NdmsNativeDirectObservationFailure & x);
+void to_json(json & j, const NdmsNativeDirectObservationFailure & x);
+
+void from_json(const json & j, NdmsNativeDeleteStatus & x);
+void to_json(json & j, const NdmsNativeDeleteStatus & x);
+
+void from_json(const json & j, NdmsNativeDeleteStop & x);
+void to_json(json & j, const NdmsNativeDeleteStop & x);
+
+void from_json(const json & j, NdmsNativeDeleteTransportOutcome & x);
+void to_json(json & j, const NdmsNativeDeleteTransportOutcome & x);
+
+void from_json(const json & j, NdmsNativeImportRecoveryAction & x);
+void to_json(json & j, const NdmsNativeImportRecoveryAction & x);
+
+void from_json(const json & j, NdmsNativeImportRecoveryAdmissionState & x);
+void to_json(json & j, const NdmsNativeImportRecoveryAdmissionState & x);
+
+void from_json(const json & j, NdmsNativeImportRecoveryDispatchState & x);
+void to_json(json & j, const NdmsNativeImportRecoveryDispatchState & x);
+
+void from_json(const json & j, NdmsNativeImportRecoveryPhase & x);
+void to_json(json & j, const NdmsNativeImportRecoveryPhase & x);
+
+void from_json(const json & j, NdmsNativeWalReadiness & x);
+void to_json(json & j, const NdmsNativeWalReadiness & x);
+
+void from_json(const json & j, NdmsNativeImportRecoveryStep & x);
+void to_json(json & j, const NdmsNativeImportRecoveryStep & x);
+
+void from_json(const json & j, NdmsNativeImportRecoveryStatus & x);
+void to_json(json & j, const NdmsNativeImportRecoveryStatus & x);
+
+void from_json(const json & j, NdmsNativeImportRecoveryStop & x);
+void to_json(json & j, const NdmsNativeImportRecoveryStop & x);
 
 void from_json(const json & j, RequestError & x);
 void to_json(json & j, const RequestError & x);
@@ -4577,6 +4713,58 @@ namespace api {
         j["required_guards"] = x.required_guards;
     }
 
+    inline void from_json(const json & j, NdmsNativeDeleteRequest& x) {
+        x.confirm_label = j.at("confirm_label").get<std::string>();
+        x.expected_ownership_revision = j.at("expected_ownership_revision").get<std::string>();
+        x.interface_name = j.at("interface_name").get<std::string>();
+    }
+
+    inline void to_json(json & j, const NdmsNativeDeleteRequest & x) {
+        j = json::object();
+        j["confirm_label"] = x.confirm_label;
+        j["expected_ownership_revision"] = x.expected_ownership_revision;
+        j["interface_name"] = x.interface_name;
+    }
+
+    inline void from_json(const json & j, NdmsNativeDeleteResponse& x) {
+        x.delete_perform_started = j.at("delete_perform_started").get<bool>();
+        x.external_writer_race_accepted = j.at("external_writer_race_accepted").get<bool>();
+        x.external_writer_race_excluded = j.at("external_writer_race_excluded").get<bool>();
+        x.global_save_scope_acknowledged = j.at("global_save_scope_acknowledged").get<bool>();
+        x.interface_name = get_stack_optional<std::string>(j, "interface_name");
+        x.kind = get_stack_optional<NdmsNativeMutationKind>(j, "kind");
+        x.observation_failure = get_stack_optional<NdmsNativeDirectObservationFailure>(j, "observation_failure");
+        x.ownership_tombstone_durable = j.at("ownership_tombstone_durable").get<bool>();
+        x.phase = get_stack_optional<NdmsNativeDeletePhase>(j, "phase");
+        x.request_may_have_been_dispatched = j.at("request_may_have_been_dispatched").get<bool>();
+        x.rollback_snapshot_retained = j.at("rollback_snapshot_retained").get<bool>();
+        x.save_perform_started = j.at("save_perform_started").get<bool>();
+        x.status = j.at("status").get<NdmsNativeDeleteStatus>();
+        x.stop = j.at("stop").get<NdmsNativeDeleteStop>();
+        x.system_configuration_save_acknowledged = j.at("system_configuration_save_acknowledged").get<bool>();
+        x.transport_outcome = get_stack_optional<NdmsNativeDeleteTransportOutcome>(j, "transport_outcome");
+    }
+
+    inline void to_json(json & j, const NdmsNativeDeleteResponse & x) {
+        j = json::object();
+        j["delete_perform_started"] = x.delete_perform_started;
+        j["external_writer_race_accepted"] = x.external_writer_race_accepted;
+        j["external_writer_race_excluded"] = x.external_writer_race_excluded;
+        j["global_save_scope_acknowledged"] = x.global_save_scope_acknowledged;
+        j["interface_name"] = x.interface_name;
+        j["kind"] = x.kind;
+        j["observation_failure"] = x.observation_failure;
+        j["ownership_tombstone_durable"] = x.ownership_tombstone_durable;
+        j["phase"] = x.phase;
+        j["request_may_have_been_dispatched"] = x.request_may_have_been_dispatched;
+        j["rollback_snapshot_retained"] = x.rollback_snapshot_retained;
+        j["save_perform_started"] = x.save_perform_started;
+        j["status"] = x.status;
+        j["stop"] = x.stop;
+        j["system_configuration_save_acknowledged"] = x.system_configuration_save_acknowledged;
+        j["transport_outcome"] = x.transport_outcome;
+    }
+
     inline void from_json(const json & j, NdmsNativeImportPreflightResponse& x) {
         x.admitted = j.at("admitted").get<bool>();
         x.external_ndms_writer_race_excluded = j.at("external_ndms_writer_race_excluded").get<bool>();
@@ -4590,21 +4778,70 @@ namespace api {
         j["owner_risk_acceptance_required"] = x.owner_risk_acceptance_required;
     }
 
+    inline void from_json(const json & j, NdmsNativeImportRecoveryResponse& x) {
+        x.created_interface = get_stack_optional<std::string>(j, "created_interface");
+        x.created_kernel_interface = get_stack_optional<std::string>(j, "created_kernel_interface");
+        x.delete_wal_readiness = get_stack_optional<NdmsNativeWalReadiness>(j, "delete_wal_readiness");
+        x.direct_observation_failure = get_stack_optional<NdmsNativeDirectObservationFailure>(j, "direct_observation_failure");
+        x.expected_interface = get_stack_optional<std::string>(j, "expected_interface");
+        x.external_ndms_writer_race_excluded = j.at("external_ndms_writer_race_excluded").get<bool>();
+        x.forward_admission_state = get_stack_optional<NdmsNativeImportRecoveryAdmissionState>(j, "forward_admission_state");
+        x.forward_dispatch_state = get_stack_optional<NdmsNativeImportRecoveryDispatchState>(j, "forward_dispatch_state");
+        x.forward_failed_step = get_stack_optional<NdmsNativeImportRecoveryStep>(j, "forward_failed_step");
+        x.import_wal_readiness = get_stack_optional<NdmsNativeWalReadiness>(j, "import_wal_readiness");
+        x.kind = get_stack_optional<NdmsNativeMutationKind>(j, "kind");
+        x.ndms_delete_dispatched = j.at("ndms_delete_dispatched").get<bool>();
+        x.ndms_import_request_dispatched = j.at("ndms_import_request_dispatched").get<bool>();
+        x.ownership_published = j.at("ownership_published").get<bool>();
+        x.phase = get_stack_optional<NdmsNativeImportRecoveryPhase>(j, "phase");
+        x.recovery_action = get_stack_optional<NdmsNativeImportRecoveryAction>(j, "recovery_action");
+        x.status = j.at("status").get<NdmsNativeImportRecoveryStatus>();
+        x.stop = j.at("stop").get<NdmsNativeImportRecoveryStop>();
+        x.system_configuration_save_performed = j.at("system_configuration_save_performed").get<bool>();
+        x.wal_may_require_recovery = j.at("wal_may_require_recovery").get<bool>();
+        x.wal_removed = j.at("wal_removed").get<bool>();
+    }
+
+    inline void to_json(json & j, const NdmsNativeImportRecoveryResponse & x) {
+        j = json::object();
+        j["created_interface"] = x.created_interface;
+        j["created_kernel_interface"] = x.created_kernel_interface;
+        j["delete_wal_readiness"] = x.delete_wal_readiness;
+        j["direct_observation_failure"] = x.direct_observation_failure;
+        j["expected_interface"] = x.expected_interface;
+        j["external_ndms_writer_race_excluded"] = x.external_ndms_writer_race_excluded;
+        j["forward_admission_state"] = x.forward_admission_state;
+        j["forward_dispatch_state"] = x.forward_dispatch_state;
+        j["forward_failed_step"] = x.forward_failed_step;
+        j["import_wal_readiness"] = x.import_wal_readiness;
+        j["kind"] = x.kind;
+        j["ndms_delete_dispatched"] = x.ndms_delete_dispatched;
+        j["ndms_import_request_dispatched"] = x.ndms_import_request_dispatched;
+        j["ownership_published"] = x.ownership_published;
+        j["phase"] = x.phase;
+        j["recovery_action"] = x.recovery_action;
+        j["status"] = x.status;
+        j["stop"] = x.stop;
+        j["system_configuration_save_performed"] = x.system_configuration_save_performed;
+        j["wal_may_require_recovery"] = x.wal_may_require_recovery;
+        j["wal_removed"] = x.wal_removed;
+    }
+
     inline void from_json(const json & j, NdmsNativeImportResponse& x) {
         x.baseline_error = get_stack_optional<std::string>(j, "baseline_error");
         x.created_interface = get_stack_optional<std::string>(j, "created_interface");
         x.created_kernel_interface = get_stack_optional<std::string>(j, "created_kernel_interface");
-        x.delete_wal_readiness = get_stack_optional<WalReadiness>(j, "delete_wal_readiness");
-        x.direct_observation_failure = get_stack_optional<std::string>(j, "direct_observation_failure");
+        x.delete_wal_readiness = get_stack_optional<NdmsNativeWalReadiness>(j, "delete_wal_readiness");
+        x.direct_observation_failure = get_stack_optional<NdmsNativeDirectObservationFailure>(j, "direct_observation_failure");
         x.executor_stop = get_stack_optional<std::string>(j, "executor_stop");
         x.expected_interface = get_stack_optional<std::string>(j, "expected_interface");
         x.external_ndms_writer_race_accepted = j.at("external_ndms_writer_race_accepted").get<bool>();
         x.external_ndms_writer_race_excluded = j.at("external_ndms_writer_race_excluded").get<bool>();
-        x.forward_admission_state = get_stack_optional<std::string>(j, "forward_admission_state");
-        x.forward_dispatch_state = get_stack_optional<std::string>(j, "forward_dispatch_state");
-        x.forward_failed_step = get_stack_optional<std::string>(j, "forward_failed_step");
-        x.import_wal_readiness = get_stack_optional<WalReadiness>(j, "import_wal_readiness");
-        x.kind = get_stack_optional<NdmsNativeImportResponseKind>(j, "kind");
+        x.forward_admission_state = get_stack_optional<NdmsNativeImportRecoveryAdmissionState>(j, "forward_admission_state");
+        x.forward_dispatch_state = get_stack_optional<NdmsNativeImportRecoveryDispatchState>(j, "forward_dispatch_state");
+        x.forward_failed_step = get_stack_optional<NdmsNativeImportRecoveryStep>(j, "forward_failed_step");
+        x.import_wal_readiness = get_stack_optional<NdmsNativeWalReadiness>(j, "import_wal_readiness");
+        x.kind = get_stack_optional<NdmsNativeMutationKind>(j, "kind");
         x.ownership_published = j.at("ownership_published").get<bool>();
         x.request_error = get_stack_optional<RequestError>(j, "request_error");
         x.request_may_have_been_dispatched = j.at("request_may_have_been_dispatched").get<bool>();
@@ -4612,7 +4849,6 @@ namespace api {
         x.status = j.at("status").get<NdmsNativeImportStatus>();
         x.stop = j.at("stop").get<NdmsNativeImportStop>();
         x.system_configuration_save_performed = j.at("system_configuration_save_performed").get<bool>();
-        x.transaction_id = get_stack_optional<std::string>(j, "transaction_id");
         x.wal_may_require_recovery = j.at("wal_may_require_recovery").get<bool>();
     }
 
@@ -4639,7 +4875,6 @@ namespace api {
         j["status"] = x.status;
         j["stop"] = x.stop;
         j["system_configuration_save_performed"] = x.system_configuration_save_performed;
-        j["transaction_id"] = x.transaction_id;
         j["wal_may_require_recovery"] = x.wal_may_require_recovery;
     }
 
@@ -6256,9 +6491,24 @@ namespace api {
         x.ndms_interface_role = get_stack_optional<NdmsInterfaceRoleEnum>(j, "NdmsInterfaceRole");
         x.ndms_management_blocker = get_stack_optional<NdmsManagementBlockerElement>(j, "NdmsManagementBlocker");
         x.ndms_native_delete_journal_state = get_stack_optional<ObservedDeleteJournalState>(j, "NdmsNativeDeleteJournalState");
+        x.ndms_native_delete_phase = get_stack_optional<NdmsNativeDeletePhase>(j, "NdmsNativeDeletePhase");
+        x.ndms_native_delete_request = get_stack_optional<NdmsNativeDeleteRequest>(j, "NdmsNativeDeleteRequest");
+        x.ndms_native_delete_response = get_stack_optional<NdmsNativeDeleteResponse>(j, "NdmsNativeDeleteResponse");
+        x.ndms_native_delete_status = get_stack_optional<NdmsNativeDeleteStatus>(j, "NdmsNativeDeleteStatus");
+        x.ndms_native_delete_stop = get_stack_optional<NdmsNativeDeleteStop>(j, "NdmsNativeDeleteStop");
+        x.ndms_native_delete_transport_outcome = get_stack_optional<NdmsNativeDeleteTransportOutcome>(j, "NdmsNativeDeleteTransportOutcome");
+        x.ndms_native_direct_observation_failure = get_stack_optional<NdmsNativeDirectObservationFailure>(j, "NdmsNativeDirectObservationFailure");
         x.ndms_native_import_preflight_response = get_stack_optional<NdmsNativeImportPreflightResponse>(j, "NdmsNativeImportPreflightResponse");
         x.ndms_native_import_readiness = get_stack_optional<NdmsNativeImportReadiness>(j, "NdmsNativeImportReadiness");
         x.ndms_native_import_readiness_journal_state = get_stack_optional<NdmsNativeImportJournalState>(j, "NdmsNativeImportReadinessJournalState");
+        x.ndms_native_import_recovery_action = get_stack_optional<NdmsNativeImportRecoveryAction>(j, "NdmsNativeImportRecoveryAction");
+        x.ndms_native_import_recovery_admission_state = get_stack_optional<NdmsNativeImportRecoveryAdmissionState>(j, "NdmsNativeImportRecoveryAdmissionState");
+        x.ndms_native_import_recovery_dispatch_state = get_stack_optional<NdmsNativeImportRecoveryDispatchState>(j, "NdmsNativeImportRecoveryDispatchState");
+        x.ndms_native_import_recovery_phase = get_stack_optional<NdmsNativeImportRecoveryPhase>(j, "NdmsNativeImportRecoveryPhase");
+        x.ndms_native_import_recovery_response = get_stack_optional<NdmsNativeImportRecoveryResponse>(j, "NdmsNativeImportRecoveryResponse");
+        x.ndms_native_import_recovery_status = get_stack_optional<NdmsNativeImportRecoveryStatus>(j, "NdmsNativeImportRecoveryStatus");
+        x.ndms_native_import_recovery_step = get_stack_optional<NdmsNativeImportRecoveryStep>(j, "NdmsNativeImportRecoveryStep");
+        x.ndms_native_import_recovery_stop = get_stack_optional<NdmsNativeImportRecoveryStop>(j, "NdmsNativeImportRecoveryStop");
         x.ndms_native_import_response = get_stack_optional<NdmsNativeImportResponse>(j, "NdmsNativeImportResponse");
         x.ndms_native_import_status = get_stack_optional<NdmsNativeImportStatus>(j, "NdmsNativeImportStatus");
         x.ndms_native_import_stop = get_stack_optional<NdmsNativeImportStop>(j, "NdmsNativeImportStop");
@@ -6267,8 +6517,12 @@ namespace api {
         x.ndms_native_inventory_deferred_delete_check = get_stack_optional<NdmsNativeInventoryDeferredDeleteCheckElement>(j, "NdmsNativeInventoryDeferredDeleteCheck");
         x.ndms_native_inventory_delete_blocker = get_stack_optional<NdmsNativeInventoryDeleteBlockerElement>(j, "NdmsNativeInventoryDeleteBlocker");
         x.ndms_native_inventory_ownership_state = get_stack_optional<OwnershipState>(j, "NdmsNativeInventoryOwnershipState");
+        x.ndms_native_kernel_interface_name = get_stack_optional<std::string>(j, "NdmsNativeKernelInterfaceName");
+        x.ndms_native_managed_interface_name = get_stack_optional<std::string>(j, "NdmsNativeManagedInterfaceName");
         x.ndms_native_mutation_inventory_status = get_stack_optional<NativeMutationStatus>(j, "NdmsNativeMutationInventoryStatus");
+        x.ndms_native_mutation_kind = get_stack_optional<NdmsNativeMutationKind>(j, "NdmsNativeMutationKind");
         x.ndms_native_ownership_lifecycle = get_stack_optional<OwnershipLifecycle>(j, "NdmsNativeOwnershipLifecycle");
+        x.ndms_native_wal_readiness = get_stack_optional<NdmsNativeWalReadiness>(j, "NdmsNativeWalReadiness");
         x.ndms_tunnel_interface = get_stack_optional<NdmsTunnelInterfaceElement>(j, "NdmsTunnelInterface");
         x.ndms_tunnel_kind = get_stack_optional<NdmsTunnelKindEnum>(j, "NdmsTunnelKind");
         x.ndms_vpn_server_kind = get_stack_optional<NdmsVpnServerKind>(j, "NdmsVpnServerKind");
@@ -6477,9 +6731,24 @@ namespace api {
         j["NdmsInterfaceRole"] = x.ndms_interface_role;
         j["NdmsManagementBlocker"] = x.ndms_management_blocker;
         j["NdmsNativeDeleteJournalState"] = x.ndms_native_delete_journal_state;
+        j["NdmsNativeDeletePhase"] = x.ndms_native_delete_phase;
+        j["NdmsNativeDeleteRequest"] = x.ndms_native_delete_request;
+        j["NdmsNativeDeleteResponse"] = x.ndms_native_delete_response;
+        j["NdmsNativeDeleteStatus"] = x.ndms_native_delete_status;
+        j["NdmsNativeDeleteStop"] = x.ndms_native_delete_stop;
+        j["NdmsNativeDeleteTransportOutcome"] = x.ndms_native_delete_transport_outcome;
+        j["NdmsNativeDirectObservationFailure"] = x.ndms_native_direct_observation_failure;
         j["NdmsNativeImportPreflightResponse"] = x.ndms_native_import_preflight_response;
         j["NdmsNativeImportReadiness"] = x.ndms_native_import_readiness;
         j["NdmsNativeImportReadinessJournalState"] = x.ndms_native_import_readiness_journal_state;
+        j["NdmsNativeImportRecoveryAction"] = x.ndms_native_import_recovery_action;
+        j["NdmsNativeImportRecoveryAdmissionState"] = x.ndms_native_import_recovery_admission_state;
+        j["NdmsNativeImportRecoveryDispatchState"] = x.ndms_native_import_recovery_dispatch_state;
+        j["NdmsNativeImportRecoveryPhase"] = x.ndms_native_import_recovery_phase;
+        j["NdmsNativeImportRecoveryResponse"] = x.ndms_native_import_recovery_response;
+        j["NdmsNativeImportRecoveryStatus"] = x.ndms_native_import_recovery_status;
+        j["NdmsNativeImportRecoveryStep"] = x.ndms_native_import_recovery_step;
+        j["NdmsNativeImportRecoveryStop"] = x.ndms_native_import_recovery_stop;
         j["NdmsNativeImportResponse"] = x.ndms_native_import_response;
         j["NdmsNativeImportStatus"] = x.ndms_native_import_status;
         j["NdmsNativeImportStop"] = x.ndms_native_import_stop;
@@ -6488,8 +6757,12 @@ namespace api {
         j["NdmsNativeInventoryDeferredDeleteCheck"] = x.ndms_native_inventory_deferred_delete_check;
         j["NdmsNativeInventoryDeleteBlocker"] = x.ndms_native_inventory_delete_blocker;
         j["NdmsNativeInventoryOwnershipState"] = x.ndms_native_inventory_ownership_state;
+        j["NdmsNativeKernelInterfaceName"] = x.ndms_native_kernel_interface_name;
+        j["NdmsNativeManagedInterfaceName"] = x.ndms_native_managed_interface_name;
         j["NdmsNativeMutationInventoryStatus"] = x.ndms_native_mutation_inventory_status;
+        j["NdmsNativeMutationKind"] = x.ndms_native_mutation_kind;
         j["NdmsNativeOwnershipLifecycle"] = x.ndms_native_ownership_lifecycle;
+        j["NdmsNativeWalReadiness"] = x.ndms_native_wal_readiness;
         j["NdmsTunnelInterface"] = x.ndms_tunnel_interface;
         j["NdmsTunnelKind"] = x.ndms_tunnel_kind;
         j["NdmsVpnServerKind"] = x.ndms_vpn_server_kind;
@@ -7438,33 +7711,437 @@ namespace api {
         }
     }
 
-    inline void from_json(const json & j, WalReadiness & x) {
-        if (j == "clean") x = WalReadiness::CLEAN;
-        else if (j == "unfinished") x = WalReadiness::UNFINISHED;
-        else if (j == "unsafe") x = WalReadiness::UNSAFE;
-        else { throw std::runtime_error("Cannot deserialize to enumeration \"WalReadiness\""); }
+    inline void from_json(const json & j, NdmsNativeDeletePhase & x) {
+        if (j == "cleanup") x = NdmsNativeDeletePhase::CLEANUP;
+        else if (j == "delete_may_be_inflight") x = NdmsNativeDeletePhase::DELETE_MAY_BE_INFLIGHT;
+        else if (j == "prepared") x = NdmsNativeDeletePhase::PREPARED;
+        else if (j == "running_absence_verified") x = NdmsNativeDeletePhase::RUNNING_ABSENCE_VERIFIED;
+        else if (j == "save_acknowledged_unverified") x = NdmsNativeDeletePhase::SAVE_ACKNOWLEDGED_UNVERIFIED;
+        else if (j == "save_may_be_inflight") x = NdmsNativeDeletePhase::SAVE_MAY_BE_INFLIGHT;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsNativeDeletePhase\""); }
     }
 
-    inline void to_json(json & j, const WalReadiness & x) {
+    inline void to_json(json & j, const NdmsNativeDeletePhase & x) {
         switch (x) {
-            case WalReadiness::CLEAN: j = "clean"; break;
-            case WalReadiness::UNFINISHED: j = "unfinished"; break;
-            case WalReadiness::UNSAFE: j = "unsafe"; break;
-            default: throw std::runtime_error("Unexpected value in enumeration \"WalReadiness\": " + std::to_string(static_cast<int>(x)));
+            case NdmsNativeDeletePhase::CLEANUP: j = "cleanup"; break;
+            case NdmsNativeDeletePhase::DELETE_MAY_BE_INFLIGHT: j = "delete_may_be_inflight"; break;
+            case NdmsNativeDeletePhase::PREPARED: j = "prepared"; break;
+            case NdmsNativeDeletePhase::RUNNING_ABSENCE_VERIFIED: j = "running_absence_verified"; break;
+            case NdmsNativeDeletePhase::SAVE_ACKNOWLEDGED_UNVERIFIED: j = "save_acknowledged_unverified"; break;
+            case NdmsNativeDeletePhase::SAVE_MAY_BE_INFLIGHT: j = "save_may_be_inflight"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NdmsNativeDeletePhase\": " + std::to_string(static_cast<int>(x)));
         }
     }
 
-    inline void from_json(const json & j, NdmsNativeImportResponseKind & x) {
-        if (j == "amnezia_wireguard") x = NdmsNativeImportResponseKind::AMNEZIA_WIREGUARD;
-        else if (j == "wireguard") x = NdmsNativeImportResponseKind::WIREGUARD;
-        else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsNativeImportResponseKind\""); }
+    inline void from_json(const json & j, NdmsNativeMutationKind & x) {
+        if (j == "amnezia_wireguard") x = NdmsNativeMutationKind::AMNEZIA_WIREGUARD;
+        else if (j == "wireguard") x = NdmsNativeMutationKind::WIREGUARD;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsNativeMutationKind\""); }
     }
 
-    inline void to_json(json & j, const NdmsNativeImportResponseKind & x) {
+    inline void to_json(json & j, const NdmsNativeMutationKind & x) {
         switch (x) {
-            case NdmsNativeImportResponseKind::AMNEZIA_WIREGUARD: j = "amnezia_wireguard"; break;
-            case NdmsNativeImportResponseKind::WIREGUARD: j = "wireguard"; break;
-            default: throw std::runtime_error("Unexpected value in enumeration \"NdmsNativeImportResponseKind\": " + std::to_string(static_cast<int>(x)));
+            case NdmsNativeMutationKind::AMNEZIA_WIREGUARD: j = "amnezia_wireguard"; break;
+            case NdmsNativeMutationKind::WIREGUARD: j = "wireguard"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NdmsNativeMutationKind\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, NdmsNativeDirectObservationFailure & x) {
+        static std::unordered_map<std::string, NdmsNativeDirectObservationFailure> enumValues {
+            {"ambiguous_marker", NdmsNativeDirectObservationFailure::AMBIGUOUS_MARKER},
+            {"catalog_malformed", NdmsNativeDirectObservationFailure::CATALOG_MALFORMED},
+            {"catalog_unavailable", NdmsNativeDirectObservationFailure::CATALOG_UNAVAILABLE},
+            {"catalog_unsafe", NdmsNativeDirectObservationFailure::CATALOG_UNSAFE},
+            {"duplicate_json_key", NdmsNativeDirectObservationFailure::DUPLICATE_JSON_KEY},
+            {"empty_response", NdmsNativeDirectObservationFailure::EMPTY_RESPONSE},
+            {"invalid_marker", NdmsNativeDirectObservationFailure::INVALID_MARKER},
+            {"invalid_target", NdmsNativeDirectObservationFailure::INVALID_TARGET},
+            {"malformed_json", NdmsNativeDirectObservationFailure::MALFORMED_JSON},
+            {"marker_target_not_managed_wireguard", NdmsNativeDirectObservationFailure::MARKER_TARGET_NOT_MANAGED_WIREGUARD},
+            {"none", NdmsNativeDirectObservationFailure::NONE},
+            {"rci_error_response", NdmsNativeDirectObservationFailure::RCI_ERROR_RESPONSE},
+            {"response_not_object", NdmsNativeDirectObservationFailure::RESPONSE_NOT_OBJECT},
+            {"response_too_large", NdmsNativeDirectObservationFailure::RESPONSE_TOO_LARGE},
+            {"target_evidence_refused", NdmsNativeDirectObservationFailure::TARGET_EVIDENCE_REFUSED},
+            {"transport_failed", NdmsNativeDirectObservationFailure::TRANSPORT_FAILED},
+        };
+        auto iter = enumValues.find(j.get<std::string>());
+        if (iter != enumValues.end()) {
+            x = iter->second;
+        }
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsNativeDirectObservationFailure\""); }
+    }
+
+    inline void to_json(json & j, const NdmsNativeDirectObservationFailure & x) {
+        switch (x) {
+            case NdmsNativeDirectObservationFailure::AMBIGUOUS_MARKER: j = "ambiguous_marker"; break;
+            case NdmsNativeDirectObservationFailure::CATALOG_MALFORMED: j = "catalog_malformed"; break;
+            case NdmsNativeDirectObservationFailure::CATALOG_UNAVAILABLE: j = "catalog_unavailable"; break;
+            case NdmsNativeDirectObservationFailure::CATALOG_UNSAFE: j = "catalog_unsafe"; break;
+            case NdmsNativeDirectObservationFailure::DUPLICATE_JSON_KEY: j = "duplicate_json_key"; break;
+            case NdmsNativeDirectObservationFailure::EMPTY_RESPONSE: j = "empty_response"; break;
+            case NdmsNativeDirectObservationFailure::INVALID_MARKER: j = "invalid_marker"; break;
+            case NdmsNativeDirectObservationFailure::INVALID_TARGET: j = "invalid_target"; break;
+            case NdmsNativeDirectObservationFailure::MALFORMED_JSON: j = "malformed_json"; break;
+            case NdmsNativeDirectObservationFailure::MARKER_TARGET_NOT_MANAGED_WIREGUARD: j = "marker_target_not_managed_wireguard"; break;
+            case NdmsNativeDirectObservationFailure::NONE: j = "none"; break;
+            case NdmsNativeDirectObservationFailure::RCI_ERROR_RESPONSE: j = "rci_error_response"; break;
+            case NdmsNativeDirectObservationFailure::RESPONSE_NOT_OBJECT: j = "response_not_object"; break;
+            case NdmsNativeDirectObservationFailure::RESPONSE_TOO_LARGE: j = "response_too_large"; break;
+            case NdmsNativeDirectObservationFailure::TARGET_EVIDENCE_REFUSED: j = "target_evidence_refused"; break;
+            case NdmsNativeDirectObservationFailure::TRANSPORT_FAILED: j = "transport_failed"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NdmsNativeDirectObservationFailure\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, NdmsNativeDeleteStatus & x) {
+        if (j == "blocked") x = NdmsNativeDeleteStatus::BLOCKED;
+        else if (j == "recovery_required") x = NdmsNativeDeleteStatus::RECOVERY_REQUIRED;
+        else if (j == "save_acknowledged_unverified") x = NdmsNativeDeleteStatus::SAVE_ACKNOWLEDGED_UNVERIFIED;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsNativeDeleteStatus\""); }
+    }
+
+    inline void to_json(json & j, const NdmsNativeDeleteStatus & x) {
+        switch (x) {
+            case NdmsNativeDeleteStatus::BLOCKED: j = "blocked"; break;
+            case NdmsNativeDeleteStatus::RECOVERY_REQUIRED: j = "recovery_required"; break;
+            case NdmsNativeDeleteStatus::SAVE_ACKNOWLEDGED_UNVERIFIED: j = "save_acknowledged_unverified"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NdmsNativeDeleteStatus\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, NdmsNativeDeleteStop & x) {
+        static std::unordered_map<std::string, NdmsNativeDeleteStop> enumValues {
+            {"delete_guard_rejected", NdmsNativeDeleteStop::DELETE_GUARD_REJECTED},
+            {"delete_transport_ambiguous", NdmsNativeDeleteStop::DELETE_TRANSPORT_AMBIGUOUS},
+            {"delete_wal_cleanup_failed", NdmsNativeDeleteStop::DELETE_WAL_CLEANUP_FAILED},
+            {"delete_wal_publish_failed", NdmsNativeDeleteStop::DELETE_WAL_PUBLISH_FAILED},
+            {"delete_wal_unfinished", NdmsNativeDeleteStop::DELETE_WAL_UNFINISHED},
+            {"delete_wal_unsafe", NdmsNativeDeleteStop::DELETE_WAL_UNSAFE},
+            {"durable_observation_failed", NdmsNativeDeleteStop::DURABLE_OBSERVATION_FAILED},
+            {"external_writer_race_not_accepted", NdmsNativeDeleteStop::EXTERNAL_WRITER_RACE_NOT_ACCEPTED},
+            {"import_wal_not_authoritatively_clean", NdmsNativeDeleteStop::IMPORT_WAL_NOT_AUTHORITATIVELY_CLEAN},
+            {"invalid_or_protected_target", NdmsNativeDeleteStop::INVALID_OR_PROTECTED_TARGET},
+            {"keen_pbr_dependencies_present", NdmsNativeDeleteStop::KEEN_PBR_DEPENDENCIES_PRESENT},
+            {"keen_pbr_dependency_changed", NdmsNativeDeleteStop::KEEN_PBR_DEPENDENCY_CHANGED},
+            {"keen_pbr_dependency_scan_incomplete", NdmsNativeDeleteStop::KEEN_PBR_DEPENDENCY_SCAN_INCOMPLETE},
+            {"none", NdmsNativeDeleteStop::NONE},
+            {"no_delete_transaction", NdmsNativeDeleteStop::NO_DELETE_TRANSACTION},
+            {"observation_scope_mismatch", NdmsNativeDeleteStop::OBSERVATION_SCOPE_MISMATCH},
+            {"observed_target_drifted", NdmsNativeDeleteStop::OBSERVED_TARGET_DRIFTED},
+            {"observed_target_mismatch", NdmsNativeDeleteStop::OBSERVED_TARGET_MISMATCH},
+            {"observed_target_reappeared_after_save", NdmsNativeDeleteStop::OBSERVED_TARGET_REAPPEARED_AFTER_SAVE},
+            {"ownership_absent", NdmsNativeDeleteStop::OWNERSHIP_ABSENT},
+            {"ownership_changed", NdmsNativeDeleteStop::OWNERSHIP_CHANGED},
+            {"ownership_not_active", NdmsNativeDeleteStop::OWNERSHIP_NOT_ACTIVE},
+            {"ownership_unreadable", NdmsNativeDeleteStop::OWNERSHIP_UNREADABLE},
+            {"owner_global_save_not_acknowledged", NdmsNativeDeleteStop::OWNER_GLOBAL_SAVE_NOT_ACKNOWLEDGED},
+            {"running_config_observation_failed", NdmsNativeDeleteStop::RUNNING_CONFIG_OBSERVATION_FAILED},
+            {"runtime_observation_failed", NdmsNativeDeleteStop::RUNTIME_OBSERVATION_FAILED},
+            {"save_guard_rejected", NdmsNativeDeleteStop::SAVE_GUARD_REJECTED},
+            {"save_reconfirmation_required", NdmsNativeDeleteStop::SAVE_RECONFIRMATION_REQUIRED},
+            {"save_transport_ambiguous", NdmsNativeDeleteStop::SAVE_TRANSPORT_AMBIGUOUS},
+            {"snapshot_absent", NdmsNativeDeleteStop::SNAPSHOT_ABSENT},
+            {"snapshot_mismatch", NdmsNativeDeleteStop::SNAPSHOT_MISMATCH},
+            {"snapshot_unreadable", NdmsNativeDeleteStop::SNAPSHOT_UNREADABLE},
+            {"tombstone_mismatch", NdmsNativeDeleteStop::TOMBSTONE_MISMATCH},
+            {"tombstone_publish_failed", NdmsNativeDeleteStop::TOMBSTONE_PUBLISH_FAILED},
+            {"unexpected_failure", NdmsNativeDeleteStop::UNEXPECTED_FAILURE},
+            {"writer_lost", NdmsNativeDeleteStop::WRITER_LOST},
+            {"writer_missing", NdmsNativeDeleteStop::WRITER_MISSING},
+        };
+        auto iter = enumValues.find(j.get<std::string>());
+        if (iter != enumValues.end()) {
+            x = iter->second;
+        }
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsNativeDeleteStop\""); }
+    }
+
+    inline void to_json(json & j, const NdmsNativeDeleteStop & x) {
+        switch (x) {
+            case NdmsNativeDeleteStop::DELETE_GUARD_REJECTED: j = "delete_guard_rejected"; break;
+            case NdmsNativeDeleteStop::DELETE_TRANSPORT_AMBIGUOUS: j = "delete_transport_ambiguous"; break;
+            case NdmsNativeDeleteStop::DELETE_WAL_CLEANUP_FAILED: j = "delete_wal_cleanup_failed"; break;
+            case NdmsNativeDeleteStop::DELETE_WAL_PUBLISH_FAILED: j = "delete_wal_publish_failed"; break;
+            case NdmsNativeDeleteStop::DELETE_WAL_UNFINISHED: j = "delete_wal_unfinished"; break;
+            case NdmsNativeDeleteStop::DELETE_WAL_UNSAFE: j = "delete_wal_unsafe"; break;
+            case NdmsNativeDeleteStop::DURABLE_OBSERVATION_FAILED: j = "durable_observation_failed"; break;
+            case NdmsNativeDeleteStop::EXTERNAL_WRITER_RACE_NOT_ACCEPTED: j = "external_writer_race_not_accepted"; break;
+            case NdmsNativeDeleteStop::IMPORT_WAL_NOT_AUTHORITATIVELY_CLEAN: j = "import_wal_not_authoritatively_clean"; break;
+            case NdmsNativeDeleteStop::INVALID_OR_PROTECTED_TARGET: j = "invalid_or_protected_target"; break;
+            case NdmsNativeDeleteStop::KEEN_PBR_DEPENDENCIES_PRESENT: j = "keen_pbr_dependencies_present"; break;
+            case NdmsNativeDeleteStop::KEEN_PBR_DEPENDENCY_CHANGED: j = "keen_pbr_dependency_changed"; break;
+            case NdmsNativeDeleteStop::KEEN_PBR_DEPENDENCY_SCAN_INCOMPLETE: j = "keen_pbr_dependency_scan_incomplete"; break;
+            case NdmsNativeDeleteStop::NONE: j = "none"; break;
+            case NdmsNativeDeleteStop::NO_DELETE_TRANSACTION: j = "no_delete_transaction"; break;
+            case NdmsNativeDeleteStop::OBSERVATION_SCOPE_MISMATCH: j = "observation_scope_mismatch"; break;
+            case NdmsNativeDeleteStop::OBSERVED_TARGET_DRIFTED: j = "observed_target_drifted"; break;
+            case NdmsNativeDeleteStop::OBSERVED_TARGET_MISMATCH: j = "observed_target_mismatch"; break;
+            case NdmsNativeDeleteStop::OBSERVED_TARGET_REAPPEARED_AFTER_SAVE: j = "observed_target_reappeared_after_save"; break;
+            case NdmsNativeDeleteStop::OWNERSHIP_ABSENT: j = "ownership_absent"; break;
+            case NdmsNativeDeleteStop::OWNERSHIP_CHANGED: j = "ownership_changed"; break;
+            case NdmsNativeDeleteStop::OWNERSHIP_NOT_ACTIVE: j = "ownership_not_active"; break;
+            case NdmsNativeDeleteStop::OWNERSHIP_UNREADABLE: j = "ownership_unreadable"; break;
+            case NdmsNativeDeleteStop::OWNER_GLOBAL_SAVE_NOT_ACKNOWLEDGED: j = "owner_global_save_not_acknowledged"; break;
+            case NdmsNativeDeleteStop::RUNNING_CONFIG_OBSERVATION_FAILED: j = "running_config_observation_failed"; break;
+            case NdmsNativeDeleteStop::RUNTIME_OBSERVATION_FAILED: j = "runtime_observation_failed"; break;
+            case NdmsNativeDeleteStop::SAVE_GUARD_REJECTED: j = "save_guard_rejected"; break;
+            case NdmsNativeDeleteStop::SAVE_RECONFIRMATION_REQUIRED: j = "save_reconfirmation_required"; break;
+            case NdmsNativeDeleteStop::SAVE_TRANSPORT_AMBIGUOUS: j = "save_transport_ambiguous"; break;
+            case NdmsNativeDeleteStop::SNAPSHOT_ABSENT: j = "snapshot_absent"; break;
+            case NdmsNativeDeleteStop::SNAPSHOT_MISMATCH: j = "snapshot_mismatch"; break;
+            case NdmsNativeDeleteStop::SNAPSHOT_UNREADABLE: j = "snapshot_unreadable"; break;
+            case NdmsNativeDeleteStop::TOMBSTONE_MISMATCH: j = "tombstone_mismatch"; break;
+            case NdmsNativeDeleteStop::TOMBSTONE_PUBLISH_FAILED: j = "tombstone_publish_failed"; break;
+            case NdmsNativeDeleteStop::UNEXPECTED_FAILURE: j = "unexpected_failure"; break;
+            case NdmsNativeDeleteStop::WRITER_LOST: j = "writer_lost"; break;
+            case NdmsNativeDeleteStop::WRITER_MISSING: j = "writer_missing"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NdmsNativeDeleteStop\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, NdmsNativeDeleteTransportOutcome & x) {
+        if (j == "acknowledged_needs_observation") x = NdmsNativeDeleteTransportOutcome::ACKNOWLEDGED_NEEDS_OBSERVATION;
+        else if (j == "body_empty") x = NdmsNativeDeleteTransportOutcome::BODY_EMPTY;
+        else if (j == "body_too_large") x = NdmsNativeDeleteTransportOutcome::BODY_TOO_LARGE;
+        else if (j == "content_type_not_json") x = NdmsNativeDeleteTransportOutcome::CONTENT_TYPE_NOT_JSON;
+        else if (j == "guard_rejected") x = NdmsNativeDeleteTransportOutcome::GUARD_REJECTED;
+        else if (j == "http_status_not_200") x = NdmsNativeDeleteTransportOutcome::HTTP_STATUS_NOT_200;
+        else if (j == "shape_not_acknowledged") x = NdmsNativeDeleteTransportOutcome::SHAPE_NOT_ACKNOWLEDGED;
+        else if (j == "transport_failed") x = NdmsNativeDeleteTransportOutcome::TRANSPORT_FAILED;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsNativeDeleteTransportOutcome\""); }
+    }
+
+    inline void to_json(json & j, const NdmsNativeDeleteTransportOutcome & x) {
+        switch (x) {
+            case NdmsNativeDeleteTransportOutcome::ACKNOWLEDGED_NEEDS_OBSERVATION: j = "acknowledged_needs_observation"; break;
+            case NdmsNativeDeleteTransportOutcome::BODY_EMPTY: j = "body_empty"; break;
+            case NdmsNativeDeleteTransportOutcome::BODY_TOO_LARGE: j = "body_too_large"; break;
+            case NdmsNativeDeleteTransportOutcome::CONTENT_TYPE_NOT_JSON: j = "content_type_not_json"; break;
+            case NdmsNativeDeleteTransportOutcome::GUARD_REJECTED: j = "guard_rejected"; break;
+            case NdmsNativeDeleteTransportOutcome::HTTP_STATUS_NOT_200: j = "http_status_not_200"; break;
+            case NdmsNativeDeleteTransportOutcome::SHAPE_NOT_ACKNOWLEDGED: j = "shape_not_acknowledged"; break;
+            case NdmsNativeDeleteTransportOutcome::TRANSPORT_FAILED: j = "transport_failed"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NdmsNativeDeleteTransportOutcome\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, NdmsNativeImportRecoveryAction & x) {
+        if (j == "abort_without_mutation") x = NdmsNativeImportRecoveryAction::ABORT_WITHOUT_MUTATION;
+        else if (j == "block_unknown") x = NdmsNativeImportRecoveryAction::BLOCK_UNKNOWN;
+        else if (j == "complete_rollback") x = NdmsNativeImportRecoveryAction::COMPLETE_ROLLBACK;
+        else if (j == "resume_forward_reconcile") x = NdmsNativeImportRecoveryAction::RESUME_FORWARD_RECONCILE;
+        else if (j == "retry_exact_owned_delete") x = NdmsNativeImportRecoveryAction::RETRY_EXACT_OWNED_DELETE;
+        else if (j == "retry_read_only_observation") x = NdmsNativeImportRecoveryAction::RETRY_READ_ONLY_OBSERVATION;
+        else if (j == "rollback_delete_exact_owned") x = NdmsNativeImportRecoveryAction::ROLLBACK_DELETE_EXACT_OWNED;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsNativeImportRecoveryAction\""); }
+    }
+
+    inline void to_json(json & j, const NdmsNativeImportRecoveryAction & x) {
+        switch (x) {
+            case NdmsNativeImportRecoveryAction::ABORT_WITHOUT_MUTATION: j = "abort_without_mutation"; break;
+            case NdmsNativeImportRecoveryAction::BLOCK_UNKNOWN: j = "block_unknown"; break;
+            case NdmsNativeImportRecoveryAction::COMPLETE_ROLLBACK: j = "complete_rollback"; break;
+            case NdmsNativeImportRecoveryAction::RESUME_FORWARD_RECONCILE: j = "resume_forward_reconcile"; break;
+            case NdmsNativeImportRecoveryAction::RETRY_EXACT_OWNED_DELETE: j = "retry_exact_owned_delete"; break;
+            case NdmsNativeImportRecoveryAction::RETRY_READ_ONLY_OBSERVATION: j = "retry_read_only_observation"; break;
+            case NdmsNativeImportRecoveryAction::ROLLBACK_DELETE_EXACT_OWNED: j = "rollback_delete_exact_owned"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NdmsNativeImportRecoveryAction\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, NdmsNativeImportRecoveryAdmissionState & x) {
+        if (j == "action_not_actionable") x = NdmsNativeImportRecoveryAdmissionState::ACTION_NOT_ACTIONABLE;
+        else if (j == "admitted") x = NdmsNativeImportRecoveryAdmissionState::ADMITTED;
+        else if (j == "inventory_not_ready") x = NdmsNativeImportRecoveryAdmissionState::INVENTORY_NOT_READY;
+        else if (j == "lease_busy") x = NdmsNativeImportRecoveryAdmissionState::LEASE_BUSY;
+        else if (j == "lease_io_error") x = NdmsNativeImportRecoveryAdmissionState::LEASE_IO_ERROR;
+        else if (j == "record_changed") x = NdmsNativeImportRecoveryAdmissionState::RECORD_CHANGED;
+        else if (j == "record_missing") x = NdmsNativeImportRecoveryAdmissionState::RECORD_MISSING;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsNativeImportRecoveryAdmissionState\""); }
+    }
+
+    inline void to_json(json & j, const NdmsNativeImportRecoveryAdmissionState & x) {
+        switch (x) {
+            case NdmsNativeImportRecoveryAdmissionState::ACTION_NOT_ACTIONABLE: j = "action_not_actionable"; break;
+            case NdmsNativeImportRecoveryAdmissionState::ADMITTED: j = "admitted"; break;
+            case NdmsNativeImportRecoveryAdmissionState::INVENTORY_NOT_READY: j = "inventory_not_ready"; break;
+            case NdmsNativeImportRecoveryAdmissionState::LEASE_BUSY: j = "lease_busy"; break;
+            case NdmsNativeImportRecoveryAdmissionState::LEASE_IO_ERROR: j = "lease_io_error"; break;
+            case NdmsNativeImportRecoveryAdmissionState::RECORD_CHANGED: j = "record_changed"; break;
+            case NdmsNativeImportRecoveryAdmissionState::RECORD_MISSING: j = "record_missing"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NdmsNativeImportRecoveryAdmissionState\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, NdmsNativeImportRecoveryDispatchState & x) {
+        if (j == "completed") x = NdmsNativeImportRecoveryDispatchState::COMPLETED;
+        else if (j == "lease_not_held") x = NdmsNativeImportRecoveryDispatchState::LEASE_NOT_HELD;
+        else if (j == "ownership_store_missing") x = NdmsNativeImportRecoveryDispatchState::OWNERSHIP_STORE_MISSING;
+        else if (j == "plan_empty") x = NdmsNativeImportRecoveryDispatchState::PLAN_EMPTY;
+        else if (j == "snapshot_retirer_missing") x = NdmsNativeImportRecoveryDispatchState::SNAPSHOT_RETIRER_MISSING;
+        else if (j == "step_failed") x = NdmsNativeImportRecoveryDispatchState::STEP_FAILED;
+        else if (j == "target_missing") x = NdmsNativeImportRecoveryDispatchState::TARGET_MISSING;
+        else if (j == "target_not_eligible") x = NdmsNativeImportRecoveryDispatchState::TARGET_NOT_ELIGIBLE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsNativeImportRecoveryDispatchState\""); }
+    }
+
+    inline void to_json(json & j, const NdmsNativeImportRecoveryDispatchState & x) {
+        switch (x) {
+            case NdmsNativeImportRecoveryDispatchState::COMPLETED: j = "completed"; break;
+            case NdmsNativeImportRecoveryDispatchState::LEASE_NOT_HELD: j = "lease_not_held"; break;
+            case NdmsNativeImportRecoveryDispatchState::OWNERSHIP_STORE_MISSING: j = "ownership_store_missing"; break;
+            case NdmsNativeImportRecoveryDispatchState::PLAN_EMPTY: j = "plan_empty"; break;
+            case NdmsNativeImportRecoveryDispatchState::SNAPSHOT_RETIRER_MISSING: j = "snapshot_retirer_missing"; break;
+            case NdmsNativeImportRecoveryDispatchState::STEP_FAILED: j = "step_failed"; break;
+            case NdmsNativeImportRecoveryDispatchState::TARGET_MISSING: j = "target_missing"; break;
+            case NdmsNativeImportRecoveryDispatchState::TARGET_NOT_ELIGIBLE: j = "target_not_eligible"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NdmsNativeImportRecoveryDispatchState\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, NdmsNativeImportRecoveryPhase & x) {
+        if (j == "absence_verified") x = NdmsNativeImportRecoveryPhase::ABSENCE_VERIFIED;
+        else if (j == "delete_may_be_inflight") x = NdmsNativeImportRecoveryPhase::DELETE_MAY_BE_INFLIGHT;
+        else if (j == "import_may_be_inflight") x = NdmsNativeImportRecoveryPhase::IMPORT_MAY_BE_INFLIGHT;
+        else if (j == "ownership_published") x = NdmsNativeImportRecoveryPhase::OWNERSHIP_PUBLISHED;
+        else if (j == "prepared") x = NdmsNativeImportRecoveryPhase::PREPARED;
+        else if (j == "response_recorded") x = NdmsNativeImportRecoveryPhase::RESPONSE_RECORDED;
+        else if (j == "rollback_requested") x = NdmsNativeImportRecoveryPhase::ROLLBACK_REQUESTED;
+        else if (j == "target_verified") x = NdmsNativeImportRecoveryPhase::TARGET_VERIFIED;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsNativeImportRecoveryPhase\""); }
+    }
+
+    inline void to_json(json & j, const NdmsNativeImportRecoveryPhase & x) {
+        switch (x) {
+            case NdmsNativeImportRecoveryPhase::ABSENCE_VERIFIED: j = "absence_verified"; break;
+            case NdmsNativeImportRecoveryPhase::DELETE_MAY_BE_INFLIGHT: j = "delete_may_be_inflight"; break;
+            case NdmsNativeImportRecoveryPhase::IMPORT_MAY_BE_INFLIGHT: j = "import_may_be_inflight"; break;
+            case NdmsNativeImportRecoveryPhase::OWNERSHIP_PUBLISHED: j = "ownership_published"; break;
+            case NdmsNativeImportRecoveryPhase::PREPARED: j = "prepared"; break;
+            case NdmsNativeImportRecoveryPhase::RESPONSE_RECORDED: j = "response_recorded"; break;
+            case NdmsNativeImportRecoveryPhase::ROLLBACK_REQUESTED: j = "rollback_requested"; break;
+            case NdmsNativeImportRecoveryPhase::TARGET_VERIFIED: j = "target_verified"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NdmsNativeImportRecoveryPhase\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, NdmsNativeWalReadiness & x) {
+        if (j == "clean") x = NdmsNativeWalReadiness::CLEAN;
+        else if (j == "unfinished") x = NdmsNativeWalReadiness::UNFINISHED;
+        else if (j == "unsafe") x = NdmsNativeWalReadiness::UNSAFE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsNativeWalReadiness\""); }
+    }
+
+    inline void to_json(json & j, const NdmsNativeWalReadiness & x) {
+        switch (x) {
+            case NdmsNativeWalReadiness::CLEAN: j = "clean"; break;
+            case NdmsNativeWalReadiness::UNFINISHED: j = "unfinished"; break;
+            case NdmsNativeWalReadiness::UNSAFE: j = "unsafe"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NdmsNativeWalReadiness\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, NdmsNativeImportRecoveryStep & x) {
+        if (j == "advance_wal_absence_verified") x = NdmsNativeImportRecoveryStep::ADVANCE_WAL_ABSENCE_VERIFIED;
+        else if (j == "advance_wal_delete_may_be_inflight") x = NdmsNativeImportRecoveryStep::ADVANCE_WAL_DELETE_MAY_BE_INFLIGHT;
+        else if (j == "advance_wal_ownership_published") x = NdmsNativeImportRecoveryStep::ADVANCE_WAL_OWNERSHIP_PUBLISHED;
+        else if (j == "advance_wal_rollback_requested") x = NdmsNativeImportRecoveryStep::ADVANCE_WAL_ROLLBACK_REQUESTED;
+        else if (j == "advance_wal_target_verified") x = NdmsNativeImportRecoveryStep::ADVANCE_WAL_TARGET_VERIFIED;
+        else if (j == "delete_exact_owned_target") x = NdmsNativeImportRecoveryStep::DELETE_EXACT_OWNED_TARGET;
+        else if (j == "publish_ownership") x = NdmsNativeImportRecoveryStep::PUBLISH_OWNERSHIP;
+        else if (j == "remove_ownership_claim") x = NdmsNativeImportRecoveryStep::REMOVE_OWNERSHIP_CLAIM;
+        else if (j == "remove_wal_record") x = NdmsNativeImportRecoveryStep::REMOVE_WAL_RECORD;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsNativeImportRecoveryStep\""); }
+    }
+
+    inline void to_json(json & j, const NdmsNativeImportRecoveryStep & x) {
+        switch (x) {
+            case NdmsNativeImportRecoveryStep::ADVANCE_WAL_ABSENCE_VERIFIED: j = "advance_wal_absence_verified"; break;
+            case NdmsNativeImportRecoveryStep::ADVANCE_WAL_DELETE_MAY_BE_INFLIGHT: j = "advance_wal_delete_may_be_inflight"; break;
+            case NdmsNativeImportRecoveryStep::ADVANCE_WAL_OWNERSHIP_PUBLISHED: j = "advance_wal_ownership_published"; break;
+            case NdmsNativeImportRecoveryStep::ADVANCE_WAL_ROLLBACK_REQUESTED: j = "advance_wal_rollback_requested"; break;
+            case NdmsNativeImportRecoveryStep::ADVANCE_WAL_TARGET_VERIFIED: j = "advance_wal_target_verified"; break;
+            case NdmsNativeImportRecoveryStep::DELETE_EXACT_OWNED_TARGET: j = "delete_exact_owned_target"; break;
+            case NdmsNativeImportRecoveryStep::PUBLISH_OWNERSHIP: j = "publish_ownership"; break;
+            case NdmsNativeImportRecoveryStep::REMOVE_OWNERSHIP_CLAIM: j = "remove_ownership_claim"; break;
+            case NdmsNativeImportRecoveryStep::REMOVE_WAL_RECORD: j = "remove_wal_record"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NdmsNativeImportRecoveryStep\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, NdmsNativeImportRecoveryStatus & x) {
+        if (j == "blocked") x = NdmsNativeImportRecoveryStatus::BLOCKED;
+        else if (j == "completed") x = NdmsNativeImportRecoveryStatus::COMPLETED;
+        else if (j == "no_work") x = NdmsNativeImportRecoveryStatus::NO_WORK;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsNativeImportRecoveryStatus\""); }
+    }
+
+    inline void to_json(json & j, const NdmsNativeImportRecoveryStatus & x) {
+        switch (x) {
+            case NdmsNativeImportRecoveryStatus::BLOCKED: j = "blocked"; break;
+            case NdmsNativeImportRecoveryStatus::COMPLETED: j = "completed"; break;
+            case NdmsNativeImportRecoveryStatus::NO_WORK: j = "no_work"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NdmsNativeImportRecoveryStatus\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, NdmsNativeImportRecoveryStop & x) {
+        static std::unordered_map<std::string, NdmsNativeImportRecoveryStop> enumValues {
+            {"delete_wal_not_clean", NdmsNativeImportRecoveryStop::DELETE_WAL_NOT_CLEAN},
+            {"durable_observation_failed", NdmsNativeImportRecoveryStop::DURABLE_OBSERVATION_FAILED},
+            {"expected_target_not_managed", NdmsNativeImportRecoveryStop::EXPECTED_TARGET_NOT_MANAGED},
+            {"first_observation_failed", NdmsNativeImportRecoveryStop::FIRST_OBSERVATION_FAILED},
+            {"forward_admission_failed", NdmsNativeImportRecoveryStop::FORWARD_ADMISSION_FAILED},
+            {"import_wal_not_single_safe", NdmsNativeImportRecoveryStop::IMPORT_WAL_NOT_SINGLE_SAFE},
+            {"none", NdmsNativeImportRecoveryStop::NONE},
+            {"observation_kind_mismatch", NdmsNativeImportRecoveryStop::OBSERVATION_KIND_MISMATCH},
+            {"observation_unstable", NdmsNativeImportRecoveryStop::OBSERVATION_UNSTABLE},
+            {"ownership_not_exact", NdmsNativeImportRecoveryStop::OWNERSHIP_NOT_EXACT},
+            {"ownership_publish_failed", NdmsNativeImportRecoveryStop::OWNERSHIP_PUBLISH_FAILED},
+            {"ownership_wal_publish_failed", NdmsNativeImportRecoveryStop::OWNERSHIP_WAL_PUBLISH_FAILED},
+            {"phase_not_forward_only", NdmsNativeImportRecoveryStop::PHASE_NOT_FORWARD_ONLY},
+            {"record_not_cooperative", NdmsNativeImportRecoveryStop::RECORD_NOT_COOPERATIVE},
+            {"recovery_action_not_forward_only", NdmsNativeImportRecoveryStop::RECOVERY_ACTION_NOT_FORWARD_ONLY},
+            {"second_observation_failed", NdmsNativeImportRecoveryStop::SECOND_OBSERVATION_FAILED},
+            {"target_verified_wal_publish_failed", NdmsNativeImportRecoveryStop::TARGET_VERIFIED_WAL_PUBLISH_FAILED},
+            {"unexpected_failure", NdmsNativeImportRecoveryStop::UNEXPECTED_FAILURE},
+            {"wal_cleanup_failed", NdmsNativeImportRecoveryStop::WAL_CLEANUP_FAILED},
+            {"writer_lost", NdmsNativeImportRecoveryStop::WRITER_LOST},
+            {"writer_missing", NdmsNativeImportRecoveryStop::WRITER_MISSING},
+        };
+        auto iter = enumValues.find(j.get<std::string>());
+        if (iter != enumValues.end()) {
+            x = iter->second;
+        }
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsNativeImportRecoveryStop\""); }
+    }
+
+    inline void to_json(json & j, const NdmsNativeImportRecoveryStop & x) {
+        switch (x) {
+            case NdmsNativeImportRecoveryStop::DELETE_WAL_NOT_CLEAN: j = "delete_wal_not_clean"; break;
+            case NdmsNativeImportRecoveryStop::DURABLE_OBSERVATION_FAILED: j = "durable_observation_failed"; break;
+            case NdmsNativeImportRecoveryStop::EXPECTED_TARGET_NOT_MANAGED: j = "expected_target_not_managed"; break;
+            case NdmsNativeImportRecoveryStop::FIRST_OBSERVATION_FAILED: j = "first_observation_failed"; break;
+            case NdmsNativeImportRecoveryStop::FORWARD_ADMISSION_FAILED: j = "forward_admission_failed"; break;
+            case NdmsNativeImportRecoveryStop::IMPORT_WAL_NOT_SINGLE_SAFE: j = "import_wal_not_single_safe"; break;
+            case NdmsNativeImportRecoveryStop::NONE: j = "none"; break;
+            case NdmsNativeImportRecoveryStop::OBSERVATION_KIND_MISMATCH: j = "observation_kind_mismatch"; break;
+            case NdmsNativeImportRecoveryStop::OBSERVATION_UNSTABLE: j = "observation_unstable"; break;
+            case NdmsNativeImportRecoveryStop::OWNERSHIP_NOT_EXACT: j = "ownership_not_exact"; break;
+            case NdmsNativeImportRecoveryStop::OWNERSHIP_PUBLISH_FAILED: j = "ownership_publish_failed"; break;
+            case NdmsNativeImportRecoveryStop::OWNERSHIP_WAL_PUBLISH_FAILED: j = "ownership_wal_publish_failed"; break;
+            case NdmsNativeImportRecoveryStop::PHASE_NOT_FORWARD_ONLY: j = "phase_not_forward_only"; break;
+            case NdmsNativeImportRecoveryStop::RECORD_NOT_COOPERATIVE: j = "record_not_cooperative"; break;
+            case NdmsNativeImportRecoveryStop::RECOVERY_ACTION_NOT_FORWARD_ONLY: j = "recovery_action_not_forward_only"; break;
+            case NdmsNativeImportRecoveryStop::SECOND_OBSERVATION_FAILED: j = "second_observation_failed"; break;
+            case NdmsNativeImportRecoveryStop::TARGET_VERIFIED_WAL_PUBLISH_FAILED: j = "target_verified_wal_publish_failed"; break;
+            case NdmsNativeImportRecoveryStop::UNEXPECTED_FAILURE: j = "unexpected_failure"; break;
+            case NdmsNativeImportRecoveryStop::WAL_CLEANUP_FAILED: j = "wal_cleanup_failed"; break;
+            case NdmsNativeImportRecoveryStop::WRITER_LOST: j = "writer_lost"; break;
+            case NdmsNativeImportRecoveryStop::WRITER_MISSING: j = "writer_missing"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NdmsNativeImportRecoveryStop\": " + std::to_string(static_cast<int>(x)));
         }
     }
 

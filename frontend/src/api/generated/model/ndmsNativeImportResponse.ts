@@ -5,15 +5,20 @@
  * REST API for the keen-pbr policy-based routing daemon.
  * OpenAPI spec version: 3.0.0
  */
-import type { NdmsNativeImportResponseDeleteWalReadiness } from './ndmsNativeImportResponseDeleteWalReadiness';
-import type { NdmsNativeImportResponseImportWalReadiness } from './ndmsNativeImportResponseImportWalReadiness';
-import type { NdmsNativeImportResponseKind } from './ndmsNativeImportResponseKind';
+import type { NdmsNativeDirectObservationFailure } from './ndmsNativeDirectObservationFailure';
+import type { NdmsNativeImportRecoveryAdmissionState } from './ndmsNativeImportRecoveryAdmissionState';
+import type { NdmsNativeImportRecoveryDispatchState } from './ndmsNativeImportRecoveryDispatchState';
+import type { NdmsNativeImportRecoveryStep } from './ndmsNativeImportRecoveryStep';
 import type { NdmsNativeImportResponseRequestError } from './ndmsNativeImportResponseRequestError';
 import type { NdmsNativeImportStatus } from './ndmsNativeImportStatus';
 import type { NdmsNativeImportStop } from './ndmsNativeImportStop';
+import type { NdmsNativeKernelInterfaceName } from './ndmsNativeKernelInterfaceName';
+import type { NdmsNativeManagedInterfaceName } from './ndmsNativeManagedInterfaceName';
+import type { NdmsNativeMutationKind } from './ndmsNativeMutationKind';
+import type { NdmsNativeWalReadiness } from './ndmsNativeWalReadiness';
 
 /**
- * A `completed` response is coherent only when stop is `none`, both WAL readiness fields are `clean`, request dispatch and ownership publication are true, recovery is false, the rollback snapshot retention flag is true, and the expected/created firmware and kernel identities form a proved safe pair. `recovery_required` and any ambiguous non-schema response must never be blindly retried.
+ * A `completed` response is coherent only when stop is `none`, both WAL readiness fields are `clean`, request dispatch and ownership publication are true, recovery is false, the rollback snapshot retention flag is true, and the expected/created firmware and kernel identities form a proved safe pair. `recovery_required` and any ambiguous non-schema response must never be blindly retried. The internal WAL transaction id is deliberately never part of the public response.
 
  */
 export interface NdmsNativeImportResponse {
@@ -28,33 +33,17 @@ export interface NdmsNativeImportResponse {
   wal_may_require_recovery: boolean;
   rollback_snapshot_may_be_retained: boolean;
   ownership_published: boolean;
-  /** @pattern ^[0-9a-f]{32}$ */
-  transaction_id?: string;
-  /** @pattern ^Wireguard(?:[0-9]|[1-9][0-9]|1[01][0-9]|12[0-6])$ */
-  expected_interface?: string;
-  /**
-     * Firmware interface identity. Returned only as a proved pair with created_kernel_interface.
-
-     * @pattern ^Wireguard(?:[0-9]|[1-9][0-9]|1[01][0-9]|12[0-6])$
-     */
-  created_interface?: string;
-  /**
-     * Safe Linux interface identity observed in both required scopes. Returned only as a proved pair with created_interface.
-
-     * @minLength 1
-     * @maxLength 15
-     * @pattern ^(?!\.{1,2}$)[A-Za-z0-9_.:-]+$
-     */
-  created_kernel_interface?: string;
-  kind?: NdmsNativeImportResponseKind;
-  delete_wal_readiness?: NdmsNativeImportResponseDeleteWalReadiness;
-  import_wal_readiness?: NdmsNativeImportResponseImportWalReadiness;
+  expected_interface?: NdmsNativeManagedInterfaceName;
+  /** Returned only as a proved pair with created_kernel_interface. */
+  created_interface?: NdmsNativeManagedInterfaceName;
+  /** Safe Linux interface identity observed in both required scopes. Returned only as a proved pair with created_interface.
+   */
+  created_kernel_interface?: NdmsNativeKernelInterfaceName;
+  kind?: NdmsNativeMutationKind;
+  delete_wal_readiness?: NdmsNativeWalReadiness;
+  import_wal_readiness?: NdmsNativeWalReadiness;
   request_error?: NdmsNativeImportResponseRequestError;
-  /**
-     * Redacted typed direct-observation stop, when available.
-     * @maxLength 96
-     */
-  direct_observation_failure?: string;
+  direct_observation_failure?: NdmsNativeDirectObservationFailure;
   /**
      * Redacted typed baseline-build stop, when available.
      * @maxLength 96
@@ -65,19 +54,7 @@ export interface NdmsNativeImportResponse {
      * @maxLength 96
      */
   executor_stop?: string;
-  /**
-     * Redacted typed recovery admission state, when available.
-     * @maxLength 96
-     */
-  forward_admission_state?: string;
-  /**
-     * Redacted typed recovery dispatch state, when available.
-     * @maxLength 96
-     */
-  forward_dispatch_state?: string;
-  /**
-     * Redacted typed recovery step, when available.
-     * @maxLength 96
-     */
-  forward_failed_step?: string;
+  forward_admission_state?: NdmsNativeImportRecoveryAdmissionState;
+  forward_dispatch_state?: NdmsNativeImportRecoveryDispatchState;
+  forward_failed_step?: NdmsNativeImportRecoveryStep;
 }
