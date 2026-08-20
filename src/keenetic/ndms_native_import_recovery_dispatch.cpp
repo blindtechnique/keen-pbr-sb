@@ -108,7 +108,10 @@ dispatch_ndms_native_import_recovery(
             plan, NdmsNativeImportRecoveryStep::remove_wal_record) &&
         !plan_contains(
             plan, NdmsNativeImportRecoveryStep::publish_ownership) &&
-        record.phase != NdmsNativeImportWalPhase::ownership_published;
+        (record.phase != NdmsNativeImportWalPhase::ownership_published ||
+         plan_contains(
+             plan,
+             NdmsNativeImportRecoveryStep::advance_wal_absence_verified));
     if (snapshot_must_retire && snapshot_retirer == nullptr) {
         result.state = NdmsNativeImportRecoveryDispatchState::
             snapshot_retirer_missing;
@@ -169,15 +172,14 @@ dispatch_ndms_native_import_recovery(
                         step_ok = true;
                     } else if (existing.state ==
                                    NdmsNativeOwnershipReadState::valid &&
-                               !(*existing.record == claim)) {
-                        step_ok = true;
-                    } else if (existing.state ==
-                               NdmsNativeOwnershipReadState::valid) {
+                               existing.record.has_value() &&
+                               *existing.record == claim) {
                         step_ok = ownership_store->remove_exact(claim);
                     }
-                    // Unreadable stays step_ok=false: a torn claim is evidence
-                    // of an interrupted publish, and "nothing to retract" is
-                    // exactly the reading that must not come from a torn one.
+                    // Foreign and unreadable claims both stay step_ok=false.
+                    // Neither is authority to retire our snapshot and WAL;
+                    // the foreign bytes remain untouched for a human or their
+                    // owning transaction to reconcile.
                 }
             } else if (step ==
                        NdmsNativeImportRecoveryStep::publish_ownership) {

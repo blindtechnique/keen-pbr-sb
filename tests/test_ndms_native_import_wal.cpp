@@ -492,7 +492,13 @@ TEST_CASE("native import WAL transitions are idempotent but never skip or rewind
     CHECK(valid_ndms_native_import_wal_transition(
         Phase::target_verified, Phase::ownership_published));
     CHECK(valid_ndms_native_import_wal_transition(
+        Phase::target_verified, Phase::absence_verified));
+    CHECK(valid_ndms_native_import_wal_transition(
         Phase::ownership_published, Phase::rollback_requested));
+    CHECK(valid_ndms_native_import_wal_transition(
+        Phase::ownership_published, Phase::absence_verified));
+    CHECK_FALSE(valid_ndms_native_import_wal_transition(
+        Phase::response_recorded, Phase::absence_verified));
     CHECK(valid_ndms_native_import_wal_transition(
         Phase::rollback_requested, Phase::delete_may_be_inflight));
     CHECK(valid_ndms_native_import_wal_transition(
@@ -693,6 +699,42 @@ TEST_CASE("native import recovery separates forward ownership and exact rollback
     CHECK(classify_ndms_native_import_recovery(
               rollback, stable_absence()) ==
           NdmsNativeImportRecoveryAction::complete_rollback);
+}
+
+TEST_CASE("verified forward phases retire only authoritative stable absence") {
+    auto verified = prepared_record();
+    verified.phase = NdmsNativeImportWalPhase::target_verified;
+    reserve(verified);
+    record_response(verified);
+    verify_target(verified);
+
+    CHECK(classify_ndms_native_import_recovery(
+              verified, stable_absence()) ==
+          NdmsNativeImportRecoveryAction::complete_rollback);
+    auto moving = stable_absence();
+    moving.stable_absence = false;
+    CHECK(classify_ndms_native_import_recovery(verified, moving) ==
+          NdmsNativeImportRecoveryAction::retry_read_only_observation);
+
+    auto owned = verified;
+    owned.phase = NdmsNativeImportWalPhase::ownership_published;
+    owned.ownership_revision =
+        digest("ndms-native-owner-v2-", 'e');
+    CHECK(classify_ndms_native_import_recovery(
+              owned, stable_absence()) ==
+          NdmsNativeImportRecoveryAction::complete_rollback);
+    CHECK(classify_ndms_native_import_recovery(owned, moving) ==
+          NdmsNativeImportRecoveryAction::retry_read_only_observation);
+
+    // A present exact target still follows the existing forward/delete
+    // classifier paths; stable-absence cleanup never broadens presence.
+    CHECK(classify_ndms_native_import_recovery(
+              verified, exact_owned_target()) ==
+          NdmsNativeImportRecoveryAction::rollback_delete_exact_owned);
+    auto exact_owned = exact_owned_target();
+    exact_owned.ownership_record_matches = true;
+    CHECK(classify_ndms_native_import_recovery(owned, exact_owned) ==
+          NdmsNativeImportRecoveryAction::resume_forward_reconcile);
 }
 
 TEST_CASE("native import recovery rejects every structurally invalid public record") {

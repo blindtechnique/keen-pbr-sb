@@ -886,9 +886,11 @@ bool valid_ndms_native_import_wal_transition(
                to == NdmsNativeImportWalPhase::rollback_requested;
     case NdmsNativeImportWalPhase::target_verified:
         return to == NdmsNativeImportWalPhase::ownership_published ||
-               to == NdmsNativeImportWalPhase::rollback_requested;
+               to == NdmsNativeImportWalPhase::rollback_requested ||
+               to == NdmsNativeImportWalPhase::absence_verified;
     case NdmsNativeImportWalPhase::ownership_published:
-        return to == NdmsNativeImportWalPhase::rollback_requested;
+        return to == NdmsNativeImportWalPhase::rollback_requested ||
+               to == NdmsNativeImportWalPhase::absence_verified;
     case NdmsNativeImportWalPhase::rollback_requested:
         return to == NdmsNativeImportWalPhase::delete_may_be_inflight ||
                to == NdmsNativeImportWalPhase::absence_verified;
@@ -953,11 +955,23 @@ NdmsNativeImportRecoveryAction classify_ndms_native_import_recovery(
                          rollback_delete_exact_owned
                    : NdmsNativeImportRecoveryAction::block_unknown;
     case NdmsNativeImportWalPhase::target_verified:
+        if (absent) {
+            return observation.stable_absence
+                       ? NdmsNativeImportRecoveryAction::complete_rollback
+                       : NdmsNativeImportRecoveryAction::
+                             retry_read_only_observation;
+        }
         return exact_owned
                    ? NdmsNativeImportRecoveryAction::
                          rollback_delete_exact_owned
                    : NdmsNativeImportRecoveryAction::block_unknown;
     case NdmsNativeImportWalPhase::ownership_published:
+        if (absent) {
+            return observation.stable_absence
+                       ? NdmsNativeImportRecoveryAction::complete_rollback
+                       : NdmsNativeImportRecoveryAction::
+                             retry_read_only_observation;
+        }
         return exact_owned && observation.ownership_record_matches
                    ? NdmsNativeImportRecoveryAction::
                          resume_forward_reconcile

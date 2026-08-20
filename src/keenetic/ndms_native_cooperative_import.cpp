@@ -951,6 +951,13 @@ bool expected_rollback_steps(
         return false;
     }
     if (action == Action::complete_rollback) {
+        if (phase == NdmsNativeImportWalPhase::target_verified ||
+            phase == NdmsNativeImportWalPhase::ownership_published) {
+            return steps == std::vector<Step>{
+                                Step::advance_wal_absence_verified,
+                                Step::remove_ownership_claim,
+                                Step::remove_wal_record};
+        }
         if (phase == NdmsNativeImportWalPhase::absence_verified) {
             return steps == std::vector<Step>{
                                 Step::remove_ownership_claim,
@@ -1933,20 +1940,21 @@ NdmsNativeCooperativeImportCoordinator::resume_once(
                     record, recovery_proof.observation);
         }
         std::optional<NdmsNativeImportForwardCompletion>
-            response_forward_completion;
-        bool response_forward_actionable = false;
+            preplanned_forward_completion;
+        bool preplanned_forward_actionable = false;
         if (record.phase ==
-            NdmsNativeImportWalPhase::response_recorded) {
-            response_forward_completion =
+                NdmsNativeImportWalPhase::response_recorded ||
+            record.phase == NdmsNativeImportWalPhase::target_verified) {
+            preplanned_forward_completion =
                 plan_ndms_native_import_forward_completion(
                     record,
                     scoped_proof.observation,
                     running_revision.value_or(std::string{}));
-            response_forward_actionable =
-                response_forward_completion->actionable() &&
+            preplanned_forward_actionable =
+                preplanned_forward_completion->actionable() &&
                 expected_forward_steps(
                     record.phase,
-                    response_forward_completion->plan.steps);
+                    preplanned_forward_completion->plan.steps);
         }
         const bool response_recorded_recovery =
             record.phase == NdmsNativeImportWalPhase::response_recorded &&
@@ -1954,13 +1962,23 @@ NdmsNativeCooperativeImportCoordinator::resume_once(
             (*candidate_recovery_action ==
                  NdmsNativeImportRecoveryAction::
                      abort_without_mutation ||
-             (*candidate_recovery_action ==
-                  NdmsNativeImportRecoveryAction::
-                      rollback_delete_exact_owned &&
-              !response_forward_actionable));
+              (*candidate_recovery_action ==
+                   NdmsNativeImportRecoveryAction::
+                       rollback_delete_exact_owned &&
+              !preplanned_forward_actionable));
+        const bool forward_phase_stable_absence_cleanup =
+            (record.phase == NdmsNativeImportWalPhase::target_verified ||
+             record.phase ==
+                 NdmsNativeImportWalPhase::ownership_published) &&
+            candidate_recovery_action.has_value() &&
+            *candidate_recovery_action ==
+                NdmsNativeImportRecoveryAction::complete_rollback &&
+            recovery_proof.observation.stable_absence &&
+            !preplanned_forward_actionable;
 
         if (rollback_recovery_phase(record.phase) ||
-            response_recorded_recovery) {
+            response_recorded_recovery ||
+            forward_phase_stable_absence_cleanup) {
             if (!recovery_proof.observation.authoritative) {
                 result.stop = NdmsNativeCooperativeImportResumeStop::
                     observation_unstable;
@@ -1988,6 +2006,9 @@ NdmsNativeCooperativeImportCoordinator::resume_once(
                     ownership_not_exact;
                 return result;
             }
+            result.ownership_published =
+                recovery_ownership.state ==
+                NdmsNativeOwnershipReadState::valid;
 
             const auto recovery_plan =
                 plan_ndms_native_import_recovery(
@@ -2251,6 +2272,13 @@ NdmsNativeCooperativeImportCoordinator::resume_once(
             result.recovery_failed_step = dispatched.failed_step;
             result.rollback_snapshot_retired =
                 snapshot_retirer.retired();
+            const auto ownership_after_dispatch =
+                impl_->ownership->read(ownership_target);
+            result.ownership_published =
+                exact_recovery_ownership_or_absent(
+                    record, ownership_after_dispatch) &&
+                ownership_after_dispatch.state ==
+                    NdmsNativeOwnershipReadState::valid;
             if (dispatched.state !=
                 NdmsNativeImportRecoveryDispatchState::completed) {
                 result.status = NdmsNativeCooperativeImportResumeStatus::
@@ -2391,8 +2419,8 @@ NdmsNativeCooperativeImportCoordinator::resume_once(
                 admit_ndms_native_import_recovery(
                     *impl_->wal, record, observation));
         } else {
-            const auto completion = response_forward_completion.has_value()
-                ? *response_forward_completion
+            const auto completion = preplanned_forward_completion.has_value()
+                ? *preplanned_forward_completion
                 : plan_ndms_native_import_forward_completion(
                       record,
                       observation,

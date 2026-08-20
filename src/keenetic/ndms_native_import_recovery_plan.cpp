@@ -94,6 +94,17 @@ NdmsNativeImportRecoveryPlan plan_ndms_native_import_recovery(
         return plan;
 
     case Action::complete_rollback:
+        // A forward phase can reach this action only after authoritative
+        // stable absence. Publish that terminal fact directly: routing it
+        // through rollback_requested would lose the metadata-only origin on
+        // crash and could later turn a reappeared target into a delete retry.
+        if (record.phase == Phase::target_verified ||
+            record.phase == Phase::ownership_published) {
+            plan.steps = {Step::advance_wal_absence_verified,
+                          Step::remove_ownership_claim,
+                          Step::remove_wal_record};
+            return plan;
+        }
         // Absence is already proven stable; what remains is bookkeeping - and
         // the claim retraction is part of the bookkeeping, because a crash
         // after the delete but before the retraction lands exactly here.

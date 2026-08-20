@@ -2,6 +2,7 @@
 
 #include "../src/keenetic/ndms_native_import_recovery_plan.hpp"
 
+#include <algorithm>
 #include <set>
 #include <string>
 #include <vector>
@@ -89,6 +90,24 @@ TEST_CASE("a target reappearing after proven absence is nobody's to delete") {
 }
 
 TEST_CASE("completing a rollback never moves the WAL backwards") {
+    const auto metadata_only =
+        std::vector<Step>{Step::advance_wal_absence_verified,
+                          Step::remove_ownership_claim,
+                          Step::remove_wal_record};
+    CHECK(steps_for(Phase::target_verified,
+                    Action::complete_rollback) == metadata_only);
+    CHECK(steps_for(Phase::ownership_published,
+                    Action::complete_rollback) == metadata_only);
+    // Direct absence is the durable discriminator: a crash cannot turn this
+    // metadata-only cleanup into rollback_requested and later authorize a
+    // delete if an interface reappears.
+    CHECK(std::find(metadata_only.begin(), metadata_only.end(),
+                    Step::advance_wal_rollback_requested) ==
+          metadata_only.end());
+    CHECK(std::find(metadata_only.begin(), metadata_only.end(),
+                    Step::delete_exact_owned_target) ==
+          metadata_only.end());
+
     CHECK(steps_for(Phase::delete_may_be_inflight,
                     Action::complete_rollback) ==
           (std::vector<Step>{Step::remove_ownership_claim,
@@ -99,7 +118,7 @@ TEST_CASE("completing a rollback never moves the WAL backwards") {
     CHECK(steps_for(Phase::absence_verified, Action::complete_rollback) ==
           (std::vector<Step>{Step::remove_ownership_claim,
                              Step::remove_wal_record}));
-    // ...and a forward phase has no rollback to complete.
+    // A response without verified target evidence cannot use this shortcut.
     CHECK(steps_for(Phase::response_recorded,
                     Action::complete_rollback)
               .empty());

@@ -492,7 +492,55 @@ TEST_CASE("a rollback that could hold a claim refuses without the store") {
     CHECK_FALSE(bare.created_interface.has_value());
 }
 
-TEST_CASE("a foreign claim on the slot survives our rollback untouched") {
+TEST_CASE("published ownership stable absence retires snapshot and WAL last") {
+    TempDirectory directory;
+    auto store = sibling_wal_store(directory);
+    NdmsNativeOwnershipStore ownership(directory.path / "ownership");
+    auto record = verified_record();
+    publish_verified_chain(store, record);
+    record.phase = NdmsNativeImportWalPhase::ownership_published;
+    record.ownership_revision = ownership.publish(claim_of(record));
+    store.publish(record);
+
+    auto admission = admit_ndms_native_import_recovery(
+        store, record, absent_observation());
+    REQUIRE(admission.state ==
+            NdmsNativeImportRecoveryAdmissionState::admitted);
+    REQUIRE(admission.action ==
+            NdmsNativeImportRecoveryAction::complete_rollback);
+    const auto plan =
+        plan_ndms_native_import_recovery(record, *admission.action);
+
+    const auto missing_snapshot = dispatch_ndms_native_import_recovery(
+        store, admission.lease, record, plan, std::nullopt, nullptr,
+        &ownership);
+    CHECK(missing_snapshot.state ==
+          NdmsNativeImportRecoveryDispatchState::snapshot_retirer_missing);
+    REQUIRE(store.load(record.transaction_id).record.has_value());
+    CHECK(store.load(record.transaction_id).record->phase ==
+          NdmsNativeImportWalPhase::ownership_published);
+
+    std::size_t delete_calls = 0U;
+    FakeSnapshotRetirer snapshots;
+    const auto result = dispatch_ndms_native_import_recovery(
+        store, admission.lease, record, plan, std::nullopt,
+        [&delete_calls](const std::string&, const std::string&) {
+            ++delete_calls;
+            return NdmsNativeImportRecoveryDeleteOutcome::failed;
+        },
+        &ownership, nullptr, &snapshots);
+    CHECK(result.state ==
+          NdmsNativeImportRecoveryDispatchState::completed);
+    CHECK(result.completed_steps == 3U);
+    CHECK(delete_calls == 0U);
+    CHECK(snapshots.calls == 1U);
+    CHECK(ownership.read("Wireguard5").state ==
+          NdmsNativeOwnershipReadState::absent);
+    CHECK(store.load(record.transaction_id).state ==
+          NdmsNativeImportWalLoadState::absent);
+}
+
+TEST_CASE("a foreign claim blocks rollback and survives untouched") {
     TempDirectory directory;
     auto store = sibling_wal_store(directory);
     NdmsNativeOwnershipStore ownership(directory.path / "ownership");
@@ -512,19 +560,31 @@ TEST_CASE("a foreign claim on the slot survives our rollback untouched") {
     const auto plan =
         plan_ndms_native_import_recovery(record, *admission.action);
     FakeSnapshotRetirer snapshots;
+    std::size_t delete_calls = 0U;
     const auto result = dispatch_ndms_native_import_recovery(
         store, admission.lease, record, plan, "Wireguard5",
-        [](const std::string&, const std::string&) {
+        [&delete_calls](const std::string&, const std::string&) {
+            ++delete_calls;
             return NdmsNativeImportRecoveryDeleteOutcome::
                 deleted_confirmed;
         },
         &ownership, nullptr, &snapshots);
     CHECK(result.state ==
-          NdmsNativeImportRecoveryDispatchState::completed);
+          NdmsNativeImportRecoveryDispatchState::step_failed);
+    REQUIRE(result.failed_step.has_value());
+    CHECK(*result.failed_step ==
+          NdmsNativeImportRecoveryStep::remove_ownership_claim);
+    CHECK(result.completed_steps == 1U);
+    CHECK(delete_calls == 0U);
+    CHECK(snapshots.calls == 0U);
 
     const auto surviving = ownership.read("Wireguard5");
     REQUIRE(surviving.state == NdmsNativeOwnershipReadState::valid);
     CHECK(surviving.record->transaction_id == foreign.transaction_id);
+    const auto retained = store.load(record.transaction_id);
+    REQUIRE(retained.record.has_value());
+    CHECK(retained.record->phase ==
+          NdmsNativeImportWalPhase::rollback_requested);
 }
 
 TEST_CASE("a torn claim stops the rollback instead of being read as absent") {
