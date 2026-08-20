@@ -22,6 +22,7 @@ import {
   usePostConfigSave,
   usePostRecommendedListSetup,
   usePostRoutingRegistryCheck,
+  usePostRoutingRegistryConsent,
   usePostRoutingTest,
   usePostTransportAction,
   usePostTransportConfigApply,
@@ -57,6 +58,9 @@ type UsePostRecommendedListSetupOptions = Parameters<
 type UsePostRoutingTestOptions = Parameters<typeof usePostRoutingTest>[0]
 type UsePostRoutingRegistryCheckOptions = Parameters<
   typeof usePostRoutingRegistryCheck
+>[0]
+type UsePostRoutingRegistryConsentOptions = Parameters<
+  typeof usePostRoutingRegistryConsent
 >[0]
 type UsePostTransportActionOptions = Parameters<
   typeof usePostTransportAction
@@ -397,6 +401,29 @@ export const usePostRoutingTestMutation = (
 export const usePostRoutingRegistryCheckMutation = (
   options?: UsePostRoutingRegistryCheckOptions
 ) => usePostRoutingRegistryCheck(options)
+
+export const usePostRoutingRegistryConsentMutation = (
+  options?: UsePostRoutingRegistryConsentOptions
+) => {
+  const queryClient = useQueryClient()
+  return usePostRoutingRegistryConsent({
+    ...options,
+    mutation: {
+      ...options?.mutation,
+      onSuccess: async (data, variables, onMutateResult, context) => {
+        await queryClient.invalidateQueries({
+          queryKey: queryKeys.routingRegistryConsent(),
+        })
+        await options?.mutation?.onSuccess?.(
+          data,
+          variables,
+          onMutateResult,
+          context
+        )
+      },
+    },
+  })
+}
 
 type ServiceAction = "start" | "stop" | "restart"
 const serviceActionMutationKey = (action: ServiceAction) =>

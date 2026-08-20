@@ -4,11 +4,13 @@ import {
   getHealthService,
   getRuntimeInterfaces,
   getRuntimeOutbounds,
+  getRoutingRegistryConsent,
   useGetNdmsInterfaceInventory as useGeneratedNdmsInterfaceInventory,
   useGetNdmsVpnServerServices as useGeneratedNdmsVpnServerServices,
   useGetHealthService as useGeneratedHealthService,
   useGetRuntimeInterfaces as useGeneratedRuntimeInterfaces,
   useGetRuntimeOutbounds as useGeneratedRuntimeOutbounds,
+  useGetRoutingRegistryConsent as useGeneratedRoutingRegistryConsent,
 } from "@/api/generated/keen-api"
 
 export {
@@ -20,6 +22,7 @@ export {
   getNdmsVpnServerServices,
   getRuntimeInterfaces,
   getRuntimeOutbounds,
+  getRoutingRegistryConsent,
   getTransports,
   getTransportConfig,
   getGetConfigQueryOptions,
@@ -30,6 +33,7 @@ export {
   getGetNdmsVpnServerServicesQueryOptions,
   getGetRuntimeInterfacesQueryOptions,
   getGetRuntimeOutboundsQueryOptions,
+  getGetRoutingRegistryConsentQueryOptions,
   getGetTransportsQueryOptions,
   getGetTransportConfigQueryOptions,
   useGetConfig,
@@ -38,6 +42,20 @@ export {
   useGetTransports,
   useGetTransportConfig,
 } from "@/api/generated/keen-api"
+
+export function useGetRoutingRegistryConsent() {
+  return useGeneratedRoutingRegistryConsent<
+    Awaited<ReturnType<typeof getRoutingRegistryConsent>>
+  >({
+    query: {
+      // Consent changes only through the dedicated mutation. One baseline and
+      // explicit invalidation avoid introducing another dashboard poller.
+      refetchOnReconnect: false,
+      refetchOnWindowFocus: false,
+      staleTime: Number.POSITIVE_INFINITY,
+    },
+  })
+}
 
 export function useGetNdmsInterfaceInventory() {
   return useGeneratedNdmsInterfaceInventory<

@@ -519,7 +519,6 @@ namespace api {
     struct UiPreferences {
         std::optional<std::vector<std::string>> hidden_native_interface_ids;
         std::optional<std::vector<PlainDnsTemplateElement>> plain_dns_templates;
-        std::optional<bool> registry_lookup_enabled;
     };
 
     struct ConfigObject {
@@ -1122,6 +1121,15 @@ namespace api {
         std::optional<std::string> rkn_domain;
         std::string service;
         std::optional<std::string> target;
+    };
+
+    struct RegistryConsentRequest {
+        bool enabled = false;
+    };
+
+    struct RegistryConsentResponse {
+        bool durable = false;
+        bool enabled = false;
     };
 
     struct ReloadResponse {
@@ -1877,6 +1885,8 @@ namespace api {
         std::optional<RecommendedListSetupRequest> recommended_list_setup_request;
         std::optional<RegistryCheckRequest> registry_check_request;
         std::optional<RegistryCheckResponse> registry_check_response;
+        std::optional<RegistryConsentRequest> registry_consent_request;
+        std::optional<RegistryConsentResponse> registry_consent_response;
         std::optional<ReloadResponse> reload_response;
         std::optional<RemoteAccessRequest> remote_access_request;
         std::optional<RemoteAccessResult> remote_access_result;
@@ -2294,6 +2304,12 @@ void to_json(json & j, const RegistryCheckRequest & x);
 
 void from_json(const json & j, RegistryCheckResponse & x);
 void to_json(json & j, const RegistryCheckResponse & x);
+
+void from_json(const json & j, RegistryConsentRequest & x);
+void to_json(json & j, const RegistryConsentRequest & x);
+
+void from_json(const json & j, RegistryConsentResponse & x);
+void to_json(json & j, const RegistryConsentResponse & x);
 
 void from_json(const json & j, ReloadResponse & x);
 void to_json(json & j, const ReloadResponse & x);
@@ -3634,14 +3650,12 @@ namespace api {
     inline void from_json(const json & j, UiPreferences& x) {
         x.hidden_native_interface_ids = get_stack_optional<std::vector<std::string>>(j, "hidden_native_interface_ids");
         x.plain_dns_templates = get_stack_optional<std::vector<PlainDnsTemplateElement>>(j, "plain_dns_templates");
-        x.registry_lookup_enabled = get_stack_optional<bool>(j, "registry_lookup_enabled");
     }
 
     inline void to_json(json & j, const UiPreferences & x) {
         j = json::object();
         j["hidden_native_interface_ids"] = x.hidden_native_interface_ids;
         j["plain_dns_templates"] = x.plain_dns_templates;
-        j["registry_lookup_enabled"] = x.registry_lookup_enabled;
     }
 
     inline void from_json(const json & j, ConfigObject& x) {
@@ -4750,6 +4764,26 @@ namespace api {
         j["rkn_domain"] = x.rkn_domain;
         j["service"] = x.service;
         j["target"] = x.target;
+    }
+
+    inline void from_json(const json & j, RegistryConsentRequest& x) {
+        x.enabled = j.at("enabled").get<bool>();
+    }
+
+    inline void to_json(json & j, const RegistryConsentRequest & x) {
+        j = json::object();
+        j["enabled"] = x.enabled;
+    }
+
+    inline void from_json(const json & j, RegistryConsentResponse& x) {
+        x.durable = j.at("durable").get<bool>();
+        x.enabled = j.at("enabled").get<bool>();
+    }
+
+    inline void to_json(json & j, const RegistryConsentResponse & x) {
+        j = json::object();
+        j["durable"] = x.durable;
+        j["enabled"] = x.enabled;
     }
 
     inline void from_json(const json & j, ReloadResponse& x) {
@@ -6017,6 +6051,8 @@ namespace api {
         x.recommended_list_setup_request = get_stack_optional<RecommendedListSetupRequest>(j, "RecommendedListSetupRequest");
         x.registry_check_request = get_stack_optional<RegistryCheckRequest>(j, "RegistryCheckRequest");
         x.registry_check_response = get_stack_optional<RegistryCheckResponse>(j, "RegistryCheckResponse");
+        x.registry_consent_request = get_stack_optional<RegistryConsentRequest>(j, "RegistryConsentRequest");
+        x.registry_consent_response = get_stack_optional<RegistryConsentResponse>(j, "RegistryConsentResponse");
         x.reload_response = get_stack_optional<ReloadResponse>(j, "ReloadResponse");
         x.remote_access_request = get_stack_optional<RemoteAccessRequest>(j, "RemoteAccessRequest");
         x.remote_access_result = get_stack_optional<RemoteAccessResult>(j, "RemoteAccessResult");
@@ -6224,6 +6260,8 @@ namespace api {
         j["RecommendedListSetupRequest"] = x.recommended_list_setup_request;
         j["RegistryCheckRequest"] = x.registry_check_request;
         j["RegistryCheckResponse"] = x.registry_check_response;
+        j["RegistryConsentRequest"] = x.registry_consent_request;
+        j["RegistryConsentResponse"] = x.registry_consent_response;
         j["ReloadResponse"] = x.reload_response;
         j["RemoteAccessRequest"] = x.remote_access_request;
         j["RemoteAccessResult"] = x.remote_access_result;

@@ -77,6 +77,8 @@ import type {
   RecommendedListSetupRequest,
   RegistryCheckRequest,
   RegistryCheckResponse,
+  RegistryConsentRequest,
+  RegistryConsentResponse,
   ReloadResponse,
   RemoteAccessRequest,
   RemoteAccessResult,
@@ -1382,13 +1384,13 @@ export const usePostRoutingTest = <TError = ErrorResponse,
 /**
  * Asks cheburcheck.ru whether a domain or address is on the registry, and reports what it says. Their code is not vendored; only the verdict is shown, and the service is credited.
 
-**Nothing leaves the router unless `ui_preferences.registry_lookup_enabled` is on.** The daemon reads that from its own configuration rather than from the request: a browser cannot authorise the lookup by asking for it, and the consent survives a cleared browser, a different device and a restore from backup. With the switch off the answer is `checked: false` with reason `registry_lookup_disabled` and nothing is sent anywhere.
+**Nothing leaves the router unless the durable registry consent is on.** The daemon reads that from its own private settings file rather than from the request: a browser cannot authorise the lookup merely by asking for a target. With the switch off the answer is `checked: false` with reason `registry_lookup_disabled` and nothing is sent anywhere.
 
 With it on, every address check also sends that address to the service. That is the whole point of the lookup, and it is stated where the switch is.
 
 The answer is about the registry, not about this router. A domain can be listed and still work here, or be absent and still fail through a blocked CDN prefix. What actually happens to it is `POST /api/routing/test` and the reachability probes; the two are kept apart deliberately.
 
-Verdicts are cached for an hour. Failures answer `checked: false` with 200 rather than an error status, because a lookup that did not run is a different thing from a target that is not blocked, and the difference must survive into the interface.
+Verdicts are cached for an hour. Third-party failures answer `checked: false` with 200 rather than pretending the target is absent. An unsafe or unreadable consent file answers 503 before any lookup; it is neither silently accepted nor confused with a valid stored choice.
 
  * @summary Is this target on Russia's blocking registry
  */
@@ -1402,10 +1404,15 @@ export type postRoutingRegistryCheckResponse400 = {
   status: 400
 }
 
+export type postRoutingRegistryCheckResponse503 = {
+  data: ErrorResponse
+  status: 503
+}
+
 export type postRoutingRegistryCheckResponseSuccess = (postRoutingRegistryCheckResponse200) & {
   headers: Headers;
 };
-export type postRoutingRegistryCheckResponseError = (postRoutingRegistryCheckResponse400) & {
+export type postRoutingRegistryCheckResponseError = (postRoutingRegistryCheckResponse400 | postRoutingRegistryCheckResponse503) & {
   headers: Headers;
 };
 
@@ -1477,6 +1484,218 @@ export const usePostRoutingRegistryCheck = <TError = ErrorResponse,
         TContext
       > => {
       return useMutation(getPostRoutingRegistryCheckMutationOptions(options), queryClient);
+    }
+
+/**
+ * Reads the router-owned consent that gates every external registry lookup. A missing file is the durable disabled default. Malformed, unsafe or unreadable state is fail-closed and reported as unavailable rather than being confused with a valid stored choice.
+
+ * @summary Read the durable external-registry lookup consent
+ */
+export type getRoutingRegistryConsentResponse200 = {
+  data: RegistryConsentResponse
+  status: 200
+}
+
+export type getRoutingRegistryConsentResponse503 = {
+  data: ErrorResponse
+  status: 503
+}
+
+export type getRoutingRegistryConsentResponseSuccess = (getRoutingRegistryConsentResponse200) & {
+  headers: Headers;
+};
+export type getRoutingRegistryConsentResponseError = (getRoutingRegistryConsentResponse503) & {
+  headers: Headers;
+};
+
+export type getRoutingRegistryConsentResponse = (getRoutingRegistryConsentResponseSuccess | getRoutingRegistryConsentResponseError)
+
+export const getGetRoutingRegistryConsentUrl = () => {
+
+
+
+
+  return `/api/routing/registry-consent`
+}
+
+export const getRoutingRegistryConsent = async ( options?: RequestInit): Promise<getRoutingRegistryConsentResponse> => {
+
+  return apiFetch<getRoutingRegistryConsentResponse>(getGetRoutingRegistryConsentUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetRoutingRegistryConsentQueryKey = () => {
+    return [
+    `/api/routing/registry-consent`
+    ] as const;
+    }
+
+
+export const getGetRoutingRegistryConsentQueryOptions = <TData = Awaited<ReturnType<typeof getRoutingRegistryConsent>>, TError = ErrorResponse>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRoutingRegistryConsent>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetRoutingRegistryConsentQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getRoutingRegistryConsent>>> = ({ signal }) => getRoutingRegistryConsent({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getRoutingRegistryConsent>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetRoutingRegistryConsentQueryResult = NonNullable<Awaited<ReturnType<typeof getRoutingRegistryConsent>>>
+export type GetRoutingRegistryConsentQueryError = ErrorResponse
+
+
+export function useGetRoutingRegistryConsent<TData = Awaited<ReturnType<typeof getRoutingRegistryConsent>>, TError = ErrorResponse>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRoutingRegistryConsent>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getRoutingRegistryConsent>>,
+          TError,
+          Awaited<ReturnType<typeof getRoutingRegistryConsent>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetRoutingRegistryConsent<TData = Awaited<ReturnType<typeof getRoutingRegistryConsent>>, TError = ErrorResponse>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRoutingRegistryConsent>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getRoutingRegistryConsent>>,
+          TError,
+          Awaited<ReturnType<typeof getRoutingRegistryConsent>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetRoutingRegistryConsent<TData = Awaited<ReturnType<typeof getRoutingRegistryConsent>>, TError = ErrorResponse>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRoutingRegistryConsent>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Read the durable external-registry lookup consent
+ */
+
+export function useGetRoutingRegistryConsent<TData = Awaited<ReturnType<typeof getRoutingRegistryConsent>>, TError = ErrorResponse>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRoutingRegistryConsent>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetRoutingRegistryConsentQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * Atomically replaces a private router-side settings file and fsyncs the file and its directory. This endpoint never stages or saves the main routing configuration, so it cannot accidentally publish an unrelated configuration draft.
+
+ * @summary Store the external-registry lookup consent
+ */
+export type postRoutingRegistryConsentResponse200 = {
+  data: RegistryConsentResponse
+  status: 200
+}
+
+export type postRoutingRegistryConsentResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postRoutingRegistryConsentResponseSuccess = (postRoutingRegistryConsentResponse200) & {
+  headers: Headers;
+};
+export type postRoutingRegistryConsentResponseError = (postRoutingRegistryConsentResponse400) & {
+  headers: Headers;
+};
+
+export type postRoutingRegistryConsentResponse = (postRoutingRegistryConsentResponseSuccess | postRoutingRegistryConsentResponseError)
+
+export const getPostRoutingRegistryConsentUrl = () => {
+
+
+
+
+  return `/api/routing/registry-consent`
+}
+
+export const postRoutingRegistryConsent = async (registryConsentRequest: RegistryConsentRequest, options?: RequestInit): Promise<postRoutingRegistryConsentResponse> => {
+
+  return apiFetch<postRoutingRegistryConsentResponse>(getPostRoutingRegistryConsentUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      registryConsentRequest,)
+  }
+);}
+
+
+
+
+export const getPostRoutingRegistryConsentMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postRoutingRegistryConsent>>, TError,{data: RegistryConsentRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postRoutingRegistryConsent>>, TError,{data: RegistryConsentRequest}, TContext> => {
+
+const mutationKey = ['postRoutingRegistryConsent'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postRoutingRegistryConsent>>, {data: RegistryConsentRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postRoutingRegistryConsent(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostRoutingRegistryConsentMutationResult = NonNullable<Awaited<ReturnType<typeof postRoutingRegistryConsent>>>
+    export type PostRoutingRegistryConsentMutationBody = RegistryConsentRequest
+    export type PostRoutingRegistryConsentMutationError = ErrorResponse
+
+    /**
+ * @summary Store the external-registry lookup consent
+ */
+export const usePostRoutingRegistryConsent = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postRoutingRegistryConsent>>, TError,{data: RegistryConsentRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postRoutingRegistryConsent>>,
+        TError,
+        {data: RegistryConsentRequest},
+        TContext
+      > => {
+      return useMutation(getPostRoutingRegistryConsentMutationOptions(options), queryClient);
     }
 
 /**
@@ -7732,4 +7951,3 @@ export const usePostCatalogSetupApply = <TError = ErrorResponse,
       > => {
       return useMutation(getPostCatalogSetupApplyMutationOptions(options), queryClient);
     }
-

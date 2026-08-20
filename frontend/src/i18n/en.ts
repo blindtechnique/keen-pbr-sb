@@ -1724,10 +1724,10 @@ export const enTranslation = {
       nfqwsTitle: "nfqws",
       nfqws: {
         unknown: "The nfqws configuration could not be read, so coverage is unknown.",
-        covered: "This domain is in an nfqws list, so DPI circumvention applies to it.",
+        covered: "This target is in an nfqws list, so DPI circumvention applies to it.",
         excluded:
-          "This domain is on the nfqws exclude list, so circumvention does not apply - even though another list also matches it.",
-        uncovered: "This domain is in no nfqws list.",
+          "This target is on an nfqws exclude list, so circumvention does not apply - even though another list also matches it.",
+        uncovered: "This target is in no active nfqws list.",
       },
       nfqwsMatch: "{{role}}: {{entry}} matched {{matched}} ({{list}})",
       role: {
@@ -1740,14 +1740,19 @@ export const enTranslation = {
       registryTitle: "Russian blocking registry",
       registryConsent:
         "Also check the address against the blocking registry. An outside service answers it, so the address you ask about becomes known to it. The setting is kept on the router.",
+      registrySaving: "Saving registry lookup consent",
+      registryConsentLoadFailed:
+        "The stored consent could not be read. External lookup remains disabled.",
+      registryDurabilityUnknown:
+        "The setting changed, but storage durability could not be confirmed.",
       registryChecking: "Checking…",
       registry: {
         "not-checked":
           "The lookup did not run, which is not the same as not being blocked.",
-        listed: "This domain is on the blocking registry.",
-        "not-listed": "This domain is not on the registry.",
+        listed: "This target is on the blocking registry.",
+        "not-listed": "This target is not on the registry.",
         "subnet-only":
-          "The domain itself is not on the registry, but its addresses fall inside blocked prefixes.",
+          "The target itself is not on the registry, but its addresses fall inside blocked prefixes.",
       },
       registrySubnets: "Blocked prefixes: {{subnets}}",
       registryCdn: "Addresses belong to CDNs: {{providers}}",

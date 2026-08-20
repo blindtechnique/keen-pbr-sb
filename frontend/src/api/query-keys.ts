@@ -7,6 +7,7 @@ import {
   getGetNdmsVpnServerServicesQueryKey,
   getGetRuntimeInterfacesQueryKey,
   getGetRuntimeOutboundsQueryKey,
+  getGetRoutingRegistryConsentQueryKey,
   getGetTransportsQueryKey,
   getGetTransportConfigQueryKey,
 } from "@/api/generated/keen-api"
@@ -18,6 +19,7 @@ export const queryKeys = {
   ndmsVpnServerServices: getGetNdmsVpnServerServicesQueryKey,
   runtimeInterfaces: getGetRuntimeInterfacesQueryKey,
   runtimeOutbounds: getGetRuntimeOutboundsQueryKey,
+  routingRegistryConsent: getGetRoutingRegistryConsentQueryKey,
   transports: getGetTransportsQueryKey,
   transportConfig: getGetTransportConfigQueryKey,
   config: getGetConfigQueryKey,

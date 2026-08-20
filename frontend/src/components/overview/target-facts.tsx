@@ -2,10 +2,18 @@ import { Loader2 } from "lucide-react"
 import { useEffect, useRef } from "react"
 import { useTranslation } from "react-i18next"
 
-import { usePostRoutingRegistryCheckMutation } from "@/api/mutations"
+import { toast } from "sonner"
+
+import type { ApiError } from "@/api/client"
+import {
+  usePostRoutingRegistryCheckMutation,
+  usePostRoutingRegistryConsentMutation,
+} from "@/api/mutations"
+import { useGetRoutingRegistryConsent } from "@/api/queries"
 import type { RoutingTestNfqws } from "@/api/generated/model"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
+import { getApiErrorMessage } from "@/lib/api-errors"
 
 import {
   nfqwsVerdict,
@@ -24,21 +32,37 @@ import {
  */
 export function TargetFacts({
   nfqws,
-  onRegistryEnabledChange,
-  registryEnabled,
-  registrySaving,
   target,
 }: {
   nfqws?: RoutingTestNfqws
-  onRegistryEnabledChange: (enabled: boolean) => void
-  registryEnabled: boolean
-  registrySaving: boolean
   target: string
 }) {
   const { t } = useTranslation()
   const coverage = summariseNfqwsCoverage(nfqws)
   const verdict = nfqwsVerdict(coverage)
   const registryMutation = usePostRoutingRegistryCheckMutation()
+  const registryConsentQuery = useGetRoutingRegistryConsent()
+  const registryEnabled = Boolean(
+    registryConsentQuery.data?.status === 200 &&
+      registryConsentQuery.data.data.enabled
+  )
+  const consentMutation = usePostRoutingRegistryConsentMutation({
+    mutation: {
+      onError: (mutationError) =>
+        toast.error(getApiErrorMessage(mutationError as ApiError), {
+          richColors: true,
+        }),
+      onSuccess: (response) => {
+        if (response.status === 200 && !response.data.durable) {
+          toast.error(t("overview.targetFacts.registryDurabilityUnknown"), {
+            richColors: true,
+          })
+        }
+      },
+    },
+  })
+  const registrySaving =
+    registryConsentQuery.isPending || consentMutation.isPending
 
   // One lookup per target per switch state, fired from the effect rather than
   // from a button: the preference is the consent, so a checked target should
@@ -60,7 +84,8 @@ export function TargetFacts({
   }, [registryEnabled, target, askRegistry, resetRegistry])
 
   const registry =
-    registryMutation.data?.status === 200 && askedRef.current === target
+    registryMutation.data?.status === 200 &&
+    registryMutation.data.data.target === target
       ? registryMutation.data.data
       : undefined
   const registryState = registry ? registryVerdict(registry) : null
@@ -78,7 +103,7 @@ export function TargetFacts({
             parent domain matching is different from the domain itself. */}
         {[...coverage.excluding, ...coverage.covering].map((match) => (
           <p
-            className="text-xs text-muted-foreground"
+            className="break-words text-xs text-muted-foreground [overflow-wrap:anywhere]"
             key={`${match.list}:${match.entry}:${match.matched}`}
           >
             {t("overview.targetFacts.nfqwsMatch", {
@@ -96,17 +121,17 @@ export function TargetFacts({
           {t("overview.targetFacts.registryTitle")}
         </div>
 
-        {/* The switch sits with the answer it governs, and is stored on the
-            router: a consent kept in the browser would be asked again on every
-            other device and lost with the first cleared cache. */}
+        {/* The switch sits with the answer it governs. Its dedicated endpoint
+            writes a private file atomically; it never stages an unrelated
+            routing draft. */}
         <div className="flex items-start gap-2 py-1">
           <Checkbox
             checked={registryEnabled}
             className="mt-0.5"
-            disabled={registrySaving}
+            disabled={registrySaving || registryConsentQuery.isError}
             id="registry-lookup-enabled"
             onCheckedChange={(checked) =>
-              onRegistryEnabledChange(checked === true)
+              consentMutation.mutate({ data: { enabled: checked === true } })
             }
           />
           <Label
@@ -116,44 +141,55 @@ export function TargetFacts({
             {t("overview.targetFacts.registryConsent")}
           </Label>
           {registrySaving ? (
-            <Loader2 className="mt-0.5 h-4 w-4 animate-spin" />
+            <span aria-live="polite" role="status">
+              <Loader2
+                aria-label={t("overview.targetFacts.registrySaving")}
+                className="mt-0.5 h-4 w-4 animate-spin"
+              />
+            </span>
           ) : null}
         </div>
 
-        {!registryEnabled ? null : registryMutation.isPending ? (
-          <p className="text-sm text-muted-foreground">
-            {t("overview.targetFacts.registryChecking")}
-          </p>
-        ) : registryMutation.isError ? (
-          <p className="text-sm text-destructive">
-            {t("overview.targetFacts.registry.not-checked")}
-          </p>
-        ) : registry ? (
-          <>
-            <p className="text-sm text-muted-foreground">
-              {t(`overview.targetFacts.registry.${registryState}`)}
+        <div aria-atomic="true" aria-live="polite">
+          {registryConsentQuery.isError ? (
+            <p className="text-sm text-destructive" role="alert">
+              {t("overview.targetFacts.registryConsentLoadFailed")}
             </p>
-            {registry.blocked_subnets?.length ? (
+          ) : !registryEnabled ? null : registryMutation.isPending ? (
+            <p className="text-sm text-muted-foreground" role="status">
+              {t("overview.targetFacts.registryChecking")}
+            </p>
+          ) : registryMutation.isError ? (
+            <p className="text-sm text-destructive">
+              {t("overview.targetFacts.registry.not-checked")}
+            </p>
+          ) : registry ? (
+            <>
+              <p className="text-sm text-muted-foreground">
+                {t(`overview.targetFacts.registry.${registryState}`)}
+              </p>
+              {registry.blocked_subnets?.length ? (
+                <p className="break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
+                  {t("overview.targetFacts.registrySubnets", {
+                    subnets: registry.blocked_subnets.join(", "),
+                  })}
+                </p>
+              ) : null}
+              {registry.cdn_providers?.length ? (
+                <p className="break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
+                  {t("overview.targetFacts.registryCdn", {
+                    providers: registry.cdn_providers.join(", "),
+                  })}
+                </p>
+              ) : null}
               <p className="text-xs text-muted-foreground">
-                {t("overview.targetFacts.registrySubnets", {
-                  subnets: registry.blocked_subnets.join(", "),
+                {t("overview.targetFacts.registrySource", {
+                  service: registry.service,
                 })}
               </p>
-            ) : null}
-            {registry.cdn_providers?.length ? (
-              <p className="text-xs text-muted-foreground">
-                {t("overview.targetFacts.registryCdn", {
-                  providers: registry.cdn_providers.join(", "),
-                })}
-              </p>
-            ) : null}
-            <p className="text-xs text-muted-foreground">
-              {t("overview.targetFacts.registrySource", {
-                service: registry.service,
-              })}
-            </p>
-          </>
-        ) : null}
+            </>
+          ) : null}
+        </div>
       </div>
     </div>
   )

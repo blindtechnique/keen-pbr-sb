@@ -2614,18 +2614,19 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
             res.set_header("Cache-Control", "no-store");
         }
 
-        const bool no_store_auth_path =
+        const bool no_store_sensitive_path =
             req.path == "/api/auth/status" ||
             req.path == "/api/auth/login" ||
             req.path == "/api/auth/step-up" ||
             req.path == "/api/auth/settings" ||
             req.path == "/api/auth/settings/step-up-preflight" ||
-            req.path == "/api/auth/logout";
-        if (no_store_auth_path) {
+            req.path == "/api/auth/logout" ||
+            req.path == "/api/routing/registry-consent";
+        if (no_store_sensitive_path) {
             // This classification is independent of the eventual auth
             // verdict. A 401/403/503 response at any early boundary must not
-            // leave authentication/session metadata in a browser or proxy
-            // cache.
+            // leave authentication/session or consent metadata in a browser
+            // or proxy cache.
             res.set_header("Cache-Control", "no-store");
         }
 

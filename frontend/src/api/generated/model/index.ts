@@ -186,6 +186,8 @@ export * from './recommendedListSetupRequest';
 export * from './registryCheckRequest';
 export * from './registryCheckResponse';
 export * from './registryCheckResponseReason';
+export * from './registryConsentRequest';
+export * from './registryConsentResponse';
 export * from './reloadResponse';
 export * from './reloadResponseStatus';
 export * from './remoteAccessRequest';
