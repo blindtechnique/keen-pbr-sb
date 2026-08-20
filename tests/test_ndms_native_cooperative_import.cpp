@@ -164,13 +164,15 @@ NdmsNativeWriterAdmission acquire_writer(
 
 nlohmann::json catalog_payload(
     const std::vector<std::uint8_t>& occupied,
-    const std::optional<std::string>& marker = std::nullopt) {
+    const std::optional<std::string>& marker = std::nullopt,
+    const bool wireguard5_without_marker = false) {
     auto payload = nlohmann::json::object();
     for (const auto slot : occupied) {
         const auto name = "Wireguard" + std::to_string(slot);
         payload[name] = {
             {"type",
-             marker.has_value() && slot == 5U
+             slot == 5U &&
+                     (marker.has_value() || wireguard5_without_marker)
                  ? "Wireguard"
                  : "Bridge"},
             {"interface-name", name},
@@ -187,10 +189,11 @@ nlohmann::json catalog_payload(
 
 NdmsCatalogSnapshot snapshot_for(
     const std::vector<std::uint8_t>& occupied,
-    const std::optional<std::string>& marker = std::nullopt) {
+    const std::optional<std::string>& marker = std::nullopt,
+    const bool wireguard5_without_marker = false) {
     NdmsCatalogSnapshot snapshot;
     snapshot.catalog = parse_ndms_interface_catalog(
-        catalog_payload(occupied, marker));
+        catalog_payload(occupied, marker, wireguard5_without_marker));
     snapshot.status = NdmsCatalogCacheStatus::fresh;
     snapshot.refreshed = true;
     snapshot.observed_at = std::chrono::steady_clock::time_point{
@@ -221,20 +224,56 @@ public:
     }
 
     NdmsNativeDirectRecoveryObservation observe_recovery(
+        const NdmsNativeDirectCatalogScope scope,
         const std::string& marker,
         const std::optional<std::string>& expected_target) noexcept override {
         ++recovery_calls;
+        recovery_scopes.push_back(scope);
         NdmsNativeDirectRecoveryObservation result;
+        result.requested_catalog_scope = scope;
+        result.catalog_scope = scope;
         if (fail_recovery_call == recovery_calls ||
             !expected_target.has_value()) {
             result.failure =
                 NdmsNativeDirectObservationFailure::transport_failed;
             return result;
         }
+        const bool omit_marker =
+            (scope == NdmsNativeDirectCatalogScope::runtime_state &&
+             omit_runtime_marker) ||
+            (scope == NdmsNativeDirectCatalogScope::running_config &&
+             omit_running_marker);
+        const std::vector<std::uint8_t> default_recovery_occupied{
+            0U, 1U, 2U, 3U, 4U, 5U, 6U};
+        const auto& recovery_occupied =
+            scope == NdmsNativeDirectCatalogScope::running_config &&
+                    running_recovery_occupied.has_value()
+                ? *running_recovery_occupied
+                : default_recovery_occupied;
         result.snapshot = snapshot_for(
-            {0U, 1U, 2U, 3U, 4U, 5U, 6U}, marker);
+            recovery_occupied,
+            omit_marker
+                ? std::optional<std::string>{}
+                : std::optional<std::string>{marker},
+            omit_marker);
+        const auto& kernel_interface =
+            scope == NdmsNativeDirectCatalogScope::runtime_state
+                ? runtime_kernel_interface
+                : running_kernel_interface;
+        if (kernel_interface.has_value()) {
+            for (auto& tunnel : result.snapshot->catalog.tunnels) {
+                if (tunnel.firmware_interface_name == *expected_target) {
+                    tunnel.kernel_name = kernel_interface;
+                }
+            }
+        }
         const auto revision_digit =
-            drift_second && recovery_calls == 2U ? 'b' : 'a';
+            (drift_second && recovery_calls == 2U) ||
+                    (running_revision_mismatch &&
+                     scope ==
+                         NdmsNativeDirectCatalogScope::running_config)
+                ? 'b'
+                : 'a';
         result.target_evidence.push_back(
             {*expected_target,
              true,
@@ -257,9 +296,17 @@ public:
         NdmsNativeAscClass::plain_wireguard};
     std::size_t fail_recovery_call{0U};
     bool drift_second{false};
+    bool running_revision_mismatch{false};
+    bool omit_runtime_marker{false};
+    bool omit_running_marker{false};
+    std::optional<std::string> runtime_kernel_interface{"nwg5"};
+    std::optional<std::string> running_kernel_interface{"nwg5"};
+    std::optional<std::vector<std::uint8_t>>
+        running_recovery_occupied;
     std::optional<NdmsNativeDirectCatalogScope> fail_catalog_scope;
     std::size_t recovery_calls{0U};
     std::vector<NdmsNativeDirectCatalogScope> catalog_scopes;
+    std::vector<NdmsNativeDirectCatalogScope> recovery_scopes;
 };
 
 class FakeBackend final : public NdmsNativeLoopbackRciPostBackend {
@@ -472,6 +519,27 @@ void check_response_recorded_wal(
           NdmsNativeImportWalPhase::response_recorded);
     CHECK(loaded.record->execution_mode ==
           NdmsNativeImportExecutionMode::cooperative_stock_import);
+}
+
+NdmsNativeCooperativeImportResult leave_response_recorded(
+    Fixture& fixture) {
+    fixture.gateway.fail_recovery_call = 1U;
+    const auto result = fixture.run();
+    REQUIRE(result.status ==
+            NdmsNativeCooperativeImportStatus::recovery_required);
+    check_response_recorded_wal(fixture, result);
+    fixture.gateway.fail_recovery_call = 0U;
+    fixture.gateway.recovery_calls = 0U;
+    fixture.gateway.recovery_scopes.clear();
+    return result;
+}
+
+void check_resume_is_router_read_only(
+    const NdmsNativeCooperativeImportResumeResult& result) {
+    CHECK_FALSE(result.ndms_import_request_dispatched);
+    CHECK_FALSE(result.ndms_delete_dispatched);
+    CHECK_FALSE(result.system_configuration_save_performed);
+    CHECK_FALSE(result.external_ndms_writer_race_excluded);
 }
 
 } // namespace
@@ -815,6 +883,8 @@ TEST_CASE("cooperative WG import completes ownership and exact WAL cleanup") {
     REQUIRE(result.transaction_id.has_value());
     REQUIRE(result.created_interface ==
             std::optional<std::string>{"Wireguard5"});
+    REQUIRE(result.created_kernel_interface ==
+            std::optional<std::string>{"nwg5"});
     REQUIRE(result.expected_interface ==
             std::optional<std::string>{"Wireguard5"});
     REQUIRE(result.kind == std::optional<NdmsNativeTunnelImportKind>{
@@ -823,6 +893,11 @@ TEST_CASE("cooperative WG import completes ownership and exact WAL cleanup") {
     CHECK(fixture.backend.perform_calls == 1U);
     CHECK(fixture.backend.saw_secret_body);
     CHECK(fixture.gateway.recovery_calls == 2U);
+    REQUIRE(fixture.gateway.recovery_scopes.size() == 2U);
+    CHECK(fixture.gateway.recovery_scopes[0] ==
+          NdmsNativeDirectCatalogScope::runtime_state);
+    CHECK(fixture.gateway.recovery_scopes[1] ==
+          NdmsNativeDirectCatalogScope::running_config);
     CHECK(fixture.maintenance->reserve_calls == 1U);
     CHECK(fixture.wal.load(*result.transaction_id).state ==
           NdmsNativeImportWalLoadState::absent);
@@ -868,6 +943,121 @@ TEST_CASE("cooperative AWG import binds the measured ASC protocol") {
     REQUIRE(ownership.record.has_value());
     CHECK(ownership.record->kind ==
           NdmsNativeTunnelImportKind::amnezia_wireguard);
+}
+
+TEST_CASE("cooperative import requires exact post-import proof in both RCI scopes") {
+    SUBCASE("runtime marker without running-config marker publishes no claim") {
+        Fixture fixture;
+        fixture.gateway.omit_running_marker = true;
+
+        const auto result = fixture.run();
+
+        REQUIRE(result.status ==
+                NdmsNativeCooperativeImportStatus::recovery_required);
+        CHECK(result.stop == NdmsNativeCooperativeImportStop::
+              forward_completion_blocked);
+        CHECK_FALSE(result.created_interface.has_value());
+        CHECK_FALSE(result.ownership_published);
+        check_response_recorded_wal(fixture, result);
+        CHECK(fixture.ownership.read("Wireguard5").state ==
+              NdmsNativeOwnershipReadState::absent);
+        REQUIRE(fixture.gateway.recovery_scopes.size() == 2U);
+        CHECK(fixture.gateway.recovery_scopes[0] ==
+              NdmsNativeDirectCatalogScope::runtime_state);
+        CHECK(fixture.gateway.recovery_scopes[1] ==
+              NdmsNativeDirectCatalogScope::running_config);
+    }
+
+    SUBCASE("running-config target revision drift publishes no claim") {
+        Fixture fixture;
+        fixture.gateway.running_revision_mismatch = true;
+
+        const auto result = fixture.run();
+
+        REQUIRE(result.status ==
+                NdmsNativeCooperativeImportStatus::recovery_required);
+        CHECK(result.stop == NdmsNativeCooperativeImportStop::
+              forward_completion_blocked);
+        CHECK_FALSE(result.created_interface.has_value());
+        CHECK_FALSE(result.ownership_published);
+        check_response_recorded_wal(fixture, result);
+        CHECK(fixture.ownership.read("Wireguard5").state ==
+              NdmsNativeOwnershipReadState::absent);
+    }
+
+    SUBCASE("scope occupancy divergence publishes no claim") {
+        Fixture fixture;
+        fixture.gateway.running_recovery_occupied =
+            std::vector<std::uint8_t>{
+                0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U};
+
+        const auto result = fixture.run();
+
+        REQUIRE(result.status ==
+                NdmsNativeCooperativeImportStatus::recovery_required);
+        CHECK(result.stop == NdmsNativeCooperativeImportStop::
+              forward_completion_blocked);
+        CHECK_FALSE(result.created_interface.has_value());
+        CHECK_FALSE(result.ownership_published);
+        check_response_recorded_wal(fixture, result);
+        CHECK(fixture.ownership.read("Wireguard5").state ==
+              NdmsNativeOwnershipReadState::absent);
+    }
+
+    SUBCASE("missing running-config kernel identity publishes no claim") {
+        Fixture fixture;
+        fixture.gateway.running_kernel_interface.reset();
+
+        const auto result = fixture.run();
+
+        REQUIRE(result.status ==
+                NdmsNativeCooperativeImportStatus::recovery_required);
+        CHECK(result.stop == NdmsNativeCooperativeImportStop::
+              forward_completion_blocked);
+        CHECK_FALSE(result.created_interface.has_value());
+        CHECK_FALSE(result.created_kernel_interface.has_value());
+        CHECK_FALSE(result.ownership_published);
+        check_response_recorded_wal(fixture, result);
+        CHECK(fixture.ownership.read("Wireguard5").state ==
+              NdmsNativeOwnershipReadState::absent);
+    }
+
+    SUBCASE("cross-scope kernel identity mismatch publishes no claim") {
+        Fixture fixture;
+        fixture.gateway.running_kernel_interface = "nwg6";
+
+        const auto result = fixture.run();
+
+        REQUIRE(result.status ==
+                NdmsNativeCooperativeImportStatus::recovery_required);
+        CHECK(result.stop == NdmsNativeCooperativeImportStop::
+              forward_completion_blocked);
+        CHECK_FALSE(result.created_interface.has_value());
+        CHECK_FALSE(result.created_kernel_interface.has_value());
+        CHECK_FALSE(result.ownership_published);
+        check_response_recorded_wal(fixture, result);
+        CHECK(fixture.ownership.read("Wireguard5").state ==
+              NdmsNativeOwnershipReadState::absent);
+    }
+
+    SUBCASE("unsafe kernel identity publishes no claim") {
+        Fixture fixture;
+        fixture.gateway.runtime_kernel_interface = "nwg/5";
+        fixture.gateway.running_kernel_interface = "nwg/5";
+
+        const auto result = fixture.run();
+
+        REQUIRE(result.status ==
+                NdmsNativeCooperativeImportStatus::recovery_required);
+        CHECK(result.stop == NdmsNativeCooperativeImportStop::
+              forward_completion_blocked);
+        CHECK_FALSE(result.created_interface.has_value());
+        CHECK_FALSE(result.created_kernel_interface.has_value());
+        CHECK_FALSE(result.ownership_published);
+        check_response_recorded_wal(fixture, result);
+        CHECK(fixture.ownership.read("Wireguard5").state ==
+              NdmsNativeOwnershipReadState::absent);
+    }
 }
 
 TEST_CASE("cooperative import failure matrix retains exact recovery phase") {
@@ -1011,6 +1201,435 @@ TEST_CASE("cooperative import failure matrix retains exact recovery phase") {
         CHECK(fixture.ownership.read("Wireguard5").state ==
               NdmsNativeOwnershipReadState::absent);
     }
+}
+
+TEST_CASE("cooperative import resume reports authoritative no-work without router access") {
+    Fixture fixture;
+
+    const auto result = fixture.coordinator.resume_once(
+        fixture.writer.lease);
+
+    CHECK(result.status ==
+          NdmsNativeCooperativeImportResumeStatus::no_work);
+    CHECK(result.stop ==
+          NdmsNativeCooperativeImportResumeStop::none);
+    CHECK(result.delete_wal_readiness ==
+          std::optional<NdmsNativeDeleteWalReadiness>{
+              NdmsNativeDeleteWalReadiness::clean});
+    CHECK(result.import_wal_readiness ==
+          std::optional<NdmsNativeCooperativeImportWalReadiness>{
+              NdmsNativeCooperativeImportWalReadiness::clean});
+    CHECK_FALSE(result.wal_may_require_recovery);
+    CHECK_FALSE(result.wal_removed);
+    check_resume_is_router_read_only(result);
+    CHECK(fixture.gateway.recovery_calls == 0U);
+    CHECK(fixture.backend.calls == 0U);
+    CHECK(fixture.observations.read().state ==
+          NdmsNativeObservationReadState::absent);
+}
+
+TEST_CASE("cooperative import resume forward-completes response-recorded WAL") {
+    Fixture fixture;
+    const auto interrupted = leave_response_recorded(fixture);
+    REQUIRE(interrupted.transaction_id.has_value());
+    const auto backend_calls_before = fixture.backend.calls;
+    const auto reserve_calls_before = fixture.maintenance->reserve_calls;
+
+    const auto result = fixture.coordinator.resume_once(
+        fixture.writer.lease);
+
+    REQUIRE(result.status ==
+            NdmsNativeCooperativeImportResumeStatus::completed);
+    CHECK(result.stop ==
+          NdmsNativeCooperativeImportResumeStop::none);
+    CHECK(result.phase ==
+          std::optional<NdmsNativeImportWalPhase>{
+              NdmsNativeImportWalPhase::response_recorded});
+    CHECK(result.transaction_id == interrupted.transaction_id);
+    CHECK(result.expected_interface ==
+          std::optional<std::string>{"Wireguard5"});
+    CHECK(result.created_interface ==
+          std::optional<std::string>{"Wireguard5"});
+    CHECK(result.created_kernel_interface ==
+          std::optional<std::string>{"nwg5"});
+    CHECK(result.ownership_published);
+    CHECK(result.wal_removed);
+    CHECK_FALSE(result.wal_may_require_recovery);
+    check_resume_is_router_read_only(result);
+    CHECK(fixture.backend.calls == backend_calls_before);
+    CHECK(fixture.maintenance->reserve_calls == reserve_calls_before);
+    REQUIRE(fixture.gateway.recovery_scopes.size() == 2U);
+    CHECK(fixture.gateway.recovery_scopes[0] ==
+          NdmsNativeDirectCatalogScope::runtime_state);
+    CHECK(fixture.gateway.recovery_scopes[1] ==
+          NdmsNativeDirectCatalogScope::running_config);
+    CHECK(fixture.wal.load(*interrupted.transaction_id).state ==
+          NdmsNativeImportWalLoadState::absent);
+
+    const auto ownership = fixture.ownership.read("Wireguard5");
+    REQUIRE(ownership.state == NdmsNativeOwnershipReadState::valid);
+    REQUIRE(ownership.record.has_value());
+    CHECK(ownership.record->schema_version ==
+          kNdmsNativeOwnershipSchemaVersion);
+    CHECK(ownership.record->lifecycle ==
+          NdmsNativeOwnershipLifecycle::active_running_only);
+    CHECK_FALSE(ownership.record->lifecycle_evidence.has_value());
+    const auto ledger = fixture.observations.read();
+    REQUIRE(ledger.state == NdmsNativeObservationReadState::valid);
+    REQUIRE(ledger.ledger.has_value());
+    CHECK(ledger.ledger->sequence == 3U);
+    CHECK(ledger.ledger->mutation_epoch == 1U);
+}
+
+TEST_CASE("cooperative import resume completes crashes at each local forward phase") {
+    SUBCASE("target-verified WAL idempotently adopts its exact claim") {
+        Fixture fixture;
+        fixture.faults->fail_ownership_after_publish = true;
+        const auto interrupted = fixture.run();
+        REQUIRE(interrupted.transaction_id.has_value());
+        REQUIRE(interrupted.status ==
+                NdmsNativeCooperativeImportStatus::recovery_required);
+        const auto loaded = fixture.wal.load(*interrupted.transaction_id);
+        REQUIRE(loaded.record.has_value());
+        REQUIRE(loaded.record->phase ==
+                NdmsNativeImportWalPhase::target_verified);
+        const auto ownership_before =
+            fixture.ownership.read("Wireguard5");
+        REQUIRE(ownership_before.record.has_value());
+        fixture.faults->fail_ownership_after_publish = false;
+        fixture.gateway.recovery_calls = 0U;
+        fixture.gateway.recovery_scopes.clear();
+        const auto backend_calls_before = fixture.backend.calls;
+
+        const auto result = fixture.coordinator.resume_once(
+            fixture.writer.lease);
+
+        REQUIRE(result.status ==
+                NdmsNativeCooperativeImportResumeStatus::completed);
+        CHECK(result.phase ==
+              std::optional<NdmsNativeImportWalPhase>{
+                  NdmsNativeImportWalPhase::target_verified});
+        CHECK(result.created_interface ==
+              std::optional<std::string>{"Wireguard5"});
+        CHECK(result.ownership_published);
+        CHECK(result.wal_removed);
+        check_resume_is_router_read_only(result);
+        CHECK(fixture.backend.calls == backend_calls_before);
+        CHECK(fixture.wal.load(*interrupted.transaction_id).state ==
+              NdmsNativeImportWalLoadState::absent);
+        const auto ownership_after =
+            fixture.ownership.read("Wireguard5");
+        REQUIRE(ownership_after.record.has_value());
+        CHECK(*ownership_after.record == *ownership_before.record);
+    }
+
+    SUBCASE("ownership-published WAL performs exact cleanup only") {
+        Fixture fixture;
+        fixture.faults->fail_wal_remove = true;
+        const auto interrupted = fixture.run();
+        REQUIRE(interrupted.transaction_id.has_value());
+        REQUIRE(interrupted.status ==
+                NdmsNativeCooperativeImportStatus::recovery_required);
+        const auto loaded = fixture.wal.load(*interrupted.transaction_id);
+        REQUIRE(loaded.record.has_value());
+        REQUIRE(loaded.record->phase ==
+                NdmsNativeImportWalPhase::ownership_published);
+        const auto ownership_before =
+            fixture.ownership.read("Wireguard5");
+        REQUIRE(ownership_before.record.has_value());
+        fixture.faults->fail_wal_remove = false;
+        fixture.gateway.recovery_calls = 0U;
+        fixture.gateway.recovery_scopes.clear();
+        const auto backend_calls_before = fixture.backend.calls;
+
+        const auto result = fixture.coordinator.resume_once(
+            fixture.writer.lease);
+
+        REQUIRE(result.status ==
+                NdmsNativeCooperativeImportResumeStatus::completed);
+        CHECK(result.phase ==
+              std::optional<NdmsNativeImportWalPhase>{
+                  NdmsNativeImportWalPhase::ownership_published});
+        CHECK(result.recovery_action ==
+              std::optional<NdmsNativeImportRecoveryAction>{
+                  NdmsNativeImportRecoveryAction::
+                      resume_forward_reconcile});
+        CHECK(result.created_interface ==
+              std::optional<std::string>{"Wireguard5"});
+        CHECK(result.ownership_published);
+        CHECK(result.wal_removed);
+        check_resume_is_router_read_only(result);
+        CHECK(fixture.backend.calls == backend_calls_before);
+        CHECK(fixture.wal.load(*interrupted.transaction_id).state ==
+              NdmsNativeImportWalLoadState::absent);
+        const auto ownership_after =
+            fixture.ownership.read("Wireguard5");
+        REQUIRE(ownership_after.record.has_value());
+        CHECK(*ownership_after.record == *ownership_before.record);
+    }
+}
+
+TEST_CASE("cooperative import resume requires dual-scope stable target proof") {
+    SUBCASE("runtime-only marker leaves response WAL and ownership untouched") {
+        Fixture fixture;
+        const auto interrupted = leave_response_recorded(fixture);
+        fixture.gateway.omit_running_marker = true;
+        const auto backend_calls_before = fixture.backend.calls;
+
+        const auto result = fixture.coordinator.resume_once(
+            fixture.writer.lease);
+
+        CHECK(result.status ==
+              NdmsNativeCooperativeImportResumeStatus::blocked);
+        CHECK(result.stop ==
+              NdmsNativeCooperativeImportResumeStop::
+                  observation_unstable);
+        CHECK_FALSE(result.created_interface.has_value());
+        CHECK_FALSE(result.ownership_published);
+        CHECK_FALSE(result.wal_removed);
+        check_resume_is_router_read_only(result);
+        CHECK(fixture.backend.calls == backend_calls_before);
+        check_response_recorded_wal(fixture, interrupted);
+        CHECK(fixture.ownership.read("Wireguard5").state ==
+              NdmsNativeOwnershipReadState::absent);
+    }
+
+    SUBCASE("scope target revision mismatch leaves forward state untouched") {
+        Fixture fixture;
+        const auto interrupted = leave_response_recorded(fixture);
+        fixture.gateway.running_revision_mismatch = true;
+        const auto backend_calls_before = fixture.backend.calls;
+
+        const auto result = fixture.coordinator.resume_once(
+            fixture.writer.lease);
+
+        CHECK(result.status ==
+              NdmsNativeCooperativeImportResumeStatus::blocked);
+        CHECK(result.stop ==
+              NdmsNativeCooperativeImportResumeStop::
+                  observation_unstable);
+        CHECK_FALSE(result.created_interface.has_value());
+        CHECK_FALSE(result.ownership_published);
+        CHECK_FALSE(result.wal_removed);
+        check_resume_is_router_read_only(result);
+        CHECK(fixture.backend.calls == backend_calls_before);
+        check_response_recorded_wal(fixture, interrupted);
+        CHECK(fixture.ownership.read("Wireguard5").state ==
+              NdmsNativeOwnershipReadState::absent);
+    }
+
+    SUBCASE("scope occupancy mismatch leaves forward state untouched") {
+        Fixture fixture;
+        const auto interrupted = leave_response_recorded(fixture);
+        fixture.gateway.running_recovery_occupied =
+            std::vector<std::uint8_t>{
+                0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U};
+        const auto backend_calls_before = fixture.backend.calls;
+
+        const auto result = fixture.coordinator.resume_once(
+            fixture.writer.lease);
+
+        CHECK(result.status ==
+              NdmsNativeCooperativeImportResumeStatus::blocked);
+        CHECK(result.stop ==
+              NdmsNativeCooperativeImportResumeStop::
+                  observation_unstable);
+        CHECK_FALSE(result.created_interface.has_value());
+        CHECK_FALSE(result.ownership_published);
+        CHECK_FALSE(result.wal_removed);
+        check_resume_is_router_read_only(result);
+        CHECK(fixture.backend.calls == backend_calls_before);
+        check_response_recorded_wal(fixture, interrupted);
+        CHECK(fixture.ownership.read("Wireguard5").state ==
+              NdmsNativeOwnershipReadState::absent);
+    }
+
+    SUBCASE("missing kernel identity leaves forward state untouched") {
+        Fixture fixture;
+        const auto interrupted = leave_response_recorded(fixture);
+        fixture.gateway.running_kernel_interface.reset();
+        const auto backend_calls_before = fixture.backend.calls;
+
+        const auto result = fixture.coordinator.resume_once(
+            fixture.writer.lease);
+
+        CHECK(result.status ==
+              NdmsNativeCooperativeImportResumeStatus::blocked);
+        CHECK(result.stop ==
+              NdmsNativeCooperativeImportResumeStop::
+                  observation_unstable);
+        CHECK_FALSE(result.created_interface.has_value());
+        CHECK_FALSE(result.created_kernel_interface.has_value());
+        CHECK_FALSE(result.ownership_published);
+        CHECK_FALSE(result.wal_removed);
+        check_resume_is_router_read_only(result);
+        CHECK(fixture.backend.calls == backend_calls_before);
+        check_response_recorded_wal(fixture, interrupted);
+        CHECK(fixture.ownership.read("Wireguard5").state ==
+              NdmsNativeOwnershipReadState::absent);
+    }
+
+    SUBCASE("kernel identity mismatch leaves forward state untouched") {
+        Fixture fixture;
+        const auto interrupted = leave_response_recorded(fixture);
+        fixture.gateway.running_kernel_interface = "nwg6";
+        const auto backend_calls_before = fixture.backend.calls;
+
+        const auto result = fixture.coordinator.resume_once(
+            fixture.writer.lease);
+
+        CHECK(result.status ==
+              NdmsNativeCooperativeImportResumeStatus::blocked);
+        CHECK(result.stop ==
+              NdmsNativeCooperativeImportResumeStop::
+                  observation_unstable);
+        CHECK_FALSE(result.created_interface.has_value());
+        CHECK_FALSE(result.created_kernel_interface.has_value());
+        CHECK_FALSE(result.ownership_published);
+        CHECK_FALSE(result.wal_removed);
+        check_resume_is_router_read_only(result);
+        CHECK(fixture.backend.calls == backend_calls_before);
+        check_response_recorded_wal(fixture, interrupted);
+        CHECK(fixture.ownership.read("Wireguard5").state ==
+              NdmsNativeOwnershipReadState::absent);
+    }
+}
+
+TEST_CASE("cooperative import resume fails closed before reads on cross-kind and unsafe state") {
+    SUBCASE("unfinished delete WAL blocks before durable recovery evidence") {
+        Fixture fixture;
+        const auto interrupted = leave_response_recorded(fixture);
+        REQUIRE(fixture.delete_wal.publish_prepared_exclusive(
+            unfinished_delete_record()));
+        const auto ledger_before = fixture.observations.read();
+        REQUIRE(ledger_before.ledger.has_value());
+        const auto backend_calls_before = fixture.backend.calls;
+
+        const auto result = fixture.coordinator.resume_once(
+            fixture.writer.lease);
+
+        CHECK(result.stop ==
+              NdmsNativeCooperativeImportResumeStop::
+                  delete_wal_not_clean);
+        CHECK(result.delete_wal_readiness ==
+              std::optional<NdmsNativeDeleteWalReadiness>{
+                  NdmsNativeDeleteWalReadiness::unfinished});
+        CHECK_FALSE(result.transaction_id.has_value());
+        CHECK(fixture.gateway.recovery_calls == 0U);
+        CHECK(fixture.backend.calls == backend_calls_before);
+        const auto ledger_after = fixture.observations.read();
+        REQUIRE(ledger_after.ledger.has_value());
+        CHECK(*ledger_after.ledger == *ledger_before.ledger);
+        check_response_recorded_wal(fixture, interrupted);
+        check_resume_is_router_read_only(result);
+    }
+
+    SUBCASE("unsafe import inventory blocks before direct observations") {
+        Fixture fixture;
+        const auto interrupted = leave_response_recorded(fixture);
+        const auto unknown = fixture.wal.state_directory() / "unknown";
+        const int descriptor = ::open(
+            unknown.c_str(),
+            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+            0600);
+        REQUIRE(descriptor >= 0);
+        REQUIRE(::close(descriptor) == 0);
+        const auto ledger_before = fixture.observations.read();
+        REQUIRE(ledger_before.ledger.has_value());
+
+        const auto result = fixture.coordinator.resume_once(
+            fixture.writer.lease);
+
+        CHECK(result.stop ==
+              NdmsNativeCooperativeImportResumeStop::
+                  import_wal_not_single_safe);
+        CHECK(result.import_wal_readiness ==
+              std::optional<NdmsNativeCooperativeImportWalReadiness>{
+                  NdmsNativeCooperativeImportWalReadiness::unsafe});
+        CHECK(fixture.gateway.recovery_calls == 0U);
+        const auto ledger_after = fixture.observations.read();
+        REQUIRE(ledger_after.ledger.has_value());
+        CHECK(*ledger_after.ledger == *ledger_before.ledger);
+        CHECK(fixture.wal.load(*interrupted.transaction_id).state ==
+              NdmsNativeImportWalLoadState::valid);
+        check_resume_is_router_read_only(result);
+    }
+}
+
+TEST_CASE("cooperative import resume never dispatches rollback phases") {
+    Fixture fixture;
+    fixture.faults->fail_ownership_after_publish = true;
+    const auto interrupted = fixture.run();
+    REQUIRE(interrupted.transaction_id.has_value());
+    auto loaded = fixture.wal.load(*interrupted.transaction_id);
+    REQUIRE(loaded.record.has_value());
+    REQUIRE(loaded.record->phase ==
+            NdmsNativeImportWalPhase::target_verified);
+    fixture.faults->fail_ownership_after_publish = false;
+    auto rollback = *loaded.record;
+    rollback.phase = NdmsNativeImportWalPhase::rollback_requested;
+    fixture.wal.publish(rollback);
+    const auto ownership_before = fixture.ownership.read("Wireguard5");
+    REQUIRE(ownership_before.record.has_value());
+    const auto ledger_before = fixture.observations.read();
+    REQUIRE(ledger_before.ledger.has_value());
+    fixture.gateway.recovery_calls = 0U;
+    fixture.gateway.recovery_scopes.clear();
+    const auto backend_calls_before = fixture.backend.calls;
+
+    const auto result = fixture.coordinator.resume_once(
+        fixture.writer.lease);
+
+    CHECK(result.stop ==
+          NdmsNativeCooperativeImportResumeStop::
+              phase_not_forward_only);
+    CHECK(result.phase ==
+          std::optional<NdmsNativeImportWalPhase>{
+              NdmsNativeImportWalPhase::rollback_requested});
+    CHECK_FALSE(result.created_interface.has_value());
+    CHECK_FALSE(result.wal_removed);
+    CHECK(result.wal_may_require_recovery);
+    CHECK(fixture.gateway.recovery_calls == 0U);
+    CHECK(fixture.backend.calls == backend_calls_before);
+    const auto current = fixture.wal.load(*interrupted.transaction_id);
+    REQUIRE(current.record.has_value());
+    CHECK(*current.record == rollback);
+    const auto ownership_after = fixture.ownership.read("Wireguard5");
+    REQUIRE(ownership_after.record.has_value());
+    CHECK(*ownership_after.record == *ownership_before.record);
+    const auto ledger_after = fixture.observations.read();
+    REQUIRE(ledger_after.ledger.has_value());
+    CHECK(*ledger_after.ledger == *ledger_before.ledger);
+    check_resume_is_router_read_only(result);
+}
+
+TEST_CASE("cooperative import resume shares the recovery CAS with concurrent recoverers") {
+    Fixture fixture;
+    const auto interrupted = leave_response_recorded(fixture);
+    auto lock_path = fixture.wal.state_directory();
+    lock_path += ".recovery-lock";
+    HeldRecoveryLock concurrent_recoverer{lock_path};
+    REQUIRE(concurrent_recoverer.held());
+    const auto backend_calls_before = fixture.backend.calls;
+
+    const auto result = fixture.coordinator.resume_once(
+        fixture.writer.lease);
+
+    CHECK(result.stop ==
+          NdmsNativeCooperativeImportResumeStop::
+              forward_admission_failed);
+    CHECK(result.forward_admission_state ==
+          std::optional<NdmsNativeImportRecoveryAdmissionState>{
+              NdmsNativeImportRecoveryAdmissionState::lease_busy});
+    CHECK(result.created_interface ==
+          std::optional<std::string>{"Wireguard5"});
+    CHECK_FALSE(result.ownership_published);
+    CHECK_FALSE(result.wal_removed);
+    CHECK(fixture.backend.calls == backend_calls_before);
+    check_response_recorded_wal(fixture, interrupted);
+    CHECK(fixture.ownership.read("Wireguard5").state ==
+          NdmsNativeOwnershipReadState::absent);
+    check_resume_is_router_read_only(result);
 }
 
 TEST_CASE("cooperative import rejects malformed secret input before reads") {

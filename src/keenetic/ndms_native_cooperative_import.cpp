@@ -17,6 +17,10 @@
 #include <utility>
 #include <vector>
 
+#if defined(__linux__)
+#include <net/if.h>
+#endif
+
 namespace keen_pbr3 {
 
 namespace {
@@ -43,6 +47,84 @@ private:
     std::string& value_;
 };
 
+constexpr std::size_t kMaximumLocalKernelInterfaces = 4096U;
+
+bool safe_kernel_interface_name(const std::string_view value) noexcept {
+    if (value.empty() || value.size() > 15U || value == "." ||
+        value == "..") {
+        return false;
+    }
+    return std::all_of(
+        value.begin(), value.end(), [](const unsigned char character) {
+            const bool ascii_alnum =
+                (character >= 'a' && character <= 'z') ||
+                (character >= 'A' && character <= 'Z') ||
+                (character >= '0' && character <= '9');
+            return ascii_alnum || character == '_' ||
+                   character == '-' || character == '.' ||
+                   character == ':';
+        });
+}
+
+std::optional<std::vector<std::string>> local_kernel_interfaces() noexcept {
+#if defined(__linux__)
+    struct InterfaceNamesGuard final {
+        struct if_nameindex* entries{nullptr};
+        ~InterfaceNamesGuard() {
+            if (entries != nullptr) ::if_freenameindex(entries);
+        }
+    } guard;
+
+    try {
+        guard.entries = ::if_nameindex();
+        if (guard.entries == nullptr) return std::nullopt;
+
+        std::vector<std::string> names;
+        names.reserve(32U);
+        for (auto* entry = guard.entries;; ++entry) {
+            if (entry->if_index == 0U && entry->if_name == nullptr) {
+                break;
+            }
+            if (entry->if_index == 0U || entry->if_name == nullptr ||
+                names.size() >= kMaximumLocalKernelInterfaces) {
+                return std::nullopt;
+            }
+            names.emplace_back(entry->if_name);
+        }
+        if (names.empty()) return std::nullopt;
+        std::sort(names.begin(), names.end());
+        if (std::adjacent_find(names.begin(), names.end()) != names.end()) {
+            return std::nullopt;
+        }
+        return names;
+    } catch (...) {
+        return std::nullopt;
+    }
+#else
+    return std::nullopt;
+#endif
+}
+
+bool attach_local_kernel_interfaces(
+    NdmsNativeDirectRecoveryObservation& observation) noexcept {
+    if (!observation.complete() || !observation.snapshot.has_value()) {
+        return false;
+    }
+    const auto names = local_kernel_interfaces();
+    if (!names.has_value()) return false;
+    try {
+        auto resolved = resolve_ndms_kernel_names(
+            observation.snapshot->catalog, *names);
+        auto revision = ndms_native_import_recovery_catalog_revision(
+            resolved, observation.target_evidence);
+        observation.snapshot->catalog = std::move(resolved);
+        observation.catalog_revision = std::move(revision);
+        return !observation.catalog_revision.empty();
+    } catch (...) {
+        return false;
+    }
+}
+
 class DirectObservationGatewayAdapter final
     : public NdmsNativeCooperativeImportObservationGateway {
 public:
@@ -52,9 +134,18 @@ public:
     }
 
     NdmsNativeDirectRecoveryObservation observe_recovery(
+        const NdmsNativeDirectCatalogScope scope,
         const std::string& marker,
         const std::optional<std::string>& expected_target) noexcept override {
-        return gateway_.observe_recovery(marker, expected_target);
+        auto observed =
+            gateway_.observe_recovery(scope, marker, expected_target);
+        if (observed.complete() &&
+            !attach_local_kernel_interfaces(observed)) {
+            observed.catalog_revision.clear();
+            observed.failure =
+                NdmsNativeDirectObservationFailure::transport_failed;
+        }
+        return observed;
     }
 
 private:
@@ -302,6 +393,287 @@ NdmsNativeCooperativeImportStop dispatch_stop(
         return NdmsNativeCooperativeImportStop::
             forward_completion_blocked;
     }
+}
+
+NdmsNativeCooperativeImportResumeStop resume_dispatch_stop(
+    const std::optional<NdmsNativeImportRecoveryStep>& step) noexcept {
+    if (!step.has_value()) {
+        return NdmsNativeCooperativeImportResumeStop::unexpected_failure;
+    }
+    switch (*step) {
+    case NdmsNativeImportRecoveryStep::advance_wal_target_verified:
+        return NdmsNativeCooperativeImportResumeStop::
+            target_verified_wal_publish_failed;
+    case NdmsNativeImportRecoveryStep::publish_ownership:
+        return NdmsNativeCooperativeImportResumeStop::
+            ownership_publish_failed;
+    case NdmsNativeImportRecoveryStep::
+        advance_wal_ownership_published:
+        return NdmsNativeCooperativeImportResumeStop::
+            ownership_wal_publish_failed;
+    case NdmsNativeImportRecoveryStep::remove_wal_record:
+        return NdmsNativeCooperativeImportResumeStop::wal_cleanup_failed;
+    default:
+        return NdmsNativeCooperativeImportResumeStop::
+            recovery_action_not_forward_only;
+    }
+}
+
+NdmsNativeCooperativeImportWalReadiness import_wal_readiness(
+    const NdmsNativeImportWalInventory& inventory) noexcept {
+    const bool clean =
+        (inventory.state == NdmsNativeImportWalInventoryState::absent ||
+         inventory.state == NdmsNativeImportWalInventoryState::ready) &&
+        inventory.items.empty();
+    if (clean) return NdmsNativeCooperativeImportWalReadiness::clean;
+    if (inventory.recovery_permitted() && !inventory.items.empty()) {
+        return NdmsNativeCooperativeImportWalReadiness::unfinished;
+    }
+    return NdmsNativeCooperativeImportWalReadiness::unsafe;
+}
+
+bool forward_only_phase(const NdmsNativeImportWalPhase phase) noexcept {
+    return phase == NdmsNativeImportWalPhase::response_recorded ||
+           phase == NdmsNativeImportWalPhase::target_verified ||
+           phase == NdmsNativeImportWalPhase::ownership_published;
+}
+
+std::optional<NdmsNativeOwnershipRecord> ownership_claim_from(
+    const NdmsNativeImportWalRecord& record) {
+    if (!record.created_interface.has_value() ||
+        !record.target_full_revision.has_value()) {
+        return std::nullopt;
+    }
+    NdmsNativeOwnershipRecord claim;
+    claim.interface_name = *record.created_interface;
+    claim.transaction_id = record.transaction_id;
+    claim.marker = record.marker;
+    claim.kind = record.kind;
+    claim.snapshot_revision = record.snapshot_revision;
+    claim.target_full_revision = *record.target_full_revision;
+    return claim;
+}
+
+bool exact_existing_claim_or_absent(
+    const NdmsNativeOwnershipReadResult& existing,
+    const NdmsNativeOwnershipRecord& expected) noexcept {
+    return existing.state == NdmsNativeOwnershipReadState::absent ||
+           (existing.state == NdmsNativeOwnershipReadState::valid &&
+            existing.record.has_value() &&
+            *existing.record == expected);
+}
+
+bool baseline_target_absent(
+    const NdmsNativeImportPersistedBaseline& baseline) noexcept {
+    if (baseline.occupancy_hex.size() !=
+        kNdmsNativeImportOccupancyHexCharacters) {
+        return false;
+    }
+    const auto slot = baseline.expected_target_slot;
+    const auto character = baseline.occupancy_hex[
+        static_cast<std::size_t>(slot / 8U) * 2U +
+        ((slot % 8U) >= 4U ? 0U : 1U)];
+    std::uint8_t nibble = 0U;
+    if (character >= '0' && character <= '9') {
+        nibble = static_cast<std::uint8_t>(character - '0');
+    } else if (character >= 'a' && character <= 'f') {
+        nibble = static_cast<std::uint8_t>(character - 'a' + 10);
+    } else {
+        return false;
+    }
+    const auto bit = static_cast<std::uint8_t>(1U << (slot % 4U));
+    return (nibble & bit) == 0U;
+}
+
+bool stamp_matches_scoped_measurement(
+    const NdmsNativeObservationBinding& binding,
+    const NdmsNativeDirectRecoveryObservation& measured,
+    const NdmsNativeObservationStamp& stamp) noexcept {
+    return valid_ndms_native_observation_stamp(stamp) &&
+           stamp.authority_id == binding.authority_id &&
+           stamp.mutation_epoch == binding.mutation_epoch &&
+           stamp.sequence > binding.baseline_sequence &&
+           stamp.catalog_revision == measured.catalog_revision;
+}
+
+bool scoped_sightings_agree(
+    const NdmsNativeImportRecoveryCatalogProbe& runtime,
+    const NdmsNativeImportRecoveryCatalogProbe& running) noexcept {
+    if (runtime.marker_sightings.size() !=
+        running.marker_sightings.size()) {
+        return false;
+    }
+    for (std::size_t index = 0U;
+         index < runtime.marker_sightings.size(); ++index) {
+        const auto& left = runtime.marker_sightings[index];
+        const auto& right = running.marker_sightings[index];
+        if (left.interface_name != right.interface_name ||
+            left.link_down != right.link_down ||
+            left.full_revision != right.full_revision) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::optional<std::string> measured_target_kernel_interface(
+    const NdmsNativeDirectRecoveryObservation& measured,
+    const std::string& expected_interface) noexcept {
+    if (!measured.snapshot.has_value()) return std::nullopt;
+
+    std::optional<std::string> kernel_interface;
+    std::size_t matches = 0U;
+    for (const auto& tunnel : measured.snapshot->catalog.tunnels) {
+        if (tunnel.firmware_interface_name != expected_interface) continue;
+        ++matches;
+        if (matches != 1U || !tunnel.kernel_name.has_value() ||
+            !safe_kernel_interface_name(*tunnel.kernel_name)) {
+            return std::nullopt;
+        }
+        kernel_interface = *tunnel.kernel_name;
+    }
+    return matches == 1U ? kernel_interface : std::nullopt;
+}
+
+std::optional<std::string> scoped_target_kernel_interface(
+    const NdmsNativeDirectRecoveryObservation& runtime_measured,
+    const NdmsNativeDirectRecoveryObservation& running_measured,
+    const std::string& expected_interface) noexcept {
+    const auto runtime = measured_target_kernel_interface(
+        runtime_measured, expected_interface);
+    const auto running = measured_target_kernel_interface(
+        running_measured, expected_interface);
+    if (!runtime.has_value() || !running.has_value() ||
+        *runtime != *running) {
+        return std::nullopt;
+    }
+    return runtime;
+}
+
+struct ScopedForwardProof final {
+    NdmsNativeImportRecoveryObservation observation;
+    std::optional<std::string> created_kernel_interface;
+};
+
+// Runtime-state and running-config catalog documents are different RCI
+// representations, so their structural catalog revisions are not expected
+// to be byte-identical.  This coordinator binds each exact document to its
+// own durable stamp, then compares only the facts that are meaningful across
+// both scopes: complete slot occupancy, the exact marker sighting, link state
+// and the direct config/runtime/ASC full revision.  Runtime structural
+// evidence remains the one compared with the runtime baseline.
+ScopedForwardProof build_scoped_forward_observation(
+    const NdmsNativeImportWalRecord& record,
+    const NdmsNativeDirectRecoveryObservation& runtime_measured,
+    const NdmsNativeImportRecoveryCatalogProbe& runtime_probe,
+    const NdmsNativeDirectRecoveryObservation& running_measured,
+    const NdmsNativeImportRecoveryCatalogProbe& running_probe,
+    const std::optional<std::string>& published_ownership_revision) {
+    ScopedForwardProof proof;
+    auto& observation = proof.observation;
+    const auto& binding = record.observation_binding;
+    const auto kernel_interface = scoped_target_kernel_interface(
+        runtime_measured,
+        running_measured,
+        record.baseline.expected_created_interface);
+    if (!valid_ndms_native_observation_binding(binding) ||
+        !runtime_measured.complete() || !running_measured.complete() ||
+        runtime_measured.requested_catalog_scope !=
+            NdmsNativeDirectCatalogScope::runtime_state ||
+        runtime_measured.catalog_scope !=
+            NdmsNativeDirectCatalogScope::runtime_state ||
+        running_measured.requested_catalog_scope !=
+            NdmsNativeDirectCatalogScope::running_config ||
+        running_measured.catalog_scope !=
+            NdmsNativeDirectCatalogScope::running_config ||
+        !runtime_probe.marker_scan_complete ||
+        !running_probe.marker_scan_complete ||
+        !stamp_matches_scoped_measurement(
+            binding, runtime_measured,
+            runtime_probe.durable_observation) ||
+        !stamp_matches_scoped_measurement(
+            binding, running_measured,
+            running_probe.durable_observation) ||
+        running_probe.durable_observation.sequence <=
+            runtime_probe.durable_observation.sequence ||
+        !runtime_measured.snapshot.has_value() ||
+        !running_measured.snapshot.has_value() ||
+        occupancy_of(runtime_measured.snapshot->catalog) !=
+            occupancy_of(running_measured.snapshot->catalog) ||
+        runtime_probe.protected_catalog_sha256 !=
+            record.baseline.protected_catalog_sha256 ||
+        !scoped_sightings_agree(runtime_probe, running_probe) ||
+        runtime_probe.marker_sightings.size() > 1U ||
+        !kernel_interface.has_value()) {
+        return proof;
+    }
+
+    observation.authoritative = true;
+    observation.generation_advanced = true;
+    observation.protected_catalog_unchanged = true;
+    observation.marker_match_count =
+        runtime_probe.marker_sightings.size();
+    observation.stable_absence =
+        runtime_probe.marker_sightings.empty();
+    if (!runtime_probe.marker_sightings.empty()) {
+        const auto& sighting = runtime_probe.marker_sightings.front();
+        observation.marker_target = sighting.interface_name;
+        observation.target_absent_in_baseline =
+            baseline_target_absent(record.baseline);
+        observation.target_down = sighting.link_down;
+        observation.target_fingerprint_matches =
+            record.target_full_revision.has_value() &&
+            *record.target_full_revision == sighting.full_revision;
+    }
+    observation.ownership_record_matches =
+        record.ownership_revision.has_value() &&
+        published_ownership_revision.has_value() &&
+        *record.ownership_revision ==
+            *published_ownership_revision;
+    proof.created_kernel_interface = kernel_interface;
+    return proof;
+}
+
+bool exact_created_observation(
+    const NdmsNativeImportWalRecord& record,
+    const NdmsNativeImportRecoveryObservation& observation,
+    const std::optional<std::string>& measured_revision) noexcept {
+    return observation.authoritative &&
+           observation.generation_advanced &&
+           observation.protected_catalog_unchanged &&
+           observation.marker_match_count == 1U &&
+           observation.marker_target.has_value() &&
+           *observation.marker_target ==
+               record.baseline.expected_created_interface &&
+           observation.target_absent_in_baseline &&
+           observation.target_down &&
+           observation.target_fingerprint_matches &&
+           measured_revision.has_value() &&
+           record.target_full_revision.has_value() &&
+           *measured_revision == *record.target_full_revision;
+}
+
+bool expected_forward_steps(
+    const NdmsNativeImportWalPhase phase,
+    const std::vector<NdmsNativeImportRecoveryStep>& steps) {
+    using Step = NdmsNativeImportRecoveryStep;
+    if (phase == NdmsNativeImportWalPhase::response_recorded) {
+        return steps == std::vector<Step>{
+                            Step::advance_wal_target_verified,
+                            Step::publish_ownership,
+                            Step::advance_wal_ownership_published,
+                            Step::remove_wal_record};
+    }
+    if (phase == NdmsNativeImportWalPhase::target_verified) {
+        return steps == std::vector<Step>{
+                            Step::publish_ownership,
+                            Step::advance_wal_ownership_published,
+                            Step::remove_wal_record};
+    }
+    if (phase == NdmsNativeImportWalPhase::ownership_published) {
+        return steps == std::vector<Step>{Step::remove_wal_record};
+    }
+    return false;
 }
 
 } // namespace
@@ -645,6 +1017,7 @@ NdmsNativeCooperativeImportCoordinator::import_once(
 
         writer.verify_held();
         auto earlier = impl_->gateway->observe_recovery(
+            NdmsNativeDirectCatalogScope::runtime_state,
             marker, expected_interface);
         if (!earlier.complete()) {
             result.direct_observation_failure = earlier.failure;
@@ -683,6 +1056,7 @@ NdmsNativeCooperativeImportCoordinator::import_once(
 
         writer.verify_held();
         auto later = impl_->gateway->observe_recovery(
+            NdmsNativeDirectCatalogScope::running_config,
             marker, expected_interface);
         if (!later.complete()) {
             result.direct_observation_failure = later.failure;
@@ -728,9 +1102,15 @@ NdmsNativeCooperativeImportCoordinator::import_once(
                     post_observation_unstable);
             return result;
         }
-        const auto observation =
-            build_ndms_native_import_recovery_observation(
-                record, earlier_probe, later_probe, std::nullopt);
+        const auto scoped_proof =
+            build_scoped_forward_observation(
+                record,
+                earlier,
+                earlier_probe,
+                later,
+                later_probe,
+                std::nullopt);
+        const auto& observation = scoped_proof.observation;
         const auto completion =
             plan_ndms_native_import_forward_completion(
                 record, observation, *measured_revision);
@@ -742,7 +1122,8 @@ NdmsNativeCooperativeImportCoordinator::import_once(
                 advance_wal_ownership_published,
             NdmsNativeImportRecoveryStep::remove_wal_record,
         };
-        if (!completion.actionable() ||
+        if (!scoped_proof.created_kernel_interface.has_value() ||
+            !completion.actionable() ||
             completion.plan.steps != expected_steps) {
             mark_recovery_required(
                 result,
@@ -754,6 +1135,8 @@ NdmsNativeCooperativeImportCoordinator::import_once(
         // Only now is "created" a measured fact rather than the stock
         // allocator target we predicted before dispatch.
         result.created_interface = expected_interface;
+        result.created_kernel_interface =
+            scoped_proof.created_kernel_interface;
 
         auto forward_admission = admit_ndms_native_import_forward(
             *impl_->wal, record, completion);
@@ -853,6 +1236,357 @@ NdmsNativeCooperativeImportCoordinator::import_once(
             result.stop =
                 NdmsNativeCooperativeImportStop::unexpected_failure;
         }
+        return result;
+    }
+}
+
+NdmsNativeCooperativeImportResumeResult
+NdmsNativeCooperativeImportCoordinator::resume_once(
+    NdmsNativeWriterLease& writer) noexcept {
+    NdmsNativeCooperativeImportResumeResult result;
+    if (!impl_ || !impl_->observations || !impl_->wal ||
+        !impl_->delete_wal || !impl_->ownership || !impl_->gateway) {
+        result.stop = NdmsNativeCooperativeImportResumeStop::
+            unexpected_failure;
+        return result;
+    }
+    if (!writer.held()) {
+        result.stop =
+            NdmsNativeCooperativeImportResumeStop::writer_missing;
+        return result;
+    }
+    try {
+        writer.verify_held();
+    } catch (...) {
+        result.stop = NdmsNativeCooperativeImportResumeStop::writer_lost;
+        return result;
+    }
+
+    try {
+        // Cross-kind order is identical to fresh import admission: the
+        // already-held global writer, then delete WAL, then import WAL.  No
+        // direct read or durable observation is allowed before both stores
+        // have been bounded and the delete side is exactly clean.
+        result.delete_wal_readiness = impl_->delete_wal->readiness();
+        if (*result.delete_wal_readiness !=
+            NdmsNativeDeleteWalReadiness::clean) {
+            result.stop = NdmsNativeCooperativeImportResumeStop::
+                delete_wal_not_clean;
+            return result;
+        }
+
+        const auto inventory = impl_->wal->try_inventory();
+        result.import_wal_readiness = import_wal_readiness(inventory);
+        if (*result.import_wal_readiness ==
+                NdmsNativeCooperativeImportWalReadiness::clean) {
+            result.status =
+                NdmsNativeCooperativeImportResumeStatus::no_work;
+            result.stop = NdmsNativeCooperativeImportResumeStop::none;
+            return result;
+        }
+        if (!inventory.recovery_permitted() ||
+            inventory.items.size() != 1U ||
+            !inventory.items.front().record.has_value() ||
+            !inventory.items.front().transaction_id.has_value() ||
+            inventory.items.front().record->transaction_id !=
+                *inventory.items.front().transaction_id) {
+            result.stop = NdmsNativeCooperativeImportResumeStop::
+                import_wal_not_single_safe;
+            return result;
+        }
+
+        const auto record = *inventory.items.front().record;
+        result.transaction_id = record.transaction_id;
+        result.expected_interface =
+            record.baseline.expected_created_interface;
+        result.kind = record.kind;
+        result.phase = record.phase;
+        result.wal_may_require_recovery = true;
+
+        if (record.execution_mode !=
+            NdmsNativeImportExecutionMode::cooperative_stock_import) {
+            result.stop = NdmsNativeCooperativeImportResumeStop::
+                record_not_cooperative;
+            return result;
+        }
+        if (!forward_only_phase(record.phase)) {
+            result.stop = NdmsNativeCooperativeImportResumeStop::
+                phase_not_forward_only;
+            return result;
+        }
+
+        const auto target_identity = parse_ndms_wireguard_identity(
+            record.baseline.expected_created_interface);
+        if (!target_identity.has_value() ||
+            !ndms_wireguard_identity_is_managed_candidate(
+                *target_identity) ||
+            target_identity->slot !=
+                record.baseline.expected_target_slot ||
+            (record.created_interface.has_value() &&
+             *record.created_interface !=
+                 record.baseline.expected_created_interface)) {
+            result.stop = NdmsNativeCooperativeImportResumeStop::
+                expected_target_not_managed;
+            return result;
+        }
+
+        writer.verify_held();
+        auto runtime_measured = impl_->gateway->observe_recovery(
+            NdmsNativeDirectCatalogScope::runtime_state,
+            record.marker,
+            record.baseline.expected_created_interface);
+        if (!runtime_measured.complete()) {
+            result.direct_observation_failure = runtime_measured.failure;
+            result.stop = NdmsNativeCooperativeImportResumeStop::
+                first_observation_failed;
+            return result;
+        }
+        if (!kind_matches_protocol(
+                runtime_measured,
+                record.baseline.expected_created_interface,
+                record.kind)) {
+            result.stop = NdmsNativeCooperativeImportResumeStop::
+                observation_kind_mismatch;
+            return result;
+        }
+        NdmsNativeObservationStamp runtime_stamp;
+        try {
+            runtime_stamp = impl_->observations->
+                record_recovery_observation(
+                    writer,
+                    record.observation_binding,
+                    runtime_measured.catalog_revision);
+        } catch (...) {
+            result.stop = NdmsNativeCooperativeImportResumeStop::
+                durable_observation_failed;
+            return result;
+        }
+        const auto runtime_probe =
+            build_ndms_native_import_recovery_probe(
+                *runtime_measured.snapshot,
+                runtime_stamp,
+                target_identity->slot,
+                record.marker,
+                runtime_measured.target_evidence);
+
+        writer.verify_held();
+        auto running_measured = impl_->gateway->observe_recovery(
+            NdmsNativeDirectCatalogScope::running_config,
+            record.marker,
+            record.baseline.expected_created_interface);
+        if (!running_measured.complete()) {
+            result.direct_observation_failure = running_measured.failure;
+            result.stop = NdmsNativeCooperativeImportResumeStop::
+                second_observation_failed;
+            return result;
+        }
+        if (!kind_matches_protocol(
+                running_measured,
+                record.baseline.expected_created_interface,
+                record.kind)) {
+            result.stop = NdmsNativeCooperativeImportResumeStop::
+                observation_kind_mismatch;
+            return result;
+        }
+        NdmsNativeObservationStamp running_stamp;
+        try {
+            running_stamp = impl_->observations->
+                record_recovery_observation(
+                    writer,
+                    record.observation_binding,
+                    running_measured.catalog_revision);
+        } catch (...) {
+            result.stop = NdmsNativeCooperativeImportResumeStop::
+                durable_observation_failed;
+            return result;
+        }
+        const auto running_probe =
+            build_ndms_native_import_recovery_probe(
+                *running_measured.snapshot,
+                running_stamp,
+                target_identity->slot,
+                record.marker,
+                running_measured.target_evidence);
+
+        const auto existing_ownership = impl_->ownership->read(
+            record.baseline.expected_created_interface);
+        const auto published_ownership_revision =
+            existing_ownership.state ==
+                    NdmsNativeOwnershipReadState::valid
+                ? existing_ownership.revision
+                : std::optional<std::string>{};
+        const auto scoped_proof = build_scoped_forward_observation(
+            record,
+            runtime_measured,
+            runtime_probe,
+            running_measured,
+            running_probe,
+            published_ownership_revision);
+        const auto& observation = scoped_proof.observation;
+        const auto running_revision = measured_target_revision(
+            running_measured,
+            record.baseline.expected_created_interface);
+
+        if (!scoped_proof.created_kernel_interface.has_value()) {
+            result.stop = NdmsNativeCooperativeImportResumeStop::
+                observation_unstable;
+            return result;
+        }
+
+        NdmsNativeImportWalRecord dispatch_record = record;
+        NdmsNativeImportRecoveryPlan forward_plan;
+        std::optional<NdmsNativeImportRecoveryAdmission>
+            forward_admission;
+        std::optional<NdmsNativeOwnershipRecord> expected_ownership;
+
+        if (record.phase ==
+            NdmsNativeImportWalPhase::ownership_published) {
+            result.recovery_action =
+                classify_ndms_native_import_recovery(
+                    record, observation);
+            expected_ownership = ownership_claim_from(record);
+            if (!expected_ownership.has_value() ||
+                existing_ownership.state !=
+                    NdmsNativeOwnershipReadState::valid ||
+                !existing_ownership.record.has_value() ||
+                !(*existing_ownership.record ==
+                  *expected_ownership) ||
+                !existing_ownership.revision.has_value() ||
+                !record.ownership_revision.has_value() ||
+                *existing_ownership.revision !=
+                    *record.ownership_revision) {
+                result.stop = NdmsNativeCooperativeImportResumeStop::
+                    ownership_not_exact;
+                return result;
+            }
+            if (!exact_created_observation(
+                    record, observation, running_revision) ||
+                *result.recovery_action !=
+                    NdmsNativeImportRecoveryAction::
+                        resume_forward_reconcile) {
+                result.stop = NdmsNativeCooperativeImportResumeStop::
+                    recovery_action_not_forward_only;
+                return result;
+            }
+            forward_plan = plan_ndms_native_import_recovery(
+                record, *result.recovery_action);
+            if (!forward_plan.actionable() ||
+                !expected_forward_steps(record.phase,
+                                        forward_plan.steps)) {
+                result.stop = NdmsNativeCooperativeImportResumeStop::
+                    recovery_action_not_forward_only;
+                return result;
+            }
+            result.created_interface =
+                record.baseline.expected_created_interface;
+            result.created_kernel_interface =
+                scoped_proof.created_kernel_interface;
+            result.ownership_published = true;
+            forward_admission.emplace(
+                admit_ndms_native_import_recovery(
+                    *impl_->wal, record, observation));
+        } else {
+            const auto completion =
+                plan_ndms_native_import_forward_completion(
+                    record,
+                    observation,
+                    running_revision.value_or(std::string{}));
+            if (!completion.actionable() ||
+                !expected_forward_steps(
+                    record.phase, completion.plan.steps)) {
+                if (observation.authoritative) {
+                    result.recovery_action =
+                        classify_ndms_native_import_recovery(
+                            record, observation);
+                    result.stop = NdmsNativeCooperativeImportResumeStop::
+                        recovery_action_not_forward_only;
+                } else {
+                    result.stop = NdmsNativeCooperativeImportResumeStop::
+                        observation_unstable;
+                }
+                return result;
+            }
+            expected_ownership = ownership_claim_from(
+                completion.enriched);
+            if (!expected_ownership.has_value() ||
+                !exact_existing_claim_or_absent(
+                    existing_ownership, *expected_ownership)) {
+                result.stop = NdmsNativeCooperativeImportResumeStop::
+                    ownership_not_exact;
+                return result;
+            }
+            result.created_interface =
+                record.baseline.expected_created_interface;
+            result.created_kernel_interface =
+                scoped_proof.created_kernel_interface;
+            result.ownership_published =
+                existing_ownership.state ==
+                NdmsNativeOwnershipReadState::valid;
+            forward_admission.emplace(
+                admit_ndms_native_import_forward(
+                    *impl_->wal, record, completion));
+            dispatch_record = completion.enriched;
+            forward_plan = completion.plan;
+        }
+
+        result.forward_admission_state = forward_admission->state;
+        if (forward_admission->state !=
+                NdmsNativeImportRecoveryAdmissionState::admitted ||
+            !forward_admission->lease.held()) {
+            result.stop = NdmsNativeCooperativeImportResumeStop::
+                forward_admission_failed;
+            return result;
+        }
+
+        const auto step_guard = [this, &writer, &record, &running_stamp](
+            const NdmsNativeImportRecoveryStep) {
+            writer.verify_held();
+            if (!durable_forward_observation_is_current(
+                    *impl_->observations,
+                    record.observation_binding,
+                    running_stamp)) {
+                throw std::runtime_error(
+                    "native resume observation changed");
+            }
+        };
+        const auto dispatched = dispatch_ndms_native_import_recovery(
+            *impl_->wal,
+            forward_admission->lease,
+            dispatch_record,
+            forward_plan,
+            observation.marker_target,
+            {},
+            impl_->ownership,
+            step_guard,
+            nullptr);
+        result.forward_dispatch_state = dispatched.state;
+        result.forward_failed_step = dispatched.failed_step;
+        if (dispatched.state !=
+            NdmsNativeImportRecoveryDispatchState::completed) {
+            if (expected_ownership.has_value()) {
+                const auto current = impl_->ownership->read(
+                    expected_ownership->interface_name);
+                result.ownership_published =
+                    current.state ==
+                        NdmsNativeOwnershipReadState::valid &&
+                    current.record.has_value() &&
+                    *current.record == *expected_ownership;
+            }
+            result.stop = resume_dispatch_stop(
+                dispatched.failed_step);
+            return result;
+        }
+
+        result.status =
+            NdmsNativeCooperativeImportResumeStatus::completed;
+        result.stop = NdmsNativeCooperativeImportResumeStop::none;
+        result.wal_may_require_recovery = false;
+        result.ownership_published = true;
+        result.wal_removed = true;
+        return result;
+    } catch (...) {
+        result.stop =
+            NdmsNativeCooperativeImportResumeStop::unexpected_failure;
         return result;
     }
 }
@@ -957,6 +1691,79 @@ const char* ndms_native_cooperative_import_stop_name(
     case NdmsNativeCooperativeImportStop::wal_cleanup_failed:
         return "wal_cleanup_failed";
     case NdmsNativeCooperativeImportStop::unexpected_failure:
+        return "unexpected_failure";
+    }
+    return "unexpected_failure";
+}
+
+const char* ndms_native_cooperative_import_resume_status_name(
+    const NdmsNativeCooperativeImportResumeStatus status) noexcept {
+    switch (status) {
+    case NdmsNativeCooperativeImportResumeStatus::no_work:
+        return "no_work";
+    case NdmsNativeCooperativeImportResumeStatus::blocked:
+        return "blocked";
+    case NdmsNativeCooperativeImportResumeStatus::completed:
+        return "completed";
+    }
+    return "blocked";
+}
+
+const char* ndms_native_cooperative_import_resume_stop_name(
+    const NdmsNativeCooperativeImportResumeStop stop) noexcept {
+    switch (stop) {
+    case NdmsNativeCooperativeImportResumeStop::none:
+        return "none";
+    case NdmsNativeCooperativeImportResumeStop::writer_missing:
+        return "writer_missing";
+    case NdmsNativeCooperativeImportResumeStop::writer_lost:
+        return "writer_lost";
+    case NdmsNativeCooperativeImportResumeStop::delete_wal_not_clean:
+        return "delete_wal_not_clean";
+    case NdmsNativeCooperativeImportResumeStop::
+        import_wal_not_single_safe:
+        return "import_wal_not_single_safe";
+    case NdmsNativeCooperativeImportResumeStop::record_not_cooperative:
+        return "record_not_cooperative";
+    case NdmsNativeCooperativeImportResumeStop::phase_not_forward_only:
+        return "phase_not_forward_only";
+    case NdmsNativeCooperativeImportResumeStop::
+        expected_target_not_managed:
+        return "expected_target_not_managed";
+    case NdmsNativeCooperativeImportResumeStop::
+        first_observation_failed:
+        return "first_observation_failed";
+    case NdmsNativeCooperativeImportResumeStop::
+        second_observation_failed:
+        return "second_observation_failed";
+    case NdmsNativeCooperativeImportResumeStop::
+        observation_kind_mismatch:
+        return "observation_kind_mismatch";
+    case NdmsNativeCooperativeImportResumeStop::
+        durable_observation_failed:
+        return "durable_observation_failed";
+    case NdmsNativeCooperativeImportResumeStop::observation_unstable:
+        return "observation_unstable";
+    case NdmsNativeCooperativeImportResumeStop::ownership_not_exact:
+        return "ownership_not_exact";
+    case NdmsNativeCooperativeImportResumeStop::
+        recovery_action_not_forward_only:
+        return "recovery_action_not_forward_only";
+    case NdmsNativeCooperativeImportResumeStop::
+        forward_admission_failed:
+        return "forward_admission_failed";
+    case NdmsNativeCooperativeImportResumeStop::
+        target_verified_wal_publish_failed:
+        return "target_verified_wal_publish_failed";
+    case NdmsNativeCooperativeImportResumeStop::
+        ownership_publish_failed:
+        return "ownership_publish_failed";
+    case NdmsNativeCooperativeImportResumeStop::
+        ownership_wal_publish_failed:
+        return "ownership_wal_publish_failed";
+    case NdmsNativeCooperativeImportResumeStop::wal_cleanup_failed:
+        return "wal_cleanup_failed";
+    case NdmsNativeCooperativeImportResumeStop::unexpected_failure:
         return "unexpected_failure";
     }
     return "unexpected_failure";
