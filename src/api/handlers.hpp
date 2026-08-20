@@ -11,6 +11,7 @@
 #include "../keenetic/ndms_native_cooperative_delete.hpp"
 #include "../keenetic/ndms_native_import_readiness.hpp"
 #include "../keenetic/ndms_native_cooperative_import.hpp"
+#include "../keenetic/ndms_native_inventory_projection.hpp"
 #include "../log/logger.hpp"
 #include "../runtime/lifecycle_operation.hpp"
 #include "../runtime/runtime_mutation_admission.hpp"
@@ -200,6 +201,14 @@ struct ApiContext {
         const NdmsNativeCooperativeDeleteResumeAcknowledgement&,
         const std::shared_ptr<SensitiveRequestReservation>&)>
         resume_ndms_native_delete_fn;
+    // Recomputed for every GET from one already-resolved catalogue.  The
+    // callback may inspect only bounded redacted ownership/WAL state and must
+    // not decrypt snapshots, scan dependencies, contact NDMS or write disk.
+    // The handler validates the entire projection before exposing any row.
+    std::function<NdmsNativeInventoryProjection(
+        const std::vector<NdmsTunnelInterface>&,
+        bool)>
+        observe_ndms_native_inventory_projection_fn;
 
     Config get_visible_config() const {
         return get_visible_config_fn();

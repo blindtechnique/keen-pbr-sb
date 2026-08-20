@@ -234,6 +234,8 @@ NdmsNativeInventoryProjection project_ndms_native_inventory(
     const NdmsNativeImportJournalReadinessState import_journal,
     const NdmsNativeDeleteWalReadiness delete_journal) noexcept {
     NdmsNativeInventoryProjection result;
+    result.observed_import_journal_state = import_journal;
+    result.observed_delete_journal_state = delete_journal;
     try {
         const auto claims = validated_claims(ownership);
         result.ownership_inventory_available = claims.has_value();

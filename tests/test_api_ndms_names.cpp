@@ -33,6 +33,73 @@ std::string ndms_payload(const std::string& label = "Office VPN") {
     }.dump();
 }
 
+std::string ndms_mutation_payload() {
+    return nlohmann::json{
+        {"Wireguard5",
+         {{"type", "Wireguard"},
+          {"interface-name", "Wireguard5"},
+          {"description", "Panel WG"},
+          {"role", "client"}}},
+        {"Wireguard6",
+         {{"type", "Amnezia WireGuard"},
+          {"interface-name", "Wireguard6"},
+          {"description", "Deleted AWG"},
+          {"role", "client"}}},
+        {"Wireguard7",
+         {{"type", "Wireguard"},
+          {"interface-name", "Wireguard7"},
+          {"description", "Foreign WG"},
+          {"role", "client"}}},
+        {"OpenVPN1",
+         {{"type", "OpenVPN"},
+          {"interface-name", "OpenVPN1"},
+          {"description", "Foreign OpenVPN"},
+          {"role", "client"}}},
+    }.dump();
+}
+
+NdmsNativeInventoryProjection valid_native_projection(
+    const std::vector<NdmsTunnelInterface>& tunnels,
+    const bool catalog_fresh) {
+    NdmsNativeOwnershipInspection ownership;
+    ownership.readable = true;
+    ownership.claims = {
+        NdmsNativeOwnershipInspectionItem{
+            "Wireguard5",
+            NdmsNativeTunnelImportKind::wireguard,
+            NdmsNativeOwnershipLifecycle::active_running_only,
+            "ndms-native-owner-v3-" + std::string(64U, 'a'),
+        },
+        NdmsNativeOwnershipInspectionItem{
+            "Wireguard6",
+            NdmsNativeTunnelImportKind::amnezia_wireguard,
+            NdmsNativeOwnershipLifecycle::
+                deleted_save_acknowledged_unverified,
+            "ndms-native-owner-tombstone-v1-" +
+                std::string(64U, 'b'),
+        },
+    };
+    return project_ndms_native_inventory(
+        tunnels,
+        catalog_fresh,
+        ownership,
+        NdmsNativeImportJournalReadinessState::clean,
+        NdmsNativeDeleteWalReadiness::clean);
+}
+
+nlohmann::json inventory_row(
+    const nlohmann::json& inventory,
+    const std::string& interface_name) {
+    const auto found = std::find_if(
+        inventory.at("interfaces").begin(),
+        inventory.at("interfaces").end(),
+        [&](const auto& row) {
+            return row.at("firmware_interface_name") == interface_name;
+        });
+    REQUIRE(found != inventory.at("interfaces").end());
+    return *found;
+}
+
 std::string ndms_vpn_services_payload() {
     return nlohmann::json{
         {"message",
@@ -629,6 +696,8 @@ TEST_CASE("NDMS read-only endpoints share the cache and safety contract") {
     REQUIRE(inventory_response != nullptr);
     CHECK(names_response->status == 200);
     CHECK(inventory_response->status == 200);
+    CHECK(inventory_response->get_header_value("Cache-Control") ==
+          "no-store");
     CHECK(fetch_count == 1);
 
     const auto names = nlohmann::json::parse(names_response->body);
@@ -643,6 +712,13 @@ TEST_CASE("NDMS read-only endpoints share the cache and safety contract") {
     CHECK(inventory["catalog_status"] == "fresh");
     CHECK(inventory["read_only"] == true);
     CHECK(inventory["mutation_mode"] == "disabled");
+    CHECK(inventory["native_mutation_status"] ==
+          nlohmann::json{
+              {"advisory", true},
+              {"ownership_inventory_available", false},
+              {"observed_import_journal_state", "unavailable"},
+              {"observed_delete_journal_state", "unavailable"},
+          });
     CHECK(inventory["required_guards"] ==
           nlohmann::json::array(
               {"typed_rci",
@@ -699,6 +775,16 @@ TEST_CASE("NDMS read-only endpoints share the cache and safety contract") {
     CHECK(inventory["interfaces"][0]["capabilities"]["can_hide"] == false);
     CHECK(inventory["interfaces"][0]["capabilities"]["backup_required"] ==
           true);
+    CHECK(inventory["interfaces"][0]["native_mutation"] ==
+          nlohmann::json{
+              {"ownership_state", "unavailable"},
+              {"delete_candidate", false},
+              {"delete_blockers",
+               nlohmann::json::array(
+                   {"ownership_inventory_unavailable"})},
+              {"deferred_authoritative_checks",
+               nlohmann::json::array()},
+          });
     const auto& readiness =
         inventory["interfaces"][0]["management_readiness"];
     CHECK(readiness["candidate"] == true);
@@ -714,6 +800,215 @@ TEST_CASE("NDMS read-only endpoints share the cache and safety contract") {
                "automatic_backup_unavailable",
                "ownership_unknown",
                "optimistic_revision_unavailable"}));
+}
+
+TEST_CASE(
+    "NDMS native mutation inventory distinguishes active tombstone and foreign advisory rows") {
+    bool fail_fetch = false;
+    int fetch_count = 0;
+    int projection_count = 0;
+    std::vector<bool> observed_freshness;
+    NdmsCatalogCache cache([&]() -> std::string {
+        ++fetch_count;
+        if (fail_fetch) {
+            throw std::runtime_error("temporary inventory outage");
+        }
+        return ndms_mutation_payload();
+    });
+
+    ApiConfig config;
+    config.listen = std::string("127.0.0.1:18199");
+    ApiServer server(config);
+    register_ndms_names_handler_for_tests(
+        server,
+        cache,
+        {},
+        NdmsNativeImportReadinessProvider{},
+        [&](const std::vector<NdmsTunnelInterface>& tunnels,
+            const bool catalog_fresh) {
+            ++projection_count;
+            observed_freshness.push_back(catalog_fresh);
+            return valid_native_projection(tunnels, catalog_fresh);
+        });
+    server.start();
+
+    httplib::Client client("127.0.0.1", 18199);
+    const auto fresh_response =
+        client.Get("/api/system/ndms/interfaces");
+    REQUIRE(fresh_response != nullptr);
+    REQUIRE(fresh_response->status == 200);
+    CHECK(fresh_response->get_header_value("Cache-Control") ==
+          "no-store");
+    const auto fresh = nlohmann::json::parse(fresh_response->body);
+    CHECK(fresh["read_only"] == true);
+    CHECK(fresh["mutation_mode"] == "disabled");
+    CHECK(fresh["native_mutation_status"] ==
+          nlohmann::json{
+              {"advisory", true},
+              {"ownership_inventory_available", true},
+              {"observed_import_journal_state", "clean"},
+              {"observed_delete_journal_state", "clean"},
+          });
+
+    const auto active = inventory_row(fresh, "Wireguard5");
+    CHECK(active["capabilities"]["can_delete"] == false);
+    CHECK(active["native_mutation"]["ownership_state"] ==
+          "panel_owned_active");
+    CHECK(active["native_mutation"]["ownership_lifecycle"] ==
+          "active_running_only");
+    CHECK(active["native_mutation"]["ownership_revision"] ==
+          "ndms-native-owner-v3-" + std::string(64U, 'a'));
+    CHECK(active["native_mutation"]["delete_candidate"] == true);
+    CHECK(active["native_mutation"]["delete_blockers"] ==
+          nlohmann::json::array());
+    CHECK(active["native_mutation"]["deferred_authoritative_checks"] ==
+          nlohmann::json::array(
+              {"encrypted_snapshot",
+               "keen_pbr_dependencies",
+               "direct_ndms_state"}));
+
+    const auto tombstone = inventory_row(fresh, "Wireguard6");
+    CHECK(tombstone["native_mutation"]["ownership_state"] ==
+          "panel_owned_tombstone");
+    CHECK(tombstone["native_mutation"]["ownership_lifecycle"] ==
+          "deleted_save_acknowledged_unverified");
+    CHECK(tombstone["native_mutation"]["delete_candidate"] == false);
+    CHECK(tombstone["native_mutation"]["delete_blockers"] ==
+          nlohmann::json::array({"ownership_not_active"}));
+
+    const auto foreign = inventory_row(fresh, "Wireguard7");
+    CHECK(foreign["native_mutation"]["ownership_state"] == "foreign");
+    CHECK_FALSE(
+        foreign["native_mutation"].contains("ownership_revision"));
+    CHECK(foreign["native_mutation"]["delete_candidate"] == false);
+    CHECK(foreign["native_mutation"]["delete_blockers"] ==
+          nlohmann::json::array({"ownership_absent"}));
+
+    const auto unsupported = inventory_row(fresh, "OpenVPN1");
+    CHECK(unsupported["native_mutation"]["ownership_state"] ==
+          "not_applicable");
+    CHECK(unsupported["native_mutation"]["delete_candidate"] == false);
+    CHECK(unsupported["native_mutation"]["delete_blockers"] ==
+          nlohmann::json::array({"unsupported_kind"}));
+
+    fail_fetch = true;
+    cache.invalidate();
+    const auto stale_response =
+        client.Get("/api/system/ndms/interfaces");
+    server.stop();
+
+    REQUIRE(stale_response != nullptr);
+    REQUIRE(stale_response->status == 200);
+    const auto stale = nlohmann::json::parse(stale_response->body);
+    CHECK(stale["catalog_status"] == "stale");
+    const auto stale_active = inventory_row(stale, "Wireguard5");
+    CHECK(stale_active["native_mutation"]["ownership_state"] ==
+          "panel_owned_active");
+    CHECK(stale_active["native_mutation"]["delete_candidate"] == false);
+    CHECK(stale_active["native_mutation"]["delete_blockers"] ==
+          nlohmann::json::array({"catalog_not_fresh"}));
+    CHECK(stale_active["capabilities"]["can_delete"] == false);
+    CHECK(fetch_count == 2);
+    CHECK(projection_count == 2);
+    CHECK(observed_freshness == std::vector<bool>{true, false});
+}
+
+TEST_CASE(
+    "NDMS native mutation inventory rejects a malformed callback as one unavailable batch") {
+    int mode = 0;
+    int projection_count = 0;
+    NdmsCatalogCache cache([] { return ndms_mutation_payload(); });
+
+    ApiConfig config;
+    config.listen = std::string("127.0.0.1:18200");
+    ApiServer server(config);
+    register_ndms_names_handler_for_tests(
+        server,
+        cache,
+        {},
+        NdmsNativeImportReadinessProvider{},
+        [&](const std::vector<NdmsTunnelInterface>& tunnels,
+            const bool catalog_fresh) {
+            ++projection_count;
+            auto projection =
+                valid_native_projection(tunnels, catalog_fresh);
+            const auto active = std::find_if(
+                projection.interfaces.begin(),
+                projection.interfaces.end(),
+                [](const auto& row) {
+                    return row.interface_name == "Wireguard5";
+                });
+            REQUIRE(active != projection.interfaces.end());
+            switch (mode) {
+            case 1:
+                projection.interfaces.pop_back();
+                break;
+            case 2:
+                REQUIRE(projection.interfaces.size() > 1U);
+                std::swap(
+                    projection.interfaces[0], projection.interfaces[1]);
+                break;
+            case 3:
+                active->interface_name = "Wireguard98";
+                break;
+            case 4:
+                active->ownership_state = static_cast<
+                    NdmsNativeInventoryOwnershipState>(255U);
+                break;
+            case 5:
+                active->ownership_revision =
+                    "PRIVATE_CALLBACK_REVISION_MUST_NOT_ESCAPE";
+                break;
+            case 6:
+                active->delete_candidate = false;
+                break;
+            case 7:
+                projection.observed_delete_journal_state = static_cast<
+                    NdmsNativeDeleteWalReadiness>(255U);
+                break;
+            case 8:
+                throw std::runtime_error(
+                    "PRIVATE_CALLBACK_EXCEPTION_MUST_NOT_ESCAPE");
+            default:
+                break;
+            }
+            return projection;
+        });
+    server.start();
+
+    httplib::Client client("127.0.0.1", 18200);
+    for (mode = 1; mode <= 8; ++mode) {
+        const auto response =
+            client.Get("/api/system/ndms/interfaces");
+        REQUIRE(response != nullptr);
+        REQUIRE(response->status == 200);
+        CHECK(response->get_header_value("Cache-Control") == "no-store");
+        const auto inventory = nlohmann::json::parse(response->body);
+        CHECK(inventory["native_mutation_status"] ==
+              nlohmann::json{
+                  {"advisory", true},
+                  {"ownership_inventory_available", false},
+                  {"observed_import_journal_state", "unavailable"},
+                  {"observed_delete_journal_state", "unavailable"},
+              });
+        for (const auto* name :
+             {"Wireguard5", "Wireguard6", "Wireguard7"}) {
+            const auto row = inventory_row(inventory, name);
+            CHECK(row["capabilities"]["can_delete"] == false);
+            CHECK(row["native_mutation"]["ownership_state"] ==
+                  "unavailable");
+            CHECK(row["native_mutation"]["delete_candidate"] == false);
+            CHECK(row["native_mutation"]["delete_blockers"] ==
+                  nlohmann::json::array(
+                      {"ownership_inventory_unavailable"}));
+            CHECK_FALSE(
+                row["native_mutation"].contains("ownership_revision"));
+        }
+        CHECK(response->body.find("PRIVATE_CALLBACK") ==
+              std::string::npos);
+    }
+    server.stop();
+    CHECK(projection_count == 8);
 }
 
 TEST_CASE("NDMS stale endpoint keeps rows but revokes server-candidate authority") {

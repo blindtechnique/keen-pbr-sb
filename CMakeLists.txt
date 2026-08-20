@@ -418,6 +418,7 @@ set(SOURCES
   src/keenetic/ndms_native_import_recovery_observation.cpp
   src/keenetic/ndms_native_import_recovery_lease.cpp
   src/keenetic/ndms_native_ownership_store.cpp
+  src/keenetic/ndms_native_inventory_projection.cpp
   src/keenetic/ndms_native_import_recovery_plan.cpp
   src/keenetic/ndms_native_import_recovery_dispatch.cpp
   src/keenetic/ndms_native_import_forward_plan.cpp

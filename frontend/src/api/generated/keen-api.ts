@@ -170,7 +170,6 @@ export const getGetHealthServiceQueryKey = () => {
     ] as const;
     }
 
-
 export const getGetHealthServiceQueryOptions = <TData = Awaited<ReturnType<typeof getHealthService>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getHealthService>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
 ) => {
 
@@ -2369,7 +2368,7 @@ export const useQueryConnections = <TError = ErrorResponse,
     }
 
 /**
- * Returns a strictly filtered, read-only inventory from NDMS RCI. Bridges, switch ports, VLANs and Wi-Fi interfaces are excluded. Its `read_only`, `mutation_mode` and `native_import_readiness` fields describe the legacy inventory/preview surface only; their fixed preview-only values do not authorize or deny the dedicated one-shot import. The bodyless `/import/preflight` endpoint is the sole current import admission authority and repeats admission on the secret request.
+ * Returns a strictly filtered, read-only inventory from NDMS RCI. Bridges, switch ports, VLANs and Wi-Fi interfaces are excluded. Its `read_only`, `mutation_mode` and `native_import_readiness` fields describe the legacy inventory/preview surface only; their fixed preview-only values do not authorize or deny the dedicated one-shot import. The bodyless `/import/preflight` endpoint is the sole current import admission authority and repeats admission on the secret request. `native_mutation_status` and each row's `native_mutation` are a bounded, redacted advisory projection. `delete_candidate` means only that the UI may submit an exact expected-revision request; it is never `can_delete`. The DELETE coordinator remains the final authority and rechecks the encrypted snapshot, keen-pbr dependencies and direct NDMS state while holding the complete writer chain.
 
  * @summary List native Keenetic tunnel and proxy interfaces
  */

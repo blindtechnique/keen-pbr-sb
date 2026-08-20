@@ -8,6 +8,7 @@
 import type { NdmsInterfaceCapabilities } from './ndmsInterfaceCapabilities';
 import type { NdmsInterfaceManagementReadiness } from './ndmsInterfaceManagementReadiness';
 import type { NdmsInterfaceRole } from './ndmsInterfaceRole';
+import type { NdmsNativeInterfaceMutationProjection } from './ndmsNativeInterfaceMutationProjection';
 import type { NdmsTunnelInterfaceOwner } from './ndmsTunnelInterfaceOwner';
 import type { NdmsTunnelKind } from './ndmsTunnelKind';
 
@@ -32,4 +33,5 @@ export interface NdmsTunnelInterface {
   link?: boolean;
   capabilities: NdmsInterfaceCapabilities;
   management_readiness: NdmsInterfaceManagementReadiness;
+  native_mutation: NdmsNativeInterfaceMutationProjection;
 }

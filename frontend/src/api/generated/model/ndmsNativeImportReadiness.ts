@@ -27,8 +27,6 @@ export interface NdmsNativeImportReadiness {
   allocator_range: NdmsNativeImportTargetRange;
   eligible_returned_targets: NdmsNativeImportTargetRange;
   protected_targets: NdmsNativeImportTargetRange[];
-  /** Redacted report-only boot observation of the native-import WAL. This state never authorizes Apply or removes the independent recovery_journal_not_integrated blocker. clean_never_activated is clean only while every production writer/provider stays disabled.
-   */
   journal_state: NdmsNativeImportReadinessJournalState;
   reconcile_barrier_state: NdmsNativeImportReadinessReconcileBarrierState;
   blockers: NdmsNativeImportReadinessBlockersItem[];

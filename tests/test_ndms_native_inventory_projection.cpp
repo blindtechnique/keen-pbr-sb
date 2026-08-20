@@ -61,6 +61,10 @@ TEST_CASE("active panel ownership is only a delete request candidate") {
         NdmsNativeDeleteWalReadiness::clean);
 
     REQUIRE(projected.ownership_inventory_available);
+    CHECK(projected.observed_import_journal_state ==
+          NdmsNativeImportJournalReadinessState::clean);
+    CHECK(projected.observed_delete_journal_state ==
+          NdmsNativeDeleteWalReadiness::clean);
     REQUIRE(projected.interfaces.size() == 1U);
     const auto& item = projected.interfaces.front();
     CHECK(item.interface_name == "Wireguard5");

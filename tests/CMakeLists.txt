@@ -57,6 +57,7 @@ add_executable(keen-pbr-tests
   test_ndms_native_import_recovery_observation.cpp
   test_ndms_native_import_recovery_lease.cpp
   test_ndms_native_ownership_store.cpp
+  test_ndms_native_inventory_projection.cpp
   test_ndms_native_import_recovery_plan.cpp
   test_ndms_native_import_recovery_dispatch.cpp
   test_ndms_native_import_forward_plan.cpp
@@ -289,6 +290,7 @@ add_executable(keen-pbr-tests
   ../src/keenetic/ndms_native_import_recovery_observation.cpp
   ../src/keenetic/ndms_native_import_recovery_lease.cpp
   ../src/keenetic/ndms_native_ownership_store.cpp
+  ../src/keenetic/ndms_native_inventory_projection.cpp
   ../src/keenetic/ndms_native_import_recovery_plan.cpp
   ../src/keenetic/ndms_native_import_recovery_dispatch.cpp
   ../src/keenetic/ndms_native_import_forward_plan.cpp
@@ -454,6 +456,7 @@ add_executable(keen-pbr-native-tunnel-import-tests
   test_ndms_native_import_recovery_observation.cpp
   test_ndms_native_import_recovery_lease.cpp
   test_ndms_native_ownership_store.cpp
+  test_ndms_native_inventory_projection.cpp
   test_ndms_native_import_recovery_plan.cpp
   test_ndms_native_import_recovery_dispatch.cpp
   test_ndms_native_import_forward_plan.cpp
@@ -491,6 +494,7 @@ add_executable(keen-pbr-native-tunnel-import-tests
   ../src/keenetic/ndms_native_import_recovery_observation.cpp
   ../src/keenetic/ndms_native_import_recovery_lease.cpp
   ../src/keenetic/ndms_native_ownership_store.cpp
+  ../src/keenetic/ndms_native_inventory_projection.cpp
   ../src/keenetic/ndms_native_import_recovery_plan.cpp
   ../src/keenetic/ndms_native_import_recovery_dispatch.cpp
   ../src/keenetic/ndms_native_import_forward_plan.cpp

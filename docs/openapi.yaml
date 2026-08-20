@@ -620,6 +620,12 @@ paths:
         preview-only values do not authorize or deny the dedicated one-shot
         import. The bodyless `/import/preflight` endpoint is the sole current
         import admission authority and repeats admission on the secret request.
+        `native_mutation_status` and each row's `native_mutation` are a
+        bounded, redacted advisory projection. `delete_candidate` means only
+        that the UI may submit an exact expected-revision request; it is never
+        `can_delete`. The DELETE coordinator remains the final authority and
+        rechecks the encrypted snapshot, keen-pbr dependencies and direct NDMS
+        state while holding the complete writer chain.
       operationId: getNdmsInterfaceInventory
       responses:
         "200":
@@ -6920,6 +6926,91 @@ components:
           items:
             $ref: "#/components/schemas/NdmsManagementBlocker"
 
+    NdmsNativeInventoryOwnershipState:
+      type: string
+      enum:
+        - not_applicable
+        - foreign
+        - panel_owned_active
+        - panel_owned_tombstone
+        - unavailable
+
+    NdmsNativeOwnershipLifecycle:
+      type: string
+      enum:
+        - active_running_only
+        - active_save_acknowledged_unverified
+        - deleted_save_acknowledged_unverified
+
+    NdmsNativeInventoryDeleteBlocker:
+      type: string
+      enum:
+        - unsupported_kind
+        - invalid_or_protected_target
+        - catalog_not_fresh
+        - ownership_inventory_unavailable
+        - ownership_absent
+        - ownership_not_active
+        - ownership_kind_mismatch
+        - import_journal_not_authoritatively_clean
+        - import_recovery_required
+        - import_journal_unsafe
+        - import_journal_unavailable
+        - delete_recovery_required
+        - delete_journal_unsafe
+
+    NdmsNativeInventoryDeferredDeleteCheck:
+      type: string
+      enum:
+        - encrypted_snapshot
+        - keen_pbr_dependencies
+        - direct_ndms_state
+
+    NdmsNativeInterfaceMutationProjection:
+      type: object
+      additionalProperties: false
+      required:
+        - ownership_state
+        - delete_candidate
+        - delete_blockers
+        - deferred_authoritative_checks
+      properties:
+        ownership_state:
+          $ref: "#/components/schemas/NdmsNativeInventoryOwnershipState"
+        ownership_lifecycle:
+          allOf:
+            - $ref: "#/components/schemas/NdmsNativeOwnershipLifecycle"
+          nullable: true
+          description: Present only for a validated panel-owned claim.
+        ownership_revision:
+          type: string
+          nullable: true
+          pattern: ^ndms-native-owner-(v2|v3|tombstone-v1)-[0-9a-f]{64}$
+          description: >
+            Opaque expected revision for an exact candidate request. It is not
+            a transaction id, marker, snapshot revision or deletion authority.
+        delete_candidate:
+          type: boolean
+          description: >
+            Advisory only. True means this row has enough redacted evidence to
+            submit DELETE for authoritative revalidation; it never means the
+            interface can be deleted.
+        delete_blockers:
+          type: array
+          maxItems: 13
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/NdmsNativeInventoryDeleteBlocker"
+        deferred_authoritative_checks:
+          type: array
+          maxItems: 3
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/NdmsNativeInventoryDeferredDeleteCheck"
+          description: >
+            Checks deliberately deferred to DELETE. GET does not decrypt a
+            snapshot, scan configuration dependencies or contact NDMS again.
+
     NdmsTunnelInterface:
       type: object
       required:
@@ -6934,6 +7025,7 @@ components:
         - owner
         - capabilities
         - management_readiness
+        - native_mutation
       properties:
         id:
           type: string
@@ -6977,6 +7069,8 @@ components:
           $ref: "#/components/schemas/NdmsInterfaceCapabilities"
         management_readiness:
           $ref: "#/components/schemas/NdmsInterfaceManagementReadiness"
+        native_mutation:
+          $ref: "#/components/schemas/NdmsNativeInterfaceMutationProjection"
 
     NdmsCatalogStatus:
       type: string
@@ -7253,6 +7347,21 @@ components:
           minimum: 0
           maximum: 126
 
+    NdmsNativeImportReadinessJournalState:
+      title: NdmsNativeImportJournalState
+      type: string
+      description: >
+        Redacted report-only observation of the native-import WAL. It never
+        authorizes a mutation. clean_never_activated is clean only while every
+        production writer/provider stays disabled.
+      enum:
+        - dormant
+        - clean_never_activated
+        - clean
+        - recovery_required
+        - unsafe
+        - unavailable
+
     NdmsNativeImportReadiness:
       title: NdmsNativeImportReadiness
       type: object
@@ -7293,20 +7402,7 @@ components:
           items:
             $ref: "#/components/schemas/NdmsNativeImportTargetRange"
         journal_state:
-          title: NdmsNativeImportJournalState
-          type: string
-          description: >
-            Redacted report-only boot observation of the native-import WAL.
-            This state never authorizes Apply or removes the independent
-            recovery_journal_not_integrated blocker. clean_never_activated is
-            clean only while every production writer/provider stays disabled.
-          enum:
-            - dormant
-            - clean_never_activated
-            - clean
-            - recovery_required
-            - unsafe
-            - unavailable
+          $ref: "#/components/schemas/NdmsNativeImportReadinessJournalState"
         reconcile_barrier_state:
           title: NdmsNativeImportReconcileBarrierState
           type: string
@@ -7322,6 +7418,39 @@ components:
               - recovery_journal_not_integrated
               - reconcile_barrier_not_integrated
 
+    NdmsNativeDeleteJournalState:
+      type: string
+      enum:
+        - clean
+        - recovery_required
+        - unsafe
+        - unavailable
+
+    NdmsNativeMutationInventoryStatus:
+      type: object
+      additionalProperties: false
+      required:
+        - advisory
+        - ownership_inventory_available
+        - observed_import_journal_state
+        - observed_delete_journal_state
+      properties:
+        advisory:
+          type: boolean
+          enum: [true]
+          description: >
+            Always true. This GET projection cannot authorize deletion.
+        ownership_inventory_available:
+          type: boolean
+          description: >
+            False when bounded ownership inspection was unavailable or the
+            callback result failed validation; no row is then treated as a
+            panel-owned active claim.
+        observed_import_journal_state:
+          $ref: "#/components/schemas/NdmsNativeImportReadinessJournalState"
+        observed_delete_journal_state:
+          $ref: "#/components/schemas/NdmsNativeDeleteJournalState"
+
     NdmsInterfaceInventoryResponse:
       type: object
       required:
@@ -7331,6 +7460,7 @@ components:
         - mutation_mode
         - required_guards
         - native_import_readiness
+        - native_mutation_status
         - interfaces
       properties:
         available:
@@ -7358,6 +7488,8 @@ components:
               - optimistic_revision
         native_import_readiness:
           $ref: "#/components/schemas/NdmsNativeImportReadiness"
+        native_mutation_status:
+          $ref: "#/components/schemas/NdmsNativeMutationInventoryStatus"
         interfaces:
           type: array
           items:

@@ -67,6 +67,13 @@ struct NdmsNativeInterfaceInventoryProjection final {
 
 struct NdmsNativeInventoryProjection final {
     bool ownership_inventory_available{false};
+    // Echoes only the redacted readiness inputs used to derive the public
+    // blockers.  They let the inventory explain a degraded candidate without
+    // exposing a WAL filename, transaction id or record payload.
+    NdmsNativeImportJournalReadinessState observed_import_journal_state{
+        NdmsNativeImportJournalReadinessState::unavailable};
+    NdmsNativeDeleteWalReadiness observed_delete_journal_state{
+        NdmsNativeDeleteWalReadiness::unsafe};
     std::vector<NdmsNativeInterfaceInventoryProjection> interfaces;
 };
 

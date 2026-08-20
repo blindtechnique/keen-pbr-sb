@@ -7,7 +7,7 @@
  */
 
 /**
- * Redacted report-only boot observation of the native-import WAL. This state never authorizes Apply or removes the independent recovery_journal_not_integrated blocker. clean_never_activated is clean only while every production writer/provider stays disabled.
+ * Redacted report-only observation of the native-import WAL. It never authorizes a mutation. clean_never_activated is clean only while every production writer/provider stays disabled.
 
  */
 export type NdmsNativeImportReadinessJournalState = typeof NdmsNativeImportReadinessJournalState[keyof typeof NdmsNativeImportReadinessJournalState];
