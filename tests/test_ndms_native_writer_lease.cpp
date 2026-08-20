@@ -276,7 +276,9 @@ TEST_CASE("a crashed native writer releases the kernel flock") {
         auto runtime_lease = runtime.try_acquire("child-native-writer");
         if (!runtime_lease.has_value()) {
             const char ready = '0';
-            (void)::write(ready_pipe[1], &ready, 1U);
+            if (::write(ready_pipe[1], &ready, 1U) != 1) {
+                ::_exit(2);
+            }
             ::_exit(1);
         }
         const auto maintenance = std::make_shared<MaintenanceState>();
@@ -287,9 +289,13 @@ TEST_CASE("a crashed native writer releases the kernel flock") {
         const char ready = admitted.state ==
                                    NdmsNativeWriterAdmissionState::admitted
             ? '1' : '0';
-        (void)::write(ready_pipe[1], &ready, 1U);
+        if (::write(ready_pipe[1], &ready, 1U) != 1) {
+            ::_exit(2);
+        }
         char release = 0;
-        (void)::read(release_pipe[0], &release, 1U);
+        if (::read(release_pipe[0], &release, 1U) != 1) {
+            ::_exit(3);
+        }
         ::_exit(0);
     }
 
