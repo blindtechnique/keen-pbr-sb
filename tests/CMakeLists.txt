@@ -47,6 +47,8 @@ add_executable(keen-pbr-tests
   test_ndms_native_import_executor.cpp
   test_ndms_native_cooperative_import.cpp
   test_ndms_native_cooperative_delete.cpp
+  test_ndms_native_tombstone_forget.cpp
+  test_ndms_native_fresh_import_preflight.cpp
   test_ndms_native_config_dependencies.cpp
   test_ndms_native_import_readiness.cpp
   test_ndms_native_import_startup_recovery.cpp
@@ -280,6 +282,8 @@ add_executable(keen-pbr-tests
   ../src/keenetic/ndms_native_import_executor.cpp
   ../src/keenetic/ndms_native_cooperative_import.cpp
   ../src/keenetic/ndms_native_cooperative_delete.cpp
+  ../src/keenetic/ndms_native_tombstone_forget.cpp
+  ../src/keenetic/ndms_native_fresh_import_preflight.cpp
   ../src/keenetic/ndms_native_config_dependencies.cpp
   ../src/keenetic/ndms_native_import_readiness.cpp
   ../src/keenetic/ndms_native_import_startup_recovery.cpp
@@ -446,6 +450,8 @@ add_executable(keen-pbr-native-tunnel-import-tests
   test_ndms_native_import_executor.cpp
   test_ndms_native_cooperative_import.cpp
   test_ndms_native_cooperative_delete.cpp
+  test_ndms_native_tombstone_forget.cpp
+  test_ndms_native_fresh_import_preflight.cpp
   test_ndms_native_config_dependencies.cpp
   test_ndms_native_import_readiness.cpp
   test_ndms_native_import_startup_recovery.cpp
@@ -484,6 +490,8 @@ add_executable(keen-pbr-native-tunnel-import-tests
   ../src/keenetic/ndms_native_import_executor.cpp
   ../src/keenetic/ndms_native_cooperative_import.cpp
   ../src/keenetic/ndms_native_cooperative_delete.cpp
+  ../src/keenetic/ndms_native_tombstone_forget.cpp
+  ../src/keenetic/ndms_native_fresh_import_preflight.cpp
   ../src/keenetic/ndms_native_config_dependencies.cpp
   ../src/keenetic/ndms_native_import_readiness.cpp
   ../src/keenetic/ndms_native_import_startup_recovery.cpp

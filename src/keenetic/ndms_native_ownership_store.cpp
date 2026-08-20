@@ -1486,6 +1486,87 @@ bool NdmsNativeOwnershipStore::remove_exact(
     }
 }
 
+bool NdmsNativeOwnershipStore::remove_v4_tombstone_exact(
+    const std::string& interface_name,
+    const std::string& expected_ownership_revision) {
+    constexpr std::string_view revision_prefix{
+        "ndms-native-owner-tombstone-v1-"};
+    if (!claimable_interface(interface_name) ||
+        expected_ownership_revision.size() !=
+            revision_prefix.size() + 64U ||
+        expected_ownership_revision.compare(
+            0U, revision_prefix.size(), revision_prefix) != 0 ||
+        !lower_hex(
+            std::string_view{expected_ownership_revision}.substr(
+                revision_prefix.size()),
+            64U)) {
+        return false;
+    }
+    const auto policy = ownership_policy(
+#ifdef KEEN_PBR3_TESTING
+        test_hooks_
+#endif
+    );
+    std::lock_guard<std::mutex> process_lock(ownership_store_mutex);
+    try {
+        auto directory = open_directory(
+            state_directory_, false, policy);
+        OwnershipDirectoryLock directory_lock(directory.get(), LOCK_EX);
+        if (!cleanup_ownership_temporaries(
+                directory.get(), policy)) {
+            return false;
+        }
+        const auto current = read_locked(
+            directory.get(), interface_name, policy);
+        const auto forgettable = [](const OwnershipFileRead& read) {
+            return read.state == OwnershipReadState::valid &&
+                   read.record.has_value() &&
+                   read.revision.has_value() &&
+                   read.record->schema_version ==
+                       kNdmsNativeOwnershipTombstoneSchemaVersion &&
+                   read.record->lifecycle ==
+                       NdmsNativeOwnershipLifecycle::
+                           deleted_save_acknowledged_unverified &&
+                   read.record->lifecycle_evidence.has_value() &&
+                   read.record->lifecycle_evidence->
+                       deleted_kernel_interface_name.has_value();
+        };
+        if (!forgettable(current) ||
+            *current.revision != expected_ownership_revision) {
+            return false;
+        }
+#ifdef KEEN_PBR3_TESTING
+        inject_ownership_fault(
+            policy,
+            NdmsNativeOwnershipStoreFaultStage::
+                before_remove_inode_recheck);
+#endif
+        const auto rebound = read_locked(
+            directory.get(), interface_name, policy);
+        if (!forgettable(rebound) ||
+            *rebound.revision != expected_ownership_revision ||
+            !(*rebound.record == *current.record) ||
+            rebound.device != current.device ||
+            rebound.inode != current.inode) {
+            return false;
+        }
+        if (::unlinkat(directory.get(), interface_name.c_str(), 0) != 0) {
+            return false;
+        }
+#ifdef KEEN_PBR3_TESTING
+        inject_ownership_fault(
+            policy,
+            NdmsNativeOwnershipStoreFaultStage::
+                post_unlink_directory_fsync);
+#endif
+        fsync_exact(directory.get(), "native ownership directory");
+        return read_locked(directory.get(), interface_name, policy).state ==
+               OwnershipReadState::absent;
+    } catch (...) {
+        return false;
+    }
+}
+
 bool NdmsNativeOwnershipStore::ensure_absence_durable(
     const std::string& interface_name) {
     if (!claimable_interface(interface_name)) return false;

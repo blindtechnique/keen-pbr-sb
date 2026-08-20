@@ -191,6 +191,15 @@ public:
     // remove failed - and the caller must treat it as still standing.
     bool remove_exact(const NdmsNativeOwnershipRecord& expected);
 
+    // Dedicated metadata-retirement CAS. It accepts only the exact opaque
+    // revision of a validated v4 deleted tombstone carrying its retained
+    // kernel identity. Active claims and legacy v3 tombstones are never
+    // removable through this path. False is deliberately ambiguous: callers
+    // must reread and establish durable absence before reporting success.
+    bool remove_v4_tombstone_exact(
+        const std::string& interface_name,
+        const std::string& expected_ownership_revision);
+
     // Establishes and rechecks the parent-directory durability boundary for
     // exact absence after a visible unlink whose fsync may have failed.
     bool ensure_absence_durable(const std::string& interface_name);

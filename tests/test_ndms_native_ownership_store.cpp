@@ -735,6 +735,69 @@ TEST_CASE("v4 tombstone refuses a missing or guessed kernel identity") {
     }
 }
 
+TEST_CASE("only an exact v4 tombstone revision can be retired") {
+    SUBCASE("active claims remain on disk") {
+        TempDirectory directory;
+        NdmsNativeOwnershipStore store(directory.path / "ownership");
+        const auto active = record_fixture();
+        const auto revision = store.publish(active);
+        CHECK_FALSE(store.remove_v4_tombstone_exact(
+            active.interface_name, revision));
+        CHECK(store.read(active.interface_name).state ==
+              NdmsNativeOwnershipReadState::valid);
+    }
+
+    SUBCASE("legacy v3 tombstones remain recovery evidence") {
+        TempDirectory directory;
+        const auto state = directory.path / "ownership";
+        NdmsNativeOwnershipStore store(state);
+        const auto active = record_fixture();
+        store.publish(active);
+        auto legacy = lifecycle_record(
+            active,
+            NdmsNativeOwnershipLifecycle::
+                deleted_save_acknowledged_unverified);
+        legacy.schema_version = kNdmsNativeOwnershipSchemaVersion;
+        legacy.lifecycle_evidence->deleted_kernel_interface_name.reset();
+        {
+            std::ofstream output(
+                state / active.interface_name,
+                std::ios::binary | std::ios::trunc);
+            output << ownership_body(legacy);
+        }
+        REQUIRE(::chmod(
+                    (state / active.interface_name).c_str(), 0600) == 0);
+        const auto revision = ndms_native_ownership_revision(legacy);
+        CHECK_FALSE(store.remove_v4_tombstone_exact(
+            active.interface_name, revision));
+        CHECK(store.read(active.interface_name).state ==
+              NdmsNativeOwnershipReadState::valid);
+    }
+
+    SUBCASE("the opaque revision is a strict CAS") {
+        TempDirectory directory;
+        NdmsNativeOwnershipStore store(directory.path / "ownership");
+        const auto active = record_fixture();
+        store.publish(active);
+        const auto tombstone = lifecycle_record(
+            active,
+            NdmsNativeOwnershipLifecycle::
+                deleted_save_acknowledged_unverified);
+        const auto revision = store.replace_exact(active, tombstone);
+        REQUIRE(revision.has_value());
+        CHECK_FALSE(store.remove_v4_tombstone_exact(
+            active.interface_name,
+            "ndms-native-owner-tombstone-v1-" +
+                std::string(64U, '0')));
+        CHECK(store.read(active.interface_name).state ==
+              NdmsNativeOwnershipReadState::valid);
+        CHECK(store.remove_v4_tombstone_exact(
+            active.interface_name, *revision));
+        CHECK(store.read(active.interface_name).state ==
+              NdmsNativeOwnershipReadState::absent);
+    }
+}
+
 TEST_CASE("v3 lifecycle numeric evidence must use canonical decimal text") {
     TempDirectory directory;
     const auto state = directory.path / "ownership";

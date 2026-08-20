@@ -429,6 +429,8 @@ set(SOURCES
   src/keenetic/ndms_native_delete_wal_store.cpp
   src/keenetic/ndms_native_cooperative_import.cpp
   src/keenetic/ndms_native_cooperative_delete.cpp
+  src/keenetic/ndms_native_tombstone_forget.cpp
+  src/keenetic/ndms_native_fresh_import_preflight.cpp
   src/keenetic/ndms_native_config_dependencies.cpp
   src/crypto/chacha20poly1305.cpp
   src/keenetic/ndms_native_secret_snapshot.cpp
