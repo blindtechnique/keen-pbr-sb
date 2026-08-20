@@ -952,6 +952,18 @@ namespace api {
 
     enum class RequiredGuard : int { AUTOMATIC_BACKUP, OPTIMISTIC_REVISION, OWNERSHIP_CHECK, TYPED_RCI };
 
+    enum class NdmsNativeRetainedDeletionDeferredCheckElement : int { ENCRYPTED_SNAPSHOT_OR_ABSENCE, FRESH_DUAL_SCOPE_ABSENCE, KEEN_PBR_DEPENDENCIES, RETAINED_KERNEL_INTERFACE_ABSENCE };
+
+    enum class NdmsNativeRetainedDeletionBlockerElement : int { CATALOG_NOT_FRESH, DELETE_JOURNAL_UNSAFE, DELETE_RECOVERY_REQUIRED, IMPORT_JOURNAL_NOT_AUTHORITATIVELY_CLEAN, IMPORT_JOURNAL_UNAVAILABLE, IMPORT_JOURNAL_UNSAFE, IMPORT_RECOVERY_REQUIRED, OWNERSHIP_SCHEMA_NOT_FORGET_CAPABLE, TARGET_PRESENT };
+
+    struct NdmsNativeRetainedDeletionElement {
+        std::vector<NdmsNativeRetainedDeletionDeferredCheckElement> deferred_authoritative_checks;
+        std::vector<NdmsNativeRetainedDeletionBlockerElement> forget_blockers;
+        bool forget_candidate = false;
+        std::string interface_name;
+        std::string ownership_revision;
+    };
+
     struct NdmsInterfaceInventoryResponse {
         bool available = false;
         CatalogStatus catalog_status;
@@ -961,6 +973,7 @@ namespace api {
         NativeMutationStatus native_mutation_status;
         bool read_only = false;
         std::vector<RequiredGuard> required_guards;
+        std::vector<NdmsNativeRetainedDeletionElement> retained_deletions;
     };
 
     enum class NdmsNativeDeletePhase : int { CLEANUP, DELETE_MAY_BE_INFLIGHT, PREPARED, RUNNING_ABSENCE_VERIFIED, SAVE_ACKNOWLEDGED_UNVERIFIED, SAVE_MAY_BE_INFLIGHT };
@@ -1083,6 +1096,35 @@ namespace api {
         NdmsNativeImportStop stop;
         bool system_configuration_save_performed = false;
         bool wal_may_require_recovery = false;
+    };
+
+    enum class NdmsNativeTombstoneForgetArtifactState : int { ABSENT_DURABLE, RETAINED, UNKNOWN };
+
+    enum class ForeignReappearanceAcknowledgement : int { ACCEPTED_REAPPEARANCE_IS_FOREIGN };
+
+    enum class RollbackDiscardAcknowledgement : int { PERMANENTLY_DISCARD_ROLLBACK_DATA };
+
+    struct NdmsNativeTombstoneForgetRequest {
+        std::string confirm_interface_name;
+        std::string expected_ownership_revision;
+        ForeignReappearanceAcknowledgement foreign_reappearance_acknowledgement;
+        std::string interface_name;
+        RollbackDiscardAcknowledgement rollback_discard_acknowledgement;
+    };
+
+    enum class NdmsNativeTombstoneForgetStatus : int { BLOCKED, FORGOTTEN, RECOVERY_REQUIRED };
+
+    enum class NdmsNativeTombstoneForgetStop : int { DELETE_WAL_UNFINISHED, DELETE_WAL_UNSAFE, IMPORT_WAL_NOT_AUTHORITATIVELY_CLEAN, KEEN_PBR_DEPENDENCIES_PRESENT, KEEN_PBR_DEPENDENCY_SCAN_INCOMPLETE, KERNEL_INVENTORY_UNAVAILABLE, NONE, OBSERVATION_SCOPE_MISMATCH, OBSERVED_CATALOG_UNSAFE, OBSERVED_MARKER_PRESENT, OBSERVED_TARGET_PRESENT, OWNERSHIP_ABSENT, OWNERSHIP_CHANGED, OWNERSHIP_NOT_FORGET_CAPABLE, OWNERSHIP_UNREADABLE, RETAINED_KERNEL_INTERFACE_PRESENT, RUNNING_CONFIG_OBSERVATION_FAILED, RUNTIME_OBSERVATION_FAILED, SNAPSHOT_MISMATCH, SNAPSHOT_RETIREMENT_FAILED, SNAPSHOT_UNREADABLE, TOMBSTONE_RETIREMENT_FAILED, UNEXPECTED_FAILURE, WRITER_LOST, WRITER_MISSING };
+
+    struct NdmsNativeTombstoneForgetResponse {
+        bool future_reappearance_is_foreign = false;
+        std::string interface_name;
+        bool router_mutation_attempted = false;
+        NdmsNativeTombstoneForgetArtifactState snapshot_state;
+        NdmsNativeTombstoneForgetStatus status;
+        NdmsNativeTombstoneForgetStop stop;
+        bool system_configuration_save_acknowledged = false;
+        NdmsNativeTombstoneForgetArtifactState tombstone_state;
     };
 
     enum class NdmsVpnServerKind : int { IKEV1, IKEV2, L2_TP, OPENCONNECT, SSTP };
@@ -2041,6 +2083,14 @@ namespace api {
         std::optional<NativeMutationStatus> ndms_native_mutation_inventory_status;
         std::optional<NdmsNativeMutationKind> ndms_native_mutation_kind;
         std::optional<OwnershipLifecycle> ndms_native_ownership_lifecycle;
+        std::optional<NdmsNativeRetainedDeletionElement> ndms_native_retained_deletion;
+        std::optional<NdmsNativeRetainedDeletionBlockerElement> ndms_native_retained_deletion_blocker;
+        std::optional<NdmsNativeRetainedDeletionDeferredCheckElement> ndms_native_retained_deletion_deferred_check;
+        std::optional<NdmsNativeTombstoneForgetArtifactState> ndms_native_tombstone_forget_artifact_state;
+        std::optional<NdmsNativeTombstoneForgetRequest> ndms_native_tombstone_forget_request;
+        std::optional<NdmsNativeTombstoneForgetResponse> ndms_native_tombstone_forget_response;
+        std::optional<NdmsNativeTombstoneForgetStatus> ndms_native_tombstone_forget_status;
+        std::optional<NdmsNativeTombstoneForgetStop> ndms_native_tombstone_forget_stop;
         std::optional<NdmsNativeWalReadiness> ndms_native_wal_readiness;
         std::optional<NdmsTunnelInterfaceElement> ndms_tunnel_interface;
         std::optional<NdmsTunnelKindEnum> ndms_tunnel_kind;
@@ -2442,6 +2492,9 @@ void to_json(json & j, const NdmsNativeImportReadiness & x);
 void from_json(const json & j, NativeMutationStatus & x);
 void to_json(json & j, const NativeMutationStatus & x);
 
+void from_json(const json & j, NdmsNativeRetainedDeletionElement & x);
+void to_json(json & j, const NdmsNativeRetainedDeletionElement & x);
+
 void from_json(const json & j, NdmsInterfaceInventoryResponse & x);
 void to_json(json & j, const NdmsInterfaceInventoryResponse & x);
 
@@ -2459,6 +2512,12 @@ void to_json(json & j, const NdmsNativeImportRecoveryResponse & x);
 
 void from_json(const json & j, NdmsNativeImportResponse & x);
 void to_json(json & j, const NdmsNativeImportResponse & x);
+
+void from_json(const json & j, NdmsNativeTombstoneForgetRequest & x);
+void to_json(json & j, const NdmsNativeTombstoneForgetRequest & x);
+
+void from_json(const json & j, NdmsNativeTombstoneForgetResponse & x);
+void to_json(json & j, const NdmsNativeTombstoneForgetResponse & x);
 
 void from_json(const json & j, NdmsVpnServerService & x);
 void to_json(json & j, const NdmsVpnServerService & x);
@@ -2853,6 +2912,12 @@ void to_json(json & j, const ObservedDeleteJournalState & x);
 void from_json(const json & j, RequiredGuard & x);
 void to_json(json & j, const RequiredGuard & x);
 
+void from_json(const json & j, NdmsNativeRetainedDeletionDeferredCheckElement & x);
+void to_json(json & j, const NdmsNativeRetainedDeletionDeferredCheckElement & x);
+
+void from_json(const json & j, NdmsNativeRetainedDeletionBlockerElement & x);
+void to_json(json & j, const NdmsNativeRetainedDeletionBlockerElement & x);
+
 void from_json(const json & j, NdmsNativeDeletePhase & x);
 void to_json(json & j, const NdmsNativeDeletePhase & x);
 
@@ -2903,6 +2968,21 @@ void to_json(json & j, const NdmsNativeImportStatus & x);
 
 void from_json(const json & j, NdmsNativeImportStop & x);
 void to_json(json & j, const NdmsNativeImportStop & x);
+
+void from_json(const json & j, NdmsNativeTombstoneForgetArtifactState & x);
+void to_json(json & j, const NdmsNativeTombstoneForgetArtifactState & x);
+
+void from_json(const json & j, ForeignReappearanceAcknowledgement & x);
+void to_json(json & j, const ForeignReappearanceAcknowledgement & x);
+
+void from_json(const json & j, RollbackDiscardAcknowledgement & x);
+void to_json(json & j, const RollbackDiscardAcknowledgement & x);
+
+void from_json(const json & j, NdmsNativeTombstoneForgetStatus & x);
+void to_json(json & j, const NdmsNativeTombstoneForgetStatus & x);
+
+void from_json(const json & j, NdmsNativeTombstoneForgetStop & x);
+void to_json(json & j, const NdmsNativeTombstoneForgetStop & x);
 
 void from_json(const json & j, NdmsVpnServerKind & x);
 void to_json(json & j, const NdmsVpnServerKind & x);
@@ -4698,6 +4778,23 @@ namespace api {
         j["ownership_inventory_available"] = x.ownership_inventory_available;
     }
 
+    inline void from_json(const json & j, NdmsNativeRetainedDeletionElement& x) {
+        x.deferred_authoritative_checks = j.at("deferred_authoritative_checks").get<std::vector<NdmsNativeRetainedDeletionDeferredCheckElement>>();
+        x.forget_blockers = j.at("forget_blockers").get<std::vector<NdmsNativeRetainedDeletionBlockerElement>>();
+        x.forget_candidate = j.at("forget_candidate").get<bool>();
+        x.interface_name = j.at("interface_name").get<std::string>();
+        x.ownership_revision = j.at("ownership_revision").get<std::string>();
+    }
+
+    inline void to_json(json & j, const NdmsNativeRetainedDeletionElement & x) {
+        j = json::object();
+        j["deferred_authoritative_checks"] = x.deferred_authoritative_checks;
+        j["forget_blockers"] = x.forget_blockers;
+        j["forget_candidate"] = x.forget_candidate;
+        j["interface_name"] = x.interface_name;
+        j["ownership_revision"] = x.ownership_revision;
+    }
+
     inline void from_json(const json & j, NdmsInterfaceInventoryResponse& x) {
         x.available = j.at("available").get<bool>();
         x.catalog_status = j.at("catalog_status").get<CatalogStatus>();
@@ -4707,6 +4804,7 @@ namespace api {
         x.native_mutation_status = j.at("native_mutation_status").get<NativeMutationStatus>();
         x.read_only = j.at("read_only").get<bool>();
         x.required_guards = j.at("required_guards").get<std::vector<RequiredGuard>>();
+        x.retained_deletions = j.at("retained_deletions").get<std::vector<NdmsNativeRetainedDeletionElement>>();
     }
 
     inline void to_json(json & j, const NdmsInterfaceInventoryResponse & x) {
@@ -4719,6 +4817,7 @@ namespace api {
         j["native_mutation_status"] = x.native_mutation_status;
         j["read_only"] = x.read_only;
         j["required_guards"] = x.required_guards;
+        j["retained_deletions"] = x.retained_deletions;
     }
 
     inline void from_json(const json & j, NdmsNativeDeleteRequest& x) {
@@ -4900,6 +4999,46 @@ namespace api {
         j["stop"] = x.stop;
         j["system_configuration_save_performed"] = x.system_configuration_save_performed;
         j["wal_may_require_recovery"] = x.wal_may_require_recovery;
+    }
+
+    inline void from_json(const json & j, NdmsNativeTombstoneForgetRequest& x) {
+        x.confirm_interface_name = j.at("confirm_interface_name").get<std::string>();
+        x.expected_ownership_revision = j.at("expected_ownership_revision").get<std::string>();
+        x.foreign_reappearance_acknowledgement = j.at("foreign_reappearance_acknowledgement").get<ForeignReappearanceAcknowledgement>();
+        x.interface_name = j.at("interface_name").get<std::string>();
+        x.rollback_discard_acknowledgement = j.at("rollback_discard_acknowledgement").get<RollbackDiscardAcknowledgement>();
+    }
+
+    inline void to_json(json & j, const NdmsNativeTombstoneForgetRequest & x) {
+        j = json::object();
+        j["confirm_interface_name"] = x.confirm_interface_name;
+        j["expected_ownership_revision"] = x.expected_ownership_revision;
+        j["foreign_reappearance_acknowledgement"] = x.foreign_reappearance_acknowledgement;
+        j["interface_name"] = x.interface_name;
+        j["rollback_discard_acknowledgement"] = x.rollback_discard_acknowledgement;
+    }
+
+    inline void from_json(const json & j, NdmsNativeTombstoneForgetResponse& x) {
+        x.future_reappearance_is_foreign = j.at("future_reappearance_is_foreign").get<bool>();
+        x.interface_name = j.at("interface_name").get<std::string>();
+        x.router_mutation_attempted = j.at("router_mutation_attempted").get<bool>();
+        x.snapshot_state = j.at("snapshot_state").get<NdmsNativeTombstoneForgetArtifactState>();
+        x.status = j.at("status").get<NdmsNativeTombstoneForgetStatus>();
+        x.stop = j.at("stop").get<NdmsNativeTombstoneForgetStop>();
+        x.system_configuration_save_acknowledged = j.at("system_configuration_save_acknowledged").get<bool>();
+        x.tombstone_state = j.at("tombstone_state").get<NdmsNativeTombstoneForgetArtifactState>();
+    }
+
+    inline void to_json(json & j, const NdmsNativeTombstoneForgetResponse & x) {
+        j = json::object();
+        j["future_reappearance_is_foreign"] = x.future_reappearance_is_foreign;
+        j["interface_name"] = x.interface_name;
+        j["router_mutation_attempted"] = x.router_mutation_attempted;
+        j["snapshot_state"] = x.snapshot_state;
+        j["status"] = x.status;
+        j["stop"] = x.stop;
+        j["system_configuration_save_acknowledged"] = x.system_configuration_save_acknowledged;
+        j["tombstone_state"] = x.tombstone_state;
     }
 
     inline void from_json(const json & j, NdmsVpnServerService& x) {
@@ -6546,6 +6685,14 @@ namespace api {
         x.ndms_native_mutation_inventory_status = get_stack_optional<NativeMutationStatus>(j, "NdmsNativeMutationInventoryStatus");
         x.ndms_native_mutation_kind = get_stack_optional<NdmsNativeMutationKind>(j, "NdmsNativeMutationKind");
         x.ndms_native_ownership_lifecycle = get_stack_optional<OwnershipLifecycle>(j, "NdmsNativeOwnershipLifecycle");
+        x.ndms_native_retained_deletion = get_stack_optional<NdmsNativeRetainedDeletionElement>(j, "NdmsNativeRetainedDeletion");
+        x.ndms_native_retained_deletion_blocker = get_stack_optional<NdmsNativeRetainedDeletionBlockerElement>(j, "NdmsNativeRetainedDeletionBlocker");
+        x.ndms_native_retained_deletion_deferred_check = get_stack_optional<NdmsNativeRetainedDeletionDeferredCheckElement>(j, "NdmsNativeRetainedDeletionDeferredCheck");
+        x.ndms_native_tombstone_forget_artifact_state = get_stack_optional<NdmsNativeTombstoneForgetArtifactState>(j, "NdmsNativeTombstoneForgetArtifactState");
+        x.ndms_native_tombstone_forget_request = get_stack_optional<NdmsNativeTombstoneForgetRequest>(j, "NdmsNativeTombstoneForgetRequest");
+        x.ndms_native_tombstone_forget_response = get_stack_optional<NdmsNativeTombstoneForgetResponse>(j, "NdmsNativeTombstoneForgetResponse");
+        x.ndms_native_tombstone_forget_status = get_stack_optional<NdmsNativeTombstoneForgetStatus>(j, "NdmsNativeTombstoneForgetStatus");
+        x.ndms_native_tombstone_forget_stop = get_stack_optional<NdmsNativeTombstoneForgetStop>(j, "NdmsNativeTombstoneForgetStop");
         x.ndms_native_wal_readiness = get_stack_optional<NdmsNativeWalReadiness>(j, "NdmsNativeWalReadiness");
         x.ndms_tunnel_interface = get_stack_optional<NdmsTunnelInterfaceElement>(j, "NdmsTunnelInterface");
         x.ndms_tunnel_kind = get_stack_optional<NdmsTunnelKindEnum>(j, "NdmsTunnelKind");
@@ -6786,6 +6933,14 @@ namespace api {
         j["NdmsNativeMutationInventoryStatus"] = x.ndms_native_mutation_inventory_status;
         j["NdmsNativeMutationKind"] = x.ndms_native_mutation_kind;
         j["NdmsNativeOwnershipLifecycle"] = x.ndms_native_ownership_lifecycle;
+        j["NdmsNativeRetainedDeletion"] = x.ndms_native_retained_deletion;
+        j["NdmsNativeRetainedDeletionBlocker"] = x.ndms_native_retained_deletion_blocker;
+        j["NdmsNativeRetainedDeletionDeferredCheck"] = x.ndms_native_retained_deletion_deferred_check;
+        j["NdmsNativeTombstoneForgetArtifactState"] = x.ndms_native_tombstone_forget_artifact_state;
+        j["NdmsNativeTombstoneForgetRequest"] = x.ndms_native_tombstone_forget_request;
+        j["NdmsNativeTombstoneForgetResponse"] = x.ndms_native_tombstone_forget_response;
+        j["NdmsNativeTombstoneForgetStatus"] = x.ndms_native_tombstone_forget_status;
+        j["NdmsNativeTombstoneForgetStop"] = x.ndms_native_tombstone_forget_stop;
         j["NdmsNativeWalReadiness"] = x.ndms_native_wal_readiness;
         j["NdmsTunnelInterface"] = x.ndms_tunnel_interface;
         j["NdmsTunnelKind"] = x.ndms_tunnel_kind;
@@ -7735,6 +7890,52 @@ namespace api {
         }
     }
 
+    inline void from_json(const json & j, NdmsNativeRetainedDeletionDeferredCheckElement & x) {
+        if (j == "encrypted_snapshot_or_absence") x = NdmsNativeRetainedDeletionDeferredCheckElement::ENCRYPTED_SNAPSHOT_OR_ABSENCE;
+        else if (j == "fresh_dual_scope_absence") x = NdmsNativeRetainedDeletionDeferredCheckElement::FRESH_DUAL_SCOPE_ABSENCE;
+        else if (j == "keen_pbr_dependencies") x = NdmsNativeRetainedDeletionDeferredCheckElement::KEEN_PBR_DEPENDENCIES;
+        else if (j == "retained_kernel_interface_absence") x = NdmsNativeRetainedDeletionDeferredCheckElement::RETAINED_KERNEL_INTERFACE_ABSENCE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsNativeRetainedDeletionDeferredCheckElement\""); }
+    }
+
+    inline void to_json(json & j, const NdmsNativeRetainedDeletionDeferredCheckElement & x) {
+        switch (x) {
+            case NdmsNativeRetainedDeletionDeferredCheckElement::ENCRYPTED_SNAPSHOT_OR_ABSENCE: j = "encrypted_snapshot_or_absence"; break;
+            case NdmsNativeRetainedDeletionDeferredCheckElement::FRESH_DUAL_SCOPE_ABSENCE: j = "fresh_dual_scope_absence"; break;
+            case NdmsNativeRetainedDeletionDeferredCheckElement::KEEN_PBR_DEPENDENCIES: j = "keen_pbr_dependencies"; break;
+            case NdmsNativeRetainedDeletionDeferredCheckElement::RETAINED_KERNEL_INTERFACE_ABSENCE: j = "retained_kernel_interface_absence"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NdmsNativeRetainedDeletionDeferredCheckElement\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, NdmsNativeRetainedDeletionBlockerElement & x) {
+        if (j == "catalog_not_fresh") x = NdmsNativeRetainedDeletionBlockerElement::CATALOG_NOT_FRESH;
+        else if (j == "delete_journal_unsafe") x = NdmsNativeRetainedDeletionBlockerElement::DELETE_JOURNAL_UNSAFE;
+        else if (j == "delete_recovery_required") x = NdmsNativeRetainedDeletionBlockerElement::DELETE_RECOVERY_REQUIRED;
+        else if (j == "import_journal_not_authoritatively_clean") x = NdmsNativeRetainedDeletionBlockerElement::IMPORT_JOURNAL_NOT_AUTHORITATIVELY_CLEAN;
+        else if (j == "import_journal_unavailable") x = NdmsNativeRetainedDeletionBlockerElement::IMPORT_JOURNAL_UNAVAILABLE;
+        else if (j == "import_journal_unsafe") x = NdmsNativeRetainedDeletionBlockerElement::IMPORT_JOURNAL_UNSAFE;
+        else if (j == "import_recovery_required") x = NdmsNativeRetainedDeletionBlockerElement::IMPORT_RECOVERY_REQUIRED;
+        else if (j == "ownership_schema_not_forget_capable") x = NdmsNativeRetainedDeletionBlockerElement::OWNERSHIP_SCHEMA_NOT_FORGET_CAPABLE;
+        else if (j == "target_present") x = NdmsNativeRetainedDeletionBlockerElement::TARGET_PRESENT;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsNativeRetainedDeletionBlockerElement\""); }
+    }
+
+    inline void to_json(json & j, const NdmsNativeRetainedDeletionBlockerElement & x) {
+        switch (x) {
+            case NdmsNativeRetainedDeletionBlockerElement::CATALOG_NOT_FRESH: j = "catalog_not_fresh"; break;
+            case NdmsNativeRetainedDeletionBlockerElement::DELETE_JOURNAL_UNSAFE: j = "delete_journal_unsafe"; break;
+            case NdmsNativeRetainedDeletionBlockerElement::DELETE_RECOVERY_REQUIRED: j = "delete_recovery_required"; break;
+            case NdmsNativeRetainedDeletionBlockerElement::IMPORT_JOURNAL_NOT_AUTHORITATIVELY_CLEAN: j = "import_journal_not_authoritatively_clean"; break;
+            case NdmsNativeRetainedDeletionBlockerElement::IMPORT_JOURNAL_UNAVAILABLE: j = "import_journal_unavailable"; break;
+            case NdmsNativeRetainedDeletionBlockerElement::IMPORT_JOURNAL_UNSAFE: j = "import_journal_unsafe"; break;
+            case NdmsNativeRetainedDeletionBlockerElement::IMPORT_RECOVERY_REQUIRED: j = "import_recovery_required"; break;
+            case NdmsNativeRetainedDeletionBlockerElement::OWNERSHIP_SCHEMA_NOT_FORGET_CAPABLE: j = "ownership_schema_not_forget_capable"; break;
+            case NdmsNativeRetainedDeletionBlockerElement::TARGET_PRESENT: j = "target_present"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NdmsNativeRetainedDeletionBlockerElement\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
     inline void from_json(const json & j, NdmsNativeDeletePhase & x) {
         if (j == "cleanup") x = NdmsNativeDeletePhase::CLEANUP;
         else if (j == "delete_may_be_inflight") x = NdmsNativeDeletePhase::DELETE_MAY_BE_INFLIGHT;
@@ -8334,6 +8535,128 @@ namespace api {
             case NdmsNativeImportStop::WRITER_LOST: j = "writer_lost"; break;
             case NdmsNativeImportStop::WRITER_MISSING: j = "writer_missing"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"NdmsNativeImportStop\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, NdmsNativeTombstoneForgetArtifactState & x) {
+        if (j == "absent_durable") x = NdmsNativeTombstoneForgetArtifactState::ABSENT_DURABLE;
+        else if (j == "retained") x = NdmsNativeTombstoneForgetArtifactState::RETAINED;
+        else if (j == "unknown") x = NdmsNativeTombstoneForgetArtifactState::UNKNOWN;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsNativeTombstoneForgetArtifactState\""); }
+    }
+
+    inline void to_json(json & j, const NdmsNativeTombstoneForgetArtifactState & x) {
+        switch (x) {
+            case NdmsNativeTombstoneForgetArtifactState::ABSENT_DURABLE: j = "absent_durable"; break;
+            case NdmsNativeTombstoneForgetArtifactState::RETAINED: j = "retained"; break;
+            case NdmsNativeTombstoneForgetArtifactState::UNKNOWN: j = "unknown"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NdmsNativeTombstoneForgetArtifactState\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, ForeignReappearanceAcknowledgement & x) {
+        if (j == "accepted_reappearance_is_foreign") x = ForeignReappearanceAcknowledgement::ACCEPTED_REAPPEARANCE_IS_FOREIGN;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"ForeignReappearanceAcknowledgement\""); }
+    }
+
+    inline void to_json(json & j, const ForeignReappearanceAcknowledgement & x) {
+        switch (x) {
+            case ForeignReappearanceAcknowledgement::ACCEPTED_REAPPEARANCE_IS_FOREIGN: j = "accepted_reappearance_is_foreign"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"ForeignReappearanceAcknowledgement\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, RollbackDiscardAcknowledgement & x) {
+        if (j == "permanently_discard_rollback_data") x = RollbackDiscardAcknowledgement::PERMANENTLY_DISCARD_ROLLBACK_DATA;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"RollbackDiscardAcknowledgement\""); }
+    }
+
+    inline void to_json(json & j, const RollbackDiscardAcknowledgement & x) {
+        switch (x) {
+            case RollbackDiscardAcknowledgement::PERMANENTLY_DISCARD_ROLLBACK_DATA: j = "permanently_discard_rollback_data"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"RollbackDiscardAcknowledgement\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, NdmsNativeTombstoneForgetStatus & x) {
+        if (j == "blocked") x = NdmsNativeTombstoneForgetStatus::BLOCKED;
+        else if (j == "forgotten") x = NdmsNativeTombstoneForgetStatus::FORGOTTEN;
+        else if (j == "recovery_required") x = NdmsNativeTombstoneForgetStatus::RECOVERY_REQUIRED;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsNativeTombstoneForgetStatus\""); }
+    }
+
+    inline void to_json(json & j, const NdmsNativeTombstoneForgetStatus & x) {
+        switch (x) {
+            case NdmsNativeTombstoneForgetStatus::BLOCKED: j = "blocked"; break;
+            case NdmsNativeTombstoneForgetStatus::FORGOTTEN: j = "forgotten"; break;
+            case NdmsNativeTombstoneForgetStatus::RECOVERY_REQUIRED: j = "recovery_required"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NdmsNativeTombstoneForgetStatus\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, NdmsNativeTombstoneForgetStop & x) {
+        static std::unordered_map<std::string, NdmsNativeTombstoneForgetStop> enumValues {
+            {"delete_wal_unfinished", NdmsNativeTombstoneForgetStop::DELETE_WAL_UNFINISHED},
+            {"delete_wal_unsafe", NdmsNativeTombstoneForgetStop::DELETE_WAL_UNSAFE},
+            {"import_wal_not_authoritatively_clean", NdmsNativeTombstoneForgetStop::IMPORT_WAL_NOT_AUTHORITATIVELY_CLEAN},
+            {"keen_pbr_dependencies_present", NdmsNativeTombstoneForgetStop::KEEN_PBR_DEPENDENCIES_PRESENT},
+            {"keen_pbr_dependency_scan_incomplete", NdmsNativeTombstoneForgetStop::KEEN_PBR_DEPENDENCY_SCAN_INCOMPLETE},
+            {"kernel_inventory_unavailable", NdmsNativeTombstoneForgetStop::KERNEL_INVENTORY_UNAVAILABLE},
+            {"none", NdmsNativeTombstoneForgetStop::NONE},
+            {"observation_scope_mismatch", NdmsNativeTombstoneForgetStop::OBSERVATION_SCOPE_MISMATCH},
+            {"observed_catalog_unsafe", NdmsNativeTombstoneForgetStop::OBSERVED_CATALOG_UNSAFE},
+            {"observed_marker_present", NdmsNativeTombstoneForgetStop::OBSERVED_MARKER_PRESENT},
+            {"observed_target_present", NdmsNativeTombstoneForgetStop::OBSERVED_TARGET_PRESENT},
+            {"ownership_absent", NdmsNativeTombstoneForgetStop::OWNERSHIP_ABSENT},
+            {"ownership_changed", NdmsNativeTombstoneForgetStop::OWNERSHIP_CHANGED},
+            {"ownership_not_forget_capable", NdmsNativeTombstoneForgetStop::OWNERSHIP_NOT_FORGET_CAPABLE},
+            {"ownership_unreadable", NdmsNativeTombstoneForgetStop::OWNERSHIP_UNREADABLE},
+            {"retained_kernel_interface_present", NdmsNativeTombstoneForgetStop::RETAINED_KERNEL_INTERFACE_PRESENT},
+            {"running_config_observation_failed", NdmsNativeTombstoneForgetStop::RUNNING_CONFIG_OBSERVATION_FAILED},
+            {"runtime_observation_failed", NdmsNativeTombstoneForgetStop::RUNTIME_OBSERVATION_FAILED},
+            {"snapshot_mismatch", NdmsNativeTombstoneForgetStop::SNAPSHOT_MISMATCH},
+            {"snapshot_retirement_failed", NdmsNativeTombstoneForgetStop::SNAPSHOT_RETIREMENT_FAILED},
+            {"snapshot_unreadable", NdmsNativeTombstoneForgetStop::SNAPSHOT_UNREADABLE},
+            {"tombstone_retirement_failed", NdmsNativeTombstoneForgetStop::TOMBSTONE_RETIREMENT_FAILED},
+            {"unexpected_failure", NdmsNativeTombstoneForgetStop::UNEXPECTED_FAILURE},
+            {"writer_lost", NdmsNativeTombstoneForgetStop::WRITER_LOST},
+            {"writer_missing", NdmsNativeTombstoneForgetStop::WRITER_MISSING},
+        };
+        auto iter = enumValues.find(j.get<std::string>());
+        if (iter != enumValues.end()) {
+            x = iter->second;
+        }
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsNativeTombstoneForgetStop\""); }
+    }
+
+    inline void to_json(json & j, const NdmsNativeTombstoneForgetStop & x) {
+        switch (x) {
+            case NdmsNativeTombstoneForgetStop::DELETE_WAL_UNFINISHED: j = "delete_wal_unfinished"; break;
+            case NdmsNativeTombstoneForgetStop::DELETE_WAL_UNSAFE: j = "delete_wal_unsafe"; break;
+            case NdmsNativeTombstoneForgetStop::IMPORT_WAL_NOT_AUTHORITATIVELY_CLEAN: j = "import_wal_not_authoritatively_clean"; break;
+            case NdmsNativeTombstoneForgetStop::KEEN_PBR_DEPENDENCIES_PRESENT: j = "keen_pbr_dependencies_present"; break;
+            case NdmsNativeTombstoneForgetStop::KEEN_PBR_DEPENDENCY_SCAN_INCOMPLETE: j = "keen_pbr_dependency_scan_incomplete"; break;
+            case NdmsNativeTombstoneForgetStop::KERNEL_INVENTORY_UNAVAILABLE: j = "kernel_inventory_unavailable"; break;
+            case NdmsNativeTombstoneForgetStop::NONE: j = "none"; break;
+            case NdmsNativeTombstoneForgetStop::OBSERVATION_SCOPE_MISMATCH: j = "observation_scope_mismatch"; break;
+            case NdmsNativeTombstoneForgetStop::OBSERVED_CATALOG_UNSAFE: j = "observed_catalog_unsafe"; break;
+            case NdmsNativeTombstoneForgetStop::OBSERVED_MARKER_PRESENT: j = "observed_marker_present"; break;
+            case NdmsNativeTombstoneForgetStop::OBSERVED_TARGET_PRESENT: j = "observed_target_present"; break;
+            case NdmsNativeTombstoneForgetStop::OWNERSHIP_ABSENT: j = "ownership_absent"; break;
+            case NdmsNativeTombstoneForgetStop::OWNERSHIP_CHANGED: j = "ownership_changed"; break;
+            case NdmsNativeTombstoneForgetStop::OWNERSHIP_NOT_FORGET_CAPABLE: j = "ownership_not_forget_capable"; break;
+            case NdmsNativeTombstoneForgetStop::OWNERSHIP_UNREADABLE: j = "ownership_unreadable"; break;
+            case NdmsNativeTombstoneForgetStop::RETAINED_KERNEL_INTERFACE_PRESENT: j = "retained_kernel_interface_present"; break;
+            case NdmsNativeTombstoneForgetStop::RUNNING_CONFIG_OBSERVATION_FAILED: j = "running_config_observation_failed"; break;
+            case NdmsNativeTombstoneForgetStop::RUNTIME_OBSERVATION_FAILED: j = "runtime_observation_failed"; break;
+            case NdmsNativeTombstoneForgetStop::SNAPSHOT_MISMATCH: j = "snapshot_mismatch"; break;
+            case NdmsNativeTombstoneForgetStop::SNAPSHOT_RETIREMENT_FAILED: j = "snapshot_retirement_failed"; break;
+            case NdmsNativeTombstoneForgetStop::SNAPSHOT_UNREADABLE: j = "snapshot_unreadable"; break;
+            case NdmsNativeTombstoneForgetStop::TOMBSTONE_RETIREMENT_FAILED: j = "tombstone_retirement_failed"; break;
+            case NdmsNativeTombstoneForgetStop::UNEXPECTED_FAILURE: j = "unexpected_failure"; break;
+            case NdmsNativeTombstoneForgetStop::WRITER_LOST: j = "writer_lost"; break;
+            case NdmsNativeTombstoneForgetStop::WRITER_MISSING: j = "writer_missing"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NdmsNativeTombstoneForgetStop\": " + std::to_string(static_cast<int>(x)));
         }
     }
 

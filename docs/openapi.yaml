@@ -1052,6 +1052,79 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/system/ndms/interfaces/retained-deletions/forget:
+    post:
+      tags: [Native manual mutation transport]
+      summary: Permanently retire one exact retained native deletion
+      description: >
+        Permanently discards the exact rollback snapshot and ownership
+        tombstone for a previously deleted panel-owned native interface. The
+        operation is metadata-only: it never changes the router or saves
+        system configuration. Both irreversible acknowledgements and the
+        exact current tombstone revision are required in the body. A future
+        interface with the same firmware name is foreign after a successful
+        result. The endpoint is one-shot and must never be retried
+        automatically. No transaction id, marker, snapshot revision,
+        historical kernel name or secret is returned. All responses are
+        served with `Cache-Control: no-store`.
+      operationId: postNdmsNativeRetainedDeletionForget
+      requestBody:
+        required: true
+        description: Exact non-secret JSON request, limited to 1024 bytes.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NdmsNativeTombstoneForgetRequest"
+      responses:
+        "200":
+          description: Redacted blocked, recovery-required or forgotten result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NdmsNativeTombstoneForgetResponse"
+        "400":
+          description: Empty, malformed or non-exact request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Authentication is required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Protected transport or step-up authentication is required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: The request body exceeded 1024 bytes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "415":
+          description: Exactly one `application/json` content type is required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Forget returned no trustworthy typed result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Native mutation reservation or service is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/system/ndms/vpn-server-services:
     get:
       summary: List native Keenetic VPN server services
@@ -7251,6 +7324,61 @@ components:
         - keen_pbr_dependencies
         - direct_ndms_state
 
+    NdmsNativeRetainedDeletionBlocker:
+      type: string
+      enum:
+        - catalog_not_fresh
+        - target_present
+        - ownership_schema_not_forget_capable
+        - import_journal_not_authoritatively_clean
+        - import_recovery_required
+        - import_journal_unsafe
+        - import_journal_unavailable
+        - delete_recovery_required
+        - delete_journal_unsafe
+
+    NdmsNativeRetainedDeletionDeferredCheck:
+      type: string
+      enum:
+        - encrypted_snapshot_or_absence
+        - keen_pbr_dependencies
+        - retained_kernel_interface_absence
+        - fresh_dual_scope_absence
+
+    NdmsNativeRetainedDeletion:
+      type: object
+      additionalProperties: false
+      required:
+        - interface_name
+        - ownership_revision
+        - forget_candidate
+        - forget_blockers
+        - deferred_authoritative_checks
+      properties:
+        interface_name:
+          $ref: "#/components/schemas/NdmsNativeManagedInterfaceName"
+        ownership_revision:
+          type: string
+          minLength: 95
+          maxLength: 95
+          pattern: ^ndms-native-owner-tombstone-v1-[0-9a-f]{64}$
+          description: Opaque exact tombstone compare-and-swap revision.
+        forget_candidate:
+          type: boolean
+          description: Advisory only; POST performs every authoritative check.
+        forget_blockers:
+          type: array
+          maxItems: 9
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/NdmsNativeRetainedDeletionBlocker"
+        deferred_authoritative_checks:
+          type: array
+          maxItems: 4
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/NdmsNativeRetainedDeletionDeferredCheck"
+
     NdmsNativeInterfaceMutationProjection:
       type: object
       additionalProperties: false
@@ -7433,6 +7561,107 @@ components:
       type: string
       pattern: "^Wireguard(?:[5-9]|[1-8][0-9]|9[0-8])$"
       description: Exact production-managed native mutation identity.
+
+    NdmsNativeTombstoneForgetRequest:
+      title: NdmsNativeTombstoneForgetRequest
+      type: object
+      additionalProperties: false
+      required:
+        - interface_name
+        - expected_ownership_revision
+        - confirm_interface_name
+        - rollback_discard_acknowledgement
+        - foreign_reappearance_acknowledgement
+      properties:
+        interface_name:
+          $ref: "#/components/schemas/NdmsNativeManagedInterfaceName"
+        expected_ownership_revision:
+          type: string
+          minLength: 95
+          maxLength: 95
+          pattern: ^ndms-native-owner-tombstone-v1-[0-9a-f]{64}$
+        confirm_interface_name:
+          $ref: "#/components/schemas/NdmsNativeManagedInterfaceName"
+        rollback_discard_acknowledgement:
+          type: string
+          enum: [permanently_discard_rollback_data]
+        foreign_reappearance_acknowledgement:
+          type: string
+          enum: [accepted_reappearance_is_foreign]
+
+    NdmsNativeTombstoneForgetStatus:
+      title: NdmsNativeTombstoneForgetStatus
+      type: string
+      enum: [blocked, recovery_required, forgotten]
+
+    NdmsNativeTombstoneForgetStop:
+      title: NdmsNativeTombstoneForgetStop
+      type: string
+      enum:
+        - none
+        - writer_missing
+        - writer_lost
+        - import_wal_not_authoritatively_clean
+        - delete_wal_unfinished
+        - delete_wal_unsafe
+        - ownership_absent
+        - ownership_unreadable
+        - ownership_not_forget_capable
+        - ownership_changed
+        - snapshot_unreadable
+        - snapshot_mismatch
+        - snapshot_retirement_failed
+        - keen_pbr_dependency_scan_incomplete
+        - keen_pbr_dependencies_present
+        - kernel_inventory_unavailable
+        - retained_kernel_interface_present
+        - runtime_observation_failed
+        - running_config_observation_failed
+        - observation_scope_mismatch
+        - observed_target_present
+        - observed_marker_present
+        - observed_catalog_unsafe
+        - tombstone_retirement_failed
+        - unexpected_failure
+
+    NdmsNativeTombstoneForgetArtifactState:
+      title: NdmsNativeTombstoneForgetArtifactState
+      type: string
+      enum: [unknown, retained, absent_durable]
+
+    NdmsNativeTombstoneForgetResponse:
+      title: NdmsNativeTombstoneForgetResponse
+      type: object
+      additionalProperties: false
+      required:
+        - status
+        - stop
+        - interface_name
+        - snapshot_state
+        - tombstone_state
+        - router_mutation_attempted
+        - system_configuration_save_acknowledged
+        - future_reappearance_is_foreign
+      properties:
+        status:
+          $ref: "#/components/schemas/NdmsNativeTombstoneForgetStatus"
+        stop:
+          $ref: "#/components/schemas/NdmsNativeTombstoneForgetStop"
+        interface_name:
+          $ref: "#/components/schemas/NdmsNativeManagedInterfaceName"
+        snapshot_state:
+          $ref: "#/components/schemas/NdmsNativeTombstoneForgetArtifactState"
+        tombstone_state:
+          $ref: "#/components/schemas/NdmsNativeTombstoneForgetArtifactState"
+        router_mutation_attempted:
+          type: boolean
+          enum: [false]
+        system_configuration_save_acknowledged:
+          type: boolean
+          enum: [false]
+        future_reappearance_is_foreign:
+          type: boolean
+          description: True only after both local artifacts are durably absent.
 
     NdmsNativeKernelInterfaceName:
       title: NdmsNativeKernelInterfaceName
@@ -8154,6 +8383,7 @@ components:
         - required_guards
         - native_import_readiness
         - native_mutation_status
+        - retained_deletions
         - interfaces
       properties:
         available:
@@ -8183,6 +8413,11 @@ components:
           $ref: "#/components/schemas/NdmsNativeImportReadiness"
         native_mutation_status:
           $ref: "#/components/schemas/NdmsNativeMutationInventoryStatus"
+        retained_deletions:
+          type: array
+          maxItems: 94
+          items:
+            $ref: "#/components/schemas/NdmsNativeRetainedDeletion"
         interfaces:
           type: array
           items:

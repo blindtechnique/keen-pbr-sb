@@ -10,6 +10,7 @@ import type { NdmsInterfaceInventoryResponseMutationMode } from './ndmsInterface
 import type { NdmsInterfaceInventoryResponseRequiredGuardsItem } from './ndmsInterfaceInventoryResponseRequiredGuardsItem';
 import type { NdmsNativeImportReadiness } from './ndmsNativeImportReadiness';
 import type { NdmsNativeMutationInventoryStatus } from './ndmsNativeMutationInventoryStatus';
+import type { NdmsNativeRetainedDeletion } from './ndmsNativeRetainedDeletion';
 import type { NdmsTunnelInterface } from './ndmsTunnelInterface';
 
 export interface NdmsInterfaceInventoryResponse {
@@ -22,5 +23,7 @@ export interface NdmsInterfaceInventoryResponse {
   required_guards: NdmsInterfaceInventoryResponseRequiredGuardsItem[];
   native_import_readiness: NdmsNativeImportReadiness;
   native_mutation_status: NdmsNativeMutationInventoryStatus;
+  /** @maxItems 94 */
+  retained_deletions: NdmsNativeRetainedDeletion[];
   interfaces: NdmsTunnelInterface[];
 }

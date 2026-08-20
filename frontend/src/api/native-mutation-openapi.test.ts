@@ -35,13 +35,14 @@ const manualMutationPaths = [
   "/api/system/ndms/interfaces/remove",
   "/api/system/ndms/interfaces/remove/recovery/retry",
   "/api/system/ndms/interfaces/import/recovery/retry",
+  "/api/system/ndms/interfaces/retained-deletions/forget",
 ] as const
 
 const loadSpec = async () =>
   Bun.YAML.parse(await Bun.file(specPath).text()) as OpenApiDocument
 
 describe("native mutation OpenAPI generation boundary", () => {
-  test("tags exactly the three one-shot operations for client exclusion", async () => {
+  test("tags every one-shot operation for client exclusion", async () => {
     const spec = await loadSpec()
     const taggedPaths = Object.entries(spec.paths)
       .filter(([, path]) => path.post?.tags?.includes(manualMutationTag))
@@ -72,6 +73,21 @@ describe("native mutation OpenAPI generation boundary", () => {
       ["confirm_label", "expected_ownership_revision", "interface_name"].sort()
     )
 
+    const forget = spec.components.schemas.NdmsNativeTombstoneForgetRequest
+    expect(forget.additionalProperties).toBeFalse()
+    expect(forget.required?.sort()).toEqual(
+      [
+        "confirm_interface_name",
+        "expected_ownership_revision",
+        "foreign_reappearance_acknowledgement",
+        "interface_name",
+        "rollback_discard_acknowledgement",
+      ].sort()
+    )
+    expect(Object.keys(forget.properties ?? {}).sort()).toEqual(
+      [...(forget.required ?? [])].sort()
+    )
+
     const recovery = spec.paths[manualMutationPaths[2]]?.post
     expect(recovery?.parameters).toEqual([
       expect.objectContaining({
@@ -90,6 +106,7 @@ describe("native mutation OpenAPI generation boundary", () => {
       "NdmsNativeImportResponse",
       "NdmsNativeImportRecoveryResponse",
       "NdmsNativeDeleteResponse",
+      "NdmsNativeTombstoneForgetResponse",
     ]) {
       expect(
         Object.hasOwn(
@@ -149,6 +166,8 @@ describe("native mutation OpenAPI generation boundary", () => {
       "ndmsNativeDeleteRequest.ts",
       "ndmsNativeDeleteResponse.ts",
       "ndmsNativeImportRecoveryResponse.ts",
+      "ndmsNativeTombstoneForgetRequest.ts",
+      "ndmsNativeTombstoneForgetResponse.ts",
     ]) {
       expect(existsSync(resolve(generatedRoot, "model", model))).toBeTrue()
     }
