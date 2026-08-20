@@ -14,6 +14,8 @@ import type {
  */
 export type NfqwsCoverage = {
   readonly known: boolean
+  /** Why coverage is unknown, when the API can distinguish it. */
+  readonly reason?: RoutingTestNfqws["reason"]
   /** Lists that make nfqws act on this target. */
   readonly covering: readonly RoutingTestNfqwsMatch[]
   /** Lists that keep it away from it - the reason coverage does not apply. */
@@ -24,7 +26,12 @@ export function summariseNfqwsCoverage(
   nfqws: RoutingTestNfqws | undefined
 ): NfqwsCoverage {
   if (!nfqws?.available) {
-    return { known: false, covering: [], excluding: [] }
+    return {
+      known: false,
+      reason: nfqws?.reason,
+      covering: [],
+      excluding: [],
+    }
   }
   const matches = nfqws.matches ?? []
   return {
@@ -42,9 +49,15 @@ export function summariseNfqwsCoverage(
  * traffic is left alone. Reporting "covered" while nfqws steps aside would be
  * the one reading that sends someone debugging the wrong thing.
  */
-export type NfqwsVerdict = "unknown" | "excluded" | "covered" | "uncovered"
+export type NfqwsVerdict =
+  | "busy"
+  | "unknown"
+  | "excluded"
+  | "covered"
+  | "uncovered"
 
 export function nfqwsVerdict(coverage: NfqwsCoverage): NfqwsVerdict {
+  if (!coverage.known && coverage.reason === "busy") return "busy"
   if (!coverage.known) return "unknown"
   if (coverage.excluding.length > 0) return "excluded"
   return coverage.covering.length > 0 ? "covered" : "uncovered"

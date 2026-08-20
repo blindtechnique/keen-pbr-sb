@@ -1723,7 +1723,8 @@ export const enTranslation = {
     targetFacts: {
       nfqwsTitle: "nfqws",
       nfqws: {
-        unknown: "The nfqws configuration could not be read, so coverage is unknown.",
+        busy: "Another nfqws coverage check is already running. This routing result is still valid; try the check again.",
+        unknown: "The nfqws configuration or an active list could not be read safely, so coverage is unknown.",
         covered: "This target is in an nfqws list, so DPI circumvention applies to it.",
         excluded:
           "This target is on an nfqws exclude list, so circumvention does not apply - even though another list also matches it.",

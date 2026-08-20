@@ -5971,11 +5971,21 @@ components:
         Which nfqws lists cover this target. Read from the files on disk, so it
         says what nfqws is configured to act on - not whether nfqws is running
         or whether its strategy works, which are separate questions with
-        separate answers.
+        separate answers. At most one request scans the bounded cached lists;
+        concurrent requests keep the routing result but report this sub-result
+        as busy instead of queueing API workers behind the scan.
       properties:
         available:
           type: boolean
-          description: false when nfqws2.conf could not be read at all.
+          description: false when coverage could not be evaluated.
+        reason:
+          type: string
+          pattern: "^(busy|unavailable)$"
+          description: >
+            Present when coverage is unavailable. `busy` means another request
+            owns the single bounded scan slot; `unavailable` means the active
+            nfqws configuration or one of its lists could not be read, bounded,
+            or parsed safely.
         matches:
           type: array
           items:

@@ -140,6 +140,25 @@ TEST_CASE("a repeated flag names its file once") {
     CHECK(refs.size() == 2);
 }
 
+TEST_CASE("bounded hostlist parsing refuses entry and character amplification") {
+    const auto ordinary = parse_hostlist_bounded(
+        "# ignored\nexample.com\n  10.0.0.0/8  \n",
+        4,
+        64,
+        4096);
+    REQUIRE(ordinary.has_value());
+    CHECK(
+        ordinary->entries ==
+        std::vector<std::string>{"example.com", "10.0.0.0/8"});
+    CHECK(ordinary->normalized_characters == 21);
+    CHECK(ordinary->conservative_bytes >
+          ordinary->normalized_characters);
+
+    CHECK_FALSE(parse_hostlist_bounded("a\nb\nc\n", 2, 64, 4096));
+    CHECK_FALSE(parse_hostlist_bounded("abcd\n", 4, 3, 4096));
+    CHECK_FALSE(parse_hostlist_bounded("ordinary.example\n", 4, 64, 1));
+}
+
 TEST_CASE("only the active nfqws mode contributes list references") {
     const auto args = build_nfqws_dry_run_args(
         "MODE_LIST=\"--hostlist=/lists/active.list\"\n"

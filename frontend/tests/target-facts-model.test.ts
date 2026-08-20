@@ -32,6 +32,17 @@ describe("nfqws coverage", () => {
     expect(nfqwsVerdict(coverage)).toBe("unknown")
   })
 
+  test("a concurrent nfqws scan is busy, not unreadable", () => {
+    const coverage = summariseNfqwsCoverage({
+      available: false,
+      reason: "busy",
+      matches: [],
+    } as never)
+    expect(coverage.known).toBe(false)
+    expect(coverage.reason).toBe("busy")
+    expect(nfqwsVerdict(coverage)).toBe("busy")
+  })
+
   test("covering and excluding lists are kept apart", () => {
     const coverage = summariseNfqwsCoverage({
       available: true,

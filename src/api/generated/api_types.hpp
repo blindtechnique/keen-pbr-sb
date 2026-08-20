@@ -1298,6 +1298,7 @@ namespace api {
     struct RoutingTestNfqws {
         bool available = false;
         std::vector<RoutingTestNfqwsMatchElement> matches;
+        std::optional<std::string> reason;
     };
 
     struct RoutingTestRequest {
@@ -5092,12 +5093,14 @@ namespace api {
     inline void from_json(const json & j, RoutingTestNfqws& x) {
         x.available = j.at("available").get<bool>();
         x.matches = j.at("matches").get<std::vector<RoutingTestNfqwsMatchElement>>();
+        x.reason = get_stack_optional<std::string>(j, "reason");
     }
 
     inline void to_json(json & j, const RoutingTestNfqws & x) {
         j = json::object();
         j["available"] = x.available;
         j["matches"] = x.matches;
+        j["reason"] = x.reason;
     }
 
     inline void from_json(const json & j, RoutingTestRequest& x) {

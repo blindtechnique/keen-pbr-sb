@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <vector>
@@ -52,6 +53,25 @@ std::vector<ListReference> parse_list_references(
 // file the same way, so a commented-out entry must not be reported as covering
 // anything. Used for address lists too - their comment syntax is the same.
 std::vector<std::string> parse_hostlist(const std::string& contents);
+
+// A parser result suitable for a long-lived router cache. The footprint is a
+// conservative upper bound over the vector storage, string capacities and an
+// allocator allowance; callers must budget this value rather than source-file
+// bytes, because millions of tiny lines amplify into millions of objects.
+struct BoundedHostlist {
+    std::vector<std::string> entries;
+    std::size_t normalized_characters{0};
+    std::size_t conservative_bytes{0};
+};
+
+// Parses without allowing a small-line list to amplify into unbounded heap
+// objects. Returns nullopt as soon as any entry, normalized-character or
+// conservative parsed-footprint limit would be exceeded.
+std::optional<BoundedHostlist> parse_hostlist_bounded(
+    const std::string& contents,
+    std::size_t max_entries,
+    std::size_t max_normalized_characters,
+    std::size_t max_conservative_bytes);
 
 // Finds the entry that covers `domain`, or nothing.
 //

@@ -4,8 +4,10 @@
 #include <arpa/inet.h>
 #include <array>
 #include <cctype>
+#include <cstddef>
 #include <cstring>
-#include <sstream>
+#include <limits>
+#include <string_view>
 
 namespace keen_pbr3::nfqws {
 
@@ -28,6 +30,29 @@ std::string lower(std::string value) {
             std::tolower(static_cast<unsigned char>(character)));
     }
     return value;
+}
+
+std::string_view trim_view(std::string_view value) {
+    const auto is_space = [](unsigned char character) {
+        return std::isspace(character) != 0;
+    };
+    while (!value.empty() &&
+           is_space(static_cast<unsigned char>(value.front()))) {
+        value.remove_prefix(1U);
+    }
+    while (!value.empty() &&
+           is_space(static_cast<unsigned char>(value.back()))) {
+        value.remove_suffix(1U);
+    }
+    return value;
+}
+
+bool checked_add(std::size_t left,
+                 std::size_t right,
+                 std::size_t& result) noexcept {
+    if (right > std::numeric_limits<std::size_t>::max() - left) return false;
+    result = left + right;
+    return true;
 }
 
 struct ParsedPrefix {
@@ -135,19 +160,71 @@ std::vector<ListReference> parse_list_references(
 }
 
 std::vector<std::string> parse_hostlist(const std::string& contents) {
-    std::vector<std::string> entries;
-    std::istringstream stream(contents);
-    std::string line;
-    while (std::getline(stream, line)) {
-        // Files edited on Windows arrive with CR still attached; an entry with
-        // a trailing CR would never match anything and would look like a
-        // working rule in the panel.
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        auto entry = trim(std::move(line));
+    auto parsed = parse_hostlist_bounded(
+        contents,
+        std::numeric_limits<std::size_t>::max(),
+        std::numeric_limits<std::size_t>::max(),
+        std::numeric_limits<std::size_t>::max());
+    return parsed ? std::move(parsed->entries) : std::vector<std::string>{};
+}
+
+std::optional<BoundedHostlist> parse_hostlist_bounded(
+    const std::string& contents,
+    std::size_t max_entries,
+    std::size_t max_normalized_characters,
+    std::size_t max_conservative_bytes) {
+    BoundedHostlist parsed;
+    std::size_t string_storage_bytes = 0;
+    std::size_t offset = 0;
+    constexpr std::size_t kAllocatorAllowance = 2U * sizeof(void*);
+
+    while (offset < contents.size()) {
+        const auto newline = contents.find('\n', offset);
+        const auto end = newline == std::string::npos ? contents.size()
+                                                       : newline;
+        auto entry = trim_view(
+            std::string_view(contents).substr(offset, end - offset));
+        offset = newline == std::string::npos ? contents.size()
+                                               : newline + 1U;
         if (entry.empty() || entry.front() == '#') continue;
-        entries.push_back(std::move(entry));
+        if (parsed.entries.size() >= max_entries) return std::nullopt;
+
+        std::size_t next_normalized = 0;
+        if (!checked_add(parsed.normalized_characters,
+                         entry.size(),
+                         next_normalized) ||
+            next_normalized > max_normalized_characters) {
+            return std::nullopt;
+        }
+
+        parsed.entries.emplace_back(entry);
+        const auto& stored = parsed.entries.back();
+        std::size_t stored_bytes = 0;
+        if (!checked_add(stored.capacity(), 1U, stored_bytes) ||
+            !checked_add(stored_bytes,
+                         kAllocatorAllowance,
+                         stored_bytes) ||
+            !checked_add(string_storage_bytes,
+                         stored_bytes,
+                         string_storage_bytes)) {
+            return std::nullopt;
+        }
+        std::size_t vector_bytes = 0;
+        if (parsed.entries.capacity() >
+            std::numeric_limits<std::size_t>::max() /
+                sizeof(std::string)) {
+            return std::nullopt;
+        }
+        vector_bytes = parsed.entries.capacity() * sizeof(std::string);
+        if (!checked_add(vector_bytes,
+                         string_storage_bytes,
+                         parsed.conservative_bytes) ||
+            parsed.conservative_bytes > max_conservative_bytes) {
+            return std::nullopt;
+        }
+        parsed.normalized_characters = next_normalized;
     }
-    return entries;
+    return parsed;
 }
 
 std::optional<HostlistMatch> match_hostlist(

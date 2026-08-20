@@ -8,11 +8,17 @@
 import type { RoutingTestNfqwsMatch } from './routingTestNfqwsMatch';
 
 /**
- * Which nfqws lists cover this target. Read from the files on disk, so it says what nfqws is configured to act on - not whether nfqws is running or whether its strategy works, which are separate questions with separate answers.
+ * Which nfqws lists cover this target. Read from the files on disk, so it says what nfqws is configured to act on - not whether nfqws is running or whether its strategy works, which are separate questions with separate answers. At most one request scans the bounded cached lists; concurrent requests keep the routing result but report this sub-result as busy instead of queueing API workers behind the scan.
 
  */
 export interface RoutingTestNfqws {
-  /** false when nfqws2.conf could not be read at all. */
+  /** false when coverage could not be evaluated. */
   available: boolean;
+  /**
+     * Present when coverage is unavailable. `busy` means another request owns the single bounded scan slot; `unavailable` means the active nfqws configuration or one of its lists could not be read, bounded, or parsed safely.
+
+     * @pattern ^(busy|unavailable)$
+     */
+  reason?: string;
   matches: RoutingTestNfqwsMatch[];
 }
