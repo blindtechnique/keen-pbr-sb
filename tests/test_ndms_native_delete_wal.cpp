@@ -142,8 +142,20 @@ TEST_CASE("prepared native delete WAL round-trips with JSON null optionals") {
     CHECK(document.at("delete_absence_observations").is_null());
     CHECK(document.at("post_save_absence_observations").is_null());
     CHECK(document.at("tombstone_revision").is_null());
+    CHECK(document.at("kernel_interface_name").is_null());
     CHECK_FALSE(document.at("delete_absence_observations").is_array());
     CHECK(parse_ndms_native_delete_wal(serialized) == record);
+
+    auto kernel_bound = record;
+    kernel_bound.kernel_interface_name = "nwg5";
+    refresh(kernel_bound);
+    const auto kernel_serialized =
+        serialize_ndms_native_delete_wal(kernel_bound);
+    const auto kernel_document =
+        nlohmann::json::parse(kernel_serialized);
+    CHECK(kernel_document.at("kernel_interface_name") == "nwg5");
+    CHECK(parse_ndms_native_delete_wal(kernel_serialized) ==
+          kernel_bound);
 }
 
 TEST_CASE("native delete WAL admits only the exact forward phase chain") {
@@ -210,6 +222,12 @@ TEST_CASE("native delete WAL corrupt legacy and rebound evidence fail closed") {
         NdmsNativeDeleteWalError);
 
     document = nlohmann::json::parse(serialized);
+    document["schema_version"] = 1;
+    CHECK_THROWS_AS(
+        parse_ndms_native_delete_wal(document.dump()),
+        NdmsNativeDeleteWalError);
+
+    document = nlohmann::json::parse(serialized);
     document["unknown"] = true;
     CHECK_THROWS_AS(
         parse_ndms_native_delete_wal(document.dump()),
@@ -224,6 +242,12 @@ TEST_CASE("native delete WAL corrupt legacy and rebound evidence fail closed") {
     document = nlohmann::json::parse(serialized);
     document["keen_pbr_dependency_revision"] =
         revision("ndms-native-delete-deps-v1-", '0');
+    CHECK_THROWS_AS(
+        parse_ndms_native_delete_wal(document.dump()),
+        NdmsNativeDeleteWalError);
+
+    document = nlohmann::json::parse(serialized);
+    document["kernel_interface_name"] = "nwg5/../foreign";
     CHECK_THROWS_AS(
         parse_ndms_native_delete_wal(document.dump()),
         NdmsNativeDeleteWalError);
@@ -264,6 +288,13 @@ TEST_CASE("native delete WAL store is single-slot durable and repeatable") {
     deleting.phase = NdmsNativeDeleteWalPhase::delete_may_be_inflight;
     refresh(deleting);
     CHECK_NOTHROW(store.publish(deleting));
+    CHECK(store.load().record == deleting);
+
+    auto rebound_kernel = deleting;
+    rebound_kernel.kernel_interface_name = "nwg5";
+    refresh(rebound_kernel);
+    CHECK_THROWS_AS(
+        store.publish(rebound_kernel), NdmsNativeDeleteWalStoreError);
     CHECK(store.load().record == deleting);
 
     auto skipped = deleting;

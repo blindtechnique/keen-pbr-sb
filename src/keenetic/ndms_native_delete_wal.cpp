@@ -21,7 +21,7 @@ namespace keen_pbr3 {
 namespace {
 
 constexpr std::string_view kIntegrityPrefix{
-    "ndms-native-delete-wal-v1-"};
+    "ndms-native-delete-wal-v2-"};
 constexpr std::string_view kOwnershipRevisionPrefix{
     "ndms-native-owner-v2-"};
 constexpr std::string_view kOwnershipRevisionV3Prefix{
@@ -50,6 +50,17 @@ bool revision(const std::string_view value,
 bool known_kind(const NdmsNativeTunnelImportKind kind) noexcept {
     return kind == NdmsNativeTunnelImportKind::wireguard ||
            kind == NdmsNativeTunnelImportKind::amnezia_wireguard;
+}
+
+bool kernel_name(const std::string_view value) noexcept {
+    return !value.empty() && value.size() <= 15U &&
+           std::all_of(value.begin(), value.end(), [](const char character) {
+               return (character >= 'a' && character <= 'z') ||
+                      (character >= 'A' && character <= 'Z') ||
+                      (character >= '0' && character <= '9') ||
+                      character == '_' || character == '-' ||
+                      character == '.';
+           });
 }
 
 const char* kind_name(const NdmsNativeTunnelImportKind kind) {
@@ -148,6 +159,8 @@ bool structurally_valid(
                       kTargetFullRevisionPrefix) ||
             !revision(record.keen_pbr_dependency_revision,
                       kNdmsNativeDeleteDependencyRevisionPrefix) ||
+            (record.kernel_interface_name &&
+             !kernel_name(*record.kernel_interface_name)) ||
             !valid_ndms_native_delete_observation_pair(
                 record.preflight_observations) ||
             !valid_ndms_native_observation_binding(
@@ -244,6 +257,8 @@ nlohmann::json record_json(const NdmsNativeDeleteWalRecord& record) {
         {"target_full_revision", record.target_full_revision},
         {"keen_pbr_dependency_revision",
          record.keen_pbr_dependency_revision},
+        {"kernel_interface_name",
+         optional_string_json(record.kernel_interface_name)},
         {"preflight_observations",
          pair_json(record.preflight_observations)},
         {"observation_binding",
@@ -338,6 +353,7 @@ bool NdmsNativeDeleteWalRecord::operator==(
            target_full_revision == other.target_full_revision &&
            keen_pbr_dependency_revision ==
                other.keen_pbr_dependency_revision &&
+           kernel_interface_name == other.kernel_interface_name &&
            preflight_observations == other.preflight_observations &&
            observation_binding == other.observation_binding &&
            owner_global_save_acknowledged ==
@@ -402,7 +418,7 @@ std::string ndms_native_delete_wal_integrity(
             "native delete WAL cannot be integrity-bound");
     }
     Sha256 hasher;
-    update_field(hasher, "keen-pbr.ndms-native-delete-wal.integrity.v1");
+    update_field(hasher, "keen-pbr.ndms-native-delete-wal.integrity.v2");
     update_number(hasher, record.schema_version);
     update_field(hasher, record.transaction_id);
     update_field(hasher, ndms_native_delete_wal_phase_name(record.phase));
@@ -414,6 +430,7 @@ std::string ndms_native_delete_wal_integrity(
     update_field(hasher, record.snapshot_revision);
     update_field(hasher, record.target_full_revision);
     update_field(hasher, record.keen_pbr_dependency_revision);
+    update_optional_string(hasher, record.kernel_interface_name);
     update_pair(hasher, record.preflight_observations);
     update_field(hasher, record.observation_binding.authority_id);
     update_number(hasher, record.observation_binding.mutation_epoch);
@@ -460,6 +477,7 @@ NdmsNativeDeleteWalRecord parse_ndms_native_delete_wal(
              "interface_name", "kind", "ownership_revision",
              "ownership_transaction_id", "marker", "snapshot_revision",
              "target_full_revision", "keen_pbr_dependency_revision",
+             "kernel_interface_name",
              "preflight_observations", "observation_binding",
              "owner_global_save_acknowledged",
              "external_writer_race_accepted",
@@ -494,6 +512,8 @@ NdmsNativeDeleteWalRecord parse_ndms_native_delete_wal(
         record.keen_pbr_dependency_revision =
             document.at("keen_pbr_dependency_revision")
                 .get<std::string>();
+        record.kernel_interface_name = parse_optional_string(
+            document.at("kernel_interface_name"));
         record.preflight_observations =
             parse_pair(document.at("preflight_observations"));
         const auto& binding = document.at("observation_binding");

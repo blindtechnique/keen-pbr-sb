@@ -594,6 +594,7 @@ void validate_update(const NdmsNativeDeleteWalRecord& before,
         before.target_full_revision != after.target_full_revision ||
         before.keen_pbr_dependency_revision !=
             after.keen_pbr_dependency_revision ||
+        before.kernel_interface_name != after.kernel_interface_name ||
         !(before.preflight_observations ==
           after.preflight_observations) ||
         !(before.observation_binding == after.observation_binding) ||

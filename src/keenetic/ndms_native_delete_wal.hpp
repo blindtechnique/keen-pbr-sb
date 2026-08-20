@@ -11,7 +11,7 @@
 
 namespace keen_pbr3 {
 
-inline constexpr std::uint32_t kNdmsNativeDeleteWalSchemaVersion = 1U;
+inline constexpr std::uint32_t kNdmsNativeDeleteWalSchemaVersion = 2U;
 inline constexpr std::size_t kNdmsNativeDeleteWalMaximumBytes =
     64U * 1024U;
 inline constexpr std::string_view kNdmsNativeDeleteDependencyRevisionPrefix{
@@ -64,6 +64,9 @@ struct NdmsNativeDeleteWalRecord final {
 
     // Complete typed dependency scan observed empty before admission.
     std::string keen_pbr_dependency_revision;
+    // Kernel name admitted by that scan, when direct runtime observation had
+    // one. It is immutable recovery evidence, not a new lookup hint.
+    std::optional<std::string> kernel_interface_name;
 
     // Durable pre-mutation observations and the epoch they admitted.
     NdmsNativeDeleteObservationPair preflight_observations;
