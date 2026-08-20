@@ -40,6 +40,8 @@ add_executable(keen-pbr-tests
   test_internal_vpn_service_resolver.cpp
   test_ndms_interface_management.cpp
   test_ndms_native_allocator_fence.cpp
+  test_ndms_native_writer_lease.cpp
+  test_ndms_native_observation_store.cpp
   test_ndms_native_create_policy.cpp
   test_ndms_native_import_baseline.cpp
   test_ndms_native_import_executor.cpp
@@ -263,6 +265,8 @@ add_executable(keen-pbr-tests
   ../src/keenetic/internal_vpn_ingress_resolver.cpp
   ../src/keenetic/ndms_interface_management.cpp
   ../src/keenetic/ndms_native_allocator_fence.cpp
+  ../src/keenetic/ndms_native_writer_lease.cpp
+  ../src/keenetic/ndms_native_observation_store.cpp
   ../src/keenetic/ndms_native_create_policy.cpp
   ../src/keenetic/ndms_native_import_baseline.cpp
   ../src/keenetic/ndms_native_import_executor.cpp
@@ -419,6 +423,8 @@ unset(_probe_output)
 add_executable(keen-pbr-native-tunnel-import-tests
   test_main.cpp
   test_ndms_native_allocator_fence.cpp
+  test_ndms_native_writer_lease.cpp
+  test_ndms_native_observation_store.cpp
   test_ndms_native_create_policy.cpp
   test_ndms_native_import_baseline.cpp
   test_ndms_native_import_executor.cpp
@@ -449,6 +455,8 @@ add_executable(keen-pbr-native-tunnel-import-tests
   test_ndms_native_reconcile_barrier.cpp
   test_ndms_native_tunnel_import.cpp
   ../src/keenetic/ndms_native_allocator_fence.cpp
+  ../src/keenetic/ndms_native_writer_lease.cpp
+  ../src/keenetic/ndms_native_observation_store.cpp
   ../src/keenetic/ndms_native_create_policy.cpp
   ../src/keenetic/ndms_native_import_baseline.cpp
   ../src/keenetic/ndms_native_import_executor.cpp

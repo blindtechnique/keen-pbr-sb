@@ -404,6 +404,8 @@ set(SOURCES
   src/keenetic/internal_vpn_ingress_resolver.cpp
   src/keenetic/ndms_interface_management.cpp
   src/keenetic/ndms_native_allocator_fence.cpp
+  src/keenetic/ndms_native_writer_lease.cpp
+  src/keenetic/ndms_native_observation_store.cpp
   src/keenetic/ndms_native_create_policy.cpp
   src/keenetic/ndms_native_import_baseline.cpp
   src/keenetic/ndms_native_import_executor.cpp
