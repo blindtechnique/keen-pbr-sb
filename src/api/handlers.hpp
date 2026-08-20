@@ -185,6 +185,7 @@ struct ApiContext {
     std::function<std::shared_ptr<SensitiveRequestReservation>()>
         reserve_ndms_native_import_recovery_fn;
     std::function<NdmsNativeCooperativeImportResumeResult(
+        NdmsNativeExternalWriterRaceAcceptance,
         const std::shared_ptr<SensitiveRequestReservation>&)>
         resume_ndms_native_import_fn;
     // Native delete uses the same complete ordered reservation as import.

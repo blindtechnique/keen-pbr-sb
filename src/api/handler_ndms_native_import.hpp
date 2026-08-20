@@ -31,9 +31,10 @@ inline constexpr std::string_view
 nlohmann::json ndms_native_import_api_response(
     const NdmsNativeCooperativeImportResult& result);
 
-// Recovery is intentionally bodyless and can only finish already-durable
-// forward bookkeeping. The transaction id and all raw observation/revision
-// material remain private even when the coordinator reports a typed stop.
+// Recovery is intentionally bodyless. It can finish already-durable forward
+// bookkeeping, retire a stable-absence transaction without a router write, or
+// perform one exact rollback delete only after fresh owner acceptance. The
+// transaction id and all raw observation/revision material remain private.
 nlohmann::json ndms_native_import_recovery_api_response(
     const NdmsNativeCooperativeImportResumeResult& result);
 

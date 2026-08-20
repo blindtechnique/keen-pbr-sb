@@ -1018,16 +1018,19 @@ namespace api {
 
     enum class NdmsNativeImportRecoveryStep : int { ADVANCE_WAL_ABSENCE_VERIFIED, ADVANCE_WAL_DELETE_MAY_BE_INFLIGHT, ADVANCE_WAL_OWNERSHIP_PUBLISHED, ADVANCE_WAL_ROLLBACK_REQUESTED, ADVANCE_WAL_TARGET_VERIFIED, DELETE_EXACT_OWNED_TARGET, PUBLISH_OWNERSHIP, REMOVE_OWNERSHIP_CLAIM, REMOVE_WAL_RECORD };
 
-    enum class NdmsNativeImportRecoveryStatus : int { BLOCKED, COMPLETED, NO_WORK };
+    enum class NdmsNativeImportRecoveryStatus : int { BLOCKED, COMPLETED, NO_WORK, RECOVERY_REQUIRED };
 
-    enum class NdmsNativeImportRecoveryStop : int { DELETE_WAL_NOT_CLEAN, DURABLE_OBSERVATION_FAILED, EXPECTED_TARGET_NOT_MANAGED, FIRST_OBSERVATION_FAILED, FORWARD_ADMISSION_FAILED, IMPORT_WAL_NOT_SINGLE_SAFE, NONE, OBSERVATION_KIND_MISMATCH, OBSERVATION_UNSTABLE, OWNERSHIP_NOT_EXACT, OWNERSHIP_PUBLISH_FAILED, OWNERSHIP_WAL_PUBLISH_FAILED, PHASE_NOT_FORWARD_ONLY, RECORD_NOT_COOPERATIVE, RECOVERY_ACTION_NOT_FORWARD_ONLY, SECOND_OBSERVATION_FAILED, TARGET_VERIFIED_WAL_PUBLISH_FAILED, UNEXPECTED_FAILURE, WAL_CLEANUP_FAILED, WRITER_LOST, WRITER_MISSING };
+    enum class NdmsNativeImportRecoveryStop : int { ABSENCE_WAL_PUBLISH_FAILED, DELETE_GUARD_REJECTED, DELETE_TRANSPORT_AMBIGUOUS, DELETE_WAL_NOT_CLEAN, DELETE_WAL_PUBLISH_FAILED, DURABLE_OBSERVATION_FAILED, EXPECTED_TARGET_NOT_MANAGED, EXTERNAL_WRITER_RACE_NOT_ACCEPTED, FIRST_OBSERVATION_FAILED, FORWARD_ADMISSION_FAILED, IMPORT_WAL_NOT_SINGLE_SAFE, NONE, OBSERVATION_KIND_MISMATCH, OBSERVATION_UNSTABLE, OWNERSHIP_NOT_EXACT, OWNERSHIP_PUBLISH_FAILED, OWNERSHIP_RETRACT_FAILED, OWNERSHIP_WAL_PUBLISH_FAILED, PHASE_NOT_FORWARD_ONLY, RECORD_NOT_COOPERATIVE, RECOVERY_ACTION_NOT_ACTIONABLE, RECOVERY_ACTION_NOT_FORWARD_ONLY, RECOVERY_ADMISSION_FAILED, ROLLBACK_WAL_PUBLISH_FAILED, SECOND_OBSERVATION_FAILED, SNAPSHOT_NOT_EXACT, SNAPSHOT_RETIREMENT_FAILED, TARGET_VERIFIED_WAL_PUBLISH_FAILED, UNEXPECTED_FAILURE, WAL_CLEANUP_FAILED, WRITER_LOST, WRITER_MISSING };
 
     struct NdmsNativeImportRecoveryResponse {
         std::optional<std::string> created_interface;
         std::optional<std::string> created_kernel_interface;
+        bool delete_perform_started = false;
+        std::optional<NdmsNativeDeleteTransportOutcome> delete_transport_outcome;
         std::optional<NdmsNativeWalReadiness> delete_wal_readiness;
         std::optional<NdmsNativeDirectObservationFailure> direct_observation_failure;
         std::optional<std::string> expected_interface;
+        bool external_ndms_writer_race_accepted = false;
         bool external_ndms_writer_race_excluded = false;
         std::optional<NdmsNativeImportRecoveryAdmissionState> forward_admission_state;
         std::optional<NdmsNativeImportRecoveryDispatchState> forward_dispatch_state;
@@ -1039,6 +1042,11 @@ namespace api {
         bool ownership_published = false;
         std::optional<NdmsNativeImportRecoveryPhase> phase;
         std::optional<NdmsNativeImportRecoveryAction> recovery_action;
+        std::optional<NdmsNativeImportRecoveryAdmissionState> recovery_admission_state;
+        std::optional<NdmsNativeImportRecoveryDispatchState> recovery_dispatch_state;
+        std::optional<NdmsNativeImportRecoveryStep> recovery_failed_step;
+        bool request_may_have_been_dispatched = false;
+        bool rollback_snapshot_retired = false;
         NdmsNativeImportRecoveryStatus status;
         NdmsNativeImportRecoveryStop stop;
         bool system_configuration_save_performed = false;
@@ -4781,9 +4789,12 @@ namespace api {
     inline void from_json(const json & j, NdmsNativeImportRecoveryResponse& x) {
         x.created_interface = get_stack_optional<std::string>(j, "created_interface");
         x.created_kernel_interface = get_stack_optional<std::string>(j, "created_kernel_interface");
+        x.delete_perform_started = j.at("delete_perform_started").get<bool>();
+        x.delete_transport_outcome = get_stack_optional<NdmsNativeDeleteTransportOutcome>(j, "delete_transport_outcome");
         x.delete_wal_readiness = get_stack_optional<NdmsNativeWalReadiness>(j, "delete_wal_readiness");
         x.direct_observation_failure = get_stack_optional<NdmsNativeDirectObservationFailure>(j, "direct_observation_failure");
         x.expected_interface = get_stack_optional<std::string>(j, "expected_interface");
+        x.external_ndms_writer_race_accepted = j.at("external_ndms_writer_race_accepted").get<bool>();
         x.external_ndms_writer_race_excluded = j.at("external_ndms_writer_race_excluded").get<bool>();
         x.forward_admission_state = get_stack_optional<NdmsNativeImportRecoveryAdmissionState>(j, "forward_admission_state");
         x.forward_dispatch_state = get_stack_optional<NdmsNativeImportRecoveryDispatchState>(j, "forward_dispatch_state");
@@ -4795,6 +4806,11 @@ namespace api {
         x.ownership_published = j.at("ownership_published").get<bool>();
         x.phase = get_stack_optional<NdmsNativeImportRecoveryPhase>(j, "phase");
         x.recovery_action = get_stack_optional<NdmsNativeImportRecoveryAction>(j, "recovery_action");
+        x.recovery_admission_state = get_stack_optional<NdmsNativeImportRecoveryAdmissionState>(j, "recovery_admission_state");
+        x.recovery_dispatch_state = get_stack_optional<NdmsNativeImportRecoveryDispatchState>(j, "recovery_dispatch_state");
+        x.recovery_failed_step = get_stack_optional<NdmsNativeImportRecoveryStep>(j, "recovery_failed_step");
+        x.request_may_have_been_dispatched = j.at("request_may_have_been_dispatched").get<bool>();
+        x.rollback_snapshot_retired = j.at("rollback_snapshot_retired").get<bool>();
         x.status = j.at("status").get<NdmsNativeImportRecoveryStatus>();
         x.stop = j.at("stop").get<NdmsNativeImportRecoveryStop>();
         x.system_configuration_save_performed = j.at("system_configuration_save_performed").get<bool>();
@@ -4806,9 +4822,12 @@ namespace api {
         j = json::object();
         j["created_interface"] = x.created_interface;
         j["created_kernel_interface"] = x.created_kernel_interface;
+        j["delete_perform_started"] = x.delete_perform_started;
+        j["delete_transport_outcome"] = x.delete_transport_outcome;
         j["delete_wal_readiness"] = x.delete_wal_readiness;
         j["direct_observation_failure"] = x.direct_observation_failure;
         j["expected_interface"] = x.expected_interface;
+        j["external_ndms_writer_race_accepted"] = x.external_ndms_writer_race_accepted;
         j["external_ndms_writer_race_excluded"] = x.external_ndms_writer_race_excluded;
         j["forward_admission_state"] = x.forward_admission_state;
         j["forward_dispatch_state"] = x.forward_dispatch_state;
@@ -4820,6 +4839,11 @@ namespace api {
         j["ownership_published"] = x.ownership_published;
         j["phase"] = x.phase;
         j["recovery_action"] = x.recovery_action;
+        j["recovery_admission_state"] = x.recovery_admission_state;
+        j["recovery_dispatch_state"] = x.recovery_dispatch_state;
+        j["recovery_failed_step"] = x.recovery_failed_step;
+        j["request_may_have_been_dispatched"] = x.request_may_have_been_dispatched;
+        j["rollback_snapshot_retired"] = x.rollback_snapshot_retired;
         j["status"] = x.status;
         j["stop"] = x.stop;
         j["system_configuration_save_performed"] = x.system_configuration_save_performed;
@@ -8075,6 +8099,7 @@ namespace api {
         if (j == "blocked") x = NdmsNativeImportRecoveryStatus::BLOCKED;
         else if (j == "completed") x = NdmsNativeImportRecoveryStatus::COMPLETED;
         else if (j == "no_work") x = NdmsNativeImportRecoveryStatus::NO_WORK;
+        else if (j == "recovery_required") x = NdmsNativeImportRecoveryStatus::RECOVERY_REQUIRED;
         else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsNativeImportRecoveryStatus\""); }
     }
 
@@ -8083,15 +8108,21 @@ namespace api {
             case NdmsNativeImportRecoveryStatus::BLOCKED: j = "blocked"; break;
             case NdmsNativeImportRecoveryStatus::COMPLETED: j = "completed"; break;
             case NdmsNativeImportRecoveryStatus::NO_WORK: j = "no_work"; break;
+            case NdmsNativeImportRecoveryStatus::RECOVERY_REQUIRED: j = "recovery_required"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"NdmsNativeImportRecoveryStatus\": " + std::to_string(static_cast<int>(x)));
         }
     }
 
     inline void from_json(const json & j, NdmsNativeImportRecoveryStop & x) {
         static std::unordered_map<std::string, NdmsNativeImportRecoveryStop> enumValues {
+            {"absence_wal_publish_failed", NdmsNativeImportRecoveryStop::ABSENCE_WAL_PUBLISH_FAILED},
+            {"delete_guard_rejected", NdmsNativeImportRecoveryStop::DELETE_GUARD_REJECTED},
+            {"delete_transport_ambiguous", NdmsNativeImportRecoveryStop::DELETE_TRANSPORT_AMBIGUOUS},
             {"delete_wal_not_clean", NdmsNativeImportRecoveryStop::DELETE_WAL_NOT_CLEAN},
+            {"delete_wal_publish_failed", NdmsNativeImportRecoveryStop::DELETE_WAL_PUBLISH_FAILED},
             {"durable_observation_failed", NdmsNativeImportRecoveryStop::DURABLE_OBSERVATION_FAILED},
             {"expected_target_not_managed", NdmsNativeImportRecoveryStop::EXPECTED_TARGET_NOT_MANAGED},
+            {"external_writer_race_not_accepted", NdmsNativeImportRecoveryStop::EXTERNAL_WRITER_RACE_NOT_ACCEPTED},
             {"first_observation_failed", NdmsNativeImportRecoveryStop::FIRST_OBSERVATION_FAILED},
             {"forward_admission_failed", NdmsNativeImportRecoveryStop::FORWARD_ADMISSION_FAILED},
             {"import_wal_not_single_safe", NdmsNativeImportRecoveryStop::IMPORT_WAL_NOT_SINGLE_SAFE},
@@ -8100,11 +8131,17 @@ namespace api {
             {"observation_unstable", NdmsNativeImportRecoveryStop::OBSERVATION_UNSTABLE},
             {"ownership_not_exact", NdmsNativeImportRecoveryStop::OWNERSHIP_NOT_EXACT},
             {"ownership_publish_failed", NdmsNativeImportRecoveryStop::OWNERSHIP_PUBLISH_FAILED},
+            {"ownership_retract_failed", NdmsNativeImportRecoveryStop::OWNERSHIP_RETRACT_FAILED},
             {"ownership_wal_publish_failed", NdmsNativeImportRecoveryStop::OWNERSHIP_WAL_PUBLISH_FAILED},
             {"phase_not_forward_only", NdmsNativeImportRecoveryStop::PHASE_NOT_FORWARD_ONLY},
             {"record_not_cooperative", NdmsNativeImportRecoveryStop::RECORD_NOT_COOPERATIVE},
+            {"recovery_action_not_actionable", NdmsNativeImportRecoveryStop::RECOVERY_ACTION_NOT_ACTIONABLE},
             {"recovery_action_not_forward_only", NdmsNativeImportRecoveryStop::RECOVERY_ACTION_NOT_FORWARD_ONLY},
+            {"recovery_admission_failed", NdmsNativeImportRecoveryStop::RECOVERY_ADMISSION_FAILED},
+            {"rollback_wal_publish_failed", NdmsNativeImportRecoveryStop::ROLLBACK_WAL_PUBLISH_FAILED},
             {"second_observation_failed", NdmsNativeImportRecoveryStop::SECOND_OBSERVATION_FAILED},
+            {"snapshot_not_exact", NdmsNativeImportRecoveryStop::SNAPSHOT_NOT_EXACT},
+            {"snapshot_retirement_failed", NdmsNativeImportRecoveryStop::SNAPSHOT_RETIREMENT_FAILED},
             {"target_verified_wal_publish_failed", NdmsNativeImportRecoveryStop::TARGET_VERIFIED_WAL_PUBLISH_FAILED},
             {"unexpected_failure", NdmsNativeImportRecoveryStop::UNEXPECTED_FAILURE},
             {"wal_cleanup_failed", NdmsNativeImportRecoveryStop::WAL_CLEANUP_FAILED},
@@ -8120,9 +8157,14 @@ namespace api {
 
     inline void to_json(json & j, const NdmsNativeImportRecoveryStop & x) {
         switch (x) {
+            case NdmsNativeImportRecoveryStop::ABSENCE_WAL_PUBLISH_FAILED: j = "absence_wal_publish_failed"; break;
+            case NdmsNativeImportRecoveryStop::DELETE_GUARD_REJECTED: j = "delete_guard_rejected"; break;
+            case NdmsNativeImportRecoveryStop::DELETE_TRANSPORT_AMBIGUOUS: j = "delete_transport_ambiguous"; break;
             case NdmsNativeImportRecoveryStop::DELETE_WAL_NOT_CLEAN: j = "delete_wal_not_clean"; break;
+            case NdmsNativeImportRecoveryStop::DELETE_WAL_PUBLISH_FAILED: j = "delete_wal_publish_failed"; break;
             case NdmsNativeImportRecoveryStop::DURABLE_OBSERVATION_FAILED: j = "durable_observation_failed"; break;
             case NdmsNativeImportRecoveryStop::EXPECTED_TARGET_NOT_MANAGED: j = "expected_target_not_managed"; break;
+            case NdmsNativeImportRecoveryStop::EXTERNAL_WRITER_RACE_NOT_ACCEPTED: j = "external_writer_race_not_accepted"; break;
             case NdmsNativeImportRecoveryStop::FIRST_OBSERVATION_FAILED: j = "first_observation_failed"; break;
             case NdmsNativeImportRecoveryStop::FORWARD_ADMISSION_FAILED: j = "forward_admission_failed"; break;
             case NdmsNativeImportRecoveryStop::IMPORT_WAL_NOT_SINGLE_SAFE: j = "import_wal_not_single_safe"; break;
@@ -8131,11 +8173,17 @@ namespace api {
             case NdmsNativeImportRecoveryStop::OBSERVATION_UNSTABLE: j = "observation_unstable"; break;
             case NdmsNativeImportRecoveryStop::OWNERSHIP_NOT_EXACT: j = "ownership_not_exact"; break;
             case NdmsNativeImportRecoveryStop::OWNERSHIP_PUBLISH_FAILED: j = "ownership_publish_failed"; break;
+            case NdmsNativeImportRecoveryStop::OWNERSHIP_RETRACT_FAILED: j = "ownership_retract_failed"; break;
             case NdmsNativeImportRecoveryStop::OWNERSHIP_WAL_PUBLISH_FAILED: j = "ownership_wal_publish_failed"; break;
             case NdmsNativeImportRecoveryStop::PHASE_NOT_FORWARD_ONLY: j = "phase_not_forward_only"; break;
             case NdmsNativeImportRecoveryStop::RECORD_NOT_COOPERATIVE: j = "record_not_cooperative"; break;
+            case NdmsNativeImportRecoveryStop::RECOVERY_ACTION_NOT_ACTIONABLE: j = "recovery_action_not_actionable"; break;
             case NdmsNativeImportRecoveryStop::RECOVERY_ACTION_NOT_FORWARD_ONLY: j = "recovery_action_not_forward_only"; break;
+            case NdmsNativeImportRecoveryStop::RECOVERY_ADMISSION_FAILED: j = "recovery_admission_failed"; break;
+            case NdmsNativeImportRecoveryStop::ROLLBACK_WAL_PUBLISH_FAILED: j = "rollback_wal_publish_failed"; break;
             case NdmsNativeImportRecoveryStop::SECOND_OBSERVATION_FAILED: j = "second_observation_failed"; break;
+            case NdmsNativeImportRecoveryStop::SNAPSHOT_NOT_EXACT: j = "snapshot_not_exact"; break;
+            case NdmsNativeImportRecoveryStop::SNAPSHOT_RETIREMENT_FAILED: j = "snapshot_retirement_failed"; break;
             case NdmsNativeImportRecoveryStop::TARGET_VERIFIED_WAL_PUBLISH_FAILED: j = "target_verified_wal_publish_failed"; break;
             case NdmsNativeImportRecoveryStop::UNEXPECTED_FAILURE: j = "unexpected_failure"; break;
             case NdmsNativeImportRecoveryStop::WAL_CLEANUP_FAILED: j = "wal_cleanup_failed"; break;

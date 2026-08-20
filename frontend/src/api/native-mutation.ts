@@ -123,6 +123,7 @@ export type NdmsNativeDeleteRequest = Readonly<{
 export const NDMS_NATIVE_IMPORT_RECOVERY_STATUSES = [
   "no_work",
   "blocked",
+  "recovery_required",
   "completed",
 ] as const
 export const NDMS_NATIVE_IMPORT_RECOVERY_STOPS = [
@@ -133,6 +134,7 @@ export const NDMS_NATIVE_IMPORT_RECOVERY_STOPS = [
   "import_wal_not_single_safe",
   "record_not_cooperative",
   "phase_not_forward_only",
+  "external_writer_race_not_accepted",
   "expected_target_not_managed",
   "first_observation_failed",
   "second_observation_failed",
@@ -140,11 +142,21 @@ export const NDMS_NATIVE_IMPORT_RECOVERY_STOPS = [
   "durable_observation_failed",
   "observation_unstable",
   "ownership_not_exact",
+  "snapshot_not_exact",
   "recovery_action_not_forward_only",
+  "recovery_action_not_actionable",
   "forward_admission_failed",
+  "recovery_admission_failed",
   "target_verified_wal_publish_failed",
   "ownership_publish_failed",
   "ownership_wal_publish_failed",
+  "rollback_wal_publish_failed",
+  "ownership_retract_failed",
+  "delete_wal_publish_failed",
+  "delete_guard_rejected",
+  "delete_transport_ambiguous",
+  "absence_wal_publish_failed",
+  "snapshot_retirement_failed",
   "wal_cleanup_failed",
   "unexpected_failure",
 ] as const
@@ -206,11 +218,15 @@ export type NdmsNativeImportRecoveryResult = Readonly<{
   status: NdmsNativeImportRecoveryStatus
   stop: NdmsNativeImportRecoveryStop
   ndms_import_request_dispatched: false
-  ndms_delete_dispatched: false
+  ndms_delete_dispatched: boolean
   system_configuration_save_performed: false
   external_ndms_writer_race_excluded: false
+  external_ndms_writer_race_accepted: boolean
+  delete_perform_started: boolean
+  request_may_have_been_dispatched: boolean
   wal_may_require_recovery: boolean
   ownership_published: boolean
+  rollback_snapshot_retired: boolean
   wal_removed: boolean
   expected_interface?: string
   created_interface?: string
@@ -224,6 +240,10 @@ export type NdmsNativeImportRecoveryResult = Readonly<{
   forward_admission_state?: (typeof importRecoveryAdmissionStates)[number]
   forward_dispatch_state?: (typeof importRecoveryDispatchStates)[number]
   forward_failed_step?: (typeof importRecoverySteps)[number]
+  recovery_admission_state?: (typeof importRecoveryAdmissionStates)[number]
+  recovery_dispatch_state?: (typeof importRecoveryDispatchStates)[number]
+  recovery_failed_step?: (typeof importRecoverySteps)[number]
+  delete_transport_outcome?: (typeof transportOutcomes)[number]
 }>
 
 export class NativeMutationTransportError extends Error {
@@ -262,8 +282,12 @@ const importRecoveryAllowedKeys = new Set([
   "ndms_delete_dispatched",
   "system_configuration_save_performed",
   "external_ndms_writer_race_excluded",
+  "external_ndms_writer_race_accepted",
+  "delete_perform_started",
+  "request_may_have_been_dispatched",
   "wal_may_require_recovery",
   "ownership_published",
+  "rollback_snapshot_retired",
   "wal_removed",
   "expected_interface",
   "created_interface",
@@ -277,6 +301,10 @@ const importRecoveryAllowedKeys = new Set([
   "forward_admission_state",
   "forward_dispatch_state",
   "forward_failed_step",
+  "recovery_admission_state",
+  "recovery_dispatch_state",
+  "recovery_failed_step",
+  "delete_transport_outcome",
 ])
 
 const inList = <T extends string>(
@@ -426,6 +454,125 @@ const forwardOnlyStep = (value: unknown): boolean =>
   value === "advance_wal_ownership_published" ||
   value === "remove_wal_record"
 
+const destructiveRecoveryAction = (value: unknown): boolean =>
+  value === "rollback_delete_exact_owned" ||
+  value === "retry_exact_owned_delete"
+
+const cleanupRecoveryAction = (value: unknown): boolean =>
+  value === "abort_without_mutation" ||
+  destructiveRecoveryAction(value) ||
+  value === "complete_rollback"
+
+const initiallyDispatchableRecoveryAction = (
+  action: unknown,
+  phase: unknown
+): boolean => {
+  switch (action) {
+    case "abort_without_mutation":
+      return (
+        phase === "prepared" ||
+        phase === "import_may_be_inflight" ||
+        phase === "response_recorded"
+      )
+    case "rollback_delete_exact_owned":
+      return phase === "import_may_be_inflight" || phase === "response_recorded"
+    case "retry_exact_owned_delete":
+      return (
+        phase === "rollback_requested" || phase === "delete_may_be_inflight"
+      )
+    case "complete_rollback":
+      return (
+        phase === "target_verified" ||
+        phase === "ownership_published" ||
+        phase === "rollback_requested" ||
+        phase === "delete_may_be_inflight" ||
+        phase === "absence_verified"
+      )
+    default:
+      return false
+  }
+}
+
+const failedRecoveryStepMatchesDurablePhase = (
+  action: unknown,
+  phase: unknown,
+  step: unknown
+): boolean => {
+  switch (action) {
+    case "abort_without_mutation":
+      return (
+        step === "remove_wal_record" &&
+        initiallyDispatchableRecoveryAction(action, phase)
+      )
+    case "rollback_delete_exact_owned":
+      if (step === "advance_wal_rollback_requested") {
+        return (
+          phase === "import_may_be_inflight" || phase === "response_recorded"
+        )
+      }
+      if (
+        step === "remove_ownership_claim" ||
+        step === "advance_wal_delete_may_be_inflight"
+      ) {
+        return phase === "rollback_requested"
+      }
+      if (
+        step === "delete_exact_owned_target" ||
+        step === "advance_wal_absence_verified"
+      ) {
+        return phase === "delete_may_be_inflight"
+      }
+      return step === "remove_wal_record" && phase === "absence_verified"
+    case "retry_exact_owned_delete":
+      if (step === "remove_ownership_claim") {
+        return (
+          phase === "rollback_requested" || phase === "delete_may_be_inflight"
+        )
+      }
+      if (step === "advance_wal_delete_may_be_inflight") {
+        return phase === "rollback_requested"
+      }
+      if (
+        step === "delete_exact_owned_target" ||
+        step === "advance_wal_absence_verified"
+      ) {
+        return phase === "delete_may_be_inflight"
+      }
+      return step === "remove_wal_record" && phase === "absence_verified"
+    case "complete_rollback":
+      if (step === "advance_wal_absence_verified") {
+        return (
+          phase === "target_verified" ||
+          phase === "ownership_published" ||
+          phase === "rollback_requested" ||
+          phase === "delete_may_be_inflight"
+        )
+      }
+      if (step === "remove_ownership_claim") {
+        return (
+          phase === "rollback_requested" ||
+          phase === "delete_may_be_inflight" ||
+          phase === "absence_verified"
+        )
+      }
+      return step === "remove_wal_record" && phase === "absence_verified"
+    default:
+      return false
+  }
+}
+
+const recoveryActionMatchesReportedPhase = (
+  action: unknown,
+  phase: unknown,
+  dispatch: unknown,
+  failedStep: unknown
+): boolean =>
+  dispatch === "step_failed"
+    ? failedStep !== undefined &&
+      failedRecoveryStepMatchesDurablePhase(action, phase, failedStep)
+    : failedStep === undefined &&
+      initiallyDispatchableRecoveryAction(action, phase)
+
 export function parseNdmsNativeImportRecoveryResult(
   payload: unknown
 ): NdmsNativeImportRecoveryResult | null {
@@ -438,11 +585,15 @@ export function parseNdmsNativeImportRecoveryResult(
     !inList(value.status, NDMS_NATIVE_IMPORT_RECOVERY_STATUSES) ||
     !inList(value.stop, NDMS_NATIVE_IMPORT_RECOVERY_STOPS) ||
     value.ndms_import_request_dispatched !== false ||
-    value.ndms_delete_dispatched !== false ||
+    typeof value.ndms_delete_dispatched !== "boolean" ||
     value.system_configuration_save_performed !== false ||
     value.external_ndms_writer_race_excluded !== false ||
+    typeof value.external_ndms_writer_race_accepted !== "boolean" ||
+    typeof value.delete_perform_started !== "boolean" ||
+    typeof value.request_may_have_been_dispatched !== "boolean" ||
     typeof value.wal_may_require_recovery !== "boolean" ||
     typeof value.ownership_published !== "boolean" ||
+    typeof value.rollback_snapshot_retired !== "boolean" ||
     typeof value.wal_removed !== "boolean" ||
     (value.expected_interface !== undefined &&
       !validFirmwareInterface(value.expected_interface)) ||
@@ -465,108 +616,456 @@ export function parseNdmsNativeImportRecoveryResult(
     (value.forward_dispatch_state !== undefined &&
       !inList(value.forward_dispatch_state, importRecoveryDispatchStates)) ||
     (value.forward_failed_step !== undefined &&
-      !inList(value.forward_failed_step, importRecoverySteps))
+      !inList(value.forward_failed_step, importRecoverySteps)) ||
+    (value.recovery_admission_state !== undefined &&
+      !inList(value.recovery_admission_state, importRecoveryAdmissionStates)) ||
+    (value.recovery_dispatch_state !== undefined &&
+      !inList(value.recovery_dispatch_state, importRecoveryDispatchStates)) ||
+    (value.recovery_failed_step !== undefined &&
+      !inList(value.recovery_failed_step, importRecoverySteps)) ||
+    (value.delete_transport_outcome !== undefined &&
+      !inList(value.delete_transport_outcome, transportOutcomes))
   ) {
     return null
   }
 
-  const recordFields = [value.expected_interface, value.kind, value.phase]
+  const result = value as unknown as NdmsNativeImportRecoveryResult
+
+  const recordFields = [result.expected_interface, result.kind, result.phase]
   const hasAnyRecord = recordFields.some((field) => field !== undefined)
   const hasRecord = recordFields.every((field) => field !== undefined)
   const hasAnyCreated =
-    value.created_interface !== undefined ||
-    value.created_kernel_interface !== undefined
+    result.created_interface !== undefined ||
+    result.created_kernel_interface !== undefined
   const hasCreated =
-    value.created_interface !== undefined &&
-    value.created_kernel_interface !== undefined
+    result.created_interface !== undefined &&
+    result.created_kernel_interface !== undefined
   if (
     hasAnyRecord !== hasRecord ||
     hasAnyCreated !== hasCreated ||
-    (hasCreated && value.created_interface !== value.expected_interface) ||
+    (hasCreated && result.created_interface !== result.expected_interface) ||
     (hasRecord &&
-      (value.delete_wal_readiness !== "clean" ||
-        value.import_wal_readiness !== "unfinished"))
+      (result.delete_wal_readiness !== "clean" ||
+        result.import_wal_readiness !== "unfinished")) ||
+    (hasRecord &&
+      result.status !== "completed" &&
+      !result.wal_may_require_recovery) ||
+    (!hasRecord &&
+      (result.wal_may_require_recovery ||
+        result.ownership_published ||
+        result.rollback_snapshot_retired ||
+        result.wal_removed)) ||
+    (result.status === "completed" && result.wal_may_require_recovery)
   ) {
     return null
   }
 
   const observationFailed =
-    value.stop === "first_observation_failed" ||
-    value.stop === "second_observation_failed"
+    result.stop === "first_observation_failed" ||
+    result.stop === "second_observation_failed"
   if (
-    observationFailed !== (value.direct_observation_failure !== undefined) ||
-    value.direct_observation_failure === "none"
+    observationFailed !== (result.direct_observation_failure !== undefined) ||
+    result.direct_observation_failure === "none"
   ) {
     return null
   }
 
-  const dispatchFailed = value.forward_dispatch_state === "step_failed"
+  const forwardDispatchFailed = result.forward_dispatch_state === "step_failed"
   if (
-    dispatchFailed !== (value.forward_failed_step !== undefined) ||
-    (value.forward_failed_step !== undefined &&
-      !forwardOnlyStep(value.forward_failed_step)) ||
-    (value.forward_dispatch_state !== undefined &&
-      value.forward_admission_state !== "admitted")
+    forwardDispatchFailed !== (result.forward_failed_step !== undefined) ||
+    (result.forward_failed_step !== undefined &&
+      !forwardOnlyStep(result.forward_failed_step)) ||
+    (result.forward_dispatch_state !== undefined &&
+      result.forward_admission_state !== "admitted")
   ) {
     return null
   }
+  const recoveryDispatchFailed =
+    result.recovery_dispatch_state === "step_failed"
+  if (
+    recoveryDispatchFailed !== (result.recovery_failed_step !== undefined) ||
+    (result.recovery_dispatch_state !== undefined &&
+      result.recovery_admission_state !== "admitted")
+  ) {
+    return null
+  }
+
   const hasForwardEvidence =
-    value.recovery_action !== undefined ||
-    value.forward_admission_state !== undefined ||
-    value.forward_dispatch_state !== undefined ||
-    value.forward_failed_step !== undefined
+    result.forward_admission_state !== undefined ||
+    result.forward_dispatch_state !== undefined ||
+    result.forward_failed_step !== undefined
+  const hasRecoveryEvidence =
+    result.recovery_admission_state !== undefined ||
+    result.recovery_dispatch_state !== undefined ||
+    result.recovery_failed_step !== undefined
   if (
+    (hasForwardEvidence && hasRecoveryEvidence) ||
     (!hasRecord &&
-      (hasCreated || value.ownership_published || hasForwardEvidence)) ||
-    (value.ownership_published && !hasCreated) ||
-    (value.wal_removed && value.status !== "completed") ||
-    ((hasCreated || value.ownership_published || hasForwardEvidence) &&
-      !forwardOnlyPhase(value.phase))
+      (hasCreated ||
+        result.recovery_action !== undefined ||
+        hasForwardEvidence ||
+        hasRecoveryEvidence)) ||
+    (hasForwardEvidence && !hasCreated) ||
+    (hasRecoveryEvidence && hasCreated) ||
+    ((hasCreated || hasForwardEvidence) && !forwardOnlyPhase(result.phase)) ||
+    (hasRecoveryEvidence &&
+      (result.recovery_action === undefined ||
+        !recoveryActionMatchesReportedPhase(
+          result.recovery_action,
+          result.phase,
+          result.recovery_dispatch_state,
+          result.recovery_failed_step
+        ))) ||
+    (result.recovery_action === "resume_forward_reconcile" &&
+      (result.phase !== "ownership_published" || hasRecoveryEvidence)) ||
+    (hasForwardEvidence &&
+      result.recovery_action !== undefined &&
+      (result.phase !== "ownership_published" ||
+        result.recovery_action !== "resume_forward_reconcile"))
+  ) {
+    return null
+  }
+
+  const allDeleteTrace =
+    result.delete_perform_started &&
+    result.request_may_have_been_dispatched &&
+    result.ndms_delete_dispatched
+  const anyDeleteTrace =
+    result.delete_perform_started ||
+    result.request_may_have_been_dispatched ||
+    result.ndms_delete_dispatched
+  if (
+    anyDeleteTrace !== allDeleteTrace ||
+    (anyDeleteTrace && result.delete_transport_outcome === undefined)
+  ) {
+    return null
+  }
+  if (result.delete_transport_outcome !== undefined) {
+    const knownZeroTrace =
+      result.delete_transport_outcome === "guard_rejected" ||
+      (result.delete_transport_outcome === "transport_failed" &&
+        result.stop === "delete_guard_rejected")
+    if (
+      (knownZeroTrace ? anyDeleteTrace : !allDeleteTrace) ||
+      !result.external_ndms_writer_race_accepted ||
+      !destructiveRecoveryAction(result.recovery_action) ||
+      result.recovery_admission_state !== "admitted" ||
+      result.recovery_dispatch_state === undefined
+    ) {
+      return null
+    }
+  }
+  const deleteCompletedBeforeFailure =
+    destructiveRecoveryAction(result.recovery_action) &&
+    (result.recovery_failed_step === "advance_wal_absence_verified" ||
+      result.recovery_failed_step === "remove_wal_record")
+  if (
+    deleteCompletedBeforeFailure &&
+    (!allDeleteTrace ||
+      result.delete_transport_outcome === undefined ||
+      result.delete_transport_outcome === "guard_rejected")
   ) {
     return null
   }
 
   if (
-    value.status === "no_work" &&
-    (value.stop !== "none" ||
+    result.rollback_snapshot_retired &&
+    (!hasRecord ||
+      !cleanupRecoveryAction(result.recovery_action) ||
+      !hasRecoveryEvidence ||
+      hasForwardEvidence ||
+      result.ownership_published)
+  ) {
+    return null
+  }
+  if (
+    result.wal_removed !== (result.status === "completed") ||
+    (result.status === "recovery_required" &&
+      result.rollback_snapshot_retired &&
+      result.stop !== "wal_cleanup_failed" &&
+      result.stop !== "unexpected_failure")
+  ) {
+    return null
+  }
+
+  const noRecordWorkEvidence =
+    !hasCreated &&
+    !result.ownership_published &&
+    result.recovery_action === undefined &&
+    !hasForwardEvidence &&
+    !hasRecoveryEvidence &&
+    result.delete_transport_outcome === undefined &&
+    !anyDeleteTrace
+  const exactForwardFailure = (step: (typeof importRecoverySteps)[number]) =>
+    result.status === "blocked" &&
+    hasRecord &&
+    hasCreated &&
+    result.forward_admission_state === "admitted" &&
+    result.forward_dispatch_state === "step_failed" &&
+    result.forward_failed_step === step &&
+    result.direct_observation_failure === undefined
+  const exactRecoveryFailure = (step: (typeof importRecoverySteps)[number]) =>
+    result.status === "recovery_required" &&
+    hasRecord &&
+    result.recovery_action !== undefined &&
+    result.recovery_admission_state === "admitted" &&
+    result.recovery_dispatch_state === "step_failed" &&
+    result.recovery_failed_step === step
+
+  let stopCoherent = true
+  switch (result.stop) {
+    case "none":
+    case "unexpected_failure":
+      break
+    case "writer_missing":
+    case "writer_lost":
+      stopCoherent =
+        result.status === "blocked" &&
+        result.delete_wal_readiness === undefined &&
+        result.import_wal_readiness === undefined &&
+        !hasRecord &&
+        noRecordWorkEvidence &&
+        result.direct_observation_failure === undefined
+      break
+    case "delete_wal_not_clean":
+      stopCoherent =
+        result.status === "blocked" &&
+        result.delete_wal_readiness !== undefined &&
+        result.delete_wal_readiness !== "clean" &&
+        result.import_wal_readiness === undefined &&
+        !hasRecord &&
+        noRecordWorkEvidence
+      break
+    case "import_wal_not_single_safe":
+      stopCoherent =
+        result.status === "blocked" &&
+        result.delete_wal_readiness === "clean" &&
+        result.import_wal_readiness !== undefined &&
+        result.import_wal_readiness !== "clean" &&
+        !hasRecord &&
+        noRecordWorkEvidence
+      break
+    case "record_not_cooperative":
+    case "phase_not_forward_only":
+    case "expected_target_not_managed":
+      stopCoherent =
+        result.status === "blocked" &&
+        hasRecord &&
+        noRecordWorkEvidence &&
+        result.direct_observation_failure === undefined
+      break
+    case "first_observation_failed":
+    case "second_observation_failed":
+      stopCoherent =
+        hasRecord &&
+        result.direct_observation_failure !== undefined &&
+        !hasCreated &&
+        !hasForwardEvidence
+      break
+    case "observation_kind_mismatch":
+    case "durable_observation_failed":
+    case "observation_unstable":
+      stopCoherent =
+        hasRecord &&
+        result.direct_observation_failure === undefined &&
+        !hasCreated &&
+        !hasForwardEvidence
+      break
+    case "ownership_not_exact":
+      stopCoherent =
+        hasRecord &&
+        !hasCreated &&
+        !hasForwardEvidence &&
+        !result.ownership_published
+      break
+    case "snapshot_not_exact":
+      stopCoherent =
+        hasRecord &&
+        result.recovery_action !== undefined &&
+        !hasCreated &&
+        !hasForwardEvidence &&
+        !result.rollback_snapshot_retired
+      break
+    case "recovery_action_not_forward_only":
+    case "recovery_action_not_actionable":
+      stopCoherent =
+        result.status === "blocked" &&
+        hasRecord &&
+        !hasCreated &&
+        result.recovery_action !== undefined &&
+        !hasForwardEvidence &&
+        !hasRecoveryEvidence &&
+        result.direct_observation_failure === undefined
+      break
+    case "external_writer_race_not_accepted":
+      stopCoherent =
+        result.status === "recovery_required" &&
+        hasRecord &&
+        destructiveRecoveryAction(result.recovery_action) &&
+        !result.external_ndms_writer_race_accepted &&
+        !hasForwardEvidence &&
+        !hasRecoveryEvidence &&
+        result.delete_transport_outcome === undefined
+      break
+    case "forward_admission_failed":
+      stopCoherent =
+        result.status === "blocked" &&
+        hasRecord &&
+        hasCreated &&
+        result.forward_admission_state !== undefined &&
+        result.forward_admission_state !== "admitted" &&
+        result.forward_dispatch_state === undefined &&
+        result.forward_failed_step === undefined &&
+        !hasRecoveryEvidence
+      break
+    case "recovery_admission_failed":
+      stopCoherent =
+        result.status === "recovery_required" &&
+        hasRecord &&
+        result.recovery_action !== undefined &&
+        result.recovery_admission_state !== undefined &&
+        result.recovery_admission_state !== "admitted" &&
+        result.recovery_dispatch_state === undefined &&
+        result.recovery_failed_step === undefined &&
+        result.delete_transport_outcome === undefined
+      break
+    case "target_verified_wal_publish_failed":
+      stopCoherent = exactForwardFailure("advance_wal_target_verified")
+      break
+    case "ownership_publish_failed":
+      stopCoherent = exactForwardFailure("publish_ownership")
+      break
+    case "ownership_wal_publish_failed":
+      stopCoherent = exactForwardFailure("advance_wal_ownership_published")
+      break
+    case "rollback_wal_publish_failed":
+      stopCoherent = exactRecoveryFailure("advance_wal_rollback_requested")
+      break
+    case "ownership_retract_failed":
+      stopCoherent = exactRecoveryFailure("remove_ownership_claim")
+      break
+    case "delete_wal_publish_failed":
+      stopCoherent = exactRecoveryFailure("advance_wal_delete_may_be_inflight")
+      break
+    case "delete_guard_rejected":
+      stopCoherent =
+        exactRecoveryFailure("delete_exact_owned_target") &&
+        (result.delete_transport_outcome === "guard_rejected" ||
+          result.delete_transport_outcome === "transport_failed") &&
+        !anyDeleteTrace
+      break
+    case "delete_transport_ambiguous":
+      stopCoherent =
+        exactRecoveryFailure("delete_exact_owned_target") &&
+        result.delete_transport_outcome !== undefined &&
+        result.delete_transport_outcome !== "guard_rejected" &&
+        allDeleteTrace
+      break
+    case "absence_wal_publish_failed":
+      stopCoherent = exactRecoveryFailure("advance_wal_absence_verified")
+      break
+    case "snapshot_retirement_failed":
+      stopCoherent =
+        exactRecoveryFailure("remove_wal_record") &&
+        !result.rollback_snapshot_retired
+      break
+    case "wal_cleanup_failed":
+      stopCoherent =
+        exactForwardFailure("remove_wal_record") ||
+        (exactRecoveryFailure("remove_wal_record") &&
+          result.rollback_snapshot_retired)
+      break
+  }
+  if (!stopCoherent) return null
+
+  if (
+    result.status === "no_work" &&
+    (result.stop !== "none" ||
       hasRecord ||
       hasCreated ||
-      value.delete_wal_readiness !== "clean" ||
-      value.import_wal_readiness !== "clean" ||
-      value.wal_may_require_recovery ||
-      value.ownership_published ||
-      value.wal_removed ||
-      hasForwardEvidence)
+      result.delete_wal_readiness !== "clean" ||
+      result.import_wal_readiness !== "clean" ||
+      result.wal_may_require_recovery ||
+      result.ownership_published ||
+      result.rollback_snapshot_retired ||
+      result.wal_removed ||
+      result.direct_observation_failure !== undefined ||
+      result.recovery_action !== undefined ||
+      hasForwardEvidence ||
+      hasRecoveryEvidence ||
+      result.delete_transport_outcome !== undefined ||
+      anyDeleteTrace)
   ) {
     return null
   }
   if (
-    value.status === "blocked" &&
-    (value.stop === "none" ||
-      value.wal_removed ||
-      hasRecord !== value.wal_may_require_recovery ||
-      value.forward_dispatch_state === "completed")
+    result.status === "blocked" &&
+    (result.stop === "none" ||
+      result.wal_removed ||
+      result.rollback_snapshot_retired ||
+      anyDeleteTrace ||
+      result.delete_transport_outcome !== undefined ||
+      hasRecoveryEvidence ||
+      result.forward_dispatch_state === "completed")
   ) {
     return null
   }
   if (
-    value.status === "completed" &&
-    (value.stop !== "none" ||
+    result.status === "recovery_required" &&
+    (result.stop === "none" ||
       !hasRecord ||
-      !hasCreated ||
-      !forwardOnlyPhase(value.phase) ||
-      value.wal_may_require_recovery ||
-      !value.ownership_published ||
-      !value.wal_removed ||
-      value.forward_admission_state !== "admitted" ||
-      value.forward_dispatch_state !== "completed" ||
-      value.forward_failed_step !== undefined ||
-      (value.phase === "ownership_published") !==
-        (value.recovery_action === "resume_forward_reconcile"))
+      !result.wal_may_require_recovery ||
+      result.wal_removed)
   ) {
     return null
   }
-  return value as NdmsNativeImportRecoveryResult
+  if (
+    result.status === "completed" &&
+    (result.stop !== "none" ||
+      !hasRecord ||
+      result.wal_may_require_recovery ||
+      !result.wal_removed ||
+      result.direct_observation_failure !== undefined ||
+      hasCreated === result.rollback_snapshot_retired)
+  ) {
+    return null
+  }
+  if (result.status === "completed" && hasCreated) {
+    const ownershipReconcile = result.phase === "ownership_published"
+    if (
+      !forwardOnlyPhase(result.phase) ||
+      !result.ownership_published ||
+      hasRecoveryEvidence ||
+      result.delete_transport_outcome !== undefined ||
+      anyDeleteTrace ||
+      result.forward_admission_state !== "admitted" ||
+      result.forward_dispatch_state !== "completed" ||
+      result.forward_failed_step !== undefined ||
+      (ownershipReconcile
+        ? result.recovery_action !== "resume_forward_reconcile"
+        : result.recovery_action !== undefined)
+    ) {
+      return null
+    }
+  }
+  if (result.status === "completed" && !hasCreated) {
+    if (
+      result.ownership_published ||
+      hasForwardEvidence ||
+      !result.rollback_snapshot_retired ||
+      !cleanupRecoveryAction(result.recovery_action) ||
+      result.recovery_admission_state !== "admitted" ||
+      result.recovery_dispatch_state !== "completed" ||
+      result.recovery_failed_step !== undefined ||
+      destructiveRecoveryAction(result.recovery_action) !== anyDeleteTrace ||
+      (destructiveRecoveryAction(result.recovery_action) &&
+        (!result.external_ndms_writer_race_accepted ||
+          result.delete_transport_outcome === undefined))
+    ) {
+      return null
+    }
+  }
+  return result
 }
 
 const commonRequestInit = {
@@ -663,12 +1162,34 @@ export async function postNdmsNativeDeleteRecoveryOnce(
 }
 
 export async function postNdmsNativeImportRecoveryOnce(
+  acceptanceOrFetch: boolean | typeof fetch = false,
   fetchImpl: typeof fetch = fetch
 ): Promise<NdmsNativeImportRecoveryResult> {
+  const acceptance =
+    typeof acceptanceOrFetch === "boolean" ? acceptanceOrFetch : false
+  const requestFetch =
+    typeof acceptanceOrFetch === "boolean" ? fetchImpl : acceptanceOrFetch
   const response = await fetchWithStepUp(
     NDMS_NATIVE_IMPORT_RECOVERY_PATH,
-    commonRequestInit,
-    fetchImpl
+    {
+      ...commonRequestInit,
+      ...(acceptance
+        ? {
+            headers: {
+              "X-Keen-Pbr-External-Ndms-Writer-Race-Acceptance":
+                "owner-accepted",
+            },
+          }
+        : {}),
+    },
+    requestFetch
   )
-  return parseTrustedResponse(response, parseNdmsNativeImportRecoveryResult)
+  const result = await parseTrustedResponse(
+    response,
+    parseNdmsNativeImportRecoveryResult
+  )
+  if (result.external_ndms_writer_race_accepted !== acceptance) {
+    throw new NativeMutationTransportError("outcome_unknown")
+  }
+  return result
 }

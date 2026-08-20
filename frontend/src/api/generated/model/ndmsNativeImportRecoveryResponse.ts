@@ -5,6 +5,7 @@
  * REST API for the keen-pbr policy-based routing daemon.
  * OpenAPI spec version: 3.0.0
  */
+import type { NdmsNativeDeleteTransportOutcome } from './ndmsNativeDeleteTransportOutcome';
 import type { NdmsNativeDirectObservationFailure } from './ndmsNativeDirectObservationFailure';
 import type { NdmsNativeImportRecoveryAction } from './ndmsNativeImportRecoveryAction';
 import type { NdmsNativeImportRecoveryAdmissionState } from './ndmsNativeImportRecoveryAdmissionState';
@@ -19,18 +20,27 @@ import type { NdmsNativeMutationKind } from './ndmsNativeMutationKind';
 import type { NdmsNativeWalReadiness } from './ndmsNativeWalReadiness';
 
 /**
- * The optional record projection is all-or-none across expected_interface, kind and phase; its private transaction id is deliberately omitted. created_interface and created_kernel_interface are a proved pair and created_interface equals expected_interface. `no_work` has stop `none`, clean WAL readiness, no identities or forward evidence and every mutation/evidence boolean false. `completed` has a proved identity, clean delete WAL, unfinished import WAL, a forward-only phase, admitted/completed forward evidence, no failed step, ownership true, WAL removal true and wal_may_require_recovery false. `blocked` has a non-none stop and never removes the WAL; a complete durable record makes wal_may_require_recovery true. No response contains an internal transaction id, ownership revision, marker, raw RCI response or secret.
+ * The optional record projection is all-or-none across expected_interface, kind and phase; its private transaction id is deliberately omitted. created_interface and created_kernel_interface are a proved pair and created_interface equals expected_interface. `no_work` has stop `none`, clean WAL readiness, no identities or dispatch evidence and every mutation/evidence boolean false except that a supplied fresh owner-risk header remains visible as invocation acceptance trace. A forward `completed` result has the proved created pair, ownership and admitted/completed forward evidence. A cleanup `completed` result has no created pair, ownership false, admitted/completed recovery evidence, an exact retired snapshot and WAL-last removal. Exact delete evidence additionally requires fresh acceptance and coherent perform/request/outcome trace; stable-absence cleanup has no delete trace and needs no acceptance. `blocked` never dispatches a delete. `recovery_required` retains the WAL and reports consent, admission, step, retirement or delete ambiguity truth. No response contains an internal transaction id, ownership revision, marker, raw RCI response or secret.
 
  */
 export interface NdmsNativeImportRecoveryResponse {
   status: NdmsNativeImportRecoveryStatus;
   stop: NdmsNativeImportRecoveryStop;
   ndms_import_request_dispatched: boolean;
+  /** Current-invocation fact. True exactly when an accepted exact rollback delete may have crossed the transport boundary.
+   */
   ndms_delete_dispatched: boolean;
   system_configuration_save_performed: boolean;
   external_ndms_writer_race_excluded: boolean;
+  /** Whether this invocation carried the exact optional header. */
+  external_ndms_writer_race_accepted: boolean;
+  /** Current-invocation exact delete transport fact only. */
+  delete_perform_started: boolean;
+  /** Current-invocation exact delete transport fact only. */
+  request_may_have_been_dispatched: boolean;
   wal_may_require_recovery: boolean;
   ownership_published: boolean;
+  rollback_snapshot_retired: boolean;
   wal_removed: boolean;
   expected_interface?: NdmsNativeManagedInterfaceName;
   created_interface?: NdmsNativeManagedInterfaceName;
@@ -44,4 +54,8 @@ export interface NdmsNativeImportRecoveryResponse {
   forward_admission_state?: NdmsNativeImportRecoveryAdmissionState;
   forward_dispatch_state?: NdmsNativeImportRecoveryDispatchState;
   forward_failed_step?: NdmsNativeImportRecoveryStep;
+  recovery_admission_state?: NdmsNativeImportRecoveryAdmissionState;
+  recovery_dispatch_state?: NdmsNativeImportRecoveryDispatchState;
+  recovery_failed_step?: NdmsNativeImportRecoveryStep;
+  delete_transport_outcome?: NdmsNativeDeleteTransportOutcome;
 }

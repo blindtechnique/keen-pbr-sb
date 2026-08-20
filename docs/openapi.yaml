@@ -771,19 +771,33 @@ paths:
   /api/system/ndms/interfaces/import/recovery/retry:
     post:
       tags: [Native manual mutation transport]
-      summary: Resume forward-only native import recovery once
+      summary: Resume one bounded native import recovery pass
       description: >
         Performs one bounded, bodyless recovery pass for an already-durable
-        cooperative import record. It can only complete forward bookkeeping:
-        it never repeats the secret import, deletes an interface or saves the
-        system configuration. The endpoint must be called exactly once for an
-        explicit owner action and must never be retried automatically. A
-        `completed` response is the only recovery result that proves the
-        created identity; `no_work` only unlocks a fresh inventory read, and
-        `blocked` remains recovery-locked. The response never exposes a
-        transaction id, ownership revision, marker, raw RCI response or
-        secret. All responses are served with `Cache-Control: no-store`.
+        cooperative import record. It never repeats the secret import or saves
+        system configuration. It can complete forward bookkeeping, retire an
+        exact snapshot and WAL after authoritative stable absence, or perform
+        one exact-owned rollback delete only when this invocation carries the
+        optional fresh owner-risk acceptance header. The bodyless call without
+        that header never deletes. The endpoint must be called exactly once
+        for an explicit owner action and must never be retried automatically
+        after an ambiguous delete. `recovery_required` preserves the durable
+        phase and current-invocation trace. The response never exposes a
+        transaction id, ownership revision, marker, raw RCI response or secret.
+        All responses are served with `Cache-Control: no-store`.
       operationId: postNdmsNativeImportRecoveryRetry
+      parameters:
+        - name: X-Keen-Pbr-External-Ndms-Writer-Race-Acceptance
+          in: header
+          required: false
+          description: >
+            Optional fresh owner acknowledgement for an exact rollback delete.
+            Absence selects the non-destructive entrance. Multiple instances,
+            surrounding whitespace and every value other than `owner-accepted`
+            are refused before the body is consumed.
+          schema:
+            type: string
+            enum: [owner-accepted]
       responses:
         "200":
           description: Redacted result of the single bounded recovery pass
@@ -811,6 +825,12 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "413":
           description: The body exceeded the one-byte rejection boundary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "428":
+          description: Optional owner-risk acceptance header was malformed or duplicated
           content:
             application/json:
               schema:
@@ -7625,7 +7645,7 @@ components:
     NdmsNativeImportRecoveryStatus:
       title: NdmsNativeImportRecoveryStatus
       type: string
-      enum: [no_work, blocked, completed]
+      enum: [no_work, blocked, recovery_required, completed]
 
     NdmsNativeImportRecoveryStop:
       title: NdmsNativeImportRecoveryStop
@@ -7638,6 +7658,7 @@ components:
         - import_wal_not_single_safe
         - record_not_cooperative
         - phase_not_forward_only
+        - external_writer_race_not_accepted
         - expected_target_not_managed
         - first_observation_failed
         - second_observation_failed
@@ -7645,11 +7666,21 @@ components:
         - durable_observation_failed
         - observation_unstable
         - ownership_not_exact
+        - snapshot_not_exact
         - recovery_action_not_forward_only
+        - recovery_action_not_actionable
         - forward_admission_failed
+        - recovery_admission_failed
         - target_verified_wal_publish_failed
         - ownership_publish_failed
         - ownership_wal_publish_failed
+        - rollback_wal_publish_failed
+        - ownership_retract_failed
+        - delete_wal_publish_failed
+        - delete_guard_rejected
+        - delete_transport_ambiguous
+        - absence_wal_publish_failed
+        - snapshot_retirement_failed
         - wal_cleanup_failed
         - unexpected_failure
 
@@ -7728,8 +7759,12 @@ components:
         - ndms_delete_dispatched
         - system_configuration_save_performed
         - external_ndms_writer_race_excluded
+        - external_ndms_writer_race_accepted
+        - delete_perform_started
+        - request_may_have_been_dispatched
         - wal_may_require_recovery
         - ownership_published
+        - rollback_snapshot_retired
         - wal_removed
       properties:
         status:
@@ -7741,16 +7776,29 @@ components:
           enum: [false]
         ndms_delete_dispatched:
           type: boolean
-          enum: [false]
+          description: >
+            Current-invocation fact. True exactly when an accepted exact
+            rollback delete may have crossed the transport boundary.
         system_configuration_save_performed:
           type: boolean
           enum: [false]
         external_ndms_writer_race_excluded:
           type: boolean
           enum: [false]
+        external_ndms_writer_race_accepted:
+          type: boolean
+          description: Whether this invocation carried the exact optional header.
+        delete_perform_started:
+          type: boolean
+          description: Current-invocation exact delete transport fact only.
+        request_may_have_been_dispatched:
+          type: boolean
+          description: Current-invocation exact delete transport fact only.
         wal_may_require_recovery:
           type: boolean
         ownership_published:
+          type: boolean
+        rollback_snapshot_retired:
           type: boolean
         wal_removed:
           type: boolean
@@ -7778,19 +7826,33 @@ components:
           $ref: "#/components/schemas/NdmsNativeImportRecoveryDispatchState"
         forward_failed_step:
           $ref: "#/components/schemas/NdmsNativeImportRecoveryStep"
+        recovery_admission_state:
+          $ref: "#/components/schemas/NdmsNativeImportRecoveryAdmissionState"
+        recovery_dispatch_state:
+          $ref: "#/components/schemas/NdmsNativeImportRecoveryDispatchState"
+        recovery_failed_step:
+          $ref: "#/components/schemas/NdmsNativeImportRecoveryStep"
+        delete_transport_outcome:
+          $ref: "#/components/schemas/NdmsNativeDeleteTransportOutcome"
       description: >
         The optional record projection is all-or-none across expected_interface,
         kind and phase; its private transaction id is deliberately omitted.
         created_interface and created_kernel_interface are a proved pair and
         created_interface equals expected_interface. `no_work` has stop `none`,
-        clean WAL readiness, no identities or forward evidence and every
-        mutation/evidence boolean false. `completed` has a proved identity,
-        clean delete WAL, unfinished import WAL, a forward-only phase,
-        admitted/completed forward evidence, no failed step, ownership true,
-        WAL removal true and wal_may_require_recovery false. `blocked` has a
-        non-none stop and never removes the WAL; a complete durable record
-        makes wal_may_require_recovery true. No response contains an internal
-        transaction id, ownership revision, marker, raw RCI response or secret.
+        clean WAL readiness, no identities or dispatch evidence and every
+        mutation/evidence boolean false except that a supplied fresh owner-risk
+        header remains visible as invocation acceptance trace. A forward
+        `completed` result has the
+        proved created pair, ownership and admitted/completed forward evidence.
+        A cleanup `completed` result has no created pair, ownership false,
+        admitted/completed recovery evidence, an exact retired snapshot and
+        WAL-last removal. Exact delete evidence additionally requires fresh
+        acceptance and coherent perform/request/outcome trace; stable-absence
+        cleanup has no delete trace and needs no acceptance. `blocked` never
+        dispatches a delete. `recovery_required` retains the WAL and reports
+        consent, admission, step, retirement or delete ambiguity truth. No
+        response contains an internal transaction id, ownership revision,
+        marker, raw RCI response or secret.
 
     NdmsNativeImportPreflightResponse:
       title: NdmsNativeImportPreflightResponse

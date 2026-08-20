@@ -6,12 +6,20 @@ type Operation = {
   tags?: string[]
   operationId?: string
   requestBody?: unknown
+  parameters?: Array<{
+    name?: string
+    in?: string
+    required?: boolean
+    schema?: { enum?: string[] }
+  }>
+  responses?: Record<string, unknown>
 }
 
 type ObjectSchema = {
   additionalProperties?: boolean
   required?: string[]
   properties?: Record<string, unknown>
+  enum?: string[]
 }
 
 type OpenApiDocument = {
@@ -63,6 +71,17 @@ describe("native mutation OpenAPI generation boundary", () => {
     expect(Object.keys(request.properties ?? {}).sort()).toEqual(
       ["confirm_label", "expected_ownership_revision", "interface_name"].sort()
     )
+
+    const recovery = spec.paths[manualMutationPaths[2]]?.post
+    expect(recovery?.parameters).toEqual([
+      expect.objectContaining({
+        name: "X-Keen-Pbr-External-Ndms-Writer-Race-Acceptance",
+        in: "header",
+        required: false,
+        schema: { type: "string", enum: ["owner-accepted"] },
+      }),
+    ])
+    expect(recovery?.responses).toHaveProperty("428")
   })
 
   test("publishes redacted schemas without an internal transaction id", async () => {
@@ -88,10 +107,40 @@ describe("native mutation OpenAPI generation boundary", () => {
         "ndms_delete_dispatched",
         "system_configuration_save_performed",
         "external_ndms_writer_race_excluded",
+        "external_ndms_writer_race_accepted",
+        "delete_perform_started",
+        "request_may_have_been_dispatched",
         "wal_may_require_recovery",
         "ownership_published",
+        "rollback_snapshot_retired",
         "wal_removed",
       ])
+    )
+
+    expect(
+      spec.components.schemas.NdmsNativeImportRecoveryStatus.enum
+    ).toContain("recovery_required")
+    expect(spec.components.schemas.NdmsNativeImportRecoveryStop.enum).toEqual(
+      expect.arrayContaining([
+        "external_writer_race_not_accepted",
+        "snapshot_not_exact",
+        "recovery_admission_failed",
+        "delete_guard_rejected",
+        "delete_transport_ambiguous",
+        "snapshot_retirement_failed",
+      ])
+    )
+    expect(
+      spec.components.schemas.NdmsNativeImportRecoveryResponse.properties
+    ).toEqual(
+      expect.objectContaining({
+        recovery_admission_state: expect.any(Object),
+        recovery_dispatch_state: expect.any(Object),
+        recovery_failed_step: expect.any(Object),
+        delete_transport_outcome: {
+          $ref: "#/components/schemas/NdmsNativeDeleteTransportOutcome",
+        },
+      })
     )
   })
 

@@ -73,6 +73,7 @@ using ImportCallback = std::function<NdmsNativeCooperativeImportResult(
     NdmsNativeExternalWriterRaceAcceptance)>;
 using ImportRecoveryCallback =
     std::function<NdmsNativeCooperativeImportResumeResult(
+        NdmsNativeExternalWriterRaceAcceptance,
         const std::shared_ptr<SensitiveRequestReservation>&)>;
 
 class ImportTestReservation final : public SensitiveRequestReservation {
@@ -306,6 +307,100 @@ NdmsNativeCooperativeImportResumeResult blocked_recovery_result() {
     result.created_kernel_interface.reset();
     result.forward_admission_state.reset();
     result.forward_dispatch_state.reset();
+    return result;
+}
+
+NdmsNativeCooperativeImportResumeResult completed_cleanup_result(
+    const NdmsNativeImportWalPhase phase,
+    const NdmsNativeImportRecoveryAction action) {
+    NdmsNativeCooperativeImportResumeResult result;
+    result.status = NdmsNativeCooperativeImportResumeStatus::completed;
+    result.stop = NdmsNativeCooperativeImportResumeStop::none;
+    result.rollback_snapshot_retired = true;
+    result.wal_removed = true;
+    result.transaction_id = std::string(32U, 'c');
+    result.expected_interface = "Wireguard5";
+    result.kind = NdmsNativeTunnelImportKind::wireguard;
+    result.phase = phase;
+    result.delete_wal_readiness = NdmsNativeDeleteWalReadiness::clean;
+    result.import_wal_readiness =
+        NdmsNativeCooperativeImportWalReadiness::unfinished;
+    result.recovery_action = action;
+    result.recovery_admission_state =
+        NdmsNativeImportRecoveryAdmissionState::admitted;
+    result.recovery_dispatch_state =
+        NdmsNativeImportRecoveryDispatchState::completed;
+    return result;
+}
+
+NdmsNativeCooperativeImportResumeResult consent_required_recovery_result() {
+    auto result = completed_cleanup_result(
+        NdmsNativeImportWalPhase::response_recorded,
+        NdmsNativeImportRecoveryAction::rollback_delete_exact_owned);
+    result.status =
+        NdmsNativeCooperativeImportResumeStatus::recovery_required;
+    result.stop = NdmsNativeCooperativeImportResumeStop::
+        external_writer_race_not_accepted;
+    result.rollback_snapshot_retired = false;
+    result.wal_removed = false;
+    result.wal_may_require_recovery = true;
+    result.recovery_admission_state.reset();
+    result.recovery_dispatch_state.reset();
+    return result;
+}
+
+NdmsNativeCooperativeImportResumeResult ambiguous_delete_result() {
+    auto result = consent_required_recovery_result();
+    result.stop =
+        NdmsNativeCooperativeImportResumeStop::delete_transport_ambiguous;
+    result.external_ndms_writer_race_accepted = true;
+    result.delete_perform_started = true;
+    result.request_may_have_been_dispatched = true;
+    result.ndms_delete_dispatched = true;
+    result.phase = NdmsNativeImportWalPhase::delete_may_be_inflight;
+    result.recovery_admission_state =
+        NdmsNativeImportRecoveryAdmissionState::admitted;
+    result.recovery_dispatch_state =
+        NdmsNativeImportRecoveryDispatchState::step_failed;
+    result.recovery_failed_step =
+        NdmsNativeImportRecoveryStep::delete_exact_owned_target;
+    result.delete_transport_outcome =
+        NdmsNativeExactMutationResponseOutcome::transport_failed;
+    return result;
+}
+
+NdmsNativeCooperativeImportResumeResult failed_cleanup_result(
+    const NdmsNativeImportRecoveryAction action,
+    const NdmsNativeImportWalPhase durable_phase,
+    const NdmsNativeCooperativeImportResumeStop stop,
+    const NdmsNativeImportRecoveryStep failed_step) {
+    auto result = consent_required_recovery_result();
+    result.stop = stop;
+    result.external_ndms_writer_race_accepted =
+        action == NdmsNativeImportRecoveryAction::
+                      rollback_delete_exact_owned ||
+        action == NdmsNativeImportRecoveryAction::
+                      retry_exact_owned_delete;
+    result.phase = durable_phase;
+    result.recovery_action = action;
+    result.recovery_admission_state =
+        NdmsNativeImportRecoveryAdmissionState::admitted;
+    result.recovery_dispatch_state =
+        NdmsNativeImportRecoveryDispatchState::step_failed;
+    result.recovery_failed_step = failed_step;
+    if (result.external_ndms_writer_race_accepted &&
+        (failed_step ==
+             NdmsNativeImportRecoveryStep::
+                 advance_wal_absence_verified ||
+         failed_step ==
+             NdmsNativeImportRecoveryStep::remove_wal_record)) {
+        result.delete_perform_started = true;
+        result.request_may_have_been_dispatched = true;
+        result.ndms_delete_dispatched = true;
+        result.delete_transport_outcome =
+            NdmsNativeExactMutationResponseOutcome::
+                acknowledged_needs_observation;
+    }
     return result;
 }
 
@@ -1081,8 +1176,12 @@ TEST_CASE("native import recovery maps only coherent redacted evidence") {
     CHECK(response.at("ndms_delete_dispatched") == false);
     CHECK(response.at("system_configuration_save_performed") == false);
     CHECK(response.at("external_ndms_writer_race_excluded") == false);
+    CHECK(response.at("external_ndms_writer_race_accepted") == false);
+    CHECK(response.at("delete_perform_started") == false);
+    CHECK(response.at("request_may_have_been_dispatched") == false);
     CHECK(response.at("wal_may_require_recovery") == false);
     CHECK(response.at("ownership_published") == true);
+    CHECK(response.at("rollback_snapshot_retired") == false);
     CHECK(response.at("wal_removed") == true);
     CHECK(response.at("expected_interface") == "Wireguard5");
     CHECK(response.at("created_interface") == "Wireguard5");
@@ -1117,6 +1216,160 @@ TEST_CASE("native import recovery maps only coherent redacted evidence") {
     CHECK(blocked.at("direct_observation_failure") ==
           "transport_failed");
     CHECK_FALSE(blocked.contains("transaction_id"));
+}
+
+TEST_CASE("native import recovery exposes stable-absence cleanup truth") {
+    for (const auto phase :
+         {NdmsNativeImportWalPhase::target_verified,
+          NdmsNativeImportWalPhase::ownership_published}) {
+        const auto response = ndms_native_import_recovery_api_response(
+            completed_cleanup_result(
+                phase,
+                NdmsNativeImportRecoveryAction::complete_rollback));
+        CHECK(response.at("status") == "completed");
+        CHECK(response.at("recovery_action") == "complete_rollback");
+        CHECK(response.at("recovery_admission_state") == "admitted");
+        CHECK(response.at("recovery_dispatch_state") == "completed");
+        CHECK(response.at("rollback_snapshot_retired") == true);
+        CHECK(response.at("wal_removed") == true);
+        CHECK(response.at("ownership_published") == false);
+        CHECK(response.at("ndms_delete_dispatched") == false);
+        CHECK(response.at("delete_perform_started") == false);
+        CHECK(response.at("request_may_have_been_dispatched") == false);
+        CHECK(response.at("external_ndms_writer_race_accepted") == false);
+        CHECK_FALSE(response.contains("created_interface"));
+        CHECK_FALSE(response.contains("transaction_id"));
+    }
+}
+
+TEST_CASE("native import recovery exposes consent and delete ambiguity truth") {
+    const auto consent = ndms_native_import_recovery_api_response(
+        consent_required_recovery_result());
+    CHECK(consent.at("status") == "recovery_required");
+    CHECK(consent.at("stop") ==
+          "external_writer_race_not_accepted");
+    CHECK(consent.at("external_ndms_writer_race_accepted") == false);
+    CHECK(consent.at("ndms_delete_dispatched") == false);
+    CHECK_FALSE(consent.contains("recovery_admission_state"));
+
+    const auto ambiguous = ndms_native_import_recovery_api_response(
+        ambiguous_delete_result());
+    CHECK(ambiguous.at("status") == "recovery_required");
+    CHECK(ambiguous.at("stop") == "delete_transport_ambiguous");
+    CHECK(ambiguous.at("external_ndms_writer_race_accepted") == true);
+    CHECK(ambiguous.at("ndms_delete_dispatched") == true);
+    CHECK(ambiguous.at("delete_perform_started") == true);
+    CHECK(ambiguous.at("request_may_have_been_dispatched") == true);
+    CHECK(ambiguous.at("recovery_failed_step") ==
+          "delete_exact_owned_target");
+    CHECK(ambiguous.at("delete_transport_outcome") ==
+          "transport_failed");
+    CHECK_FALSE(ambiguous.contains("transaction_id"));
+
+    auto setup_failure = failed_cleanup_result(
+        NdmsNativeImportRecoveryAction::rollback_delete_exact_owned,
+        NdmsNativeImportWalPhase::delete_may_be_inflight,
+        NdmsNativeCooperativeImportResumeStop::delete_guard_rejected,
+        NdmsNativeImportRecoveryStep::delete_exact_owned_target);
+    setup_failure.delete_transport_outcome =
+        NdmsNativeExactMutationResponseOutcome::transport_failed;
+    const auto before_guard = ndms_native_import_recovery_api_response(
+        setup_failure);
+    CHECK(before_guard.at("status") == "recovery_required");
+    CHECK(before_guard.at("stop") == "delete_guard_rejected");
+    CHECK(before_guard.at("delete_transport_outcome") ==
+          "transport_failed");
+    CHECK(before_guard.at("delete_perform_started") == false);
+    CHECK(before_guard.at("request_may_have_been_dispatched") == false);
+    CHECK(before_guard.at("ndms_delete_dispatched") == false);
+}
+
+TEST_CASE("native import recovery accepts exact monotonic rollback prefixes") {
+    using Action = NdmsNativeImportRecoveryAction;
+    using Phase = NdmsNativeImportWalPhase;
+    using Step = NdmsNativeImportRecoveryStep;
+    using Stop = NdmsNativeCooperativeImportResumeStop;
+
+    const auto check_prefix = [](const auto& result,
+                                 const std::string_view phase,
+                                 const std::string_view failed_step) {
+        const auto response =
+            ndms_native_import_recovery_api_response(result);
+        CHECK(response.at("status") == "recovery_required");
+        CHECK(response.at("phase") == phase);
+        CHECK(response.at("recovery_failed_step") == failed_step);
+        CHECK(response.at("wal_may_require_recovery") == true);
+        CHECK(response.at("wal_removed") == false);
+    };
+
+    check_prefix(
+        failed_cleanup_result(
+            Action::rollback_delete_exact_owned,
+            Phase::response_recorded,
+            Stop::rollback_wal_publish_failed,
+            Step::advance_wal_rollback_requested),
+        "response_recorded",
+        "advance_wal_rollback_requested");
+    check_prefix(
+        failed_cleanup_result(
+            Action::rollback_delete_exact_owned,
+            Phase::rollback_requested,
+            Stop::ownership_retract_failed,
+            Step::remove_ownership_claim),
+        "rollback_requested",
+        "remove_ownership_claim");
+    check_prefix(
+        failed_cleanup_result(
+            Action::rollback_delete_exact_owned,
+            Phase::rollback_requested,
+            Stop::delete_wal_publish_failed,
+            Step::advance_wal_delete_may_be_inflight),
+        "rollback_requested",
+        "advance_wal_delete_may_be_inflight");
+    check_prefix(
+        ambiguous_delete_result(),
+        "delete_may_be_inflight",
+        "delete_exact_owned_target");
+    auto observed_absence_after_transport_failure =
+        failed_cleanup_result(
+            Action::rollback_delete_exact_owned,
+            Phase::delete_may_be_inflight,
+            Stop::absence_wal_publish_failed,
+            Step::advance_wal_absence_verified);
+    observed_absence_after_transport_failure.delete_transport_outcome =
+        NdmsNativeExactMutationResponseOutcome::http_status_not_200;
+    check_prefix(
+        observed_absence_after_transport_failure,
+        "delete_may_be_inflight",
+        "advance_wal_absence_verified");
+    check_prefix(
+        failed_cleanup_result(
+            Action::rollback_delete_exact_owned,
+            Phase::absence_verified,
+            Stop::snapshot_retirement_failed,
+            Step::remove_wal_record),
+        "absence_verified",
+        "remove_wal_record");
+
+    auto wal_last = failed_cleanup_result(
+        Action::retry_exact_owned_delete,
+        Phase::absence_verified,
+        Stop::wal_cleanup_failed,
+        Step::remove_wal_record);
+    wal_last.rollback_snapshot_retired = true;
+    check_prefix(wal_last, "absence_verified", "remove_wal_record");
+
+    auto hidden_delete = failed_cleanup_result(
+        Action::rollback_delete_exact_owned,
+        Phase::delete_may_be_inflight,
+        Stop::absence_wal_publish_failed,
+        Step::advance_wal_absence_verified);
+    hidden_delete.delete_perform_started = false;
+    hidden_delete.request_may_have_been_dispatched = false;
+    hidden_delete.ndms_delete_dispatched = false;
+    hidden_delete.delete_transport_outcome.reset();
+    CHECK_THROWS(
+        ndms_native_import_recovery_api_response(hidden_delete));
 }
 
 TEST_CASE("native import recovery rejects unknown or incoherent results") {
@@ -1296,8 +1549,11 @@ TEST_CASE("native import recovery is bodyless and invokes exactly once") {
     std::size_t callback_count = 0U;
     NativeImportApiFixture fixture(
         ImportCallback{},
-        [&](const std::shared_ptr<SensitiveRequestReservation>& reservation) {
+        [&](const NdmsNativeExternalWriterRaceAcceptance acceptance,
+            const std::shared_ptr<SensitiveRequestReservation>& reservation) {
             ++callback_count;
+            CHECK(acceptance ==
+                  NdmsNativeExternalWriterRaceAcceptance::not_accepted);
             CHECK(reservation != nullptr);
             return no_work_recovery_result();
         });
@@ -1337,11 +1593,109 @@ TEST_CASE("native import recovery is bodyless and invokes exactly once") {
     CHECK_FALSE(fixture.reservation_active());
 }
 
+TEST_CASE("native import recovery accepts only one exact optional owner header") {
+    std::size_t callback_count = 0U;
+    NativeImportApiFixture fixture(
+        ImportCallback{},
+        [&](const NdmsNativeExternalWriterRaceAcceptance acceptance,
+            const std::shared_ptr<SensitiveRequestReservation>&) {
+            ++callback_count;
+            auto result = no_work_recovery_result();
+            result.external_ndms_writer_race_accepted =
+                acceptance ==
+                NdmsNativeExternalWriterRaceAcceptance::owner_accepted;
+            return result;
+        });
+    const auto session = fixture.login();
+    fixture.grant_step_up(session);
+
+    const auto accepted = fixture.client().Post(
+        std::string{kNdmsNativeImportRecoveryApiPath},
+        fixture.accepted_headers(session),
+        "",
+        "application/octet-stream");
+    check_no_store(accepted);
+    REQUIRE(accepted->status == 200);
+    CHECK(nlohmann::json::parse(accepted->body).at(
+              "external_ndms_writer_race_accepted") == true);
+    CHECK(callback_count == 1U);
+
+    const auto attempts_before_invalid = fixture.reservation_attempts();
+    auto invalid_headers = session;
+    invalid_headers.emplace(
+        std::string{kNdmsNativeImportRaceAcceptanceHeader},
+        "accepted");
+    reset_sensitive_request_body_stream_count_for_testing();
+    const auto invalid = fixture.client().Post(
+        std::string{kNdmsNativeImportRecoveryApiPath},
+        invalid_headers,
+        "must-not-stream",
+        "application/octet-stream");
+    check_no_store(invalid);
+    CHECK(invalid->status == 428);
+    CHECK(invalid->get_header_value("Connection") == "close");
+    CHECK(fixture.reservation_attempts() == attempts_before_invalid);
+    CHECK(sensitive_request_body_stream_count_for_testing() == 0U);
+    CHECK(callback_count == 1U);
+
+    auto duplicate_headers = fixture.accepted_headers(session);
+    duplicate_headers.emplace(
+        std::string{kNdmsNativeImportRaceAcceptanceHeader},
+        std::string{kNdmsNativeImportRaceAcceptanceValue});
+    const auto duplicate = fixture.client().Post(
+        std::string{kNdmsNativeImportRecoveryApiPath},
+        duplicate_headers,
+        "",
+        "application/octet-stream");
+    check_no_store(duplicate);
+    CHECK(duplicate->status == 428);
+    CHECK(fixture.reservation_attempts() == attempts_before_invalid);
+    CHECK(callback_count == 1U);
+}
+
+TEST_CASE("native import recovery binds callback acceptance to the request") {
+    for (const bool request_acceptance : {false, true}) {
+        std::size_t callback_count = 0U;
+        NativeImportApiFixture fixture(
+            ImportCallback{},
+            [&](const NdmsNativeExternalWriterRaceAcceptance acceptance,
+                const std::shared_ptr<SensitiveRequestReservation>&) {
+                ++callback_count;
+                CHECK((acceptance ==
+                       NdmsNativeExternalWriterRaceAcceptance::
+                           owner_accepted) == request_acceptance);
+                auto result = no_work_recovery_result();
+                result.external_ndms_writer_race_accepted =
+                    !request_acceptance;
+                return result;
+            });
+        const auto session = fixture.login();
+        fixture.grant_step_up(session);
+        const auto headers = request_acceptance
+            ? fixture.accepted_headers(session)
+            : session;
+
+        const auto response = fixture.client().Post(
+            std::string{kNdmsNativeImportRecoveryApiPath},
+            headers,
+            "",
+            "application/octet-stream");
+        check_no_store(response);
+        REQUIRE(response->status == 500);
+        CHECK(nlohmann::json::parse(response->body).at("error") ==
+              "sensitive_request_failed");
+        CHECK(callback_count == 1U);
+        CHECK(fixture.reservation_attempts() == 1U);
+        CHECK_FALSE(fixture.reservation_active());
+    }
+}
+
 TEST_CASE("native import recovery guards precede reservation and callback") {
     std::size_t callback_count = 0U;
     NativeImportApiFixture fixture(
         ImportCallback{},
-        [&](const std::shared_ptr<SensitiveRequestReservation>&) {
+        [&](NdmsNativeExternalWriterRaceAcceptance,
+            const std::shared_ptr<SensitiveRequestReservation>&) {
             ++callback_count;
             return no_work_recovery_result();
         });
@@ -1381,7 +1735,8 @@ TEST_CASE("native import recovery reservation refusal is pre-body") {
     std::size_t callback_count = 0U;
     NativeImportApiFixture fixture(
         ImportCallback{},
-        [&](const std::shared_ptr<SensitiveRequestReservation>&) {
+        [&](NdmsNativeExternalWriterRaceAcceptance,
+            const std::shared_ptr<SensitiveRequestReservation>&) {
             ++callback_count;
             return no_work_recovery_result();
         });
@@ -1412,7 +1767,8 @@ TEST_CASE("native import recovery reservation excludes a second callback") {
 
     NativeImportApiFixture fixture(
         ImportCallback{},
-        [&](const std::shared_ptr<SensitiveRequestReservation>&) {
+        [&](NdmsNativeExternalWriterRaceAcceptance,
+            const std::shared_ptr<SensitiveRequestReservation>&) {
             callback_count.fetch_add(1U, std::memory_order_relaxed);
             std::unique_lock<std::mutex> lock(barrier_mutex);
             first_entered = true;
@@ -1462,7 +1818,8 @@ TEST_CASE("native import recovery callback failure releases reservation") {
     std::size_t callback_count = 0U;
     NativeImportApiFixture fixture(
         ImportCallback{},
-        [&](const std::shared_ptr<SensitiveRequestReservation>&) {
+        [&](NdmsNativeExternalWriterRaceAcceptance,
+            const std::shared_ptr<SensitiveRequestReservation>&) {
             ++callback_count;
             if (callback_count == 1U) {
                 throw std::runtime_error(

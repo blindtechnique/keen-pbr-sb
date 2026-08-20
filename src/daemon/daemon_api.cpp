@@ -28,6 +28,7 @@
 #include "../keenetic/ndms_native_config_dependencies.hpp"
 #include "../keenetic/ndms_native_cooperative_delete.hpp"
 #include "../keenetic/ndms_native_cooperative_import.hpp"
+#include "../keenetic/ndms_native_fresh_import_preflight.hpp"
 #include "../keenetic/ndms_native_inventory_projection.hpp"
 #include "../keenetic/ndms_native_writer_lease.hpp"
 #include "../health/runtime_outbound_state.hpp"
@@ -85,9 +86,13 @@ NdmsNativeCooperativeImportResult blocked_native_import(
 }
 
 NdmsNativeCooperativeImportResumeResult blocked_native_import_recovery(
-    const NdmsNativeCooperativeImportResumeStop stop) noexcept {
+    const NdmsNativeCooperativeImportResumeStop stop,
+    const NdmsNativeExternalWriterRaceAcceptance acceptance) noexcept {
     NdmsNativeCooperativeImportResumeResult result;
     result.stop = stop;
+    result.external_ndms_writer_race_accepted =
+        acceptance ==
+        NdmsNativeExternalWriterRaceAcceptance::owner_accepted;
     return result;
 }
 
@@ -1258,12 +1263,59 @@ void Daemon::setup_api() {
             return {};
         }
     };
+
+    const auto read_native_dependency_snapshot =
+        [this]() -> std::optional<NdmsNativeConfigDependencySnapshot> {
+        return config_store_.project_active_and_staged(
+            [](const Config& active,
+               const std::optional<Config>& staged)
+                -> std::optional<NdmsNativeConfigDependencySnapshot> {
+                NdmsNativeConfigDependencySnapshot snapshot;
+                snapshot.active =
+                    project_ndms_native_config_dependencies(active);
+                if (staged.has_value()) {
+                    snapshot.staged =
+                        project_ndms_native_config_dependencies(*staged);
+                }
+                return snapshot;
+            });
+    };
+
     api_ctx_->reserve_ndms_native_import_fn =
-        [reserve_native_mutation]() {
-            return reserve_native_mutation(
+        [this, reserve_native_mutation,
+         read_native_dependency_snapshot]() {
+            auto opaque_reservation = reserve_native_mutation(
                 "ndms-native-import",
                 NativeMutationReservationPurpose::new_import,
                 true);
+            auto* reservation = dynamic_cast<
+                NativeMutationRequestReservation*>(
+                    opaque_reservation.get());
+            if (reservation == nullptr ||
+                !reservation->owned_by(
+                    this,
+                    NativeMutationReservationPurpose::new_import)) {
+                return std::shared_ptr<SensitiveRequestReservation>{};
+            }
+            try {
+                reservation->writer().verify_held();
+                NdmsNativeConfigDependencyProvider dependencies{
+                    read_native_dependency_snapshot};
+                NdmsNativeFreshImportPreflight preflight{
+                    ndms_native_import_wal_store_,
+                    ndms_native_delete_wal_store_,
+                    ndms_native_ownership_store_,
+                    ndms_native_secret_snapshot_store_,
+                    dependencies};
+                const auto result = preflight.check_before_secret_take(
+                    reservation->writer());
+                if (!result.secret_body_may_be_taken()) {
+                    return std::shared_ptr<SensitiveRequestReservation>{};
+                }
+                return opaque_reservation;
+            } catch (...) {
+                return std::shared_ptr<SensitiveRequestReservation>{};
+            }
         };
     api_ctx_->run_ndms_native_import_fn =
         [this](
@@ -1312,6 +1364,7 @@ void Daemon::setup_api() {
         };
     api_ctx_->resume_ndms_native_import_fn =
         [this](
+            const NdmsNativeExternalWriterRaceAcceptance acceptance,
             const std::shared_ptr<SensitiveRequestReservation>&
                 opaque_reservation) {
             auto* reservation = dynamic_cast<
@@ -1322,7 +1375,8 @@ void Daemon::setup_api() {
                     this,
                     NativeMutationReservationPurpose::import_recovery)) {
                 return blocked_native_import_recovery(
-                    NdmsNativeCooperativeImportResumeStop::writer_missing);
+                    NdmsNativeCooperativeImportResumeStop::writer_missing,
+                    acceptance);
             }
             try {
                 reservation->writer().verify_held();
@@ -1332,30 +1386,15 @@ void Daemon::setup_api() {
                     ndms_native_delete_wal_store_,
                     ndms_native_secret_snapshot_store_,
                     ndms_native_ownership_store_};
-                return coordinator.resume_once(reservation->writer());
+                return coordinator.resume_once(
+                    reservation->writer(), acceptance);
             } catch (...) {
                 return blocked_native_import_recovery(
                     NdmsNativeCooperativeImportResumeStop::
-                        unexpected_failure);
+                        unexpected_failure,
+                    acceptance);
             }
         };
-
-    const auto read_native_dependency_snapshot =
-        [this]() -> std::optional<NdmsNativeConfigDependencySnapshot> {
-        return config_store_.project_active_and_staged(
-            [](const Config& active,
-               const std::optional<Config>& staged)
-                -> std::optional<NdmsNativeConfigDependencySnapshot> {
-                NdmsNativeConfigDependencySnapshot snapshot;
-                snapshot.active =
-                    project_ndms_native_config_dependencies(active);
-                if (staged.has_value()) {
-                    snapshot.staged =
-                        project_ndms_native_config_dependencies(*staged);
-                }
-                return snapshot;
-            });
-    };
 
     api_ctx_->reserve_ndms_native_delete_fn =
         [reserve_native_mutation]() {

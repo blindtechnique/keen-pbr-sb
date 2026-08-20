@@ -81,6 +81,22 @@ bool accepted_owner_race_header(const httplib::Request& request) {
                kNdmsNativeImportRaceAcceptanceValue;
 }
 
+NdmsNativeExternalWriterRaceAcceptance recovery_owner_race_acceptance(
+    const httplib::Request& request) {
+    const std::string name{kNdmsNativeImportRaceAcceptanceHeader};
+    const auto count = request.get_header_value_count(name);
+    if (count == 0U) {
+        return NdmsNativeExternalWriterRaceAcceptance::not_accepted;
+    }
+    if (count != 1U ||
+        request.get_header_value(name) !=
+            kNdmsNativeImportRaceAcceptanceValue) {
+        throw ApiError(
+            "external NDMS writer race acceptance is invalid", 428);
+    }
+    return NdmsNativeExternalWriterRaceAcceptance::owner_accepted;
+}
+
 bool public_interface_name(const std::string& value) {
     const auto identity = parse_ndms_wireguard_identity(value);
     return identity.has_value() &&
@@ -826,7 +842,26 @@ bool known_public_import_recovery_enums(
                result.forward_failed_step,
                NdmsNativeImportRecoveryStep::
                    advance_wal_target_verified,
-               NdmsNativeImportRecoveryStep::remove_wal_record);
+               NdmsNativeImportRecoveryStep::remove_wal_record) &&
+           known_optional_enum_value(
+               result.recovery_admission_state,
+               NdmsNativeImportRecoveryAdmissionState::admitted,
+               NdmsNativeImportRecoveryAdmissionState::
+                   action_not_actionable) &&
+           known_optional_enum_value(
+               result.recovery_dispatch_state,
+               NdmsNativeImportRecoveryDispatchState::completed,
+               NdmsNativeImportRecoveryDispatchState::step_failed) &&
+           known_optional_enum_value(
+               result.recovery_failed_step,
+               NdmsNativeImportRecoveryStep::
+                   advance_wal_target_verified,
+               NdmsNativeImportRecoveryStep::remove_wal_record) &&
+           known_optional_enum_value(
+               result.delete_transport_outcome,
+               NdmsNativeExactMutationResponseOutcome::guard_rejected,
+               NdmsNativeExactMutationResponseOutcome::
+                   acknowledged_needs_observation);
 }
 
 bool forward_only_phase(const NdmsNativeImportWalPhase phase) noexcept {
@@ -845,30 +880,186 @@ bool forward_only_step(
            step == NdmsNativeImportRecoveryStep::remove_wal_record;
 }
 
+bool destructive_recovery_action(
+    const NdmsNativeImportRecoveryAction action) noexcept {
+    return action == NdmsNativeImportRecoveryAction::
+                         rollback_delete_exact_owned ||
+           action == NdmsNativeImportRecoveryAction::
+                         retry_exact_owned_delete;
+}
+
+bool initially_dispatchable_recovery_action(
+    const NdmsNativeImportRecoveryAction action,
+    const NdmsNativeImportWalPhase phase) noexcept {
+    using Action = NdmsNativeImportRecoveryAction;
+    using Phase = NdmsNativeImportWalPhase;
+    switch (action) {
+    case Action::abort_without_mutation:
+        return phase == Phase::prepared ||
+               phase == Phase::import_may_be_inflight ||
+               phase == Phase::response_recorded;
+    case Action::rollback_delete_exact_owned:
+        return phase == Phase::import_may_be_inflight ||
+               phase == Phase::response_recorded;
+    case Action::retry_exact_owned_delete:
+        return phase == Phase::rollback_requested ||
+               phase == Phase::delete_may_be_inflight;
+    case Action::complete_rollback:
+        return phase == Phase::target_verified ||
+               phase == Phase::ownership_published ||
+               phase == Phase::rollback_requested ||
+               phase == Phase::delete_may_be_inflight ||
+               phase == Phase::absence_verified;
+    case Action::retry_read_only_observation:
+    case Action::resume_forward_reconcile:
+    case Action::block_unknown:
+        return false;
+    }
+    return false;
+}
+
+bool failed_recovery_step_matches_durable_phase(
+    const NdmsNativeImportRecoveryAction action,
+    const NdmsNativeImportWalPhase phase,
+    const NdmsNativeImportRecoveryStep step) noexcept {
+    using Action = NdmsNativeImportRecoveryAction;
+    using Phase = NdmsNativeImportWalPhase;
+    using Step = NdmsNativeImportRecoveryStep;
+
+    switch (action) {
+    case Action::abort_without_mutation:
+        return step == Step::remove_wal_record &&
+               initially_dispatchable_recovery_action(action, phase);
+    case Action::rollback_delete_exact_owned:
+        switch (step) {
+        case Step::advance_wal_rollback_requested:
+            return phase == Phase::import_may_be_inflight ||
+                   phase == Phase::response_recorded;
+        case Step::remove_ownership_claim:
+        case Step::advance_wal_delete_may_be_inflight:
+            return phase == Phase::rollback_requested;
+        case Step::delete_exact_owned_target:
+        case Step::advance_wal_absence_verified:
+            return phase == Phase::delete_may_be_inflight;
+        case Step::remove_wal_record:
+            return phase == Phase::absence_verified;
+        case Step::advance_wal_target_verified:
+        case Step::publish_ownership:
+        case Step::advance_wal_ownership_published:
+            return false;
+        }
+        return false;
+    case Action::retry_exact_owned_delete:
+        switch (step) {
+        case Step::remove_ownership_claim:
+            return phase == Phase::rollback_requested ||
+                   phase == Phase::delete_may_be_inflight;
+        case Step::advance_wal_delete_may_be_inflight:
+            return phase == Phase::rollback_requested;
+        case Step::delete_exact_owned_target:
+        case Step::advance_wal_absence_verified:
+            return phase == Phase::delete_may_be_inflight;
+        case Step::remove_wal_record:
+            return phase == Phase::absence_verified;
+        case Step::advance_wal_target_verified:
+        case Step::publish_ownership:
+        case Step::advance_wal_ownership_published:
+        case Step::advance_wal_rollback_requested:
+            return false;
+        }
+        return false;
+    case Action::complete_rollback:
+        switch (step) {
+        case Step::advance_wal_absence_verified:
+            return phase == Phase::target_verified ||
+                   phase == Phase::ownership_published ||
+                   phase == Phase::rollback_requested ||
+                   phase == Phase::delete_may_be_inflight;
+        case Step::remove_ownership_claim:
+            return phase == Phase::rollback_requested ||
+                   phase == Phase::delete_may_be_inflight ||
+                   phase == Phase::absence_verified;
+        case Step::remove_wal_record:
+            return phase == Phase::absence_verified;
+        case Step::advance_wal_target_verified:
+        case Step::publish_ownership:
+        case Step::advance_wal_ownership_published:
+        case Step::advance_wal_rollback_requested:
+        case Step::advance_wal_delete_may_be_inflight:
+        case Step::delete_exact_owned_target:
+            return false;
+        }
+        return false;
+    case Action::retry_read_only_observation:
+    case Action::resume_forward_reconcile:
+    case Action::block_unknown:
+        return false;
+    }
+    return false;
+}
+
+bool recovery_action_matches_reported_phase(
+    const NdmsNativeImportRecoveryAction action,
+    const NdmsNativeImportWalPhase phase,
+    const std::optional<NdmsNativeImportRecoveryDispatchState>& dispatch,
+    const std::optional<NdmsNativeImportRecoveryStep>& failed_step) noexcept {
+    if (dispatch != std::optional<NdmsNativeImportRecoveryDispatchState>{
+                        NdmsNativeImportRecoveryDispatchState::step_failed}) {
+        // Admission refusals, dispatcher refusals and successful dispatches
+        // report the record phase from the start of this invocation.
+        return !failed_step.has_value() &&
+               initially_dispatchable_recovery_action(action, phase);
+    }
+    // A failed dispatch reloads the monotonic durable WAL phase.  Bind that
+    // descendant to the exact prefix step that failed instead of pretending
+    // the phase still names the plan's origin.
+    return failed_step.has_value() &&
+           failed_recovery_step_matches_durable_phase(
+               action, phase, *failed_step);
+}
+
+bool cleanup_recovery_action(
+    const NdmsNativeImportRecoveryAction action) noexcept {
+    return action == NdmsNativeImportRecoveryAction::
+                         abort_without_mutation ||
+           action == NdmsNativeImportRecoveryAction::
+                         rollback_delete_exact_owned ||
+           action == NdmsNativeImportRecoveryAction::
+                         retry_exact_owned_delete ||
+           action == NdmsNativeImportRecoveryAction::complete_rollback;
+}
+
 void validate_public_import_recovery_result(
     const NdmsNativeCooperativeImportResumeResult& result) {
+    using Status = NdmsNativeCooperativeImportResumeStatus;
+    using Stop = NdmsNativeCooperativeImportResumeStop;
+    using Admission = NdmsNativeImportRecoveryAdmissionState;
+    using Dispatch = NdmsNativeImportRecoveryDispatchState;
+    using Step = NdmsNativeImportRecoveryStep;
+    using Action = NdmsNativeImportRecoveryAction;
+    using Outcome = NdmsNativeExactMutationResponseOutcome;
+
     if (!known_public_import_recovery_enums(result)) {
         throw std::runtime_error(
             "invalid native import recovery result enum");
     }
     if (result.ndms_import_request_dispatched ||
-        result.ndms_delete_dispatched ||
         result.system_configuration_save_performed ||
         result.external_ndms_writer_race_excluded) {
         throw std::runtime_error(
             "native import recovery overclaimed router mutation");
     }
 
-    const bool has_any_record_identity =
+    const bool any_record_identity =
         result.transaction_id.has_value() ||
         result.expected_interface.has_value() ||
         result.kind.has_value() || result.phase.has_value();
-    const bool has_complete_record_identity =
+    const bool has_record_identity =
         result.transaction_id.has_value() &&
         result.expected_interface.has_value() &&
         result.kind.has_value() && result.phase.has_value();
-    if (has_any_record_identity != has_complete_record_identity ||
-        (has_complete_record_identity &&
+    if (any_record_identity != has_record_identity ||
+        (has_record_identity &&
          (!valid_ndms_native_import_transaction_id(
               *result.transaction_id) ||
           !public_interface_name(*result.expected_interface)))) {
@@ -876,35 +1067,50 @@ void validate_public_import_recovery_result(
             "invalid native import recovery record identity");
     }
 
-    const bool has_any_created_identity =
+    const bool any_created_identity =
         result.created_interface.has_value() ||
         result.created_kernel_interface.has_value();
     const bool has_created_identity = public_created_identity(result);
-    if (has_any_created_identity != has_created_identity ||
+    if (any_created_identity != has_created_identity ||
         (has_created_identity &&
          (!result.expected_interface.has_value() ||
           *result.created_interface != *result.expected_interface))) {
         throw std::runtime_error(
             "invalid native import recovery created identity");
     }
-    if (has_complete_record_identity &&
-        (result.delete_wal_readiness !=
-             std::optional<NdmsNativeDeleteWalReadiness>{
-                 NdmsNativeDeleteWalReadiness::clean} ||
-         result.import_wal_readiness !=
-             std::optional<NdmsNativeCooperativeImportWalReadiness>{
-                 NdmsNativeCooperativeImportWalReadiness::unfinished})) {
+
+    if (has_record_identity) {
+        if (result.delete_wal_readiness !=
+                std::optional<NdmsNativeDeleteWalReadiness>{
+                    NdmsNativeDeleteWalReadiness::clean} ||
+            result.import_wal_readiness !=
+                std::optional<NdmsNativeCooperativeImportWalReadiness>{
+                    NdmsNativeCooperativeImportWalReadiness::unfinished}) {
+            throw std::runtime_error(
+                "invalid native import recovery journal evidence");
+        }
+        if (result.status != Status::completed &&
+            !result.wal_may_require_recovery) {
+            throw std::runtime_error(
+                "native import recovery hid its unfinished WAL");
+        }
+    } else if (result.wal_may_require_recovery ||
+               result.ownership_published ||
+               result.rollback_snapshot_retired || result.wal_removed) {
         throw std::runtime_error(
-            "invalid native import recovery journal evidence");
+            "native import recovery durable evidence lacks identity");
+    }
+    if (result.status == Status::completed &&
+        result.wal_may_require_recovery) {
+        throw std::runtime_error(
+            "completed native import recovery retained WAL authority");
     }
 
-    const bool observation_failed =
-        result.stop == NdmsNativeCooperativeImportResumeStop::
-                           first_observation_failed ||
-        result.stop == NdmsNativeCooperativeImportResumeStop::
-                           second_observation_failed;
+    const bool observation_stop =
+        result.stop == Stop::first_observation_failed ||
+        result.stop == Stop::second_observation_failed;
     if (result.direct_observation_failure.has_value() !=
-            observation_failed ||
+            observation_stop ||
         (result.direct_observation_failure.has_value() &&
          *result.direct_observation_failure ==
              NdmsNativeDirectObservationFailure::none)) {
@@ -912,231 +1118,351 @@ void validate_public_import_recovery_result(
             "invalid native import recovery observation evidence");
     }
 
-    const bool dispatch_step_failed =
+    const bool forward_step_failed =
         result.forward_dispatch_state ==
-        std::optional<NdmsNativeImportRecoveryDispatchState>{
-            NdmsNativeImportRecoveryDispatchState::step_failed};
+        std::optional<Dispatch>{Dispatch::step_failed};
     if (result.forward_failed_step.has_value() !=
-            dispatch_step_failed ||
+            forward_step_failed ||
         (result.forward_failed_step.has_value() &&
          !forward_only_step(*result.forward_failed_step)) ||
         (result.forward_dispatch_state.has_value() &&
          result.forward_admission_state !=
-             std::optional<NdmsNativeImportRecoveryAdmissionState>{
-                 NdmsNativeImportRecoveryAdmissionState::admitted})) {
+             std::optional<Admission>{Admission::admitted})) {
         throw std::runtime_error(
-            "invalid native import recovery dispatch evidence");
+            "invalid native import forward dispatch evidence");
     }
+    const bool recovery_step_failed =
+        result.recovery_dispatch_state ==
+        std::optional<Dispatch>{Dispatch::step_failed};
+    if (result.recovery_failed_step.has_value() !=
+            recovery_step_failed ||
+        (result.recovery_dispatch_state.has_value() &&
+         result.recovery_admission_state !=
+             std::optional<Admission>{Admission::admitted})) {
+        throw std::runtime_error(
+            "invalid native import rollback dispatch evidence");
+    }
+
     const bool has_forward_evidence =
-        result.recovery_action.has_value() ||
         result.forward_admission_state.has_value() ||
         result.forward_dispatch_state.has_value() ||
         result.forward_failed_step.has_value();
-    if ((!has_complete_record_identity &&
-         (has_created_identity || result.ownership_published ||
-          has_forward_evidence)) ||
-        (result.ownership_published && !has_created_identity) ||
-        (result.wal_removed &&
-         result.status !=
-             NdmsNativeCooperativeImportResumeStatus::completed)) {
+    const bool has_recovery_evidence =
+        result.recovery_admission_state.has_value() ||
+        result.recovery_dispatch_state.has_value() ||
+        result.recovery_failed_step.has_value();
+    if (has_forward_evidence && has_recovery_evidence) {
+        throw std::runtime_error(
+            "native import recovery mixed dispatch families");
+    }
+    if ((!has_record_identity &&
+         (has_created_identity || result.recovery_action.has_value() ||
+          has_forward_evidence || has_recovery_evidence)) ||
+        (has_forward_evidence && !has_created_identity) ||
+        (has_recovery_evidence && has_created_identity)) {
         throw std::runtime_error(
             "incoherent native import recovery evidence");
     }
-    if ((has_created_identity || result.ownership_published ||
-         has_forward_evidence) &&
+    if ((has_created_identity || has_forward_evidence) &&
         (!result.phase.has_value() ||
          !forward_only_phase(*result.phase))) {
         throw std::runtime_error(
-            "native import recovery forward evidence has wrong phase");
+            "native import forward evidence has wrong phase");
     }
-    if (has_created_identity && result.recovery_action.has_value() &&
+    if (has_recovery_evidence &&
+        (!result.recovery_action.has_value() ||
+         !recovery_action_matches_reported_phase(
+             *result.recovery_action,
+             *result.phase,
+             result.recovery_dispatch_state,
+             result.recovery_failed_step))) {
+        throw std::runtime_error(
+            "native import rollback dispatch has impossible action");
+    }
+    if (result.recovery_action ==
+            std::optional<Action>{Action::resume_forward_reconcile} &&
+        (!result.phase.has_value() ||
+         *result.phase !=
+             NdmsNativeImportWalPhase::ownership_published ||
+         has_recovery_evidence)) {
+        throw std::runtime_error(
+            "native import forward reconcile has impossible evidence");
+    }
+    if (has_forward_evidence &&
+        result.recovery_action.has_value() &&
         (*result.phase !=
              NdmsNativeImportWalPhase::ownership_published ||
          *result.recovery_action !=
-             NdmsNativeImportRecoveryAction::
-                 resume_forward_reconcile)) {
+             Action::resume_forward_reconcile)) {
         throw std::runtime_error(
-            "native import recovery action has wrong forward phase");
-    }
-    if (result.recovery_action.has_value() &&
-        *result.phase !=
-            NdmsNativeImportWalPhase::ownership_published &&
-        result.stop != NdmsNativeCooperativeImportResumeStop::
-                           recovery_action_not_forward_only) {
-        throw std::runtime_error(
-            "native import recovery action has impossible stop");
+            "native import forward dispatch has impossible action");
     }
 
-    const auto require_stop_evidence = [](const bool condition) {
+    const bool all_delete_trace =
+        result.delete_perform_started &&
+        result.request_may_have_been_dispatched &&
+        result.ndms_delete_dispatched;
+    const bool any_delete_trace =
+        result.delete_perform_started ||
+        result.request_may_have_been_dispatched ||
+        result.ndms_delete_dispatched;
+    if (any_delete_trace != all_delete_trace ||
+        (any_delete_trace &&
+         !result.delete_transport_outcome.has_value())) {
+        throw std::runtime_error(
+            "native import recovery delete trace is incoherent");
+    }
+    if (result.delete_transport_outcome.has_value()) {
+        const bool guard_rejected =
+            *result.delete_transport_outcome ==
+            Outcome::guard_rejected;
+        const bool setup_failed_before_guard =
+            *result.delete_transport_outcome ==
+                Outcome::transport_failed &&
+            result.stop == Stop::delete_guard_rejected;
+        const bool coherent_transport_trace =
+            (guard_rejected || setup_failed_before_guard)
+                ? !any_delete_trace
+                : all_delete_trace;
+        if (!coherent_transport_trace ||
+            !result.external_ndms_writer_race_accepted ||
+            !result.recovery_action.has_value() ||
+            !destructive_recovery_action(*result.recovery_action) ||
+            result.recovery_admission_state !=
+                std::optional<Admission>{Admission::admitted} ||
+            !result.recovery_dispatch_state.has_value()) {
+            throw std::runtime_error(
+                "native import recovery delete outcome is incoherent");
+        }
+    }
+    const bool destructive_delete_completed_before_failure =
+        result.recovery_action.has_value() &&
+        destructive_recovery_action(*result.recovery_action) &&
+        (result.recovery_failed_step ==
+             std::optional<Step>{Step::advance_wal_absence_verified} ||
+         result.recovery_failed_step ==
+             std::optional<Step>{Step::remove_wal_record});
+    if (destructive_delete_completed_before_failure &&
+        (!all_delete_trace ||
+         !result.delete_transport_outcome.has_value() ||
+         result.delete_transport_outcome ==
+             std::optional<Outcome>{Outcome::guard_rejected})) {
+        throw std::runtime_error(
+            "native import recovery hid a completed delete prefix");
+    }
+
+    if (result.rollback_snapshot_retired &&
+        (!has_record_identity || !result.recovery_action.has_value() ||
+         !cleanup_recovery_action(*result.recovery_action) ||
+         !has_recovery_evidence || has_forward_evidence ||
+         result.ownership_published)) {
+        throw std::runtime_error(
+            "native import recovery snapshot evidence is incoherent");
+    }
+    if (result.wal_removed != (result.status == Status::completed)) {
+        throw std::runtime_error(
+            "native import recovery WAL removal is incoherent");
+    }
+    if (result.status == Status::recovery_required &&
+        result.rollback_snapshot_retired &&
+        result.stop != Stop::wal_cleanup_failed &&
+        result.stop != Stop::unexpected_failure) {
+        throw std::runtime_error(
+            "native import recovery retired a snapshot at wrong stop");
+    }
+
+    const auto require = [](const bool condition) {
         if (!condition) {
             throw std::runtime_error(
                 "native import recovery stop evidence is incoherent");
         }
     };
-    const bool no_created_or_forward_evidence =
+    const bool no_record_work_evidence =
         !has_created_identity && !result.ownership_published &&
         !result.recovery_action.has_value() &&
-        !result.forward_admission_state.has_value() &&
-        !result.forward_dispatch_state.has_value() &&
-        !result.forward_failed_step.has_value();
-    const auto exact_dispatch_failure =
-        [&](const NdmsNativeImportRecoveryStep expected_step) {
-            return has_complete_record_identity &&
-                   has_created_identity &&
-                   result.forward_admission_state ==
-                       std::optional<
-                           NdmsNativeImportRecoveryAdmissionState>{
-                           NdmsNativeImportRecoveryAdmissionState::
-                               admitted} &&
-                   result.forward_dispatch_state ==
-                       std::optional<
-                           NdmsNativeImportRecoveryDispatchState>{
-                           NdmsNativeImportRecoveryDispatchState::
-                               step_failed} &&
-                   result.forward_failed_step ==
-                       std::optional<NdmsNativeImportRecoveryStep>{
-                           expected_step} &&
-                   !result.direct_observation_failure.has_value();
-        };
+        !has_forward_evidence && !has_recovery_evidence &&
+        !result.delete_transport_outcome.has_value() &&
+        !any_delete_trace;
+    const auto exact_forward_failure = [&](const Step step) {
+        return result.status == Status::blocked &&
+               has_record_identity && has_created_identity &&
+               result.forward_admission_state ==
+                   std::optional<Admission>{Admission::admitted} &&
+               result.forward_dispatch_state ==
+                   std::optional<Dispatch>{Dispatch::step_failed} &&
+               result.forward_failed_step ==
+                   std::optional<Step>{step} &&
+               !result.direct_observation_failure.has_value();
+    };
+    const auto exact_recovery_failure = [&](const Step step) {
+        return result.status == Status::recovery_required &&
+               has_record_identity &&
+               result.recovery_action.has_value() &&
+               result.recovery_admission_state ==
+                   std::optional<Admission>{Admission::admitted} &&
+               result.recovery_dispatch_state ==
+                   std::optional<Dispatch>{Dispatch::step_failed} &&
+               result.recovery_failed_step ==
+                   std::optional<Step>{step};
+    };
 
     switch (result.stop) {
-    case NdmsNativeCooperativeImportResumeStop::none:
-    case NdmsNativeCooperativeImportResumeStop::unexpected_failure:
-        // An exception can preserve any already-validated monotonic prefix.
-        // The generic ordering checks above still prevent evidence from
-        // appearing before its durable record or forward-only phase.
+    case Stop::none:
+    case Stop::unexpected_failure:
         break;
-    case NdmsNativeCooperativeImportResumeStop::writer_missing:
-    case NdmsNativeCooperativeImportResumeStop::writer_lost:
-        require_stop_evidence(
-            !result.delete_wal_readiness.has_value() &&
-            !result.import_wal_readiness.has_value() &&
-            !has_complete_record_identity &&
-            no_created_or_forward_evidence &&
-            !result.direct_observation_failure.has_value());
+    case Stop::writer_missing:
+    case Stop::writer_lost:
+        require(result.status == Status::blocked &&
+                !result.delete_wal_readiness.has_value() &&
+                !result.import_wal_readiness.has_value() &&
+                !has_record_identity && no_record_work_evidence &&
+                !result.direct_observation_failure.has_value());
         break;
-    case NdmsNativeCooperativeImportResumeStop::delete_wal_not_clean:
-        require_stop_evidence(
-            result.delete_wal_readiness.has_value() &&
-            *result.delete_wal_readiness !=
-                NdmsNativeDeleteWalReadiness::clean &&
-            !result.import_wal_readiness.has_value() &&
-            !has_complete_record_identity &&
-            no_created_or_forward_evidence &&
-            !result.direct_observation_failure.has_value());
+    case Stop::delete_wal_not_clean:
+        require(result.status == Status::blocked &&
+                result.delete_wal_readiness.has_value() &&
+                *result.delete_wal_readiness !=
+                    NdmsNativeDeleteWalReadiness::clean &&
+                !result.import_wal_readiness.has_value() &&
+                !has_record_identity && no_record_work_evidence);
         break;
-    case NdmsNativeCooperativeImportResumeStop::
-        import_wal_not_single_safe:
-        require_stop_evidence(
-            result.delete_wal_readiness ==
-                std::optional<NdmsNativeDeleteWalReadiness>{
-                    NdmsNativeDeleteWalReadiness::clean} &&
-            result.import_wal_readiness.has_value() &&
-            *result.import_wal_readiness !=
-                NdmsNativeCooperativeImportWalReadiness::clean &&
-            !has_complete_record_identity &&
-            no_created_or_forward_evidence &&
-            !result.direct_observation_failure.has_value());
+    case Stop::import_wal_not_single_safe:
+        require(result.status == Status::blocked &&
+                result.delete_wal_readiness ==
+                    std::optional<NdmsNativeDeleteWalReadiness>{
+                        NdmsNativeDeleteWalReadiness::clean} &&
+                result.import_wal_readiness.has_value() &&
+                *result.import_wal_readiness !=
+                    NdmsNativeCooperativeImportWalReadiness::clean &&
+                !has_record_identity && no_record_work_evidence);
         break;
-    case NdmsNativeCooperativeImportResumeStop::record_not_cooperative:
-        require_stop_evidence(
-            has_complete_record_identity &&
-            no_created_or_forward_evidence &&
-            !result.direct_observation_failure.has_value());
+    case Stop::record_not_cooperative:
+    case Stop::phase_not_forward_only:
+    case Stop::expected_target_not_managed:
+        require(result.status == Status::blocked &&
+                has_record_identity && no_record_work_evidence &&
+                !result.direct_observation_failure.has_value());
         break;
-    case NdmsNativeCooperativeImportResumeStop::phase_not_forward_only:
-        require_stop_evidence(
-            has_complete_record_identity &&
-            !forward_only_phase(*result.phase) &&
-            no_created_or_forward_evidence &&
-            !result.direct_observation_failure.has_value());
+    case Stop::first_observation_failed:
+    case Stop::second_observation_failed:
+        require(has_record_identity &&
+                result.direct_observation_failure.has_value() &&
+                !has_created_identity && !has_forward_evidence);
         break;
-    case NdmsNativeCooperativeImportResumeStop::
-        expected_target_not_managed:
-    case NdmsNativeCooperativeImportResumeStop::
-        observation_kind_mismatch:
-    case NdmsNativeCooperativeImportResumeStop::
-        durable_observation_failed:
-    case NdmsNativeCooperativeImportResumeStop::observation_unstable:
-        require_stop_evidence(
-            has_complete_record_identity &&
-            forward_only_phase(*result.phase) &&
-            no_created_or_forward_evidence &&
-            !result.direct_observation_failure.has_value());
+    case Stop::observation_kind_mismatch:
+    case Stop::durable_observation_failed:
+    case Stop::observation_unstable:
+        require(has_record_identity &&
+                !result.direct_observation_failure.has_value() &&
+                !has_created_identity && !has_forward_evidence);
         break;
-    case NdmsNativeCooperativeImportResumeStop::
-        first_observation_failed:
-    case NdmsNativeCooperativeImportResumeStop::
-        second_observation_failed:
-        require_stop_evidence(
-            has_complete_record_identity &&
-            forward_only_phase(*result.phase) &&
-            no_created_or_forward_evidence &&
-            result.direct_observation_failure.has_value());
+    case Stop::ownership_not_exact:
+        require(has_record_identity && !has_created_identity &&
+                !has_forward_evidence && !result.ownership_published);
         break;
-    case NdmsNativeCooperativeImportResumeStop::ownership_not_exact:
-        require_stop_evidence(
-            has_complete_record_identity &&
-            forward_only_phase(*result.phase) &&
-            !has_created_identity && !result.ownership_published &&
-            !result.forward_admission_state.has_value() &&
-            !result.forward_dispatch_state.has_value() &&
-            !result.forward_failed_step.has_value() &&
-            !result.direct_observation_failure.has_value() &&
-            (!result.recovery_action.has_value() ||
-             *result.phase ==
-                 NdmsNativeImportWalPhase::ownership_published));
+    case Stop::snapshot_not_exact:
+        require(has_record_identity &&
+                result.recovery_action.has_value() &&
+                !has_created_identity && !has_forward_evidence &&
+                !result.rollback_snapshot_retired);
         break;
-    case NdmsNativeCooperativeImportResumeStop::
-        recovery_action_not_forward_only:
-        require_stop_evidence(
-            has_complete_record_identity &&
-            forward_only_phase(*result.phase) &&
-            !has_created_identity && !result.ownership_published &&
-            result.recovery_action.has_value() &&
-            !result.forward_admission_state.has_value() &&
-            !result.forward_dispatch_state.has_value() &&
-            !result.forward_failed_step.has_value() &&
-            !result.direct_observation_failure.has_value());
+    case Stop::recovery_action_not_forward_only:
+    case Stop::recovery_action_not_actionable:
+        require(result.status == Status::blocked &&
+                has_record_identity && !has_created_identity &&
+                result.recovery_action.has_value() &&
+                !has_forward_evidence && !has_recovery_evidence &&
+                !result.direct_observation_failure.has_value());
         break;
-    case NdmsNativeCooperativeImportResumeStop::
-        forward_admission_failed:
-        require_stop_evidence(
-            has_complete_record_identity && has_created_identity &&
-            result.forward_admission_state.has_value() &&
-            *result.forward_admission_state !=
-                NdmsNativeImportRecoveryAdmissionState::admitted &&
-            !result.forward_dispatch_state.has_value() &&
-            !result.forward_failed_step.has_value() &&
-            !result.direct_observation_failure.has_value());
+    case Stop::external_writer_race_not_accepted:
+        require(result.status == Status::recovery_required &&
+                has_record_identity &&
+                result.recovery_action.has_value() &&
+                destructive_recovery_action(*result.recovery_action) &&
+                !result.external_ndms_writer_race_accepted &&
+                !has_forward_evidence && !has_recovery_evidence &&
+                !result.delete_transport_outcome.has_value());
         break;
-    case NdmsNativeCooperativeImportResumeStop::
-        target_verified_wal_publish_failed:
-        require_stop_evidence(exact_dispatch_failure(
-            NdmsNativeImportRecoveryStep::
-                advance_wal_target_verified));
+    case Stop::forward_admission_failed:
+        require(result.status == Status::blocked &&
+                has_record_identity && has_created_identity &&
+                result.forward_admission_state.has_value() &&
+                *result.forward_admission_state !=
+                    Admission::admitted &&
+                !result.forward_dispatch_state.has_value() &&
+                !result.forward_failed_step.has_value() &&
+                !has_recovery_evidence);
         break;
-    case NdmsNativeCooperativeImportResumeStop::ownership_publish_failed:
-        require_stop_evidence(exact_dispatch_failure(
-            NdmsNativeImportRecoveryStep::publish_ownership));
+    case Stop::recovery_admission_failed:
+        require(result.status == Status::recovery_required &&
+                has_record_identity &&
+                result.recovery_action.has_value() &&
+                result.recovery_admission_state.has_value() &&
+                *result.recovery_admission_state !=
+                    Admission::admitted &&
+                !result.recovery_dispatch_state.has_value() &&
+                !result.recovery_failed_step.has_value() &&
+                !result.delete_transport_outcome.has_value());
         break;
-    case NdmsNativeCooperativeImportResumeStop::
-        ownership_wal_publish_failed:
-        require_stop_evidence(exact_dispatch_failure(
-            NdmsNativeImportRecoveryStep::
-                advance_wal_ownership_published));
+    case Stop::target_verified_wal_publish_failed:
+        require(exact_forward_failure(
+            Step::advance_wal_target_verified));
         break;
-    case NdmsNativeCooperativeImportResumeStop::wal_cleanup_failed:
-        require_stop_evidence(exact_dispatch_failure(
-            NdmsNativeImportRecoveryStep::remove_wal_record));
+    case Stop::ownership_publish_failed:
+        require(exact_forward_failure(Step::publish_ownership));
+        break;
+    case Stop::ownership_wal_publish_failed:
+        require(exact_forward_failure(
+            Step::advance_wal_ownership_published));
+        break;
+    case Stop::rollback_wal_publish_failed:
+        require(exact_recovery_failure(
+            Step::advance_wal_rollback_requested));
+        break;
+    case Stop::ownership_retract_failed:
+        require(exact_recovery_failure(
+            Step::remove_ownership_claim));
+        break;
+    case Stop::delete_wal_publish_failed:
+        require(exact_recovery_failure(
+            Step::advance_wal_delete_may_be_inflight));
+        break;
+    case Stop::delete_guard_rejected:
+        require(exact_recovery_failure(
+                    Step::delete_exact_owned_target) &&
+                (result.delete_transport_outcome ==
+                     std::optional<Outcome>{Outcome::guard_rejected} ||
+                 result.delete_transport_outcome ==
+                     std::optional<Outcome>{Outcome::transport_failed}) &&
+                !any_delete_trace);
+        break;
+    case Stop::delete_transport_ambiguous:
+        require(exact_recovery_failure(
+                    Step::delete_exact_owned_target) &&
+                result.delete_transport_outcome.has_value() &&
+                *result.delete_transport_outcome !=
+                    Outcome::guard_rejected &&
+                all_delete_trace);
+        break;
+    case Stop::absence_wal_publish_failed:
+        require(exact_recovery_failure(
+            Step::advance_wal_absence_verified));
+        break;
+    case Stop::snapshot_retirement_failed:
+        require(exact_recovery_failure(Step::remove_wal_record) &&
+                !result.rollback_snapshot_retired);
+        break;
+    case Stop::wal_cleanup_failed:
+        require(exact_forward_failure(Step::remove_wal_record) ||
+                (exact_recovery_failure(Step::remove_wal_record) &&
+                 result.rollback_snapshot_retired));
         break;
     }
 
     switch (result.status) {
-    case NdmsNativeCooperativeImportResumeStatus::no_work:
-        if (result.stop !=
-                NdmsNativeCooperativeImportResumeStop::none ||
-            has_complete_record_identity || has_created_identity ||
+    case Status::no_work:
+        if (result.stop != Stop::none ||
+            has_record_identity || has_created_identity ||
             result.delete_wal_readiness !=
                 std::optional<NdmsNativeDeleteWalReadiness>{
                     NdmsNativeDeleteWalReadiness::clean} ||
@@ -1144,49 +1470,84 @@ void validate_public_import_recovery_result(
                 std::optional<NdmsNativeCooperativeImportWalReadiness>{
                     NdmsNativeCooperativeImportWalReadiness::clean} ||
             result.wal_may_require_recovery ||
-            result.ownership_published || result.wal_removed ||
+            result.ownership_published ||
+            result.rollback_snapshot_retired || result.wal_removed ||
             result.direct_observation_failure.has_value() ||
-            has_forward_evidence) {
+            result.recovery_action.has_value() ||
+            has_forward_evidence || has_recovery_evidence ||
+            result.delete_transport_outcome.has_value() ||
+            any_delete_trace) {
             throw std::runtime_error(
                 "incoherent no-work native import recovery result");
         }
         break;
-    case NdmsNativeCooperativeImportResumeStatus::blocked:
-        if (result.stop ==
-                NdmsNativeCooperativeImportResumeStop::none ||
-            result.wal_removed ||
-            (has_complete_record_identity !=
-             result.wal_may_require_recovery) ||
+    case Status::blocked:
+        if (result.stop == Stop::none || result.wal_removed ||
+            result.rollback_snapshot_retired || any_delete_trace ||
+            result.delete_transport_outcome.has_value() ||
+            has_recovery_evidence ||
             result.forward_dispatch_state ==
-                std::optional<NdmsNativeImportRecoveryDispatchState>{
-                    NdmsNativeImportRecoveryDispatchState::completed}) {
+                std::optional<Dispatch>{Dispatch::completed}) {
             throw std::runtime_error(
                 "incoherent blocked native import recovery result");
         }
         break;
-    case NdmsNativeCooperativeImportResumeStatus::completed:
-        if (result.stop !=
-                NdmsNativeCooperativeImportResumeStop::none ||
-            !has_complete_record_identity || !has_created_identity ||
-            !forward_only_phase(*result.phase) ||
-            result.wal_may_require_recovery ||
-            !result.ownership_published || !result.wal_removed ||
+    case Status::recovery_required:
+        if (result.stop == Stop::none || !has_record_identity ||
+            !result.wal_may_require_recovery || result.wal_removed) {
+            throw std::runtime_error(
+                "incoherent recovery-required native import result");
+        }
+        break;
+    case Status::completed:
+        if (result.stop != Stop::none || !has_record_identity ||
+            result.wal_may_require_recovery || !result.wal_removed ||
             result.direct_observation_failure.has_value() ||
-            result.forward_admission_state !=
-                std::optional<NdmsNativeImportRecoveryAdmissionState>{
-                    NdmsNativeImportRecoveryAdmissionState::admitted} ||
-            result.forward_dispatch_state !=
-                std::optional<NdmsNativeImportRecoveryDispatchState>{
-                    NdmsNativeImportRecoveryDispatchState::completed} ||
-            result.forward_failed_step.has_value() ||
-            ((*result.phase ==
-                  NdmsNativeImportWalPhase::ownership_published) !=
-             (result.recovery_action ==
-              std::optional<NdmsNativeImportRecoveryAction>{
-                  NdmsNativeImportRecoveryAction::
-                      resume_forward_reconcile}))) {
+            (has_created_identity ==
+             result.rollback_snapshot_retired)) {
             throw std::runtime_error(
                 "incoherent completed native import recovery result");
+        }
+        if (has_created_identity) {
+            const bool ownership_reconcile =
+                *result.phase ==
+                NdmsNativeImportWalPhase::ownership_published;
+            if (!forward_only_phase(*result.phase) ||
+                !result.ownership_published || has_recovery_evidence ||
+                result.delete_transport_outcome.has_value() ||
+                any_delete_trace ||
+                result.forward_admission_state !=
+                    std::optional<Admission>{Admission::admitted} ||
+                result.forward_dispatch_state !=
+                    std::optional<Dispatch>{Dispatch::completed} ||
+                result.forward_failed_step.has_value() ||
+                (ownership_reconcile
+                     ? result.recovery_action !=
+                           std::optional<Action>{
+                               Action::resume_forward_reconcile}
+                     : result.recovery_action.has_value())) {
+                throw std::runtime_error(
+                    "incoherent forward-completed native import recovery");
+            }
+        } else {
+            if (result.ownership_published || has_forward_evidence ||
+                !result.rollback_snapshot_retired ||
+                !result.recovery_action.has_value() ||
+                !cleanup_recovery_action(*result.recovery_action) ||
+                result.recovery_admission_state !=
+                    std::optional<Admission>{Admission::admitted} ||
+                result.recovery_dispatch_state !=
+                    std::optional<Dispatch>{Dispatch::completed} ||
+                result.recovery_failed_step.has_value() ||
+                (destructive_recovery_action(
+                     *result.recovery_action) != any_delete_trace) ||
+                (destructive_recovery_action(
+                     *result.recovery_action) &&
+                 (!result.external_ndms_writer_race_accepted ||
+                  !result.delete_transport_outcome.has_value()))) {
+                throw std::runtime_error(
+                    "incoherent cleanup-completed native import recovery");
+            }
         }
         break;
     }
@@ -1203,6 +1564,31 @@ const char* import_wal_readiness_name(
         return "unsafe";
     }
     return "unsafe";
+}
+
+const char* import_recovery_transport_outcome_name(
+    const NdmsNativeExactMutationResponseOutcome outcome) {
+    switch (outcome) {
+    case NdmsNativeExactMutationResponseOutcome::guard_rejected:
+        return "guard_rejected";
+    case NdmsNativeExactMutationResponseOutcome::transport_failed:
+        return "transport_failed";
+    case NdmsNativeExactMutationResponseOutcome::body_too_large:
+        return "body_too_large";
+    case NdmsNativeExactMutationResponseOutcome::http_status_not_200:
+        return "http_status_not_200";
+    case NdmsNativeExactMutationResponseOutcome::content_type_not_json:
+        return "content_type_not_json";
+    case NdmsNativeExactMutationResponseOutcome::body_empty:
+        return "body_empty";
+    case NdmsNativeExactMutationResponseOutcome::shape_not_acknowledged:
+        return "shape_not_acknowledged";
+    case NdmsNativeExactMutationResponseOutcome::
+        acknowledged_needs_observation:
+        return "acknowledged_needs_observation";
+    }
+    throw std::runtime_error(
+        "invalid native import recovery transport outcome");
 }
 
 ApiServer::SensitiveRequestReservationPtr reserve_import(
@@ -1328,11 +1714,18 @@ nlohmann::json ndms_native_import_recovery_api_response(
         {"stop", ndms_native_cooperative_import_resume_stop_name(
                      result.stop)},
         {"ndms_import_request_dispatched", false},
-        {"ndms_delete_dispatched", false},
+        {"ndms_delete_dispatched", result.ndms_delete_dispatched},
         {"system_configuration_save_performed", false},
         {"external_ndms_writer_race_excluded", false},
+        {"external_ndms_writer_race_accepted",
+         result.external_ndms_writer_race_accepted},
+        {"delete_perform_started", result.delete_perform_started},
+        {"request_may_have_been_dispatched",
+         result.request_may_have_been_dispatched},
         {"wal_may_require_recovery", result.wal_may_require_recovery},
         {"ownership_published", result.ownership_published},
+        {"rollback_snapshot_retired",
+         result.rollback_snapshot_retired},
         {"wal_removed", result.wal_removed},
     };
 
@@ -1388,6 +1781,26 @@ nlohmann::json ndms_native_import_recovery_api_response(
         response["forward_failed_step"] =
             ndms_native_import_recovery_step_name(
                 *result.forward_failed_step);
+    }
+    if (result.recovery_admission_state.has_value()) {
+        response["recovery_admission_state"] =
+            ndms_native_import_recovery_admission_state_name(
+                *result.recovery_admission_state);
+    }
+    if (result.recovery_dispatch_state.has_value()) {
+        response["recovery_dispatch_state"] =
+            ndms_native_import_recovery_dispatch_state_name(
+                *result.recovery_dispatch_state);
+    }
+    if (result.recovery_failed_step.has_value()) {
+        response["recovery_failed_step"] =
+            ndms_native_import_recovery_step_name(
+                *result.recovery_failed_step);
+    }
+    if (result.delete_transport_outcome.has_value()) {
+        response["delete_transport_outcome"] =
+            import_recovery_transport_outcome_name(
+                *result.delete_transport_outcome);
     }
     return response;
 }
@@ -1451,19 +1864,30 @@ void register_ndms_native_import_handler(ApiServer& server,
     server.post_sensitive(
         std::string{kNdmsNativeImportRecoveryApiPath},
         1U,
-        [&ctx](const httplib::Request&) {
+        [&ctx](const httplib::Request& request) {
+            static_cast<void>(recovery_owner_race_acceptance(request));
             return reserve_import_recovery(ctx);
         },
         [&ctx](
-            const httplib::Request&,
+            const httplib::Request& request,
             SensitiveRequestBody body,
             const ApiServer::SensitiveRequestReservationPtr& reservation) {
             if (!body.empty()) {
                 throw ApiError(
                     "native import recovery body must be empty", 400);
             }
+            const auto acceptance =
+                recovery_owner_race_acceptance(request);
             const auto result =
-                ctx.resume_ndms_native_import_fn(reservation);
+                ctx.resume_ndms_native_import_fn(
+                    acceptance, reservation);
+            if (result.external_ndms_writer_race_accepted !=
+                (acceptance ==
+                 NdmsNativeExternalWriterRaceAcceptance::
+                     owner_accepted)) {
+                throw std::runtime_error(
+                    "native import recovery acceptance trace mismatch");
+            }
             return ndms_native_import_recovery_api_response(result).dump();
         });
 }

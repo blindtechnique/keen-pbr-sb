@@ -12,5 +12,6 @@ export type NdmsNativeImportRecoveryStatus = typeof NdmsNativeImportRecoveryStat
 export const NdmsNativeImportRecoveryStatus = {
   no_work: 'no_work',
   blocked: 'blocked',
+  recovery_required: 'recovery_required',
   completed: 'completed',
 } as const;

@@ -35,8 +35,12 @@ const noWorkImportRecovery = () => ({
   ndms_delete_dispatched: false,
   system_configuration_save_performed: false,
   external_ndms_writer_race_excluded: false,
+  external_ndms_writer_race_accepted: false,
+  delete_perform_started: false,
+  request_may_have_been_dispatched: false,
   wal_may_require_recovery: false,
   ownership_published: false,
+  rollback_snapshot_retired: false,
   wal_removed: false,
   delete_wal_readiness: "clean",
   import_wal_readiness: "clean",
@@ -142,6 +146,98 @@ describe("native mutation response trust", () => {
     ).rejects.toMatchObject({ code: "outcome_unknown" })
   })
 
+  test("accepts stable cleanup, consent, ambiguity and pre-guard truth", () => {
+    const record = {
+      ...noWorkImportRecovery(),
+      status: "recovery_required",
+      wal_may_require_recovery: true,
+      delete_wal_readiness: "clean",
+      import_wal_readiness: "unfinished",
+      expected_interface: "Wireguard5",
+      kind: "wireguard",
+      phase: "response_recorded",
+      recovery_action: "rollback_delete_exact_owned",
+    } as const
+    const consent = {
+      ...record,
+      stop: "external_writer_race_not_accepted",
+    } as const
+    expect(parseNdmsNativeImportRecoveryResult(consent)).not.toBeNull()
+
+    const ambiguity = {
+      ...record,
+      stop: "delete_transport_ambiguous",
+      phase: "delete_may_be_inflight",
+      external_ndms_writer_race_accepted: true,
+      delete_perform_started: true,
+      request_may_have_been_dispatched: true,
+      ndms_delete_dispatched: true,
+      recovery_admission_state: "admitted",
+      recovery_dispatch_state: "step_failed",
+      recovery_failed_step: "delete_exact_owned_target",
+      delete_transport_outcome: "transport_failed",
+    } as const
+    expect(parseNdmsNativeImportRecoveryResult(ambiguity)).not.toBeNull()
+
+    const beforeGuard = {
+      ...ambiguity,
+      stop: "delete_guard_rejected",
+      delete_perform_started: false,
+      request_may_have_been_dispatched: false,
+      ndms_delete_dispatched: false,
+    } as const
+    expect(parseNdmsNativeImportRecoveryResult(beforeGuard)).not.toBeNull()
+
+    const stableCleanup = {
+      ...record,
+      status: "completed",
+      stop: "none",
+      phase: "target_verified",
+      recovery_action: "complete_rollback",
+      recovery_admission_state: "admitted",
+      recovery_dispatch_state: "completed",
+      wal_may_require_recovery: false,
+      rollback_snapshot_retired: true,
+      wal_removed: true,
+    } as const
+    expect(parseNdmsNativeImportRecoveryResult(stableCleanup)).not.toBeNull()
+  })
+
+  test("requires the retained trace after a destructive delete prefix", () => {
+    const postDeleteFailure = {
+      ...noWorkImportRecovery(),
+      status: "recovery_required",
+      stop: "absence_wal_publish_failed",
+      external_ndms_writer_race_accepted: true,
+      delete_perform_started: true,
+      request_may_have_been_dispatched: true,
+      ndms_delete_dispatched: true,
+      wal_may_require_recovery: true,
+      expected_interface: "Wireguard5",
+      kind: "wireguard",
+      phase: "delete_may_be_inflight",
+      delete_wal_readiness: "clean",
+      import_wal_readiness: "unfinished",
+      recovery_action: "rollback_delete_exact_owned",
+      recovery_admission_state: "admitted",
+      recovery_dispatch_state: "step_failed",
+      recovery_failed_step: "advance_wal_absence_verified",
+      delete_transport_outcome: "http_status_not_200",
+    } as const
+    expect(
+      parseNdmsNativeImportRecoveryResult(postDeleteFailure)
+    ).not.toBeNull()
+    expect(
+      parseNdmsNativeImportRecoveryResult({
+        ...postDeleteFailure,
+        delete_perform_started: false,
+        request_may_have_been_dispatched: false,
+        ndms_delete_dispatched: false,
+        delete_transport_outcome: undefined,
+      })
+    ).toBeNull()
+  })
+
   test("keeps exact pre-core 4xx distinguishable from ambiguity", async () => {
     const fetchImpl = mock(() =>
       Promise.resolve(new Response("", { status: 428 }))
@@ -156,5 +252,49 @@ describe("native mutation response trust", () => {
     await expect(
       postNdmsNativeImportRecoveryOnce(fetchImpl)
     ).rejects.toBeInstanceOf(TypeError)
+  })
+
+  test("sends fresh owner acceptance only for the explicit invocation", async () => {
+    const fetchImpl = mock((_input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers)
+      expect(
+        headers.get("X-Keen-Pbr-External-Ndms-Writer-Race-Acceptance")
+      ).toBe("owner-accepted")
+      return Promise.resolve(
+        Response.json({
+          ...noWorkImportRecovery(),
+          external_ndms_writer_race_accepted: true,
+        })
+      )
+    })
+
+    await expect(
+      postNdmsNativeImportRecoveryOnce(true, fetchImpl)
+    ).resolves.toMatchObject({
+      status: "no_work",
+      external_ndms_writer_race_accepted: true,
+    })
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
+  test("binds the response acceptance trace to this exact request", async () => {
+    const acceptedResponse = mock(() =>
+      Promise.resolve(
+        Response.json({
+          ...noWorkImportRecovery(),
+          external_ndms_writer_race_accepted: true,
+        })
+      )
+    )
+    await expect(
+      postNdmsNativeImportRecoveryOnce(false, acceptedResponse)
+    ).rejects.toMatchObject({ code: "outcome_unknown" })
+
+    const absentResponse = mock(() =>
+      Promise.resolve(Response.json(noWorkImportRecovery()))
+    )
+    await expect(
+      postNdmsNativeImportRecoveryOnce(true, absentResponse)
+    ).rejects.toMatchObject({ code: "outcome_unknown" })
   })
 })
