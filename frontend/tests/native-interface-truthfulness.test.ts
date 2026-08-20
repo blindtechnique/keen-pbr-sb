@@ -49,10 +49,16 @@ describe("native Keenetic interface wording", () => {
     }
     expect(
       ruTranslation.transports.nativeInterface.managementReadOnlyDescription
-    ).toContain("отключены")
+    ).toContain("Создание и изменение остаются в KeeneticOS")
+    expect(
+      ruTranslation.transports.nativeInterface.managementReadOnlyDescription
+    ).toContain("только точный импорт панели")
     expect(
       enTranslation.transports.nativeInterface.managementReadOnlyDescription
-    ).toContain("disabled")
+    ).toContain("Creating and editing stay in KeeneticOS")
+    expect(
+      enTranslation.transports.nativeInterface.managementReadOnlyDescription
+    ).toContain("only an exact panel-owned import")
   })
 
   test("previews locally and sends once only after protected explicit consent", () => {

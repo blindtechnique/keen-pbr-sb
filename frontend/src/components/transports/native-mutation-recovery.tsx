@@ -12,12 +12,8 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import {
-  beginNativeMutationPending,
-  clearNativeMutationPending,
-  latchNativeMutationRecovery,
-  latchNativeMutationUnknown,
-  nativeMutationPendingIsActiveInThisProcess,
   readNativeMutationLock,
+  runWithNativeMutationLease,
   subscribeNativeMutationLock,
   type NativeMutationLock,
   type NativeMutationOperation,
@@ -32,6 +28,22 @@ type RecoveryOutcome =
   | "delete_terminal"
   | "delete_blocked"
   | "unknown"
+
+type ImportRecoveryLeaseValue = Extract<
+  RecoveryOutcome,
+  "import_no_work" | "import_completed" | "import_blocked" | "unknown"
+>
+
+type DeleteRecoveryLeaseValue =
+  | Readonly<{
+      outcome: "delete_terminal"
+      result: NdmsNativeDeleteResult
+      reconfirm: false
+    }>
+  | Readonly<{
+      outcome: "delete_no_work" | "delete_blocked" | "unknown"
+      reconfirm: boolean
+    }>
 
 const operationRecoveryKind = (
   operation: NativeMutationOperation
@@ -76,7 +88,6 @@ export function NativeMutationRecovery({
   const importState = inventoryStatus?.observed_import_journal_state
   const deleteState = inventoryStatus?.observed_delete_journal_state
   const pending = lock?.state === "pending"
-  const pendingActiveHere = nativeMutationPendingIsActiveInThisProcess(lock)
   const importNeedsRecovery =
     importState === "recovery_required" || lockMatches(lock, "import")
   const deleteNeedsRecovery =
@@ -96,16 +107,6 @@ export function NativeMutationRecovery({
 
   const syncLock = () => setLock(readNativeMutationLock())
 
-  const finishTrustedPending = (
-    token: ReturnType<typeof beginNativeMutationPending>,
-    operation: NativeMutationOperation
-  ): boolean => {
-    if (token && clearNativeMutationPending(token)) return true
-    latchNativeMutationUnknown(operation)
-    setOutcome("unknown")
-    return false
-  }
-
   const refresh = async () => {
     try {
       await onInventoryRefresh()
@@ -115,41 +116,58 @@ export function NativeMutationRecovery({
   }
 
   const recoverImport = async () => {
-    if (busy || pendingActiveHere) return
-    const token = beginNativeMutationPending("import_recovery")
-    if (!token) {
-      setOutcome("unknown")
-      syncLock()
-      return
-    }
+    if (busy) return
     setBusy("import")
     setOutcome(null)
-    syncLock()
     try {
-      const result = await postNdmsNativeImportRecoveryOnce()
-      if (result.status === "no_work") {
-        if (finishTrustedPending(token, "import_recovery")) {
-          setOutcome("import_no_work")
-        }
-      } else if (result.status === "completed") {
-        if (finishTrustedPending(token, "import_recovery")) {
-          setOutcome("import_completed")
-        }
-      } else {
-        latchNativeMutationRecovery("import")
-        setOutcome("import_blocked")
-      }
-    } catch (error) {
-      if (
-        error instanceof NativeMutationTransportError &&
-        error.code === "rejected"
-      ) {
-        latchNativeMutationRecovery("import")
-        setOutcome("import_blocked")
-        return
-      }
-      latchNativeMutationUnknown("import_recovery")
-      setOutcome("unknown")
+      const leaseResult =
+        await runWithNativeMutationLease<ImportRecoveryLeaseValue>(
+          "import_recovery",
+          async () => {
+            try {
+              const result = await postNdmsNativeImportRecoveryOnce()
+              if (result.status === "no_work") {
+                return {
+                  disposition: { state: "clear" } as const,
+                  value: "import_no_work" as const,
+                }
+              }
+              if (result.status === "completed") {
+                return {
+                  disposition: { state: "clear" } as const,
+                  value: "import_completed" as const,
+                }
+              }
+              return {
+                disposition: {
+                  state: "recovery",
+                  recovery: "import",
+                } as const,
+                value: "import_blocked" as const,
+              }
+            } catch (error) {
+              if (
+                error instanceof NativeMutationTransportError &&
+                error.code === "rejected"
+              ) {
+                return {
+                  disposition: {
+                    state: "recovery",
+                    recovery: "import",
+                  } as const,
+                  value: "import_blocked" as const,
+                }
+              }
+              return {
+                disposition: { state: "unknown" } as const,
+                value: "unknown" as const,
+              }
+            }
+          }
+        )
+      setOutcome(
+        leaseResult.status === "completed" ? leaseResult.value : "unknown"
+      )
     } finally {
       setBusy(null)
       await refresh().catch(() => undefined)
@@ -157,59 +175,97 @@ export function NativeMutationRecovery({
   }
 
   const recoverDelete = async (withAcknowledgements: boolean) => {
-    if (busy || pendingActiveHere) return
+    if (busy) return
     if (
       withAcknowledgements &&
       (!externalWriterAccepted || !globalSaveAcknowledged)
     ) {
       return
     }
-    const token = beginNativeMutationPending("delete_recovery")
-    if (!token) {
-      setOutcome("unknown")
-      syncLock()
-      return
-    }
     setBusy("delete")
     setOutcome(null)
     setExternalWriterAccepted(false)
     setGlobalSaveAcknowledged(false)
-    syncLock()
     try {
-      const result =
-        await postNdmsNativeDeleteRecoveryOnce(withAcknowledgements)
-      if (result.status === "save_acknowledged_unverified") {
-        if (finishTrustedPending(token, "delete_recovery")) {
-          setDeleteReconfirmation(false)
-          setOutcome("delete_terminal")
-          onDeleteTerminal(result)
-        }
-      } else if (
-        result.status === "blocked" &&
-        result.stop === "no_delete_transaction"
-      ) {
-        if (finishTrustedPending(token, "delete_recovery")) {
-          setDeleteReconfirmation(false)
-          setOutcome("delete_no_work")
-        }
+      const leaseResult =
+        await runWithNativeMutationLease<DeleteRecoveryLeaseValue>(
+          "delete_recovery",
+          async () => {
+            try {
+              const result =
+                await postNdmsNativeDeleteRecoveryOnce(withAcknowledgements)
+              if (result.status === "save_acknowledged_unverified") {
+                return {
+                  disposition: { state: "clear" } as const,
+                  value: {
+                    outcome: "delete_terminal",
+                    result,
+                    reconfirm: false,
+                  } as const,
+                }
+              }
+              if (
+                result.status === "blocked" &&
+                result.stop === "no_delete_transaction"
+              ) {
+                return {
+                  disposition: { state: "clear" } as const,
+                  value: {
+                    outcome: "delete_no_work",
+                    reconfirm: false,
+                  } as const,
+                }
+              }
+              return {
+                disposition: {
+                  state: "recovery",
+                  recovery: "delete",
+                } as const,
+                value: {
+                  outcome: "delete_blocked",
+                  reconfirm: result.stop === "save_reconfirmation_required",
+                } as const,
+              }
+            } catch (error) {
+              if (
+                error instanceof NativeMutationTransportError &&
+                error.code === "rejected"
+              ) {
+                return {
+                  disposition: {
+                    state: "recovery",
+                    recovery: "delete",
+                  } as const,
+                  value: {
+                    outcome: "delete_blocked",
+                    reconfirm: false,
+                  } as const,
+                }
+              }
+              return {
+                disposition: { state: "unknown" } as const,
+                value: {
+                  outcome: "unknown",
+                  reconfirm: false,
+                } as const,
+              }
+            }
+          }
+        )
+
+      if (leaseResult.status !== "completed") {
+        setDeleteReconfirmation(false)
+        setOutcome("unknown")
       } else {
-        latchNativeMutationRecovery("delete")
-        const reconfirm = result.stop === "save_reconfirmation_required"
-        setDeleteReconfirmation(reconfirm)
-        setOutcome("delete_blocked")
+        setDeleteReconfirmation(leaseResult.value.reconfirm)
+        setOutcome(leaseResult.value.outcome)
+        if (
+          leaseResult.value.outcome === "delete_terminal" &&
+          "result" in leaseResult.value
+        ) {
+          onDeleteTerminal(leaseResult.value.result)
+        }
       }
-    } catch (error) {
-      if (
-        error instanceof NativeMutationTransportError &&
-        error.code === "rejected"
-      ) {
-        latchNativeMutationRecovery("delete")
-        setOutcome("delete_blocked")
-        return
-      }
-      latchNativeMutationUnknown("delete_recovery")
-      setDeleteReconfirmation(false)
-      setOutcome("unknown")
     } finally {
       setBusy(null)
       await refresh().catch(() => undefined)
@@ -247,7 +303,7 @@ export function NativeMutationRecovery({
         </Alert>
       ) : null}
 
-      {importNeedsRecovery && !pendingActiveHere ? (
+      {importNeedsRecovery ? (
         <Alert variant="warning" aria-atomic="true" aria-live="polite">
           <AlertTriangleIcon />
           <AlertTitle>
@@ -271,7 +327,7 @@ export function NativeMutationRecovery({
         </Alert>
       ) : null}
 
-      {deleteNeedsRecovery && !pendingActiveHere ? (
+      {deleteNeedsRecovery ? (
         <Alert variant="warning" aria-atomic="true" aria-live="polite">
           <AlertTriangleIcon />
           <AlertTitle>

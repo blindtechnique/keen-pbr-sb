@@ -1,72 +1,643 @@
-import { afterEach, describe, expect, test } from "bun:test"
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  test,
+} from "bun:test"
 
 import {
   NATIVE_MUTATION_LOCK_STORAGE_KEY,
-  beginNativeMutationPending,
-  clearNativeMutationPending,
+  NATIVE_MUTATION_WEB_LOCK_NAME,
+  readNativeMutationLock,
+  runWithNativeMutationLease,
+  subscribeNativeMutationLock,
+  type NativeMutationLeaseCompletion,
+  type NativeMutationLock,
+  type NativeMutationOperation,
 } from "./native-mutation-lock"
 
-class MemoryStorage implements Storage {
-  private readonly values = new Map<string, string>()
+class ControlledStorage implements Storage {
+  readonly values = new Map<string, string>()
+  throwGet = false
+  throwSet = false
+  throwRemove = false
+  afterSet: (() => void) | null = null
+
   get length() {
     return this.values.size
   }
+
   clear() {
     this.values.clear()
   }
+
   getItem(key: string) {
+    if (this.throwGet) throw new DOMException("read unavailable")
     return this.values.get(key) ?? null
   }
+
   key(index: number) {
     return [...this.values.keys()][index] ?? null
   }
+
   removeItem(key: string) {
+    if (this.throwRemove) throw new DOMException("remove unavailable")
     this.values.delete(key)
   }
+
   setItem(key: string, value: string) {
+    if (this.throwSet) throw new DOMException("write unavailable")
     this.values.set(key, value)
+    this.afterSet?.()
   }
 }
 
-const localStorage = new MemoryStorage()
-const sessionStorage = new MemoryStorage()
+type LockRequestRecord = Readonly<{
+  name: string
+  mode: LockMode | undefined
+  ifAvailable: boolean | undefined
+}>
 
-Object.defineProperty(globalThis, "window", {
-  configurable: true,
-  value: {
-    addEventListener: () => undefined,
-    localStorage,
-    removeEventListener: () => undefined,
-    sessionStorage,
-  },
+class FakeLockManager {
+  held = false
+  rejectRequests = false
+  readonly requests: LockRequestRecord[] = []
+
+  async request<T>(
+    name: string,
+    options: LockOptions,
+    callback: (lock: Lock | null) => T | PromiseLike<T>
+  ): Promise<T> {
+    this.requests.push({
+      name,
+      mode: options.mode,
+      ifAvailable: options.ifAvailable,
+    })
+    if (this.rejectRequests) throw new DOMException("locks unavailable")
+    if (this.held) return await callback(null)
+
+    this.held = true
+    try {
+      return await callback({ name, mode: "exclusive" } as Lock)
+    } finally {
+      this.held = false
+    }
+  }
+}
+
+const localStorage = new ControlledStorage()
+const sessionStorage = new ControlledStorage()
+let lockManager = new FakeLockManager()
+const storageListeners = new Set<(event: StorageEvent) => void>()
+
+const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window")
+const originalNavigator = Object.getOwnPropertyDescriptor(
+  globalThis,
+  "navigator"
+)
+
+const installNavigator = (locks: FakeLockManager | null) => {
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: locks ? { locks: locks as unknown as LockManager } : {},
+  })
+}
+
+const installWindow = () => {
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      localStorage,
+      sessionStorage,
+      addEventListener: (
+        type: string,
+        listener: (event: StorageEvent) => void
+      ) => {
+        if (type === "storage") storageListeners.add(listener)
+      },
+      removeEventListener: (
+        type: string,
+        listener: (event: StorageEvent) => void
+      ) => {
+        if (type === "storage") storageListeners.delete(listener)
+      },
+    },
+  })
+}
+
+const marker = (lock: NativeMutationLock): string => JSON.stringify(lock)
+
+const pending = (
+  operation: NativeMutationOperation,
+  digit = "a"
+): NativeMutationLock => ({
+  version: 1,
+  state: "pending",
+  operation,
+  token: digit.repeat(32),
+})
+
+const complete = <T>(
+  disposition: NativeMutationLeaseCompletion<T>["disposition"],
+  value: T
+): NativeMutationLeaseCompletion<T> => ({ disposition, value })
+
+const defer = () => {
+  let resolve!: () => void
+  const promise = new Promise<void>((done) => {
+    resolve = done
+  })
+  return { promise, resolve }
+}
+
+const dispatchStorage = (newValue: string | null) => {
+  for (const listener of storageListeners) {
+    listener({
+      key: NATIVE_MUTATION_LOCK_STORAGE_KEY,
+      newValue,
+      storageArea: localStorage,
+    } as StorageEvent)
+  }
+}
+
+beforeEach(() => {
+  localStorage.clear()
+  sessionStorage.clear()
+  localStorage.throwGet = false
+  localStorage.throwSet = false
+  localStorage.throwRemove = false
+  localStorage.afterSet = null
+  sessionStorage.throwGet = false
+  sessionStorage.throwSet = false
+  sessionStorage.throwRemove = false
+  sessionStorage.afterSet = null
+  storageListeners.clear()
+  lockManager = new FakeLockManager()
+  installWindow()
+  installNavigator(lockManager)
 })
 
 afterEach(() => {
-  localStorage.clear()
-  sessionStorage.clear()
+  expect(lockManager.held).toBe(false)
 })
 
-describe("native mutation crash recovery lock", () => {
-  test("matching recovery may replace an orphan pending marker, but not a live local request", () => {
-    localStorage.setItem(
-      NATIVE_MUTATION_LOCK_STORAGE_KEY,
-      JSON.stringify({
-        version: 1,
-        state: "pending",
-        operation: "import",
-        token: "a".repeat(32),
-      })
+afterAll(() => {
+  if (originalWindow) {
+    Object.defineProperty(globalThis, "window", originalWindow)
+  } else {
+    Reflect.deleteProperty(globalThis, "window")
+  }
+  if (originalNavigator) {
+    Object.defineProperty(globalThis, "navigator", originalNavigator)
+  } else {
+    Reflect.deleteProperty(globalThis, "navigator")
+  }
+})
+
+describe("native mutation browser-global lease", () => {
+  test("1: a live import excludes another tab until its exact clear", async () => {
+    const begun = defer()
+    const release = defer()
+    const importRun = runWithNativeMutationLease(
+      "import",
+      async ({ beginPending }) => {
+        expect(beginPending()).toBe(true)
+        begun.resolve()
+        await release.promise
+        return complete({ state: "clear" }, "imported")
+      }
+    )
+    await begun.promise
+
+    const durableWhileHeld = localStorage.getItem(
+      NATIVE_MUTATION_LOCK_STORAGE_KEY
+    )
+    let recoveryCalls = 0
+    const concurrent = await runWithNativeMutationLease(
+      "import_recovery",
+      async () => {
+        recoveryCalls += 1
+        return complete({ state: "clear" }, "unexpected")
+      }
+    )
+    expect(concurrent).toEqual({ status: "busy" })
+    expect(recoveryCalls).toBe(0)
+    expect(localStorage.getItem(NATIVE_MUTATION_LOCK_STORAGE_KEY)).toBe(
+      durableWhileHeld
     )
 
-    expect(beginNativeMutationPending("delete_recovery")).toBeNull()
-    const recovered = beginNativeMutationPending("import_recovery")
-    expect(recovered).not.toBeNull()
-    expect(beginNativeMutationPending("import_recovery")).toBeNull()
+    release.resolve()
+    expect(await importRun).toEqual({ status: "completed", value: "imported" })
+    expect(localStorage.getItem(NATIVE_MUTATION_LOCK_STORAGE_KEY)).toBeNull()
+    expect(lockManager.requests).toEqual([
+      {
+        name: NATIVE_MUTATION_WEB_LOCK_NAME,
+        mode: "exclusive",
+        ifAvailable: true,
+      },
+      {
+        name: NATIVE_MUTATION_WEB_LOCK_NAME,
+        mode: "exclusive",
+        ifAvailable: true,
+      },
+    ])
+    expect(NATIVE_MUTATION_WEB_LOCK_NAME).toBe("keen-pbr.native-mutation.v1")
+  })
 
-    expect(clearNativeMutationPending(recovered!)).toBe(true)
-    const liveImport = beginNativeMutationPending("import")
-    expect(liveImport).not.toBeNull()
-    expect(beginNativeMutationPending("import_recovery")).toBeNull()
-    expect(clearNativeMutationPending(liveImport!)).toBe(true)
+  test("2: only matching recovery replaces an orphan after lock grant", async () => {
+    const orphan = pending("import")
+    localStorage.setItem(NATIVE_MUTATION_LOCK_STORAGE_KEY, marker(orphan))
+
+    let deleteCalls = 0
+    const wrongFamily = await runWithNativeMutationLease(
+      "delete_recovery",
+      async () => {
+        deleteCalls += 1
+        return complete({ state: "clear" }, undefined)
+      }
+    )
+    expect(wrongFamily).toEqual({ status: "unavailable" })
+    expect(deleteCalls).toBe(0)
+    expect(localStorage.getItem(NATIVE_MUTATION_LOCK_STORAGE_KEY)).toBe(
+      marker(orphan)
+    )
+
+    let observedReplacement = false
+    const matching = await runWithNativeMutationLease(
+      "import_recovery",
+      async () => {
+        const observed = readNativeMutationLock()
+        observedReplacement =
+          observed?.state === "pending" &&
+          observed.operation === "import_recovery" &&
+          observed.token !== orphan.token
+        return complete({ state: "clear" }, "recovered")
+      }
+    )
+    expect(observedReplacement).toBe(true)
+    expect(matching).toEqual({ status: "completed", value: "recovered" })
+    expect(localStorage.getItem(NATIVE_MUTATION_LOCK_STORAGE_KEY)).toBeNull()
+  })
+
+  test("3: import writes only after admitted preflight and before raw request", async () => {
+    let rawRequestCount = 0
+    const denied = await runWithNativeMutationLease("import", async () => {
+      expect(localStorage.getItem(NATIVE_MUTATION_LOCK_STORAGE_KEY)).toBeNull()
+      return complete({ state: "not_started" }, "denied")
+    })
+    expect(denied).toEqual({ status: "completed", value: "denied" })
+    expect(rawRequestCount).toBe(0)
+    expect(localStorage.getItem(NATIVE_MUTATION_LOCK_STORAGE_KEY)).toBeNull()
+
+    const admitted = await runWithNativeMutationLease(
+      "import",
+      async ({ beginPending }) => {
+        expect(
+          localStorage.getItem(NATIVE_MUTATION_LOCK_STORAGE_KEY)
+        ).toBeNull()
+        expect(beginPending()).toBe(true)
+        expect(beginPending()).toBe(false)
+        expect(readNativeMutationLock()?.state).toBe("pending")
+        rawRequestCount += 1
+        return complete({ state: "clear" }, "ok")
+      }
+    )
+    expect(admitted).toEqual({ status: "completed", value: "ok" })
+    expect(rawRequestCount).toBe(1)
+    expect(localStorage.getItem(NATIVE_MUTATION_LOCK_STORAGE_KEY)).toBeNull()
+  })
+
+  test("4: missing locks and uncertain storage fail closed before dispatch", async () => {
+    let callbackCount = 0
+    installNavigator(null)
+    expect(
+      await runWithNativeMutationLease("delete", async () => {
+        callbackCount += 1
+        return complete({ state: "clear" }, undefined)
+      })
+    ).toEqual({ status: "unavailable" })
+    expect(callbackCount).toBe(0)
+
+    lockManager = new FakeLockManager()
+    lockManager.rejectRequests = true
+    installNavigator(lockManager)
+    expect(
+      await runWithNativeMutationLease("delete", async () => {
+        callbackCount += 1
+        return complete({ state: "clear" }, undefined)
+      })
+    ).toEqual({ status: "unavailable" })
+    expect(callbackCount).toBe(0)
+
+    lockManager = new FakeLockManager()
+    installNavigator(lockManager)
+    localStorage.throwGet = true
+    expect(
+      await runWithNativeMutationLease("delete", async () => {
+        callbackCount += 1
+        return complete({ state: "clear" }, undefined)
+      })
+    ).toEqual({ status: "unavailable" })
+    expect(callbackCount).toBe(0)
+    localStorage.throwGet = false
+
+    localStorage.throwSet = true
+    let rawRequestCount = 0
+    expect(
+      await runWithNativeMutationLease("import", async ({ beginPending }) => {
+        expect(beginPending()).toBe(false)
+        if (beginPending()) rawRequestCount += 1
+        return complete({ state: "not_started" }, undefined)
+      })
+    ).toEqual({ status: "unavailable" })
+    expect(rawRequestCount).toBe(0)
+    localStorage.throwSet = false
+
+    localStorage.afterSet = () => {
+      localStorage.throwGet = true
+    }
+    expect(
+      await runWithNativeMutationLease("import", async ({ beginPending }) => {
+        expect(beginPending()).toBe(false)
+        if (beginPending()) rawRequestCount += 1
+        return complete({ state: "not_started" }, undefined)
+      })
+    ).toEqual({ status: "unavailable" })
+    expect(rawRequestCount).toBe(0)
+    localStorage.throwGet = false
+    localStorage.afterSet = null
+  })
+
+  test("5: a post-begin exception latches unknown and releases for recovery", async () => {
+    const failed = await runWithNativeMutationLease("delete", async () => {
+      throw new Error()
+    })
+    expect(failed).toEqual({ status: "outcome_unknown" })
+    expect(readNativeMutationLock()).toEqual({
+      version: 1,
+      state: "unknown",
+      operation: "delete",
+    })
+    expect(lockManager.held).toBe(false)
+
+    const recovered = await runWithNativeMutationLease(
+      "delete_recovery",
+      async () => complete({ state: "clear" }, "recovered")
+    )
+    expect(recovered).toEqual({ status: "completed", value: "recovered" })
+    expect(readNativeMutationLock()).toBeNull()
+  })
+
+  test("6: a rogue token swap is preserved and makes clear outcome unknown", async () => {
+    const rogue = pending("delete", "b")
+    const result = await runWithNativeMutationLease("delete", async () => {
+      localStorage.setItem(NATIVE_MUTATION_LOCK_STORAGE_KEY, marker(rogue))
+      return complete({ state: "clear" }, "forged-terminal")
+    })
+
+    expect(result).toEqual({ status: "outcome_unknown" })
+    expect(localStorage.getItem(NATIVE_MUTATION_LOCK_STORAGE_KEY)).toBe(
+      marker(rogue)
+    )
+  })
+
+  test("7: terminal states require exact verified persistence", async () => {
+    expect(
+      await runWithNativeMutationLease("delete", async () =>
+        complete({ state: "clear" }, "cleared")
+      )
+    ).toEqual({ status: "completed", value: "cleared" })
+    expect(readNativeMutationLock()).toBeNull()
+
+    expect(
+      await runWithNativeMutationLease("import_recovery", async () =>
+        complete({ state: "recovery", recovery: "import" }, "blocked")
+      )
+    ).toEqual({ status: "completed", value: "blocked" })
+    expect(readNativeMutationLock()).toEqual({
+      version: 1,
+      state: "recovery_required",
+      recovery: "import",
+    })
+
+    expect(
+      await runWithNativeMutationLease("import_recovery", async () =>
+        complete({ state: "unknown" }, "ambiguous")
+      )
+    ).toEqual({ status: "outcome_unknown" })
+    expect(readNativeMutationLock()).toEqual({
+      version: 1,
+      state: "unknown",
+      operation: "import_recovery",
+    })
+
+    localStorage.clear()
+    localStorage.throwRemove = true
+    expect(
+      await runWithNativeMutationLease("delete", async () =>
+        complete({ state: "clear" }, undefined)
+      )
+    ).toEqual({ status: "outcome_unknown" })
+    expect(lockManager.held).toBe(false)
+    localStorage.throwRemove = false
+    localStorage.clear()
+
+    expect(
+      await runWithNativeMutationLease("delete", async () => {
+        localStorage.throwSet = true
+        return complete({ state: "recovery", recovery: "delete" }, undefined)
+      })
+    ).toEqual({ status: "outcome_unknown" })
+    expect(lockManager.held).toBe(false)
+    localStorage.throwSet = false
+    localStorage.clear()
+
+    expect(
+      await runWithNativeMutationLease("delete", async () => {
+        localStorage.throwGet = true
+        return complete({ state: "clear" }, undefined)
+      })
+    ).toEqual({ status: "outcome_unknown" })
+    expect(lockManager.held).toBe(false)
+    localStorage.throwGet = false
+  })
+
+  test("8: missing terminal disposition and post-begin not_started latch unknown", async () => {
+    const missing = await runWithNativeMutationLease(
+      "delete",
+      async () => undefined as never
+    )
+    expect(missing).toEqual({ status: "outcome_unknown" })
+    expect(readNativeMutationLock()).toEqual({
+      version: 1,
+      state: "unknown",
+      operation: "delete",
+    })
+
+    localStorage.clear()
+    const contradicted = await runWithNativeMutationLease("delete", async () =>
+      complete({ state: "not_started" }, undefined)
+    )
+    expect(contradicted).toEqual({ status: "outcome_unknown" })
+    expect(readNativeMutationLock()).toEqual({
+      version: 1,
+      state: "unknown",
+      operation: "delete",
+    })
+  })
+
+  test("9: storage events reread truth and same-document transitions notify once", async () => {
+    const observed: Array<NativeMutationLock | null> = []
+    const heldDuringNotification: boolean[] = []
+    const unsubscribe = subscribeNativeMutationLock((lock) => {
+      observed.push(lock)
+      heldDuringNotification.push(lockManager.held)
+    })
+    const unsubscribeThrowing = subscribeNativeMutationLock(() => {
+      throw new Error()
+    })
+
+    const newer = pending("delete", "c")
+    localStorage.setItem(NATIVE_MUTATION_LOCK_STORAGE_KEY, marker(newer))
+    dispatchStorage(null)
+    expect(observed).toEqual([newer])
+
+    observed.length = 0
+    heldDuringNotification.length = 0
+    localStorage.clear()
+    expect(
+      await runWithNativeMutationLease("delete", async () =>
+        complete({ state: "clear" }, undefined)
+      )
+    ).toEqual({ status: "completed", value: undefined })
+    expect(observed).toHaveLength(2)
+    expect(observed[0]?.state).toBe("pending")
+    expect(observed[1]).toBeNull()
+    expect(heldDuringNotification).toEqual([true, true])
+    expect(
+      await runWithNativeMutationLease(
+        "import_recovery",
+        async ({ beginPending }) => {
+          // Recovery already consumed the one-shot begin before its callback.
+          expect(beginPending()).toBe(false)
+          return complete({ state: "clear" }, "still-usable")
+        }
+      )
+    ).toEqual({ status: "completed", value: "still-usable" })
+    unsubscribeThrowing()
+    unsubscribe()
+  })
+
+  test("10: fresh and recovery eligibility are exact and family-scoped", async () => {
+    let calls = 0
+    expect(
+      await runWithNativeMutationLease("import", async () => {
+        calls += 1
+        return complete({ state: "not_started" }, "fresh")
+      })
+    ).toEqual({ status: "completed", value: "fresh" })
+
+    localStorage.setItem(
+      NATIVE_MUTATION_LOCK_STORAGE_KEY,
+      marker({ version: 1, state: "unknown", operation: "import" })
+    )
+    expect(
+      await runWithNativeMutationLease("delete", async () => {
+        calls += 1
+        return complete({ state: "clear" }, undefined)
+      })
+    ).toEqual({ status: "unavailable" })
+
+    for (const accepted of [
+      null,
+      pending("import", "d"),
+      { version: 1, state: "unknown", operation: "import" } as const,
+      { version: 1, state: "recovery_required", recovery: "import" } as const,
+    ]) {
+      localStorage.clear()
+      if (accepted) {
+        localStorage.setItem(NATIVE_MUTATION_LOCK_STORAGE_KEY, marker(accepted))
+      }
+      const before = calls
+      expect(
+        await runWithNativeMutationLease("import_recovery", async () => {
+          calls += 1
+          return complete({ state: "clear" }, "ok")
+        })
+      ).toEqual({ status: "completed", value: "ok" })
+      expect(calls).toBe(before + 1)
+    }
+
+    for (const rejected of [
+      marker({ version: 1, state: "unknown", operation: "delete" }),
+      marker({ version: 1, state: "recovery_required", recovery: "delete" }),
+      "not-json",
+    ]) {
+      localStorage.setItem(NATIVE_MUTATION_LOCK_STORAGE_KEY, rejected)
+      const before = calls
+      expect(
+        await runWithNativeMutationLease("import_recovery", async () => {
+          calls += 1
+          return complete({ state: "clear" }, undefined)
+        })
+      ).toEqual({ status: "unavailable" })
+      expect(calls).toBe(before)
+    }
+
+    expect(lockManager.requests.length).toBeGreaterThan(0)
+    expect(
+      lockManager.requests.every(
+        (request) =>
+          request.name === "keen-pbr.native-mutation.v1" &&
+          request.mode === "exclusive" &&
+          request.ifAvailable === true
+      )
+    ).toBe(true)
+  })
+
+  test("a mutating pending subscriber cannot authorize the raw request", async () => {
+    const rogue = pending("import", "e")
+    const unsubscribe = subscribeNativeMutationLock((lock) => {
+      if (lock?.state === "pending" && lock.operation === "import") {
+        localStorage.setItem(NATIVE_MUTATION_LOCK_STORAGE_KEY, marker(rogue))
+      }
+    })
+    let rawRequestCount = 0
+
+    const result = await runWithNativeMutationLease(
+      "import",
+      async ({ beginPending }) => {
+        if (beginPending()) rawRequestCount += 1
+        return complete({ state: "not_started" }, undefined)
+      }
+    )
+
+    expect(result).toEqual({ status: "unavailable" })
+    expect(rawRequestCount).toBe(0)
+    expect(localStorage.getItem(NATIVE_MUTATION_LOCK_STORAGE_KEY)).toBe(
+      marker(rogue)
+    )
+    unsubscribe()
+  })
+
+  test("a mutating terminal subscriber preserves its token and defeats success", async () => {
+    const rogue = pending("delete", "f")
+    const unsubscribe = subscribeNativeMutationLock((lock) => {
+      if (lock === null) {
+        localStorage.setItem(NATIVE_MUTATION_LOCK_STORAGE_KEY, marker(rogue))
+      }
+    })
+
+    const result = await runWithNativeMutationLease("delete", async () =>
+      complete({ state: "clear" }, "untrusted")
+    )
+
+    expect(result).toEqual({ status: "outcome_unknown" })
+    expect(localStorage.getItem(NATIVE_MUTATION_LOCK_STORAGE_KEY)).toBe(
+      marker(rogue)
+    )
+    unsubscribe()
   })
 })

@@ -56,13 +56,10 @@ import {
   nativeWireGuardImportOperationSurvivesContextChange,
 } from "@/lib/native-wireguard-import-operation"
 import {
-  beginNativeWireGuardImportPending,
-  clearNativeWireGuardImportPending,
-  latchNativeWireGuardImportLock,
   readNativeWireGuardImportLock,
   subscribeNativeWireGuardImportLock,
-  type NativeWireGuardImportPendingToken,
 } from "@/lib/native-wireguard-import-lock"
+import { runWithNativeMutationLease } from "@/lib/native-mutation-lock"
 import {
   ndmsNativeImportOutcome,
   parseNdmsNativeImportResult,
@@ -323,6 +320,16 @@ function NativeWireGuardImportFieldsContent({
   useEffect(
     () =>
       subscribeNativeWireGuardImportLock((reason) => {
+        if (reason === null) {
+          if (submissionActiveRef.current) return
+          readGateRef.current.invalidate()
+          vaultRef.current?.revoke()
+          setOwnerRiskAccepted(false)
+          setState({ status: "empty" })
+          onImportedIdentityChange?.(null)
+          setOperation({ status: "idle" })
+          return
+        }
         readGateRef.current.invalidate()
         vaultRef.current?.revoke()
         setOwnerRiskAccepted(false)
@@ -573,93 +580,93 @@ function NativeWireGuardImportFieldsContent({
       return
     }
 
-    let pendingToken: NativeWireGuardImportPendingToken | null = null
-    let blockedByExistingLock = false
-    let abandonedBeforePending = false
+    let pendingStarted = false
     submissionActiveRef.current = true
     setOperation({ status: "preflighting" })
     try {
-      const response = await postNdmsNativeImportSecretOnce({
-        vault: vaultRef.current!,
-        ticket: state.ticket,
-        preflight: async (binding) => {
-          const verdict = await preflightNdmsNativeImport({ binding })
-          if (verdict === "admitted") {
-            if (!mountedRef.current) {
-              abandonedBeforePending = true
-              return "denied"
+      const leaseResult = await runWithNativeMutationLease(
+        "import",
+        async ({ beginPending }) => {
+          try {
+            const response = await postNdmsNativeImportSecretOnce({
+              vault: vaultRef.current!,
+              ticket: state.ticket,
+              preflight: async (binding) => {
+                const verdict = await preflightNdmsNativeImport({ binding })
+                if (verdict !== "admitted") return verdict
+                if (!mountedRef.current || !beginPending()) return "denied"
+                pendingStarted = true
+                setOperation({ status: "sending" })
+                return verdict
+              },
+            })
+            const payload = await response.json().catch(() => null)
+            const result = response.ok
+              ? parseNdmsNativeImportResult(payload)
+              : null
+            if (!result) {
+              return {
+                disposition: { state: "unknown" } as const,
+                value: { status: "unknown" } as ImportOperationState,
+              }
             }
-            pendingToken = beginNativeWireGuardImportPending()
-            if (!pendingToken) {
-              blockedByExistingLock = true
-              const durableLock = readNativeWireGuardImportLock()
-              setOperation(
-                durableLock === "recovery_required"
-                  ? { status: "recovery-locked" }
-                  : { status: "unknown" }
-              )
-              return "denied"
+
+            const outcome = ndmsNativeImportOutcome(result)
+            return {
+              disposition:
+                outcome === "recovery_required"
+                  ? ({ state: "recovery", recovery: "import" } as const)
+                  : ({ state: "clear" } as const),
+              value: {
+                status: "result",
+                outcome,
+                result,
+              } as ImportOperationState,
             }
-            setOperation({ status: "sending" })
+          } catch (error) {
+            if (error instanceof NativeSecretTransportError) {
+              if (
+                error.code === "preflight_denied" ||
+                error.code === "preflight_failed"
+              ) {
+                return {
+                  disposition: { state: "not_started" } as const,
+                  value: {
+                    status: "preflight-error",
+                  } as ImportOperationState,
+                }
+              }
+              if (error.code === "secret_unavailable") {
+                return {
+                  disposition: { state: "clear" } as const,
+                  value: {
+                    status: "selection-expired",
+                  } as ImportOperationState,
+                }
+              }
+            }
+            return {
+              disposition: { state: "unknown" } as const,
+              value: { status: "unknown" } as ImportOperationState,
+            }
           }
-          return verdict
-        },
-      })
-      const payload = await response.json().catch(() => null)
-      const result = response.ok ? parseNdmsNativeImportResult(payload) : null
-      if (!result) {
-        latchNativeWireGuardImportLock("unknown")
-        if (mountedRef.current) setOperation({ status: "unknown" })
-        return
-      }
-      const outcome = ndmsNativeImportOutcome(result)
-      if (outcome === "recovery_required") {
-        latchNativeWireGuardImportLock("recovery_required")
-        if (mountedRef.current) {
-          setOperation({ status: "result", outcome, result })
         }
-        return
+      )
+
+      if (!mountedRef.current) return
+      if (leaseResult.status === "completed") {
+        setOperation(leaseResult.value)
+      } else {
+        const durableLock = readNativeWireGuardImportLock()
+        setOperation(
+          durableLock === "recovery_required"
+            ? { status: "recovery-locked" }
+            : { status: "unknown" }
+        )
       }
-      if (!mountedRef.current || pendingToken === null) {
-        latchNativeWireGuardImportLock("unknown")
-        return
-      }
-      if (!clearNativeWireGuardImportPending(pendingToken)) {
-        latchNativeWireGuardImportLock("unknown")
-        setOperation({ status: "unknown" })
-        return
-      }
-      submissionActiveRef.current = false
-      setOperation({ status: "result", outcome, result })
-    } catch (error) {
-      if (error instanceof NativeSecretTransportError) {
-        if (
-          error.code === "preflight_denied" ||
-          error.code === "preflight_failed"
-        ) {
-          submissionActiveRef.current = false
-          if (
-            mountedRef.current &&
-            !blockedByExistingLock &&
-            !abandonedBeforePending
-          ) {
-            setOperation({ status: "preflight-error" })
-          }
-          return
-        }
-        if (error.code === "secret_unavailable") {
-          submissionActiveRef.current = false
-          if (pendingToken) clearNativeWireGuardImportPending(pendingToken)
-          if (mountedRef.current) {
-            setOperation({ status: "selection-expired" })
-          }
-          return
-        }
-      }
-      latchNativeWireGuardImportLock("unknown")
-      if (mountedRef.current) setOperation({ status: "unknown" })
     } finally {
-      if (pendingToken) {
+      submissionActiveRef.current = false
+      if (pendingStarted) {
         await Promise.all([
           queryClient.invalidateQueries({
             queryKey: queryKeys.ndmsInterfaceInventory(),

@@ -1,43 +1,73 @@
 import { expect, test } from "bun:test"
 
 import {
-  NATIVE_WIREGUARD_IMPORT_LOCK_STORAGE_KEY,
-  beginNativeWireGuardImportPending,
-  clearNativeWireGuardImportPending,
-  latchNativeWireGuardImportLock,
+  NATIVE_MUTATION_LOCK_STORAGE_KEY,
+  runWithNativeMutationLease,
+} from "@/lib/native-mutation-lock"
+import {
   readNativeWireGuardImportLock,
   subscribeNativeWireGuardImportLock,
-  type NativeWireGuardImportPendingToken,
+  type NativeWireGuardImportLockReason,
 } from "@/lib/native-wireguard-import-lock"
 
-test("native import pending and ambiguity remain serialized and fail closed", () => {
-  let rejectWrites = false
-  const makeStorage = (): Storage => {
-    const values = new Map<string, string>()
-    return {
-      get length() {
-        return values.size
-      },
-      clear: () => values.clear(),
-      getItem: (key) => values.get(key) ?? null,
-      key: (index) => [...values.keys()][index] ?? null,
-      removeItem: (key) => void values.delete(key),
-      setItem: (key, value) => {
-        if (rejectWrites) throw new DOMException("storage unavailable")
-        values.set(key, value)
-      },
-    }
+class MemoryStorage implements Storage {
+  private readonly values = new Map<string, string>()
+  get length() {
+    return this.values.size
   }
-  const localStorage = makeStorage()
-  const sessionStorage = makeStorage()
+  clear() {
+    this.values.clear()
+  }
+  getItem(key: string) {
+    return this.values.get(key) ?? null
+  }
+  key(index: number) {
+    return [...this.values.keys()][index] ?? null
+  }
+  removeItem(key: string) {
+    this.values.delete(key)
+  }
+  setItem(key: string, value: string) {
+    this.values.set(key, value)
+  }
+}
+
+test("native import compatibility view delivers authoritative clears", async () => {
+  const localStorage = new MemoryStorage()
+  const sessionStorage = new MemoryStorage()
   const listeners = new Set<(event: StorageEvent) => void>()
+  let held = false
+  const locks = {
+    request: async <T>(
+      name: string,
+      options: LockOptions,
+      callback: (lock: Lock | null) => T | PromiseLike<T>
+    ): Promise<T> => {
+      expect(name).toBe("keen-pbr.native-mutation.v1")
+      expect(options).toMatchObject({ mode: "exclusive", ifAvailable: true })
+      if (held) return await callback(null)
+      held = true
+      try {
+        return await callback({ name, mode: "exclusive" } as Lock)
+      } finally {
+        held = false
+      }
+    },
+  }
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window")
+  const originalNavigator = Object.getOwnPropertyDescriptor(
+    globalThis,
+    "navigator"
+  )
   Object.defineProperty(globalThis, "window", {
     configurable: true,
     value: {
       localStorage,
       sessionStorage,
-      addEventListener: (type: string, listener: (event: StorageEvent) => void) => {
+      addEventListener: (
+        type: string,
+        listener: (event: StorageEvent) => void
+      ) => {
         if (type === "storage") listeners.add(listener)
       },
       removeEventListener: (
@@ -48,63 +78,68 @@ test("native import pending and ambiguity remain serialized and fail closed", ()
       },
     },
   })
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: { locks: locks as unknown as LockManager },
+  })
 
   try {
     expect(readNativeWireGuardImportLock()).toBeNull()
-
-    const pending = beginNativeWireGuardImportPending()
-    expect(pending).not.toBeNull()
-    expect(readNativeWireGuardImportLock()).toBe("pending")
-    expect(
-      localStorage.getItem(NATIVE_WIREGUARD_IMPORT_LOCK_STORAGE_KEY)
-    ).toBe(`pending:${pending}`)
-    expect(beginNativeWireGuardImportPending()).toBeNull()
-    expect(
-      clearNativeWireGuardImportPending(
-        "another-operation" as NativeWireGuardImportPendingToken
-      )
-    ).toBe(false)
-    expect(readNativeWireGuardImportLock()).toBe("pending")
-
-    expect(clearNativeWireGuardImportPending(pending!)).toBe(true)
-    expect(readNativeWireGuardImportLock()).toBeNull()
-
-    rejectWrites = true
-    expect(beginNativeWireGuardImportPending()).toBeNull()
-    expect(readNativeWireGuardImportLock()).toBe("unknown")
-    expect(
-      localStorage.getItem(NATIVE_WIREGUARD_IMPORT_LOCK_STORAGE_KEY)
-    ).toBeNull()
-    rejectWrites = false
-
-    let observed: string | null = null
+    const observed: Array<NativeWireGuardImportLockReason | null> = []
     const unsubscribe = subscribeNativeWireGuardImportLock((reason) => {
-      observed = reason
+      observed.push(reason)
     })
-    localStorage.setItem(NATIVE_WIREGUARD_IMPORT_LOCK_STORAGE_KEY, "unknown")
+
+    expect(
+      await runWithNativeMutationLease("import", async ({ beginPending }) => {
+        expect(beginPending()).toBe(true)
+        return {
+          disposition: { state: "clear" },
+          value: "ok",
+        }
+      })
+    ).toEqual({ status: "completed", value: "ok" })
+    // Its own pending notification is suppressed; the verified clear is not.
+    expect(observed).toEqual([null])
+
+    localStorage.setItem(
+      NATIVE_MUTATION_LOCK_STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        state: "recovery_required",
+        recovery: "import",
+      })
+    )
     for (const listener of listeners) {
       listener({
-        key: NATIVE_WIREGUARD_IMPORT_LOCK_STORAGE_KEY,
-        newValue: "unknown",
+        key: NATIVE_MUTATION_LOCK_STORAGE_KEY,
+        newValue: null,
         storageArea: localStorage,
       } as StorageEvent)
     }
-    expect(observed).toBe("unknown")
-    expect(readNativeWireGuardImportLock()).toBe("unknown")
-    expect(beginNativeWireGuardImportPending()).toBeNull()
-    unsubscribe()
+    expect(observed.at(-1)).toBe("recovery_required")
 
-    latchNativeWireGuardImportLock("recovery_required")
-    expect(readNativeWireGuardImportLock()).toBe("recovery_required")
-    expect(beginNativeWireGuardImportPending()).toBeNull()
-    expect(
-      localStorage.getItem(NATIVE_WIREGUARD_IMPORT_LOCK_STORAGE_KEY)
-    ).toBe("recovery_required")
+    localStorage.removeItem(NATIVE_MUTATION_LOCK_STORAGE_KEY)
+    for (const listener of listeners) {
+      listener({
+        key: NATIVE_MUTATION_LOCK_STORAGE_KEY,
+        newValue: "stale-non-null-value",
+        storageArea: localStorage,
+      } as StorageEvent)
+    }
+    expect(observed.at(-1)).toBeNull()
+    unsubscribe()
   } finally {
+    expect(held).toBe(false)
     if (originalWindow) {
       Object.defineProperty(globalThis, "window", originalWindow)
     } else {
       Reflect.deleteProperty(globalThis, "window")
+    }
+    if (originalNavigator) {
+      Object.defineProperty(globalThis, "navigator", originalNavigator)
+    } else {
+      Reflect.deleteProperty(globalThis, "navigator")
     }
   }
 })

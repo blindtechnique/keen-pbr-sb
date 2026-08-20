@@ -18,12 +18,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
-import {
-  beginNativeMutationPending,
-  clearNativeMutationPending,
-  latchNativeMutationRecovery,
-  latchNativeMutationUnknown,
-} from "@/lib/native-mutation-lock"
+import { runWithNativeMutationLease } from "@/lib/native-mutation-lock"
 import type { NativeInterfaceModel } from "@/lib/native-interfaces"
 
 type SubmissionState =
@@ -33,6 +28,19 @@ type SubmissionState =
   | { readonly status: "rejected" }
   | { readonly status: "recovery_required" }
   | { readonly status: "unknown" }
+
+type DeleteLeaseValue =
+  | { readonly status: "terminal"; readonly result: NdmsNativeDeleteResult }
+  | Extract<
+      SubmissionState,
+      {
+        readonly status:
+          | "blocked"
+          | "rejected"
+          | "recovery_required"
+          | "unknown"
+      }
+    >
 
 export function NativeInterfaceDeleteDialog({
   expectedOwnershipRevision,
@@ -88,54 +96,65 @@ export function NativeInterfaceDeleteDialog({
 
   const submit = async () => {
     if (!canSubmit || !nativeInterface) return
-    const pendingToken = beginNativeMutationPending("delete")
-    if (!pendingToken) {
-      setSubmission({ status: "unknown" })
-      return
-    }
-
     setSubmission({ status: "sending" })
     try {
-      const result = await postNdmsNativeDeleteOnce({
-        interface_name: interfaceName,
-        expected_ownership_revision: expectedOwnershipRevision,
-        confirm_label: interfaceName,
-      })
-      if (result.status === "save_acknowledged_unverified") {
-        if (!clearNativeMutationPending(pendingToken)) {
-          latchNativeMutationUnknown("delete")
-          setSubmission({ status: "unknown" })
-          return
-        }
-        onTerminal(result)
-        onOpenChange(false)
-        return
-      }
-      if (result.status === "recovery_required") {
-        latchNativeMutationRecovery("delete")
-        setSubmission({ status: "recovery_required" })
-        return
-      }
+      const leaseResult = await runWithNativeMutationLease<DeleteLeaseValue>(
+        "delete",
+        async () => {
+          try {
+            const result = await postNdmsNativeDeleteOnce({
+              interface_name: interfaceName,
+              expected_ownership_revision: expectedOwnershipRevision,
+              confirm_label: interfaceName,
+            })
+            if (result.status === "save_acknowledged_unverified") {
+              return {
+                disposition: { state: "clear" } as const,
+                value: { status: "terminal", result } as const,
+              }
+            }
+            if (result.status === "recovery_required") {
+              return {
+                disposition: {
+                  state: "recovery",
+                  recovery: "delete",
+                } as const,
+                value: { status: "recovery_required" } as const,
+              }
+            }
 
-      // The strict parser accepts a blocked initial delete only when this
-      // invocation has no dispatch/save trace and no durable terminal claim.
-      if (!clearNativeMutationPending(pendingToken)) {
-        latchNativeMutationUnknown("delete")
+            // The strict parser accepts a blocked initial delete only when
+            // this invocation has no dispatch/save trace or durable claim.
+            return {
+              disposition: { state: "clear" } as const,
+              value: { status: "blocked", result } as const,
+            }
+          } catch (error) {
+            if (
+              error instanceof NativeMutationTransportError &&
+              error.code === "rejected"
+            ) {
+              return {
+                disposition: { state: "clear" } as const,
+                value: { status: "rejected" } as const,
+              }
+            }
+            return {
+              disposition: { state: "unknown" } as const,
+              value: { status: "unknown" } as const,
+            }
+          }
+        }
+      )
+
+      if (leaseResult.status !== "completed") {
         setSubmission({ status: "unknown" })
-        return
+      } else if (leaseResult.value.status === "terminal") {
+        onTerminal(leaseResult.value.result)
+        onOpenChange(false)
+      } else {
+        setSubmission(leaseResult.value)
       }
-      setSubmission({ status: "blocked", result })
-    } catch (error) {
-      if (
-        error instanceof NativeMutationTransportError &&
-        error.code === "rejected" &&
-        clearNativeMutationPending(pendingToken)
-      ) {
-        setSubmission({ status: "rejected" })
-        return
-      }
-      latchNativeMutationUnknown("delete")
-      setSubmission({ status: "unknown" })
     } finally {
       await onInventoryRefresh().catch(() => undefined)
     }
