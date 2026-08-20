@@ -67,6 +67,7 @@ type AvailableSnapshot = Readonly<{
   raw: string | null
   lock: NativeMutationLock | null
   corrupt: boolean
+  legacy: boolean
 }>
 
 type DurableSnapshot = AvailableSnapshot | Readonly<{ status: "unavailable" }>
@@ -190,9 +191,9 @@ const getItem = (
   }
 }
 
-const migrateLegacyImportLock = (
+const readLegacyImportLock = (
   localStorage: Storage
-): AvailableSnapshot | null | "unavailable" => {
+): NativeMutationLock | null | "unavailable" => {
   const legacyLocal = getItem(localStorage, LEGACY_IMPORT_LOCK_STORAGE_KEY)
   if (!legacyLocal.ok) return "unavailable"
 
@@ -204,33 +205,102 @@ const migrateLegacyImportLock = (
   const legacy = legacyLocal.value ?? legacySession.value
   if (legacy === null) return null
 
-  const migrated: NativeMutationLock =
-    legacy === "recovery_required"
-      ? { version: 1, state: "recovery_required", recovery: "import" }
-      : { version: 1, state: "unknown", operation: "import" }
+  return legacy === "recovery_required"
+    ? { version: 1, state: "recovery_required", recovery: "import" }
+    : { version: 1, state: "unknown", operation: "import" }
+}
+
+const migrateLegacyImportLockUnderLease = (): DurableSnapshot => {
+  // This helper is called only after the browser-global Web Lock was granted.
+  // Ordinary reads must remain observational: otherwise a stale read in one
+  // tab can overwrite a live pending token just written by the lock holder.
+  const baseline = readDurableSnapshot()
+  if (baseline.status !== "available" || !baseline.legacy) return baseline
+
+  const migrated = baseline.lock
+  if (!migrated || baseline.raw !== null) return { status: "unavailable" }
+
+  // Reconfirm the authoritative key is still exactly absent immediately
+  // before promotion. Compliant writers are fenced by the Web Lock; this
+  // reread also refuses any non-compliant change observed since baseline.
+  const current = getItem(baseline.storage, NATIVE_MUTATION_LOCK_STORAGE_KEY)
+  const legacy = readLegacyImportLock(baseline.storage)
+  if (
+    !current.ok ||
+    current.value !== null ||
+    legacy === "unavailable" ||
+    legacy === null ||
+    serializeLock(legacy) !== serializeLock(migrated)
+  ) {
+    adoptSnapshot(readDurableSnapshot())
+    return { status: "unavailable" }
+  }
+
   const serialized = serializeLock(migrated)
   try {
-    localStorage.setItem(NATIVE_MUTATION_LOCK_STORAGE_KEY, serialized)
+    baseline.storage.setItem(NATIVE_MUTATION_LOCK_STORAGE_KEY, serialized)
   } catch {
-    return "unavailable"
+    return { status: "unavailable" }
   }
-  const verified = getItem(localStorage, NATIVE_MUTATION_LOCK_STORAGE_KEY)
-  if (!verified.ok || verified.value !== serialized) return "unavailable"
 
+  const verified = readDurableSnapshot()
+  if (
+    verified.status !== "available" ||
+    verified.storage !== baseline.storage ||
+    verified.legacy ||
+    verified.raw !== serialized ||
+    verified.corrupt ||
+    !verified.lock ||
+    serializeLock(verified.lock) !== serialized
+  ) {
+    adoptSnapshot(verified)
+    return { status: "unavailable" }
+  }
+
+  // The verified v1 marker is already authoritative. Legacy cleanup is best
+  // effort only: a leftover legacy marker can fail closed after a later exact
+  // clear, but it can never authorize a fresh mutation.
   try {
-    localStorage.removeItem(LEGACY_IMPORT_LOCK_STORAGE_KEY)
-    session.storage.removeItem(LEGACY_IMPORT_SESSION_KEY)
+    baseline.storage.removeItem(LEGACY_IMPORT_LOCK_STORAGE_KEY)
+    const session = getStorage(() => window.sessionStorage)
+    if (session.ok) session.storage.removeItem(LEGACY_IMPORT_SESSION_KEY)
   } catch {
-    // The verified new marker remains authoritative. Legacy cleanup is best
-    // effort and can never reopen the mutation path.
+    // Keep the verified v1 marker authoritative.
+  }
+
+  const stable = readDurableSnapshot()
+  if (
+    stable.status !== "available" ||
+    stable.storage !== baseline.storage ||
+    stable.legacy ||
+    stable.raw !== serialized ||
+    stable.corrupt ||
+    !stable.lock ||
+    serializeLock(stable.lock) !== serialized
+  ) {
+    adoptSnapshot(stable)
+    return { status: "unavailable" }
   }
   volatileLock = migrated
+  return stable
+}
+
+/*
+ * Reads are deliberately side-effect-free. Legacy state is projected as a
+ * synthetic fail-closed snapshot until a granted Web Lock promotes it.
+ */
+const legacySnapshot = (
+  localStorage: Storage
+): AvailableSnapshot | null | "unavailable" => {
+  const legacy = readLegacyImportLock(localStorage)
+  if (legacy === "unavailable" || legacy === null) return legacy
   return {
     status: "available",
     storage: localStorage,
-    raw: serialized,
-    lock: migrated,
+    raw: null,
+    lock: legacy,
     corrupt: false,
+    legacy: true,
   }
 }
 
@@ -243,15 +313,16 @@ const readDurableSnapshot = (): DurableSnapshot => {
   if (!current.ok) return { status: "unavailable" }
 
   if (current.value === null) {
-    const migrated = migrateLegacyImportLock(local.storage)
-    if (migrated === "unavailable") return { status: "unavailable" }
-    if (migrated) return migrated
+    const legacy = legacySnapshot(local.storage)
+    if (legacy === "unavailable") return { status: "unavailable" }
+    if (legacy) return legacy
     return {
       status: "available",
       storage: local.storage,
       raw: null,
       lock: null,
       corrupt: false,
+      legacy: false,
     }
   }
 
@@ -262,6 +333,7 @@ const readDurableSnapshot = (): DurableSnapshot => {
     raw: current.value,
     lock: parsed,
     corrupt: parsed === null,
+    legacy: false,
   }
 }
 
@@ -333,10 +405,12 @@ const writePending = (
 
   const current = readDurableSnapshot()
   if (
+    baseline.legacy ||
     current.status !== "available" ||
     current.storage !== baseline.storage ||
     current.raw !== baseline.raw ||
-    current.corrupt
+    current.corrupt ||
+    current.legacy
   ) {
     adoptSnapshot(current)
     return null
@@ -518,7 +592,7 @@ export async function runWithNativeMutationLease<T>(
       async (lock) => {
         if (!lock) return { status: "busy" } as const
 
-        const baseline = readDurableSnapshot()
+        const baseline = migrateLegacyImportLockUnderLease()
         if (
           baseline.status !== "available" ||
           !operationEligible(baseline, operation)

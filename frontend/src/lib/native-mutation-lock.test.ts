@@ -23,6 +23,7 @@ class ControlledStorage implements Storage {
   throwGet = false
   throwSet = false
   throwRemove = false
+  afterGet: ((key: string, value: string | null) => void) | null = null
   afterSet: (() => void) | null = null
 
   get length() {
@@ -35,7 +36,9 @@ class ControlledStorage implements Storage {
 
   getItem(key: string) {
     if (this.throwGet) throw new DOMException("read unavailable")
-    return this.values.get(key) ?? null
+    const value = this.values.get(key) ?? null
+    this.afterGet?.(key, value)
+    return value
   }
 
   key(index: number) {
@@ -91,6 +94,8 @@ const localStorage = new ControlledStorage()
 const sessionStorage = new ControlledStorage()
 let lockManager = new FakeLockManager()
 const storageListeners = new Set<(event: StorageEvent) => void>()
+const LEGACY_IMPORT_LOCK_STORAGE_KEY = "keen-pbr.native-import-write-lock.v2"
+const LEGACY_IMPORT_SESSION_KEY = "keen-pbr.native-import-write-lock.v1"
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window")
 const originalNavigator = Object.getOwnPropertyDescriptor(
@@ -168,10 +173,12 @@ beforeEach(() => {
   localStorage.throwGet = false
   localStorage.throwSet = false
   localStorage.throwRemove = false
+  localStorage.afterGet = null
   localStorage.afterSet = null
   sessionStorage.throwGet = false
   sessionStorage.throwSet = false
   sessionStorage.throwRemove = false
+  sessionStorage.afterGet = null
   sessionStorage.afterSet = null
   storageListeners.clear()
   lockManager = new FakeLockManager()
@@ -639,5 +646,141 @@ describe("native mutation browser-global lease", () => {
       marker(rogue)
     )
     unsubscribe()
+  })
+
+  test("11: an ordinary legacy observer cannot overwrite a live pending token", () => {
+    localStorage.setItem(LEGACY_IMPORT_LOCK_STORAGE_KEY, "recovery_required")
+    const live = pending("delete", "1")
+    let interleaved = false
+    localStorage.afterGet = (key, value) => {
+      if (
+        !interleaved &&
+        key === NATIVE_MUTATION_LOCK_STORAGE_KEY &&
+        value === null
+      ) {
+        interleaved = true
+        // A different tab writes while this observer still holds its stale
+        // null read. Direct map access models the other Storage object.
+        localStorage.values.set(NATIVE_MUTATION_LOCK_STORAGE_KEY, marker(live))
+      }
+    }
+
+    readNativeMutationLock()
+    localStorage.afterGet = null
+
+    expect(interleaved).toBe(true)
+    expect(localStorage.getItem(NATIVE_MUTATION_LOCK_STORAGE_KEY)).toBe(
+      marker(live)
+    )
+    expect(readNativeMutationLock()).toEqual(live)
+    expect(localStorage.getItem(LEGACY_IMPORT_LOCK_STORAGE_KEY)).toBe(
+      "recovery_required"
+    )
+  })
+
+  test("12: legacy promotion is under-lease and participates in eligibility", async () => {
+    localStorage.setItem(LEGACY_IMPORT_LOCK_STORAGE_KEY, "legacy-pending")
+
+    expect(readNativeMutationLock()).toEqual({
+      version: 1,
+      state: "unknown",
+      operation: "import",
+    })
+    expect(localStorage.getItem(NATIVE_MUTATION_LOCK_STORAGE_KEY)).toBeNull()
+    expect(localStorage.getItem(LEGACY_IMPORT_LOCK_STORAGE_KEY)).toBe(
+      "legacy-pending"
+    )
+
+    let freshCalls = 0
+    expect(
+      await runWithNativeMutationLease("delete", async () => {
+        freshCalls += 1
+        return complete({ state: "clear" }, undefined)
+      })
+    ).toEqual({ status: "unavailable" })
+    expect(freshCalls).toBe(0)
+    expect(readNativeMutationLock()).toEqual({
+      version: 1,
+      state: "unknown",
+      operation: "import",
+    })
+    expect(localStorage.getItem(LEGACY_IMPORT_LOCK_STORAGE_KEY)).toBeNull()
+
+    let observedReplacement = false
+    expect(
+      await runWithNativeMutationLease("import_recovery", async () => {
+        const observed = readNativeMutationLock()
+        observedReplacement =
+          observed?.state === "pending" &&
+          observed.operation === "import_recovery"
+        return complete({ state: "clear" }, "recovered")
+      })
+    ).toEqual({ status: "completed", value: "recovered" })
+    expect(observedReplacement).toBe(true)
+    expect(readNativeMutationLock()).toBeNull()
+  })
+
+  test("13: failed legacy promotion and cleanup remain fail closed", async () => {
+    sessionStorage.setItem(LEGACY_IMPORT_SESSION_KEY, "recovery_required")
+    localStorage.throwSet = true
+    let recoveryCalls = 0
+    expect(
+      await runWithNativeMutationLease("import_recovery", async () => {
+        recoveryCalls += 1
+        return complete({ state: "clear" }, undefined)
+      })
+    ).toEqual({ status: "unavailable" })
+    expect(recoveryCalls).toBe(0)
+    expect(localStorage.getItem(NATIVE_MUTATION_LOCK_STORAGE_KEY)).toBeNull()
+    expect(readNativeMutationLock()).toEqual({
+      version: 1,
+      state: "recovery_required",
+      recovery: "import",
+    })
+
+    localStorage.throwSet = false
+    sessionStorage.throwRemove = true
+    expect(
+      await runWithNativeMutationLease("import_recovery", async () => {
+        recoveryCalls += 1
+        return complete({ state: "clear" }, undefined)
+      })
+    ).toEqual({ status: "outcome_unknown" })
+    expect(recoveryCalls).toBe(1)
+    expect(readNativeMutationLock()).toEqual({
+      version: 1,
+      state: "recovery_required",
+      recovery: "import",
+    })
+
+    let freshCalls = 0
+    expect(
+      await runWithNativeMutationLease("import", async ({ beginPending }) => {
+        freshCalls += 1
+        if (beginPending()) freshCalls += 1
+        return complete({ state: "clear" }, undefined)
+      })
+    ).toEqual({ status: "unavailable" })
+    expect(freshCalls).toBe(0)
+  })
+
+  test("14: a failed legacy promotion roundtrip never enters the callback", async () => {
+    localStorage.setItem(LEGACY_IMPORT_LOCK_STORAGE_KEY, "recovery_required")
+    localStorage.afterSet = () => {
+      localStorage.values.set(NATIVE_MUTATION_LOCK_STORAGE_KEY, "not-json")
+    }
+    let callbackCount = 0
+
+    expect(
+      await runWithNativeMutationLease("import_recovery", async () => {
+        callbackCount += 1
+        return complete({ state: "clear" }, undefined)
+      })
+    ).toEqual({ status: "unavailable" })
+    expect(callbackCount).toBe(0)
+    expect(localStorage.getItem(NATIVE_MUTATION_LOCK_STORAGE_KEY)).toBe(
+      "not-json"
+    )
+    expect(readNativeMutationLock()?.state).toBe("unknown")
   })
 })
