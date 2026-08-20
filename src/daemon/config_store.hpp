@@ -36,6 +36,21 @@ public:
     OutboundMarkMap outbound_marks() const;
     Config visible_config() const;
     VisibleConfigSnapshot visible_snapshot() const;
+
+    // Runs one narrow projection while both active config and the optional
+    // panel draft are protected by the same shared lock. The callback must
+    // return owned data and must not retain either reference. This avoids a
+    // torn two-read delete decision without copying unrelated multi-megabyte
+    // lists, URLs or other configuration into the native mutation boundary.
+    template <typename Projection>
+    auto project_active_and_staged(Projection&& projection) const
+        -> decltype(std::forward<Projection>(projection)(
+            std::declval<const Config&>(),
+            std::declval<const std::optional<Config>&>())) {
+        KPBR_SHARED_LOCK(lock, mutex_);
+        return std::forward<Projection>(projection)(
+            active_config_, staged_config_);
+    }
     bool config_is_draft() const;
 
     void replace_active(Config active_config, OutboundMarkMap outbound_marks);

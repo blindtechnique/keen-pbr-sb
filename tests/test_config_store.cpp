@@ -73,6 +73,34 @@ TEST_CASE("config store visible snapshot identifies active and draft states") {
     CHECK(store.visible_config().daemon->cache_dir == "/tmp/draft");
 }
 
+TEST_CASE("config store snapshots active and staged dependency views together") {
+    const auto active =
+        interface_config_named("active", "nwg5");
+    ConfigStore store(active);
+
+    const auto project = [](const Config& current,
+                            const std::optional<Config>& staged) {
+        return std::pair{
+            current.outbounds->front().interface.value_or(""),
+            staged && staged->outbounds
+                ? staged->outbounds->front().interface
+                      .value_or("")
+                : std::string{},
+        };
+    };
+    const auto without_draft =
+        store.project_active_and_staged(project);
+    CHECK(without_draft.first == "nwg5");
+    CHECK(without_draft.second.empty());
+
+    const auto draft =
+        interface_config_named("draft", "nwg6");
+    store.stage_config(draft, staged_json(draft));
+    const auto with_draft = store.project_active_and_staged(project);
+    CHECK(with_draft.first == "nwg5");
+    CHECK(with_draft.second == "nwg6");
+}
+
 TEST_CASE(
     "config store compare-and-stage rejects stale state without mutation") {
     const auto active = config_named("active");
