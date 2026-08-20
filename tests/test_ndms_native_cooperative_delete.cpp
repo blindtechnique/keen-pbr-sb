@@ -371,6 +371,9 @@ public:
 };
 
 struct DeleteFaultControl final {
+    std::size_t wal_publish_attempts{0U};
+    std::size_t fail_wal_before_visibility_call{0U};
+    std::function<void()> before_wal_visibility_failure;
     std::size_t wal_replace_calls{0U};
     std::size_t fail_wal_replace_call{0U};
     bool fail_wal_remove_after_unlink{false};
@@ -398,6 +401,18 @@ NdmsNativeDeleteWalStoreTestHooks delete_wal_hooks(
     hooks.allow_current_process_owner = true;
     hooks.force_portable_linkat = true;
     hooks.fault_injector = [faults](const auto stage) {
+        if (stage == NdmsNativeDeleteWalStoreFaultStage::
+                         after_temporary_file_fsync) {
+            ++faults->wal_publish_attempts;
+            if (faults->fail_wal_before_visibility_call ==
+                faults->wal_publish_attempts) {
+                if (faults->before_wal_visibility_failure) {
+                    faults->before_wal_visibility_failure();
+                }
+                throw std::runtime_error(
+                    "synthetic WAL pre-publication crash");
+            }
+        }
         if (stage == NdmsNativeDeleteWalStoreFaultStage::
                          after_replace_rename_before_directory_fsync) {
             ++faults->wal_replace_calls;
@@ -578,6 +593,7 @@ struct DeleteFixture final {
         gateway.calls = 0U;
         gateway.presence_override_on_call = 0U;
         events.clear();
+        faults->wal_publish_attempts = 0U;
         faults->wal_replace_calls = 0U;
         return ownership_revision;
     }
@@ -691,6 +707,20 @@ void overwrite_delete_wal_for_test(
     REQUIRE(::close(descriptor) == 0);
 }
 
+void corrupt_delete_wal_for_test(
+    const NdmsNativeDeleteWalStore& store) {
+    const auto path = store.state_directory() /
+                      kNdmsNativeDeleteWalFilename;
+    const int descriptor = ::open(
+        path.c_str(), O_WRONLY | O_TRUNC | O_CLOEXEC | O_NOFOLLOW);
+    REQUIRE(descriptor >= 0);
+    constexpr std::string_view corrupt{"{"};
+    REQUIRE(::write(descriptor, corrupt.data(), corrupt.size()) ==
+            static_cast<ssize_t>(corrupt.size()));
+    REQUIRE(::fsync(descriptor) == 0);
+    REQUIRE(::close(descriptor) == 0);
+}
+
 void corrupt_delete_snapshot_for_test(const DeleteFixture& fixture) {
     const auto path = fixture.directory.root / "snapshots" / "Wireguard5";
     const int descriptor = ::open(
@@ -721,6 +751,24 @@ void check_no_router_write(const DeleteFixture& fixture) {
     CHECK(fixture.backend.perform_calls == 0U);
     CHECK(fixture.delete_wal.readiness() ==
           NdmsNativeDeleteWalReadiness::clean);
+}
+
+void check_result_matches_durable_record(
+    const NdmsNativeCooperativeDeleteResult& result,
+    const NdmsNativeDeleteWalRecord& durable,
+    const NdmsNativeDeleteWalPhase expected_phase) {
+    REQUIRE(result.durable_phase.has_value());
+    CHECK(*result.durable_phase == expected_phase);
+    REQUIRE(result.transaction_id.has_value());
+    CHECK(*result.transaction_id == durable.transaction_id);
+    REQUIRE(result.interface_name.has_value());
+    CHECK(*result.interface_name == durable.interface_name);
+    REQUIRE(result.kind.has_value());
+    CHECK(*result.kind == durable.kind);
+    CHECK(result.external_writer_race_accepted ==
+          durable.external_writer_race_accepted);
+    CHECK(result.global_save_scope_acknowledged ==
+          durable.owner_global_save_acknowledged);
 }
 
 } // namespace
@@ -1125,6 +1173,12 @@ TEST_CASE("lost writer or guard drift never reaches backend perform") {
         CHECK(result.status ==
               NdmsNativeCooperativeDeleteStatus::recovery_required);
         CHECK(result.stop == NdmsNativeCooperativeDeleteStop::writer_lost);
+        CHECK_FALSE(result.durable_phase.has_value());
+        CHECK_FALSE(result.transaction_id.has_value());
+        CHECK_FALSE(result.interface_name.has_value());
+        CHECK_FALSE(result.kind.has_value());
+        CHECK_FALSE(result.external_writer_race_accepted);
+        CHECK_FALSE(result.global_save_scope_acknowledged);
         CHECK(fixture.backend.calls == 1U);
         CHECK(fixture.backend.perform_calls == 0U);
         CHECK(fixture.gateway.present);
@@ -1169,6 +1223,12 @@ TEST_CASE("lost writer or guard drift never reaches backend perform") {
         CHECK(result.status ==
               NdmsNativeCooperativeDeleteStatus::recovery_required);
         CHECK(result.stop == NdmsNativeCooperativeDeleteStop::writer_lost);
+        CHECK_FALSE(result.durable_phase.has_value());
+        CHECK_FALSE(result.transaction_id.has_value());
+        CHECK_FALSE(result.interface_name.has_value());
+        CHECK_FALSE(result.kind.has_value());
+        CHECK_FALSE(result.external_writer_race_accepted);
+        CHECK_FALSE(result.global_save_scope_acknowledged);
         CHECK(fixture.backend.calls == 2U);
         CHECK(fixture.backend.perform_calls == 1U);
         REQUIRE(fixture.delete_wal.load().record.has_value());
@@ -1633,6 +1693,122 @@ TEST_CASE("dependency added before recovered save blocks save and tombstone") {
     CHECK(fixture.snapshot_retained());
     CHECK(fixture.delete_wal.readiness() ==
           NdmsNativeDeleteWalReadiness::unfinished);
+}
+
+TEST_CASE("delete failure phases come only from an exact durable reread") {
+    struct TransitionCase final {
+        const char* label;
+        std::size_t publish_attempt;
+        std::size_t replace_attempt;
+        NdmsNativeDeleteWalPhase predecessor;
+        NdmsNativeDeleteWalPhase successor;
+    };
+    const TransitionCase transitions[] = {
+        {"prepared to delete-may-be-inflight", 2U, 1U,
+         NdmsNativeDeleteWalPhase::prepared,
+         NdmsNativeDeleteWalPhase::delete_may_be_inflight},
+        {"observed absence to running-absence-verified", 3U, 2U,
+         NdmsNativeDeleteWalPhase::delete_may_be_inflight,
+         NdmsNativeDeleteWalPhase::running_absence_verified},
+        {"running-absence-verified to save-may-be-inflight", 4U, 3U,
+         NdmsNativeDeleteWalPhase::running_absence_verified,
+         NdmsNativeDeleteWalPhase::save_may_be_inflight},
+        {"tombstone to cleanup", 6U, 5U,
+         NdmsNativeDeleteWalPhase::save_acknowledged_unverified,
+         NdmsNativeDeleteWalPhase::cleanup},
+    };
+
+    for (const auto& transition : transitions) {
+        CAPTURE(transition.label);
+        {
+            DeleteFixture fixture;
+            fixture.install_owned_target();
+            fixture.faults->fail_wal_before_visibility_call =
+                transition.publish_attempt;
+
+            const auto result = fixture.coordinator.delete_once(
+                fixture.writer.lease, fixture.request());
+
+            CHECK(result.status ==
+                  NdmsNativeCooperativeDeleteStatus::recovery_required);
+            CHECK(result.stop == NdmsNativeCooperativeDeleteStop::
+                  delete_wal_publish_failed);
+            const auto loaded = fixture.delete_wal.load();
+            REQUIRE(loaded.state == NdmsNativeDeleteWalLoadState::valid);
+            REQUIRE(loaded.record.has_value());
+            REQUIRE(loaded.record->phase == transition.predecessor);
+            check_result_matches_durable_record(
+                result, *loaded.record, transition.predecessor);
+        }
+
+        {
+            DeleteFixture fixture;
+            fixture.install_owned_target();
+            fixture.faults->fail_wal_replace_call =
+                transition.replace_attempt;
+
+            const auto result = fixture.coordinator.delete_once(
+                fixture.writer.lease, fixture.request());
+
+            CHECK(result.status ==
+                  NdmsNativeCooperativeDeleteStatus::recovery_required);
+            CHECK(result.stop == NdmsNativeCooperativeDeleteStop::
+                  delete_wal_publish_failed);
+            const auto loaded = fixture.delete_wal.load();
+            REQUIRE(loaded.state == NdmsNativeDeleteWalLoadState::valid);
+            REQUIRE(loaded.record.has_value());
+            REQUIRE(loaded.record->phase == transition.successor);
+            check_result_matches_durable_record(
+                result, *loaded.record, transition.successor);
+        }
+    }
+}
+
+TEST_CASE("unreadable delete WAL never leaks guessed durable identity") {
+    DeleteFixture fixture;
+    fixture.install_owned_target();
+    fixture.faults->fail_wal_before_visibility_call = 2U;
+    fixture.faults->before_wal_visibility_failure = [&fixture] {
+        corrupt_delete_wal_for_test(fixture.delete_wal);
+    };
+
+    const auto result = fixture.coordinator.delete_once(
+        fixture.writer.lease, fixture.request());
+
+    CHECK(result.status ==
+          NdmsNativeCooperativeDeleteStatus::recovery_required);
+    CHECK(result.stop == NdmsNativeCooperativeDeleteStop::
+          delete_wal_publish_failed);
+    CHECK(fixture.delete_wal.load().state ==
+          NdmsNativeDeleteWalLoadState::corrupt_record);
+    CHECK_FALSE(result.durable_phase.has_value());
+    CHECK_FALSE(result.transaction_id.has_value());
+    CHECK_FALSE(result.interface_name.has_value());
+    CHECK_FALSE(result.kind.has_value());
+    CHECK_FALSE(result.external_writer_race_accepted);
+    CHECK_FALSE(result.global_save_scope_acknowledged);
+}
+
+TEST_CASE("failed initial WAL publication has no invented durable record") {
+    DeleteFixture fixture;
+    fixture.install_owned_target();
+    fixture.faults->fail_wal_before_visibility_call = 1U;
+
+    const auto result = fixture.coordinator.delete_once(
+        fixture.writer.lease, fixture.request());
+
+    CHECK(result.status ==
+          NdmsNativeCooperativeDeleteStatus::recovery_required);
+    CHECK(result.stop == NdmsNativeCooperativeDeleteStop::
+          delete_wal_publish_failed);
+    CHECK(fixture.delete_wal.load().state ==
+          NdmsNativeDeleteWalLoadState::absent);
+    CHECK_FALSE(result.durable_phase.has_value());
+    CHECK_FALSE(result.transaction_id.has_value());
+    CHECK_FALSE(result.interface_name.has_value());
+    CHECK_FALSE(result.kind.has_value());
+    CHECK_FALSE(result.external_writer_race_accepted);
+    CHECK_FALSE(result.global_save_scope_acknowledged);
 }
 
 TEST_CASE("visible WAL transition and cleanup crashes recover idempotently") {

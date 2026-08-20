@@ -625,6 +625,32 @@ bool writer_still_held(NdmsNativeWriterLease& writer) noexcept {
 }
 
 template <typename ImplType>
+NdmsNativeCooperativeDeleteResult durable_stop_result(
+    ImplType& impl,
+    NdmsNativeWriterLease& writer,
+    const NdmsNativeCooperativeDeleteStop stop) noexcept {
+    // `record` is an in-memory work item. A failed publication may have left
+    // either its predecessor or its successor visible, so it is never valid
+    // evidence for a failure response. Report identity and phase only from an
+    // exact reread bracketed by the still-held cooperative writer lease. If
+    // the lease or WAL cannot be read authoritatively, omit all durable record
+    // fields; callers must then fail closed instead of guessing a phase.
+    auto result = stop_result(stop, nullptr, true);
+    try {
+        writer.verify_held();
+        const auto loaded = impl.delete_wal.load();
+        writer.verify_held();
+        if (loaded.state == NdmsNativeDeleteWalLoadState::valid &&
+            loaded.record) {
+            result = stop_result(stop, &*loaded.record, true);
+        }
+    } catch (...) {
+        // The conservative result deliberately has no durable identity.
+    }
+    return result;
+}
+
+template <typename ImplType>
 bool artifacts_and_dependencies_still_exact(
     ImplType& impl,
     NdmsNativeWriterLease& writer,
@@ -799,9 +825,13 @@ NdmsNativeCooperativeDeleteCoordinator::run_record(
         return merge_invocation_trace(
             std::move(result), invocation_trace);
     };
-    const auto stop = [&finish, &record](
-                          const NdmsNativeCooperativeDeleteStop reason) {
-        return finish(stop_result(reason, &record, true));
+    const auto stop = [&finish, &impl, &writer](
+                          const NdmsNativeCooperativeDeleteStop reason,
+                          std::optional<NdmsNativeDirectObservationFailure>
+                              observation_failure = std::nullopt) {
+        auto result = durable_stop_result(impl, writer, reason);
+        result.observation_failure = observation_failure;
+        return finish(std::move(result));
     };
     while (true) {
         if (!import_wal_clean(impl.import_wal)) {
@@ -879,59 +909,35 @@ NdmsNativeCooperativeDeleteCoordinator::run_record(
                 transport.request_may_have_been_dispatched;
             invocation_trace.transport_outcome =
                 transport.response_manifest.outcome;
-            auto transport_result = base_result(&record);
-            transport_result.delete_perform_started =
-                transport.perform_started;
-            transport_result.request_may_have_been_dispatched =
-                transport.request_may_have_been_dispatched;
-            transport_result.transport_outcome =
-                transport.response_manifest.outcome;
             if (!transport.pre_dispatch_guard_passed) {
-                transport_result.status =
-                    NdmsNativeCooperativeDeleteStatus::recovery_required;
-                transport_result.stop = guard_stop;
-                return finish(std::move(transport_result));
+                return stop(guard_stop);
             }
 
             const auto after = observe_pair(
                 impl, writer, record, ExpectedPresence::either, false);
             if (after.stop != NdmsNativeCooperativeDeleteStop::none) {
-                transport_result.status =
-                    NdmsNativeCooperativeDeleteStatus::recovery_required;
-                transport_result.stop = after.stop;
-                transport_result.observation_failure = after.failure;
-                return finish(std::move(transport_result));
+                return stop(after.stop, after.failure);
             }
             if (after.presence != MeasuredPresence::absent) {
-                transport_result.status =
-                    NdmsNativeCooperativeDeleteStatus::recovery_required;
-                transport_result.stop =
+                return stop(
                     after.presence == MeasuredPresence::present
                         ? NdmsNativeCooperativeDeleteStop::
                               delete_transport_ambiguous
                         : NdmsNativeCooperativeDeleteStop::
-                              observed_target_drifted;
-                return finish(std::move(transport_result));
+                              observed_target_drifted);
             }
             record.delete_absence_observations = after.pair;
             record.phase =
                 NdmsNativeDeleteWalPhase::running_absence_verified;
             refresh_integrity(record);
             if (!writer_still_held(writer)) {
-                transport_result.status =
-                    NdmsNativeCooperativeDeleteStatus::recovery_required;
-                transport_result.stop =
-                    NdmsNativeCooperativeDeleteStop::writer_lost;
-                return finish(std::move(transport_result));
+                return stop(NdmsNativeCooperativeDeleteStop::writer_lost);
             }
             try {
                 impl.delete_wal.publish(record);
             } catch (...) {
-                transport_result.status =
-                    NdmsNativeCooperativeDeleteStatus::recovery_required;
-                transport_result.stop = NdmsNativeCooperativeDeleteStop::
-                    delete_wal_publish_failed;
-                return finish(std::move(transport_result));
+                return stop(NdmsNativeCooperativeDeleteStop::
+                    delete_wal_publish_failed);
             }
             continue;
         }
@@ -991,63 +997,36 @@ NdmsNativeCooperativeDeleteCoordinator::run_record(
                 transport.request_may_have_been_dispatched;
             invocation_trace.transport_outcome =
                 transport.response_manifest.outcome;
-            auto transport_result = base_result(&record);
-            transport_result.save_perform_started = transport.perform_started;
-            transport_result.request_may_have_been_dispatched =
-                transport.request_may_have_been_dispatched;
-            transport_result.transport_outcome =
-                transport.response_manifest.outcome;
             if (!transport.pre_dispatch_guard_passed) {
-                transport_result.status =
-                    NdmsNativeCooperativeDeleteStatus::recovery_required;
-                transport_result.stop = guard_stop;
-                return finish(std::move(transport_result));
+                return stop(guard_stop);
             }
             if (!transport.response_manifest.
                     acknowledged_needs_observation()) {
-                transport_result.status =
-                    NdmsNativeCooperativeDeleteStatus::recovery_required;
-                transport_result.stop = NdmsNativeCooperativeDeleteStop::
-                    save_transport_ambiguous;
-                return finish(std::move(transport_result));
+                return stop(NdmsNativeCooperativeDeleteStop::
+                    save_transport_ambiguous);
             }
-            transport_result.system_configuration_save_acknowledged = true;
             invocation_trace.system_configuration_save_acknowledged = true;
             const auto after = observe_pair(
                 impl, writer, record, ExpectedPresence::either, false);
             if (after.stop != NdmsNativeCooperativeDeleteStop::none) {
-                transport_result.status =
-                    NdmsNativeCooperativeDeleteStatus::recovery_required;
-                transport_result.stop = after.stop;
-                transport_result.observation_failure = after.failure;
-                return finish(std::move(transport_result));
+                return stop(after.stop, after.failure);
             }
             if (after.presence != MeasuredPresence::absent) {
-                transport_result.status =
-                    NdmsNativeCooperativeDeleteStatus::recovery_required;
-                transport_result.stop = NdmsNativeCooperativeDeleteStop::
-                    observed_target_reappeared_after_save;
-                return finish(std::move(transport_result));
+                return stop(NdmsNativeCooperativeDeleteStop::
+                    observed_target_reappeared_after_save);
             }
             record.post_save_absence_observations = after.pair;
             record.phase = NdmsNativeDeleteWalPhase::
                 save_acknowledged_unverified;
             refresh_integrity(record);
             if (!writer_still_held(writer)) {
-                transport_result.status =
-                    NdmsNativeCooperativeDeleteStatus::recovery_required;
-                transport_result.stop =
-                    NdmsNativeCooperativeDeleteStop::writer_lost;
-                return finish(std::move(transport_result));
+                return stop(NdmsNativeCooperativeDeleteStop::writer_lost);
             }
             try {
                 impl.delete_wal.publish(record);
             } catch (...) {
-                transport_result.status =
-                    NdmsNativeCooperativeDeleteStatus::recovery_required;
-                transport_result.stop = NdmsNativeCooperativeDeleteStop::
-                    delete_wal_publish_failed;
-                return finish(std::move(transport_result));
+                return stop(NdmsNativeCooperativeDeleteStop::
+                    delete_wal_publish_failed);
             }
             continue;
         }
@@ -1361,9 +1340,11 @@ NdmsNativeCooperativeDeleteCoordinator::delete_once(
         return stop_result(
             NdmsNativeCooperativeDeleteStop::unexpected_failure);
     }
-    auto result = base_result(&record);
-    result.external_writer_race_accepted = true;
-    result.global_save_scope_acknowledged = true;
+    // Until the prepared record is published there is no durable delete
+    // identity. Owner acknowledgements held only in this request are likewise
+    // not durable audit evidence and must not be projected as such.
+    NdmsNativeCooperativeDeleteResult result;
+    result.external_writer_race_excluded = false;
 
     auto snapshot_stop = validate_snapshot(impl_->snapshots, record);
     if (snapshot_stop != NdmsNativeCooperativeDeleteStop::none) {
@@ -1429,28 +1410,28 @@ NdmsNativeCooperativeDeleteCoordinator::delete_once(
         return result;
     }
     if (!writer_still_held(writer)) {
-        result.stop = NdmsNativeCooperativeDeleteStop::writer_lost;
-        return result;
+        return stop_result(NdmsNativeCooperativeDeleteStop::writer_lost);
     }
     try {
         if (!impl_->delete_wal.publish_prepared_exclusive(record)) {
-            result.stop =
-                NdmsNativeCooperativeDeleteStop::delete_wal_unfinished;
-            return result;
+            return durable_stop_result(
+                *impl_,
+                writer,
+                NdmsNativeCooperativeDeleteStop::delete_wal_unfinished);
         }
     } catch (...) {
-        result.stop =
-            NdmsNativeCooperativeDeleteStop::delete_wal_publish_failed;
-        result.status = NdmsNativeCooperativeDeleteStatus::recovery_required;
-        return result;
+        return durable_stop_result(
+            *impl_,
+            writer,
+            NdmsNativeCooperativeDeleteStop::delete_wal_publish_failed);
     }
     try {
         return run_record(writer, record, true);
     } catch (...) {
-        return stop_result(
-            NdmsNativeCooperativeDeleteStop::unexpected_failure,
-            &record,
-            true);
+        return durable_stop_result(
+            *impl_,
+            writer,
+            NdmsNativeCooperativeDeleteStop::unexpected_failure);
     }
 }
 
@@ -1494,10 +1475,10 @@ NdmsNativeCooperativeDeleteCoordinator::resume_once(
         return run_record(
             writer, *loaded.record, current_save_reconfirmed);
     } catch (...) {
-        return stop_result(
-            NdmsNativeCooperativeDeleteStop::unexpected_failure,
-            &*loaded.record,
-            true);
+        return durable_stop_result(
+            *impl_,
+            writer,
+            NdmsNativeCooperativeDeleteStop::unexpected_failure);
     }
 }
 
