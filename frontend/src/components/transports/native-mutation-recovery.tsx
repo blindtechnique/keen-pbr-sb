@@ -52,10 +52,15 @@ type DeleteRecoveryLeaseValue =
 
 const operationRecoveryKind = (
   operation: NativeMutationOperation
-): NativeMutationRecoveryKind =>
-  operation === "import" || operation === "import_recovery"
-    ? "import"
-    : "delete"
+): NativeMutationRecoveryKind => {
+  if (operation === "import" || operation === "import_recovery") {
+    return "import"
+  }
+  if (operation === "delete" || operation === "delete_recovery") {
+    return "delete"
+  }
+  return "forget"
+}
 
 const lockMatches = (
   lock: NativeMutationLock | null,
@@ -97,6 +102,7 @@ export function NativeMutationRecovery({
     importState === "recovery_required" || lockMatches(lock, "import")
   const deleteNeedsRecovery =
     deleteState === "recovery_required" || lockMatches(lock, "delete")
+  const forgetNeedsRecovery = lockMatches(lock, "forget")
   const importJournalUnsafe =
     importState === "unsafe" || importState === "unavailable"
   const deleteJournalUnsafe =
@@ -105,6 +111,7 @@ export function NativeMutationRecovery({
     pending ||
     importNeedsRecovery ||
     deleteNeedsRecovery ||
+    forgetNeedsRecovery ||
     importJournalUnsafe ||
     deleteJournalUnsafe ||
     outcome !== null
@@ -390,6 +397,28 @@ export function NativeMutationRecovery({
                 : deleteReconfirmation
                   ? t("transports.nativeMutation.recovery.continueDelete")
                   : t("transports.nativeMutation.recovery.checkDelete")}
+            </Button>
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
+      {forgetNeedsRecovery ? (
+        <Alert variant="warning" aria-atomic="true" aria-live="polite">
+          <AlertTriangleIcon />
+          <AlertTitle>
+            {t("transports.nativeMutation.forget.recoveryTitle")}
+          </AlertTitle>
+          <AlertDescription className="space-y-3 break-words">
+            <p>{t("transports.nativeMutation.forget.recoveryDescription")}</p>
+            <Button
+              className="min-h-11 max-w-full whitespace-normal"
+              disabled={busy !== null}
+              onClick={() => void refresh().catch(() => undefined)}
+              type="button"
+              variant="outline"
+            >
+              <RotateCcwIcon />
+              {t("transports.nativeMutation.forget.refreshInventory")}
             </Button>
           </AlertDescription>
         </Alert>

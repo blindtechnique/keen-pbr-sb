@@ -68,6 +68,7 @@ import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
 import { NativeInterfaceDetails } from "@/components/transports/native-interface-details"
 import { NativeInterfaceDeleteDialog } from "@/components/transports/native-interface-delete-dialog"
 import { NativeMutationRecovery } from "@/components/transports/native-mutation-recovery"
+import { NativeRetainedDeletions } from "@/components/transports/native-retained-deletions"
 import { NativeRouteOffer } from "@/components/transports/native-route-offer"
 import { InterfaceTraffic } from "@/components/transports/interface-traffic"
 import { TransportLatencyPill } from "@/components/transports/transport-latency-pill"
@@ -305,6 +306,10 @@ export function TransportsPage({
     ndmsInventoryQuery.data?.status === 200
       ? ndmsInventoryQuery.data.data.native_mutation_status
       : undefined
+  const nativeRetainedDeletions =
+    ndmsInventoryQuery.data?.status === 200
+      ? ndmsInventoryQuery.data.data.retained_deletions
+      : []
   const selectedNativeDeleteTarget = nativeDeleteSelection
     ? nativeInterfaces.find(
         (nativeInterface) => nativeInterface.id === nativeDeleteSelection.id
@@ -1644,6 +1649,11 @@ export function TransportsPage({
         inventoryStatus={nativeMutationStatus}
         onDeleteTerminal={setNativeDeleteTerminal}
         onInventoryRefresh={refreshNativeMutationInventory}
+      />
+
+      <NativeRetainedDeletions
+        onInventoryRefresh={refreshNativeMutationInventory}
+        retainedDeletions={nativeRetainedDeletions}
       />
 
       {nativeDeleteTerminal ? (

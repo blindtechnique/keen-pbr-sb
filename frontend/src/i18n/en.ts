@@ -982,6 +982,127 @@ export const enTranslation = {
         deleting: "Submitting once…",
         delete: "Delete and save",
       },
+      forget: {
+        regionLabel: "Retained native VPN deletions",
+        title: "Retained deletion records",
+        description:
+          "These records keep encrypted rollback data after a panel-managed VPN is deleted. Forgetting a record changes only local panel metadata: it does not change the router or save the KeeneticOS configuration.",
+        candidate: "Eligible for final checks",
+        blocked: "Not eligible",
+        blockersTitle: "Why this record cannot be forgotten",
+        deferredTitle: "Checks repeated after confirmation",
+        openDialog: "Permanently forget this deletion",
+        dialogTitle: "Permanently discard rollback data?",
+        dialogDescription:
+          "This irreversibly removes the encrypted rollback snapshot and deletion record for {{name}}. No router interface is deleted or changed.",
+        staleTitle: "Fresh deletion evidence is required",
+        staleDescription:
+          "The retained record or its revision changed. Close this dialog, refresh the inventory and review the new evidence.",
+        typeName: "Type {{name}} exactly",
+        rollbackAcknowledgement:
+          "I understand that the encrypted rollback data will be permanently discarded and cannot be restored by this panel.",
+        foreignAcknowledgement:
+          "I understand that if an interface with this name appears later, the panel will treat it as foreign and will not claim or remove it automatically.",
+        sending: "Submitting once…",
+        confirm: "Permanently forget",
+        rejectedTitle: "The record was not forgotten",
+        rejectedDescription:
+          "The authoritative checks rejected this one request. Nothing is retried automatically; review the refreshed inventory before deciding again.",
+        unknownTitle: "The forget outcome is unknown",
+        unknownDescription:
+          "The response was missing or untrusted. Do not submit another request until a fresh inventory shows the retained record and the recovery notice is resolved.",
+        artifactState:
+          "Rollback snapshot: {{snapshot}}. Deletion record: {{tombstone}}.",
+        artifactStates: {
+          unknown: "not proven",
+          retained: "retained",
+          absent_durable: "durably absent",
+        },
+        forgottenDescription:
+          "Rollback data and the retained deletion record for {{name}} are durably absent. Any future interface with that name is foreign.",
+        recoveryTitle: "A retained-deletion cleanup needs reconciliation",
+        recoveryDescription:
+          "A previous one-shot request may have removed only part of the local metadata. No router mutation or global save was attempted. Refresh the fresh inventory; the panel never repeats the request automatically.",
+        refreshInventory: "Refresh retained deletions",
+        blockers: {
+          catalog_not_fresh: "A fresh KeeneticOS interface list is required",
+          target_present:
+            "An interface with this name is currently present in KeeneticOS",
+          ownership_schema_not_forget_capable:
+            "This deletion record cannot be retired by this panel version",
+          import_journal_not_authoritatively_clean:
+            "Native import state is not authoritatively clean",
+          import_recovery_required: "Finish native import recovery first",
+          import_journal_unsafe: "The native import journal is unsafe",
+          import_journal_unavailable:
+            "The native import journal is unavailable",
+          delete_recovery_required:
+            "Finish the previous deletion recovery first",
+          delete_journal_unsafe: "The native deletion journal is unsafe",
+        },
+        deferred: {
+          encrypted_snapshot_or_absence:
+            "Prove the exact encrypted snapshot or its durable absence",
+          keen_pbr_dependencies:
+            "Check that no panel configuration or runtime object still refers to the interface",
+          retained_kernel_interface_absence:
+            "Prove that no retained kernel interface remains",
+          fresh_dual_scope_absence:
+            "Observe stable absence in both runtime and running configuration",
+        },
+        stops: {
+          none: "No stop condition remains",
+          writer_missing: "The exclusive panel writer was not available",
+          writer_lost: "The exclusive panel writer was lost",
+          import_wal_not_authoritatively_clean:
+            "Native import state is not authoritatively clean",
+          delete_wal_unfinished:
+            "A native deletion transaction still needs recovery",
+          delete_wal_unsafe: "The native deletion journal is unsafe",
+          ownership_absent: "The retained deletion record is absent",
+          ownership_unreadable:
+            "The retained deletion record could not be read safely",
+          ownership_not_forget_capable:
+            "This deletion record cannot be retired by this panel version",
+          ownership_changed:
+            "The retained deletion record changed during the request",
+          snapshot_unreadable:
+            "The encrypted rollback snapshot could not be read safely",
+          snapshot_mismatch:
+            "The encrypted rollback snapshot no longer matches the retained record",
+          snapshot_retirement_failed:
+            "Durable removal of the rollback snapshot was not proved",
+          keen_pbr_dependency_scan_incomplete:
+            "The panel dependency scan was incomplete",
+          keen_pbr_dependencies_present:
+            "Panel configuration or runtime objects still refer to this interface",
+          kernel_inventory_unavailable:
+            "The kernel interface inventory was unavailable",
+          retained_kernel_interface_present:
+            "A retained kernel interface is still present",
+          runtime_observation_failed:
+            "The runtime interface observation failed",
+          running_config_observation_failed:
+            "The running-configuration observation failed",
+          observation_scope_mismatch:
+            "The two authoritative observations did not describe the required scopes",
+          observed_target_present:
+            "The interface appeared during the final checks",
+          observed_marker_present:
+            "The retained ownership marker appeared during the final checks",
+          observed_catalog_unsafe:
+            "The final KeeneticOS catalog was incomplete or unsafe",
+          tombstone_retirement_failed:
+            "The deletion record was not proved durably absent",
+          unexpected_failure:
+            "An unexpected failure left the outcome requiring reconciliation",
+        },
+        outcomes: {
+          blocked: "The record was not forgotten",
+          recovery_required: "Local metadata cleanup is incomplete",
+          forgotten: "Deletion record permanently forgotten",
+        },
+      },
       recovery: {
         regionLabel: "Native VPN mutation recovery",
         pendingTitle: "A native VPN operation is pending",

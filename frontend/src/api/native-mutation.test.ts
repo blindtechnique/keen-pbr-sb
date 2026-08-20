@@ -4,8 +4,10 @@ import {
   NativeMutationTransportError,
   parseNdmsNativeDeleteResult,
   parseNdmsNativeImportRecoveryResult,
+  parseNdmsNativeTombstoneForgetResult,
   postNdmsNativeDeleteOnce,
   postNdmsNativeImportRecoveryOnce,
+  postNdmsNativeTombstoneForgetOnce,
 } from "./native-mutation"
 import { resetStepUpState } from "@/lib/step-up"
 
@@ -44,6 +46,28 @@ const noWorkImportRecovery = () => ({
   wal_removed: false,
   delete_wal_readiness: "clean",
   import_wal_readiness: "clean",
+})
+
+const forgottenTombstone = (interfaceName = "Wireguard5") => ({
+  status: "forgotten",
+  stop: "none",
+  interface_name: interfaceName,
+  snapshot_state: "absent_durable",
+  tombstone_state: "absent_durable",
+  router_mutation_attempted: false,
+  system_configuration_save_acknowledged: false,
+  future_reappearance_is_foreign: true,
+})
+
+const tombstoneRevision = `ndms-native-owner-tombstone-v1-${"a".repeat(64)}`
+const tombstoneForgetRequest = () => ({
+  interface_name: "Wireguard5",
+  expected_ownership_revision: tombstoneRevision,
+  confirm_interface_name: "Wireguard5",
+  rollback_discard_acknowledgement:
+    "permanently_discard_rollback_data" as const,
+  foreign_reappearance_acknowledgement:
+    "accepted_reappearance_is_foreign" as const,
 })
 
 describe("native mutation identity boundaries", () => {
@@ -296,5 +320,132 @@ describe("native mutation response trust", () => {
     await expect(
       postNdmsNativeImportRecoveryOnce(true, absentResponse)
     ).rejects.toMatchObject({ code: "outcome_unknown" })
+  })
+})
+
+describe("native tombstone forget transport", () => {
+  test("accepts only truthful terminal and partial artifact states", () => {
+    expect(
+      parseNdmsNativeTombstoneForgetResult(forgottenTombstone())
+    ).not.toBeNull()
+    expect(
+      parseNdmsNativeTombstoneForgetResult({
+        ...forgottenTombstone(),
+        status: "blocked",
+        stop: "ownership_changed",
+        snapshot_state: "unknown",
+        tombstone_state: "unknown",
+        future_reappearance_is_foreign: false,
+      })
+    ).not.toBeNull()
+    expect(
+      parseNdmsNativeTombstoneForgetResult({
+        ...forgottenTombstone(),
+        status: "blocked",
+        stop: "snapshot_retirement_failed",
+        snapshot_state: "retained",
+        tombstone_state: "retained",
+        future_reappearance_is_foreign: false,
+      })
+    ).not.toBeNull()
+    expect(
+      parseNdmsNativeTombstoneForgetResult({
+        ...forgottenTombstone(),
+        status: "recovery_required",
+        stop: "tombstone_retirement_failed",
+        tombstone_state: "retained",
+        future_reappearance_is_foreign: false,
+      })
+    ).not.toBeNull()
+    expect(
+      parseNdmsNativeTombstoneForgetResult({
+        ...forgottenTombstone(),
+        status: "recovery_required",
+        stop: "snapshot_retirement_failed",
+        snapshot_state: "retained",
+        tombstone_state: "retained",
+        future_reappearance_is_foreign: false,
+      })
+    ).not.toBeNull()
+
+    for (const forged of [
+      { ...forgottenTombstone(), router_mutation_attempted: true },
+      { ...forgottenTombstone(), snapshot_state: "retained" },
+      { ...forgottenTombstone(), transaction_id: "private" },
+      {
+        ...forgottenTombstone(),
+        status: "blocked",
+        stop: "snapshot_retirement_failed",
+        snapshot_state: "unknown",
+        tombstone_state: "unknown",
+        future_reappearance_is_foreign: false,
+      },
+      {
+        ...forgottenTombstone(),
+        status: "blocked",
+        stop: "tombstone_retirement_failed",
+        snapshot_state: "unknown",
+        tombstone_state: "unknown",
+        future_reappearance_is_foreign: false,
+      },
+      {
+        ...forgottenTombstone(),
+        status: "recovery_required",
+        stop: "ownership_absent",
+        tombstone_state: "retained",
+        future_reappearance_is_foreign: false,
+      },
+    ]) {
+      expect(parseNdmsNativeTombstoneForgetResult(forged)).toBeNull()
+    }
+  })
+
+  test("rejects a non-exact request before fetch", async () => {
+    const fetchImpl = mock(() =>
+      Promise.resolve(Response.json(forgottenTombstone()))
+    )
+    await expect(
+      postNdmsNativeTombstoneForgetOnce(
+        {
+          ...tombstoneForgetRequest(),
+          confirm_interface_name: "Wireguard6",
+        },
+        fetchImpl
+      )
+    ).rejects.toMatchObject({ code: "rejected" })
+    expect(fetchImpl).toHaveBeenCalledTimes(0)
+  })
+
+  test("posts exact JSON once without mutation headers", async () => {
+    const fetchImpl = mock((input: RequestInfo | URL, init?: RequestInit) => {
+      expect(input).toBe(
+        "/api/system/ndms/interfaces/retained-deletions/forget"
+      )
+      expect(init?.method).toBe("POST")
+      expect(init?.cache).toBe("no-store")
+      expect(init?.redirect).toBe("error")
+      const headers = new Headers(init?.headers)
+      expect(headers.get("Content-Type")).toBe("application/json")
+      expect(
+        headers.get("X-Keen-Pbr-External-Ndms-Writer-Race-Acceptance")
+      ).toBeNull()
+      expect(JSON.parse(String(init?.body))).toEqual(tombstoneForgetRequest())
+      return Promise.resolve(Response.json(forgottenTombstone()))
+    })
+
+    await expect(
+      postNdmsNativeTombstoneForgetOnce(tombstoneForgetRequest(), fetchImpl)
+    ).resolves.toMatchObject({ status: "forgotten" })
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
+  test("does not trust a response for another retained deletion", async () => {
+    const fetchImpl = mock(() =>
+      Promise.resolve(Response.json(forgottenTombstone("Wireguard6")))
+    )
+    await expect(
+      postNdmsNativeTombstoneForgetOnce(tombstoneForgetRequest(), fetchImpl)
+    ).rejects.toMatchObject({ code: "outcome_unknown" })
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
   })
 })

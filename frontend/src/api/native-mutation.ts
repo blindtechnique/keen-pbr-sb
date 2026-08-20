@@ -5,6 +5,8 @@ export const NDMS_NATIVE_DELETE_RECOVERY_PATH =
   "/api/system/ndms/interfaces/remove/recovery/retry"
 export const NDMS_NATIVE_IMPORT_RECOVERY_PATH =
   "/api/system/ndms/interfaces/import/recovery/retry"
+export const NDMS_NATIVE_TOMBSTONE_FORGET_PATH =
+  "/api/system/ndms/interfaces/retained-deletions/forget"
 
 export const NDMS_NATIVE_DELETE_STATUSES = [
   "blocked",
@@ -118,6 +120,68 @@ export type NdmsNativeDeleteRequest = Readonly<{
   interface_name: string
   expected_ownership_revision: string
   confirm_label: string
+}>
+
+export const NDMS_NATIVE_TOMBSTONE_FORGET_STATUSES = [
+  "blocked",
+  "recovery_required",
+  "forgotten",
+] as const
+export const NDMS_NATIVE_TOMBSTONE_FORGET_STOPS = [
+  "none",
+  "writer_missing",
+  "writer_lost",
+  "import_wal_not_authoritatively_clean",
+  "delete_wal_unfinished",
+  "delete_wal_unsafe",
+  "ownership_absent",
+  "ownership_unreadable",
+  "ownership_not_forget_capable",
+  "ownership_changed",
+  "snapshot_unreadable",
+  "snapshot_mismatch",
+  "snapshot_retirement_failed",
+  "keen_pbr_dependency_scan_incomplete",
+  "keen_pbr_dependencies_present",
+  "kernel_inventory_unavailable",
+  "retained_kernel_interface_present",
+  "runtime_observation_failed",
+  "running_config_observation_failed",
+  "observation_scope_mismatch",
+  "observed_target_present",
+  "observed_marker_present",
+  "observed_catalog_unsafe",
+  "tombstone_retirement_failed",
+  "unexpected_failure",
+] as const
+export const NDMS_NATIVE_TOMBSTONE_FORGET_ARTIFACT_STATES = [
+  "unknown",
+  "retained",
+  "absent_durable",
+] as const
+
+export type NdmsNativeTombstoneForgetStatus =
+  (typeof NDMS_NATIVE_TOMBSTONE_FORGET_STATUSES)[number]
+export type NdmsNativeTombstoneForgetStop =
+  (typeof NDMS_NATIVE_TOMBSTONE_FORGET_STOPS)[number]
+export type NdmsNativeTombstoneForgetArtifactState =
+  (typeof NDMS_NATIVE_TOMBSTONE_FORGET_ARTIFACT_STATES)[number]
+export type NdmsNativeTombstoneForgetRequest = Readonly<{
+  interface_name: string
+  expected_ownership_revision: string
+  confirm_interface_name: string
+  rollback_discard_acknowledgement: "permanently_discard_rollback_data"
+  foreign_reappearance_acknowledgement: "accepted_reappearance_is_foreign"
+}>
+export type NdmsNativeTombstoneForgetResult = Readonly<{
+  status: NdmsNativeTombstoneForgetStatus
+  stop: NdmsNativeTombstoneForgetStop
+  interface_name: string
+  snapshot_state: NdmsNativeTombstoneForgetArtifactState
+  tombstone_state: NdmsNativeTombstoneForgetArtifactState
+  router_mutation_attempted: false
+  system_configuration_save_acknowledged: false
+  future_reappearance_is_foreign: boolean
 }>
 
 export const NDMS_NATIVE_IMPORT_RECOVERY_STATUSES = [
@@ -307,6 +371,17 @@ const importRecoveryAllowedKeys = new Set([
   "delete_transport_outcome",
 ])
 
+const tombstoneForgetAllowedKeys = new Set([
+  "status",
+  "stop",
+  "interface_name",
+  "snapshot_state",
+  "tombstone_state",
+  "router_mutation_attempted",
+  "system_configuration_save_acknowledged",
+  "future_reappearance_is_foreign",
+])
+
 const inList = <T extends string>(
   value: unknown,
   values: readonly T[]
@@ -325,6 +400,10 @@ const validKernelInterface = (value: unknown): value is string =>
 const validOwnershipRevision = (value: unknown): value is string =>
   typeof value === "string" &&
   /^ndms-native-owner-(?:v2|v3|tombstone-v1)-[0-9a-f]{64}$/.test(value)
+
+const validTombstoneOwnershipRevision = (value: unknown): value is string =>
+  typeof value === "string" &&
+  /^ndms-native-owner-tombstone-v1-[0-9a-f]{64}$/.test(value)
 
 const isRecord = (payload: unknown): payload is Record<string, unknown> =>
   Boolean(payload) && typeof payload === "object" && !Array.isArray(payload)
@@ -441,6 +520,72 @@ export function parseNdmsNativeDeleteResult(
     return null
   }
   return value as NdmsNativeDeleteResult
+}
+
+const recoveryImpossibleForgetStops = new Set<NdmsNativeTombstoneForgetStop>([
+  "writer_missing",
+  "ownership_absent",
+  "ownership_unreadable",
+  "ownership_not_forget_capable",
+  "snapshot_unreadable",
+  "snapshot_mismatch",
+])
+
+export function parseNdmsNativeTombstoneForgetResult(
+  payload: unknown
+): NdmsNativeTombstoneForgetResult | null {
+  if (!isRecord(payload)) return null
+  const value = payload
+  if (Object.keys(value).some((key) => !tombstoneForgetAllowedKeys.has(key))) {
+    return null
+  }
+  if (
+    !inList(value.status, NDMS_NATIVE_TOMBSTONE_FORGET_STATUSES) ||
+    !inList(value.stop, NDMS_NATIVE_TOMBSTONE_FORGET_STOPS) ||
+    !validFirmwareInterface(value.interface_name) ||
+    !inList(
+      value.snapshot_state,
+      NDMS_NATIVE_TOMBSTONE_FORGET_ARTIFACT_STATES
+    ) ||
+    !inList(
+      value.tombstone_state,
+      NDMS_NATIVE_TOMBSTONE_FORGET_ARTIFACT_STATES
+    ) ||
+    value.router_mutation_attempted !== false ||
+    value.system_configuration_save_acknowledged !== false ||
+    typeof value.future_reappearance_is_foreign !== "boolean"
+  ) {
+    return null
+  }
+
+  const result = value as unknown as NdmsNativeTombstoneForgetResult
+  if (result.status === "forgotten") {
+    return result.stop === "none" &&
+      result.snapshot_state === "absent_durable" &&
+      result.tombstone_state === "absent_durable" &&
+      result.future_reappearance_is_foreign
+      ? result
+      : null
+  }
+  if (result.stop === "none" || result.future_reappearance_is_foreign) {
+    return null
+  }
+  if (result.status === "blocked") {
+    if (result.stop === "tombstone_retirement_failed") return null
+    const expectedArtifactState =
+      result.stop === "snapshot_retirement_failed" ? "retained" : "unknown"
+    return result.snapshot_state === expectedArtifactState &&
+      result.tombstone_state === expectedArtifactState
+      ? result
+      : null
+  }
+
+  if (recoveryImpossibleForgetStops.has(result.stop)) return null
+  if (result.stop === "snapshot_retirement_failed") {
+    return result.snapshot_state !== "absent_durable" ? result : null
+  }
+  if (result.stop === "unexpected_failure") return result
+  return result.snapshot_state === "absent_durable" ? result : null
 }
 
 const forwardOnlyPhase = (value: unknown): boolean =>
@@ -1159,6 +1304,40 @@ export async function postNdmsNativeDeleteRecoveryOnce(
     fetchImpl
   )
   return parseTrustedResponse(response, parseNdmsNativeDeleteResult)
+}
+
+export async function postNdmsNativeTombstoneForgetOnce(
+  request: NdmsNativeTombstoneForgetRequest,
+  fetchImpl: typeof fetch = fetch
+): Promise<NdmsNativeTombstoneForgetResult> {
+  if (
+    !validFirmwareInterface(request.interface_name) ||
+    request.confirm_interface_name !== request.interface_name ||
+    !validTombstoneOwnershipRevision(request.expected_ownership_revision) ||
+    request.rollback_discard_acknowledgement !==
+      "permanently_discard_rollback_data" ||
+    request.foreign_reappearance_acknowledgement !==
+      "accepted_reappearance_is_foreign"
+  ) {
+    throw new NativeMutationTransportError("rejected")
+  }
+  const response = await fetchWithStepUp(
+    NDMS_NATIVE_TOMBSTONE_FORGET_PATH,
+    {
+      ...commonRequestInit,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    },
+    fetchImpl
+  )
+  const result = await parseTrustedResponse(
+    response,
+    parseNdmsNativeTombstoneForgetResult
+  )
+  if (result.interface_name !== request.interface_name) {
+    throw new NativeMutationTransportError("outcome_unknown")
+  }
+  return result
 }
 
 export async function postNdmsNativeImportRecoveryOnce(

@@ -1,30 +1,54 @@
 import { safeStorageMatches } from "@/lib/safe-storage"
 
-export type NativeMutationOperation =
+type NativeMutationOperationV1 =
   | "import"
   | "delete"
   | "import_recovery"
   | "delete_recovery"
 
-export type NativeMutationRecoveryKind = "import" | "delete"
+type NativeMutationRecoveryKindV1 = "import" | "delete"
 
-export type NativeMutationLock =
+export type NativeMutationOperation = NativeMutationOperationV1 | "forget"
+
+export type NativeMutationRecoveryKind = NativeMutationRecoveryKindV1 | "forget"
+
+type NativeMutationLockV1 =
   | Readonly<{
       version: 1
       state: "pending"
-      operation: NativeMutationOperation
+      operation: NativeMutationOperationV1
       token: string
     }>
   | Readonly<{
       version: 1
       state: "recovery_required"
-      recovery: NativeMutationRecoveryKind
+      recovery: NativeMutationRecoveryKindV1
     }>
   | Readonly<{
       version: 1
       state: "unknown"
+      operation: NativeMutationOperationV1
+    }>
+
+type NativeMutationLockV2 =
+  | Readonly<{
+      version: 2
+      state: "pending"
+      operation: NativeMutationOperation
+      token: string
+    }>
+  | Readonly<{
+      version: 2
+      state: "recovery_required"
+      recovery: NativeMutationRecoveryKind
+    }>
+  | Readonly<{
+      version: 2
+      state: "unknown"
       operation: NativeMutationOperation
     }>
+
+export type NativeMutationLock = NativeMutationLockV1 | NativeMutationLockV2
 
 export type NativeMutationLeaseDisposition =
   | Readonly<{ state: "not_started" }>
@@ -62,6 +86,11 @@ export const NATIVE_MUTATION_LOCK_STORAGE_KEY =
   "keen-pbr.native-mutation-lock.v1"
 export const NATIVE_MUTATION_WEB_LOCK_NAME = "keen-pbr.native-mutation.v1"
 
+// The shared names deliberately remain v1. A v2 writer must contend with old
+// tabs on the same Web Lock and publish into the same durable key; a v1 reader
+// then sees an unsupported record version and fails closed instead of writing
+// through a forget operation it cannot understand.
+
 const LEGACY_IMPORT_LOCK_STORAGE_KEY = "keen-pbr.native-import-write-lock.v2"
 const LEGACY_IMPORT_SESSION_KEY = "keen-pbr.native-import-write-lock.v1"
 
@@ -95,19 +124,40 @@ const isOperation = (value: unknown): value is NativeMutationOperation =>
   value === "import" ||
   value === "delete" ||
   value === "import_recovery" ||
+  value === "delete_recovery" ||
+  value === "forget"
+
+const isOperationV1 = (value: unknown): value is NativeMutationOperationV1 =>
+  value === "import" ||
+  value === "delete" ||
+  value === "import_recovery" ||
   value === "delete_recovery"
 
 const isRecoveryKind = (value: unknown): value is NativeMutationRecoveryKind =>
+  value === "import" || value === "delete" || value === "forget"
+
+const isRecoveryKindV1 = (
+  value: unknown
+): value is NativeMutationRecoveryKindV1 =>
   value === "import" || value === "delete"
 
 const parseLock = (serialized: string | null): NativeMutationLock | null => {
   if (serialized === null) return null
   try {
     const value = JSON.parse(serialized) as Record<string, unknown>
-    if (!value || Array.isArray(value) || value.version !== 1) return null
+    if (
+      !value ||
+      Array.isArray(value) ||
+      (value.version !== 1 && value.version !== 2)
+    ) {
+      return null
+    }
+    const validOperation = value.version === 1 ? isOperationV1 : isOperation
+    const validRecovery =
+      value.version === 1 ? isRecoveryKindV1 : isRecoveryKind
     if (
       value.state === "pending" &&
-      isOperation(value.operation) &&
+      validOperation(value.operation) &&
       typeof value.token === "string" &&
       /^[0-9a-f]{32}$/.test(value.token) &&
       Object.keys(value).every((key) =>
@@ -118,7 +168,7 @@ const parseLock = (serialized: string | null): NativeMutationLock | null => {
     }
     if (
       value.state === "recovery_required" &&
-      isRecoveryKind(value.recovery) &&
+      validRecovery(value.recovery) &&
       Object.keys(value).every((key) =>
         ["version", "state", "recovery"].includes(key)
       )
@@ -127,7 +177,7 @@ const parseLock = (serialized: string | null): NativeMutationLock | null => {
     }
     if (
       value.state === "unknown" &&
-      isOperation(value.operation) &&
+      validOperation(value.operation) &&
       Object.keys(value).every((key) =>
         ["version", "state", "operation"].includes(key)
       )
@@ -147,7 +197,8 @@ const hasUnsupportedLockVersion = (serialized: string): boolean => {
       Boolean(value) &&
       !Array.isArray(value) &&
       Object.prototype.hasOwnProperty.call(value, "version") &&
-      value.version !== 1
+      value.version !== 1 &&
+      value.version !== 2
     )
   } catch {
     return false
@@ -157,7 +208,7 @@ const hasUnsupportedLockVersion = (serialized: string): boolean => {
 const serializeLock = (lock: NativeMutationLock): string => JSON.stringify(lock)
 
 const corruptLock = (): NativeMutationLock => ({
-  version: 1,
+  version: 2,
   state: "unknown",
   operation: "import",
 })
@@ -225,8 +276,8 @@ const readLegacyImportLock = (
   if (legacy === null) return null
 
   return legacy === "recovery_required"
-    ? { version: 1, state: "recovery_required", recovery: "import" }
-    : { version: 1, state: "unknown", operation: "import" }
+    ? { version: 2, state: "recovery_required", recovery: "import" }
+    : { version: 2, state: "unknown", operation: "import" }
 }
 
 const migrateLegacyImportLockUnderLease = (): DurableSnapshot => {
@@ -392,10 +443,15 @@ const newToken = (): string | null => {
 
 const recoveryForOperation = (
   operation: NativeMutationOperation
-): NativeMutationRecoveryKind =>
-  operation === "import" || operation === "import_recovery"
-    ? "import"
-    : "delete"
+): NativeMutationRecoveryKind => {
+  if (operation === "import" || operation === "import_recovery") {
+    return "import"
+  }
+  if (operation === "delete" || operation === "delete_recovery") {
+    return "delete"
+  }
+  return "forget"
+}
 
 const isFreshOperation = (operation: NativeMutationOperation): boolean =>
   operation === "import" || operation === "delete"
@@ -405,7 +461,9 @@ const operationEligible = (
   operation: NativeMutationOperation
 ): boolean => {
   if (snapshot.unsupported) return false
-  if (snapshot.corrupt) return !isFreshOperation(operation)
+  if (snapshot.corrupt) {
+    return operation === "import_recovery" || operation === "delete_recovery"
+  }
   if (isFreshOperation(operation)) return snapshot.lock === null
   if (snapshot.lock === null) return true
 
@@ -449,7 +507,7 @@ const writePending = (
   }
 
   const pending: NativeMutationLock = {
-    version: 1,
+    version: 2,
     state: "pending",
     operation,
     token,
@@ -653,7 +711,7 @@ export async function runWithNativeMutationLease<T>(
           } catch (error) {
             if (!authority) throw new CallbackBeforePendingError(error)
             writeTerminal(authority, {
-              version: 1,
+              version: 2,
               state: "unknown",
               operation,
             })
@@ -667,7 +725,7 @@ export async function runWithNativeMutationLease<T>(
           ) {
             return authority
               ? (writeTerminal(authority, {
-                  version: 1,
+                  version: 2,
                   state: "unknown",
                   operation,
                 }),
@@ -683,7 +741,7 @@ export async function runWithNativeMutationLease<T>(
 
           if (completion.disposition.state === "not_started") {
             writeTerminal(authority, {
-              version: 1,
+              version: 2,
               state: "unknown",
               operation,
             })
@@ -692,7 +750,7 @@ export async function runWithNativeMutationLease<T>(
 
           if (completion.disposition.state === "unknown") {
             writeTerminal(authority, {
-              version: 1,
+              version: 2,
               state: "unknown",
               operation,
             })
@@ -710,12 +768,12 @@ export async function runWithNativeMutationLease<T>(
                 : completion.disposition.recovery === operationRecovery
             target = coherentDisposition
               ? {
-                  version: 1,
+                  version: 2,
                   state: "recovery_required",
                   recovery: completion.disposition.recovery,
                 }
               : {
-                  version: 1,
+                  version: 2,
                   state: "unknown",
                   operation,
                 }

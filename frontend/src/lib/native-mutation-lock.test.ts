@@ -144,7 +144,7 @@ const installWindow = () => {
 const marker = (lock: NativeMutationLock): string => JSON.stringify(lock)
 
 const pending = (
-  operation: NativeMutationOperation,
+  operation: Exclude<NativeMutationOperation, "forget">,
   digit = "a"
 ): NativeMutationLock => ({
   version: 1,
@@ -424,7 +424,7 @@ describe("native mutation browser-global lease", () => {
     })
     expect(failed).toEqual({ status: "outcome_unknown" })
     expect(readNativeMutationLock()).toEqual({
-      version: 1,
+      version: 2,
       state: "unknown",
       operation: "delete",
     })
@@ -465,7 +465,7 @@ describe("native mutation browser-global lease", () => {
       )
     ).toEqual({ status: "completed", value: "blocked" })
     expect(readNativeMutationLock()).toEqual({
-      version: 1,
+      version: 2,
       state: "recovery_required",
       recovery: "import",
     })
@@ -476,7 +476,7 @@ describe("native mutation browser-global lease", () => {
       )
     ).toEqual({ status: "outcome_unknown" })
     expect(readNativeMutationLock()).toEqual({
-      version: 1,
+      version: 2,
       state: "unknown",
       operation: "import_recovery",
     })
@@ -519,7 +519,7 @@ describe("native mutation browser-global lease", () => {
     )
     expect(missing).toEqual({ status: "outcome_unknown" })
     expect(readNativeMutationLock()).toEqual({
-      version: 1,
+      version: 2,
       state: "unknown",
       operation: "delete",
     })
@@ -530,7 +530,7 @@ describe("native mutation browser-global lease", () => {
     )
     expect(contradicted).toEqual({ status: "outcome_unknown" })
     expect(readNativeMutationLock()).toEqual({
-      version: 1,
+      version: 2,
       state: "unknown",
       operation: "delete",
     })
@@ -722,7 +722,7 @@ describe("native mutation browser-global lease", () => {
     localStorage.setItem(LEGACY_IMPORT_LOCK_STORAGE_KEY, "legacy-pending")
 
     expect(readNativeMutationLock()).toEqual({
-      version: 1,
+      version: 2,
       state: "unknown",
       operation: "import",
     })
@@ -740,7 +740,7 @@ describe("native mutation browser-global lease", () => {
     ).toEqual({ status: "unavailable" })
     expect(freshCalls).toBe(0)
     expect(readNativeMutationLock()).toEqual({
-      version: 1,
+      version: 2,
       state: "unknown",
       operation: "import",
     })
@@ -773,7 +773,7 @@ describe("native mutation browser-global lease", () => {
     expect(recoveryCalls).toBe(0)
     expect(localStorage.getItem(NATIVE_MUTATION_LOCK_STORAGE_KEY)).toBeNull()
     expect(readNativeMutationLock()).toEqual({
-      version: 1,
+      version: 2,
       state: "recovery_required",
       recovery: "import",
     })
@@ -788,7 +788,7 @@ describe("native mutation browser-global lease", () => {
     ).toEqual({ status: "outcome_unknown" })
     expect(recoveryCalls).toBe(1)
     expect(readNativeMutationLock()).toEqual({
-      version: 1,
+      version: 2,
       state: "recovery_required",
       recovery: "import",
     })
@@ -867,7 +867,7 @@ describe("native mutation browser-global lease", () => {
         )
       ).toEqual({ status: "completed", value: "redirected" })
       expect(readNativeMutationLock()).toEqual({
-        version: 1,
+        version: 2,
         state: "recovery_required",
         recovery: "delete",
       })
@@ -900,7 +900,7 @@ describe("native mutation browser-global lease", () => {
         )
       ).toEqual({ status: "completed", value: "redirected-back" })
       expect(readNativeMutationLock()).toEqual({
-        version: 1,
+        version: 2,
         state: "recovery_required",
         recovery: "import",
       })
@@ -918,7 +918,7 @@ describe("native mutation browser-global lease", () => {
       )
     ).toEqual({ status: "outcome_unknown" })
     expect(readNativeMutationLock()).toEqual({
-      version: 1,
+      version: 2,
       state: "unknown",
       operation: "import_recovery",
     })
@@ -934,7 +934,7 @@ describe("native mutation browser-global lease", () => {
       })
     ).toEqual({ status: "outcome_unknown" })
     expect(readNativeMutationLock()).toEqual({
-      version: 1,
+      version: 2,
       state: "unknown",
       operation: "import",
     })
@@ -982,9 +982,58 @@ describe("native mutation browser-global lease", () => {
     unsubscribe()
   })
 
-  test("18: an unsupported future lock version is never overwritten", async () => {
-    const future = JSON.stringify({
+  test("18: forget uses an identity-free v2 family and can resume explicitly", async () => {
+    let observedPending: NativeMutationLock | null = null
+    expect(
+      await runWithNativeMutationLease("forget", async () => {
+        observedPending = readNativeMutationLock()
+        return complete({ state: "recovery", recovery: "forget" }, "partial")
+      })
+    ).toEqual({ status: "completed", value: "partial" })
+    expect(observedPending).toEqual({
       version: 2,
+      state: "pending",
+      operation: "forget",
+      token: expect.stringMatching(/^[0-9a-f]{32}$/),
+    })
+    expect(readNativeMutationLock()).toEqual({
+      version: 2,
+      state: "recovery_required",
+      recovery: "forget",
+    })
+    expect(JSON.stringify(readNativeMutationLock())).not.toContain("Wireguard")
+
+    expect(
+      await runWithNativeMutationLease("forget", async () =>
+        complete({ state: "clear" }, "resolved")
+      )
+    ).toEqual({ status: "completed", value: "resolved" })
+    expect(readNativeMutationLock()).toBeNull()
+  })
+
+  test("19: a v1 record cannot smuggle the forget family", async () => {
+    const invalidV1 = JSON.stringify({
+      version: 1,
+      state: "unknown",
+      operation: "forget",
+    })
+    localStorage.setItem(NATIVE_MUTATION_LOCK_STORAGE_KEY, invalidV1)
+    let callbackCount = 0
+    expect(
+      await runWithNativeMutationLease("forget", async () => {
+        callbackCount += 1
+        return complete({ state: "clear" }, undefined)
+      })
+    ).toEqual({ status: "unavailable" })
+    expect(callbackCount).toBe(0)
+    expect(localStorage.getItem(NATIVE_MUTATION_LOCK_STORAGE_KEY)).toBe(
+      invalidV1
+    )
+  })
+
+  test("20: an unsupported future lock version is never overwritten", async () => {
+    const future = JSON.stringify({
+      version: 3,
       state: "recovery_required",
       recovery: "delete",
     })
@@ -996,6 +1045,7 @@ describe("native mutation browser-global lease", () => {
       "delete",
       "import_recovery",
       "delete_recovery",
+      "forget",
     ] as const) {
       expect(
         await runWithNativeMutationLease(operation, async () => {
