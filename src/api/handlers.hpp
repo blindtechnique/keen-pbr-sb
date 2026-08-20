@@ -8,6 +8,7 @@
 #include "../config/config.hpp"
 #include "../daemon/config_store.hpp"
 #include "../health/routing_health.hpp"
+#include "../keenetic/ndms_native_cooperative_delete.hpp"
 #include "../keenetic/ndms_native_import_readiness.hpp"
 #include "../keenetic/ndms_native_cooperative_import.hpp"
 #include "../log/logger.hpp"
@@ -177,6 +178,20 @@ struct ApiContext {
         NdmsNativeExternalWriterRaceAcceptance,
         const std::shared_ptr<SensitiveRequestReservation>&)>
         run_ndms_native_import_fn;
+    // Native delete uses the same complete ordered reservation as import.
+    // Acquiring it before body admission prevents a losing request from
+    // consuming its selector/consent evidence, while the cooperative delete
+    // coordinator remains the final WAL/ownership/dependency gate.
+    std::function<std::shared_ptr<SensitiveRequestReservation>()>
+        reserve_ndms_native_delete_fn;
+    std::function<NdmsNativeCooperativeDeleteResult(
+        const NdmsNativeCooperativeDeleteRequest&,
+        const std::shared_ptr<SensitiveRequestReservation>&)>
+        run_ndms_native_delete_fn;
+    std::function<NdmsNativeCooperativeDeleteResult(
+        const NdmsNativeCooperativeDeleteResumeAcknowledgement&,
+        const std::shared_ptr<SensitiveRequestReservation>&)>
+        resume_ndms_native_delete_fn;
 
     Config get_visible_config() const {
         return get_visible_config_fn();

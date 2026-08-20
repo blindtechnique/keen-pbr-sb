@@ -66,7 +66,7 @@ const std::vector<StepUpProtectedRoute>& step_up_protected_routes() {
         {"POST", "/api/system/ndms/interfaces/import"},
         {"POST", "/api/system/ndms/interfaces/import/preflight"},
         {"POST", "/api/system/ndms/interfaces/remove"},
-        {"POST", "/api/system/ndms/recovery/retry"},
+        {"POST", "/api/system/ndms/interfaces/remove/recovery/retry"},
         {"POST", "/api/backup"},
     };
     return routes;

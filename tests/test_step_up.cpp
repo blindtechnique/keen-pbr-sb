@@ -33,7 +33,7 @@ const std::vector<StepUpProtectedRoute>& registered_privileged_routes() {
         {"POST", "/api/system/ndms/interfaces/import"},
         {"POST", "/api/system/ndms/interfaces/import/preflight"},
         {"POST", "/api/system/ndms/interfaces/remove"},
-        {"POST", "/api/system/ndms/recovery/retry"},
+        {"POST", "/api/system/ndms/interfaces/remove/recovery/retry"},
         {"POST", "/api/system/remote-access"},
         {"GET", "/api/system/remote-access"},
         {"POST", "/api/system/update"},
@@ -81,7 +81,7 @@ const std::vector<std::string>& registered_routes() {
         "/api/system/ndms/interfaces/import",
         "/api/system/ndms/interfaces/import/preflight",
         "/api/system/ndms/interfaces/remove",
-        "/api/system/ndms/recovery/retry",
+        "/api/system/ndms/interfaces/remove/recovery/retry",
         "/api/system/remote-access",
         "/api/system/router",
         "/api/system/update",
@@ -149,6 +149,8 @@ TEST_CASE("the package and access operations require a step-up") {
     CHECK(requires_step_up(
         "POST", "/api/system/ndms/interfaces/remove"));
     CHECK(requires_step_up(
+        "POST", "/api/system/ndms/interfaces/remove/recovery/retry"));
+    CHECK_FALSE(requires_step_up(
         "POST", "/api/system/ndms/recovery/retry"));
     // Exporting the archive: it carries credentials and the whole routing
     // state, so handing it out is closer to exfiltration than to a status

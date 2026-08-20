@@ -26,6 +26,7 @@
 #include "handler_geo.hpp"
 #include "handler_naive.hpp"
 #include "handler_ndms_names.hpp"
+#include "handler_ndms_native_delete.hpp"
 #include "handler_ndms_native_import.hpp"
 #include "handler_remote_access.hpp"
 #include "handler_backup.hpp"
@@ -65,6 +66,7 @@ void register_api_handlers(ApiServer& server, ApiContext& ctx) {
     register_geo_handler(server, ctx);
     register_naive_component_handler(server, ctx);
     register_ndms_names_handler(server, ctx);
+    register_ndms_native_delete_handler(server, ctx);
     register_ndms_native_import_handler(server, ctx);
     register_remote_access_handler(server, ctx);
     register_backup_handler(server, ctx);
