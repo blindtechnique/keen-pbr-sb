@@ -21,19 +21,19 @@ namespace {
 
 using Json = nlohmann::json;
 
-constexpr int kSchemaVersion = 2;
+constexpr int kSchemaVersion = 3;
 constexpr std::string_view kCandidateRevisionPrefix{
     "ndms-native-import-v1-"};
 constexpr std::string_view kRequestBindingDigestPrefix{
-    "ndms-import-request-binding-v1-"};
+    "ndms-import-request-binding-v2-"};
 constexpr std::string_view kGenerationTicketPrefix{
     "ndms-create-ticket-v1-"};
 constexpr std::string_view kResponseManifestDigestPrefix{
-    "ndms-import-response-manifest-v2-"};
+    "ndms-import-response-manifest-v3-"};
 constexpr std::string_view kTargetRevisionPrefix{
     "ndms-rci-full-v1-"};
 constexpr std::string_view kOwnershipRevisionPrefix{
-    "ndms-native-owner-v1-"};
+    "ndms-native-owner-v2-"};
 
 bool lower_hex(const std::string_view value) noexcept {
     return std::all_of(
@@ -81,6 +81,11 @@ bool known_phase(const NdmsNativeImportWalPhase phase) noexcept {
     return false;
 }
 
+bool known_kind(const NdmsNativeTunnelImportKind kind) noexcept {
+    return kind == NdmsNativeTunnelImportKind::wireguard ||
+           kind == NdmsNativeTunnelImportKind::amnezia_wireguard;
+}
+
 bool is_forward_verified_phase(
     const NdmsNativeImportWalPhase phase) noexcept {
     return phase == NdmsNativeImportWalPhase::target_verified ||
@@ -102,8 +107,8 @@ void validate_record(const NdmsNativeImportWalRecord& record) {
         known_phase(record.phase),
         "native import WAL phase is invalid");
     require(
-        record.kind == NdmsNativeTunnelImportKind::wireguard,
-        "native import WAL v2 kind is not measured");
+        known_kind(record.kind),
+        "native import WAL kind is invalid");
     require(
         valid_ndms_native_import_transaction_id(record.transaction_id),
         "native import WAL transaction id is invalid");
@@ -132,11 +137,16 @@ void validate_record(const NdmsNativeImportWalRecord& record) {
             record.maintenance_base_generation,
         "native import WAL baseline generation is inconsistent");
     require(
+        valid_ndms_native_observation_binding(
+            record.observation_binding),
+        "native import WAL observation binding is invalid");
+    require(
         record.request_binding_sha256 ==
             ndms_native_import_request_binding_digest(
                 record.transaction_id,
                 record.marker,
                 record.candidate_revision,
+                record.kind,
                 record.baseline.expected_created_interface),
         "native import WAL request binding verification failed");
 
@@ -175,6 +185,13 @@ void validate_record(const NdmsNativeImportWalRecord& record) {
                 record.baseline.expected_created_interface,
             "native import WAL created target differs from baseline");
     }
+    require(
+        prefixed_digest(
+            record.snapshot_revision, kCandidateRevisionPrefix),
+        "native import WAL snapshot revision is invalid");
+    require(
+        record.snapshot_revision == record.candidate_revision,
+        "native import WAL snapshot revision differs from request");
     if (record.target_full_revision.has_value()) {
         require(
             prefixed_digest(
@@ -323,6 +340,15 @@ Json baseline_json(
     };
 }
 
+Json observation_binding_json(
+    const NdmsNativeObservationBinding& binding) {
+    return {
+        {"authority_id", binding.authority_id},
+        {"mutation_epoch", binding.mutation_epoch},
+        {"baseline_sequence", binding.baseline_sequence},
+    };
+}
+
 Json document_without_integrity(
     const NdmsNativeImportWalRecord& record) {
     validate_record(record);
@@ -337,6 +363,8 @@ Json document_without_integrity(
         {"generation_ticket", record.generation_ticket},
         {"maintenance_base_generation",
          record.maintenance_base_generation},
+        {"observation_binding",
+         observation_binding_json(record.observation_binding)},
         {"baseline", baseline_json(record.baseline)},
         {"reserved_generation",
          optional_generation_json(record.reserved_generation)},
@@ -344,6 +372,7 @@ Json document_without_integrity(
          optional_string_json(record.response_manifest_sha256)},
         {"created_interface",
          optional_string_json(record.created_interface)},
+        {"snapshot_revision", record.snapshot_revision},
         {"target_full_revision",
          optional_string_json(record.target_full_revision)},
         {"ownership_revision",
@@ -374,6 +403,29 @@ std::uint64_t parse_unsigned_u64(
     const char* message) {
     require(value.is_number_unsigned(), message);
     return value.get<std::uint64_t>();
+}
+
+NdmsNativeObservationBinding parse_observation_binding(
+    const Json& value) {
+    require_exact_keys(
+        value,
+        {"authority_id", "mutation_epoch", "baseline_sequence"});
+    require(
+        value.at("authority_id").is_string(),
+        "native import WAL observation authority type is invalid");
+    NdmsNativeObservationBinding binding;
+    binding.authority_id =
+        value.at("authority_id").get<std::string>();
+    binding.mutation_epoch = parse_unsigned_u64(
+        value.at("mutation_epoch"),
+        "native import WAL mutation epoch type is invalid");
+    binding.baseline_sequence = parse_unsigned_u64(
+        value.at("baseline_sequence"),
+        "native import WAL baseline sequence type is invalid");
+    require(
+        valid_ndms_native_observation_binding(binding),
+        "native import WAL observation binding verification failed");
+    return binding;
 }
 
 NdmsNativeImportPersistedBaseline parse_baseline(
@@ -548,15 +600,18 @@ std::string ndms_native_import_request_binding_digest(
     const std::string_view transaction_id,
     const std::string_view marker,
     const std::string_view candidate_revision,
+    const NdmsNativeTunnelImportKind kind,
     const std::string_view expected_created_interface) {
     constexpr std::string_view domain{
-        "keen-pbr.ndms-native-import.request-binding.v1"};
+        "keen-pbr.ndms-native-import.request-binding.v2"};
     Sha256 hasher;
     update_binding_field(hasher, 0U, domain);
     update_binding_field(hasher, 1U, transaction_id);
     update_binding_field(hasher, 2U, marker);
     update_binding_field(hasher, 3U, candidate_revision);
-    update_binding_field(hasher, 4U, expected_created_interface);
+    update_binding_field(
+        hasher, 4U, ndms_native_tunnel_import_kind_name(kind));
+    update_binding_field(hasher, 5U, expected_created_interface);
     return std::string{kRequestBindingDigestPrefix} +
            hasher.hex_digest();
 }
@@ -572,11 +627,13 @@ bool NdmsNativeImportWalRecord::operator==(
            generation_ticket == other.generation_ticket &&
            maintenance_base_generation ==
                other.maintenance_base_generation &&
+           observation_binding == other.observation_binding &&
            baseline == other.baseline &&
            reserved_generation == other.reserved_generation &&
            response_manifest_sha256 ==
                other.response_manifest_sha256 &&
            created_interface == other.created_interface &&
+           snapshot_revision == other.snapshot_revision &&
            target_full_revision == other.target_full_revision &&
            ownership_revision == other.ownership_revision;
 }
@@ -610,10 +667,12 @@ NdmsNativeImportWalRecord parse_ndms_native_import_wal(
          "request_binding_sha256",
          "generation_ticket",
          "maintenance_base_generation",
+         "observation_binding",
          "baseline",
          "reserved_generation",
          "response_manifest_sha256",
          "created_interface",
+         "snapshot_revision",
          "target_full_revision",
          "ownership_revision",
          "integrity_sha256"});
@@ -658,6 +717,8 @@ NdmsNativeImportWalRecord parse_ndms_native_import_wal(
         document.at("generation_ticket").get<std::string>();
     record.maintenance_base_generation =
         static_cast<std::uint32_t>(base);
+    record.observation_binding = parse_observation_binding(
+        document.at("observation_binding"));
     record.baseline = parse_baseline(document.at("baseline"));
     record.reserved_generation = parse_optional_generation(
         document.at("reserved_generation"));
@@ -667,6 +728,11 @@ NdmsNativeImportWalRecord parse_ndms_native_import_wal(
     record.created_interface = parse_optional_string(
         document.at("created_interface"),
         "native import WAL created target type is invalid");
+    require(
+        document.at("snapshot_revision").is_string(),
+        "native import WAL snapshot revision type is invalid");
+    record.snapshot_revision =
+        document.at("snapshot_revision").get<std::string>();
     record.target_full_revision = parse_optional_string(
         document.at("target_full_revision"),
         "native import WAL target revision type is invalid");

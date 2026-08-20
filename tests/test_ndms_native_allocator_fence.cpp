@@ -59,12 +59,12 @@ static_assert(!HasPublicReceiptFactory<
               NdmsNativeAllocatorFenceReceipt>::value);
 static_assert(!std::is_constructible_v<
               NdmsNativeAllocatorFenceReceipt,
-              NdmsNativeImportResponseManifestV2>);
+              NdmsNativeImportResponseManifestV3>);
 static_assert(!std::is_convertible_v<
-              NdmsNativeImportResponseManifestV2,
+              NdmsNativeImportResponseManifestV3,
               NdmsNativeAllocatorFenceReceipt>);
 static_assert(!CanValidateAsAllocatorReceipt<
-              NdmsNativeImportResponseManifestV2>::value);
+              NdmsNativeImportResponseManifestV3>::value);
 
 const auto kIssuedAt = NdmsNativeAllocatorMonotonicTime{
     std::chrono::seconds{1000}};

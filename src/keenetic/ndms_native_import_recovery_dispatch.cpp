@@ -50,7 +50,8 @@ dispatch_ndms_native_import_recovery(
     const NdmsNativeImportRecoveryDeleteExecutor& delete_executor,
     NdmsNativeOwnershipStore* const ownership_store,
     const std::function<void(NdmsNativeImportRecoveryStep)>&
-        step_observer) {
+        step_observer,
+    NdmsNativeImportSnapshotRetirer* const snapshot_retirer) {
     NdmsNativeImportRecoveryDispatchResult result;
 
     if (!lease.held()) {
@@ -102,6 +103,18 @@ dispatch_ndms_native_import_recovery(
         return result;
     }
 
+    const bool snapshot_must_retire =
+        plan_contains(
+            plan, NdmsNativeImportRecoveryStep::remove_wal_record) &&
+        !plan_contains(
+            plan, NdmsNativeImportRecoveryStep::publish_ownership) &&
+        record.phase != NdmsNativeImportWalPhase::ownership_published;
+    if (snapshot_must_retire && snapshot_retirer == nullptr) {
+        result.state = NdmsNativeImportRecoveryDispatchState::
+            snapshot_retirer_missing;
+        return result;
+    }
+
     auto current = record;
     for (const auto step : plan.steps) {
         if (step_observer) step_observer(step);
@@ -121,8 +134,13 @@ dispatch_ndms_native_import_recovery(
                         deleted_confirmed;
             } else if (step ==
                        NdmsNativeImportRecoveryStep::remove_wal_record) {
-                store.remove_exact(current);
-                step_ok = true;
+                step_ok = !snapshot_must_retire ||
+                    snapshot_retirer->remove_if_present_exact(
+                        current.baseline.expected_created_interface,
+                        current.transaction_id,
+                        current.marker,
+                        current.snapshot_revision);
+                if (step_ok) store.remove_exact(current);
             } else if (step == NdmsNativeImportRecoveryStep::
                                    remove_ownership_claim) {
                 if (!current.created_interface.has_value() ||
@@ -140,6 +158,8 @@ dispatch_ndms_native_import_recovery(
                     claim.transaction_id = current.transaction_id;
                     claim.marker = current.marker;
                     claim.kind = current.kind;
+                    claim.snapshot_revision =
+                        current.snapshot_revision;
                     claim.target_full_revision =
                         *current.target_full_revision;
                     const auto existing = ownership_store->read(
@@ -171,6 +191,8 @@ dispatch_ndms_native_import_recovery(
                     claim.transaction_id = current.transaction_id;
                     claim.marker = current.marker;
                     claim.kind = current.kind;
+                    claim.snapshot_revision =
+                        current.snapshot_revision;
                     claim.target_full_revision =
                         *current.target_full_revision;
                     // Carried forward in memory so the very next WAL advance
@@ -215,6 +237,8 @@ const char* ndms_native_import_recovery_dispatch_state_name(
         return "target_not_eligible";
     case NdmsNativeImportRecoveryDispatchState::ownership_store_missing:
         return "ownership_store_missing";
+    case NdmsNativeImportRecoveryDispatchState::snapshot_retirer_missing:
+        return "snapshot_retirer_missing";
     case NdmsNativeImportRecoveryDispatchState::step_failed:
         return "step_failed";
     }

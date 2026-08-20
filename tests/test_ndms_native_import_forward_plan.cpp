@@ -8,6 +8,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <array>
 #include <cerrno>
 #include <filesystem>
 #include <string>
@@ -72,18 +73,24 @@ NdmsNativeImportPersistedBaseline forward_baseline() {
     return persist_ndms_native_import_baseline(*built.evidence);
 }
 
-NdmsNativeImportWalRecord response_recorded_record() {
+NdmsNativeImportWalRecord response_recorded_record(
+    const NdmsNativeTunnelImportKind kind =
+        NdmsNativeTunnelImportKind::wireguard) {
     NdmsNativeImportWalRecord record;
+    record.kind = kind;
     record.transaction_id = std::string(32U, 'a');
     record.marker = "kpbr-ni-v1-" + record.transaction_id;
     record.candidate_revision =
         "ndms-native-import-v1-" + std::string(64U, 'b');
+    record.snapshot_revision = record.candidate_revision;
+    record.observation_binding = {std::string(32U, 'd'), 9U, 7U};
     record.baseline = forward_baseline();
     record.request_binding_sha256 =
         ndms_native_import_request_binding_digest(
             record.transaction_id,
             record.marker,
             record.candidate_revision,
+            record.kind,
             record.baseline.expected_created_interface);
     record.generation_ticket =
         "ndms-create-ticket-v1-" + std::string(64U, 'c');
@@ -91,7 +98,7 @@ NdmsNativeImportWalRecord response_recorded_record() {
     record.phase = NdmsNativeImportWalPhase::response_recorded;
     record.reserved_generation = 42U;
     record.response_manifest_sha256 =
-        "ndms-import-response-manifest-v2-" + std::string(64U, 'e');
+        "ndms-import-response-manifest-v3-" + std::string(64U, 'e');
     return record;
 }
 
@@ -110,56 +117,59 @@ NdmsNativeImportRecoveryObservation verified_observation() {
 
 } // namespace
 
-TEST_CASE("forward completion finishes the import end to end") {
-    TempDirectory directory;
-    NdmsNativeImportWalStoreTestHooks hooks;
-    hooks.allow_current_process_owner = true;
-    NdmsNativeImportWalStore store(directory.path / "wal", hooks);
-    NdmsNativeOwnershipStore ownership(directory.path / "ownership");
+TEST_CASE("forward completion preserves WG and AWG kind into ownership") {
+    for (const auto kind : std::array{
+             NdmsNativeTunnelImportKind::wireguard,
+             NdmsNativeTunnelImportKind::amnezia_wireguard}) {
+        CAPTURE(ndms_native_tunnel_import_kind_name(kind));
+        TempDirectory directory;
+        NdmsNativeImportWalStoreTestHooks hooks;
+        hooks.allow_current_process_owner = true;
+        NdmsNativeImportWalStore store(directory.path / "wal", hooks);
+        NdmsNativeOwnershipStore ownership(directory.path / "ownership");
 
-    auto prepared = response_recorded_record();
-    prepared.phase = NdmsNativeImportWalPhase::prepared;
-    prepared.reserved_generation.reset();
-    prepared.response_manifest_sha256.reset();
-    REQUIRE(store.publish_prepared_exclusive(prepared) ==
-            NdmsNativeImportWalAdmissionState::admitted);
-    auto inflight = response_recorded_record();
-    inflight.phase = NdmsNativeImportWalPhase::import_may_be_inflight;
-    inflight.response_manifest_sha256.reset();
-    store.publish(inflight);
-    const auto record = response_recorded_record();
-    store.publish(record);
+        auto prepared = response_recorded_record(kind);
+        prepared.phase = NdmsNativeImportWalPhase::prepared;
+        prepared.reserved_generation.reset();
+        prepared.response_manifest_sha256.reset();
+        REQUIRE(store.publish_prepared_exclusive(prepared) ==
+                NdmsNativeImportWalAdmissionState::admitted);
+        auto inflight = response_recorded_record(kind);
+        inflight.phase = NdmsNativeImportWalPhase::import_may_be_inflight;
+        inflight.response_manifest_sha256.reset();
+        store.publish(inflight);
+        const auto record = response_recorded_record(kind);
+        store.publish(record);
 
-    const auto completion = plan_ndms_native_import_forward_completion(
-        record, verified_observation(), kMeasuredRevision);
-    REQUIRE(completion.actionable());
-    REQUIRE(completion.plan.steps.size() == 4U);
-    CHECK(completion.enriched.created_interface == "Wireguard5");
-    CHECK(completion.enriched.target_full_revision == kMeasuredRevision);
+        const auto completion = plan_ndms_native_import_forward_completion(
+            record, verified_observation(), kMeasuredRevision);
+        REQUIRE(completion.actionable());
+        REQUIRE(completion.plan.steps.size() == 4U);
+        CHECK(completion.enriched.created_interface == "Wireguard5");
+        CHECK(completion.enriched.target_full_revision == kMeasuredRevision);
 
-    auto admission = admit_ndms_native_import_forward(
-        store, record, completion);
-    REQUIRE(admission.state ==
-            NdmsNativeImportRecoveryAdmissionState::admitted);
+        auto admission = admit_ndms_native_import_forward(
+            store, record, completion);
+        REQUIRE(admission.state ==
+                NdmsNativeImportRecoveryAdmissionState::admitted);
 
-    const auto result = dispatch_ndms_native_import_recovery(
-        store, admission.lease, completion.enriched, completion.plan,
-        std::nullopt, nullptr, &ownership);
-    CHECK(result.state ==
-          NdmsNativeImportRecoveryDispatchState::completed);
-    CHECK(result.completed_steps == 4U);
+        const auto result = dispatch_ndms_native_import_recovery(
+            store, admission.lease, completion.enriched, completion.plan,
+            std::nullopt, nullptr, &ownership);
+        CHECK(result.state ==
+              NdmsNativeImportRecoveryDispatchState::completed);
+        CHECK(result.completed_steps == 4U);
 
-    // The transaction is gone, the claim is durable, and the claim's revision
-    // is exactly what a later recovery will compare through the WAL.
-    CHECK(store.load(record.transaction_id).state ==
-          NdmsNativeImportWalLoadState::absent);
-    const auto claim = ownership.read("Wireguard5");
-    REQUIRE(claim.state == NdmsNativeOwnershipReadState::valid);
-    CHECK(claim.record->transaction_id == record.transaction_id);
-    CHECK(claim.record->target_full_revision == kMeasuredRevision);
-    // ...and the store admits the next import.
-    CHECK(store.publish_prepared_exclusive(prepared) ==
-          NdmsNativeImportWalAdmissionState::admitted);
+        CHECK(store.load(record.transaction_id).state ==
+              NdmsNativeImportWalLoadState::absent);
+        const auto claim = ownership.read("Wireguard5");
+        REQUIRE(claim.state == NdmsNativeOwnershipReadState::valid);
+        CHECK(claim.record->transaction_id == record.transaction_id);
+        CHECK(claim.record->kind == kind);
+        CHECK(claim.record->target_full_revision == kMeasuredRevision);
+        CHECK(store.publish_prepared_exclusive(prepared) ==
+              NdmsNativeImportWalAdmissionState::admitted);
+    }
 }
 
 TEST_CASE("forward completion refuses a world it did not measure at rest") {

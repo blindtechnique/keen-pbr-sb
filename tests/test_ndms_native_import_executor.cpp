@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include "keenetic/ndms_native_import_executor.hpp"
+#include "keenetic/ndms_native_import_forward_plan.hpp"
 #include "keenetic/ndms_native_import_identity.hpp"
 
 #include <chrono>
@@ -25,6 +26,7 @@ static_assert(!std::is_default_constructible_v<
 static_assert(!std::is_constructible_v<
               NdmsNativeImportExecutorDependencies,
               NdmsNativeImportWalPublisher*,
+              NdmsNativeImportSnapshotPublisher*,
               NdmsNativeImportGenerationCoordinator*,
               NdmsNativeLoopbackRciPostBackend*,
               NdmsNativeImportExecutorClock*>);
@@ -108,6 +110,8 @@ NdmsNativeImportExecutionPlan execution_plan(
         kNdmsNativeAllocatorKeeneticOs511FirmwareIdentity;
     plan.allocator_implementation_digest = digest(
         kNdmsNativeAllocatorImplementationDigestPrefix, 'd');
+    plan.observation_binding = {
+        std::string(32U, 'a'), 9U, 7U};
     plan.fence_mode = mode;
     return plan;
 }
@@ -229,6 +233,38 @@ private:
     }
 };
 
+class FakeSnapshotPublisher final
+    : public NdmsNativeImportSnapshotPublisher {
+public:
+    void publish(
+        const std::string& expected_interface,
+        const std::string& transaction_id,
+        const std::string& marker,
+        NdmsNativePanelDeleteSnapshot snapshot) override {
+        if (events != nullptr) events->push_back("snapshot.publish");
+        ++calls;
+        published_interface = expected_interface;
+        published_transaction_id = transaction_id;
+        published_marker = marker;
+        published_revision =
+            std::string(snapshot.canonical_revision());
+        published_kind = snapshot.kind();
+        if (throw_on_publish) {
+            throw std::runtime_error("synthetic snapshot publish failure");
+        }
+    }
+
+    std::vector<std::string>* events{nullptr};
+    std::size_t calls{0U};
+    bool throw_on_publish{false};
+    std::string published_interface;
+    std::string published_transaction_id;
+    std::string published_marker;
+    std::string published_revision;
+    NdmsNativeTunnelImportKind published_kind{
+        NdmsNativeTunnelImportKind::wireguard};
+};
+
 class FakeBackend final : public NdmsNativeLoopbackRciPostBackend {
 private:
     NdmsNativeImportRawTransportResponse post_fixed_loopback_once(
@@ -274,9 +310,10 @@ struct Fixture final {
     Fixture()
         : dependencies(
               NdmsNativeImportExecutorTestIssuer::issue(
-                  &wal, &generations, &backend, &clock)) {
+                  &wal, &snapshots, &generations, &backend, &clock)) {
         generations.events = &events;
         wal.events = &events;
+        snapshots.events = &events;
         backend.events = &events;
     }
 
@@ -288,6 +325,7 @@ struct Fixture final {
 
     std::vector<std::string> events;
     FakeWalPublisher wal;
+    FakeSnapshotPublisher snapshots;
     FakeGenerations generations;
     FakeBackend backend;
     FakeClock clock;
@@ -296,7 +334,7 @@ struct Fixture final {
 
 } // namespace
 
-TEST_CASE("native import request binding is deterministic and target-bound") {
+TEST_CASE("native import request binding is deterministic, target- and kind-bound") {
     auto request = make_ndms_native_wireguard_import_request(
         plain_wireguard_config());
     const auto first = ndms_native_import_request_binding_digest(
@@ -310,11 +348,20 @@ TEST_CASE("native import request binding is deterministic and target-bound") {
             request.transaction_id(),
             request.marker(),
             request.candidate_revision(),
+            request.kind(),
+            "Wireguard5");
+    const auto other_kind =
+        ndms_native_import_request_binding_digest(
+            request.transaction_id(),
+            request.marker(),
+            request.candidate_revision(),
+            NdmsNativeTunnelImportKind::amnezia_wireguard,
             "Wireguard5");
 
     CHECK(first == repeated);
     CHECK(first == from_persisted_identity);
     CHECK(first != other_target);
+    CHECK(first != other_kind);
     CHECK(first.rfind(
               kNdmsNativeAllocatorRequestBindingDigestPrefix, 0U) == 0U);
     CHECK(first.size() ==
@@ -325,37 +372,48 @@ TEST_CASE("native import request binding is deterministic and target-bound") {
 }
 
 TEST_CASE("native import executor cannot dispatch without every authority") {
-    SUBCASE("AWG serialization cannot enter the WG-only WAL") {
+    SUBCASE("AWG uses the same kind-bound stock transaction") {
         Fixture fixture;
         const auto plan = execution_plan();
-        auto request = make_ndms_native_wireguard_import_request(
+        auto prepared = prepare_ndms_native_import(
             amnezia_wireguard_config());
+        const auto& request = prepared.request_identity();
         REQUIRE(request.kind() ==
                 NdmsNativeTunnelImportKind::amnezia_wireguard);
         auto receipt = fence_receipt(plan, request);
 
         const auto result = execute_ndms_native_import_transaction(
-            std::move(request),
+            std::move(prepared),
             plan,
             fixture.baseline(),
             std::optional<NdmsNativeAllocatorFenceReceipt>{
                 std::move(receipt)},
             fixture.dependencies);
 
-        CHECK(result.status == NdmsNativeImportExecutionStatus::blocked);
-        CHECK(result.stop ==
-              NdmsNativeImportExecutionStop::unsupported_tunnel_kind);
-        CHECK(fixture.wal.calls == 0U);
-        CHECK(fixture.generations.observe_calls == 0U);
-        CHECK(fixture.generations.reserve_calls == 0U);
-        CHECK(fixture.backend.calls == 0U);
+        CHECK(result.status == NdmsNativeImportExecutionStatus::
+              response_recorded_needs_verification);
+        CHECK(result.stop == NdmsNativeImportExecutionStop::none);
+        CHECK(fixture.wal.calls == 3U);
+        CHECK(fixture.generations.reserve_calls == 1U);
+        CHECK(fixture.backend.calls == 1U);
+        REQUIRE(result.response_manifest.has_value());
+        CHECK(result.response_manifest->request_kind ==
+              NdmsNativeTunnelImportKind::amnezia_wireguard);
+        for (const auto& record : fixture.wal.records) {
+            CHECK(record.kind ==
+                  NdmsNativeTunnelImportKind::amnezia_wireguard);
+            const auto safe = serialize_ndms_native_import_wal(record);
+            CHECK(safe.find(kPrivateKey) == std::string::npos);
+            CHECK(safe.find("Jc = 4") == std::string::npos);
+        }
     }
 
     SUBCASE("current firmware provider yields no fence") {
         Fixture fixture;
         const auto plan = execution_plan();
-        auto request = make_ndms_native_wireguard_import_request(
+        auto prepared = prepare_ndms_native_import(
             plain_wireguard_config());
+        const auto& request = prepared.request_identity();
         NdmsNativeKeeneticOs511AllocatorFenceProvider provider;
         NdmsNativeAllocatorFenceExpectation expectation;
         expectation.mode = plan.fence_mode;
@@ -374,7 +432,7 @@ TEST_CASE("native import executor cannot dispatch without every authority") {
         REQUIRE_FALSE(unavailable.has_value());
 
         const auto result = execute_ndms_native_import_transaction(
-            std::move(request),
+            std::move(prepared),
             plan,
             fixture.baseline(),
             std::move(unavailable),
@@ -390,17 +448,19 @@ TEST_CASE("native import executor cannot dispatch without every authority") {
     SUBCASE("no WAL publisher") {
         Fixture fixture;
         const auto plan = execution_plan();
-        auto request = make_ndms_native_wireguard_import_request(
+        auto prepared = prepare_ndms_native_import(
             plain_wireguard_config());
+        const auto& request = prepared.request_identity();
         auto receipt = fence_receipt(plan, request);
         auto missing_wal = NdmsNativeImportExecutorTestIssuer::issue(
             nullptr,
+            &fixture.snapshots,
             &fixture.generations,
             &fixture.backend,
             &fixture.clock);
 
         const auto result = execute_ndms_native_import_transaction(
-            std::move(request),
+            std::move(prepared),
             plan,
             fixture.baseline(),
             std::optional<NdmsNativeAllocatorFenceReceipt>{
@@ -417,13 +477,14 @@ TEST_CASE("native import executor cannot dispatch without every authority") {
 TEST_CASE("native import executor publishes prepared WAL before reservation") {
     Fixture fixture;
     const auto plan = execution_plan();
-    auto request = make_ndms_native_wireguard_import_request(
+    auto prepared = prepare_ndms_native_import(
         plain_wireguard_config());
+    const auto& request = prepared.request_identity();
     auto receipt = fence_receipt(plan, request);
     fixture.wal.fail_on_call = 1U;
 
     const auto result = execute_ndms_native_import_transaction(
-        std::move(request),
+        std::move(prepared),
         plan,
         fixture.baseline(),
         std::optional<NdmsNativeAllocatorFenceReceipt>{
@@ -440,11 +501,54 @@ TEST_CASE("native import executor publishes prepared WAL before reservation") {
     CHECK(fixture.backend.calls == 0U);
 }
 
+TEST_CASE("native import seals the exact snapshot after WAL and before reservation") {
+    Fixture fixture;
+    const auto plan = execution_plan();
+    auto prepared = prepare_ndms_native_import(
+        amnezia_wireguard_config());
+    const auto& request = prepared.request_identity();
+    const auto transaction_id = std::string(request.transaction_id());
+    const auto marker = std::string(request.marker());
+    const auto revision = std::string(request.candidate_revision());
+    auto receipt = fence_receipt(plan, request);
+    fixture.snapshots.throw_on_publish = true;
+
+    const auto result = execute_ndms_native_import_transaction(
+        std::move(prepared),
+        plan,
+        fixture.baseline(),
+        std::optional<NdmsNativeAllocatorFenceReceipt>{
+            std::move(receipt)},
+        fixture.dependencies);
+
+    CHECK(result.status ==
+          NdmsNativeImportExecutionStatus::recovery_required);
+    CHECK(result.stop ==
+          NdmsNativeImportExecutionStop::snapshot_publish_failed);
+    CHECK(result.prepared_wal_published);
+    CHECK_FALSE(result.snapshot_published);
+    CHECK(fixture.events == std::vector<std::string>{
+          "generation.observe", "wal.prepared", "snapshot.publish"});
+    CHECK(fixture.snapshots.calls == 1U);
+    CHECK(fixture.snapshots.published_interface == "Wireguard5");
+    CHECK(fixture.snapshots.published_transaction_id == transaction_id);
+    CHECK(fixture.snapshots.published_marker == marker);
+    CHECK(fixture.snapshots.published_revision == revision);
+    CHECK(fixture.snapshots.published_kind ==
+          NdmsNativeTunnelImportKind::amnezia_wireguard);
+    CHECK(fixture.generations.reserve_calls == 0U);
+    CHECK(fixture.backend.calls == 0U);
+    REQUIRE(fixture.wal.records.size() == 1U);
+    CHECK(fixture.wal.records.front().phase ==
+          NdmsNativeImportWalPhase::prepared);
+}
+
 TEST_CASE("receipt without the complete dispatch budget is rejected") {
     Fixture fixture;
     const auto plan = execution_plan();
-    auto request = make_ndms_native_wireguard_import_request(
+    auto prepared = prepare_ndms_native_import(
         plain_wireguard_config());
+    const auto& request = prepared.request_identity();
     auto receipt = fence_receipt(
         plan,
         request,
@@ -452,7 +556,7 @@ TEST_CASE("receipt without the complete dispatch budget is rejected") {
         kNow + std::chrono::seconds{5});
 
     const auto result = execute_ndms_native_import_transaction(
-        std::move(request),
+        std::move(prepared),
         plan,
         fixture.baseline(),
         std::optional<NdmsNativeAllocatorFenceReceipt>{
@@ -472,13 +576,14 @@ TEST_CASE("receipt without the complete dispatch budget is rejected") {
 TEST_CASE("native import executor publishes inflight WAL before transport") {
     Fixture fixture;
     const auto plan = execution_plan();
-    auto request = make_ndms_native_wireguard_import_request(
+    auto prepared = prepare_ndms_native_import(
         plain_wireguard_config());
+    const auto& request = prepared.request_identity();
     auto receipt = fence_receipt(plan, request);
     fixture.wal.fail_on_call = 2U;
 
     const auto result = execute_ndms_native_import_transaction(
-        std::move(request),
+        std::move(prepared),
         plan,
         fixture.baseline(),
         std::optional<NdmsNativeAllocatorFenceReceipt>{
@@ -490,7 +595,8 @@ TEST_CASE("native import executor publishes inflight WAL before transport") {
     CHECK(result.stop ==
           NdmsNativeImportExecutionStop::inflight_wal_publish_failed);
     CHECK(fixture.events == std::vector<std::string>{
-          "generation.observe", "wal.prepared", "generation.reserve",
+          "generation.observe", "wal.prepared", "snapshot.publish",
+          "generation.reserve",
           "generation.observe", "wal.import_may_be_inflight"});
     CHECK(fixture.backend.calls == 0U);
 }
@@ -498,13 +604,14 @@ TEST_CASE("native import executor publishes inflight WAL before transport") {
 TEST_CASE("expired fence after setup cannot start the network perform") {
     Fixture fixture;
     const auto plan = execution_plan();
-    auto request = make_ndms_native_wireguard_import_request(
+    auto prepared = prepare_ndms_native_import(
         plain_wireguard_config());
+    const auto& request = prepared.request_identity();
     auto receipt = fence_receipt(plan, request);
     fixture.clock.times = {kNow, kNow, kNow, kExpiresAt};
 
     const auto result = execute_ndms_native_import_transaction(
-        std::move(request),
+        std::move(prepared),
         plan,
         fixture.baseline(),
         std::optional<NdmsNativeAllocatorFenceReceipt>{
@@ -531,13 +638,14 @@ TEST_CASE("expired fence after setup cannot start the network perform") {
 TEST_CASE("pre-backend transport failure is never reported as dispatched") {
     Fixture fixture;
     const auto plan = execution_plan();
-    auto request = make_ndms_native_wireguard_import_request(
+    auto prepared = prepare_ndms_native_import(
         plain_wireguard_config());
+    const auto& request = prepared.request_identity();
     auto receipt = fence_receipt(plan, request);
     NdmsNativeImportTransportTestControl::fail_before_backend_once();
 
     const auto result = execute_ndms_native_import_transaction(
-        std::move(request),
+        std::move(prepared),
         plan,
         fixture.baseline(),
         std::optional<NdmsNativeAllocatorFenceReceipt>{
@@ -562,13 +670,14 @@ TEST_CASE("pre-backend transport failure is never reported as dispatched") {
 TEST_CASE("backend setup failure is not mislabeled as a fence loss") {
     Fixture fixture;
     const auto plan = execution_plan();
-    auto request = make_ndms_native_wireguard_import_request(
+    auto prepared = prepare_ndms_native_import(
         plain_wireguard_config());
+    const auto& request = prepared.request_identity();
     auto receipt = fence_receipt(plan, request);
     fixture.backend.throw_before_guard = true;
 
     const auto result = execute_ndms_native_import_transaction(
-        std::move(request),
+        std::move(prepared),
         plan,
         fixture.baseline(),
         std::optional<NdmsNativeAllocatorFenceReceipt>{
@@ -598,12 +707,13 @@ TEST_CASE("ambiguous native import response is recorded and never replayed") {
     fixture.backend.transport_ok = false;
     fixture.backend.status_code = 0;
     fixture.backend.response_body.clear();
-    auto request = make_ndms_native_wireguard_import_request(
+    auto prepared = prepare_ndms_native_import(
         plain_wireguard_config());
+    const auto& request = prepared.request_identity();
     auto receipt = fence_receipt(plan, request);
 
     const auto first = execute_ndms_native_import_transaction(
-        std::move(request),
+        std::move(prepared),
         plan,
         fixture.baseline(),
         std::optional<NdmsNativeAllocatorFenceReceipt>{
@@ -622,11 +732,12 @@ TEST_CASE("ambiguous native import response is recorded and never replayed") {
     CHECK(fixture.wal.records.back().phase ==
           NdmsNativeImportWalPhase::response_recorded);
 
-    auto second_request = make_ndms_native_wireguard_import_request(
+    auto second_prepared = prepare_ndms_native_import(
         plain_wireguard_config());
-    auto fresh_receipt = fence_receipt(plan, second_request);
+    auto fresh_receipt = fence_receipt(
+        plan, second_prepared.request_identity());
     const auto second = execute_ndms_native_import_transaction(
-        std::move(second_request),
+        std::move(second_prepared),
         plan,
         fixture.baseline(),
         std::optional<NdmsNativeAllocatorFenceReceipt>{
@@ -647,16 +758,16 @@ TEST_CASE("ambiguous native import response is recorded and never replayed") {
 TEST_CASE("allocator receipt cannot authorize a swapped import request") {
     Fixture fixture;
     const auto plan = execution_plan();
-    auto authorized_request = make_ndms_native_wireguard_import_request(
+    auto authorized = prepare_ndms_native_import(
         plain_wireguard_config());
-    auto receipt = fence_receipt(plan, authorized_request);
-    auto swapped_request = make_ndms_native_wireguard_import_request(
+    auto receipt = fence_receipt(plan, authorized.request_identity());
+    auto swapped = prepare_ndms_native_import(
         plain_wireguard_config());
-    REQUIRE(authorized_request.transaction_id() !=
-            swapped_request.transaction_id());
+    REQUIRE(authorized.request_identity().transaction_id() !=
+            swapped.request_identity().transaction_id());
 
     const auto result = execute_ndms_native_import_transaction(
-        std::move(swapped_request),
+        std::move(swapped),
         plan,
         fixture.baseline(),
         std::optional<NdmsNativeAllocatorFenceReceipt>{
@@ -676,8 +787,9 @@ TEST_CASE("allocator receipt cannot authorize a swapped import request") {
 TEST_CASE("native import executor keeps one identity through durable order") {
     Fixture fixture;
     const auto plan = execution_plan();
-    auto request = make_ndms_native_wireguard_import_request(
+    auto prepared = prepare_ndms_native_import(
         plain_wireguard_config());
+    const auto& request = prepared.request_identity();
     auto receipt = fence_receipt(plan, request);
     const auto transaction_id = std::string(request.transaction_id());
     const auto marker = std::string(request.marker());
@@ -691,7 +803,7 @@ TEST_CASE("native import executor keeps one identity through durable order") {
             request, plan.expected_created_interface);
 
     const auto result = execute_ndms_native_import_transaction(
-        std::move(request),
+        std::move(prepared),
         plan,
         baseline,
         std::optional<NdmsNativeAllocatorFenceReceipt>{
@@ -702,6 +814,7 @@ TEST_CASE("native import executor keeps one identity through durable order") {
           response_recorded_needs_verification);
     CHECK(result.stop == NdmsNativeImportExecutionStop::none);
     CHECK(result.prepared_wal_published);
+    CHECK(result.snapshot_published);
     CHECK(result.inflight_wal_published);
     CHECK(result.response_wal_published);
     CHECK(result.backend_call_confirmed);
@@ -713,7 +826,8 @@ TEST_CASE("native import executor keeps one identity through durable order") {
     REQUIRE(fixture.wal.records.size() == 3U);
 
     CHECK(fixture.events == std::vector<std::string>{
-          "generation.observe", "wal.prepared", "generation.reserve",
+          "generation.observe", "wal.prepared", "snapshot.publish",
+          "generation.reserve",
           "generation.observe", "wal.import_may_be_inflight",
           "generation.observe", "generation.observe", "transport.post",
           "wal.response_recorded"});
@@ -743,20 +857,88 @@ TEST_CASE("native import executor keeps one identity through durable order") {
     CHECK(fixture.wal.records[2].reserved_generation == 42U);
     REQUIRE(fixture.wal.records[2].response_manifest_sha256.has_value());
     CHECK(fixture.wal.records[2].response_manifest_sha256->rfind(
-              "ndms-import-response-manifest-v2-", 0U) == 0U);
+              "ndms-import-response-manifest-v3-", 0U) == 0U);
     CHECK(fixture.wal.records[2].created_interface == "Wireguard5");
+}
+
+TEST_CASE("unexpected returned targets stay recovery-only and never become ownership") {
+    const auto run = [](const std::string& returned_target) {
+        Fixture fixture;
+        const auto plan = execution_plan();
+        fixture.backend.response_body =
+            "[{\"interface\":{\"wireguard\":{\"import\":{\"created\":\"" +
+            returned_target +
+            "\",\"intersects\":\"\"}}}}]";
+        auto prepared = prepare_ndms_native_import(
+            plain_wireguard_config());
+        const auto& request = prepared.request_identity();
+        const auto marker = std::string(request.marker());
+        auto receipt = fence_receipt(plan, request);
+
+        const auto result = execute_ndms_native_import_transaction(
+            std::move(prepared),
+            plan,
+            fixture.baseline(),
+            std::optional<NdmsNativeAllocatorFenceReceipt>{
+                std::move(receipt)},
+            fixture.dependencies);
+
+        CHECK(result.status ==
+              NdmsNativeImportExecutionStatus::recovery_required);
+        CHECK(result.stop ==
+              NdmsNativeImportExecutionStop::ambiguous_response);
+        REQUIRE(result.response_manifest.has_value());
+        CHECK(result.response_manifest->created_evidence ==
+              NdmsNativeImportCreatedEvidence::absent);
+        REQUIRE(fixture.wal.records.size() == 3U);
+        const auto& recorded = fixture.wal.records.back();
+        CHECK(recorded.phase ==
+              NdmsNativeImportWalPhase::response_recorded);
+        CHECK_FALSE(recorded.created_interface.has_value());
+        const auto safe = serialize_ndms_native_import_wal(recorded);
+        CHECK(safe.find(returned_target) == std::string::npos);
+        CHECK(safe.find(kPrivateKey) == std::string::npos);
+
+        NdmsNativeImportRecoveryObservation observation;
+        observation.authoritative = true;
+        observation.generation_advanced = true;
+        observation.protected_catalog_unchanged = true;
+        observation.marker_match_count = 1U;
+        observation.marker_target = returned_target;
+        observation.target_absent_in_baseline = true;
+        observation.target_down = true;
+        CHECK_FALSE(plan_ndms_native_import_forward_completion(
+                        recorded,
+                        observation,
+                        digest("ndms-rci-full-v1-", 'e'))
+                        .actionable());
+        CHECK(recorded.marker == marker);
+        return classify_ndms_native_import_recovery(
+            recorded, observation);
+    };
+
+    SUBCASE("another managed slot can only be rolled back by recovery") {
+        CHECK(run("Wireguard6") ==
+              NdmsNativeImportRecoveryAction::
+                  rollback_delete_exact_owned);
+    }
+    SUBCASE("a protected slot blocks even recovery deletion") {
+        CHECK(run("Wireguard4") ==
+              NdmsNativeImportRecoveryAction::block_unknown);
+    }
 }
 
 TEST_CASE("native import executor rejects a stale authoritative baseline") {
     Fixture fixture;
     const auto plan = execution_plan();
-    auto request = make_ndms_native_wireguard_import_request(
+    auto prepared = prepare_ndms_native_import(
         plain_wireguard_config());
+    const auto& request = prepared.request_identity();
     auto receipt = fence_receipt(plan, request);
     const auto stale_baseline = authoritative_baseline(41U, 76U);
 
     const auto result = execute_ndms_native_import_transaction(
-        std::move(request),
+        std::move(prepared),
         plan,
         stale_baseline,
         std::optional<NdmsNativeAllocatorFenceReceipt>{
@@ -776,13 +958,14 @@ TEST_CASE("native import executor blocks incompatible or protected targets") {
     SUBCASE("protected expected target") {
         Fixture fixture;
         auto plan = execution_plan();
-        auto request = make_ndms_native_wireguard_import_request(
+        auto prepared = prepare_ndms_native_import(
             plain_wireguard_config());
+        const auto& request = prepared.request_identity();
         auto receipt = fence_receipt(plan, request);
         plan.expected_created_interface = "Wireguard4";
 
         const auto result = execute_ndms_native_import_transaction(
-            std::move(request),
+            std::move(prepared),
             plan,
             fixture.baseline(),
             std::optional<NdmsNativeAllocatorFenceReceipt>{
@@ -800,12 +983,13 @@ TEST_CASE("native import executor blocks incompatible or protected targets") {
         Fixture fixture;
         const auto plan = execution_plan(
             NdmsNativeAllocatorFenceMode::exact_create_if_absent);
-        auto request = make_ndms_native_wireguard_import_request(
+        auto prepared = prepare_ndms_native_import(
             plain_wireguard_config());
+        const auto& request = prepared.request_identity();
         auto receipt = fence_receipt(plan, request);
 
         const auto result = execute_ndms_native_import_transaction(
-            std::move(request),
+            std::move(prepared),
             plan,
             fixture.baseline(),
             std::optional<NdmsNativeAllocatorFenceReceipt>{
@@ -823,13 +1007,14 @@ TEST_CASE("native import executor blocks incompatible or protected targets") {
 TEST_CASE("response WAL failure cannot authorize forward progress") {
     Fixture fixture;
     const auto plan = execution_plan();
-    auto request = make_ndms_native_wireguard_import_request(
+    auto prepared = prepare_ndms_native_import(
         plain_wireguard_config());
+    const auto& request = prepared.request_identity();
     auto receipt = fence_receipt(plan, request);
     fixture.wal.fail_on_call = 3U;
 
     const auto result = execute_ndms_native_import_transaction(
-        std::move(request),
+        std::move(prepared),
         plan,
         fixture.baseline(),
         std::optional<NdmsNativeAllocatorFenceReceipt>{

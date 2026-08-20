@@ -163,9 +163,11 @@ bool json_content_type_header_value(std::string_view raw) noexcept {
             ascii_iends_with(raw, "+json"));
 }
 
-NdmsNativeImportResponseManifestV2 uninspected_manifest(
-    const NdmsNativeImportRawTransportResponse& response) {
-    NdmsNativeImportResponseManifestV2 manifest;
+NdmsNativeImportResponseManifestV3 uninspected_manifest(
+    const NdmsNativeImportRawTransportResponse& response,
+    const NdmsNativeTunnelImportKind request_kind) {
+    NdmsNativeImportResponseManifestV3 manifest;
+    manifest.request_kind = request_kind;
     const auto body = response.body.view();
     manifest.body_bytes = body.size();
     manifest.transport_ok =
@@ -534,6 +536,7 @@ NdmsNativeImportTransportResult post_ndms_native_import_once(
         throw NdmsNativeImportTransportError(
             "expected native import target is not eligible");
     }
+    const auto request_kind = request.kind();
     const std::size_t expected_bytes = request.content_length();
     NdmsNativeSecretBuffer request_body(expected_bytes);
     if (!request.write_stock_rci_body_once(request_body) ||
@@ -558,7 +561,7 @@ NdmsNativeImportTransportResult post_ndms_native_import_once(
         auto response = backend.post_fixed_loopback_once(
             std::move(capability), std::move(request_body),
             pre_dispatch_guard, trace);
-        auto manifest = uninspected_manifest(response);
+        auto manifest = uninspected_manifest(response, request_kind);
         if (manifest.transport_ok && response.status_code == 200 &&
             manifest.content_type_is_json &&
             exact_safe_success_body(
@@ -567,12 +570,13 @@ NdmsNativeImportTransportResult post_ndms_native_import_once(
             // firmware-controlled opaque string. It is safe to pass to the
             // richer diagnostic parser without creating an un-wiped DOM copy
             // of a key.
-            manifest = inspect_ndms_native_import_response_v2(
+            manifest = inspect_ndms_native_import_response_v3(
                 NdmsNativeImportHttpResponseView{
                     true,
                     response.status_code,
                     "application/json",
                     response.body.view()},
+                request_kind,
                 expected_created_interface);
         }
         // A later stage is also proof that every earlier one was crossed.
@@ -594,7 +598,8 @@ NdmsNativeImportTransportResult post_ndms_native_import_once(
         // The backend boundary has been entered, but setup can still fail
         // before the guard or perform. The trace is the only authority for
         // whether dispatch became ambiguous.
-        NdmsNativeImportResponseManifestV2 manifest;
+        NdmsNativeImportResponseManifestV3 manifest;
+        manifest.request_kind = request_kind;
         manifest.transport_ok = false;
         manifest.outcome =
             NdmsNativeImportResponseOutcome::transport_failed;

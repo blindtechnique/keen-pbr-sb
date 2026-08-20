@@ -44,6 +44,8 @@ NdmsNativeOwnershipRecord record_fixture() {
     record.interface_name = "Wireguard5";
     record.transaction_id = std::string(32U, 'a');
     record.marker = "kpbr-ni-v1-" + record.transaction_id;
+    record.snapshot_revision =
+        "ndms-native-import-v1-" + std::string(64U, 'c');
     record.target_full_revision =
         "ndms-rci-full-v1-" + std::string(64U, 'b');
     return record;
@@ -54,9 +56,10 @@ std::string ownership_body(const NdmsNativeOwnershipRecord& record) {
                                NdmsNativeTunnelImportKind::amnezia_wireguard
                            ? "amnezia_wireguard"
                            : "wireguard";
-    return std::string("keen-pbr-native-ownership-v1\n") +
+    return std::string("keen-pbr-native-ownership-v2\n") +
            record.interface_name + "\n" + record.transaction_id + "\n" +
            record.marker + "\n" + kind + "\n" +
+           record.snapshot_revision + "\n" +
            record.target_full_revision + "\n";
 }
 
@@ -101,6 +104,10 @@ TEST_CASE("a published claim reads back exactly, with a stable revision") {
     // digest that survived a field change would let a swapped claim pass the
     // ownership_record_matches comparison.
     auto other = record;
+    other.snapshot_revision =
+        "ndms-native-import-v1-" + std::string(64U, 'd');
+    CHECK(ndms_native_ownership_revision(other) != revision);
+    other = record;
     other.target_full_revision =
         "ndms-rci-full-v1-" + std::string(64U, 'c');
     CHECK(ndms_native_ownership_revision(other) != revision);
@@ -128,13 +135,37 @@ TEST_CASE("a torn claim is unreadable, never absent") {
 
     std::ofstream torn(directory.path / "ownership" / "Wireguard5",
                        std::ios::binary | std::ios::trunc);
-    torn << "keen-pbr-native-ownership-v1\nWireguard5\n";
+    torn << "keen-pbr-native-ownership-v2\nWireguard5\n";
     torn.close();
 
     // "No claim" is exactly the reading that must not come from a torn one:
     // it would tell recovery the interface belongs to the operator.
     CHECK(store.read("Wireguard5").state ==
           NdmsNativeOwnershipReadState::unreadable);
+}
+
+TEST_CASE("legacy v1 ownership is quarantined, never read as absence") {
+    TempDirectory directory;
+    NdmsNativeOwnershipStore store(directory.path / "ownership");
+    const auto record = record_fixture();
+    store.publish(record);
+
+    std::ofstream legacy(
+        directory.path / "ownership" / "Wireguard5",
+        std::ios::binary | std::ios::trunc);
+    legacy << "keen-pbr-native-ownership-v1\n"
+           << record.interface_name << '\n'
+           << record.transaction_id << '\n'
+           << record.marker << "\nwireguard\n"
+           << record.target_full_revision << '\n';
+    legacy.close();
+
+    // Production mutation was disabled when v1 existed, so there is no
+    // automatic adoption. Legacy claims require an explicit owner action;
+    // silently treating one as absent could authorize somebody else's slot.
+    CHECK(store.read("Wireguard5").state ==
+          NdmsNativeOwnershipReadState::unreadable);
+    CHECK_FALSE(store.remove_exact(record));
 }
 
 TEST_CASE("a claim naming a different interface than its filename is refused") {
@@ -218,6 +249,55 @@ TEST_CASE("claims are immutable and an exact retry repairs publication durabilit
     const auto read = retry.read("Wireguard5");
     REQUIRE(read.record.has_value());
     CHECK(*read.record == record);
+}
+
+TEST_CASE("replace_exact has no unlink gap and is crash-idempotent") {
+    TempDirectory directory;
+    const auto state = directory.path / "ownership";
+    const auto expected = record_fixture();
+    auto replacement = expected;
+    replacement.target_full_revision =
+        "ndms-rci-full-v1-" + std::string(64U, 'd');
+
+    NdmsNativeOwnershipStore initial(state);
+    initial.publish(expected);
+
+    bool existed_after_atomic_replace = false;
+    NdmsNativeOwnershipStoreTestHooks hooks;
+    hooks.allow_current_process_owner = true;
+    hooks.fault_injector = [&](const auto stage) {
+        if (stage == NdmsNativeOwnershipStoreFaultStage::
+                         post_rename_directory_fsync) {
+            existed_after_atomic_replace =
+                fs::exists(state / "Wireguard5");
+            throw std::runtime_error("injected replace fsync failure");
+        }
+    };
+    NdmsNativeOwnershipStore interrupted(state, hooks);
+    CHECK_FALSE(interrupted.replace_exact(expected, replacement)
+                    .has_value());
+    CHECK(existed_after_atomic_replace);
+
+    NdmsNativeOwnershipStore retry(state);
+    const auto visible = retry.read("Wireguard5");
+    REQUIRE(visible.record.has_value());
+    CHECK(*visible.record == replacement);
+    const auto revision = retry.replace_exact(expected, replacement);
+    REQUIRE(revision.has_value());
+    CHECK(*revision == ndms_native_ownership_revision(replacement));
+
+    auto stale = expected;
+    stale.target_full_revision =
+        "ndms-rci-full-v1-" + std::string(64U, 'e');
+    CHECK_FALSE(retry.replace_exact(stale, expected).has_value());
+    auto rebound_snapshot = replacement;
+    rebound_snapshot.snapshot_revision =
+        "ndms-native-import-v1-" + std::string(64U, 'e');
+    CHECK_FALSE(
+        retry.replace_exact(replacement, rebound_snapshot).has_value());
+    const auto final_read = retry.read("Wireguard5");
+    REQUIRE(final_read.record.has_value());
+    CHECK(*final_read.record == replacement);
 }
 
 TEST_CASE("portable no-replace publication recovers both crash windows") {

@@ -88,12 +88,15 @@ NdmsNativeImportWalRecord store_prepared_record(char transaction_digit = 'a') {
     record.marker = "kpbr-ni-v1-" + record.transaction_id;
     record.candidate_revision =
         store_digest("ndms-native-import-v1-", 'b');
+    record.snapshot_revision = record.candidate_revision;
+    record.observation_binding = {std::string(32U, 'd'), 9U, 7U};
     record.baseline = store_baseline();
     record.request_binding_sha256 =
         ndms_native_import_request_binding_digest(
             record.transaction_id,
             record.marker,
             record.candidate_revision,
+            record.kind,
             record.baseline.expected_created_interface);
     record.generation_ticket =
         store_digest("ndms-create-ticket-v1-", 'c');
@@ -117,6 +120,7 @@ NdmsNativeImportWalRecord indexed_store_record(std::size_t index) {
             record.transaction_id,
             record.marker,
             record.candidate_revision,
+            record.kind,
             record.baseline.expected_created_interface);
     return record;
 }
@@ -132,7 +136,7 @@ NdmsNativeImportWalRecord store_response_record(char digit = 'a') {
     auto record = store_inflight_record(digit);
     record.phase = NdmsNativeImportWalPhase::response_recorded;
     record.response_manifest_sha256 =
-        store_digest("ndms-import-response-manifest-v2-", 'd');
+        store_digest("ndms-import-response-manifest-v3-", 'd');
     record.created_interface = "Wireguard5";
     return record;
 }
@@ -146,7 +150,7 @@ NdmsNativeImportWalRecord store_record_for_phase(
         phase == NdmsNativeImportWalPhase::target_verified ||
         phase == NdmsNativeImportWalPhase::ownership_published) {
         record.response_manifest_sha256 =
-            store_digest("ndms-import-response-manifest-v2-", 'd');
+            store_digest("ndms-import-response-manifest-v3-", 'd');
         record.created_interface = "Wireguard5";
     }
     if (phase == NdmsNativeImportWalPhase::target_verified ||
@@ -156,7 +160,7 @@ NdmsNativeImportWalRecord store_record_for_phase(
     }
     if (phase == NdmsNativeImportWalPhase::ownership_published) {
         record.ownership_revision =
-            store_digest("ndms-native-owner-v1-", 'f');
+            store_digest("ndms-native-owner-v2-", 'f');
     }
     return record;
 }
@@ -471,11 +475,14 @@ TEST_CASE("native import WAL store advances only exact monotonic evidence") {
     auto same_phase_rewrite = prepared;
     same_phase_rewrite.candidate_revision =
         store_digest("ndms-native-import-v1-", 'e');
+    same_phase_rewrite.snapshot_revision =
+        same_phase_rewrite.candidate_revision;
     same_phase_rewrite.request_binding_sha256 =
         ndms_native_import_request_binding_digest(
             same_phase_rewrite.transaction_id,
             same_phase_rewrite.marker,
             same_phase_rewrite.candidate_revision,
+            same_phase_rewrite.kind,
             same_phase_rewrite.baseline.expected_created_interface);
     CHECK_THROWS_AS(
         store.publish(same_phase_rewrite),
@@ -494,19 +501,25 @@ TEST_CASE("native import WAL store advances only exact monotonic evidence") {
     CHECK_THROWS_AS(
         store.publish(changed_baseline),
         NdmsNativeImportWalStoreError);
+    auto changed_observation = inflight;
+    ++changed_observation.observation_binding.mutation_epoch;
+    CHECK_NOTHROW(serialize_ndms_native_import_wal(changed_observation));
+    CHECK_THROWS_AS(
+        store.publish(changed_observation),
+        NdmsNativeImportWalStoreError);
     CHECK_NOTHROW(store.publish(inflight));
     CHECK_NOTHROW(store.publish(response));
 
     auto rewritten_response = response;
     rewritten_response.response_manifest_sha256 =
-        store_digest("ndms-import-response-manifest-v2-", 'e');
+        store_digest("ndms-import-response-manifest-v3-", 'e');
     CHECK_THROWS_AS(
         store.publish(rewritten_response),
         NdmsNativeImportWalStoreError);
     CHECK(store.load(prepared.transaction_id).record == response);
 }
 
-TEST_CASE("prepared native import WAL v2 survives the published crash boundary") {
+TEST_CASE("prepared native import WAL v3 survives the published crash boundary") {
     WalStoreTempDirectory temporary;
     const auto state = temporary.path / "state";
     auto hooks = unprivileged_test_hooks();
@@ -548,7 +561,7 @@ TEST_CASE("native import WAL load classifies corruption without records") {
         const auto record = store_prepared_record();
         admit_prepared(store, record);
         auto body = read_file(record_path(state, record.transaction_id));
-        const auto version = body.find("\"schema_version\": 2");
+        const auto version = body.find("\"schema_version\": 3");
         REQUIRE(version != std::string::npos);
         body[version + std::string{"\"schema_version\": "}.size()] = '1';
         write_private_file(record_path(state, record.transaction_id), body);

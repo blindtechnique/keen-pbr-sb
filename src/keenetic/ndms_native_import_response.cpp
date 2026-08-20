@@ -337,7 +337,7 @@ bool lowercase_hex_digest(const std::string& value) {
 }
 
 void count_key(const std::string& key,
-               NdmsNativeImportResponseManifestV2& manifest) {
+               NdmsNativeImportResponseManifestV3& manifest) {
     if (!known_manifest_key(key)) ++manifest.unknown_key_count;
     if (sensitive_key(key)) ++manifest.sensitive_key_count;
 
@@ -356,7 +356,7 @@ void count_key(const std::string& key,
 
 void inspect_status_value(
     const Json& value,
-    NdmsNativeImportResponseManifestV2& manifest) {
+    NdmsNativeImportResponseManifestV3& manifest) {
     if (!value.is_string()) {
         ++manifest.status_unknown_value_count;
         return;
@@ -377,7 +377,7 @@ void inspect_status_value(
 }
 
 void inspect_tree(const Json& value,
-                  NdmsNativeImportResponseManifestV2& manifest,
+                  NdmsNativeImportResponseManifestV3& manifest,
                   const Json* import_object,
                   const Json* wireguard_object,
                   const Json*& sole_outer_status,
@@ -433,7 +433,7 @@ bool exact_keys(const Json& object,
 
 const Json* locate_import_object(
     const Json& root,
-    NdmsNativeImportResponseManifestV2& manifest) {
+    NdmsNativeImportResponseManifestV3& manifest) {
     if (!root.is_array() || root.size() != 1U ||
         !root.front().is_object()) {
         return nullptr;
@@ -475,7 +475,7 @@ bool known_direct_status_record_key(const std::string& key) {
 
 void inspect_direct_status_record(
     const Json& record,
-    NdmsNativeImportResponseManifestV2& manifest,
+    NdmsNativeImportResponseManifestV3& manifest,
     RedactedDigest& status_digest,
     RedactedDigest& code_digest,
     RedactedDigest& ident_digest,
@@ -527,7 +527,7 @@ void inspect_direct_status_record(
 
 void inspect_direct_status(
     const Json& value,
-    NdmsNativeImportResponseManifestV2& manifest) {
+    NdmsNativeImportResponseManifestV3& manifest) {
     manifest.direct_status_value_kind = json_value_kind(value);
     RedactedDigest status_digest;
     RedactedDigest code_digest;
@@ -584,7 +584,7 @@ void inspect_direct_status(
 void inspect_direct_import(
     const Json& object,
     const std::string& expected_created_interface,
-    NdmsNativeImportResponseManifestV2& manifest) {
+    NdmsNativeImportResponseManifestV3& manifest) {
     manifest.direct_import_key_count = object.size();
     manifest.direct_status_key_count = object.count("status");
     manifest.direct_code_key_count = object.count("code");
@@ -639,7 +639,7 @@ bool exact_two_field_envelope(const Json& root) {
     return exact_keys(wireguard.at("import"), {"created", "intersects"});
 }
 
-void classify_status(NdmsNativeImportResponseManifestV2& manifest) {
+void classify_status(NdmsNativeImportResponseManifestV3& manifest) {
     if (manifest.status_key_count == 0U) {
         manifest.status_evidence = NdmsNativeImportStatusEvidence::absent;
     } else if (manifest.status_failure_token_count != 0U) {
@@ -730,11 +730,13 @@ void append_field(std::string& output,
 
 } // namespace
 
-NdmsNativeImportResponseManifestV2
-inspect_ndms_native_import_response_v2(
+NdmsNativeImportResponseManifestV3
+inspect_ndms_native_import_response_v3(
     const NdmsNativeImportHttpResponseView& response,
+    const NdmsNativeTunnelImportKind request_kind,
     const std::string& expected_created_interface) {
-    NdmsNativeImportResponseManifestV2 manifest;
+    NdmsNativeImportResponseManifestV3 manifest;
+    manifest.request_kind = request_kind;
     manifest.body_bytes = response.body.size();
     manifest.transport_ok = response.transport_ok;
     manifest.http_status = response.status_code;
@@ -870,22 +872,47 @@ inspect_ndms_native_import_response_v2(
     return manifest;
 }
 
-NdmsNativeImportResponseManifestV2
-inspect_ndms_native_import_response_v2(
+NdmsNativeImportResponseManifestV3
+inspect_ndms_native_import_response_v3(
     const NdmsNativeImportHttpResponse& response,
+    const NdmsNativeTunnelImportKind request_kind,
     const std::string& expected_created_interface) {
-    return inspect_ndms_native_import_response_v2(
+    return inspect_ndms_native_import_response_v3(
         NdmsNativeImportHttpResponseView{
             response.transport_ok,
             response.status_code,
             response.content_type,
             response.body},
+        request_kind,
         expected_created_interface);
 }
 
-std::string serialize_ndms_native_import_response_manifest_v2(
-    const NdmsNativeImportResponseManifestV2& manifest) {
-    std::string output{"ndms-native-import-response-v2"};
+NdmsNativeImportResponseManifestV3
+inspect_ndms_native_import_response_v3(
+    const NdmsNativeImportHttpResponseView& response,
+    const std::string& expected_created_interface) {
+    return inspect_ndms_native_import_response_v3(
+        response,
+        NdmsNativeTunnelImportKind::wireguard,
+        expected_created_interface);
+}
+
+NdmsNativeImportResponseManifestV3
+inspect_ndms_native_import_response_v3(
+    const NdmsNativeImportHttpResponse& response,
+    const std::string& expected_created_interface) {
+    return inspect_ndms_native_import_response_v3(
+        response,
+        NdmsNativeTunnelImportKind::wireguard,
+        expected_created_interface);
+}
+
+std::string serialize_ndms_native_import_response_manifest_v3(
+    const NdmsNativeImportResponseManifestV3& manifest) {
+    std::string output{"ndms-native-import-response-v3"};
+    append_field(
+        output, "kind",
+        ndms_native_tunnel_import_kind_name(manifest.request_kind));
     append_field(output, "body_bytes", manifest.body_bytes);
     append_digest_field(output, "body_sha256", manifest.body_sha256);
     append_field(output, "transport_ok", manifest.transport_ok);

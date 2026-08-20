@@ -155,7 +155,7 @@ private:
 
     friend NdmsNativeImportExecutionResult
     execute_ndms_native_import_transaction(
-        NdmsNativeWireguardImportRequest,
+        NdmsNativePreparedImport,
         const NdmsNativeImportExecutionPlan&,
         const NdmsNativeImportBaselineEvidence&,
         std::optional<NdmsNativeAllocatorFenceReceipt>,
@@ -201,7 +201,7 @@ struct NdmsNativeImportTransportResult {
     bool pre_dispatch_guard_passed{false};
     bool perform_started{false};
     bool request_may_have_been_dispatched{false};
-    NdmsNativeImportResponseManifestV2 response_manifest;
+    NdmsNativeImportResponseManifestV3 response_manifest;
 };
 
 // Serializes and consumes request exactly once, performs exactly one fixed

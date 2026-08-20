@@ -10,6 +10,7 @@
 namespace keen_pbr3 {
 
 class NdmsNativeSecretSnapshotStore;
+class NdmsNativePreparedImport;
 
 class NdmsNativePanelDeleteSnapshotError final
     : public std::runtime_error {
@@ -73,6 +74,8 @@ private:
     make_ndms_native_panel_delete_snapshot(
         std::string&&,
         const std::string&);
+    friend NdmsNativePreparedImport
+    prepare_ndms_native_import(std::string&&);
     friend class NdmsNativeSecretSnapshotStore;
 };
 

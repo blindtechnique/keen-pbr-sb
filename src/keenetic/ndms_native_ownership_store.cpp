@@ -27,7 +27,7 @@ namespace keen_pbr3 {
 
 namespace {
 
-constexpr const char* kHeader = "keen-pbr-native-ownership-v1";
+constexpr const char* kHeader = "keen-pbr-native-ownership-v2";
 constexpr std::size_t kMaximumRecordBytes = 4096U;
 constexpr mode_t kOwnershipDirectoryMode = 0700;
 constexpr mode_t kOwnershipFileMode = 0600;
@@ -318,6 +318,13 @@ bool rci_full_revision(const std::string_view value) noexcept {
            lower_hex(value.substr(prefix.size()), 64U);
 }
 
+bool snapshot_revision(const std::string_view value) noexcept {
+    constexpr std::string_view prefix{"ndms-native-import-v1-"};
+    return value.size() == prefix.size() + 64U &&
+           value.substr(0U, prefix.size()) == prefix &&
+           lower_hex(value.substr(prefix.size()), 64U);
+}
+
 bool claimable_interface(const std::string& name) {
     const auto identity = parse_ndms_wireguard_identity(name);
     return identity.has_value() &&
@@ -329,10 +336,11 @@ bool record_fields_valid(const NdmsNativeOwnershipRecord& record) {
     return (record.kind == NdmsNativeTunnelImportKind::wireguard ||
             record.kind ==
                 NdmsNativeTunnelImportKind::amnezia_wireguard) &&
-           claimable_interface(record.interface_name) &&
-           lower_hex(record.transaction_id, 32U) &&
-           record.marker == "kpbr-ni-v1-" + record.transaction_id &&
-           rci_full_revision(record.target_full_revision);
+            claimable_interface(record.interface_name) &&
+            lower_hex(record.transaction_id, 32U) &&
+            record.marker == "kpbr-ni-v1-" + record.transaction_id &&
+            snapshot_revision(record.snapshot_revision) &&
+            rci_full_revision(record.target_full_revision);
 }
 
 void update_field(Sha256& hasher, const std::string_view value) {
@@ -363,6 +371,7 @@ std::string serialize(const NdmsNativeOwnershipRecord& record) {
          << record.transaction_id << '\n'
          << record.marker << '\n'
          << kind_name(record.kind) << '\n'
+         << record.snapshot_revision << '\n'
          << record.target_full_revision << '\n';
     return body.str();
 }
@@ -378,6 +387,7 @@ std::optional<NdmsNativeOwnershipRecord> parse(const std::string& body) {
         !std::getline(input, record.transaction_id) ||
         !std::getline(input, record.marker) ||
         !std::getline(input, kind) ||
+        !std::getline(input, record.snapshot_revision) ||
         !std::getline(input, record.target_full_revision) ||
         std::getline(input, extra)) {
         return std::nullopt;
@@ -754,6 +764,7 @@ bool NdmsNativeOwnershipRecord::operator==(
     return interface_name == other.interface_name &&
            transaction_id == other.transaction_id &&
            marker == other.marker && kind == other.kind &&
+           snapshot_revision == other.snapshot_revision &&
            target_full_revision == other.target_full_revision;
 }
 
@@ -764,13 +775,14 @@ std::string ndms_native_ownership_revision(
             "native ownership record cannot be revisioned");
     }
     Sha256 hasher;
-    update_field(hasher, "keen-pbr.ndms-native-ownership.revision.v1");
+    update_field(hasher, "keen-pbr.ndms-native-ownership.revision.v2");
     update_field(hasher, record.interface_name);
     update_field(hasher, record.transaction_id);
     update_field(hasher, record.marker);
     update_field(hasher, kind_name(record.kind));
+    update_field(hasher, record.snapshot_revision);
     update_field(hasher, record.target_full_revision);
-    return std::string("ndms-native-owner-v1-") + hasher.hex_digest();
+    return std::string("ndms-native-owner-v2-") + hasher.hex_digest();
 }
 
 NdmsNativeOwnershipStore::NdmsNativeOwnershipStore(
@@ -841,6 +853,107 @@ std::string NdmsNativeOwnershipStore::publish(
             "published native ownership claim failed exact verification");
     }
     return ndms_native_ownership_revision(record);
+}
+
+std::optional<std::string> NdmsNativeOwnershipStore::replace_exact(
+    const NdmsNativeOwnershipRecord& expected,
+    const NdmsNativeOwnershipRecord& replacement) {
+    if (!record_fields_valid(expected) ||
+        !record_fields_valid(replacement) ||
+        expected.interface_name != replacement.interface_name ||
+        expected.transaction_id != replacement.transaction_id ||
+        expected.marker != replacement.marker ||
+        expected.kind != replacement.kind ||
+        expected.snapshot_revision != replacement.snapshot_revision) {
+        return std::nullopt;
+    }
+    const auto policy = ownership_policy(
+#ifdef KEEN_PBR3_TESTING
+        test_hooks_
+#endif
+    );
+    std::lock_guard<std::mutex> process_lock(ownership_store_mutex);
+    try {
+        auto directory = open_directory(
+            state_directory_, false, policy);
+        OwnershipDirectoryLock directory_lock(directory.get(), LOCK_EX);
+        if (!cleanup_ownership_temporaries(
+                directory.get(), policy)) {
+            return std::nullopt;
+        }
+        const auto current = read_locked(
+            directory.get(), expected.interface_name, policy);
+        if (current.state != OwnershipReadState::valid ||
+            !current.record) {
+            return std::nullopt;
+        }
+        if (*current.record == replacement) {
+            fsync_exact(directory.get(), "native ownership directory");
+            return ndms_native_ownership_revision(replacement);
+        }
+        if (!(*current.record == expected)) return std::nullopt;
+
+        OwnershipFileDescriptor temporary;
+        const auto temporary_name = create_temporary(
+            directory.get(), temporary, expected.interface_name, policy);
+        bool temporary_exists = true;
+        try {
+            const auto body = serialize(replacement);
+            write_all(temporary.get(), body);
+            fsync_exact(
+                temporary.get(), "temporary native ownership file");
+            if (::close(temporary.release()) != 0) {
+                throw std::runtime_error(
+                    ownership_error(
+                        "cannot close temporary native ownership file"));
+            }
+#ifdef KEEN_PBR3_TESTING
+            inject_ownership_fault(
+                policy,
+                NdmsNativeOwnershipStoreFaultStage::
+                    pre_publish_after_file_fsync);
+#endif
+            const auto rebound = read_locked(
+                directory.get(), expected.interface_name, policy);
+            if (rebound.state != OwnershipReadState::valid ||
+                !rebound.record || !(*rebound.record == expected) ||
+                rebound.device != current.device ||
+                rebound.inode != current.inode) {
+                throw std::runtime_error(
+                    "native ownership claim changed during exact replace");
+            }
+            if (::renameat(
+                    directory.get(), temporary_name.c_str(),
+                    directory.get(), expected.interface_name.c_str()) != 0) {
+                throw std::runtime_error(
+                    ownership_error(
+                        "cannot replace native ownership file"));
+            }
+            temporary_exists = false;
+#ifdef KEEN_PBR3_TESTING
+            inject_ownership_fault(
+                policy,
+                NdmsNativeOwnershipStoreFaultStage::
+                    post_rename_directory_fsync);
+#endif
+            fsync_exact(directory.get(), "native ownership directory");
+        } catch (...) {
+            if (temporary_exists) {
+                (void)::unlinkat(
+                    directory.get(), temporary_name.c_str(), 0);
+            }
+            throw;
+        }
+        const auto verified = read_locked(
+            directory.get(), expected.interface_name, policy);
+        if (verified.state != OwnershipReadState::valid ||
+            !verified.record || !(*verified.record == replacement)) {
+            return std::nullopt;
+        }
+        return ndms_native_ownership_revision(replacement);
+    } catch (...) {
+        return std::nullopt;
+    }
 }
 
 NdmsNativeOwnershipReadResult NdmsNativeOwnershipStore::read(

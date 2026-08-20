@@ -603,6 +603,7 @@ void validate_update(const NdmsNativeImportWalRecord& before,
         before.generation_ticket != after.generation_ticket ||
         before.maintenance_base_generation !=
             after.maintenance_base_generation ||
+        !(before.observation_binding == after.observation_binding) ||
         !(before.baseline == after.baseline) ||
         (before.reserved_generation.has_value() &&
          before.reserved_generation != after.reserved_generation) ||
@@ -611,6 +612,7 @@ void validate_update(const NdmsNativeImportWalRecord& before,
             after.response_manifest_sha256) ||
         !optional_string_preserved(
             before.created_interface, after.created_interface) ||
+        before.snapshot_revision != after.snapshot_revision ||
         !optional_string_preserved(
             before.target_full_revision, after.target_full_revision) ||
         !optional_string_preserved(

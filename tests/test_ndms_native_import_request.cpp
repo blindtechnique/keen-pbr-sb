@@ -247,6 +247,16 @@ static_assert(!std::is_invocable_v<
 static_assert(!std::is_invocable_v<
               decltype(&make_ndms_native_wireguard_import_request),
               std::string, std::string>);
+static_assert(!std::is_copy_constructible_v<NdmsNativePreparedImport>);
+static_assert(std::is_nothrow_move_constructible_v<
+              NdmsNativePreparedImport>);
+static_assert(std::is_invocable_r_v<
+              NdmsNativePreparedImport,
+              decltype(&prepare_ndms_native_import),
+              std::string>);
+static_assert(!std::is_invocable_v<
+              decltype(&prepare_ndms_native_import),
+              std::string&>);
 
 TEST_CASE("native WG request is an exact canonical stock batch") {
     const auto private_key = key('P');
@@ -386,6 +396,62 @@ TEST_CASE("native AWG request preserves absent S3 and S4 with signatures") {
     CHECK(request.write_stock_rci_body_once(sink));
     CHECK(sink.body() == expected);
     CHECK_FALSE(request.has_pending_secret_body());
+}
+
+TEST_CASE("prepared native import binds one parsed profile to request and delete snapshot") {
+    const auto verify = [](std::string raw,
+                           const NdmsNativeTunnelImportKind expected_kind) {
+        auto prepared = prepare_ndms_native_import(std::move(raw));
+        CHECK(raw.empty());
+        const auto& identity = prepared.request_identity();
+        const auto& snapshot = prepared.delete_snapshot_metadata();
+        CHECK(identity.kind() == expected_kind);
+        CHECK(snapshot.kind() == expected_kind);
+        CHECK(snapshot.marker() == identity.marker());
+        CHECK(snapshot.canonical_revision() ==
+              identity.candidate_revision());
+        CHECK(snapshot.sealed_payload_bytes() > 0U);
+        CHECK(snapshot.has_complete_awg_parameters() ==
+              (expected_kind ==
+               NdmsNativeTunnelImportKind::amnezia_wireguard));
+
+        const auto marker = std::string(identity.marker());
+        auto delete_snapshot = prepared.take_delete_snapshot();
+        auto request = prepared.take_request();
+        CHECK(delete_snapshot.marker() == marker);
+        CHECK(request.marker() == marker);
+        CHECK(request.has_pending_secret_body());
+        CHECK_FALSE(prepared.request_identity().has_pending_secret_body());
+        CHECK(prepared.delete_snapshot_metadata().sealed_payload_bytes() ==
+              0U);
+
+        RejectingSecretSink sink(0U);
+        CHECK_FALSE(request.write_stock_rci_body_once(sink));
+        CHECK_FALSE(request.has_pending_secret_body());
+    };
+
+    SUBCASE("WireGuard") {
+        verify(wg_conf(), NdmsNativeTunnelImportKind::wireguard);
+    }
+    SUBCASE("AmneziaWG") {
+        verify(
+            awg_conf(),
+            NdmsNativeTunnelImportKind::amnezia_wireguard);
+    }
+}
+
+TEST_CASE("prepared native import wipes adopted raw input on parse failure") {
+    auto raw = wg_conf();
+    const auto endpoint = raw.find("vpn.example.test:443");
+    REQUIRE(endpoint != std::string::npos);
+    raw.replace(
+        endpoint,
+        std::string{"vpn.example.test:443"}.size(),
+        "invalid endpoint");
+    CHECK_THROWS_AS(
+        prepare_ndms_native_import(std::move(raw)),
+        NdmsNativeTunnelImportError);
+    CHECK(raw.empty());
 }
 
 TEST_CASE("native WG and AWG requests still reject URI envelopes") {

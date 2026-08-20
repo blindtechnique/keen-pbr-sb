@@ -37,6 +37,7 @@ enum class NdmsNativeImportRecoveryDispatchState {
     target_missing,
     target_not_eligible,
     ownership_store_missing,
+    snapshot_retirer_missing,
     // A step ran and failed. Everything before it is durable, and the WAL
     // record that remains says exactly how far this got.
     step_failed,
@@ -63,6 +64,19 @@ struct NdmsNativeImportRecoveryDispatchResult {
 // far this got.
 class NdmsNativeOwnershipStore;
 
+// Exact, idempotent retirement seam for a snapshot that may or may not have
+// become durable after the prepared WAL was published. Implementations return
+// true only when the exact snapshot was removed or exact absence is durable.
+class NdmsNativeImportSnapshotRetirer {
+public:
+    virtual ~NdmsNativeImportSnapshotRetirer() = default;
+    virtual bool remove_if_present_exact(
+        const std::string& expected_interface,
+        const std::string& transaction_id,
+        const std::string& marker,
+        const std::string& snapshot_revision) = 0;
+};
+
 NdmsNativeImportRecoveryDispatchResult
 dispatch_ndms_native_import_recovery(
     NdmsNativeImportWalStore& store,
@@ -80,7 +94,8 @@ dispatch_ndms_native_import_recovery(
     // property under test is that a crash between any two steps leaves a WAL
     // the next recovery pass finishes from. Never called after a failure.
     const std::function<void(NdmsNativeImportRecoveryStep)>&
-        step_observer = nullptr);
+        step_observer = nullptr,
+    NdmsNativeImportSnapshotRetirer* snapshot_retirer = nullptr);
 
 const char* ndms_native_import_recovery_dispatch_state_name(
     NdmsNativeImportRecoveryDispatchState state) noexcept;

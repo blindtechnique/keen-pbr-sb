@@ -103,12 +103,15 @@ NdmsNativeImportWalRecord startup_prepared_record(
     record.marker = "kpbr-ni-v1-" + record.transaction_id;
     record.candidate_revision =
         startup_digest("ndms-native-import-v1-", 'b');
+    record.snapshot_revision = record.candidate_revision;
+    record.observation_binding = {std::string(32U, 'd'), 9U, 7U};
     record.baseline = startup_baseline();
     record.request_binding_sha256 =
         ndms_native_import_request_binding_digest(
             record.transaction_id,
             record.marker,
             record.candidate_revision,
+            record.kind,
             record.baseline.expected_created_interface);
     record.generation_ticket =
         startup_digest("ndms-create-ticket-v1-", 'c');

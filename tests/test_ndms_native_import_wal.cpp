@@ -51,18 +51,24 @@ NdmsNativeImportPersistedBaseline persisted_baseline(
     return persist_ndms_native_import_baseline(*built.evidence);
 }
 
-NdmsNativeImportWalRecord prepared_record() {
+NdmsNativeImportWalRecord prepared_record(
+    const NdmsNativeTunnelImportKind kind =
+        NdmsNativeTunnelImportKind::wireguard) {
     NdmsNativeImportWalRecord record;
+    record.kind = kind;
     record.transaction_id = std::string(32U, 'a');
     record.marker = "kpbr-ni-v1-" + record.transaction_id;
     record.candidate_revision =
         digest("ndms-native-import-v1-", 'b');
+    record.snapshot_revision = record.candidate_revision;
+    record.observation_binding = {std::string(32U, 'd'), 9U, 7U};
     record.baseline = persisted_baseline();
     record.request_binding_sha256 =
         ndms_native_import_request_binding_digest(
             record.transaction_id,
             record.marker,
             record.candidate_revision,
+            record.kind,
             record.baseline.expected_created_interface);
     record.generation_ticket =
         digest("ndms-create-ticket-v1-", 'c');
@@ -76,7 +82,7 @@ void reserve(NdmsNativeImportWalRecord& record) {
 
 void record_response(NdmsNativeImportWalRecord& record) {
     record.response_manifest_sha256 =
-        digest("ndms-import-response-manifest-v2-", 'f');
+        digest("ndms-import-response-manifest-v3-", 'f');
 }
 
 // The revision the production evidence builder actually emits, taken from it
@@ -164,7 +170,7 @@ TEST_CASE("dormant native import WAL round-trips every valid phase") {
     auto owned = verified;
     owned.phase = NdmsNativeImportWalPhase::ownership_published;
     owned.ownership_revision =
-        digest("ndms-native-owner-v1-", 'e');
+        digest("ndms-native-owner-v2-", 'e');
     records.push_back(owned);
 
     auto rollback = inflight;
@@ -195,7 +201,7 @@ TEST_CASE("native import WAL codec is exact integrity-bound and non-secret") {
     CHECK(serialized.find("Endpoint") == std::string::npos);
     CHECK(serialized.find("AllowedIPs") == std::string::npos);
     CHECK(serialized.find("Address") == std::string::npos);
-    CHECK(serialized.find("\"schema_version\": 2") !=
+    CHECK(serialized.find("\"schema_version\": 3") !=
           std::string::npos);
     CHECK(serialized.find("\"baseline\"") != std::string::npos);
     CHECK(serialized.find("\"occupancy_hex\"") !=
@@ -237,7 +243,7 @@ TEST_CASE("native import WAL codec is exact integrity-bound and non-secret") {
 
     auto legacy = nlohmann::json::parse(serialized);
     legacy.erase("integrity_sha256");
-    legacy["schema_version"] = 1;
+    legacy["schema_version"] = 2;
     legacy["integrity_sha256"] = Sha256::hex(legacy.dump());
     CHECK(parse_rejected(legacy.dump()));
 }
@@ -279,9 +285,22 @@ TEST_CASE("native import WAL rejects malformed or forged v2 baseline evidence") 
     CHECK_THROWS_AS(
         serialize_ndms_native_import_wal(mismatched_generation),
         NdmsNativeImportWalError);
+
+    auto invalid_observation = prepared_record();
+    invalid_observation.observation_binding.authority_id.clear();
+    CHECK_THROWS_AS(
+        serialize_ndms_native_import_wal(invalid_observation),
+        NdmsNativeImportWalError);
+
+    auto rebound_snapshot = prepared_record();
+    rebound_snapshot.snapshot_revision =
+        digest("ndms-native-import-v1-", 'e');
+    CHECK_THROWS_AS(
+        serialize_ndms_native_import_wal(rebound_snapshot),
+        NdmsNativeImportWalError);
 }
 
-TEST_CASE("native import WAL v2 rejects protected and non-first-free baselines") {
+TEST_CASE("native import WAL v3 rejects protected and non-first-free baselines") {
     auto protected_target = prepared_record();
     protected_target.baseline.expected_created_interface = "Wireguard4";
     protected_target.baseline.expected_target_slot = 4U;
@@ -290,6 +309,7 @@ TEST_CASE("native import WAL v2 rejects protected and non-first-free baselines")
             protected_target.transaction_id,
             protected_target.marker,
             protected_target.candidate_revision,
+            protected_target.kind,
             protected_target.baseline.expected_created_interface);
     CHECK_THROWS_AS(
         serialize_ndms_native_import_wal(protected_target),
@@ -304,15 +324,21 @@ TEST_CASE("native import WAL v2 rejects protected and non-first-free baselines")
         NdmsNativeImportWalError);
 }
 
-TEST_CASE("native import WAL v2 is limited to measured plain WireGuard") {
-    auto awg = prepared_record();
-    awg.kind = NdmsNativeTunnelImportKind::amnezia_wireguard;
-    CHECK_THROWS_AS(
-        serialize_ndms_native_import_wal(awg),
-        NdmsNativeImportWalError);
+TEST_CASE("native import WAL v3 binds both measured WG and AWG kinds") {
+    const auto wg = prepared_record(
+        NdmsNativeTunnelImportKind::wireguard);
+    const auto awg = prepared_record(
+        NdmsNativeTunnelImportKind::amnezia_wireguard);
+    const auto serialized_awg = serialize_ndms_native_import_wal(awg);
+    CHECK(parse_ndms_native_import_wal(serialized_awg) == awg);
+    CHECK(serialized_awg.find("\"kind\": \"amnezia_wireguard\"") !=
+          std::string::npos);
+    CHECK(wg.request_binding_sha256 != awg.request_binding_sha256);
 
+    // Integrity alone is not enough to swap the request kind: the request
+    // binding independently includes it.
     auto forged_document = nlohmann::json::parse(
-        serialize_ndms_native_import_wal(prepared_record()));
+        serialize_ndms_native_import_wal(wg));
     forged_document.erase("integrity_sha256");
     forged_document["kind"] = "amnezia_wireguard";
     forged_document["integrity_sha256"] =
@@ -363,6 +389,16 @@ TEST_CASE("native import WAL rejects protected targets and phase evidence leaks"
         "ndms-native-import-response-v2|message=secret-value";
     CHECK_THROWS_AS(
         serialize_ndms_native_import_wal(raw_manifest),
+        NdmsNativeImportWalError);
+
+    auto legacy_manifest_digest = prepared_record();
+    legacy_manifest_digest.phase =
+        NdmsNativeImportWalPhase::response_recorded;
+    reserve(legacy_manifest_digest);
+    legacy_manifest_digest.response_manifest_sha256 =
+        digest("ndms-import-response-manifest-v2-", 'f');
+    CHECK_THROWS_AS(
+        serialize_ndms_native_import_wal(legacy_manifest_digest),
         NdmsNativeImportWalError);
 }
 
@@ -556,7 +592,7 @@ TEST_CASE("native import recovery separates forward ownership and exact rollback
     record_response(owned);
     verify_target(owned);
     owned.ownership_revision =
-        digest("ndms-native-owner-v1-", 'e');
+        digest("ndms-native-owner-v2-", 'e');
 
     auto observation = exact_owned_target();
     observation.ownership_record_matches = true;
@@ -591,7 +627,7 @@ TEST_CASE("native import recovery rejects every structurally invalid public reco
     record_response(owned);
     verify_target(owned);
     owned.ownership_revision =
-        digest("ndms-native-owner-v1-", 'e');
+        digest("ndms-native-owner-v2-", 'e');
     auto observation = exact_owned_target();
     observation.ownership_record_matches = true;
 

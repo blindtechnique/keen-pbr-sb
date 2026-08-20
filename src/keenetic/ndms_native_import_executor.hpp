@@ -18,6 +18,7 @@ struct NdmsNativeImportExecutionPlan final {
     std::string generation_ticket;
     std::string firmware_identity;
     std::string allocator_implementation_digest;
+    NdmsNativeObservationBinding observation_binding;
     NdmsNativeAllocatorFenceMode fence_mode{
         NdmsNativeAllocatorFenceMode::bounded_atomic_import};
 };
@@ -85,6 +86,21 @@ private:
     NdmsNativeImportWalStore& store_;
 };
 
+// Opaque durable boundary between the prepared WAL intent and any allocator
+// generation reservation. A production adapter is deliberately not exposed
+// by this slice: future wiring must prove where its key/store live. Returning
+// normally means the exact move-only rollback snapshot is durable; throwing
+// leaves the prepared WAL for recovery and transport must not be entered.
+class NdmsNativeImportSnapshotPublisher {
+public:
+    virtual ~NdmsNativeImportSnapshotPublisher() = default;
+    virtual void publish(
+        const std::string& expected_interface,
+        const std::string& transaction_id,
+        const std::string& marker,
+        NdmsNativePanelDeleteSnapshot snapshot) = 0;
+};
+
 struct NdmsNativeImportExecutionResult;
 #ifdef KEEN_PBR3_TESTING
 class NdmsNativeImportExecutorTestIssuer;
@@ -108,11 +124,13 @@ public:
 private:
     NdmsNativeImportExecutorDependencies(
         NdmsNativeImportWalPublisher* wal,
+        NdmsNativeImportSnapshotPublisher* snapshots,
         NdmsNativeImportGenerationCoordinator* generations,
         NdmsNativeLoopbackRciPostBackend* transport,
         NdmsNativeImportExecutorClock* clock) noexcept;
 
     NdmsNativeImportWalPublisher* wal_{nullptr};
+    NdmsNativeImportSnapshotPublisher* snapshots_{nullptr};
     NdmsNativeImportGenerationCoordinator* generations_{nullptr};
     NdmsNativeLoopbackRciPostBackend* transport_{nullptr};
     NdmsNativeImportExecutorClock* clock_{nullptr};
@@ -122,7 +140,7 @@ private:
 #endif
     friend NdmsNativeImportExecutionResult
     execute_ndms_native_import_transaction(
-        NdmsNativeWireguardImportRequest,
+        NdmsNativePreparedImport,
         const NdmsNativeImportExecutionPlan&,
         const NdmsNativeImportBaselineEvidence&,
         std::optional<NdmsNativeAllocatorFenceReceipt>,
@@ -134,6 +152,7 @@ class NdmsNativeImportExecutorTestIssuer final {
 public:
     static NdmsNativeImportExecutorDependencies issue(
         NdmsNativeImportWalPublisher* wal,
+        NdmsNativeImportSnapshotPublisher* snapshots,
         NdmsNativeImportGenerationCoordinator* generations,
         NdmsNativeLoopbackRciPostBackend* transport,
         NdmsNativeImportExecutorClock* clock) noexcept;
@@ -150,7 +169,8 @@ enum class NdmsNativeImportExecutionStop : std::uint8_t {
     none,
     missing_dependency,
     request_identity_invalid,
-    unsupported_tunnel_kind,
+    snapshot_identity_invalid,
+    observation_binding_invalid,
     expected_target_ineligible,
     baseline_mismatch,
     incompatible_fence_mode,
@@ -160,6 +180,7 @@ enum class NdmsNativeImportExecutionStop : std::uint8_t {
     fence_invalid,
     unfinished_transaction_present,
     prepared_wal_publish_failed,
+    snapshot_publish_failed,
     generation_reservation_failed,
     generation_changed,
     inflight_wal_publish_failed,
@@ -177,6 +198,7 @@ struct NdmsNativeImportExecutionResult final {
     NdmsNativeAllocatorFenceValidationError fence_error{
         NdmsNativeAllocatorFenceValidationError::none};
     bool prepared_wal_published{false};
+    bool snapshot_published{false};
     bool inflight_wal_published{false};
     bool response_wal_published{false};
     // True only once the fixed backend boundary is known to have been
@@ -185,7 +207,7 @@ struct NdmsNativeImportExecutionResult final {
     // True only at the final irreversible perform boundary.
     bool dispatch_perform_started{false};
     bool request_may_have_been_dispatched{false};
-    std::optional<NdmsNativeImportResponseManifestV2> response_manifest;
+    std::optional<NdmsNativeImportResponseManifestV3> response_manifest;
     NdmsNativeImportRecoveryAction recovery_action{
         NdmsNativeImportRecoveryAction::block_unknown};
 };
@@ -200,14 +222,14 @@ std::string ndms_native_import_request_binding_digest(
 // Executes the create-only stock import boundary. There is no delete,
 // ownership publish, API registration, retry or recovery mutation here.
 //
-// The current WAL/recovery schema is WireGuard-only, so an AmneziaWG request
-// is rejected before any WAL or transport work even in tests. A receipt is
-// intentionally consumed through a move-only optional: production code cannot
-// construct or replay one, and the measured KeeneticOS 5.1.1 provider always
-// returns nullopt. Consequently this function cannot reach transport on that
-// firmware.
+// WG and AWG share the measured stock empty-name import operation. Their kind
+// remains bound through the request digest, WAL, response manifest and future
+// ownership publication. A receipt is intentionally consumed through a
+// move-only optional: production code cannot construct or replay one, and the
+// measured KeeneticOS 5.1.1 provider always returns nullopt. Consequently this
+// function cannot reach transport on that firmware.
 NdmsNativeImportExecutionResult execute_ndms_native_import_transaction(
-    NdmsNativeWireguardImportRequest request,
+    NdmsNativePreparedImport prepared,
     const NdmsNativeImportExecutionPlan& plan,
     const NdmsNativeImportBaselineEvidence& baseline,
     std::optional<NdmsNativeAllocatorFenceReceipt> receipt,

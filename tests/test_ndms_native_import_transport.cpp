@@ -4,6 +4,7 @@
 
 #include <string>
 #include <new>
+#include <stdexcept>
 #include <type_traits>
 #include <utility>
 
@@ -21,6 +22,20 @@ std::string plain_wireguard_config() {
            "\nAddress = 10.7.0.2/32\n\n[Peer]\nPublicKey = " +
            kPublicKey +
            "\nEndpoint = vpn.example:51820\nAllowedIPs = 0.0.0.0/0\n";
+}
+
+std::string amnezia_wireguard_config() {
+    auto config = plain_wireguard_config();
+    const auto peer = config.find("\n\n[Peer]");
+    if (peer == std::string::npos) {
+        throw std::runtime_error("invalid AWG transport fixture");
+    }
+    config.insert(
+        peer,
+        "\nJc = 4\nJmin = 40\nJmax = 70\n"
+        "S1 = 100\nS2 = 200\n"
+        "H1 = 101\nH2 = 202\nH3 = 303\nH4 = 404\n");
+    return config;
 }
 
 class FakeBackend final : public NdmsNativeLoopbackRciPostBackend {
@@ -157,10 +172,29 @@ TEST_CASE("native import transport exposes only a redacted response manifest") {
     CHECK(backend.request_size == expected_request_size);
     CHECK(result.request_may_have_been_dispatched);
     CHECK(result.response_manifest.success());
-    const auto safe = serialize_ndms_native_import_response_manifest_v2(
+    const auto safe = serialize_ndms_native_import_response_manifest_v3(
         result.response_manifest);
     CHECK(safe.find(kPrivateKey) == std::string::npos);
     CHECK(safe.find(kPublicKey) == std::string::npos);
+}
+
+TEST_CASE("native import transport preserves AWG kind through redacted inspection") {
+    auto request = make_ndms_native_wireguard_import_request(
+        amnezia_wireguard_config());
+    FakeBackend backend;
+    FakePreDispatchGuard guard;
+
+    const auto result = post_for_test(
+        std::move(request), "Wireguard5", guard, backend);
+
+    REQUIRE(result.response_manifest.success());
+    CHECK(result.response_manifest.request_kind ==
+          NdmsNativeTunnelImportKind::amnezia_wireguard);
+    const auto safe = serialize_ndms_native_import_response_manifest_v3(
+        result.response_manifest);
+    CHECK(safe.find("kind=amnezia_wireguard") != std::string::npos);
+    CHECK(safe.find(kPrivateKey) == std::string::npos);
+    CHECK(safe.find("Jc = 4") == std::string::npos);
 }
 
 TEST_CASE("native import transport never upgrades an ambiguous failure") {
@@ -196,7 +230,7 @@ TEST_CASE("unknown response shape is not decoded into ordinary DOM strings") {
 
     const auto result = post_for_test(
         std::move(request), "Wireguard5", guard, backend);
-    const auto safe = serialize_ndms_native_import_response_manifest_v2(
+    const auto safe = serialize_ndms_native_import_response_manifest_v3(
         result.response_manifest);
 
     CHECK_FALSE(result.response_manifest.success());

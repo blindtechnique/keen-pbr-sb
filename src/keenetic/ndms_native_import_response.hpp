@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ndms_native_tunnel_import.hpp"
+
 #include <cstddef>
 #include <string>
 #include <string_view>
@@ -128,7 +130,12 @@ enum class NdmsNativeImportResponseOutcome {
 // Redacted structural evidence. It deliberately retains no response strings,
 // status message, identifier, created value, intersection value or unknown
 // JSON value. body_sha256 binds diagnostics to the caller-retained response.
-struct NdmsNativeImportResponseManifestV2 {
+struct NdmsNativeImportResponseManifestV3 {
+    // The stock response uses the same `interface.wireguard.import` envelope
+    // for WG and AWG. Preserve the already-validated request kind explicitly
+    // so the redacted manifest digest cannot be reused across tunnel kinds.
+    NdmsNativeTunnelImportKind request_kind{
+        NdmsNativeTunnelImportKind::wireguard};
     std::size_t body_bytes{0U};
     std::string body_sha256;
     bool transport_ok{false};
@@ -232,21 +239,33 @@ struct NdmsNativeImportResponseManifestV2 {
 constexpr std::size_t kNdmsNativeImportMaximumResponseBytes =
     128U * 1024U;
 
-NdmsNativeImportResponseManifestV2
-inspect_ndms_native_import_response_v2(
+NdmsNativeImportResponseManifestV3
+inspect_ndms_native_import_response_v3(
+    const NdmsNativeImportHttpResponse& response,
+    NdmsNativeTunnelImportKind request_kind,
+    const std::string& expected_created_interface);
+
+NdmsNativeImportResponseManifestV3
+inspect_ndms_native_import_response_v3(
     const NdmsNativeImportHttpResponse& response,
     const std::string& expected_created_interface);
 
-NdmsNativeImportResponseManifestV2
-inspect_ndms_native_import_response_v2(
+NdmsNativeImportResponseManifestV3
+inspect_ndms_native_import_response_v3(
+    const NdmsNativeImportHttpResponseView& response,
+    NdmsNativeTunnelImportKind request_kind,
+    const std::string& expected_created_interface);
+
+NdmsNativeImportResponseManifestV3
+inspect_ndms_native_import_response_v3(
     const NdmsNativeImportHttpResponseView& response,
     const std::string& expected_created_interface);
 
 // Stable, single-line, safe-character representation for WAL/diagnostics.
 // It contains fixed enumerations, counts, booleans, a bounded decimal status
 // code and one-way digests; raw status/identifier/message values are omitted.
-std::string serialize_ndms_native_import_response_manifest_v2(
-    const NdmsNativeImportResponseManifestV2& manifest);
+std::string serialize_ndms_native_import_response_manifest_v3(
+    const NdmsNativeImportResponseManifestV3& manifest);
 
 const char* to_string(NdmsNativeImportJsonState value) noexcept;
 const char* to_string(NdmsNativeImportRootKind value) noexcept;

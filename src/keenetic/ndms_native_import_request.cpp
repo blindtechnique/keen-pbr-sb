@@ -608,7 +608,7 @@ make_ndms_native_wireguard_import_request(std::string&& raw_conf) {
             NdmsNativeTunnelImportErrorCode::input_too_large);
     }
 
-    auto imported = parse_ndms_native_tunnel_import(raw_conf);
+    auto imported = parse_ndms_native_tunnel_import(std::move(raw_conf));
     if (imported.source !=
         NdmsNativeTunnelImportSource::wireguard_conf) {
         fail(NdmsNativeWireguardImportRequestErrorCode::
@@ -630,6 +630,91 @@ make_ndms_native_wireguard_import_request(std::string&& raw_conf) {
         std::move(marker),
         std::move(filename),
         std::move(candidate_revision));
+}
+
+NdmsNativePreparedImport::NdmsNativePreparedImport(
+    NdmsNativeWireguardImportRequest request,
+    NdmsNativePanelDeleteSnapshot delete_snapshot) noexcept
+    : request_(std::move(request)),
+      delete_snapshot_(std::move(delete_snapshot)) {}
+
+const NdmsNativeWireguardImportRequest&
+NdmsNativePreparedImport::request_identity() const noexcept {
+    return request_;
+}
+
+const NdmsNativePanelDeleteSnapshot&
+NdmsNativePreparedImport::delete_snapshot_metadata() const noexcept {
+    return delete_snapshot_;
+}
+
+NdmsNativeWireguardImportRequest
+NdmsNativePreparedImport::take_request() noexcept {
+    return std::move(request_);
+}
+
+NdmsNativePanelDeleteSnapshot
+NdmsNativePreparedImport::take_delete_snapshot() noexcept {
+    return std::move(delete_snapshot_);
+}
+
+NdmsNativePreparedImport prepare_ndms_native_import(
+    std::string&& raw_conf) {
+    WipeStringGuard raw_guard(raw_conf);
+    if (raw_conf.size() >
+        kNdmsNativeWireguardImportRequestMaximumBytes) {
+        throw NdmsNativeTunnelImportError(
+            NdmsNativeTunnelImportErrorCode::input_too_large);
+    }
+
+    // Move the caller allocation into the wiping parser. This is the only
+    // parse of the raw profile and avoids retaining a second raw secret copy.
+    auto imported = parse_ndms_native_tunnel_import(std::move(raw_conf));
+    if (imported.source !=
+        NdmsNativeTunnelImportSource::wireguard_conf) {
+        fail(NdmsNativeWireguardImportRequestErrorCode::
+                 unsupported_source);
+    }
+
+    auto transaction_id = generate_transaction_id();
+    auto marker = std::string{kNdmsNativeImportMarkerPrefix} +
+                  transaction_id;
+    auto filename = marker + ".conf";
+    const auto preview =
+        build_ndms_native_tunnel_import_preview(imported);
+    auto canonical_conf = build_canonical_conf(imported, marker);
+    WipeStringGuard canonical_guard(canonical_conf);
+
+    // The encrypted-store object and the stock request share the exact same
+    // canonical bytes and marker. The one unavoidable canonical copy is the
+    // rollback payload; there is no second raw input or parser pass.
+    std::string snapshot_payload;
+    snapshot_payload.reserve(
+        kPanelDeleteSnapshotMagic.size() + canonical_conf.size());
+    snapshot_payload.append(
+        kPanelDeleteSnapshotMagic.data(),
+        kPanelDeleteSnapshotMagic.size());
+    snapshot_payload.append(canonical_conf);
+    WipeStringGuard snapshot_payload_guard(snapshot_payload);
+
+    NdmsNativePanelDeleteSnapshot snapshot{
+        imported.kind,
+        marker,
+        preview.revision,
+        preview.preshared_key_count,
+        imported.kind ==
+                NdmsNativeTunnelImportKind::amnezia_wireguard &&
+            imported.awg.has_value(),
+        std::move(snapshot_payload)};
+    NdmsNativeWireguardImportRequest request{
+        std::move(canonical_conf),
+        imported.kind,
+        std::move(transaction_id),
+        std::move(marker),
+        std::move(filename),
+        preview.revision};
+    return NdmsNativePreparedImport{
+        std::move(request), std::move(snapshot)};
 }
 
 NdmsNativePanelDeleteSnapshot::NdmsNativePanelDeleteSnapshot(

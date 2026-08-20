@@ -64,7 +64,7 @@ constexpr auto kNdmsNativeAllocatorMaximumReceiptLifetime =
 inline constexpr char kNdmsNativeAllocatorImplementationDigestPrefix[] =
     "ndms-allocator-implementation-v1-";
 inline constexpr char kNdmsNativeAllocatorRequestBindingDigestPrefix[] =
-    "ndms-import-request-binding-v1-";
+    "ndms-import-request-binding-v2-";
 inline constexpr char kNdmsNativeAllocatorGenerationTicketPrefix[] =
     "ndms-create-ticket-v1-";
 inline constexpr char kNdmsNativeAllocatorKeeneticOs511FirmwareIdentity[] =

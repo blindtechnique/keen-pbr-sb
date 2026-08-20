@@ -77,12 +77,15 @@ NdmsNativeImportWalRecord prepared_record() {
     record.marker = "kpbr-ni-v1-" + record.transaction_id;
     record.candidate_revision =
         "ndms-native-import-v1-" + std::string(64U, 'b');
+    record.snapshot_revision = record.candidate_revision;
+    record.observation_binding = {std::string(32U, 'd'), 9U, 7U};
     record.baseline = dispatch_baseline();
     record.request_binding_sha256 =
         ndms_native_import_request_binding_digest(
             record.transaction_id,
             record.marker,
             record.candidate_revision,
+            record.kind,
             record.baseline.expected_created_interface);
     record.generation_ticket =
         "ndms-create-ticket-v1-" + std::string(64U, 'c');
@@ -125,6 +128,30 @@ NdmsNativeImportRecoveryObservation owned_target_observation() {
     return observation;
 }
 
+class FakeSnapshotRetirer final
+    : public NdmsNativeImportSnapshotRetirer {
+public:
+    bool remove_if_present_exact(
+        const std::string& expected_interface,
+        const std::string& transaction_id,
+        const std::string& marker,
+        const std::string& snapshot_revision) override {
+        ++calls;
+        interface = expected_interface;
+        transaction = transaction_id;
+        ownership_marker = marker;
+        revision = snapshot_revision;
+        return succeeds;
+    }
+
+    bool succeeds{true};
+    std::size_t calls{0U};
+    std::string interface;
+    std::string transaction;
+    std::string ownership_marker;
+    std::string revision;
+};
+
 } // namespace
 
 TEST_CASE("an aborted transaction dispatches to an empty, admissible store") {
@@ -140,17 +167,57 @@ TEST_CASE("an aborted transaction dispatches to an empty, admissible store") {
             NdmsNativeImportRecoveryAdmissionState::admitted);
     const auto plan =
         plan_ndms_native_import_recovery(record, *admission.action);
+    FakeSnapshotRetirer snapshots;
 
     const auto result = dispatch_ndms_native_import_recovery(
-        store, admission.lease, record, plan, std::nullopt, nullptr);
+        store, admission.lease, record, plan, std::nullopt, nullptr,
+        nullptr, nullptr, &snapshots);
     CHECK(result.state ==
           NdmsNativeImportRecoveryDispatchState::completed);
     CHECK(result.completed_steps == 1U);
+    CHECK(snapshots.calls == 1U);
+    CHECK(snapshots.interface == "Wireguard5");
+    CHECK(snapshots.transaction == record.transaction_id);
+    CHECK(snapshots.ownership_marker == record.marker);
+    CHECK(snapshots.revision == record.snapshot_revision);
 
     // The store is empty and admits the next transaction: the whole point of
     // finishing a recovery.
     CHECK(store.publish_prepared_exclusive(prepared_record()) ==
           NdmsNativeImportWalAdmissionState::admitted);
+}
+
+TEST_CASE("prepared recovery cannot orphan or ignore a rollback snapshot") {
+    TempDirectory directory;
+    auto store = store_for(directory);
+    const auto record = prepared_record();
+    REQUIRE(store.publish_prepared_exclusive(record) ==
+            NdmsNativeImportWalAdmissionState::admitted);
+    auto admission = admit_ndms_native_import_recovery(
+        store, record, absent_observation());
+    REQUIRE(admission.state ==
+            NdmsNativeImportRecoveryAdmissionState::admitted);
+    const auto plan =
+        plan_ndms_native_import_recovery(record, *admission.action);
+
+    const auto missing = dispatch_ndms_native_import_recovery(
+        store, admission.lease, record, plan, std::nullopt, nullptr);
+    CHECK(missing.state == NdmsNativeImportRecoveryDispatchState::
+                               snapshot_retirer_missing);
+    CHECK(missing.completed_steps == 0U);
+
+    FakeSnapshotRetirer snapshots;
+    snapshots.succeeds = false;
+    const auto refused = dispatch_ndms_native_import_recovery(
+        store, admission.lease, record, plan, std::nullopt, nullptr,
+        nullptr, nullptr, &snapshots);
+    CHECK(refused.state ==
+          NdmsNativeImportRecoveryDispatchState::step_failed);
+    REQUIRE(refused.failed_step.has_value());
+    CHECK(*refused.failed_step ==
+          NdmsNativeImportRecoveryStep::remove_wal_record);
+    CHECK(store.load(record.transaction_id).state ==
+          NdmsNativeImportWalLoadState::valid);
 }
 
 TEST_CASE("a rollback publishes intent, deletes under it, and finishes") {
@@ -172,6 +239,7 @@ TEST_CASE("a rollback publishes intent, deletes under it, and finishes") {
 
     std::size_t deletes = 0U;
     NdmsNativeImportWalPhase phase_at_delete{};
+    FakeSnapshotRetirer snapshots;
     const auto result = dispatch_ndms_native_import_recovery(
         store, admission.lease, record, plan, "Wireguard5",
         [&](const std::string& target, const std::string& marker) {
@@ -186,7 +254,7 @@ TEST_CASE("a rollback publishes intent, deletes under it, and finishes") {
             phase_at_delete = loaded.record->phase;
             return NdmsNativeImportRecoveryDeleteOutcome::
                 deleted_confirmed;
-        });
+        }, nullptr, nullptr, &snapshots);
     CHECK(result.state ==
           NdmsNativeImportRecoveryDispatchState::completed);
     CHECK(result.completed_steps == 6U);
@@ -195,6 +263,7 @@ TEST_CASE("a rollback publishes intent, deletes under it, and finishes") {
           NdmsNativeImportWalPhase::delete_may_be_inflight);
     CHECK(store.load(record.transaction_id).state ==
           NdmsNativeImportWalLoadState::absent);
+    CHECK(snapshots.calls == 1U);
 }
 
 TEST_CASE("a failed delete leaves the durable account of how far this got") {
@@ -211,12 +280,13 @@ TEST_CASE("a failed delete leaves the durable account of how far this got") {
             NdmsNativeImportRecoveryAdmissionState::admitted);
     const auto plan =
         plan_ndms_native_import_recovery(record, *admission.action);
+    FakeSnapshotRetirer snapshots;
 
     const auto result = dispatch_ndms_native_import_recovery(
         store, admission.lease, record, plan, "Wireguard5",
         [](const std::string&, const std::string&) {
             return NdmsNativeImportRecoveryDeleteOutcome::failed;
-        });
+        }, nullptr, nullptr, &snapshots);
     CHECK(result.state ==
           NdmsNativeImportRecoveryDispatchState::step_failed);
     REQUIRE(result.failed_step.has_value());
@@ -300,7 +370,7 @@ NdmsNativeImportWalRecord verified_record() {
     auto record = inflight_record();
     record.phase = NdmsNativeImportWalPhase::target_verified;
     record.response_manifest_sha256 =
-        "ndms-import-response-manifest-v2-" + std::string(64U, 'f');
+        "ndms-import-response-manifest-v3-" + std::string(64U, 'f');
     record.created_interface = "Wireguard5";
     record.target_full_revision =
         "ndms-rci-full-v1-" + std::string(64U, 'd');
@@ -314,6 +384,7 @@ NdmsNativeOwnershipRecord claim_of(
     claim.transaction_id = record.transaction_id;
     claim.marker = record.marker;
     claim.kind = record.kind;
+    claim.snapshot_revision = record.snapshot_revision;
     claim.target_full_revision = *record.target_full_revision;
     return claim;
 }
@@ -367,6 +438,7 @@ TEST_CASE("rolling back a published claim retracts it, and only it") {
             NdmsNativeImportRecoveryAction::rollback_delete_exact_owned);
     const auto plan =
         plan_ndms_native_import_recovery(record, *admission.action);
+    FakeSnapshotRetirer snapshots;
 
     const auto result = dispatch_ndms_native_import_recovery(
         store, admission.lease, record, plan, "Wireguard5",
@@ -374,7 +446,7 @@ TEST_CASE("rolling back a published claim retracts it, and only it") {
             return NdmsNativeImportRecoveryDeleteOutcome::
                 deleted_confirmed;
         },
-        &ownership);
+        &ownership, nullptr, &snapshots);
     CHECK(result.state ==
           NdmsNativeImportRecoveryDispatchState::completed);
     CHECK(store.load(record.transaction_id).state ==
@@ -439,13 +511,14 @@ TEST_CASE("a foreign claim on the slot survives our rollback untouched") {
             NdmsNativeImportRecoveryAdmissionState::admitted);
     const auto plan =
         plan_ndms_native_import_recovery(record, *admission.action);
+    FakeSnapshotRetirer snapshots;
     const auto result = dispatch_ndms_native_import_recovery(
         store, admission.lease, record, plan, "Wireguard5",
         [](const std::string&, const std::string&) {
             return NdmsNativeImportRecoveryDeleteOutcome::
                 deleted_confirmed;
         },
-        &ownership);
+        &ownership, nullptr, &snapshots);
     CHECK(result.state ==
           NdmsNativeImportRecoveryDispatchState::completed);
 
@@ -473,13 +546,14 @@ TEST_CASE("a torn claim stops the rollback instead of being read as absent") {
             NdmsNativeImportRecoveryAdmissionState::admitted);
     const auto plan =
         plan_ndms_native_import_recovery(record, *admission.action);
+    FakeSnapshotRetirer snapshots;
     const auto result = dispatch_ndms_native_import_recovery(
         store, admission.lease, record, plan, "Wireguard5",
         [](const std::string&, const std::string&) {
             return NdmsNativeImportRecoveryDeleteOutcome::
                 deleted_confirmed;
         },
-        &ownership);
+        &ownership, nullptr, &snapshots);
     // A torn claim is evidence of an interrupted publish. Reading it as
     // "nothing to retract" and carrying on is exactly the collapse the
     // ownership store refuses elsewhere; the dispatcher must not shortcut it.

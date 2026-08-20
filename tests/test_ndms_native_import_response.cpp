@@ -13,8 +13,8 @@ NdmsNativeImportHttpResponse json_response(std::string body) {
     return {true, 200, "application/json; charset=utf-8", std::move(body)};
 }
 
-NdmsNativeImportResponseManifestV2 inspect(std::string body) {
-    return inspect_ndms_native_import_response_v2(
+NdmsNativeImportResponseManifestV3 inspect(std::string body) {
+    return inspect_ndms_native_import_response_v3(
         json_response(std::move(body)), "Wireguard5");
 }
 
@@ -53,23 +53,54 @@ TEST_CASE("native import response accepts only the exact two-field envelope") {
     CHECK(reversed.success());
 }
 
+TEST_CASE("native import response manifest binds the request kind without raw data") {
+    const auto response = json_response(
+        R"([{"interface":{"wireguard":{"import":{"created":"Wireguard5","intersects":""}}}}])");
+    const auto wg = inspect_ndms_native_import_response_v3(
+        response,
+        NdmsNativeTunnelImportKind::wireguard,
+        "Wireguard5");
+    const auto awg = inspect_ndms_native_import_response_v3(
+        response,
+        NdmsNativeTunnelImportKind::amnezia_wireguard,
+        "Wireguard5");
+
+    REQUIRE(wg.success());
+    REQUIRE(awg.success());
+    CHECK(wg.request_kind == NdmsNativeTunnelImportKind::wireguard);
+    CHECK(awg.request_kind ==
+          NdmsNativeTunnelImportKind::amnezia_wireguard);
+    const auto wg_manifest =
+        serialize_ndms_native_import_response_manifest_v3(wg);
+    const auto awg_manifest =
+        serialize_ndms_native_import_response_manifest_v3(awg);
+    CHECK(wg_manifest.rfind(
+              "ndms-native-import-response-v3|", 0U) == 0U);
+    CHECK(wg_manifest.rfind(
+              "ndms-native-import-response-v2|", 0U) != 0U);
+    CHECK(wg_manifest.find("kind=wireguard") != std::string::npos);
+    CHECK(awg_manifest.find("kind=amnezia_wireguard") !=
+          std::string::npos);
+    CHECK(wg_manifest != awg_manifest);
+}
+
 TEST_CASE("native import response view avoids an owning response copy") {
     const std::string body =
         R"([{"interface":{"wireguard":{"import":{"created":"Wireguard5","intersects":""}}}}])";
     const std::string content_type{"application/json; charset=utf-8"};
 
-    const auto viewed = inspect_ndms_native_import_response_v2(
+    const auto viewed = inspect_ndms_native_import_response_v3(
         NdmsNativeImportHttpResponseView{
             true, 200, content_type, body},
         "Wireguard5");
-    const auto owned = inspect_ndms_native_import_response_v2(
+    const auto owned = inspect_ndms_native_import_response_v3(
         NdmsNativeImportHttpResponse{
             true, 200, content_type, body},
         "Wireguard5");
 
     CHECK(viewed.success());
-    CHECK(serialize_ndms_native_import_response_manifest_v2(viewed) ==
-          serialize_ndms_native_import_response_manifest_v2(owned));
+    CHECK(serialize_ndms_native_import_response_manifest_v3(viewed) ==
+          serialize_ndms_native_import_response_manifest_v3(owned));
 }
 
 TEST_CASE("native import response rejects target and intersection mismatch") {
@@ -160,7 +191,7 @@ TEST_CASE("unknown stock status is structurally diagnosed and fails closed") {
     CHECK(result.direct_record_message_sha256.size() == 64U);
 
     const auto serialized =
-        serialize_ndms_native_import_response_manifest_v2(result);
+        serialize_ndms_native_import_response_manifest_v3(result);
     CHECK(serialized.find(status_secret) == std::string::npos);
     CHECK(serialized.find(ident_secret) == std::string::npos);
     CHECK(serialized.find(message_secret) == std::string::npos);
@@ -217,7 +248,7 @@ TEST_CASE("opaque long status codes are hashed rather than serialized") {
     CHECK(result.direct_record_code_bytes == long_digits.size());
     CHECK(result.direct_record_code_sha256.size() == 64U);
     const auto serialized =
-        serialize_ndms_native_import_response_manifest_v2(result);
+        serialize_ndms_native_import_response_manifest_v3(result);
     CHECK(serialized.find(long_digits) == std::string::npos);
 }
 
@@ -232,7 +263,7 @@ TEST_CASE("manifest serializer rejects forged free-form atoms") {
     result.direct_record_ident_sha256 = forged_secret;
     result.direct_record_message_sha256 = forged_secret;
     const auto serialized =
-        serialize_ndms_native_import_response_manifest_v2(result);
+        serialize_ndms_native_import_response_manifest_v3(result);
     CHECK(serialized.find(forged_secret) == std::string::npos);
     CHECK(serialized.find("invalid") != std::string::npos);
     CHECK(std::all_of(
@@ -250,7 +281,7 @@ TEST_CASE("secret-shaped labels and echoed import payload are counted only") {
           NdmsNativeImportResponseOutcome::shape_mismatch);
     CHECK(result.sensitive_key_count == 3U);
     const auto serialized =
-        serialize_ndms_native_import_response_manifest_v2(result);
+        serialize_ndms_native_import_response_manifest_v3(result);
     CHECK(serialized.find(echoed_private) == std::string::npos);
     CHECK(serialized.find("PrivateKey") == std::string::npos);
     CHECK(serialized.find("PresharedKey") == std::string::npos);
@@ -307,18 +338,18 @@ TEST_CASE("duplicate keys are rejected before DOM interpretation") {
 TEST_CASE("transport syntax and structural bounds fail closed") {
     auto transport = json_response("[]");
     transport.transport_ok = false;
-    CHECK(inspect_ndms_native_import_response_v2(transport, "Wireguard5")
+    CHECK(inspect_ndms_native_import_response_v3(transport, "Wireguard5")
               .outcome == NdmsNativeImportResponseOutcome::transport_failed);
 
     auto http = json_response("[]");
     http.status_code = 500;
-    CHECK(inspect_ndms_native_import_response_v2(http, "Wireguard5")
+    CHECK(inspect_ndms_native_import_response_v3(http, "Wireguard5")
               .outcome ==
           NdmsNativeImportResponseOutcome::http_status_not_200);
 
     auto content = json_response("[]");
     content.content_type = "text/plain";
-    CHECK(inspect_ndms_native_import_response_v2(content, "Wireguard5")
+    CHECK(inspect_ndms_native_import_response_v3(content, "Wireguard5")
               .outcome ==
           NdmsNativeImportResponseOutcome::content_type_not_json);
 
@@ -331,7 +362,7 @@ TEST_CASE("transport syntax and structural bounds fail closed") {
         kNdmsNativeImportMaximumResponseBytes + 1U, ' '));
     CHECK(oversized.body_sha256.empty());
     const auto oversized_manifest =
-        serialize_ndms_native_import_response_manifest_v2(oversized);
+        serialize_ndms_native_import_response_manifest_v3(oversized);
     CHECK(std::all_of(
         oversized_manifest.begin(), oversized_manifest.end(),
         safe_manifest_character));
@@ -350,7 +381,7 @@ TEST_CASE("invalid expected target is rejected independently of response") {
     const auto response = json_response(
         R"([{"interface":{"wireguard":{"import":{"created":"Wireguard5","intersects":""}}}}])");
     const auto result =
-        inspect_ndms_native_import_response_v2(response, "Wireguard05");
+        inspect_ndms_native_import_response_v3(response, "Wireguard05");
     CHECK(result.outcome ==
           NdmsNativeImportResponseOutcome::expected_target_invalid);
     CHECK_FALSE(result.success());
@@ -358,7 +389,7 @@ TEST_CASE("invalid expected target is rejected independently of response") {
     for (const auto* unsupported_target : {
              "Wireguard127", "Wireguard999"}) {
         const auto unsupported_result =
-            inspect_ndms_native_import_response_v2(
+            inspect_ndms_native_import_response_v3(
                 response, unsupported_target);
         CHECK(unsupported_result.outcome ==
               NdmsNativeImportResponseOutcome::
@@ -370,7 +401,7 @@ TEST_CASE("invalid expected target is rejected independently of response") {
              "Wireguard0", "Wireguard4", "Wireguard99",
              "Wireguard100", "Wireguard126"}) {
         const auto protected_result =
-            inspect_ndms_native_import_response_v2(response, protected_target);
+            inspect_ndms_native_import_response_v3(response, protected_target);
         CHECK(protected_result.outcome == NdmsNativeImportResponseOutcome::
                                               expected_target_ineligible);
         CHECK_FALSE(protected_result.success());

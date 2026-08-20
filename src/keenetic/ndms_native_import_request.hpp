@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ndms_native_panel_delete_snapshot.hpp"
 #include "ndms_native_tunnel_import.hpp"
 
 #include <cstddef>
@@ -8,6 +9,8 @@
 #include <string_view>
 
 namespace keen_pbr3 {
+
+class NdmsNativePreparedImport;
 
 // The stock importer accepts WireGuard and AmneziaWG .conf documents. URI
 // envelopes deliberately remain outside this request boundary: the request
@@ -80,6 +83,8 @@ public:
 private:
     friend NdmsNativeWireguardImportRequest
     make_ndms_native_wireguard_import_request(std::string&& raw_conf);
+    friend NdmsNativePreparedImport
+    prepare_ndms_native_import(std::string&& raw_conf);
 
     NdmsNativeWireguardImportRequest(
         std::string canonical_conf,
@@ -110,5 +115,41 @@ private:
 // copy.
 NdmsNativeWireguardImportRequest
 make_ndms_native_wireguard_import_request(std::string&& raw_conf);
+
+// One parse and one canonicalization produce the two secret-bearing objects
+// required by a production import. The executor first publishes prepared WAL
+// intent, then durably seals this snapshot, and only then may reserve a
+// generation or dispatch the request. Neither side has a raw secret accessor,
+// and moving the aggregate preserves one-shot request semantics.
+class NdmsNativePreparedImport final {
+public:
+    NdmsNativePreparedImport(const NdmsNativePreparedImport&) = delete;
+    NdmsNativePreparedImport& operator=(
+        const NdmsNativePreparedImport&) = delete;
+    NdmsNativePreparedImport(NdmsNativePreparedImport&&) noexcept = default;
+    NdmsNativePreparedImport& operator=(
+        NdmsNativePreparedImport&&) noexcept = default;
+
+    const NdmsNativeWireguardImportRequest& request_identity() const noexcept;
+    const NdmsNativePanelDeleteSnapshot&
+    delete_snapshot_metadata() const noexcept;
+
+    NdmsNativeWireguardImportRequest take_request() noexcept;
+    NdmsNativePanelDeleteSnapshot take_delete_snapshot() noexcept;
+
+private:
+    NdmsNativePreparedImport(
+        NdmsNativeWireguardImportRequest request,
+        NdmsNativePanelDeleteSnapshot delete_snapshot) noexcept;
+
+    NdmsNativeWireguardImportRequest request_;
+    NdmsNativePanelDeleteSnapshot delete_snapshot_;
+
+    friend NdmsNativePreparedImport
+    prepare_ndms_native_import(std::string&& raw_conf);
+};
+
+NdmsNativePreparedImport prepare_ndms_native_import(
+    std::string&& raw_conf);
 
 } // namespace keen_pbr3

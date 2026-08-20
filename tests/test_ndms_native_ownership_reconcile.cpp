@@ -57,6 +57,8 @@ NdmsNativeOwnershipRecord claim_for(const std::string& name) {
     claim.transaction_id = std::string(32U, 'a');
     claim.marker = "kpbr-ni-v1-" + std::string(32U, 'a');
     claim.kind = NdmsNativeTunnelImportKind::wireguard;
+    claim.snapshot_revision =
+        "ndms-native-import-v1-" + std::string(64U, 'c');
     claim.target_full_revision =
         "ndms-rci-full-v1-" + std::string(64U, 'd');
     return claim;

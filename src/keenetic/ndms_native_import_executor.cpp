@@ -15,7 +15,7 @@ namespace keen_pbr3 {
 namespace {
 
 constexpr const char* kResponseManifestDigestPrefix =
-    "ndms-import-response-manifest-v2-";
+    "ndms-import-response-manifest-v3-";
 bool compatible_empty_name_fence_mode(
     const NdmsNativeAllocatorFenceMode mode) noexcept {
     return mode == NdmsNativeAllocatorFenceMode::bounded_atomic_import ||
@@ -68,10 +68,10 @@ void validate_wal_record(const NdmsNativeImportWalRecord& record) {
 }
 
 std::string response_manifest_digest(
-    const NdmsNativeImportResponseManifestV2& manifest) {
+    const NdmsNativeImportResponseManifestV3& manifest) {
     return std::string{kResponseManifestDigestPrefix} +
            Sha256::hex(
-               serialize_ndms_native_import_response_manifest_v2(
+               serialize_ndms_native_import_response_manifest_v3(
                    manifest));
 }
 
@@ -174,10 +174,12 @@ NdmsNativeImportSteadyClock::now() const noexcept {
 NdmsNativeImportExecutorDependencies::
 NdmsNativeImportExecutorDependencies(
     NdmsNativeImportWalPublisher* wal,
+    NdmsNativeImportSnapshotPublisher* snapshots,
     NdmsNativeImportGenerationCoordinator* generations,
     NdmsNativeLoopbackRciPostBackend* transport,
     NdmsNativeImportExecutorClock* clock) noexcept
     : wal_(wal),
+      snapshots_(snapshots),
       generations_(generations),
       transport_(transport),
       clock_(clock) {}
@@ -186,11 +188,12 @@ NdmsNativeImportExecutorDependencies(
 NdmsNativeImportExecutorDependencies
 NdmsNativeImportExecutorTestIssuer::issue(
     NdmsNativeImportWalPublisher* wal,
+    NdmsNativeImportSnapshotPublisher* snapshots,
     NdmsNativeImportGenerationCoordinator* generations,
     NdmsNativeLoopbackRciPostBackend* transport,
     NdmsNativeImportExecutorClock* clock) noexcept {
     return NdmsNativeImportExecutorDependencies{
-        wal, generations, transport, clock};
+        wal, snapshots, generations, transport, clock};
 }
 #endif
 
@@ -216,32 +219,44 @@ std::string ndms_native_import_request_binding_digest(
         request.transaction_id(),
         request.marker(),
         request.candidate_revision(),
+        request.kind(),
         expected_created_interface);
 }
 
 NdmsNativeImportExecutionResult execute_ndms_native_import_transaction(
-    NdmsNativeWireguardImportRequest request,
+    NdmsNativePreparedImport prepared,
     const NdmsNativeImportExecutionPlan& plan,
     const NdmsNativeImportBaselineEvidence& baseline,
     std::optional<NdmsNativeAllocatorFenceReceipt> receipt,
     const NdmsNativeImportExecutorDependencies& dependencies) {
     if (dependencies.wal_ == nullptr ||
+        dependencies.snapshots_ == nullptr ||
         dependencies.generations_ == nullptr ||
         dependencies.transport_ == nullptr ||
         dependencies.clock_ == nullptr) {
         return blocked(
             NdmsNativeImportExecutionStop::missing_dependency);
     }
-    if (!request_identity_is_valid(request)) {
+    const auto& prepared_request = prepared.request_identity();
+    const auto& prepared_snapshot = prepared.delete_snapshot_metadata();
+    if (!request_identity_is_valid(prepared_request)) {
         return blocked(
             NdmsNativeImportExecutionStop::request_identity_invalid);
     }
-    if (request.kind() != NdmsNativeTunnelImportKind::wireguard) {
-        // Serialization support is deliberately ahead of execution support.
-        // The v2 WAL and ownership publication flow are still WG-only; never
-        // mislabel an AWG request as WireGuard in durable recovery state.
+    if (prepared_snapshot.sealed_payload_bytes() == 0U ||
+        prepared_snapshot.kind() != prepared_request.kind() ||
+        prepared_snapshot.marker() != prepared_request.marker() ||
+        prepared_snapshot.canonical_revision() !=
+            prepared_request.candidate_revision()) {
         return blocked(
-            NdmsNativeImportExecutionStop::unsupported_tunnel_kind);
+            NdmsNativeImportExecutionStop::snapshot_identity_invalid);
+    }
+    auto request = prepared.take_request();
+    auto snapshot = prepared.take_delete_snapshot();
+    if (!valid_ndms_native_observation_binding(
+            plan.observation_binding)) {
+        return blocked(
+            NdmsNativeImportExecutionStop::observation_binding_invalid);
     }
     if (!ndms_native_created_target_is_eligible(
             plan.expected_created_interface)) {
@@ -319,7 +334,7 @@ NdmsNativeImportExecutionResult execute_ndms_native_import_transaction(
     NdmsNativeImportWalRecord record;
     record.transaction_id = std::string(request.transaction_id());
     record.phase = NdmsNativeImportWalPhase::prepared;
-    record.kind = NdmsNativeTunnelImportKind::wireguard;
+    record.kind = request.kind();
     record.marker = std::string(request.marker());
     record.candidate_revision =
         std::string(request.candidate_revision());
@@ -327,7 +342,10 @@ NdmsNativeImportExecutionResult execute_ndms_native_import_transaction(
     record.generation_ticket = plan.generation_ticket;
     record.maintenance_base_generation =
         initial_generation.maintenance_generation;
+    record.observation_binding = plan.observation_binding;
     record.baseline = std::move(persisted_baseline);
+    record.snapshot_revision =
+        std::string(request.candidate_revision());
 
     NdmsNativeImportExecutionResult result;
     try {
@@ -351,6 +369,24 @@ NdmsNativeImportExecutionResult execute_ndms_native_import_transaction(
         // that may already be visible before any later transaction proceeds.
         return recovery_required(
             NdmsNativeImportExecutionStop::prepared_wal_publish_failed,
+            record,
+            std::move(result));
+    }
+
+    try {
+        dependencies.snapshots_->publish(
+            plan.expected_created_interface,
+            record.transaction_id,
+            record.marker,
+            std::move(snapshot));
+        result.snapshot_published = true;
+    } catch (...) {
+        // prepared is already durable and transport has not been entered.
+        // The publisher may have made the snapshot visible before throwing;
+        // recovery therefore performs an exact idempotent retirement before
+        // it may remove this WAL record.
+        return recovery_required(
+            NdmsNativeImportExecutionStop::snapshot_publish_failed,
             record,
             std::move(result));
     }
@@ -577,8 +613,10 @@ const char* ndms_native_import_execution_stop_name(
         return "missing_dependency";
     case NdmsNativeImportExecutionStop::request_identity_invalid:
         return "request_identity_invalid";
-    case NdmsNativeImportExecutionStop::unsupported_tunnel_kind:
-        return "unsupported_tunnel_kind";
+    case NdmsNativeImportExecutionStop::snapshot_identity_invalid:
+        return "snapshot_identity_invalid";
+    case NdmsNativeImportExecutionStop::observation_binding_invalid:
+        return "observation_binding_invalid";
     case NdmsNativeImportExecutionStop::expected_target_ineligible:
         return "expected_target_ineligible";
     case NdmsNativeImportExecutionStop::baseline_mismatch:
@@ -597,6 +635,8 @@ const char* ndms_native_import_execution_stop_name(
         return "unfinished_transaction_present";
     case NdmsNativeImportExecutionStop::prepared_wal_publish_failed:
         return "prepared_wal_publish_failed";
+    case NdmsNativeImportExecutionStop::snapshot_publish_failed:
+        return "snapshot_publish_failed";
     case NdmsNativeImportExecutionStop::generation_reservation_failed:
         return "generation_reservation_failed";
     case NdmsNativeImportExecutionStop::generation_changed:

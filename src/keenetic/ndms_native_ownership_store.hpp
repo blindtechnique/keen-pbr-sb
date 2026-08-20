@@ -27,6 +27,7 @@ struct NdmsNativeOwnershipRecord {
     std::string marker;
     NdmsNativeTunnelImportKind kind{
         NdmsNativeTunnelImportKind::wireguard};
+    std::string snapshot_revision;
     std::string target_full_revision;
 
     bool operator==(const NdmsNativeOwnershipRecord& other) const noexcept;
@@ -89,6 +90,16 @@ public:
 
     // Durable publish-or-throw; returns the revision of what is now on disk.
     std::string publish(const NdmsNativeOwnershipRecord& record);
+
+    // Atomically replaces one byte-exact claim with its validated successor.
+    // There is no unlink window: a fsynced temporary is renamed over the
+    // expected inode and then the directory is fsynced. Identity, kind and
+    // snapshot binding are immutable; only target evidence may advance.
+    // A retry after a post-rename durability fault is idempotent. Nullopt
+    // means the exact predecessor was not current or the transition failed.
+    std::optional<std::string> replace_exact(
+        const NdmsNativeOwnershipRecord& expected,
+        const NdmsNativeOwnershipRecord& replacement);
 
     NdmsNativeOwnershipReadResult read(
         const std::string& interface_name) const;

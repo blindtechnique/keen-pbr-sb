@@ -67,11 +67,14 @@ NdmsNativeImportWalRecord response_recorded_record() {
     record.marker = "kpbr-ni-v1-" + record.transaction_id;
     record.candidate_revision =
         "ndms-native-import-v1-" + std::string(64U, 'b');
+    record.snapshot_revision = record.candidate_revision;
+    record.observation_binding = {std::string(32U, 'd'), 9U, 7U};
     record.baseline = driver_baseline();
     record.request_binding_sha256 =
         ndms_native_import_request_binding_digest(
             record.transaction_id, record.marker,
             record.candidate_revision,
+            record.kind,
             record.baseline.expected_created_interface);
     record.generation_ticket =
         "ndms-create-ticket-v1-" + std::string(64U, 'c');
@@ -79,7 +82,7 @@ NdmsNativeImportWalRecord response_recorded_record() {
     record.phase = NdmsNativeImportWalPhase::response_recorded;
     record.reserved_generation = 42U;
     record.response_manifest_sha256 =
-        "ndms-import-response-manifest-v2-" + std::string(64U, 'e');
+        "ndms-import-response-manifest-v3-" + std::string(64U, 'e');
     return record;
 }
 
@@ -106,12 +109,27 @@ NdmsNativeImportWalStore store_for(const std::string& directory) {
         std::filesystem::path(directory) / "wal", hooks);
 }
 
+class SimulatedSnapshotRetirer final
+    : public NdmsNativeImportSnapshotRetirer {
+public:
+    bool remove_if_present_exact(
+        const std::string&,
+        const std::string&,
+        const std::string&,
+        const std::string&) override {
+        // This durability-only driver never creates a secret snapshot; exact
+        // absence is part of its simulated state.
+        return true;
+    }
+};
+
 int seed_and_run(const std::string& directory,
                  const std::string& mode,
                  const unsigned crash_at) {
     auto store = store_for(directory);
     NdmsNativeOwnershipStore ownership(
         std::filesystem::path(directory) / "ownership");
+    SimulatedSnapshotRetirer snapshots;
 
     auto prepared = response_recorded_record();
     prepared.phase = NdmsNativeImportWalPhase::prepared;
@@ -168,7 +186,7 @@ int seed_and_run(const std::string& directory,
         [](const std::string&, const std::string&) {
             return NdmsNativeImportRecoveryDeleteOutcome::deleted_confirmed;
         },
-        nullptr, crash_observer);
+        nullptr, crash_observer, &snapshots);
     return result.state ==
                    NdmsNativeImportRecoveryDispatchState::completed
                ? 0
@@ -179,6 +197,7 @@ int recover(const std::string& directory) {
     auto store = store_for(directory);
     NdmsNativeOwnershipStore ownership(
         std::filesystem::path(directory) / "ownership");
+    SimulatedSnapshotRetirer snapshots;
 
     const auto inventory = store.try_inventory();
     if (inventory.state == NdmsNativeImportWalInventoryState::ready &&
@@ -239,7 +258,7 @@ int recover(const std::string& directory) {
         [](const std::string&, const std::string&) {
             return NdmsNativeImportRecoveryDeleteOutcome::deleted_confirmed;
         },
-        &ownership);
+        &ownership, nullptr, &snapshots);
     if (result.state !=
         NdmsNativeImportRecoveryDispatchState::completed) {
         std::fprintf(stderr, "recovery dispatch failed at %zu\n",

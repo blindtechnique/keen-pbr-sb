@@ -195,7 +195,8 @@ int main(int argc, char** argv) {
         binding = ndms_native_import_request_binding_digest(
             std::string(request->transaction_id()),
             std::string(request->marker()),
-            std::string(request->candidate_revision()), target);
+            std::string(request->candidate_revision()),
+            request->kind(), target);
     } catch (const std::exception& error) {
         return fail(error.what());
     }
