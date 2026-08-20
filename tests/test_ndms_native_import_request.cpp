@@ -168,6 +168,34 @@ std::string wireguard_vpn_uri() {
     return qcompress_uri(envelope.dump());
 }
 
+std::string amnezia_vpn_uri() {
+    const nlohmann::json last_config{
+        {"config", awg_conf()}, {"mtu", "1420"}, {"port", 51820},
+    };
+    const nlohmann::json envelope{
+        {"containers", nlohmann::json::array({
+            {{"container", "amnezia-awg"},
+             {"awg", {{"last_config", last_config.dump()}}}},
+        })},
+    };
+    return qcompress_uri(envelope.dump());
+}
+
+std::string decompression_bomb_vpn_uri() {
+    const auto expected = static_cast<std::uint32_t>(
+        kNdmsNativeTunnelImportMaximumBytes + 1U);
+    std::string compressed{
+        static_cast<char>((expected >> 24U) & 0xFFU),
+        static_cast<char>((expected >> 16U) & 0xFFU),
+        static_cast<char>((expected >> 8U) & 0xFFU),
+        static_cast<char>(expected & 0xFFU),
+        static_cast<char>(0x78U),
+        static_cast<char>(0x9CU),
+    };
+    WipeGuard compressed_guard(compressed);
+    return "vpn://" + base64url(compressed);
+}
+
 class CapturingSecretSink final : public NdmsNativeSecretBodySink {
 public:
     explicit CapturingSecretSink(const std::size_t expected_size) {
@@ -410,7 +438,11 @@ TEST_CASE("prepared native import binds one parsed profile to request and delete
         CHECK(snapshot.marker() == identity.marker());
         CHECK(snapshot.canonical_revision() ==
               identity.candidate_revision());
-        CHECK(snapshot.sealed_payload_bytes() > 0U);
+        constexpr auto snapshot_magic_bytes =
+            std::string_view{"keen-pbr-panel-delete-snapshot-v1\n"}.size();
+        REQUIRE(snapshot.sealed_payload_bytes() > snapshot_magic_bytes);
+        CHECK(snapshot.sealed_payload_bytes() - snapshot_magic_bytes <=
+              kNdmsNativeWireguardImportRequestMaximumBytes);
         CHECK(snapshot.has_complete_awg_parameters() ==
               (expected_kind ==
                NdmsNativeTunnelImportKind::amnezia_wireguard));
@@ -438,6 +470,16 @@ TEST_CASE("prepared native import binds one parsed profile to request and delete
             awg_conf(),
             NdmsNativeTunnelImportKind::amnezia_wireguard);
     }
+    SUBCASE("official compressed WireGuard .vpn") {
+        verify(
+            wireguard_vpn_uri(),
+            NdmsNativeTunnelImportKind::wireguard);
+    }
+    SUBCASE("official compressed AmneziaWG .vpn") {
+        verify(
+            amnezia_vpn_uri(),
+            NdmsNativeTunnelImportKind::amnezia_wireguard);
+    }
 }
 
 TEST_CASE("prepared native import wipes adopted raw input on parse failure") {
@@ -454,9 +496,53 @@ TEST_CASE("prepared native import wipes adopted raw input on parse failure") {
     CHECK(raw.empty());
 }
 
-TEST_CASE("native WG and AWG requests still reject URI envelopes") {
+TEST_CASE("raw-only native request factory still rejects URI envelopes") {
     CHECK(request_error(wireguard_vpn_uri()) ==
           NdmsNativeWireguardImportRequestErrorCode::unsupported_source);
+}
+
+TEST_CASE("prepared native import rejects malformed and oversized URI envelopes") {
+    const auto rejected = [](std::string raw,
+                             const NdmsNativeTunnelImportErrorCode code) {
+        try {
+            static_cast<void>(prepare_ndms_native_import(std::move(raw)));
+            FAIL("invalid URI was accepted");
+        } catch (const NdmsNativeTunnelImportError& error) {
+            CHECK(error.code() == code);
+        }
+        // The rvalue-only preparation boundary adopted and released the only
+        // caller allocation on every failure path. Parser-owned compressed,
+        // JSON and decoded-config copies are independently wipe-guarded.
+        CHECK(raw.empty());
+    };
+
+    SUBCASE("invalid base64") {
+        rejected(
+            "vpn://%%%%",
+            NdmsNativeTunnelImportErrorCode::invalid_base64);
+    }
+    SUBCASE("invalid compressed bytes") {
+        rejected(
+            "vpn://AAAAAA",
+            NdmsNativeTunnelImportErrorCode::invalid_compression);
+    }
+    SUBCASE("unsupported non-vpn URI scheme") {
+        rejected(
+            "wireguard://not-an-official-envelope",
+            NdmsNativeTunnelImportErrorCode::unsupported_uri);
+    }
+    SUBCASE("declared decompression bomb") {
+        rejected(
+            decompression_bomb_vpn_uri(),
+            NdmsNativeTunnelImportErrorCode::limit_exceeded);
+    }
+    SUBCASE("raw URI over 512 KiB") {
+        rejected(
+            "vpn://" + std::string(
+                kNdmsNativePreparedImportMaximumInputBytes,
+                'A'),
+            NdmsNativeTunnelImportErrorCode::input_too_large);
+    }
 }
 
 TEST_CASE("native WG request bounds raw input before parsing") {

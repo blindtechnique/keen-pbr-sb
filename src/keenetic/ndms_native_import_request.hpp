@@ -12,11 +12,13 @@ namespace keen_pbr3 {
 
 class NdmsNativePreparedImport;
 
-// The stock importer accepts WireGuard and AmneziaWG .conf documents. URI
-// envelopes deliberately remain outside this request boundary: the request
-// owns only the already-validated canonical configuration it will send.
+// A stock RCI request owns at most one canonical WireGuard/AmneziaWG .conf.
+// The preparation boundary may consume a larger official Amnezia .vpn URI,
+// but its decoded canonical request remains bounded by this smaller limit.
 constexpr std::size_t kNdmsNativeWireguardImportRequestMaximumBytes =
     kNdmsNativeTunnelImportMaximumBytes;
+constexpr std::size_t kNdmsNativePreparedImportMaximumInputBytes =
+    kNdmsNativeTunnelImportMaximumUriBytes;
 
 enum class NdmsNativeWireguardImportRequestErrorCode {
     unsupported_source,
@@ -116,11 +118,12 @@ private:
 NdmsNativeWireguardImportRequest
 make_ndms_native_wireguard_import_request(std::string&& raw_conf);
 
-// One parse and one canonicalization produce the two secret-bearing objects
-// required by a production import. The executor first publishes prepared WAL
-// intent, then durably seals this snapshot, and only then may reserve a
-// generation or dispatch the request. Neither side has a raw secret accessor,
-// and moving the aggregate preserves one-shot request semantics.
+// One parse/decode and one canonicalization of either a bounded WG/AWG .conf
+// or an official Amnezia .vpn/vpn:// envelope produce the two secret-bearing
+// objects required by a production import. The executor first publishes
+// prepared WAL intent, then durably seals this snapshot, and only then may
+// reserve a generation or dispatch the request. Neither side has a raw secret
+// accessor, and moving the aggregate preserves one-shot request semantics.
 class NdmsNativePreparedImport final {
 public:
     NdmsNativePreparedImport(const NdmsNativePreparedImport&) = delete;

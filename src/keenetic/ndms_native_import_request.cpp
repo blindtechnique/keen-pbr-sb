@@ -662,16 +662,26 @@ NdmsNativePreparedImport prepare_ndms_native_import(
     std::string&& raw_conf) {
     WipeStringGuard raw_guard(raw_conf);
     if (raw_conf.size() >
-        kNdmsNativeWireguardImportRequestMaximumBytes) {
+        kNdmsNativePreparedImportMaximumInputBytes) {
         throw NdmsNativeTunnelImportError(
             NdmsNativeTunnelImportErrorCode::input_too_large);
     }
 
     // Move the caller allocation into the wiping parser. This is the only
-    // parse of the raw profile and avoids retaining a second raw secret copy.
+    // parse/decode of the raw profile and avoids retaining a second raw secret
+    // copy. The parser's URI compressed, JSON and embedded-config allocations
+    // all have their own wipe guards.
     auto imported = parse_ndms_native_tunnel_import(std::move(raw_conf));
-    if (imported.source !=
-        NdmsNativeTunnelImportSource::wireguard_conf) {
+    if (imported.source != NdmsNativeTunnelImportSource::wireguard_conf &&
+        imported.source != NdmsNativeTunnelImportSource::amnezia_vpn_uri) {
+        fail(NdmsNativeWireguardImportRequestErrorCode::
+                 unsupported_source);
+    }
+    switch (imported.kind) {
+    case NdmsNativeTunnelImportKind::wireguard:
+    case NdmsNativeTunnelImportKind::amnezia_wireguard:
+        break;
+    default:
         fail(NdmsNativeWireguardImportRequestErrorCode::
                  unsupported_source);
     }
@@ -684,6 +694,11 @@ NdmsNativePreparedImport prepare_ndms_native_import(
         build_ndms_native_tunnel_import_preview(imported);
     auto canonical_conf = build_canonical_conf(imported, marker);
     WipeStringGuard canonical_guard(canonical_conf);
+    if (canonical_conf.size() >
+        kNdmsNativeWireguardImportRequestMaximumBytes) {
+        throw NdmsNativeTunnelImportError(
+            NdmsNativeTunnelImportErrorCode::limit_exceeded);
+    }
 
     // The encrypted-store object and the stock request share the exact same
     // canonical bytes and marker. The one unavoidable canonical copy is the
