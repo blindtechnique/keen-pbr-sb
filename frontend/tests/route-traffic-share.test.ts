@@ -20,8 +20,8 @@ const iface = (name: string, rx: number, tx: number) =>
     },
   ] as unknown as [string, RuntimeInterfaceInventoryEntry]
 
-describe("route traffic shares", () => {
-  test("a share is received plus sent, over the sum of all routes", () => {
+describe("used-interface counter shares", () => {
+  test("a share is received plus sent, over the sum of shown interfaces", () => {
     const { slices, totalBytes } = collectRouteTrafficShares(
       [path("nwg0", "Amsterdam"), path("hy1", "Frankfurt")],
       new Map([iface("nwg0", 60, 40), iface("hy1", 200, 100)]),
@@ -34,7 +34,7 @@ describe("route traffic shares", () => {
     ])
   })
 
-  test("colour belongs to the position, so the biggest route is always the first hue", () => {
+  test("colour belongs to the position, so the biggest counter is always the first hue", () => {
     const { slices } = collectRouteTrafficShares(
       [path("a"), path("b")],
       new Map([iface("a", 1, 0), iface("b", 9, 0)]),
@@ -47,7 +47,7 @@ describe("route traffic shares", () => {
 
   // Больше шести долей глаз не различает, поэтому хвост сворачивается — но его
   // байты обязаны остаться в сумме, иначе проценты перестанут сходиться.
-  test("beyond six routes the tail folds into one slice and keeps its bytes", () => {
+  test("beyond six interfaces the tail folds into one slice and keeps its bytes", () => {
     const names = ["a", "b", "c", "d", "e", "f", "g", "h"]
     const { slices, totalBytes } = collectRouteTrafficShares(
       names.map((n) => path(n)),

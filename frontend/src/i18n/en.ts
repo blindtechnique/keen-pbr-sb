@@ -1482,19 +1482,19 @@ export const enTranslation = {
       },
     },
     routeTraffic: {
-      title: "Where the traffic goes",
+      title: "Traffic on used interfaces",
       description:
-        "Share of bytes received and sent per route since its interface came up. This is not a daily total: the panel keeps no persistent accounting.",
-      total: "Total",
+        "Cumulative RX and TX counters for interfaces referenced by active routes. They include all traffic on each interface and may have different start times, so these shares do not prove which route handled traffic or whether traffic bypassed a tunnel.",
+      total: "Shown counters",
       rest: "Others",
-      idle: "Route interfaces are up, but no traffic has passed through them yet.",
+      idle: "Used interfaces are up, but their counters are still zero.",
       unavailable:
-        "Traffic counters are not available for the route interfaces.",
+        "Traffic counters are not available for the used interfaces.",
       loadErrorTitle: "Unable to load traffic counters",
       loadErrorDescription:
         "The dashboard could not read the current interface inventory.",
-      idleCounters: "Routes with no traffic yet: {{count}}.",
-      unavailableCounters: "Routes without available counters: {{count}}.",
+      idleCounters: "Used interfaces with zero counters: {{count}}.",
+      unavailableCounters: "Used interfaces without available counters: {{count}}.",
     },
     outbounds: {
       liveTraffic: "Traffic through used VPN and proxies",
