@@ -45,6 +45,7 @@ add_executable(keen-pbr-tests
   test_ndms_native_create_policy.cpp
   test_ndms_native_import_baseline.cpp
   test_ndms_native_import_executor.cpp
+  test_ndms_native_cooperative_import.cpp
   test_ndms_native_import_readiness.cpp
   test_ndms_native_import_startup_recovery.cpp
   test_ndms_native_import_request.cpp
@@ -272,6 +273,7 @@ add_executable(keen-pbr-tests
   ../src/keenetic/ndms_native_create_policy.cpp
   ../src/keenetic/ndms_native_import_baseline.cpp
   ../src/keenetic/ndms_native_import_executor.cpp
+  ../src/keenetic/ndms_native_cooperative_import.cpp
   ../src/keenetic/ndms_native_import_readiness.cpp
   ../src/keenetic/ndms_native_import_startup_recovery.cpp
   ../src/keenetic/ndms_native_import_request.cpp
@@ -434,6 +436,7 @@ add_executable(keen-pbr-native-tunnel-import-tests
   test_ndms_native_create_policy.cpp
   test_ndms_native_import_baseline.cpp
   test_ndms_native_import_executor.cpp
+  test_ndms_native_cooperative_import.cpp
   test_ndms_native_import_readiness.cpp
   test_ndms_native_import_startup_recovery.cpp
   test_ndms_native_import_request.cpp
@@ -468,6 +471,7 @@ add_executable(keen-pbr-native-tunnel-import-tests
   ../src/keenetic/ndms_native_create_policy.cpp
   ../src/keenetic/ndms_native_import_baseline.cpp
   ../src/keenetic/ndms_native_import_executor.cpp
+  ../src/keenetic/ndms_native_cooperative_import.cpp
   ../src/keenetic/ndms_native_import_readiness.cpp
   ../src/keenetic/ndms_native_import_startup_recovery.cpp
   ../src/keenetic/ndms_native_import_request.cpp
