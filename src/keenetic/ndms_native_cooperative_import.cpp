@@ -914,6 +914,46 @@ NdmsNativeCooperativeImportCoordinator::import_once(
                 .canonical_name();
         result.expected_interface = expected_interface;
 
+        // Runtime/catalog absence is not authority to reuse a durable target:
+        // an ownership tombstone or orphan rollback snapshot can outlive the
+        // interface itself. Under the same cooperative writer, prove both
+        // namespaces durably absent before the observation epoch advances or
+        // the executor can publish a snapshot, WAL record or router request.
+        try {
+            writer.verify_held();
+        } catch (...) {
+            result.stop = NdmsNativeCooperativeImportStop::writer_lost;
+            return result;
+        }
+        const auto target_ownership =
+            impl_->ownership->read(expected_interface);
+        if (target_ownership.state !=
+                NdmsNativeOwnershipReadState::absent ||
+            !impl_->ownership->ensure_absence_durable(
+                expected_interface)) {
+            result.stop = NdmsNativeCooperativeImportStop::
+                ownership_target_not_available;
+            return result;
+        }
+        try {
+            writer.verify_held();
+        } catch (...) {
+            result.stop = NdmsNativeCooperativeImportStop::writer_lost;
+            return result;
+        }
+        if (!impl_->snapshots->ensure_absence_durable(
+                expected_interface)) {
+            result.stop = NdmsNativeCooperativeImportStop::
+                snapshot_target_not_available;
+            return result;
+        }
+        try {
+            writer.verify_held();
+        } catch (...) {
+            result.stop = NdmsNativeCooperativeImportStop::writer_lost;
+            return result;
+        }
+
         NdmsNativeObservationStamp baseline_stamp;
         NdmsNativeMutationEpoch mutation;
         try {
@@ -1658,6 +1698,10 @@ const char* ndms_native_cooperative_import_stop_name(
         return "marker_collision";
     case NdmsNativeCooperativeImportStop::first_free_target_not_managed:
         return "first_free_target_not_managed";
+    case NdmsNativeCooperativeImportStop::ownership_target_not_available:
+        return "ownership_target_not_available";
+    case NdmsNativeCooperativeImportStop::snapshot_target_not_available:
+        return "snapshot_target_not_available";
     case NdmsNativeCooperativeImportStop::durable_observation_failed:
         return "durable_observation_failed";
     case NdmsNativeCooperativeImportStop::cooperative_baseline_failed:

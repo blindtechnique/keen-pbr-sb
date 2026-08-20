@@ -350,7 +350,9 @@ public:
 
 struct FaultControl final {
     bool fail_snapshot_before_publish{false};
+    bool fail_snapshot_absence_fsync{false};
     bool fail_ownership_after_publish{false};
+    bool fail_ownership_absence_fsync{false};
     bool fail_wal_remove{false};
 };
 
@@ -383,6 +385,12 @@ NdmsNativeSecretSnapshotStoreTestHooks snapshot_hooks(
     hooks.allow_current_process_owner = true;
     hooks.fault_injector = [faults](
         const NdmsNativeSecretSnapshotStoreFaultStage stage) {
+        if (faults->fail_snapshot_absence_fsync &&
+            stage == NdmsNativeSecretSnapshotStoreFaultStage::
+                absence_directory_fsync) {
+            throw std::runtime_error(
+                "synthetic snapshot absence fsync failure");
+        }
         if (faults->fail_snapshot_before_publish &&
             stage == NdmsNativeSecretSnapshotStoreFaultStage::
                 pre_publish_after_file_fsync) {
@@ -398,6 +406,12 @@ NdmsNativeOwnershipStoreTestHooks ownership_hooks(
     hooks.allow_current_process_owner = true;
     hooks.fault_injector = [faults](
         const NdmsNativeOwnershipStoreFaultStage stage) {
+        if (faults->fail_ownership_absence_fsync &&
+            stage == NdmsNativeOwnershipStoreFaultStage::
+                absence_directory_fsync) {
+            throw std::runtime_error(
+                "synthetic ownership absence fsync failure");
+        }
         if (faults->fail_ownership_after_publish &&
             stage == NdmsNativeOwnershipStoreFaultStage::
                 post_rename_directory_fsync) {
@@ -507,6 +521,68 @@ struct Fixture final {
     FakeClock clock;
     NdmsNativeCooperativeImportCoordinator coordinator;
 };
+
+NdmsNativeOwnershipRecord target_ownership_record(
+    const NdmsNativeOwnershipLifecycle lifecycle =
+        NdmsNativeOwnershipLifecycle::active_running_only) {
+    NdmsNativeOwnershipRecord record;
+    record.interface_name = "Wireguard5";
+    record.transaction_id = std::string(32U, '7');
+    record.marker = std::string{kNdmsNativeImportMarkerPrefix} +
+                    record.transaction_id;
+    record.snapshot_revision = revision(
+        "ndms-native-import-v1-", '8');
+    record.target_full_revision = revision(
+        "ndms-rci-full-v1-", '9');
+    record.lifecycle = lifecycle;
+    if (lifecycle != NdmsNativeOwnershipLifecycle::active_running_only) {
+        NdmsNativeOwnershipLifecycleEvidence evidence;
+        evidence.transaction_id = std::string(32U, '6');
+        evidence.observation_binding = {std::string(32U, '5'), 2U, 3U};
+        evidence.runtime_catalog_revision = revision(
+            kNdmsNativeObservationCatalogRevisionPrefix, '4');
+        evidence.runtime_sequence = 4U;
+        evidence.running_config_catalog_revision = revision(
+            kNdmsNativeObservationCatalogRevisionPrefix, '3');
+        evidence.running_config_sequence = 5U;
+        record.lifecycle_evidence = std::move(evidence);
+    }
+    return record;
+}
+
+void check_target_precheck_wrote_no_mutation(
+    Fixture& fixture,
+    const NdmsNativeCooperativeImportResult& result) {
+    CHECK(result.status == NdmsNativeCooperativeImportStatus::blocked);
+    CHECK(result.expected_interface ==
+          std::optional<std::string>{"Wireguard5"});
+    CHECK_FALSE(result.created_interface.has_value());
+    CHECK_FALSE(result.created_kernel_interface.has_value());
+    CHECK_FALSE(result.request_may_have_been_dispatched);
+    CHECK_FALSE(result.wal_may_require_recovery);
+    CHECK_FALSE(result.rollback_snapshot_may_be_retained);
+    CHECK_FALSE(result.ownership_published);
+    CHECK(fixture.backend.calls == 0U);
+    CHECK(fixture.backend.perform_calls == 0U);
+    CHECK(fixture.maintenance->reserve_calls == 0U);
+    CHECK(fixture.gateway.catalog_scopes.size() == 2U);
+    CHECK(fixture.gateway.recovery_calls == 0U);
+    CHECK(fixture.observations.read().state ==
+          NdmsNativeObservationReadState::absent);
+    const auto inventory = fixture.wal.try_inventory();
+    CHECK(inventory.state == NdmsNativeImportWalInventoryState::absent);
+    CHECK(inventory.items.empty());
+}
+
+NdmsNativeCooperativeImportResult run_target_precheck(Fixture& fixture) {
+    auto raw = plain_config();
+    auto result = fixture.coordinator.import_once(
+        fixture.writer.lease,
+        std::move(raw),
+        NdmsNativeExternalWriterRaceAcceptance::owner_accepted);
+    CHECK(raw.empty());
+    return result;
+}
 
 void check_response_recorded_wal(
     Fixture& fixture,
@@ -854,6 +930,130 @@ TEST_CASE("cooperative import compares both direct prewrite scopes") {
         REQUIRE(result.transaction_id.has_value());
         CHECK(fixture.wal.load(*result.transaction_id).state ==
               NdmsNativeImportWalLoadState::absent);
+    }
+}
+
+TEST_CASE("cooperative import requires durable absence of target artifacts") {
+    SUBCASE("an active ownership claim reserves an absent runtime slot") {
+        Fixture fixture;
+        const auto claim = target_ownership_record();
+        const auto revision_before = fixture.ownership.publish(claim);
+
+        const auto result = run_target_precheck(fixture);
+
+        CHECK(result.stop == NdmsNativeCooperativeImportStop::
+              ownership_target_not_available);
+        check_target_precheck_wrote_no_mutation(fixture, result);
+        const auto retained = fixture.ownership.read("Wireguard5");
+        REQUIRE(retained.state == NdmsNativeOwnershipReadState::valid);
+        CHECK(retained.revision ==
+              std::optional<std::string>{revision_before});
+        REQUIRE(retained.record.has_value());
+        CHECK(*retained.record == claim);
+        CHECK_FALSE(std::filesystem::exists(
+            fixture.directory.root / "native-import-snapshots"));
+    }
+
+    SUBCASE("a delete tombstone reserves an absent runtime slot") {
+        Fixture fixture;
+        const auto claim = target_ownership_record(
+            NdmsNativeOwnershipLifecycle::
+                deleted_save_acknowledged_unverified);
+        const auto revision_before = fixture.ownership.publish(claim);
+
+        const auto result = run_target_precheck(fixture);
+
+        CHECK(result.stop == NdmsNativeCooperativeImportStop::
+              ownership_target_not_available);
+        check_target_precheck_wrote_no_mutation(fixture, result);
+        const auto retained = fixture.ownership.read("Wireguard5");
+        REQUIRE(retained.state == NdmsNativeOwnershipReadState::valid);
+        CHECK(retained.revision ==
+              std::optional<std::string>{revision_before});
+        REQUIRE(retained.record.has_value());
+        CHECK(*retained.record == claim);
+        CHECK_FALSE(std::filesystem::exists(
+            fixture.directory.root / "native-import-snapshots"));
+    }
+
+    SUBCASE("an unreadable ownership claim is never collapsed to absence") {
+        Fixture fixture;
+        const auto state = fixture.directory.root / "ownership";
+        REQUIRE(std::filesystem::create_directory(state));
+        std::filesystem::permissions(
+            state,
+            std::filesystem::perms::owner_all,
+            std::filesystem::perm_options::replace);
+        const auto path = state / "Wireguard5";
+        const int descriptor = ::open(
+            path.c_str(),
+            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+            0600);
+        REQUIRE(descriptor >= 0);
+        const std::string torn{"keen-pbr-native-ownership-v3\nWireguard5\n"};
+        REQUIRE(::write(descriptor, torn.data(), torn.size()) ==
+                static_cast<ssize_t>(torn.size()));
+        REQUIRE(::close(descriptor) == 0);
+
+        const auto result = run_target_precheck(fixture);
+
+        CHECK(result.stop == NdmsNativeCooperativeImportStop::
+              ownership_target_not_available);
+        check_target_precheck_wrote_no_mutation(fixture, result);
+        CHECK(fixture.ownership.read("Wireguard5").state ==
+              NdmsNativeOwnershipReadState::unreadable);
+        CHECK(std::filesystem::exists(path));
+        CHECK_FALSE(std::filesystem::exists(
+            fixture.directory.root / "native-import-snapshots"));
+    }
+
+    SUBCASE("ownership absence fsync failure stops before snapshot admission") {
+        Fixture fixture;
+        fixture.faults->fail_ownership_absence_fsync = true;
+
+        const auto result = run_target_precheck(fixture);
+
+        CHECK(result.stop == NdmsNativeCooperativeImportStop::
+              ownership_target_not_available);
+        check_target_precheck_wrote_no_mutation(fixture, result);
+        CHECK_FALSE(std::filesystem::exists(
+            fixture.directory.root / "native-import-snapshots"));
+    }
+
+    SUBCASE("an orphan encrypted snapshot is preserved and blocks reuse") {
+        Fixture fixture;
+        const std::string transaction(32U, '2');
+        const std::string marker =
+            std::string{kNdmsNativeImportMarkerPrefix} + transaction;
+        fixture.snapshots.publish(
+            "Wireguard5", transaction, marker, "orphan-secret");
+
+        const auto result = run_target_precheck(fixture);
+
+        CHECK(result.stop == NdmsNativeCooperativeImportStop::
+              snapshot_target_not_available);
+        check_target_precheck_wrote_no_mutation(fixture, result);
+        auto retained = fixture.snapshots.read(
+            "Wireguard5", transaction, marker);
+        REQUIRE(retained.state == NdmsNativeSecretReadState::valid);
+        REQUIRE(retained.secret != nullptr);
+        CHECK(*retained.secret == "orphan-secret");
+    }
+
+    SUBCASE("snapshot absence fsync failure stops before mutation admission") {
+        Fixture fixture;
+        fixture.faults->fail_snapshot_absence_fsync = true;
+
+        const auto result = run_target_precheck(fixture);
+
+        CHECK(result.stop == NdmsNativeCooperativeImportStop::
+              snapshot_target_not_available);
+        check_target_precheck_wrote_no_mutation(fixture, result);
+        CHECK(fixture.ownership.read("Wireguard5").state ==
+              NdmsNativeOwnershipReadState::absent);
+        CHECK_FALSE(std::filesystem::exists(
+            fixture.directory.root / "native-import-snapshots" /
+                "Wireguard5"));
     }
 }
 

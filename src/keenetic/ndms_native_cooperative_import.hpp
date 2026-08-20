@@ -50,6 +50,8 @@ enum class NdmsNativeCooperativeImportStop : std::uint8_t {
     prewrite_catalog_diverged,
     marker_collision,
     first_free_target_not_managed,
+    ownership_target_not_available,
+    snapshot_target_not_available,
     durable_observation_failed,
     cooperative_baseline_failed,
     cooperative_writer_admission_failed,
