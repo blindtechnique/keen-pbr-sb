@@ -120,12 +120,13 @@ OwnerAcknowledgementHeaders owner_acknowledgement_headers(
 }
 
 ApiServer::SensitiveRequestReservationPtr reserve_delete(
-    const ApiContext& context) {
-    if (!context.reserve_ndms_native_delete_fn) {
+    const std::function<ApiServer::SensitiveRequestReservationPtr()>&
+        reserve_fn) {
+    if (!reserve_fn) {
         throw ApiError("native interface delete is unavailable", 503);
     }
     try {
-        return context.reserve_ndms_native_delete_fn();
+        return reserve_fn();
     } catch (const ApiError&) {
         throw;
     } catch (...) {
@@ -243,20 +244,20 @@ void validate_public_delete_result(
         throw std::runtime_error("incoherent native delete audit evidence");
     }
 
-    const bool has_record_identity =
+    const bool any_record_identity =
         result.durable_phase.has_value() ||
+        result.transaction_id.has_value() ||
         result.interface_name.has_value() || result.kind.has_value();
-    if (has_record_identity &&
-        (!result.durable_phase.has_value() ||
-         !result.interface_name.has_value() || !result.kind.has_value() ||
-         !result.transaction_id.has_value() ||
-         !valid_ndms_native_import_transaction_id(
-             *result.transaction_id) ||
-         !public_interface_name(*result.interface_name))) {
+    const bool has_record_identity =
+        result.durable_phase.has_value() &&
+        result.transaction_id.has_value() &&
+        result.interface_name.has_value() && result.kind.has_value();
+    if (any_record_identity != has_record_identity ||
+        (has_record_identity &&
+         (!valid_ndms_native_import_transaction_id(
+              *result.transaction_id) ||
+          !public_interface_name(*result.interface_name)))) {
         throw std::runtime_error("incoherent native delete identity");
-    }
-    if (!has_record_identity && result.transaction_id.has_value()) {
-        throw std::runtime_error("orphan native delete transaction id");
     }
     if (has_record_identity != result.external_writer_race_accepted) {
         throw std::runtime_error(
@@ -287,14 +288,12 @@ void validate_public_delete_result(
             throw std::runtime_error(
                 "incoherent nonterminal native delete result");
         }
-        if (result.status ==
-                NdmsNativeCooperativeDeleteStatus::recovery_required &&
-            (!has_record_identity ||
-             !result.external_writer_race_accepted ||
-             !result.global_save_scope_acknowledged)) {
-            throw std::runtime_error(
-                "incoherent native delete recovery result");
-        }
+        // A failure response intentionally has no durable identity when the
+        // coordinator could not reread the WAL while retaining its writer
+        // lease. The typed status, stop and current-invocation trace remain
+        // useful, but phase/name/kind/audit evidence must all stay absent.
+        // Complete known-record results remain subject to the strict identity
+        // and durable-audit checks above.
         if (result.status == NdmsNativeCooperativeDeleteStatus::blocked &&
             (result.delete_perform_started || result.save_perform_started ||
              result.request_may_have_been_dispatched ||
@@ -319,9 +318,9 @@ void validate_public_delete_result(
         result.request_may_have_been_dispatched) {
         throw std::runtime_error("incoherent native delete dispatch trace");
     }
-    if (result.transport_outcome.has_value() && !has_record_identity) {
-        throw std::runtime_error("native delete transport identity is missing");
-    }
+    // Transport facts describe only this invocation and can remain known even
+    // when the final authoritative WAL reread fails. Their internal dispatch
+    // coherence is still checked below without fabricating durable identity.
     if (result.transport_outcome.has_value() &&
         *result.transport_outcome !=
             NdmsNativeExactMutationResponseOutcome::guard_rejected &&
@@ -373,10 +372,9 @@ void validate_public_delete_result(
         throw std::runtime_error(
             "incoherent native delete observation failure");
     }
-    if (observation_stop && !has_record_identity) {
-        throw std::runtime_error(
-            "native delete observation stop lacks record identity");
-    }
+    // Observation failures can happen before the initial WAL publication or
+    // after a transport whose durable WAL can no longer be read. The narrow
+    // reason is therefore valid without a durable record projection.
 }
 
 const char* transport_outcome_name(
@@ -472,7 +470,7 @@ void register_ndms_native_delete_handler(ApiServer& server,
                     "native interface delete acknowledgements are required",
                     428);
             }
-            return reserve_delete(context);
+            return reserve_delete(context.reserve_ndms_native_delete_fn);
         },
         [&context](
             const httplib::Request&,
@@ -499,7 +497,7 @@ void register_ndms_native_delete_handler(ApiServer& server,
         1U,
         [&context](const httplib::Request& request) {
             if (!context.resume_ndms_native_delete_fn ||
-                !context.reserve_ndms_native_delete_fn) {
+                !context.reserve_ndms_native_delete_recovery_fn) {
                 throw ApiError(
                     "native interface delete recovery is unavailable", 503);
             }
@@ -509,7 +507,8 @@ void register_ndms_native_delete_handler(ApiServer& server,
                     "native interface delete recovery acknowledgements are invalid",
                     428);
             }
-            return reserve_delete(context);
+            return reserve_delete(
+                context.reserve_ndms_native_delete_recovery_fn);
         },
         [&context](
             const httplib::Request& request,

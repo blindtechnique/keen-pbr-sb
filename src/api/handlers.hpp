@@ -193,6 +193,8 @@ struct ApiContext {
     // coordinator remains the final WAL/ownership/dependency gate.
     std::function<std::shared_ptr<SensitiveRequestReservation>()>
         reserve_ndms_native_delete_fn;
+    std::function<std::shared_ptr<SensitiveRequestReservation>()>
+        reserve_ndms_native_delete_recovery_fn;
     std::function<NdmsNativeCooperativeDeleteResult(
         const NdmsNativeCooperativeDeleteRequest&,
         const std::shared_ptr<SensitiveRequestReservation>&)>

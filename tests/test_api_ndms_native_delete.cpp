@@ -70,18 +70,34 @@ public:
     }
 };
 
+enum class DeleteReservationPurpose {
+    new_delete,
+    delete_recovery,
+};
+
 class DeleteTestReservation final : public SensitiveRequestReservation {
 public:
-    explicit DeleteTestReservation(std::atomic<bool>& active) noexcept
-        : active_(active) {}
+    DeleteTestReservation(std::atomic<bool>& active,
+                          const DeleteReservationPurpose purpose) noexcept
+        : active_(active), purpose_(purpose) {}
 
     ~DeleteTestReservation() noexcept override {
         active_.store(false, std::memory_order_release);
     }
 
+    DeleteReservationPurpose purpose() const noexcept { return purpose_; }
+
 private:
     std::atomic<bool>& active_;
+    DeleteReservationPurpose purpose_;
 };
+
+NdmsNativeCooperativeDeleteResult wrong_delete_reservation_result() {
+    NdmsNativeCooperativeDeleteResult result;
+    result.status = NdmsNativeCooperativeDeleteStatus::blocked;
+    result.stop = NdmsNativeCooperativeDeleteStop::writer_missing;
+    return result;
+}
 
 using DeleteCallback = std::function<NdmsNativeCooperativeDeleteResult(
     const NdmsNativeCooperativeDeleteRequest&)>;
@@ -110,12 +126,17 @@ public:
                     const NdmsNativeCooperativeDeleteRequest& request,
                     const std::shared_ptr<SensitiveRequestReservation>&
                         reservation) {
-                    if (reservation &&
-                        reservation_active_.load(
+                    const auto* typed = dynamic_cast<
+                        const DeleteTestReservation*>(reservation.get());
+                    if (typed == nullptr ||
+                        typed->purpose() !=
+                            DeleteReservationPurpose::new_delete ||
+                        !reservation_active_.load(
                             std::memory_order_acquire)) {
-                        reservation_seen_by_callback_.fetch_add(
-                            1U, std::memory_order_relaxed);
+                        return wrong_delete_reservation_result();
                     }
+                    reservation_seen_by_callback_.fetch_add(
+                        1U, std::memory_order_relaxed);
                     return callback(request);
                 };
         }
@@ -126,35 +147,31 @@ public:
                         acknowledgement,
                     const std::shared_ptr<SensitiveRequestReservation>&
                         reservation) {
-                    if (reservation &&
-                        reservation_active_.load(
+                    const auto* typed = dynamic_cast<
+                        const DeleteTestReservation*>(reservation.get());
+                    if (typed == nullptr ||
+                        typed->purpose() !=
+                            DeleteReservationPurpose::delete_recovery ||
+                        !reservation_active_.load(
                             std::memory_order_acquire)) {
-                        reservation_seen_by_callback_.fetch_add(
-                            1U, std::memory_order_relaxed);
+                        return wrong_delete_reservation_result();
                     }
+                    reservation_seen_by_callback_.fetch_add(
+                        1U, std::memory_order_relaxed);
                     return callback(acknowledgement);
                 };
         }
         context_.reserve_ndms_native_delete_fn = [this]()
             -> std::shared_ptr<SensitiveRequestReservation> {
-            reservation_attempts_.fetch_add(1U, std::memory_order_relaxed);
-            if (!reservation_available_.load(std::memory_order_acquire)) {
-                return {};
-            }
-            bool expected = false;
-            if (!reservation_active_.compare_exchange_strong(
-                    expected, true,
-                    std::memory_order_acq_rel,
-                    std::memory_order_acquire)) {
-                return {};
-            }
-            try {
-                return std::make_shared<DeleteTestReservation>(
-                    reservation_active_);
-            } catch (...) {
-                reservation_active_.store(false, std::memory_order_release);
-                throw;
-            }
+            delete_reservation_attempts_.fetch_add(
+                1U, std::memory_order_relaxed);
+            return reserve(delete_reservation_purpose_);
+        };
+        context_.reserve_ndms_native_delete_recovery_fn = [this]()
+            -> std::shared_ptr<SensitiveRequestReservation> {
+            recovery_reservation_attempts_.fetch_add(
+                1U, std::memory_order_relaxed);
+            return reserve(recovery_reservation_purpose_);
         };
         register_ndms_native_delete_handler(server_, context_);
         server_.start();
@@ -165,6 +182,28 @@ public:
 
     NativeDeleteApiFixture(const NativeDeleteApiFixture&) = delete;
     NativeDeleteApiFixture& operator=(const NativeDeleteApiFixture&) = delete;
+
+    std::shared_ptr<SensitiveRequestReservation> reserve(
+        const DeleteReservationPurpose purpose) {
+        reservation_attempts_.fetch_add(1U, std::memory_order_relaxed);
+        if (!reservation_available_.load(std::memory_order_acquire)) {
+            return {};
+        }
+        bool expected = false;
+        if (!reservation_active_.compare_exchange_strong(
+                expected, true,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire)) {
+            return {};
+        }
+        try {
+            return std::make_shared<DeleteTestReservation>(
+                reservation_active_, purpose);
+        } catch (...) {
+            reservation_active_.store(false, std::memory_order_release);
+            throw;
+        }
+    }
 
     httplib::Headers login() {
         const auto response = client_->Post(
@@ -212,6 +251,33 @@ public:
         return reservation_attempts_.load(std::memory_order_relaxed);
     }
 
+    std::size_t delete_reservation_attempts() const noexcept {
+        return delete_reservation_attempts_.load(std::memory_order_relaxed);
+    }
+
+    std::size_t recovery_reservation_attempts() const noexcept {
+        return recovery_reservation_attempts_.load(
+            std::memory_order_relaxed);
+    }
+
+    void set_delete_reservation_purpose(
+        const DeleteReservationPurpose purpose) noexcept {
+        delete_reservation_purpose_ = purpose;
+    }
+
+    void set_recovery_reservation_purpose(
+        const DeleteReservationPurpose purpose) noexcept {
+        recovery_reservation_purpose_ = purpose;
+    }
+
+    void disable_delete_reservation() {
+        context_.reserve_ndms_native_delete_fn = {};
+    }
+
+    void disable_recovery_reservation() {
+        context_.reserve_ndms_native_delete_recovery_fn = {};
+    }
+
     std::size_t reservation_seen_by_callback() const noexcept {
         return reservation_seen_by_callback_.load(
             std::memory_order_relaxed);
@@ -242,7 +308,13 @@ private:
     std::atomic<bool> reservation_available_{true};
     std::atomic<bool> reservation_active_{false};
     std::atomic<std::size_t> reservation_attempts_{0U};
+    std::atomic<std::size_t> delete_reservation_attempts_{0U};
+    std::atomic<std::size_t> recovery_reservation_attempts_{0U};
     std::atomic<std::size_t> reservation_seen_by_callback_{0U};
+    DeleteReservationPurpose delete_reservation_purpose_{
+        DeleteReservationPurpose::new_delete};
+    DeleteReservationPurpose recovery_reservation_purpose_{
+        DeleteReservationPurpose::delete_recovery};
     TrustedLocalConnectionEvaluatorGuard trusted_transport_;
     SseBroadcaster broadcaster_;
     ApiContext context_;
@@ -284,6 +356,15 @@ NdmsNativeCooperativeDeleteResult recovery_result() {
     result.kind = NdmsNativeTunnelImportKind::wireguard;
     result.external_writer_race_accepted = true;
     result.global_save_scope_acknowledged = true;
+    return result;
+}
+
+NdmsNativeCooperativeDeleteResult identityless_recovery_result(
+    const NdmsNativeCooperativeDeleteStop stop =
+        NdmsNativeCooperativeDeleteStop::writer_lost) {
+    NdmsNativeCooperativeDeleteResult result;
+    result.status = NdmsNativeCooperativeDeleteStatus::recovery_required;
+    result.stop = stop;
     return result;
 }
 
@@ -359,6 +440,77 @@ TEST_CASE("native delete API maps typed evidence and redacts durable internals")
           false);
     CHECK(cleanup_only.at("ownership_tombstone_durable") == true);
     CHECK(cleanup_only.at("rollback_snapshot_retained") == true);
+}
+
+TEST_CASE("native delete API preserves identityless failure truth") {
+    SUBCASE("writer loss has no invented durable record") {
+        const auto response = ndms_native_delete_api_response(
+            identityless_recovery_result());
+
+        CHECK(response.size() == 11U);
+        CHECK(response.at("status") == "recovery_required");
+        CHECK(response.at("stop") == "writer_lost");
+        CHECK(response.at("external_writer_race_accepted") == false);
+        CHECK(response.at("global_save_scope_acknowledged") == false);
+        CHECK_FALSE(response.contains("phase"));
+        CHECK_FALSE(response.contains("transaction_id"));
+        CHECK_FALSE(response.contains("interface_name"));
+        CHECK_FALSE(response.contains("kind"));
+    }
+
+    SUBCASE("current delete trace survives an unreadable durable WAL") {
+        auto result = identityless_recovery_result(
+            NdmsNativeCooperativeDeleteStop::delete_wal_publish_failed);
+        result.delete_perform_started = true;
+        result.request_may_have_been_dispatched = true;
+        result.transport_outcome = NdmsNativeExactMutationResponseOutcome::
+            acknowledged_needs_observation;
+
+        const auto response = ndms_native_delete_api_response(result);
+
+        CHECK(response.at("status") == "recovery_required");
+        CHECK(response.at("stop") == "delete_wal_publish_failed");
+        CHECK(response.at("delete_perform_started") == true);
+        CHECK(response.at("request_may_have_been_dispatched") == true);
+        CHECK(response.at("transport_outcome") ==
+              "acknowledged_needs_observation");
+        CHECK_FALSE(response.contains("phase"));
+        CHECK_FALSE(response.contains("interface_name"));
+        CHECK_FALSE(response.contains("kind"));
+    }
+
+    SUBCASE("save acknowledgement remains invocation-only evidence") {
+        auto result = identityless_recovery_result();
+        result.save_perform_started = true;
+        result.request_may_have_been_dispatched = true;
+        result.system_configuration_save_acknowledged = true;
+        result.transport_outcome = NdmsNativeExactMutationResponseOutcome::
+            acknowledged_needs_observation;
+
+        const auto response = ndms_native_delete_api_response(result);
+
+        CHECK(response.at("save_perform_started") == true);
+        CHECK(response.at("system_configuration_save_acknowledged") == true);
+        CHECK(response.at("external_writer_race_accepted") == false);
+        CHECK_FALSE(response.contains("phase"));
+        CHECK_FALSE(response.contains("interface_name"));
+    }
+
+    SUBCASE("blocked pre-WAL observation retains only its typed reason") {
+        auto result = blocked_result(
+            NdmsNativeCooperativeDeleteStop::runtime_observation_failed);
+        result.observation_failure =
+            NdmsNativeDirectObservationFailure::transport_failed;
+
+        const auto response = ndms_native_delete_api_response(result);
+
+        CHECK(response.at("status") == "blocked");
+        CHECK(response.at("stop") == "runtime_observation_failed");
+        CHECK(response.at("observation_failure") == "transport_failed");
+        CHECK_FALSE(response.contains("phase"));
+        CHECK_FALSE(response.contains("interface_name"));
+        CHECK_FALSE(response.contains("kind"));
+    }
 }
 
 TEST_CASE("native delete API accepts every known typed enum") {
@@ -549,6 +701,49 @@ TEST_CASE("native delete API rejects unknown enums and incoherent claims") {
         result.ownership_tombstone_durable = true;
         CHECK_THROWS(ndms_native_delete_api_response(result));
     }
+    {
+        auto result = identityless_recovery_result();
+        result.durable_phase = NdmsNativeDeleteWalPhase::prepared;
+        CHECK_THROWS(ndms_native_delete_api_response(result));
+    }
+    {
+        auto result = identityless_recovery_result();
+        result.transaction_id = std::string(32U, 'e');
+        CHECK_THROWS(ndms_native_delete_api_response(result));
+    }
+    {
+        auto result = identityless_recovery_result();
+        result.external_writer_race_accepted = true;
+        result.global_save_scope_acknowledged = true;
+        CHECK_THROWS(ndms_native_delete_api_response(result));
+    }
+    {
+        auto result = identityless_recovery_result();
+        result.delete_perform_started = true;
+        result.request_may_have_been_dispatched = true;
+        CHECK_THROWS(ndms_native_delete_api_response(result));
+    }
+    {
+        auto result = identityless_recovery_result();
+        result.transport_outcome = NdmsNativeExactMutationResponseOutcome::
+            acknowledged_needs_observation;
+        CHECK_THROWS(ndms_native_delete_api_response(result));
+    }
+    {
+        auto result = identityless_recovery_result();
+        result.status = NdmsNativeCooperativeDeleteStatus::
+            save_acknowledged_unverified;
+        result.stop = NdmsNativeCooperativeDeleteStop::none;
+        result.ownership_tombstone_durable = true;
+        result.rollback_snapshot_retained = true;
+        CHECK_THROWS(ndms_native_delete_api_response(result));
+    }
+    {
+        auto result = blocked_result();
+        result.transport_outcome =
+            NdmsNativeExactMutationResponseOutcome::guard_rejected;
+        CHECK_THROWS(ndms_native_delete_api_response(result));
+    }
 }
 
 TEST_CASE("native delete remove preserves exact request and returns typed 200") {
@@ -598,6 +793,209 @@ TEST_CASE("native delete remove preserves exact request and returns typed 200") 
     CHECK(revisions == std::vector<std::string>(3U, revision));
     CHECK(fixture.reservation_seen_by_callback() == 3U);
     CHECK_FALSE(fixture.reservation_active());
+}
+
+TEST_CASE("native delete endpoints expose identityless failures without invention") {
+    std::size_t delete_count = 0U;
+    std::size_t recovery_count = 0U;
+    NativeDeleteApiFixture fixture(
+        [&](const NdmsNativeCooperativeDeleteRequest&) {
+            ++delete_count;
+            return identityless_recovery_result();
+        },
+        [&](const NdmsNativeCooperativeDeleteResumeAcknowledgement&) {
+            ++recovery_count;
+            if (recovery_count == 1U) {
+                return blocked_result(
+                    NdmsNativeCooperativeDeleteStop::delete_wal_unsafe);
+            }
+            auto result = identityless_recovery_result(
+                NdmsNativeCooperativeDeleteStop::
+                    delete_wal_publish_failed);
+            result.save_perform_started = true;
+            result.request_may_have_been_dispatched = true;
+            result.system_configuration_save_acknowledged = true;
+            result.transport_outcome =
+                NdmsNativeExactMutationResponseOutcome::
+                    acknowledged_needs_observation;
+            return result;
+        });
+    const auto session = fixture.login();
+    fixture.grant_step_up(session);
+
+    const auto remove = fixture.client().Post(
+        std::string{kNdmsNativeDeleteApiPath},
+        fixture.acknowledged_headers(session),
+        valid_delete_body(),
+        "application/json");
+    check_no_store(remove);
+    REQUIRE(remove->status == 200);
+    const auto remove_body = nlohmann::json::parse(remove->body);
+    CHECK(remove_body.at("status") == "recovery_required");
+    CHECK(remove_body.at("stop") == "writer_lost");
+    CHECK_FALSE(remove_body.contains("phase"));
+    CHECK_FALSE(remove_body.contains("interface_name"));
+    CHECK_FALSE(remove_body.contains("kind"));
+
+    const auto unsafe = fixture.client().Post(
+        std::string{kNdmsNativeDeleteRecoveryApiPath},
+        session,
+        "",
+        "application/octet-stream");
+    check_no_store(unsafe);
+    REQUIRE(unsafe->status == 200);
+    const auto unsafe_body = nlohmann::json::parse(unsafe->body);
+    CHECK(unsafe_body.at("status") == "blocked");
+    CHECK(unsafe_body.at("stop") == "delete_wal_unsafe");
+    CHECK_FALSE(unsafe_body.contains("phase"));
+    CHECK_FALSE(unsafe_body.contains("interface_name"));
+
+    const auto ambiguous = fixture.client().Post(
+        std::string{kNdmsNativeDeleteRecoveryApiPath},
+        session,
+        "",
+        "application/octet-stream");
+    check_no_store(ambiguous);
+    REQUIRE(ambiguous->status == 200);
+    const auto ambiguous_body = nlohmann::json::parse(ambiguous->body);
+    CHECK(ambiguous_body.at("status") == "recovery_required");
+    CHECK(ambiguous_body.at("save_perform_started") == true);
+    CHECK(ambiguous_body.at("system_configuration_save_acknowledged") ==
+          true);
+    CHECK_FALSE(ambiguous_body.contains("phase"));
+    CHECK_FALSE(ambiguous_body.contains("interface_name"));
+    CHECK_FALSE(ambiguous_body.contains("kind"));
+
+    CHECK(delete_count == 1U);
+    CHECK(recovery_count == 2U);
+    CHECK(fixture.delete_reservation_attempts() == 1U);
+    CHECK(fixture.recovery_reservation_attempts() == 2U);
+    CHECK(fixture.reservation_seen_by_callback() == 3U);
+    CHECK_FALSE(fixture.reservation_active());
+}
+
+TEST_CASE("native delete routes keep reservation purposes distinct") {
+    SUBCASE("each route calls only its own reservation provider") {
+        NativeDeleteApiFixture fixture(
+            [](const NdmsNativeCooperativeDeleteRequest&) {
+                return blocked_result();
+            },
+            [](const NdmsNativeCooperativeDeleteResumeAcknowledgement&) {
+                return blocked_result(
+                    NdmsNativeCooperativeDeleteStop::delete_wal_unsafe);
+            });
+        const auto session = fixture.login();
+        fixture.grant_step_up(session);
+
+        const auto remove = fixture.client().Post(
+            std::string{kNdmsNativeDeleteApiPath},
+            fixture.acknowledged_headers(session),
+            valid_delete_body(),
+            "application/json");
+        check_no_store(remove);
+        REQUIRE(remove->status == 200);
+        CHECK(fixture.delete_reservation_attempts() == 1U);
+        CHECK(fixture.recovery_reservation_attempts() == 0U);
+
+        const auto recovery = fixture.client().Post(
+            std::string{kNdmsNativeDeleteRecoveryApiPath},
+            session,
+            "",
+            "application/octet-stream");
+        check_no_store(recovery);
+        REQUIRE(recovery->status == 200);
+        CHECK(fixture.delete_reservation_attempts() == 1U);
+        CHECK(fixture.recovery_reservation_attempts() == 1U);
+    }
+
+    SUBCASE("missing recovery provider refuses before body admission") {
+        std::size_t recovery_count = 0U;
+        NativeDeleteApiFixture fixture(
+            [](const NdmsNativeCooperativeDeleteRequest&) {
+                return blocked_result();
+            },
+            [&](const NdmsNativeCooperativeDeleteResumeAcknowledgement&) {
+                ++recovery_count;
+                return blocked_result();
+            });
+        const auto session = fixture.login();
+        fixture.grant_step_up(session);
+        fixture.disable_recovery_reservation();
+        reset_sensitive_request_body_stream_count_for_testing();
+
+        const auto response = fixture.client().Post(
+            std::string{kNdmsNativeDeleteRecoveryApiPath},
+            session,
+            "must-not-stream",
+            "application/octet-stream");
+
+        check_no_store(response);
+        CHECK(response->status == 503);
+        CHECK(response->get_header_value("Connection") == "close");
+        CHECK(sensitive_request_body_stream_count_for_testing() == 0U);
+        CHECK(fixture.delete_reservation_attempts() == 0U);
+        CHECK(fixture.recovery_reservation_attempts() == 0U);
+        CHECK(recovery_count == 0U);
+    }
+
+    SUBCASE("new-delete callback refuses a recovery-purpose token") {
+        std::size_t delete_count = 0U;
+        NativeDeleteApiFixture fixture(
+            [&](const NdmsNativeCooperativeDeleteRequest&) {
+                ++delete_count;
+                return terminal_result();
+            });
+        const auto session = fixture.login();
+        fixture.grant_step_up(session);
+        fixture.set_delete_reservation_purpose(
+            DeleteReservationPurpose::delete_recovery);
+
+        const auto response = fixture.client().Post(
+            std::string{kNdmsNativeDeleteApiPath},
+            fixture.acknowledged_headers(session),
+            valid_delete_body(),
+            "application/json");
+
+        check_no_store(response);
+        REQUIRE(response->status == 200);
+        const auto body = nlohmann::json::parse(response->body);
+        CHECK(body.at("status") == "blocked");
+        CHECK(body.at("stop") == "writer_missing");
+        CHECK(delete_count == 0U);
+        CHECK(fixture.delete_reservation_attempts() == 1U);
+        CHECK(fixture.recovery_reservation_attempts() == 0U);
+    }
+
+    SUBCASE("recovery callback refuses a new-delete-purpose token") {
+        std::size_t recovery_count = 0U;
+        NativeDeleteApiFixture fixture(
+            [](const NdmsNativeCooperativeDeleteRequest&) {
+                return blocked_result();
+            },
+            [&](const NdmsNativeCooperativeDeleteResumeAcknowledgement&) {
+                ++recovery_count;
+                return terminal_result();
+            });
+        const auto session = fixture.login();
+        fixture.grant_step_up(session);
+        fixture.set_recovery_reservation_purpose(
+            DeleteReservationPurpose::new_delete);
+
+        const auto response = fixture.client().Post(
+            std::string{kNdmsNativeDeleteRecoveryApiPath},
+            session,
+            "",
+            "application/octet-stream");
+
+        check_no_store(response);
+        REQUIRE(response->status == 200);
+        const auto body = nlohmann::json::parse(response->body);
+        CHECK(body.at("status") == "blocked");
+        CHECK(body.at("stop") == "writer_missing");
+        CHECK(recovery_count == 0U);
+        CHECK(fixture.delete_reservation_attempts() == 0U);
+        CHECK(fixture.recovery_reservation_attempts() == 1U);
+    }
 }
 
 TEST_CASE("native delete rejects malformed request shapes without callback") {
