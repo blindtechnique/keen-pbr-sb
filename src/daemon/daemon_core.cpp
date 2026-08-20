@@ -1,5 +1,7 @@
 #include "daemon.hpp"
 
+#include "../keenetic/ndms_native_writer_lease.hpp"
+
 #include <arpa/inet.h>
 #include <algorithm>
 #include <array>
@@ -300,8 +302,15 @@ Daemon::Daemon(Config config,
                     max_file_size_bytes(config))
     , ndms_native_import_wal_store_(
           "/opt/var/lib/keen-pbr/native-import-wal")
+    , ndms_native_delete_wal_store_(
+          "/opt/var/lib/keen-pbr/native-delete-wal")
     , ndms_native_ownership_store_(
           "/opt/var/lib/keen-pbr/native-import-ownership")
+    , ndms_native_observation_store_(
+          "/opt/var/lib/keen-pbr/native-mutation")
+    , ndms_native_secret_snapshot_store_(
+          "/opt/etc/keen-pbr/native-import-snapshot.key",
+          "/opt/var/lib/keen-pbr/native-import-snapshots")
     , config_(std::move(config))
     , config_path_(std::move(config_path))
     , opts_(std::move(opts))
@@ -3963,9 +3972,34 @@ void Daemon::run() {
     auto& log = Logger::instance();
 
     try {
+#if defined(USE_KEENETIC_API) && defined(WITH_API)
         auto native_import_readiness =
             NdmsNativeImportJournalReadinessState::unavailable;
+        auto native_delete_readiness =
+            NdmsNativeDeleteWalReadiness::unsafe;
+        auto native_mutation_admission =
+            NdmsNativeMutationAdmissionState::unavailable;
         try {
+            // Startup reconciliation uses the same established lock order as
+            // every request. Publishing a cross-WAL clean hint from two
+            // unlocked reads would let another cooperating process transition
+            // between them and create a torn admission view.
+            auto maintenance = std::make_unique<MaintenanceCoordinator>(
+                "ndms-native-startup-reconciliation");
+            auto runtime = runtime_mutation_admission_.try_acquire(
+                "ndms-native-startup-reconciliation");
+            if (!runtime.has_value()) {
+                throw std::runtime_error(
+                    "native startup runtime mutation admission is busy");
+            }
+            auto writer = admit_ndms_native_writer(
+                ndms_native_observation_store_.state_directory(),
+                std::move(maintenance),
+                std::move(*runtime));
+            if (writer.state != NdmsNativeWriterAdmissionState::admitted) {
+                throw std::runtime_error(
+                    "native startup writer admission failed");
+            }
             // Before the inventory is judged: a process that died between
             // creating its WAL temporary and renaming it into place leaves a
             // name the inventory reads as unsafe, and without this sweep the
@@ -3974,11 +4008,18 @@ void Daemon::run() {
             // noexcept, removes only this store's own dead-owner temporaries,
             // and an absent store is simply not its problem.
             ndms_native_import_wal_store_.sweep_orphaned_temporaries();
+            ndms_native_delete_wal_store_.sweep_orphaned_temporaries();
+            native_delete_readiness =
+                ndms_native_delete_wal_store_.readiness();
             const auto native_import_inventory =
                 ndms_native_import_wal_store_.try_inventory();
             native_import_readiness =
                 summarize_ndms_native_import_readiness(
                     native_import_inventory);
+            native_mutation_admission =
+                summarize_ndms_native_mutation_admission(
+                    native_import_inventory,
+                    native_delete_readiness);
 
             // The removal crash window closes here and only here. A tunnel
             // deleted by an operator whose process then died leaves a durable
@@ -3986,10 +4027,11 @@ void Daemon::run() {
             // from removed_claim_survived, and nothing else would ever notice.
             // Skip unless this exact bounded snapshot proves a ready, empty
             // WAL. Busy, unsafe, I/O-failed and absent stores are unknown for
-            // mutation authority even though `absent` is a useful report-only
-            // state while the writer remains disabled. The recovery dispatcher
-            // retracts its own claim, and a second remover racing it would turn
-            // that retirement into a failure.
+            // ownership retirement: `absent` is sufficient for a new writer
+            // to publish exclusively, but it does not prove that no historical
+            // claim still needs recovery. The recovery dispatcher retracts its
+            // own claim, and a second remover racing it would turn that
+            // retirement into a failure.
             const bool transaction_in_flight_or_unknown =
                 !ndms_native_import_inventory_permits_ownership_reconciliation(
                     native_import_inventory);
@@ -3997,7 +4039,8 @@ void Daemon::run() {
                 reconcile_ndms_native_ownership_claims(
                     ndms_native_ownership_store_,
                     transaction_in_flight_or_unknown,
-                    ndms_native_interface_read_production_dependencies());
+                    ndms_native_interface_read_production_dependencies(),
+                    native_delete_readiness);
             if (!reconciled.store_readable) {
                 log.warn(
                     "Native import ownership claims could not be read; "
@@ -4015,21 +4058,44 @@ void Daemon::run() {
                     reconciled.retired.size(),
                     reconciled.unresolved.size());
             }
+            writer.lease.verify_held();
+            ndms_native_import_journal_readiness_.store(
+                native_import_readiness, std::memory_order_release);
+            ndms_native_mutation_admission_.store(
+                native_mutation_admission, std::memory_order_release);
         } catch (...) {
             // Startup inventory is observational. Even an unexpected local
             // allocation/runtime failure must fail the report closed without
             // taking down the already-working routing daemon.
+            native_import_readiness =
+                NdmsNativeImportJournalReadinessState::unavailable;
+            native_mutation_admission =
+                NdmsNativeMutationAdmissionState::unavailable;
+            ndms_native_import_journal_readiness_.store(
+                native_import_readiness, std::memory_order_release);
+            ndms_native_mutation_admission_.store(
+                native_mutation_admission, std::memory_order_release);
         }
-        ndms_native_import_journal_readiness_.store(
-            native_import_readiness, std::memory_order_release);
         // Deliberately log only the collapsed enum. Inventory entries can
         // contain transaction identifiers and filenames, neither of which
         // belongs in the API or routine daemon logs.
         log.info(
             "Native import WAL startup observation: state={} (report-only; "
-            "writer and recovery remain disabled).",
+            "every operation still reacquires maintenance, runtime and "
+            "cooperative native-writer guards).",
             ndms_native_import_journal_readiness_state_name(
                 native_import_readiness));
+        log.info(
+            "Native delete WAL startup observation: state={} (report-only; "
+            "ownership reconciliation requires clean cross-kind state).",
+            ndms_native_delete_wal_readiness_name(
+                native_delete_readiness));
+        log.info(
+            "Native mutation pre-body admission: state={} (redacted hint; "
+            "the coordinator still reacquires and rechecks authority).",
+            ndms_native_mutation_admission_state_name(
+                native_mutation_admission));
+#endif
 
     // Startup happens before the event loop. It is the one lifecycle point
     // where a bounded shared-cache refresh may safely query loopback NDMS.

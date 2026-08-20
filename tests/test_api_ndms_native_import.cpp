@@ -10,14 +10,17 @@
 #include "api/sse_broadcaster.hpp"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <unistd.h>
 
@@ -69,6 +72,19 @@ using ImportCallback = std::function<NdmsNativeCooperativeImportResult(
     std::string&&,
     NdmsNativeExternalWriterRaceAcceptance)>;
 
+class ImportTestReservation final : public SensitiveRequestReservation {
+public:
+    explicit ImportTestReservation(std::atomic<bool>& active) noexcept
+        : active_(active) {}
+
+    ~ImportTestReservation() noexcept override {
+        active_.store(false, std::memory_order_release);
+    }
+
+private:
+    std::atomic<bool>& active_;
+};
+
 class NativeImportApiFixture final {
 public:
     explicit NativeImportApiFixture(ImportCallback callback = {})
@@ -84,7 +100,38 @@ public:
               broadcaster_,
               "/tmp/keen-pbr-native-import-api-config.json")),
           server_(config()) {
-        context_.run_ndms_native_import_fn = std::move(callback);
+        if (callback) {
+            context_.run_ndms_native_import_fn =
+                [callback = std::move(callback)](
+                    std::string&& raw,
+                    const NdmsNativeExternalWriterRaceAcceptance
+                        acceptance,
+                    const std::shared_ptr<SensitiveRequestReservation>&) {
+                    return callback(std::move(raw), acceptance);
+                };
+        }
+        context_.reserve_ndms_native_import_fn = [this]()
+            -> std::shared_ptr<SensitiveRequestReservation> {
+            if (!reservation_available_.load(
+                    std::memory_order_acquire)) {
+                return {};
+            }
+            bool expected = false;
+            if (!reservation_active_.compare_exchange_strong(
+                    expected, true,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                return {};
+            }
+            try {
+                return std::make_shared<ImportTestReservation>(
+                    reservation_active_);
+            } catch (...) {
+                reservation_active_.store(
+                    false, std::memory_order_release);
+                throw;
+            }
+        };
         register_ndms_native_import_handler(server_, context_);
         server_.start();
         client_ = std::make_unique<httplib::Client>(
@@ -132,7 +179,18 @@ public:
         protected_transport_.store(value, std::memory_order_relaxed);
     }
 
+    void set_admission(const NdmsNativeMutationAdmissionState value) {
+        reservation_available_.store(
+            value == NdmsNativeMutationAdmissionState::admitted,
+            std::memory_order_release);
+    }
+
     httplib::Client& client() noexcept { return *client_; }
+
+    std::unique_ptr<httplib::Client> new_client() const {
+        return std::make_unique<httplib::Client>(
+            "127.0.0.1", port());
+    }
 
 private:
     static int port() {
@@ -148,6 +206,8 @@ private:
     ImportAuthDirectory auth_directory_;
     test_support::EnvironmentVariableGuard auth_file_;
     std::atomic<bool> protected_transport_{true};
+    std::atomic<bool> reservation_available_{true};
+    std::atomic<bool> reservation_active_{false};
     TrustedLocalConnectionEvaluatorGuard trusted_transport_;
     SseBroadcaster broadcaster_;
     ApiContext context_;
@@ -244,6 +304,15 @@ TEST_CASE("native import API maps only redacted typed evidence") {
     CHECK(serialized.find("revision/private") == std::string::npos);
     CHECK(serialized.find("marker-secret") == std::string::npos);
     CHECK(serialized.find("nwg5/private") == std::string::npos);
+
+    result.stop = NdmsNativeCooperativeImportStop::
+        ownership_target_not_available;
+    CHECK(ndms_native_import_api_response(result).at("stop") ==
+          "ownership_target_not_available");
+    result.stop = NdmsNativeCooperativeImportStop::
+        snapshot_target_not_available;
+    CHECK(ndms_native_import_api_response(result).at("stop") ==
+          "snapshot_target_not_available");
 }
 
 TEST_CASE("native import API exposes only a complete proved created identity") {
@@ -482,6 +551,55 @@ TEST_CASE("native import availability content type and consent reject pre-body")
         CHECK(sensitive_request_body_stream_count_for_testing() == 0U);
     }
 
+    {
+        std::size_t blocked_callback_count = 0U;
+        NativeImportApiFixture blocked(
+            [&](std::string&&,
+                NdmsNativeExternalWriterRaceAcceptance) {
+                ++blocked_callback_count;
+                return completed_result();
+            });
+        const auto blocked_session = blocked.login();
+        blocked.grant_step_up(blocked_session);
+        blocked.set_admission(
+            NdmsNativeMutationAdmissionState::blocked);
+
+        reset_sensitive_request_body_stream_count_for_testing();
+        const auto dirty_wal = blocked.client().Post(
+            std::string{kNdmsNativeImportApiPath},
+            blocked.accepted_headers(blocked_session),
+            "must-not-stream",
+            "text/plain");
+        check_no_store(dirty_wal);
+        CHECK(dirty_wal->status == 503);
+        CHECK(dirty_wal->get_header_value("Connection") == "close");
+        CHECK(sensitive_request_body_stream_count_for_testing() == 0U);
+        CHECK(blocked_callback_count == 0U);
+
+        reset_sensitive_request_body_stream_count_for_testing();
+        const auto dirty_wal_preflight = blocked.client().Post(
+            std::string{kNdmsNativeImportPreflightApiPath},
+            blocked_session,
+            "",
+            "application/octet-stream");
+        check_no_store(dirty_wal_preflight);
+        CHECK(dirty_wal_preflight->status == 503);
+        CHECK(dirty_wal_preflight->get_header_value("Connection") ==
+              "close");
+        CHECK(sensitive_request_body_stream_count_for_testing() == 0U);
+
+        blocked.set_admission(
+            NdmsNativeMutationAdmissionState::unavailable);
+        const auto unreadable_wal_preflight = blocked.client().Post(
+            std::string{kNdmsNativeImportPreflightApiPath},
+            blocked_session,
+            "",
+            "application/octet-stream");
+        check_no_store(unreadable_wal_preflight);
+        CHECK(unreadable_wal_preflight->status == 503);
+        CHECK(blocked_callback_count == 0U);
+    }
+
     std::size_t callback_count = 0U;
     NativeImportApiFixture fixture(
         [&](std::string&&,
@@ -640,6 +758,68 @@ TEST_CASE("native import callback failure is generic and never retried") {
     CHECK(response->body.find("PRIVATE_TEST_SECRET") == std::string::npos);
     CHECK(nlohmann::json::parse(response->body).at("error") ==
           "sensitive_request_failed");
+}
+
+TEST_CASE("native import reservation excludes a second body stream") {
+    std::mutex barrier_mutex;
+    std::condition_variable barrier_cv;
+    bool first_entered = false;
+    bool release_first = false;
+    std::atomic<std::size_t> callback_count{0U};
+
+    NativeImportApiFixture fixture(
+        [&](std::string&&,
+            NdmsNativeExternalWriterRaceAcceptance) {
+            callback_count.fetch_add(1U, std::memory_order_relaxed);
+            std::unique_lock<std::mutex> lock(barrier_mutex);
+            first_entered = true;
+            barrier_cv.notify_all();
+            barrier_cv.wait(lock, [&] { return release_first; });
+            return completed_result();
+        });
+    const auto session = fixture.login();
+    fixture.grant_step_up(session);
+    const auto headers = fixture.accepted_headers(session);
+
+    reset_sensitive_request_body_stream_count_for_testing();
+    int first_status = 0;
+    std::thread first_request([&] {
+        const auto response = fixture.client().Post(
+            std::string{kNdmsNativeImportApiPath},
+            headers,
+            "FIRST_PRIVATE_KEY",
+            "text/plain");
+        first_status = response ? response->status : -1;
+    });
+
+    {
+        std::unique_lock<std::mutex> lock(barrier_mutex);
+        barrier_cv.wait(lock, [&] { return first_entered; });
+    }
+    const auto streams_after_first =
+        sensitive_request_body_stream_count_for_testing();
+    auto second_client = fixture.new_client();
+    const auto second = second_client->Post(
+        std::string{kNdmsNativeImportApiPath},
+        headers,
+        "SECOND_MUST_NOT_STREAM",
+        "text/plain");
+    CHECK(second != nullptr);
+    if (second) {
+        CHECK(second->status == 503);
+        CHECK(second->get_header_value("Connection") == "close");
+    }
+    CHECK(sensitive_request_body_stream_count_for_testing() ==
+          streams_after_first);
+    CHECK(callback_count.load(std::memory_order_relaxed) == 1U);
+
+    {
+        std::lock_guard<std::mutex> lock(barrier_mutex);
+        release_first = true;
+    }
+    barrier_cv.notify_all();
+    first_request.join();
+    CHECK(first_status == 200);
 }
 
 } // namespace keen_pbr3

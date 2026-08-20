@@ -25,6 +25,8 @@
 #include "../health/runtime_interface_inventory.hpp"
 #include "../keenetic/ndms_catalog_cache.hpp"
 #include "../keenetic/ndms_interface_inventory.hpp"
+#include "../keenetic/ndms_native_cooperative_import.hpp"
+#include "../keenetic/ndms_native_writer_lease.hpp"
 #include "../health/runtime_outbound_state.hpp"
 #include "../api/handler_runtime_inventory.hpp"
 #include "../api/handler_diagnostic_tasks.hpp"
@@ -44,6 +46,106 @@ namespace {
 
 constexpr auto conntrack_publish_delay = std::chrono::milliseconds{500};
 constexpr auto interface_traffic_sample_interval = std::chrono::seconds{2};
+
+#ifdef USE_KEENETIC_API
+class NativeImportBodyWipeGuard final {
+public:
+    explicit NativeImportBodyWipeGuard(std::string& value) noexcept
+        : value_(value) {}
+
+    ~NativeImportBodyWipeGuard() noexcept {
+        volatile char* cursor = value_.empty() ? nullptr : value_.data();
+        for (std::size_t index = 0U;
+             cursor != nullptr && index < value_.size(); ++index) {
+            cursor[index] = 0;
+        }
+        value_.clear();
+    }
+
+    NativeImportBodyWipeGuard(const NativeImportBodyWipeGuard&) = delete;
+    NativeImportBodyWipeGuard& operator=(
+        const NativeImportBodyWipeGuard&) = delete;
+
+private:
+    std::string& value_;
+};
+
+NdmsNativeCooperativeImportResult blocked_native_import(
+    const NdmsNativeCooperativeImportStop stop,
+    const NdmsNativeExternalWriterRaceAcceptance acceptance) noexcept {
+    NdmsNativeCooperativeImportResult result;
+    result.stop = stop;
+    result.external_ndms_writer_race_accepted =
+        acceptance ==
+        NdmsNativeExternalWriterRaceAcceptance::owner_accepted;
+    return result;
+}
+
+class NativeImportRequestReservation final
+    : public SensitiveRequestReservation {
+public:
+    NativeImportRequestReservation(
+        const void* owner,
+        NdmsNativeWriterLease&& writer,
+        NdmsNativeImportWalStore& import_wal,
+        NdmsNativeDeleteWalStore& delete_wal,
+        std::atomic<NdmsNativeImportJournalReadinessState>&
+            import_readiness,
+        std::atomic<NdmsNativeMutationAdmissionState>&
+            mutation_admission) noexcept
+        : owner_(owner),
+          writer_(std::move(writer)),
+          import_wal_(import_wal),
+          delete_wal_(delete_wal),
+          import_readiness_(import_readiness),
+          mutation_admission_(mutation_admission) {}
+
+    ~NativeImportRequestReservation() noexcept override {
+        // Refresh while the cooperative writer is still held. Member
+        // destruction releases the writer only after this body returns, so a
+        // second request can never observe "admitted" between the two WAL
+        // reads or before the first request has fully left the API callback.
+        try {
+            writer_.verify_held();
+            const auto delete_readiness = delete_wal_.readiness();
+            const auto inventory = import_wal_.try_inventory();
+            writer_.verify_held();
+            const auto import_state =
+                summarize_ndms_native_import_readiness(inventory);
+            const auto mutation_state =
+                summarize_ndms_native_mutation_admission(
+                    inventory, delete_readiness);
+            import_readiness_.store(
+                import_state, std::memory_order_release);
+            mutation_admission_.store(
+                mutation_state, std::memory_order_release);
+        } catch (...) {
+            import_readiness_.store(
+                NdmsNativeImportJournalReadinessState::unavailable,
+                std::memory_order_release);
+            mutation_admission_.store(
+                NdmsNativeMutationAdmissionState::unavailable,
+                std::memory_order_release);
+        }
+    }
+
+    bool owned_by(const void* owner) const noexcept {
+        return owner_ == owner;
+    }
+
+    NdmsNativeWriterLease& writer() noexcept { return writer_; }
+
+private:
+    const void* owner_{nullptr};
+    NdmsNativeWriterLease writer_;
+    NdmsNativeImportWalStore& import_wal_;
+    NdmsNativeDeleteWalStore& delete_wal_;
+    std::atomic<NdmsNativeImportJournalReadinessState>&
+        import_readiness_;
+    std::atomic<NdmsNativeMutationAdmissionState>&
+        mutation_admission_;
+};
+#endif
 
 std::int64_t interface_traffic_timestamp_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1027,10 +1129,115 @@ void Daemon::setup_api() {
         }
         return admitted;
     };
+#ifdef USE_KEENETIC_API
     api_ctx_->get_ndms_native_import_readiness_fn = [this]() noexcept {
         return ndms_native_import_journal_readiness_.load(
             std::memory_order_acquire);
     };
+    api_ctx_->reserve_ndms_native_import_fn = [this]()
+        -> std::shared_ptr<SensitiveRequestReservation> {
+        const auto publish_unavailable = [this]() noexcept {
+            ndms_native_import_journal_readiness_.store(
+                NdmsNativeImportJournalReadinessState::unavailable,
+                std::memory_order_release);
+            ndms_native_mutation_admission_.store(
+                NdmsNativeMutationAdmissionState::unavailable,
+                std::memory_order_release);
+        };
+        try {
+            // Existing production order is load-bearing:
+            // maintenance -> runtime admission -> native cross-process flock.
+            auto maintenance = std::make_unique<MaintenanceCoordinator>(
+                "ndms-native-import");
+            auto runtime = acquire_runtime_mutation_or_throw(
+                "ndms-native-import", false, false);
+            auto writer = admit_ndms_native_writer(
+                ndms_native_observation_store_.state_directory(),
+                std::move(maintenance),
+                std::move(runtime));
+            if (writer.state !=
+                NdmsNativeWriterAdmissionState::admitted) {
+                publish_unavailable();
+                return {};
+            }
+
+            writer.lease.verify_held();
+            ndms_native_import_wal_store_.sweep_orphaned_temporaries();
+            ndms_native_delete_wal_store_.sweep_orphaned_temporaries();
+            const auto delete_readiness =
+                ndms_native_delete_wal_store_.readiness();
+            const auto inventory =
+                ndms_native_import_wal_store_.try_inventory();
+            writer.lease.verify_held();
+
+            const auto import_state =
+                summarize_ndms_native_import_readiness(inventory);
+            const auto mutation_state =
+                summarize_ndms_native_mutation_admission(
+                    inventory, delete_readiness);
+            ndms_native_import_journal_readiness_.store(
+                import_state, std::memory_order_release);
+            if (mutation_state !=
+                NdmsNativeMutationAdmissionState::admitted) {
+                ndms_native_mutation_admission_.store(
+                    mutation_state, std::memory_order_release);
+                return {};
+            }
+
+            // While this exact token is live, every other request must see a
+            // fail-closed report even though both journals were just clean.
+            ndms_native_mutation_admission_.store(
+                NdmsNativeMutationAdmissionState::blocked,
+                std::memory_order_release);
+            return std::make_shared<NativeImportRequestReservation>(
+                this,
+                std::move(writer.lease),
+                ndms_native_import_wal_store_,
+                ndms_native_delete_wal_store_,
+                ndms_native_import_journal_readiness_,
+                ndms_native_mutation_admission_);
+        } catch (...) {
+            // Never upgrade readiness from separately observed WALs without
+            // the complete ordered writer chain.
+            publish_unavailable();
+            return {};
+        }
+    };
+    api_ctx_->run_ndms_native_import_fn =
+        [this](
+            std::string&& raw_configuration,
+            const NdmsNativeExternalWriterRaceAcceptance acceptance,
+            const std::shared_ptr<SensitiveRequestReservation>&
+                opaque_reservation) {
+            NativeImportBodyWipeGuard raw_guard{raw_configuration};
+            auto* reservation = dynamic_cast<
+                NativeImportRequestReservation*>(
+                    opaque_reservation.get());
+            if (reservation == nullptr || !reservation->owned_by(this)) {
+                return blocked_native_import(
+                    NdmsNativeCooperativeImportStop::
+                        cooperative_writer_admission_failed,
+                    acceptance);
+            }
+            try {
+                reservation->writer().verify_held();
+                NdmsNativeCooperativeImportCoordinator coordinator{
+                    ndms_native_observation_store_,
+                    ndms_native_import_wal_store_,
+                    ndms_native_delete_wal_store_,
+                    ndms_native_secret_snapshot_store_,
+                    ndms_native_ownership_store_};
+                return coordinator.import_once(
+                    reservation->writer(),
+                    std::move(raw_configuration),
+                    acceptance);
+            } catch (...) {
+                return blocked_native_import(
+                    NdmsNativeCooperativeImportStop::unexpected_failure,
+                    acceptance);
+            }
+        };
+#endif
     refresh_interface_traffic_config_targets(config_);
     lifecycle_operation_store_.set_publish_callback([this]() {
         if (status_stream_) status_stream_->reconcile();

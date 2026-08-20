@@ -161,13 +161,21 @@ struct ApiContext {
     // absent callback means the feature remains dormant.
     std::function<NdmsNativeImportJournalReadinessState()>
         get_ndms_native_import_readiness_fn;
-    // Optional tail callback keeps the import HTTP surface dormant until the
-    // daemon owns the complete maintenance/runtime/writer admission chain.
-    // It adopts the only raw secret string and returns the coordinator's
-    // redacted result; the API layer neither retries nor serializes internals.
+    // The reservation callback acquires the complete ordered
+    // maintenance/runtime/native-writer chain before the server allocates or
+    // reads a sensitive body. The same opaque token is retained by the server
+    // through response/error handling and passed to the execution callback,
+    // so a second request cannot consume its one-shot secret and lose a race
+    // only afterwards.
+    std::function<std::shared_ptr<SensitiveRequestReservation>()>
+        reserve_ndms_native_import_fn;
+    // Adopts the only raw secret string under the exact reservation above and
+    // returns the coordinator's redacted result; the API layer neither
+    // retries nor serializes internals.
     std::function<NdmsNativeCooperativeImportResult(
         std::string&&,
-        NdmsNativeExternalWriterRaceAcceptance)>
+        NdmsNativeExternalWriterRaceAcceptance,
+        const std::shared_ptr<SensitiveRequestReservation>&)>
         run_ndms_native_import_fn;
 
     Config get_visible_config() const {

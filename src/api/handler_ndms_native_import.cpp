@@ -233,8 +233,17 @@ const char* import_wal_readiness_name(
     return "unsafe";
 }
 
-void require_import_available(const ApiContext& context) {
-    if (!context.run_ndms_native_import_fn) {
+ApiServer::SensitiveRequestReservationPtr reserve_import(
+    const ApiContext& context) {
+    if (!context.run_ndms_native_import_fn ||
+        !context.reserve_ndms_native_import_fn) {
+        throw ApiError("native import is unavailable", 503);
+    }
+    try {
+        return context.reserve_ndms_native_import_fn();
+    } catch (const ApiError&) {
+        throw;
+    } catch (...) {
         throw ApiError("native import is unavailable", 503);
     }
 }
@@ -332,9 +341,11 @@ void register_ndms_native_import_handler(ApiServer& server,
         std::string{kNdmsNativeImportPreflightApiPath},
         1U,
         [&ctx](const httplib::Request&) {
-            require_import_available(ctx);
+            return reserve_import(ctx);
         },
-        [](const httplib::Request&, SensitiveRequestBody body) {
+        [](const httplib::Request&,
+           SensitiveRequestBody body,
+           const ApiServer::SensitiveRequestReservationPtr&) {
             if (!body.empty()) {
                 throw ApiError("native import preflight body must be empty",
                                400);
@@ -350,7 +361,10 @@ void register_ndms_native_import_handler(ApiServer& server,
         std::string{kNdmsNativeImportApiPath},
         kNdmsNativePreparedImportMaximumInputBytes,
         [&ctx](const httplib::Request& request) {
-            require_import_available(ctx);
+            if (!ctx.run_ndms_native_import_fn ||
+                !ctx.reserve_ndms_native_import_fn) {
+                throw ApiError("native import is unavailable", 503);
+            }
             if (!accepted_plain_text_content_type(request)) {
                 throw ApiError("native import requires text/plain", 415);
             }
@@ -359,8 +373,12 @@ void register_ndms_native_import_handler(ApiServer& server,
                     "external NDMS writer race acceptance is required",
                     428);
             }
+            return reserve_import(ctx);
         },
-        [&ctx](const httplib::Request&, SensitiveRequestBody body) {
+        [&ctx](const httplib::Request&,
+               SensitiveRequestBody body,
+               const ApiServer::SensitiveRequestReservationPtr&
+                   reservation) {
             if (body.empty()) {
                 throw ApiError("native import body must not be empty", 400);
             }
@@ -368,7 +386,8 @@ void register_ndms_native_import_handler(ApiServer& server,
             WipeSensitiveString wipe_raw{raw_configuration};
             const auto result = ctx.run_ndms_native_import_fn(
                 std::move(raw_configuration),
-                NdmsNativeExternalWriterRaceAcceptance::owner_accepted);
+                NdmsNativeExternalWriterRaceAcceptance::owner_accepted,
+                reservation);
             return ndms_native_import_api_response(result).dump();
         });
 }

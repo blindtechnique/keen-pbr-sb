@@ -127,3 +127,55 @@ TEST_CASE("native import readiness collapses unavailable inventory without ident
         CHECK(name.find("kpbr-ni") == std::string::npos);
     }
 }
+
+TEST_CASE("native mutation pre-body admission requires both WAL domains clean") {
+    NdmsNativeImportWalInventory absent;
+    absent.state = NdmsNativeImportWalInventoryState::absent;
+    NdmsNativeImportWalInventory empty;
+    empty.state = NdmsNativeImportWalInventoryState::ready;
+    const auto unfinished = valid_nonempty_inventory();
+
+    CHECK(summarize_ndms_native_mutation_admission(
+              absent, NdmsNativeDeleteWalReadiness::clean) ==
+          NdmsNativeMutationAdmissionState::admitted);
+    CHECK(summarize_ndms_native_mutation_admission(
+              empty, NdmsNativeDeleteWalReadiness::clean) ==
+          NdmsNativeMutationAdmissionState::admitted);
+    CHECK(summarize_ndms_native_mutation_admission(
+              unfinished, NdmsNativeDeleteWalReadiness::clean) ==
+          NdmsNativeMutationAdmissionState::blocked);
+    CHECK(summarize_ndms_native_mutation_admission(
+              empty, NdmsNativeDeleteWalReadiness::unfinished) ==
+          NdmsNativeMutationAdmissionState::blocked);
+    CHECK(summarize_ndms_native_mutation_admission(
+              empty, NdmsNativeDeleteWalReadiness::unsafe) ==
+          NdmsNativeMutationAdmissionState::unavailable);
+
+    NdmsNativeImportWalInventory unavailable;
+    unavailable.state = NdmsNativeImportWalInventoryState::io_error;
+    CHECK(summarize_ndms_native_mutation_admission(
+              unavailable, NdmsNativeDeleteWalReadiness::clean) ==
+          NdmsNativeMutationAdmissionState::unavailable);
+
+    auto corrupt = unfinished;
+    corrupt.items.front().state =
+        NdmsNativeImportWalLoadState::corrupt_record;
+    CHECK(summarize_ndms_native_mutation_admission(
+              corrupt, NdmsNativeDeleteWalReadiness::clean) ==
+          NdmsNativeMutationAdmissionState::unavailable);
+    NdmsNativeImportWalInventory oversized;
+    oversized.state =
+        NdmsNativeImportWalInventoryState::directory_limit_exceeded;
+    CHECK(summarize_ndms_native_mutation_admission(
+              oversized, NdmsNativeDeleteWalReadiness::clean) ==
+          NdmsNativeMutationAdmissionState::unavailable);
+
+    for (const auto state : {
+             NdmsNativeMutationAdmissionState::admitted,
+             NdmsNativeMutationAdmissionState::blocked,
+             NdmsNativeMutationAdmissionState::unavailable,
+         }) {
+        CHECK_FALSE(std::string{
+            ndms_native_mutation_admission_state_name(state)}.empty());
+    }
+}

@@ -51,6 +51,35 @@ bool ndms_native_import_inventory_permits_ownership_reconciliation(
            inventory.items.empty();
 }
 
+NdmsNativeMutationAdmissionState summarize_ndms_native_mutation_admission(
+    const NdmsNativeImportWalInventory& import_inventory,
+    const NdmsNativeDeleteWalReadiness delete_readiness) noexcept {
+    if (delete_readiness == NdmsNativeDeleteWalReadiness::unsafe) {
+        return NdmsNativeMutationAdmissionState::unavailable;
+    }
+    if (delete_readiness != NdmsNativeDeleteWalReadiness::clean) {
+        return NdmsNativeMutationAdmissionState::blocked;
+    }
+
+    const bool import_clean =
+        (import_inventory.state ==
+             NdmsNativeImportWalInventoryState::absent ||
+         import_inventory.state ==
+             NdmsNativeImportWalInventoryState::ready) &&
+        import_inventory.items.empty();
+    if (import_clean) {
+        return NdmsNativeMutationAdmissionState::admitted;
+    }
+    // Only a complete inventory of valid durable records proves a known
+    // unfinished transaction. Unsafe names/records, excessive inventories,
+    // contention and I/O failure are unknown rather than "blocked".
+    if (import_inventory.recovery_permitted() &&
+        !import_inventory.items.empty()) {
+        return NdmsNativeMutationAdmissionState::blocked;
+    }
+    return NdmsNativeMutationAdmissionState::unavailable;
+}
+
 const char* ndms_native_import_journal_readiness_state_name(
     const NdmsNativeImportJournalReadinessState state) noexcept {
     switch (state) {
@@ -63,6 +92,19 @@ const char* ndms_native_import_journal_readiness_state_name(
     case NdmsNativeImportJournalReadinessState::unsafe:
         return "unsafe";
     case NdmsNativeImportJournalReadinessState::unavailable:
+        return "unavailable";
+    }
+    return "unavailable";
+}
+
+const char* ndms_native_mutation_admission_state_name(
+    const NdmsNativeMutationAdmissionState state) noexcept {
+    switch (state) {
+    case NdmsNativeMutationAdmissionState::admitted:
+        return "admitted";
+    case NdmsNativeMutationAdmissionState::blocked:
+        return "blocked";
+    case NdmsNativeMutationAdmissionState::unavailable:
         return "unavailable";
     }
     return "unavailable";

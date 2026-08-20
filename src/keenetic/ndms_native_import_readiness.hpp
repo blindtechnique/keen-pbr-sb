@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ndms_native_delete_wal_store.hpp"
 #include "ndms_native_import_wal_store.hpp"
 
 #include <cstdint>
@@ -11,10 +12,10 @@ namespace keen_pbr3 {
 // expose Apply.  In particular, callers must keep the independent
 // recovery_journal_not_integrated blocker until boot recovery is complete.
 enum class NdmsNativeImportJournalReadinessState : std::uint8_t {
-    // No state directory has ever been published.  Treating this as clean is
-    // valid only while every production writer/provider remains disabled.  A
-    // future enabled writer must provision and verify the journal before this
-    // state can participate in readiness decisions.
+    // No state directory has ever been published. This can participate in a
+    // fresh admission only while the caller holds the complete native writer;
+    // the same value cached in an atomic remains report-only. It is never by
+    // itself enough authority for ownership retirement.
     clean_never_activated,
     // A private, bounded and fully inspected journal exists and is empty.
     clean,
@@ -23,6 +24,18 @@ enum class NdmsNativeImportJournalReadinessState : std::uint8_t {
     // The bounded inventory or one of its entries is unsafe or incomplete.
     unsafe,
     // The journal could not be inspected due to an I/O or availability fault.
+    unavailable,
+};
+
+// Redacted cross-WAL summary shared by bodyless preflight and the real
+// sensitive route. It authorizes reading a request body only when computed
+// from fresh bounded store reads under the complete ordered native writer.
+// A cached copy is report-only. The server retains that writer through body
+// handling, and the coordinator independently validates its exact journals
+// and observation binding before dispatch.
+enum class NdmsNativeMutationAdmissionState : std::uint8_t {
+    admitted,
+    blocked,
     unavailable,
 };
 
@@ -41,7 +54,14 @@ summarize_ndms_native_import_readiness(
 bool ndms_native_import_inventory_permits_ownership_reconciliation(
     const NdmsNativeImportWalInventory& inventory) noexcept;
 
+NdmsNativeMutationAdmissionState summarize_ndms_native_mutation_admission(
+    const NdmsNativeImportWalInventory& import_inventory,
+    NdmsNativeDeleteWalReadiness delete_readiness) noexcept;
+
 const char* ndms_native_import_journal_readiness_state_name(
     NdmsNativeImportJournalReadinessState state) noexcept;
+
+const char* ndms_native_mutation_admission_state_name(
+    NdmsNativeMutationAdmissionState state) noexcept;
 
 } // namespace keen_pbr3

@@ -32,7 +32,10 @@
 #include "../keenetic/internal_vpn_runtime_target.hpp"
 #include "../keenetic/ndms_native_import_readiness.hpp"
 #include "../keenetic/ndms_native_import_wal_store.hpp"
+#include "../keenetic/ndms_native_delete_wal_store.hpp"
+#include "../keenetic/ndms_native_observation_store.hpp"
 #include "../keenetic/ndms_native_ownership_store.hpp"
+#include "../keenetic/ndms_native_secret_snapshot.hpp"
 #include "../lists/list_set_usage.hpp"
 #include "../routing/interface_monitor.hpp"
 #include "../routing/firewall_state.hpp"
@@ -1076,17 +1079,28 @@ private:
     // Snapshot stores
     ConfigStore config_store_;
     ListService list_service_;
-    // Report-only startup observation. The store is inventoried exactly once
-    // before NDMS/routing startup; API workers read only the redacted atomic
-    // summary and can never turn it into mutation authority.
+    // Report-only WAL observations. API workers read only redacted atomic
+    // summaries and can never turn either one into mutation authority.
     NdmsNativeImportWalStore ndms_native_import_wal_store_;
+    // A single fixed-name delete WAL is the cross-kind crash anchor. Import,
+    // ownership reconciliation and delete all treat anything except an
+    // authoritative clean reading as a mutation barrier.
+    NdmsNativeDeleteWalStore ndms_native_delete_wal_store_;
     // Sits beside the WAL store rather than inside it: an unknown name inside
     // the WAL directory makes every inventory unsafe by design, so its
     // neighbours must live elsewhere.
     NdmsNativeOwnershipStore ndms_native_ownership_store_;
+    // Restart-stable mutation authority and encrypted full WG/AWG rollback
+    // material. The key intentionally lives outside the snapshot directory so
+    // backup policy can include one without silently including the other.
+    NdmsNativeObservationStore ndms_native_observation_store_;
+    NdmsNativeSecretSnapshotStore ndms_native_secret_snapshot_store_;
     std::atomic<NdmsNativeImportJournalReadinessState>
         ndms_native_import_journal_readiness_{
             NdmsNativeImportJournalReadinessState::unavailable};
+    std::atomic<NdmsNativeMutationAdmissionState>
+        ndms_native_mutation_admission_{
+            NdmsNativeMutationAdmissionState::unavailable};
     RuntimeStateStore runtime_state_store_;
     LifecycleOperationStore lifecycle_operation_store_;
     LifecycleOperationCoordinator lifecycle_operations_{lifecycle_operation_store_};
