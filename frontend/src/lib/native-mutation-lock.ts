@@ -33,6 +33,10 @@ export type NativeMutationLeaseDisposition =
       state: "recovery"
       recovery: NativeMutationRecoveryKind
     }>
+  | Readonly<{
+      state: "redirect_recovery"
+      recovery: NativeMutationRecoveryKind
+    }>
   | Readonly<{ state: "unknown" }>
 
 export type NativeMutationLeaseCompletion<T> = Readonly<{
@@ -67,6 +71,7 @@ type AvailableSnapshot = Readonly<{
   raw: string | null
   lock: NativeMutationLock | null
   corrupt: boolean
+  unsupported: boolean
   legacy: boolean
 }>
 
@@ -133,6 +138,20 @@ const parseLock = (serialized: string | null): NativeMutationLock | null => {
     // The caller distinguishes corrupt durable state from an empty journal.
   }
   return null
+}
+
+const hasUnsupportedLockVersion = (serialized: string): boolean => {
+  try {
+    const value = JSON.parse(serialized) as Record<string, unknown>
+    return (
+      Boolean(value) &&
+      !Array.isArray(value) &&
+      Object.prototype.hasOwnProperty.call(value, "version") &&
+      value.version !== 1
+    )
+  } catch {
+    return false
+  }
 }
 
 const serializeLock = (lock: NativeMutationLock): string => JSON.stringify(lock)
@@ -300,6 +319,7 @@ const legacySnapshot = (
     raw: null,
     lock: legacy,
     corrupt: false,
+    unsupported: false,
     legacy: true,
   }
 }
@@ -322,6 +342,7 @@ const readDurableSnapshot = (): DurableSnapshot => {
       raw: null,
       lock: null,
       corrupt: false,
+      unsupported: false,
       legacy: false,
     }
   }
@@ -333,6 +354,7 @@ const readDurableSnapshot = (): DurableSnapshot => {
     raw: current.value,
     lock: parsed,
     corrupt: parsed === null,
+    unsupported: parsed === null && hasUnsupportedLockVersion(current.value),
     legacy: false,
   }
 }
@@ -382,7 +404,8 @@ const operationEligible = (
   snapshot: AvailableSnapshot,
   operation: NativeMutationOperation
 ): boolean => {
-  if (snapshot.corrupt) return false
+  if (snapshot.unsupported) return false
+  if (snapshot.corrupt) return !isFreshOperation(operation)
   if (isFreshOperation(operation)) return snapshot.lock === null
   if (snapshot.lock === null) return true
 
@@ -404,12 +427,21 @@ const writePending = (
   if (!token) return null
 
   const current = readDurableSnapshot()
+  const exactCorruptRecovery =
+    baseline.corrupt &&
+    current.status === "available" &&
+    current.corrupt &&
+    !baseline.unsupported &&
+    !current.unsupported &&
+    !isFreshOperation(operation)
   if (
     baseline.legacy ||
     current.status !== "available" ||
     current.storage !== baseline.storage ||
     current.raw !== baseline.raw ||
-    current.corrupt ||
+    baseline.unsupported ||
+    current.unsupported ||
+    ((baseline.corrupt || current.corrupt) && !exactCorruptRecovery) ||
     current.legacy
   ) {
     adoptSnapshot(current)
@@ -554,7 +586,7 @@ const isDisposition = (
     return true
   }
   return (
-    state === "recovery" &&
+    (state === "recovery" || state === "redirect_recovery") &&
     isRecoveryKind((value as { recovery?: unknown }).recovery)
   )
 }
@@ -667,26 +699,29 @@ export async function runWithNativeMutationLease<T>(
             return { status: "outcome_unknown" } as const
           }
 
-          const target =
-            completion.disposition.state === "clear"
-              ? null
-              : completion.disposition.recovery ===
-                  recoveryForOperation(operation)
-                ? ({
-                    version: 1,
-                    state: "recovery_required",
-                    recovery: completion.disposition.recovery,
-                  } as const)
-                : ({
-                    version: 1,
-                    state: "unknown",
-                    operation,
-                  } as const)
+          let coherentDisposition = true
+          let target: NativeMutationLock | null = null
+          if (completion.disposition.state !== "clear") {
+            const operationRecovery = recoveryForOperation(operation)
+            coherentDisposition =
+              completion.disposition.state === "redirect_recovery"
+                ? !isFreshOperation(operation) &&
+                  completion.disposition.recovery !== operationRecovery
+                : completion.disposition.recovery === operationRecovery
+            target = coherentDisposition
+              ? {
+                  version: 1,
+                  state: "recovery_required",
+                  recovery: completion.disposition.recovery,
+                }
+              : {
+                  version: 1,
+                  state: "unknown",
+                  operation,
+                }
+          }
 
-          const coherentRecovery =
-            completion.disposition.state !== "recovery" ||
-            completion.disposition.recovery === recoveryForOperation(operation)
-          if (!writeTerminal(authority, target) || !coherentRecovery) {
+          if (!writeTerminal(authority, target) || !coherentDisposition) {
             return { status: "outcome_unknown" } as const
           }
           return { status: "completed", value: completion.value } as const

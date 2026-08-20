@@ -20,6 +20,11 @@ import {
   type NativeMutationRecoveryKind,
 } from "@/lib/native-mutation-lock"
 
+import {
+  nativeDeleteRecoveryDisposition,
+  nativeImportRecoveryDisposition,
+} from "./native-mutation-recovery-model"
+
 type RecoveryOutcome =
   | "import_no_work"
   | "import_completed"
@@ -128,21 +133,18 @@ export function NativeMutationRecovery({
               const result = await postNdmsNativeImportRecoveryOnce()
               if (result.status === "no_work") {
                 return {
-                  disposition: { state: "clear" } as const,
+                  disposition: nativeImportRecoveryDisposition(result),
                   value: "import_no_work" as const,
                 }
               }
               if (result.status === "completed") {
                 return {
-                  disposition: { state: "clear" } as const,
+                  disposition: nativeImportRecoveryDisposition(result),
                   value: "import_completed" as const,
                 }
               }
               return {
-                disposition: {
-                  state: "recovery",
-                  recovery: "import",
-                } as const,
+                disposition: nativeImportRecoveryDisposition(result),
                 value: "import_blocked" as const,
               }
             } catch (error) {
@@ -196,7 +198,7 @@ export function NativeMutationRecovery({
                 await postNdmsNativeDeleteRecoveryOnce(withAcknowledgements)
               if (result.status === "save_acknowledged_unverified") {
                 return {
-                  disposition: { state: "clear" } as const,
+                  disposition: nativeDeleteRecoveryDisposition(result),
                   value: {
                     outcome: "delete_terminal",
                     result,
@@ -209,7 +211,7 @@ export function NativeMutationRecovery({
                 result.stop === "no_delete_transaction"
               ) {
                 return {
-                  disposition: { state: "clear" } as const,
+                  disposition: nativeDeleteRecoveryDisposition(result),
                   value: {
                     outcome: "delete_no_work",
                     reconfirm: false,
@@ -217,10 +219,7 @@ export function NativeMutationRecovery({
                 }
               }
               return {
-                disposition: {
-                  state: "recovery",
-                  recovery: "delete",
-                } as const,
+                disposition: nativeDeleteRecoveryDisposition(result),
                 value: {
                   outcome: "delete_blocked",
                   reconfirm: result.stop === "save_reconfirmation_required",

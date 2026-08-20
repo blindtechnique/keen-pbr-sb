@@ -7,6 +7,15 @@ import {
   test,
 } from "bun:test"
 
+import type {
+  NdmsNativeDeleteResult,
+  NdmsNativeImportRecoveryResult,
+} from "@/api/native-mutation"
+import {
+  nativeDeleteRecoveryDisposition,
+  nativeImportRecoveryDisposition,
+} from "@/components/transports/native-mutation-recovery-model"
+
 import {
   NATIVE_MUTATION_LOCK_STORAGE_KEY,
   NATIVE_MUTATION_WEB_LOCK_NAME,
@@ -148,6 +157,38 @@ const complete = <T>(
   disposition: NativeMutationLeaseCompletion<T>["disposition"],
   value: T
 ): NativeMutationLeaseCompletion<T> => ({ disposition, value })
+
+const importRecoveryResult = (
+  status: NdmsNativeImportRecoveryResult["status"],
+  stop: NdmsNativeImportRecoveryResult["stop"]
+): NdmsNativeImportRecoveryResult => ({
+  status,
+  stop,
+  ndms_import_request_dispatched: false,
+  ndms_delete_dispatched: false,
+  system_configuration_save_performed: false,
+  external_ndms_writer_race_excluded: false,
+  wal_may_require_recovery: status === "blocked",
+  ownership_published: false,
+  wal_removed: false,
+})
+
+const deleteRecoveryResult = (
+  status: NdmsNativeDeleteResult["status"],
+  stop: NdmsNativeDeleteResult["stop"]
+): NdmsNativeDeleteResult => ({
+  status,
+  stop,
+  external_writer_race_excluded: false,
+  external_writer_race_accepted: false,
+  global_save_scope_acknowledged: false,
+  delete_perform_started: false,
+  save_perform_started: false,
+  request_may_have_been_dispatched: false,
+  system_configuration_save_acknowledged: false,
+  ownership_tombstone_durable: false,
+  rollback_snapshot_retained: false,
+})
 
 const defer = () => {
   let resolve!: () => void
@@ -580,7 +621,6 @@ describe("native mutation browser-global lease", () => {
     for (const rejected of [
       marker({ version: 1, state: "unknown", operation: "delete" }),
       marker({ version: 1, state: "recovery_required", recovery: "delete" }),
-      "not-json",
     ]) {
       localStorage.setItem(NATIVE_MUTATION_LOCK_STORAGE_KEY, rejected)
       const before = calls
@@ -782,5 +822,242 @@ describe("native mutation browser-global lease", () => {
       "not-json"
     )
     expect(readNativeMutationLock()?.state).toBe("unknown")
+  })
+
+  test("15: an exact redirect changes only an orphan recovery family", async () => {
+    localStorage.setItem(NATIVE_MUTATION_LOCK_STORAGE_KEY, "not-json")
+    let freshCalls = 0
+    expect(
+      await runWithNativeMutationLease("import", async () => {
+        freshCalls += 1
+        return complete({ state: "clear" }, "must-not-run")
+      })
+    ).toEqual({ status: "unavailable" })
+    expect(freshCalls).toBe(0)
+    expect(localStorage.getItem(NATIVE_MUTATION_LOCK_STORAGE_KEY)).toBe(
+      "not-json"
+    )
+
+    const importOrphans: Array<() => void> = [
+      () =>
+        localStorage.setItem(
+          NATIVE_MUTATION_LOCK_STORAGE_KEY,
+          marker(pending("import", "2"))
+        ),
+      () =>
+        localStorage.setItem(LEGACY_IMPORT_LOCK_STORAGE_KEY, "legacy-pending"),
+      () => localStorage.setItem(NATIVE_MUTATION_LOCK_STORAGE_KEY, "not-json"),
+      () =>
+        localStorage.setItem(
+          NATIVE_MUTATION_LOCK_STORAGE_KEY,
+          JSON.stringify({ version: 1, state: "invalid-current-state" })
+        ),
+    ]
+
+    for (const prepare of importOrphans) {
+      localStorage.clear()
+      sessionStorage.clear()
+      prepare()
+      expect(
+        await runWithNativeMutationLease("import_recovery", async () =>
+          complete(
+            { state: "redirect_recovery", recovery: "delete" },
+            "redirected"
+          )
+        )
+      ).toEqual({ status: "completed", value: "redirected" })
+      expect(readNativeMutationLock()).toEqual({
+        version: 1,
+        state: "recovery_required",
+        recovery: "delete",
+      })
+    }
+
+    const deleteOrphans: Array<() => void> = [
+      () =>
+        localStorage.setItem(
+          NATIVE_MUTATION_LOCK_STORAGE_KEY,
+          marker(pending("delete", "3"))
+        ),
+      () => localStorage.setItem(NATIVE_MUTATION_LOCK_STORAGE_KEY, "not-json"),
+      () =>
+        localStorage.setItem(
+          NATIVE_MUTATION_LOCK_STORAGE_KEY,
+          JSON.stringify({ version: 1, state: "invalid-current-state" })
+        ),
+    ]
+
+    for (const prepare of deleteOrphans) {
+      localStorage.clear()
+      sessionStorage.clear()
+      prepare()
+      expect(
+        await runWithNativeMutationLease("delete_recovery", async () =>
+          complete(
+            { state: "redirect_recovery", recovery: "import" },
+            "redirected-back"
+          )
+        )
+      ).toEqual({ status: "completed", value: "redirected-back" })
+      expect(readNativeMutationLock()).toEqual({
+        version: 1,
+        state: "recovery_required",
+        recovery: "import",
+      })
+    }
+  })
+
+  test("16: same-family and fresh-operation redirects stay outcome-unknown", async () => {
+    localStorage.setItem(
+      NATIVE_MUTATION_LOCK_STORAGE_KEY,
+      marker(pending("import", "4"))
+    )
+    expect(
+      await runWithNativeMutationLease("import_recovery", async () =>
+        complete({ state: "redirect_recovery", recovery: "import" }, "invalid")
+      )
+    ).toEqual({ status: "outcome_unknown" })
+    expect(readNativeMutationLock()).toEqual({
+      version: 1,
+      state: "unknown",
+      operation: "import_recovery",
+    })
+
+    localStorage.clear()
+    expect(
+      await runWithNativeMutationLease("import", async ({ beginPending }) => {
+        expect(beginPending()).toBe(true)
+        return complete(
+          { state: "redirect_recovery", recovery: "delete" },
+          "invalid-fresh"
+        )
+      })
+    ).toEqual({ status: "outcome_unknown" })
+    expect(readNativeMutationLock()).toEqual({
+      version: 1,
+      state: "unknown",
+      operation: "import",
+    })
+  })
+
+  test("17: redirect persistence failures preserve exact journal authority", async () => {
+    localStorage.setItem(
+      NATIVE_MUTATION_LOCK_STORAGE_KEY,
+      marker(pending("import", "5"))
+    )
+    const failedWrite = await runWithNativeMutationLease(
+      "import_recovery",
+      async () => {
+        localStorage.throwSet = true
+        return complete(
+          { state: "redirect_recovery", recovery: "delete" },
+          "uncommitted"
+        )
+      }
+    )
+    localStorage.throwSet = false
+    expect(failedWrite).toEqual({ status: "outcome_unknown" })
+    const retained = readNativeMutationLock()
+    expect(retained?.state).toBe("pending")
+    expect(retained?.state === "pending" && retained.operation).toBe(
+      "import_recovery"
+    )
+
+    localStorage.setItem(
+      NATIVE_MUTATION_LOCK_STORAGE_KEY,
+      marker(pending("import", "6"))
+    )
+    const rogue = pending("import", "7")
+    const unsubscribe = subscribeNativeMutationLock((lock) => {
+      if (lock?.state === "recovery_required" && lock.recovery === "delete") {
+        localStorage.setItem(NATIVE_MUTATION_LOCK_STORAGE_KEY, marker(rogue))
+      }
+    })
+    expect(
+      await runWithNativeMutationLease("import_recovery", async () =>
+        complete({ state: "redirect_recovery", recovery: "delete" }, "tampered")
+      )
+    ).toEqual({ status: "outcome_unknown" })
+    expect(readNativeMutationLock()).toEqual(rogue)
+    unsubscribe()
+  })
+
+  test("18: an unsupported future lock version is never overwritten", async () => {
+    const future = JSON.stringify({
+      version: 2,
+      state: "recovery_required",
+      recovery: "delete",
+    })
+    localStorage.setItem(NATIVE_MUTATION_LOCK_STORAGE_KEY, future)
+    let callbackCount = 0
+
+    for (const operation of [
+      "import",
+      "delete",
+      "import_recovery",
+      "delete_recovery",
+    ] as const) {
+      expect(
+        await runWithNativeMutationLease(operation, async () => {
+          callbackCount += 1
+          return complete(
+            { state: "redirect_recovery", recovery: "delete" },
+            undefined
+          )
+        })
+      ).toEqual({ status: "unavailable" })
+    }
+    expect(callbackCount).toBe(0)
+    expect(localStorage.getItem(NATIVE_MUTATION_LOCK_STORAGE_KEY)).toBe(future)
+  })
+})
+
+describe("native mutation recovery dispositions", () => {
+  test("only exact cross-WAL stops redirect the recovery family", () => {
+    expect(
+      nativeImportRecoveryDisposition(
+        importRecoveryResult("blocked", "delete_wal_not_clean")
+      )
+    ).toEqual({ state: "redirect_recovery", recovery: "delete" })
+    expect(
+      nativeImportRecoveryDisposition(
+        importRecoveryResult("blocked", "phase_not_forward_only")
+      )
+    ).toEqual({ state: "recovery", recovery: "import" })
+    expect(
+      nativeImportRecoveryDisposition(
+        importRecoveryResult("blocked", "unexpected_failure")
+      )
+    ).toEqual({ state: "recovery", recovery: "import" })
+
+    expect(
+      nativeDeleteRecoveryDisposition(
+        deleteRecoveryResult("blocked", "import_wal_not_authoritatively_clean")
+      )
+    ).toEqual({ state: "redirect_recovery", recovery: "import" })
+    expect(
+      nativeDeleteRecoveryDisposition(
+        deleteRecoveryResult("blocked", "save_reconfirmation_required")
+      )
+    ).toEqual({ state: "recovery", recovery: "delete" })
+    expect(
+      nativeDeleteRecoveryDisposition(
+        deleteRecoveryResult("blocked", "unexpected_failure")
+      )
+    ).toEqual({ state: "recovery", recovery: "delete" })
+  })
+
+  test("terminal no-work results still clear the browser journal", () => {
+    expect(
+      nativeImportRecoveryDisposition(importRecoveryResult("no_work", "none"))
+    ).toEqual({ state: "clear" })
+    expect(
+      nativeImportRecoveryDisposition(importRecoveryResult("completed", "none"))
+    ).toEqual({ state: "clear" })
+    expect(
+      nativeDeleteRecoveryDisposition(
+        deleteRecoveryResult("blocked", "no_delete_transaction")
+      )
+    ).toEqual({ state: "clear" })
   })
 })
