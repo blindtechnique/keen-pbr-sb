@@ -50,9 +50,10 @@ namespace {
 
 #ifdef KEEN_PBR3_TESTING
 std::atomic<std::size_t> sensitive_request_body_wipe_count{0U};
+std::atomic<std::size_t> sensitive_request_body_stream_count{0U};
 #endif
 
-constexpr std::size_t kMaximumSensitiveRequestBodyBytes = 256U * 1024U;
+constexpr std::size_t kMaximumSensitiveRequestBodyBytes = 512U * 1024U;
 
 void wipe_sensitive_bytes(std::vector<char>& bytes) noexcept {
     if (bytes.empty()) return;
@@ -123,6 +124,16 @@ void reset_sensitive_request_body_wipe_count_for_testing() noexcept {
 
 std::size_t sensitive_request_body_wipe_count_for_testing() noexcept {
     return sensitive_request_body_wipe_count.load(
+        std::memory_order_relaxed);
+}
+
+void reset_sensitive_request_body_stream_count_for_testing() noexcept {
+    sensitive_request_body_stream_count.store(
+        0U, std::memory_order_relaxed);
+}
+
+std::size_t sensitive_request_body_stream_count_for_testing() noexcept {
+    return sensitive_request_body_stream_count.load(
         std::memory_order_relaxed);
 }
 #endif
@@ -3022,6 +3033,18 @@ void ApiServer::post_sensitive(
     const std::string& path,
     const std::size_t maximum_body_bytes,
     SensitiveBodyRouteHandler handler) {
+    post_sensitive(
+        path,
+        maximum_body_bytes,
+        SensitivePreBodyAdmission{},
+        std::move(handler));
+}
+
+void ApiServer::post_sensitive(
+    const std::string& path,
+    const std::size_t maximum_body_bytes,
+    SensitivePreBodyAdmission pre_body_admission,
+    SensitiveBodyRouteHandler handler) {
     if (!requires_step_up("POST", path)) {
         throw std::invalid_argument(
             "sensitive route must be registered for step-up");
@@ -3036,7 +3059,10 @@ void ApiServer::post_sensitive(
     }
     impl_->server.Post(
         path,
-        [state = impl_.get(), h = std::move(handler), maximum_body_bytes](
+        [state = impl_.get(),
+         admission = std::move(pre_body_admission),
+         h = std::move(handler),
+         maximum_body_bytes](
             const httplib::Request& req,
             httplib::Response& res,
             const httplib::ContentReader& content_reader) {
@@ -3058,6 +3084,18 @@ void ApiServer::post_sensitive(
                     return;
                 }
 
+                if (admission) {
+                    try {
+                        admission(req);
+                    } catch (...) {
+                        // A pre-body refusal deliberately leaves the request
+                        // payload unread. Never let those bytes become the
+                        // next request on a persistent connection.
+                        res.set_header("Connection", "close");
+                        throw;
+                    }
+                }
+
                 SensitiveRequestBody body{std::vector<char>{}};
                 // Allocate once before receiving credentials. Reallocation
                 // after the first chunk would release an unwiped old buffer.
@@ -3065,6 +3103,10 @@ void ApiServer::post_sensitive(
                 bool too_large = false;
                 const bool read_ok = content_reader(
                     [&](const char* data, const std::size_t size) {
+#ifdef KEEN_PBR3_TESTING
+                        sensitive_request_body_stream_count.fetch_add(
+                            1U, std::memory_order_relaxed);
+#endif
                         if (size >
                             maximum_body_bytes - body.bytes_.size()) {
                             too_large = true;

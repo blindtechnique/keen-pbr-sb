@@ -31,6 +31,7 @@ const std::vector<StepUpProtectedRoute>& registered_privileged_routes() {
         {"POST", "/api/system/naive-component"},
         {"GET", "/api/system/naive-component"},
         {"POST", "/api/system/ndms/interfaces/import"},
+        {"POST", "/api/system/ndms/interfaces/import/preflight"},
         {"POST", "/api/system/ndms/interfaces/remove"},
         {"POST", "/api/system/ndms/recovery/retry"},
         {"POST", "/api/system/remote-access"},
@@ -78,6 +79,7 @@ const std::vector<std::string>& registered_routes() {
         "/api/system/geo",
         "/api/system/naive-component",
         "/api/system/ndms/interfaces/import",
+        "/api/system/ndms/interfaces/import/preflight",
         "/api/system/ndms/interfaces/remove",
         "/api/system/ndms/recovery/retry",
         "/api/system/remote-access",
@@ -142,6 +144,8 @@ TEST_CASE("the package and access operations require a step-up") {
     CHECK(requires_step_up("POST", "/api/system/remote-access"));
     CHECK(requires_step_up(
         "POST", "/api/system/ndms/interfaces/import"));
+    CHECK(requires_step_up(
+        "POST", "/api/system/ndms/interfaces/import/preflight"));
     CHECK(requires_step_up(
         "POST", "/api/system/ndms/interfaces/remove"));
     CHECK(requires_step_up(

@@ -74,6 +74,8 @@ private:
 #ifdef KEEN_PBR3_TESTING
 void reset_sensitive_request_body_wipe_count_for_testing() noexcept;
 std::size_t sensitive_request_body_wipe_count_for_testing() noexcept;
+void reset_sensitive_request_body_stream_count_for_testing() noexcept;
+std::size_t sensitive_request_body_stream_count_for_testing() noexcept;
 #endif
 
 // HTTP REST API server using cpp-httplib.
@@ -98,6 +100,8 @@ public:
     using SensitiveBodyRouteHandler = std::function<std::string(
         const httplib::Request& request,
         SensitiveRequestBody body)>;
+    using SensitivePreBodyAdmission =
+        std::function<void(const httplib::Request& request)>;
     using StreamRouteHandler = std::function<void(const httplib::Request&,
                                                   httplib::Response&)>;
 
@@ -115,6 +119,15 @@ public:
     // transport check. ContentReader avoids retaining a second req.body copy.
     void post_sensitive(const std::string& path,
                         std::size_t maximum_body_bytes,
+                        SensitiveBodyRouteHandler handler);
+
+    // Optional route-specific admission runs after authentication, step-up
+    // and protected-transport checks but before ContentReader is entered or a
+    // body buffer is allocated. Existing callers use the overload above and
+    // retain their previous behavior.
+    void post_sensitive(const std::string& path,
+                        std::size_t maximum_body_bytes,
+                        SensitivePreBodyAdmission pre_body_admission,
                         SensitiveBodyRouteHandler handler);
 
     // Register a GET handler that streams a non-JSON response.

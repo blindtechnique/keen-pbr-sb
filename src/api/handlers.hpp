@@ -9,6 +9,7 @@
 #include "../daemon/config_store.hpp"
 #include "../health/routing_health.hpp"
 #include "../keenetic/ndms_native_import_readiness.hpp"
+#include "../keenetic/ndms_native_cooperative_import.hpp"
 #include "../log/logger.hpp"
 #include "../runtime/lifecycle_operation.hpp"
 #include "../runtime/runtime_mutation_admission.hpp"
@@ -160,6 +161,14 @@ struct ApiContext {
     // absent callback means the feature remains dormant.
     std::function<NdmsNativeImportJournalReadinessState()>
         get_ndms_native_import_readiness_fn;
+    // Optional tail callback keeps the import HTTP surface dormant until the
+    // daemon owns the complete maintenance/runtime/writer admission chain.
+    // It adopts the only raw secret string and returns the coordinator's
+    // redacted result; the API layer neither retries nor serializes internals.
+    std::function<NdmsNativeCooperativeImportResult(
+        std::string&&,
+        NdmsNativeExternalWriterRaceAcceptance)>
+        run_ndms_native_import_fn;
 
     Config get_visible_config() const {
         return get_visible_config_fn();
