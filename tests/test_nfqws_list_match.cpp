@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include "../src/nfqws/list_match.hpp"
+#include "../src/util/nfqws_validator.hpp"
 
 namespace keen_pbr3::nfqws {
 
@@ -83,12 +84,13 @@ TEST_CASE("list roles come from the flag, not from the file name") {
     // Taken from a live nfqws2.conf: the roles are what the flags say, and a
     // custom list named anything at all is classified the same way.
     const auto refs = parse_list_references(
-        "NFQWS_ARGS=\"--hostlist=/opt/etc/nfqws2/lists/user.list "
-        "--hostlist-auto=/opt/etc/nfqws2/lists/auto.list "
-        "--hostlist-exclude=/opt/etc/nfqws2/lists/exclude.list "
-        "--ipset=/opt/etc/nfqws2/lists/ipset.list "
-        "--ipset-exclude=/opt/etc/nfqws2/lists/ipset_exclude.list "
-        "--hostlist=/opt/etc/nfqws2/lists/my-own.list\"\n");
+        std::vector<std::string>{
+            "--hostlist=/opt/etc/nfqws2/lists/user.list",
+            "--hostlist-auto=/opt/etc/nfqws2/lists/auto.list",
+            "--hostlist-exclude=/opt/etc/nfqws2/lists/exclude.list",
+            "--ipset=/opt/etc/nfqws2/lists/ipset.list",
+            "--ipset-exclude=/opt/etc/nfqws2/lists/ipset_exclude.list",
+            "--hostlist=/opt/etc/nfqws2/lists/my-own.list"});
 
     REQUIRE(refs.size() == 6);
     const auto role_of = [&](const std::string& path) {
@@ -123,7 +125,7 @@ TEST_CASE("the exclude flag is not read as the shorter one it starts with") {
     // "--hostlist-exclude=" begins with "--hostlist", and filing an exclude
     // list as coverage would invert the answer for every domain on it.
     const auto refs = parse_list_references(
-        "--hostlist-exclude=/lists/exclude.list\n");
+        std::vector<std::string>{"--hostlist-exclude=/lists/exclude.list"});
     REQUIRE(refs.size() == 1);
     CHECK(refs[0].role == ListRole::hostlist_exclude);
     CHECK(refs[0].path == "/lists/exclude.list");
@@ -131,10 +133,24 @@ TEST_CASE("the exclude flag is not read as the shorter one it starts with") {
 
 TEST_CASE("a repeated flag names its file once") {
     const auto refs = parse_list_references(
-        "--hostlist-exclude=/lists/exclude.list\n"
-        "--hostlist-exclude=/lists/exclude.list\n"
-        "--hostlist-exclude=/lists/other.list\n");
+        std::vector<std::string>{
+            "--hostlist-exclude=/lists/exclude.list",
+            "--hostlist-exclude=/lists/exclude.list",
+            "--hostlist-exclude=/lists/other.list"});
     CHECK(refs.size() == 2);
+}
+
+TEST_CASE("only the active nfqws mode contributes list references") {
+    const auto args = build_nfqws_dry_run_args(
+        "MODE_LIST=\"--hostlist=/lists/active.list\"\n"
+        "MODE_AUTO=\"--hostlist-auto=/lists/inactive.list\"\n"
+        "# NFQWS_EXTRA_ARGS=\"--hostlist=/lists/commented.list\"\n"
+        "NFQWS_EXTRA_ARGS=\"$MODE_LIST\"\n");
+
+    const auto refs = parse_list_references(args);
+    REQUIRE(refs.size() == 1);
+    CHECK(refs[0].path == "/lists/active.list");
+    CHECK(refs[0].role == ListRole::hostlist);
 }
 
 TEST_CASE("address lists match by prefix, and families never cross") {

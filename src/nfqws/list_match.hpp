@@ -39,11 +39,14 @@ bool role_includes(ListRole role) noexcept;
 // True for the roles whose entries are domains rather than addresses.
 bool role_is_hostlist(ListRole role) noexcept;
 
-// Finds every list file nfqws2.conf refers to, with the role each flag gives
-// it. A file named by several flags appears once per role, because the same
-// file can legitimately be both.
+// Finds every list file named by the effective nfqws argv, with the role each
+// flag gives it. The caller must derive this argv from the parsed active
+// assignments (build_nfqws_dry_run_args does that); scanning nfqws2.conf as
+// plain text would count comments and inactive MODE_* definitions. A file
+// named by several flags appears once per role, because the same file can
+// legitimately be both.
 std::vector<ListReference> parse_list_references(
-    const std::string& config_contents);
+    const std::vector<std::string>& arguments);
 
 // Parses one nfqws list. Blank lines and comments are dropped; nfqws reads the
 // file the same way, so a commented-out entry must not be reported as covering

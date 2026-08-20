@@ -105,9 +105,9 @@ bool role_is_hostlist(ListRole role) noexcept {
 }
 
 std::vector<ListReference> parse_list_references(
-    const std::string& config_contents) {
-    // Longest first: "--hostlist-exclude=" also starts with "--hostlist", and
-    // matching the shorter flag would file an exclude list as coverage.
+    const std::vector<std::string>& arguments) {
+    // Longest first for clarity. Each comparison is an exact token prefix, so
+    // --hostlist-exclude can never be mistaken for --hostlist.
     static const std::vector<std::pair<std::string, ListRole>> kFlags{
         {"--hostlist-exclude=", ListRole::hostlist_exclude},
         {"--hostlist-auto=", ListRole::hostlist_auto},
@@ -117,29 +117,18 @@ std::vector<ListReference> parse_list_references(
     };
 
     std::vector<ListReference> references;
-    for (const auto& [flag, role] : kFlags) {
-        std::string::size_type at = 0;
-        while ((at = config_contents.find(flag, at)) != std::string::npos) {
-            const auto start = at + flag.size();
-            auto end = start;
-            while (end < config_contents.size()) {
-                const char character = config_contents[end];
-                if (character == ' ' || character == '\t' ||
-                    character == '\n' || character == '\r' ||
-                    character == '"' || character == '\'') {
-                    break;
-                }
-                ++end;
-            }
-            auto path = config_contents.substr(start, end - start);
-            at = end;
-            if (path.empty()) continue;
+    for (const auto& argument : arguments) {
+        for (const auto& [flag, role] : kFlags) {
+            if (argument.rfind(flag, 0) != 0) continue;
+            auto path = argument.substr(flag.size());
+            if (path.empty()) break;
             const bool already = std::any_of(
                 references.begin(), references.end(),
                 [&](const ListReference& existing) {
                     return existing.path == path && existing.role == role;
                 });
             if (!already) references.push_back(ListReference{path, role});
+            break;
         }
     }
     return references;
