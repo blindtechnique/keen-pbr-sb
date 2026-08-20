@@ -32,6 +32,7 @@ const std::vector<StepUpProtectedRoute>& registered_privileged_routes() {
         {"GET", "/api/system/naive-component"},
         {"POST", "/api/system/ndms/interfaces/import"},
         {"POST", "/api/system/ndms/interfaces/import/preflight"},
+        {"POST", "/api/system/ndms/interfaces/import/recovery/retry"},
         {"POST", "/api/system/ndms/interfaces/remove"},
         {"POST", "/api/system/ndms/interfaces/remove/recovery/retry"},
         {"POST", "/api/system/remote-access"},
@@ -80,6 +81,7 @@ const std::vector<std::string>& registered_routes() {
         "/api/system/naive-component",
         "/api/system/ndms/interfaces/import",
         "/api/system/ndms/interfaces/import/preflight",
+        "/api/system/ndms/interfaces/import/recovery/retry",
         "/api/system/ndms/interfaces/remove",
         "/api/system/ndms/interfaces/remove/recovery/retry",
         "/api/system/remote-access",
@@ -147,11 +149,15 @@ TEST_CASE("the package and access operations require a step-up") {
     CHECK(requires_step_up(
         "POST", "/api/system/ndms/interfaces/import/preflight"));
     CHECK(requires_step_up(
+        "POST", "/api/system/ndms/interfaces/import/recovery/retry"));
+    CHECK(requires_step_up(
         "POST", "/api/system/ndms/interfaces/remove"));
     CHECK(requires_step_up(
         "POST", "/api/system/ndms/interfaces/remove/recovery/retry"));
     CHECK_FALSE(requires_step_up(
         "POST", "/api/system/ndms/recovery/retry"));
+    CHECK_FALSE(requires_step_up(
+        "POST", "/api/system/ndms/interfaces/recovery/retry"));
     // Exporting the archive: it carries credentials and the whole routing
     // state, so handing it out is closer to exfiltration than to a status
     // query. A POST because the body selects which groups to export.

@@ -17,6 +17,8 @@ inline constexpr std::string_view kNdmsNativeImportApiPath{
     "/api/system/ndms/interfaces/import"};
 inline constexpr std::string_view kNdmsNativeImportPreflightApiPath{
     "/api/system/ndms/interfaces/import/preflight"};
+inline constexpr std::string_view kNdmsNativeImportRecoveryApiPath{
+    "/api/system/ndms/interfaces/import/recovery/retry"};
 inline constexpr std::string_view
     kNdmsNativeImportRaceAcceptanceHeader{
         "X-Keen-Pbr-External-Ndms-Writer-Race-Acceptance"};
@@ -28,6 +30,12 @@ inline constexpr std::string_view
 // faulty embedder callback cannot use them as an accidental secret channel.
 nlohmann::json ndms_native_import_api_response(
     const NdmsNativeCooperativeImportResult& result);
+
+// Recovery is intentionally bodyless and can only finish already-durable
+// forward bookkeeping. The transaction id and all raw observation/revision
+// material remain private even when the coordinator reports a typed stop.
+nlohmann::json ndms_native_import_recovery_api_response(
+    const NdmsNativeCooperativeImportResumeResult& result);
 
 void register_ndms_native_import_handler(ApiServer& server,
                                          ApiContext& ctx);

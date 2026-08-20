@@ -178,6 +178,14 @@ struct ApiContext {
         NdmsNativeExternalWriterRaceAcceptance,
         const std::shared_ptr<SensitiveRequestReservation>&)>
         run_ndms_native_import_fn;
+    // A recovery reservation uses the same ordered maintenance/runtime/native
+    // writer chain as a fresh import, but it must admit an unfinished safe
+    // import WAL so the coordinator can complete forward bookkeeping.
+    std::function<std::shared_ptr<SensitiveRequestReservation>()>
+        reserve_ndms_native_import_recovery_fn;
+    std::function<NdmsNativeCooperativeImportResumeResult(
+        const std::shared_ptr<SensitiveRequestReservation>&)>
+        resume_ndms_native_import_fn;
     // Native delete uses the same complete ordered reservation as import.
     // Acquiring it before body admission prevents a losing request from
     // consuming its selector/consent evidence, while the cooperative delete

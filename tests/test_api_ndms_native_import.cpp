@@ -71,6 +71,9 @@ public:
 using ImportCallback = std::function<NdmsNativeCooperativeImportResult(
     std::string&&,
     NdmsNativeExternalWriterRaceAcceptance)>;
+using ImportRecoveryCallback =
+    std::function<NdmsNativeCooperativeImportResumeResult(
+        const std::shared_ptr<SensitiveRequestReservation>&)>;
 
 class ImportTestReservation final : public SensitiveRequestReservation {
 public:
@@ -87,7 +90,9 @@ private:
 
 class NativeImportApiFixture final {
 public:
-    explicit NativeImportApiFixture(ImportCallback callback = {})
+    explicit NativeImportApiFixture(
+        ImportCallback callback = {},
+        ImportRecoveryCallback recovery_callback = {})
         : auth_file_("KEEN_PBR_AUTH_FILE",
                      auth_directory_.auth_path().string()),
           trusted_transport_([this](std::string_view,
@@ -110,27 +115,15 @@ public:
                     return callback(std::move(raw), acceptance);
                 };
         }
-        context_.reserve_ndms_native_import_fn = [this]()
-            -> std::shared_ptr<SensitiveRequestReservation> {
-            if (!reservation_available_.load(
-                    std::memory_order_acquire)) {
-                return {};
-            }
-            bool expected = false;
-            if (!reservation_active_.compare_exchange_strong(
-                    expected, true,
-                    std::memory_order_acq_rel,
-                    std::memory_order_acquire)) {
-                return {};
-            }
-            try {
-                return std::make_shared<ImportTestReservation>(
-                    reservation_active_);
-            } catch (...) {
-                reservation_active_.store(
-                    false, std::memory_order_release);
-                throw;
-            }
+        if (recovery_callback) {
+            context_.resume_ndms_native_import_fn =
+                std::move(recovery_callback);
+        }
+        context_.reserve_ndms_native_import_fn = [this]() {
+            return reserve_for_request();
+        };
+        context_.reserve_ndms_native_import_recovery_fn = [this]() {
+            return reserve_for_request();
         };
         register_ndms_native_import_handler(server_, context_);
         server_.start();
@@ -185,6 +178,14 @@ public:
             std::memory_order_release);
     }
 
+    std::size_t reservation_attempts() const noexcept {
+        return reservation_attempts_.load(std::memory_order_relaxed);
+    }
+
+    bool reservation_active() const noexcept {
+        return reservation_active_.load(std::memory_order_acquire);
+    }
+
     httplib::Client& client() noexcept { return *client_; }
 
     std::unique_ptr<httplib::Client> new_client() const {
@@ -193,6 +194,27 @@ public:
     }
 
 private:
+    std::shared_ptr<SensitiveRequestReservation> reserve_for_request() {
+        reservation_attempts_.fetch_add(1U, std::memory_order_relaxed);
+        if (!reservation_available_.load(std::memory_order_acquire)) {
+            return {};
+        }
+        bool expected = false;
+        if (!reservation_active_.compare_exchange_strong(
+                expected, true,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire)) {
+            return {};
+        }
+        try {
+            return std::make_shared<ImportTestReservation>(
+                reservation_active_);
+        } catch (...) {
+            reservation_active_.store(false, std::memory_order_release);
+            throw;
+        }
+    }
+
     static int port() {
         return test_support::isolated_api_port(0);
     }
@@ -208,6 +230,7 @@ private:
     std::atomic<bool> protected_transport_{true};
     std::atomic<bool> reservation_available_{true};
     std::atomic<bool> reservation_active_{false};
+    std::atomic<std::size_t> reservation_attempts_{0U};
     TrustedLocalConnectionEvaluatorGuard trusted_transport_;
     SseBroadcaster broadcaster_;
     ApiContext context_;
@@ -231,6 +254,53 @@ NdmsNativeCooperativeImportResult completed_result() {
     result.delete_wal_readiness = NdmsNativeDeleteWalReadiness::clean;
     result.import_wal_readiness =
         NdmsNativeCooperativeImportWalReadiness::clean;
+    return result;
+}
+
+NdmsNativeCooperativeImportResumeResult completed_recovery_result() {
+    NdmsNativeCooperativeImportResumeResult result;
+    result.status = NdmsNativeCooperativeImportResumeStatus::completed;
+    result.stop = NdmsNativeCooperativeImportResumeStop::none;
+    result.ownership_published = true;
+    result.wal_removed = true;
+    result.transaction_id = std::string(32U, 'b');
+    result.expected_interface = "Wireguard5";
+    result.created_interface = "Wireguard5";
+    result.created_kernel_interface = "nwg5";
+    result.kind = NdmsNativeTunnelImportKind::wireguard;
+    result.phase = NdmsNativeImportWalPhase::response_recorded;
+    result.delete_wal_readiness = NdmsNativeDeleteWalReadiness::clean;
+    result.import_wal_readiness =
+        NdmsNativeCooperativeImportWalReadiness::unfinished;
+    result.forward_admission_state =
+        NdmsNativeImportRecoveryAdmissionState::admitted;
+    result.forward_dispatch_state =
+        NdmsNativeImportRecoveryDispatchState::completed;
+    return result;
+}
+
+NdmsNativeCooperativeImportResumeResult no_work_recovery_result() {
+    NdmsNativeCooperativeImportResumeResult result;
+    result.status = NdmsNativeCooperativeImportResumeStatus::no_work;
+    result.stop = NdmsNativeCooperativeImportResumeStop::none;
+    result.delete_wal_readiness = NdmsNativeDeleteWalReadiness::clean;
+    result.import_wal_readiness =
+        NdmsNativeCooperativeImportWalReadiness::clean;
+    return result;
+}
+
+NdmsNativeCooperativeImportResumeResult blocked_recovery_result() {
+    auto result = completed_recovery_result();
+    result.status = NdmsNativeCooperativeImportResumeStatus::blocked;
+    result.stop =
+        NdmsNativeCooperativeImportResumeStop::observation_unstable;
+    result.wal_may_require_recovery = true;
+    result.ownership_published = false;
+    result.wal_removed = false;
+    result.created_interface.reset();
+    result.created_kernel_interface.reset();
+    result.forward_admission_state.reset();
+    result.forward_dispatch_state.reset();
     return result;
 }
 
@@ -820,6 +890,433 @@ TEST_CASE("native import reservation excludes a second body stream") {
     barrier_cv.notify_all();
     first_request.join();
     CHECK(first_status == 200);
+}
+
+TEST_CASE("native import recovery maps only coherent redacted evidence") {
+    auto result = completed_recovery_result();
+    result.phase = NdmsNativeImportWalPhase::ownership_published;
+    result.recovery_action =
+        NdmsNativeImportRecoveryAction::resume_forward_reconcile;
+
+    const auto response = ndms_native_import_recovery_api_response(result);
+    CHECK(response.at("status") == "completed");
+    CHECK(response.at("stop") == "none");
+    CHECK(response.at("ndms_import_request_dispatched") == false);
+    CHECK(response.at("ndms_delete_dispatched") == false);
+    CHECK(response.at("system_configuration_save_performed") == false);
+    CHECK(response.at("external_ndms_writer_race_excluded") == false);
+    CHECK(response.at("wal_may_require_recovery") == false);
+    CHECK(response.at("ownership_published") == true);
+    CHECK(response.at("wal_removed") == true);
+    CHECK(response.at("expected_interface") == "Wireguard5");
+    CHECK(response.at("created_interface") == "Wireguard5");
+    CHECK(response.at("created_kernel_interface") == "nwg5");
+    CHECK(response.at("kind") == "wireguard");
+    CHECK(response.at("phase") == "ownership_published");
+    CHECK(response.at("delete_wal_readiness") == "clean");
+    CHECK(response.at("import_wal_readiness") == "unfinished");
+    CHECK(response.at("recovery_action") ==
+          "resume_forward_reconcile");
+    CHECK(response.at("forward_admission_state") == "admitted");
+    CHECK(response.at("forward_dispatch_state") == "completed");
+    CHECK_FALSE(response.contains("transaction_id"));
+    CHECK(response.dump().find(std::string(32U, 'b')) ==
+          std::string::npos);
+
+    const auto no_work = ndms_native_import_recovery_api_response(
+        no_work_recovery_result());
+    CHECK(no_work.at("status") == "no_work");
+    CHECK(no_work.at("delete_wal_readiness") == "clean");
+    CHECK(no_work.at("import_wal_readiness") == "clean");
+    CHECK_FALSE(no_work.contains("expected_interface"));
+
+    auto observation_failed = blocked_recovery_result();
+    observation_failed.stop = NdmsNativeCooperativeImportResumeStop::
+        first_observation_failed;
+    observation_failed.direct_observation_failure =
+        NdmsNativeDirectObservationFailure::transport_failed;
+    const auto blocked = ndms_native_import_recovery_api_response(
+        observation_failed);
+    CHECK(blocked.at("status") == "blocked");
+    CHECK(blocked.at("direct_observation_failure") ==
+          "transport_failed");
+    CHECK_FALSE(blocked.contains("transaction_id"));
+}
+
+TEST_CASE("native import recovery rejects unknown or incoherent results") {
+    const auto reject = [](auto mutate) {
+        auto result = completed_recovery_result();
+        mutate(result);
+        CHECK_THROWS(
+            ndms_native_import_recovery_api_response(result));
+    };
+
+    reject([](auto& result) {
+        result.status = static_cast<
+            NdmsNativeCooperativeImportResumeStatus>(255U);
+    });
+    reject([](auto& result) {
+        result.stop = static_cast<
+            NdmsNativeCooperativeImportResumeStop>(255U);
+    });
+    reject([](auto& result) {
+        result.ndms_import_request_dispatched = true;
+    });
+    reject([](auto& result) { result.ndms_delete_dispatched = true; });
+    reject([](auto& result) {
+        result.system_configuration_save_performed = true;
+    });
+    reject([](auto& result) {
+        result.external_ndms_writer_race_excluded = true;
+    });
+    reject([](auto& result) {
+        result.transaction_id = "PrivateKey=must-not-escape";
+    });
+    reject([](auto& result) { result.expected_interface = "Wireguard05"; });
+    reject([](auto& result) { result.created_interface = "Wireguard6"; });
+    reject([](auto& result) { result.created_kernel_interface.reset(); });
+    reject([](auto& result) {
+        result.created_kernel_interface = "nwg5/private";
+    });
+    reject([](auto& result) {
+        result.phase = NdmsNativeImportWalPhase::prepared;
+    });
+    reject([](auto& result) {
+        result.import_wal_readiness =
+            NdmsNativeCooperativeImportWalReadiness::clean;
+    });
+    reject([](auto& result) { result.ownership_published = false; });
+    reject([](auto& result) { result.wal_removed = false; });
+    reject([](auto& result) { result.wal_may_require_recovery = true; });
+    reject([](auto& result) {
+        result.forward_dispatch_state =
+            NdmsNativeImportRecoveryDispatchState::step_failed;
+        result.forward_failed_step =
+            NdmsNativeImportRecoveryStep::delete_exact_owned_target;
+    });
+    reject([](auto& result) {
+        result.direct_observation_failure =
+            NdmsNativeDirectObservationFailure::transport_failed;
+    });
+    reject([](auto& result) {
+        result.recovery_action =
+            NdmsNativeImportRecoveryAction::resume_forward_reconcile;
+    });
+
+    {
+        auto result = completed_recovery_result();
+        result.status = NdmsNativeCooperativeImportResumeStatus::blocked;
+        result.stop = NdmsNativeCooperativeImportResumeStop::writer_missing;
+        result.wal_may_require_recovery = true;
+        result.wal_removed = false;
+        CHECK_THROWS(ndms_native_import_recovery_api_response(result));
+    }
+    {
+        auto result = completed_recovery_result();
+        result.status = NdmsNativeCooperativeImportResumeStatus::blocked;
+        result.stop = NdmsNativeCooperativeImportResumeStop::
+            first_observation_failed;
+        result.wal_may_require_recovery = true;
+        result.wal_removed = false;
+        result.direct_observation_failure =
+            NdmsNativeDirectObservationFailure::transport_failed;
+        CHECK_THROWS(ndms_native_import_recovery_api_response(result));
+    }
+    {
+        auto result = blocked_recovery_result();
+        result.stop = NdmsNativeCooperativeImportResumeStop::
+            first_observation_failed;
+        result.direct_observation_failure =
+            NdmsNativeDirectObservationFailure::none;
+        CHECK_THROWS(ndms_native_import_recovery_api_response(result));
+    }
+    {
+        auto result = completed_recovery_result();
+        result.status = NdmsNativeCooperativeImportResumeStatus::blocked;
+        result.stop = NdmsNativeCooperativeImportResumeStop::
+            forward_admission_failed;
+        result.phase = NdmsNativeImportWalPhase::prepared;
+        result.wal_may_require_recovery = true;
+        result.wal_removed = false;
+        result.ownership_published = false;
+        result.forward_admission_state =
+            NdmsNativeImportRecoveryAdmissionState::lease_busy;
+        result.forward_dispatch_state.reset();
+        CHECK_THROWS(ndms_native_import_recovery_api_response(result));
+    }
+    {
+        auto result = completed_recovery_result();
+        result.status = NdmsNativeCooperativeImportResumeStatus::blocked;
+        result.stop = NdmsNativeCooperativeImportResumeStop::
+            ownership_publish_failed;
+        result.wal_may_require_recovery = true;
+        result.wal_removed = false;
+        result.ownership_published = false;
+        result.forward_dispatch_state =
+            NdmsNativeImportRecoveryDispatchState::step_failed;
+        result.forward_failed_step =
+            NdmsNativeImportRecoveryStep::remove_wal_record;
+        CHECK_THROWS(ndms_native_import_recovery_api_response(result));
+    }
+    {
+        auto result = completed_recovery_result();
+        result.phase = NdmsNativeImportWalPhase::ownership_published;
+        CHECK_THROWS(ndms_native_import_recovery_api_response(result));
+    }
+    {
+        auto result = completed_recovery_result();
+        result.status = NdmsNativeCooperativeImportResumeStatus::blocked;
+        result.stop = NdmsNativeCooperativeImportResumeStop::
+            forward_admission_failed;
+        result.wal_may_require_recovery = true;
+        result.wal_removed = false;
+        result.ownership_published = false;
+        result.forward_admission_state =
+            NdmsNativeImportRecoveryAdmissionState::lease_busy;
+        result.forward_dispatch_state.reset();
+        result.recovery_action =
+            NdmsNativeImportRecoveryAction::resume_forward_reconcile;
+        CHECK_THROWS(ndms_native_import_recovery_api_response(result));
+    }
+
+    {
+        auto result = completed_recovery_result();
+        result.status = NdmsNativeCooperativeImportResumeStatus::blocked;
+        result.stop = NdmsNativeCooperativeImportResumeStop::
+            forward_admission_failed;
+        result.wal_may_require_recovery = true;
+        result.wal_removed = false;
+        result.ownership_published = false;
+        result.forward_admission_state =
+            NdmsNativeImportRecoveryAdmissionState::lease_busy;
+        result.forward_dispatch_state.reset();
+        CHECK_NOTHROW(ndms_native_import_recovery_api_response(result));
+    }
+    {
+        auto result = completed_recovery_result();
+        result.status = NdmsNativeCooperativeImportResumeStatus::blocked;
+        result.stop = NdmsNativeCooperativeImportResumeStop::
+            ownership_publish_failed;
+        result.wal_may_require_recovery = true;
+        result.wal_removed = false;
+        result.ownership_published = false;
+        result.forward_dispatch_state =
+            NdmsNativeImportRecoveryDispatchState::step_failed;
+        result.forward_failed_step =
+            NdmsNativeImportRecoveryStep::publish_ownership;
+        CHECK_NOTHROW(ndms_native_import_recovery_api_response(result));
+    }
+
+    auto no_work = no_work_recovery_result();
+    no_work.wal_may_require_recovery = true;
+    CHECK_THROWS(ndms_native_import_recovery_api_response(no_work));
+
+    auto blocked = blocked_recovery_result();
+    blocked.stop = NdmsNativeCooperativeImportResumeStop::none;
+    CHECK_THROWS(ndms_native_import_recovery_api_response(blocked));
+}
+
+TEST_CASE("native import recovery is bodyless and invokes exactly once") {
+    std::size_t callback_count = 0U;
+    NativeImportApiFixture fixture(
+        ImportCallback{},
+        [&](const std::shared_ptr<SensitiveRequestReservation>& reservation) {
+            ++callback_count;
+            CHECK(reservation != nullptr);
+            return no_work_recovery_result();
+        });
+    const auto session = fixture.login();
+    fixture.grant_step_up(session);
+
+    const auto accepted = fixture.client().Post(
+        std::string{kNdmsNativeImportRecoveryApiPath},
+        session,
+        "",
+        "application/octet-stream");
+    check_no_store(accepted);
+    REQUIRE(accepted->status == 200);
+    CHECK(nlohmann::json::parse(accepted->body).at("status") ==
+          "no_work");
+    CHECK(callback_count == 1U);
+    CHECK_FALSE(fixture.reservation_active());
+
+    const auto one_byte = fixture.client().Post(
+        std::string{kNdmsNativeImportRecoveryApiPath},
+        session,
+        "x",
+        "application/octet-stream");
+    check_no_store(one_byte);
+    CHECK(one_byte->status == 400);
+    CHECK(callback_count == 1U);
+    CHECK_FALSE(fixture.reservation_active());
+
+    const auto too_large = fixture.client().Post(
+        std::string{kNdmsNativeImportRecoveryApiPath},
+        session,
+        "xx",
+        "application/octet-stream");
+    check_no_store(too_large);
+    CHECK(too_large->status == 413);
+    CHECK(callback_count == 1U);
+    CHECK_FALSE(fixture.reservation_active());
+}
+
+TEST_CASE("native import recovery guards precede reservation and callback") {
+    std::size_t callback_count = 0U;
+    NativeImportApiFixture fixture(
+        ImportCallback{},
+        [&](const std::shared_ptr<SensitiveRequestReservation>&) {
+            ++callback_count;
+            return no_work_recovery_result();
+        });
+
+    const auto unauthenticated = fixture.client().Post(
+        std::string{kNdmsNativeImportRecoveryApiPath},
+        "",
+        "application/octet-stream");
+    check_no_store(unauthenticated);
+    CHECK(unauthenticated->status == 401);
+    CHECK(fixture.reservation_attempts() == 0U);
+
+    const auto session = fixture.login();
+    const auto no_step_up = fixture.client().Post(
+        std::string{kNdmsNativeImportRecoveryApiPath},
+        session,
+        "",
+        "application/octet-stream");
+    check_no_store(no_step_up);
+    CHECK(no_step_up->status == 403);
+    CHECK(fixture.reservation_attempts() == 0U);
+
+    fixture.grant_step_up(session);
+    fixture.set_protected_transport(false);
+    const auto unprotected = fixture.client().Post(
+        std::string{kNdmsNativeImportRecoveryApiPath},
+        session,
+        "",
+        "application/octet-stream");
+    check_no_store(unprotected);
+    CHECK(unprotected->status == 403);
+    CHECK(fixture.reservation_attempts() == 0U);
+    CHECK(callback_count == 0U);
+}
+
+TEST_CASE("native import recovery reservation refusal is pre-body") {
+    std::size_t callback_count = 0U;
+    NativeImportApiFixture fixture(
+        ImportCallback{},
+        [&](const std::shared_ptr<SensitiveRequestReservation>&) {
+            ++callback_count;
+            return no_work_recovery_result();
+        });
+    const auto session = fixture.login();
+    fixture.grant_step_up(session);
+    fixture.set_admission(NdmsNativeMutationAdmissionState::blocked);
+
+    reset_sensitive_request_body_stream_count_for_testing();
+    const auto response = fixture.client().Post(
+        std::string{kNdmsNativeImportRecoveryApiPath},
+        session,
+        "must-not-stream",
+        "application/octet-stream");
+    check_no_store(response);
+    CHECK(response->status == 503);
+    CHECK(response->get_header_value("Connection") == "close");
+    CHECK(fixture.reservation_attempts() == 1U);
+    CHECK(sensitive_request_body_stream_count_for_testing() == 0U);
+    CHECK(callback_count == 0U);
+}
+
+TEST_CASE("native import recovery reservation excludes a second callback") {
+    std::mutex barrier_mutex;
+    std::condition_variable barrier_cv;
+    bool first_entered = false;
+    bool release_first = false;
+    std::atomic<std::size_t> callback_count{0U};
+
+    NativeImportApiFixture fixture(
+        ImportCallback{},
+        [&](const std::shared_ptr<SensitiveRequestReservation>&) {
+            callback_count.fetch_add(1U, std::memory_order_relaxed);
+            std::unique_lock<std::mutex> lock(barrier_mutex);
+            first_entered = true;
+            barrier_cv.notify_all();
+            barrier_cv.wait(lock, [&] { return release_first; });
+            return no_work_recovery_result();
+        });
+    const auto session = fixture.login();
+    fixture.grant_step_up(session);
+
+    int first_status = 0;
+    std::thread first_request([&] {
+        const auto response = fixture.client().Post(
+            std::string{kNdmsNativeImportRecoveryApiPath},
+            session,
+            "",
+            "application/octet-stream");
+        first_status = response ? response->status : -1;
+    });
+    {
+        std::unique_lock<std::mutex> lock(barrier_mutex);
+        barrier_cv.wait(lock, [&] { return first_entered; });
+    }
+
+    auto second_client = fixture.new_client();
+    const auto second = second_client->Post(
+        std::string{kNdmsNativeImportRecoveryApiPath},
+        session,
+        "SECOND_MUST_NOT_STREAM",
+        "application/octet-stream");
+    REQUIRE(second != nullptr);
+    CHECK(second->status == 503);
+    CHECK(second->get_header_value("Connection") == "close");
+    CHECK(callback_count.load(std::memory_order_relaxed) == 1U);
+
+    {
+        std::lock_guard<std::mutex> lock(barrier_mutex);
+        release_first = true;
+    }
+    barrier_cv.notify_all();
+    first_request.join();
+    CHECK(first_status == 200);
+    CHECK_FALSE(fixture.reservation_active());
+}
+
+TEST_CASE("native import recovery callback failure releases reservation") {
+    std::size_t callback_count = 0U;
+    NativeImportApiFixture fixture(
+        ImportCallback{},
+        [&](const std::shared_ptr<SensitiveRequestReservation>&) {
+            ++callback_count;
+            if (callback_count == 1U) {
+                throw std::runtime_error(
+                    "PRIVATE_RECOVERY_DETAIL must not reach HTTP");
+            }
+            return no_work_recovery_result();
+        });
+    const auto session = fixture.login();
+    fixture.grant_step_up(session);
+
+    const auto failed = fixture.client().Post(
+        std::string{kNdmsNativeImportRecoveryApiPath},
+        session,
+        "",
+        "application/octet-stream");
+    check_no_store(failed);
+    CHECK(failed->status == 500);
+    CHECK(failed->body.find("PRIVATE_RECOVERY_DETAIL") ==
+          std::string::npos);
+    CHECK_FALSE(fixture.reservation_active());
+
+    const auto retried_by_owner = fixture.client().Post(
+        std::string{kNdmsNativeImportRecoveryApiPath},
+        session,
+        "",
+        "application/octet-stream");
+    check_no_store(retried_by_owner);
+    CHECK(retried_by_owner->status == 200);
+    CHECK(callback_count == 2U);
+    CHECK_FALSE(fixture.reservation_active());
 }
 
 } // namespace keen_pbr3
