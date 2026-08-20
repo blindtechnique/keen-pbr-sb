@@ -60,8 +60,8 @@ void secure_wipe_string(std::string& value) noexcept {
 }
 
 void wipe_secret_result(
-    std::optional<std::string>& secret) noexcept {
-    if (!secret.has_value()) return;
+    std::unique_ptr<std::string>& secret) noexcept {
+    if (!secret) return;
     secure_wipe_string(*secret);
     secret.reset();
 #ifdef KEEN_PBR3_TESTING
@@ -991,7 +991,8 @@ NdmsNativeSecretReadResult read_snapshot_locked(
         key.bytes, nonce.bytes, aad,
         std::string_view(body).substr(kMagicBytes + nonce.size()));
     if (!opened) return result;
-    result.secret = std::move(*opened);
+    WipeString opened_guard(*opened);
+    result.secret = std::make_unique<std::string>(std::move(*opened));
     result.state = NdmsNativeSecretReadState::valid;
     return result;
 }
@@ -1005,7 +1006,6 @@ NdmsNativeSecretReadResult::~NdmsNativeSecretReadResult() noexcept {
 NdmsNativeSecretReadResult::NdmsNativeSecretReadResult(
     NdmsNativeSecretReadResult&& other) noexcept
     : state(other.state), secret(std::move(other.secret)) {
-    wipe_secret_result(other.secret);
     other.state = NdmsNativeSecretReadState::unreadable;
 }
 
@@ -1015,7 +1015,6 @@ NdmsNativeSecretReadResult& NdmsNativeSecretReadResult::operator=(
     wipe_secret_result(secret);
     state = other.state;
     secret = std::move(other.secret);
-    wipe_secret_result(other.secret);
     other.state = NdmsNativeSecretReadState::unreadable;
     return *this;
 }
@@ -1125,7 +1124,7 @@ void NdmsNativeSecretSnapshotStore::publish_payload(
             directory.get(), key_path_, interface_name,
             transaction_id, marker, policy);
         if (opened.state != NdmsNativeSecretReadState::valid ||
-            !opened.secret.has_value() ||
+            !opened.secret ||
             !constant_time_equal(*opened.secret, secret)) {
             if (opened.secret) secure_wipe_string(*opened.secret);
             throw std::runtime_error(
@@ -1197,7 +1196,7 @@ NdmsNativeSecretSnapshotStore::read_panel_delete_snapshot(
     auto raw = read(interface_name, transaction_id, marker);
     result.state = raw.state;
     if (raw.state != NdmsNativeSecretReadState::valid ||
-        !raw.secret.has_value()) {
+        !raw.secret) {
         return result;
     }
     try {
@@ -1248,7 +1247,7 @@ bool NdmsNativeSecretSnapshotStore::remove_panel_delete_snapshot_exact(
                 directory.get(), key_path_, interface_name,
                 transaction_id, marker, policy);
             if (current.state != NdmsNativeSecretReadState::valid ||
-                !current.secret.has_value()) {
+                !current.secret) {
                 return false;
             }
             try {

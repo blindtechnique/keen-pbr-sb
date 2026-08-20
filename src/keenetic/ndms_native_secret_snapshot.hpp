@@ -3,6 +3,7 @@
 #include "ndms_native_panel_delete_snapshot.hpp"
 
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -50,7 +51,7 @@ struct NdmsNativeSecretReadResult {
 
     NdmsNativeSecretReadState state{
         NdmsNativeSecretReadState::unreadable};
-    std::optional<std::string> secret;
+    std::unique_ptr<std::string> secret;
 };
 
 #ifdef KEEN_PBR3_TESTING

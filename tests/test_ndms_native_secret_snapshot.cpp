@@ -164,28 +164,46 @@ TEST_CASE("raw secret read results wipe on move overwrite and destruction") {
     {
         NdmsNativeSecretReadResult source;
         source.state = NdmsNativeSecretReadState::valid;
-        source.secret = "first plaintext private key";
+        source.secret = std::make_unique<std::string>(
+            "first plaintext private key");
+        const auto* original_secret = source.secret.get();
         NdmsNativeSecretReadResult moved(std::move(source));
         CHECK(source.state == NdmsNativeSecretReadState::unreadable);
-        CHECK_FALSE(source.secret.has_value());
-        REQUIRE(moved.secret.has_value());
+        CHECK_FALSE(source.secret);
+        REQUIRE(moved.secret);
+        CHECK(moved.secret.get() == original_secret);
 
         NdmsNativeSecretReadResult destination;
-        destination.secret = "plaintext being overwritten";
+        destination.secret = std::make_unique<std::string>(
+            "plaintext being overwritten");
         destination = std::move(moved);
         CHECK(moved.state == NdmsNativeSecretReadState::unreadable);
-        CHECK_FALSE(moved.secret.has_value());
-        REQUIRE(destination.secret.has_value());
+        CHECK_FALSE(moved.secret);
+        REQUIRE(destination.secret);
+        CHECK(destination.secret.get() == original_secret);
         CHECK(*destination.secret == "first plaintext private key");
 
         auto* same_destination = &destination;
         destination = std::move(*same_destination);
-        REQUIRE(destination.secret.has_value());
+        REQUIRE(destination.secret);
         CHECK(*destination.secret == "first plaintext private key");
     }
-    // Source poisoning, overwrite, second source poisoning and final payload
-    // destruction all passed through the non-optimizable wipe path.
-    CHECK(ndms_native_secret_result_wipe_count_for_testing() >= 4U);
+    // Moving transfers the owning pointer without copying secret bytes. The
+    // overwritten destination and the final owner still pass through the
+    // non-optimizable wipe path.
+    CHECK(ndms_native_secret_result_wipe_count_for_testing() == 2U);
+}
+
+TEST_CASE("raw secret read results preserve an empty valid payload") {
+    NdmsNativeSecretReadResult source;
+    source.state = NdmsNativeSecretReadState::valid;
+    source.secret = std::make_unique<std::string>();
+
+    NdmsNativeSecretReadResult moved(std::move(source));
+    CHECK(source.state == NdmsNativeSecretReadState::unreadable);
+    CHECK_FALSE(source.secret);
+    REQUIRE(moved.secret);
+    CHECK(moved.secret->empty());
 }
 
 TEST_CASE("typed panel delete snapshots preserve complete WG and AWG state") {
