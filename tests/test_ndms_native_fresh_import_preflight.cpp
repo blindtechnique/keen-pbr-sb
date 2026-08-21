@@ -179,11 +179,15 @@ public:
         nlohmann::json payload = nlohmann::json::object();
         for (std::uint8_t slot = 0U; slot < first_free; ++slot) {
             const auto name = "Wireguard" + std::to_string(slot);
-            payload[name] = {
-                {"type", "Wireguard"},
-                {"interface-name", name},
-                {"description", "occupied"},
-            };
+            payload[name] = runtime
+                ? nlohmann::json{
+                      {"type", "Wireguard"},
+                      {"interface-name", name},
+                      {"description", "occupied"},
+                  }
+                : nlohmann::json{
+                      {"description", "occupied"},
+                  };
         }
         NdmsCatalogSnapshot snapshot;
         snapshot.catalog = parse_ndms_interface_catalog(payload);

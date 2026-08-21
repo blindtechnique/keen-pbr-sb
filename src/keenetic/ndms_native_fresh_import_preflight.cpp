@@ -157,7 +157,9 @@ NdmsNativeFreshImportPreflightResult result(
     return {status, stop, std::move(target)};
 }
 
-bool catalog_slots_safe(const NdmsInterfaceCatalog& catalog) noexcept {
+bool catalog_slots_safe(
+    const NdmsInterfaceCatalog& catalog,
+    const bool require_typed_tunnel_views) noexcept {
     if (!catalog.firmware_available ||
         !catalog.wireguard_slot_evidence_complete) {
         return false;
@@ -175,6 +177,13 @@ bool catalog_slots_safe(const NdmsInterfaceCatalog& catalog) noexcept {
                     kSlotRevisionPrefix)) {
                 return false;
             }
+            // show/rc/interface identifies WireGuard records by their
+            // canonical WireguardN keys, but current Keenetic firmware does
+            // not repeat the runtime `type` discriminator there.  The
+            // runtime scope remains responsible for proving the typed tunnel
+            // view; running-config proves the same slot occupancy through
+            // its independently measured canonical keys.
+            if (!require_typed_tunnel_views) break;
             const auto expected =
                 "Wireguard" + std::to_string(slot);
             const auto matches = std::count_if(
@@ -224,7 +233,7 @@ CatalogMeasure measure_catalog(
     const auto& snapshot = *observation.snapshot;
     if (snapshot.status != NdmsCatalogCacheStatus::fresh ||
         !snapshot.refreshed || !snapshot.observed_at.has_value() ||
-        !catalog_slots_safe(snapshot.catalog)) {
+        !catalog_slots_safe(snapshot.catalog, runtime)) {
         return {
             NdmsNativeFreshImportPreflightStop::observed_catalog_unsafe,
             std::nullopt};
