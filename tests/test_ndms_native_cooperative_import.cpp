@@ -793,10 +793,11 @@ NdmsNativeCooperativeImportResult leave_response_recorded(
 }
 
 NdmsNativeCooperativeImportResult leave_ambiguous_response_recorded(
-    Fixture& fixture) {
+    Fixture& fixture,
+    std::string config = plain_config()) {
     fixture.backend.response_body =
         R"([{"interface":{"wireguard":{"import":{"created":"Wireguard7","intersects":""}}}}])";
-    const auto result = fixture.run();
+    const auto result = fixture.run(std::move(config));
     REQUIRE(result.status ==
             NdmsNativeCooperativeImportStatus::recovery_required);
     REQUIRE(result.executor_stop ==
@@ -2667,6 +2668,33 @@ TEST_CASE("cooperative import recovery rolls back only an exact divergent respon
         CHECK(fixture.wal.load(*interrupted.transaction_id).state ==
               NdmsNativeImportWalLoadState::absent);
         check_resume_is_router_read_only(result);
+    }
+
+    SUBCASE("redacted response completes an already-up AWG target without consent") {
+        Fixture fixture(true);
+        fixture.gateway.protocol = NdmsNativeAscClass::amnezia_wg;
+        const auto interrupted =
+            leave_ambiguous_response_recorded(
+                fixture, amnezia_config());
+        fixture.gateway.recovery_target_down = false;
+
+        const auto result = fixture.coordinator.resume_once(
+            fixture.writer.lease);
+
+        REQUIRE(result.status ==
+                NdmsNativeCooperativeImportResumeStatus::completed);
+        CHECK_FALSE(result.external_ndms_writer_race_accepted);
+        CHECK(result.created_interface ==
+              std::optional<std::string>{"Wireguard5"});
+        CHECK(result.created_kernel_interface ==
+              std::optional<std::string>{"nwg5"});
+        CHECK(result.ownership_published);
+        CHECK(result.system_configuration_save_performed);
+        CHECK(result.wal_removed);
+        CHECK(fixture.activation_backend.calls == 2U);
+        CHECK(fixture.delete_backend.calls == 0U);
+        CHECK(fixture.wal.load(*interrupted.transaction_id).state ==
+              NdmsNativeImportWalLoadState::absent);
     }
 
     SUBCASE("bodyless entrance is zero-dispatch and fresh acceptance deletes once") {

@@ -1164,6 +1164,8 @@ export const enTranslation = {
     },
     nativeImport: {
       title: "Import WireGuard / AmneziaWG",
+      displayNameRequired:
+        "Enter the tunnel name above first. It will be used in KeeneticOS and for the automatically created route.",
       description:
         "Import is available after sign-in over a protected Keenetic HTTPS domain or a direct local connection verified by the router. The structural preview is local. Only after your explicit risk acceptance does the application send the source once to the dedicated Keenetic import endpoint; it is never placed in page state, storage, query caches, URLs, logs, or automatic retries.",
       fileDescription:

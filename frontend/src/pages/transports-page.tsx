@@ -18,7 +18,10 @@ import { toast } from "sonner"
 import { useLocation } from "wouter"
 
 import type { ApiError } from "@/api/client"
-import type { NdmsNativeDeleteResult } from "@/api/native-mutation"
+import type {
+  NdmsNativeDeleteResult,
+  NdmsNativeImportRecoveryResult,
+} from "@/api/native-mutation"
 import {
   getTransportConfigExport,
   postConfig,
@@ -28,11 +31,14 @@ import {
 import {
   TransportActionRequestAction,
   TransportConfigOperationOperation,
+  TransportSpecType,
   type TransportSpec,
   type TransportStatus,
 } from "@/api/generated/model"
 import {
+  createLinkedTransportApplyRequest,
   usePostTransportActionMutation,
+  usePostTransportConfigApplyMutation,
   usePostTransportConfigMutation,
   usePostConfigMutation,
 } from "@/api/mutations"
@@ -854,6 +860,7 @@ export function TransportsPage({
         }),
     },
   })
+  const recoveredImportApplyMutation = usePostTransportConfigApplyMutation()
 
   // «Да» из вопроса о новом туннеле: маршрут создаётся сразу, с настройками
   // по умолчанию — имя от туннеля, тег порождается из имени. Тонкая
@@ -888,6 +895,74 @@ export function TransportsPage({
           ),
       }
     )
+  }
+
+  const createRouteAfterRecoveredImport = async (
+    result: NdmsNativeImportRecoveryResult
+  ) => {
+    const firmwareInterface = result.created_interface
+    const kernelInterface = result.created_kernel_interface
+    if (
+      !firmwareInterface ||
+      !kernelInterface ||
+      result.status !== "completed"
+    ) {
+      return
+    }
+
+    const [inventoryResult, configResult] = await Promise.all([
+      ndmsInventoryQuery.refetch(),
+      keenConfigQuery.refetch(),
+    ])
+    const refreshedConfig = selectConfig(configResult.data)
+    if (!refreshedConfig) return
+    const existingOutbounds = refreshedConfig.outbounds ?? []
+    if (
+      existingOutbounds.some(
+        (outbound) =>
+          outbound.type === "interface" &&
+          outbound.interface === kernelInterface
+      )
+    ) {
+      return
+    }
+
+    const inventory =
+      inventoryResult.data?.status === 200
+        ? inventoryResult.data.data.interfaces
+        : []
+    const imported = inventory.find(
+      (item) =>
+        item.firmware_interface_name === firmwareInterface &&
+        item.kernel_name === kernelInterface
+    )
+    const label = imported?.label.trim() || firmwareInterface
+    const tag = makeTechnicalId(
+      label,
+      [
+        ...configured.map((transport) => transport.tag),
+        ...existingOutbounds.map((outbound) => outbound.tag),
+      ],
+      { prefix: "native" }
+    )
+
+    try {
+      await recoveredImportApplyMutation.mutateAsync({
+        data: createLinkedTransportApplyRequest({
+          type: TransportSpecType.native,
+          tag,
+          display_name: label,
+          interface: kernelInterface,
+          auto_start: false,
+          geo_mode: "disabled",
+        }),
+      })
+      toast.success(t("transports.routeOffer.created", { name: label }))
+    } catch (mutationError) {
+      toast.error(getApiErrorMessage(mutationError as ApiError), {
+        richColors: true,
+      })
+    }
   }
   const dismissRouteOffer = (candidate: NativeRouteOfferCandidate) => {
     setDismissedRouteOffers((current) =>
@@ -1671,6 +1746,7 @@ export function TransportsPage({
       <NativeMutationRecovery
         inventoryStatus={nativeMutationStatus}
         onDeleteTerminal={setNativeDeleteTerminal}
+        onImportCompleted={createRouteAfterRecoveredImport}
         onInventoryRefresh={refreshNativeMutationInventory}
       />
 

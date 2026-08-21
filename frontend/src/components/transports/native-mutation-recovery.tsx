@@ -8,6 +8,7 @@ import {
   postNdmsNativeDeleteRecoveryOnce,
   postNdmsNativeImportRecoveryOnce,
   type NdmsNativeDeleteResult,
+  type NdmsNativeImportRecoveryResult,
 } from "@/api/native-mutation"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
@@ -34,10 +35,12 @@ type RecoveryOutcome =
   | "delete_blocked"
   | "unknown"
 
-type ImportRecoveryLeaseValue = Extract<
-  RecoveryOutcome,
-  "import_no_work" | "import_completed" | "import_blocked" | "unknown"
->
+type ImportRecoveryLeaseValue =
+  | Readonly<{ outcome: "import_no_work" | "import_blocked" | "unknown" }>
+  | Readonly<{
+      outcome: "import_completed"
+      result: NdmsNativeImportRecoveryResult
+    }>
 
 type DeleteRecoveryLeaseValue =
   | Readonly<{
@@ -74,10 +77,14 @@ const lockMatches = (
 export function NativeMutationRecovery({
   inventoryStatus,
   onDeleteTerminal,
+  onImportCompleted,
   onInventoryRefresh,
 }: {
   readonly inventoryStatus?: NdmsNativeMutationInventoryStatus
   readonly onDeleteTerminal: (result: NdmsNativeDeleteResult) => void
+  readonly onImportCompleted?: (
+    result: NdmsNativeImportRecoveryResult
+  ) => void | Promise<void>
   readonly onInventoryRefresh: () => Promise<void>
 }) {
   const { t } = useTranslation()
@@ -89,7 +96,7 @@ export function NativeMutationRecovery({
   const [deleteReconfirmation, setDeleteReconfirmation] = useState(false)
   const [externalWriterAccepted, setExternalWriterAccepted] = useState(false)
   const [globalSaveAcknowledged, setGlobalSaveAcknowledged] = useState(false)
-  const automaticImportRecoveryStarted = useRef(false)
+  const automaticImportRecoveryAttempts = useRef(0)
 
   useEffect(
     () => subscribeNativeMutationLock((nextLock) => setLock(nextLock)),
@@ -132,18 +139,18 @@ export function NativeMutationRecovery({
               if (result.status === "no_work") {
                 return {
                   disposition: nativeImportRecoveryDisposition(result),
-                  value: "import_no_work" as const,
+                  value: { outcome: "import_no_work" } as const,
                 }
               }
               if (result.status === "completed") {
                 return {
                   disposition: nativeImportRecoveryDisposition(result),
-                  value: "import_completed" as const,
+                  value: { outcome: "import_completed", result } as const,
                 }
               }
               return {
                 disposition: nativeImportRecoveryDisposition(result),
-                value: "import_blocked" as const,
+                value: { outcome: "import_blocked" } as const,
               }
             } catch (error) {
               if (
@@ -155,23 +162,35 @@ export function NativeMutationRecovery({
                     state: "recovery",
                     recovery: "import",
                   } as const,
-                  value: "import_blocked" as const,
+                  value: { outcome: "import_blocked" } as const,
                 }
               }
               return {
                 disposition: { state: "unknown" } as const,
-                value: "unknown" as const,
+                value: { outcome: "unknown" } as const,
               }
             }
           }
         )
       const nextOutcome =
-        leaseResult.status === "completed" ? leaseResult.value : "unknown"
-      // A clean/no-work result is ordinary automatic reconciliation. The
-      // refreshed inventory is the useful outcome; do not replace it with a
-      // recovery lecture or a manual button.
+        leaseResult.status === "completed"
+          ? leaseResult.value.outcome
+          : "unknown"
+      if (
+        leaseResult.status === "completed" &&
+        leaseResult.value.outcome === "import_completed"
+      ) {
+        await Promise.resolve(
+          onImportCompleted?.(leaseResult.value.result)
+        ).catch(() => undefined)
+      }
+      // Import recovery is automatic and bodyless. Keep the ordinary progress
+      // state visible while another pass is required instead of replacing it
+      // with a frightening terminal lecture or a manual recovery button.
       setOutcome(
-        nextOutcome === "import_no_work" || nextOutcome === "import_completed"
+        nextOutcome === "import_no_work" ||
+          nextOutcome === "import_completed" ||
+          importNeedsRecovery
           ? null
           : nextOutcome
       )
@@ -179,22 +198,27 @@ export function NativeMutationRecovery({
       setBusy(null)
       await refresh().catch(() => undefined)
     }
-  }, [busy, refresh])
+  }, [busy, importNeedsRecovery, onImportCompleted, refresh])
 
   useEffect(() => {
     if (!importNeedsRecovery) {
-      automaticImportRecoveryStarted.current = false
+      automaticImportRecoveryAttempts.current = 0
       return
     }
-    if (busy !== null || automaticImportRecoveryStarted.current) return
-    // The fresh import publishes its terminal browser marker immediately
-    // before releasing the lease. Let that lease unwind before starting the
-    // bodyless reconciliation, otherwise the first and only pass can observe
-    // its own operation as busy and remain stuck until a page reload.
+    if (busy !== null) return
+    // The fresh import publishes its browser marker immediately before
+    // releasing the lease. Let that lease unwind, then keep reconciling with
+    // bounded backoff. A partial first pass must not require a page reload to
+    // run the next bodyless pass.
+    const attempt = automaticImportRecoveryAttempts.current
+    const delay =
+      attempt === 0
+        ? 500
+        : Math.min(1_000 * 2 ** Math.min(attempt - 1, 4), 15_000)
     const timeout = window.setTimeout(() => {
-      automaticImportRecoveryStarted.current = true
+      automaticImportRecoveryAttempts.current += 1
       void recoverImport()
-    }, 500)
+    }, delay)
     return () => window.clearTimeout(timeout)
   }, [busy, importNeedsRecovery, recoverImport])
 
@@ -302,6 +326,18 @@ export function NativeMutationRecovery({
     >
       {pending ? (
         <Alert variant="warning" aria-atomic="true" aria-live="polite">
+          <RotateCcwIcon className="animate-spin" />
+          <AlertTitle>
+            {t("transports.nativeMutation.recovery.pendingTitle")}
+          </AlertTitle>
+          <AlertDescription className="break-words">
+            {t("transports.nativeMutation.recovery.pendingDescription")}
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
+      {importNeedsRecovery && !pending ? (
+        <Alert aria-atomic="true" aria-live="polite">
           <RotateCcwIcon className="animate-spin" />
           <AlertTitle>
             {t("transports.nativeMutation.recovery.pendingTitle")}

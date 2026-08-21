@@ -630,6 +630,7 @@ function NativeWireGuardImportFieldsContent({
   const submitImport = async () => {
     if (
       state.status !== "ready" ||
+      !displayName?.trim() ||
       !ownerRiskAccepted ||
       recoveryLocked ||
       submissionActiveRef.current ||
@@ -1031,6 +1032,11 @@ function NativeWireGuardImportFieldsContent({
         operation.status === "preflighting" ||
         operation.status === "sending") ? (
         <div className="space-y-3 rounded-lg border border-warning/40 bg-warning/5 p-3">
+          {!displayName?.trim() ? (
+            <p className="text-sm font-medium text-foreground">
+              {t("transports.nativeImport.displayNameRequired")}
+            </p>
+          ) : null}
           <label className="flex min-h-11 cursor-pointer items-start gap-3 rounded-md p-1 text-sm">
             <input
               checked={ownerRiskAccepted}
@@ -1061,6 +1067,7 @@ function NativeWireGuardImportFieldsContent({
             <Button
               className="min-h-11 whitespace-normal"
               disabled={
+                !displayName?.trim() ||
                 !ownerRiskAccepted ||
                 operation.status === "preflighting" ||
                 operation.status === "sending"
