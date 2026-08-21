@@ -171,13 +171,7 @@ type Status = {
 // и оба нужны редко. Вместе они занимали две вкладки из шести, а «Списки»
 // вдобавок повторяли название пункта меню, за которым лежат совсем другие
 // списки keen-pbr. Теперь это «Файлы» с переключателем внутри.
-const NFQWS_TAB_VALUES = [
-  "strategies",
-  "settings",
-  "files",
-  "logs",
-  "check",
-] as const
+const NFQWS_TAB_VALUES = ["strategies", "settings", "files", "logs"] as const
 
 type Tab = (typeof NFQWS_TAB_VALUES)[number]
 
@@ -743,9 +737,7 @@ export function NfqwsPage() {
                       </span>
                     }
                   />
-                  <TooltipContent>
-                    {t(upgradeButton.tooltipKey)}
-                  </TooltipContent>
+                  <TooltipContent>{t(upgradeButton.tooltipKey)}</TooltipContent>
                 </Tooltip>
                 <NfqwsMaintenanceMenu
                   items={[
@@ -881,8 +873,6 @@ export function NfqwsPage() {
               readonly
             />
           ) : null}
-          {tab === "check" ? <UrlCheck /> : null}
-
           <NfqwsOperationDialog
             onClose={() =>
               setOperation((current) => ({ ...current, open: false }))
@@ -2546,52 +2536,6 @@ function NfqwsConfirmDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  )
-}
-
-function UrlCheck() {
-  const { t } = useTranslation()
-  const [url, setUrl] = useState("https://www.youtube.com/")
-  const [result, setResult] = useState<boolean | null>(null)
-  const check = async () => {
-    const response = await nfqwsAction<{ reachable: boolean }>({
-      action: "check_url",
-      url,
-    })
-    setResult(response.reachable)
-  }
-  return (
-    <NfqwsSection
-      description={t("nfqws.checkDescription")}
-      title={t("nfqws.checkTitle")}
-    >
-      <div className="space-y-4">
-        <div className="flex items-center gap-2">
-          <Input
-            onChange={(event) => setUrl(event.target.value)}
-            size="sm"
-            value={url}
-          />
-          <Button onClick={() => void check()}>{t("nfqws.check")}</Button>
-        </div>
-        {result !== null ? (
-          // Success in grey read like a note rather than an answer; the whole
-          // point of the check is to say yes or no at a glance.
-          <Alert
-            className={
-              result
-                ? "border-success/40 bg-success/10 text-success"
-                : undefined
-            }
-            variant={result ? "default" : "destructive"}
-          >
-            <AlertDescription className={result ? "text-success" : undefined}>
-              {result ? t("nfqws.reachable") : t("nfqws.unreachable")}
-            </AlertDescription>
-          </Alert>
-        ) : null}
-      </div>
-    </NfqwsSection>
   )
 }
 

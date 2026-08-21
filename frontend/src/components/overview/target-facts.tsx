@@ -1,19 +1,9 @@
-import { Loader2 } from "lucide-react"
+import { CircleCheck, CircleX, Loader2 } from "lucide-react"
 import { useEffect, useRef } from "react"
 import { useTranslation } from "react-i18next"
 
-import { toast } from "sonner"
-
-import type { ApiError } from "@/api/client"
-import {
-  usePostRoutingRegistryCheckMutation,
-  usePostRoutingRegistryConsentMutation,
-} from "@/api/mutations"
-import { useGetRoutingRegistryConsent } from "@/api/queries"
+import { usePostRoutingRegistryCheckMutation } from "@/api/mutations"
 import type { RoutingTestNfqws } from "@/api/generated/model"
-import { Checkbox } from "@/components/ui/checkbox"
-import { Label } from "@/components/ui/label"
-import { getApiErrorMessage } from "@/lib/api-errors"
 
 import {
   nfqwsVerdict,
@@ -21,48 +11,34 @@ import {
   summariseNfqwsCoverage,
 } from "./target-facts-model"
 
+export type SiteAvailability =
+  "idle" | "checking" | "reachable" | "unreachable" | "error"
+
 /**
- * Two facts about the target that the routing verdict does not answer, shown
- * as two facts.
+ * Three facts about the target that the routing verdict does not answer,
+ * shown before the routing details.
  *
- * They are deliberately not combined into "it works" or "it does not": nfqws
- * coverage, the registry and the route are three independent things, and any
- * two of them can disagree without either being wrong. A single verdict would
- * have to pick a winner and would be wrong in both directions.
+ * They are deliberately not combined into one verdict: reachability, nfqws
+ * coverage, the registry and the route are independent, and any two of them
+ * can disagree without either being wrong.
  */
 export function TargetFacts({
   nfqws,
+  nfqwsPending = false,
+  registryEnabled,
+  siteAvailability,
   target,
 }: {
   nfqws?: RoutingTestNfqws
+  nfqwsPending?: boolean
+  registryEnabled: boolean
+  siteAvailability: SiteAvailability
   target: string
 }) {
   const { t } = useTranslation()
   const coverage = summariseNfqwsCoverage(nfqws)
   const verdict = nfqwsVerdict(coverage)
   const registryMutation = usePostRoutingRegistryCheckMutation()
-  const registryConsentQuery = useGetRoutingRegistryConsent()
-  const registryEnabled = Boolean(
-    registryConsentQuery.data?.status === 200 &&
-      registryConsentQuery.data.data.enabled
-  )
-  const consentMutation = usePostRoutingRegistryConsentMutation({
-    mutation: {
-      onError: (mutationError) =>
-        toast.error(getApiErrorMessage(mutationError as ApiError), {
-          richColors: true,
-        }),
-      onSuccess: (response) => {
-        if (response.status === 200 && !response.data.durable) {
-          toast.error(t("overview.targetFacts.registryDurabilityUnknown"), {
-            richColors: true,
-          })
-        }
-      },
-    },
-  })
-  const registrySaving =
-    registryConsentQuery.isPending || consentMutation.isPending
 
   // One lookup per target per switch state, fired from the effect rather than
   // from a button: the preference is the consent, so a checked target should
@@ -91,19 +67,53 @@ export function TargetFacts({
   const registryState = registry ? registryVerdict(registry) : null
 
   return (
-    <div className="space-y-3 border-t pt-3">
+    <div className="space-y-3 rounded-md border bg-muted/20 p-3">
+      <div className="space-y-1">
+        <div className="text-xs font-medium">
+          {t("overview.targetFacts.availabilityTitle")}
+        </div>
+        <div aria-atomic="true" aria-live="polite">
+          {siteAvailability === "checking" ? (
+            <p className="inline-flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              {t("overview.targetFacts.availability.checking")}
+            </p>
+          ) : siteAvailability === "reachable" ? (
+            <p className="inline-flex items-center gap-2 text-sm text-green-700">
+              <CircleCheck className="h-4 w-4" />
+              {t("overview.targetFacts.availability.reachable")}
+            </p>
+          ) : siteAvailability === "unreachable" ? (
+            <p className="inline-flex items-center gap-2 text-sm text-destructive">
+              <CircleX className="h-4 w-4" />
+              {t("overview.targetFacts.availability.unreachable")}
+            </p>
+          ) : siteAvailability === "error" ? (
+            <p className="text-sm text-destructive">
+              {t("overview.targetFacts.availability.error")}
+            </p>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              {t("overview.targetFacts.availability.idle")}
+            </p>
+          )}
+        </div>
+      </div>
+
       <div className="space-y-1">
         <div className="text-xs font-medium">
           {t("overview.targetFacts.nfqwsTitle")}
         </div>
         <p className="text-sm text-muted-foreground">
-          {t(`overview.targetFacts.nfqws.${verdict}`)}
+          {nfqwsPending
+            ? t("overview.targetFacts.nfqwsChecking")
+            : t(`overview.targetFacts.nfqws.${verdict}`)}
         </p>
         {/* The entry, not just the fact: it is what an operator edits, and a
             parent domain matching is different from the domain itself. */}
         {[...coverage.excluding, ...coverage.covering].map((match) => (
           <p
-            className="break-words text-xs text-muted-foreground [overflow-wrap:anywhere]"
+            className="text-xs [overflow-wrap:anywhere] break-words text-muted-foreground"
             key={`${match.list}:${match.entry}:${match.matched}`}
           >
             {t("overview.targetFacts.nfqwsMatch", {
@@ -120,42 +130,12 @@ export function TargetFacts({
         <div className="text-xs font-medium">
           {t("overview.targetFacts.registryTitle")}
         </div>
-
-        {/* The switch sits with the answer it governs. Its dedicated endpoint
-            writes a private file atomically; it never stages an unrelated
-            routing draft. */}
-        <div className="flex items-start gap-2 py-1">
-          <Checkbox
-            checked={registryEnabled}
-            className="mt-0.5"
-            disabled={registrySaving || registryConsentQuery.isError}
-            id="registry-lookup-enabled"
-            onCheckedChange={(checked) =>
-              consentMutation.mutate({ data: { enabled: checked === true } })
-            }
-          />
-          <Label
-            className="text-sm font-normal text-muted-foreground"
-            htmlFor="registry-lookup-enabled"
-          >
-            {t("overview.targetFacts.registryConsent")}
-          </Label>
-          {registrySaving ? (
-            <span aria-live="polite" role="status">
-              <Loader2
-                aria-label={t("overview.targetFacts.registrySaving")}
-                className="mt-0.5 h-4 w-4 animate-spin"
-              />
-            </span>
-          ) : null}
-        </div>
-
         <div aria-atomic="true" aria-live="polite">
-          {registryConsentQuery.isError ? (
-            <p className="text-sm text-destructive" role="alert">
-              {t("overview.targetFacts.registryConsentLoadFailed")}
+          {!registryEnabled ? (
+            <p className="text-sm text-muted-foreground">
+              {t("overview.targetFacts.registryDisabled")}
             </p>
-          ) : !registryEnabled ? null : registryMutation.isPending ? (
+          ) : registryMutation.isPending ? (
             <p className="text-sm text-muted-foreground" role="status">
               {t("overview.targetFacts.registryChecking")}
             </p>
@@ -169,14 +149,14 @@ export function TargetFacts({
                 {t(`overview.targetFacts.registry.${registryState}`)}
               </p>
               {registry.blocked_subnets?.length ? (
-                <p className="break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
+                <p className="text-xs [overflow-wrap:anywhere] break-words text-muted-foreground">
                   {t("overview.targetFacts.registrySubnets", {
                     subnets: registry.blocked_subnets.join(", "),
                   })}
                 </p>
               ) : null}
               {registry.cdn_providers?.length ? (
-                <p className="break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
+                <p className="text-xs [overflow-wrap:anywhere] break-words text-muted-foreground">
                   {t("overview.targetFacts.registryCdn", {
                     providers: registry.cdn_providers.join(", "),
                   })}

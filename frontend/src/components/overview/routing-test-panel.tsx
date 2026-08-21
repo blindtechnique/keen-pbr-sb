@@ -1,11 +1,22 @@
 import { Loader2, Search } from "lucide-react"
 import { useState } from "react"
 import { useTranslation } from "react-i18next"
+import { useMutation } from "@tanstack/react-query"
+import { toast } from "sonner"
 
-import { usePostRoutingTestMutation } from "@/api/mutations"
+import type { ApiError } from "@/api/client"
+import type { NfqwsActionResult } from "@/api/generated/model"
+import {
+  usePostRoutingRegistryConsentMutation,
+  usePostRoutingTestMutation,
+} from "@/api/mutations"
+import { nfqwsAction } from "@/api/nfqws"
+import { useGetRoutingRegistryConsent } from "@/api/queries"
 import type { ConfigObject } from "@/api/generated/model"
 import { SectionCard } from "@/components/shared/section-card"
 import { Alert, AlertDescription } from "@/components/ui/alert"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Label } from "@/components/ui/label"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import {
   InputGroup,
@@ -15,10 +26,11 @@ import {
   InputGroupText,
 } from "@/components/ui/input-group"
 import { Skeleton } from "@/components/ui/skeleton"
+import { getApiErrorMessage } from "@/lib/api-errors"
 
 import { RoutingDiagnosticsResult } from "./routing-diagnostics-result"
 import { sanitizeRoutingTarget } from "./sanitize-routing-target"
-import { TargetFacts } from "./target-facts"
+import { TargetFacts, type SiteAvailability } from "./target-facts"
 
 export function RoutingTestPanel({
   lists,
@@ -32,12 +44,60 @@ export function RoutingTestPanel({
   const [routingInputError, setRoutingInputError] = useState<string | null>(
     null
   )
+  const [activeTarget, setActiveTarget] = useState<string | null>(null)
 
   const routingTestMutation = usePostRoutingTestMutation()
+  const registryConsentQuery = useGetRoutingRegistryConsent()
+  const registryEnabled = Boolean(
+    registryConsentQuery.data?.status === 200 &&
+    registryConsentQuery.data.data.enabled
+  )
+  const consentMutation = usePostRoutingRegistryConsentMutation({
+    mutation: {
+      onError: (mutationError) =>
+        toast.error(getApiErrorMessage(mutationError as ApiError), {
+          richColors: true,
+        }),
+      onSuccess: (response) => {
+        if (response.status === 200 && !response.data.durable) {
+          toast.error(t("overview.targetFacts.registryDurabilityUnknown"), {
+            richColors: true,
+          })
+        }
+      },
+    },
+  })
+  const registrySaving =
+    registryConsentQuery.isPending || consentMutation.isPending
+  const siteAvailabilityMutation = useMutation({
+    mutationFn: async ({ target, url }: { target: string; url: string }) => {
+      const response = await nfqwsAction<NfqwsActionResult>({
+        action: "check_url",
+        url,
+      })
+      if (typeof response.reachable !== "boolean") {
+        throw new TypeError()
+      }
+      return { reachable: response.reachable, target }
+    },
+  })
   const routingDiagnostics =
     routingTestMutation.data?.status === 200
-      ? routingTestMutation.data.data
+      ? routingTestMutation.data.data.target === activeTarget
+        ? routingTestMutation.data.data
+        : undefined
       : undefined
+  const siteAvailability: SiteAvailability = !activeTarget
+    ? "idle"
+    : siteAvailabilityMutation.isPending
+      ? "checking"
+      : siteAvailabilityMutation.isError
+        ? "error"
+        : siteAvailabilityMutation.data?.target === activeTarget
+          ? siteAvailabilityMutation.data.reachable
+            ? "reachable"
+            : "unreachable"
+          : "idle"
 
   return (
     <SectionCard title={t("overview.routingTest.title")}>
@@ -58,7 +118,12 @@ export function RoutingTestPanel({
           if (sanitized !== testTarget) {
             setTestTarget(sanitized)
           }
+          setActiveTarget(sanitized)
           routingTestMutation.mutate({ data: { target: sanitized } })
+          siteAvailabilityMutation.mutate({
+            target: sanitized,
+            url: siteCheckUrl(testTarget, sanitized),
+          })
         }}
       >
         <InputGroup>
@@ -97,7 +162,52 @@ export function RoutingTestPanel({
             </InputGroupButton>
           </InputGroupAddon>
         </InputGroup>
+
+        {/* This is a stored consent for the external registry lookup, so it
+            belongs with the address that will be disclosed rather than below
+            a previous result. */}
+        <div className="flex items-start gap-2 px-1">
+          <Checkbox
+            checked={registryEnabled}
+            className="mt-0.5"
+            disabled={registrySaving || registryConsentQuery.isError}
+            id="registry-lookup-enabled"
+            onCheckedChange={(checked) =>
+              consentMutation.mutate({ data: { enabled: checked === true } })
+            }
+          />
+          <Label
+            className="text-sm font-normal text-muted-foreground"
+            htmlFor="registry-lookup-enabled"
+          >
+            {t("overview.targetFacts.registryConsent")}
+          </Label>
+          {registrySaving ? (
+            <span aria-live="polite" role="status">
+              <Loader2
+                aria-label={t("overview.targetFacts.registrySaving")}
+                className="mt-0.5 h-4 w-4 animate-spin"
+              />
+            </span>
+          ) : null}
+        </div>
+
+        {registryConsentQuery.isError ? (
+          <p className="px-1 text-sm text-destructive" role="alert">
+            {t("overview.targetFacts.registryConsentLoadFailed")}
+          </p>
+        ) : null}
       </form>
+
+      {activeTarget ? (
+        <TargetFacts
+          nfqws={routingDiagnostics?.nfqws}
+          nfqwsPending={routingTestMutation.isPending}
+          registryEnabled={registryEnabled}
+          siteAvailability={siteAvailability}
+          target={activeTarget}
+        />
+      ) : null}
 
       {routingTestMutation.isPending ? (
         <div className="space-y-2">
@@ -131,20 +241,21 @@ export function RoutingTestPanel({
       ) : null}
 
       {routingDiagnostics ? (
-        <>
-          <RoutingDiagnosticsResult
-            diagnostics={routingDiagnostics}
-            lists={lists}
-            outbounds={outbounds}
-          />
-          {/* Below the routing verdict, not merged into it: nfqws coverage and
-              the registry are separate facts that the route does not answer. */}
-          <TargetFacts
-            nfqws={routingDiagnostics.nfqws}
-            target={routingDiagnostics.target}
-          />
-        </>
+        <RoutingDiagnosticsResult
+          diagnostics={routingDiagnostics}
+          lists={lists}
+          outbounds={outbounds}
+        />
       ) : null}
     </SectionCard>
   )
+}
+
+function siteCheckUrl(input: string, target: string): string {
+  const trimmed = input.trim()
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed
+  }
+  const host = target.includes(":") ? `[${target}]` : target
+  return `https://${host}/`
 }

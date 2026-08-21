@@ -337,7 +337,6 @@ export const enTranslation = {
       lists: "Lists",
       lua: "Lua scripts",
       logs: "Logs",
-      check: "Website check",
     },
     notInstalled: {
       title: "nfqws2 is not installed",
@@ -377,12 +376,6 @@ export const enTranslation = {
     confirmClearLog: "Clear the selected nfqws2 log?",
     logCleared: "Log cleared",
     configMissing: "nfqws2.conf was not found.",
-    checkTitle: "Website availability check",
-    checkDescription:
-      "Checks the HTTP response from the router, equivalent to the original nfqws-web check.",
-    check: "Check",
-    reachable: "The website returned a readable response.",
-    unreachable: "The website is unavailable or returned no readable response.",
     backup: {
       button: "Backups",
       title: "nfqws2 backups",
@@ -2011,7 +2004,17 @@ export const enTranslation = {
       },
     },
     targetFacts: {
+      availabilityTitle: "Website availability",
+      availability: {
+        idle: "The check has not run yet.",
+        checking: "Checking availability from the router…",
+        reachable: "The website is reachable from the router.",
+        unreachable:
+          "The website is unreachable from the router or returned no readable response.",
+        error: "The availability check could not be completed.",
+      },
       nfqwsTitle: "nfqws",
+      nfqwsChecking: "Checking whether DPI circumvention applies…",
       nfqws: {
         busy: "Another nfqws coverage check is already running. This routing result is still valid; try the check again.",
         unknown:
@@ -2038,6 +2041,7 @@ export const enTranslation = {
         "The stored consent could not be read. External lookup remains disabled.",
       registryDurabilityUnknown:
         "The setting changed, but storage durability could not be confirmed.",
+      registryDisabled: "Registry lookup is off.",
       registryChecking: "Checking…",
       registry: {
         "not-checked":

@@ -338,7 +338,6 @@ export const ruTranslation = {
       lists: "Списки",
       lua: "Lua-скрипты",
       logs: "Журналы",
-      check: "Проверка сайта",
     },
     notInstalled: {
       title: "nfqws2 не установлен",
@@ -378,12 +377,6 @@ export const ruTranslation = {
     confirmClearLog: "Очистить выбранный журнал nfqws2?",
     logCleared: "Журнал очищен",
     configMissing: "Файл nfqws2.conf не найден.",
-    checkTitle: "Проверка доступности сайта",
-    checkDescription:
-      "Проверяет HTTP-ответ с маршрутизатора. Это аналог проверки из оригинального nfqws-web.",
-    check: "Проверить",
-    reachable: "Сайт доступен.",
-    unreachable: "Сайт недоступен или не вернул читаемый ответ.",
     backup: {
       button: "Резервные копии",
       title: "Резервные копии nfqws2",
@@ -2026,7 +2019,16 @@ export const ruTranslation = {
       },
     },
     targetFacts: {
+      availabilityTitle: "Доступность сайта",
+      availability: {
+        idle: "Проверка ещё не запускалась.",
+        checking: "Проверяем доступность с роутера…",
+        reachable: "Сайт доступен с роутера.",
+        unreachable: "Сайт недоступен с роутера или не вернул читаемый ответ.",
+        error: "Не удалось выполнить проверку доступности.",
+      },
       nfqwsTitle: "nfqws",
+      nfqwsChecking: "Проверяем, применяется ли обход DPI…",
       nfqws: {
         busy: "Другая проверка покрытия nfqws уже выполняется. Результат маршрутизации остаётся действительным; повторите проверку.",
         unknown:
@@ -2053,6 +2055,7 @@ export const ruTranslation = {
         "Не удалось прочитать сохранённое разрешение. Внешняя проверка остаётся выключенной.",
       registryDurabilityUnknown:
         "Настройка изменилась, но подтвердить её сохранность после сбоя не удалось.",
+      registryDisabled: "Проверка по реестру выключена.",
       registryChecking: "Проверяем…",
       registry: {
         "not-checked":
