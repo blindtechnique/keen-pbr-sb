@@ -1,8 +1,12 @@
-import { useEffect } from "react"
+import { useEffect, useRef } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 
-import { applyStatusEvent } from "@/api/status-event-cache"
 import {
+  applyStatusEvent,
+  getTerminalConfigLifecycleOperationKey,
+} from "@/api/status-event-cache"
+import {
+  getGetConfigQueryKey,
   getGetHealthServiceQueryKey,
   getGetRuntimeInterfacesQueryKey,
   getGetRuntimeOutboundsQueryKey,
@@ -38,6 +42,7 @@ const STATUS_EVENT_NAMES = [
 
 export function StatusEventBridge() {
   const queryClient = useQueryClient()
+  const lastConfigResyncOperationRef = useRef<string | null>(null)
 
   useEffect(() => {
     let source: EventSource | null = null
@@ -105,6 +110,17 @@ export function StatusEventBridge() {
             applySingBoxInstallStatusEvent(data)
           } else {
             applyStatusEvent(queryClient, data)
+            const terminalOperationKey =
+              getTerminalConfigLifecycleOperationKey(data)
+            if (
+              terminalOperationKey &&
+              terminalOperationKey !== lastConfigResyncOperationRef.current
+            ) {
+              lastConfigResyncOperationRef.current = terminalOperationKey
+              void queryClient.invalidateQueries({
+                queryKey: getGetConfigQueryKey(),
+              })
+            }
           }
         })
       }

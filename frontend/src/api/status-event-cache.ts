@@ -73,9 +73,7 @@ export function applyStatusEvent(
       getGetRuntimeInterfacesQueryKey(),
       (current) =>
         current
-          ? response(
-              applyInterfaceTrafficUpdate(current.data, data)
-            )
+          ? response(applyInterfaceTrafficUpdate(current.data, data))
           : current
     )
 
@@ -104,6 +102,35 @@ export function applyStatusEvent(
       return false
   }
   return true
+}
+
+export function getTerminalConfigLifecycleOperationKey(
+  rawData: string
+): string | null {
+  let event: StatusEvent | null
+  try {
+    event = JSON.parse(rawData) as StatusEvent
+  } catch {
+    return null
+  }
+
+  const service =
+    event?.type === "snapshot"
+      ? event.data.service
+      : event?.type === "service"
+        ? event.data
+        : null
+  const operation = service?.lifecycle_operation
+  if (
+    !operation ||
+    (operation.type !== "apply_config" &&
+      operation.type !== "rollback_config") ||
+    (operation.status !== "succeeded" && operation.status !== "failed")
+  ) {
+    return null
+  }
+
+  return `${operation.id}:${operation.status}`
 }
 
 export function applyInterfaceTrafficUpdate(

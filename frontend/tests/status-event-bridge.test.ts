@@ -10,6 +10,7 @@ import {
 import {
   applyInterfaceTrafficUpdate,
   applyStatusEvent,
+  getTerminalConfigLifecycleOperationKey,
 } from "../src/api/status-event-cache"
 import type { RuntimeInterfaceInventoryResponse } from "../src/api/generated/model"
 
@@ -48,10 +49,14 @@ describe("status event cache bridge", () => {
       data: { version: "2" },
       status: 200,
     })
-    expect(client.getQueryData(getGetRuntimeOutboundsQueryKey())).toMatchObject({
-      data: { outbounds: [{ tag: "vpn" }] },
-    })
-    expect(client.getQueryData(getGetRuntimeInterfacesQueryKey())).toMatchObject({
+    expect(client.getQueryData(getGetRuntimeOutboundsQueryKey())).toMatchObject(
+      {
+        data: { outbounds: [{ tag: "vpn" }] },
+      }
+    )
+    expect(
+      client.getQueryData(getGetRuntimeInterfacesQueryKey())
+    ).toMatchObject({
       data: { interfaces: [{ name: "tun0" }] },
     })
   })
@@ -161,10 +166,9 @@ describe("status event cache bridge", () => {
       )
     ).toBe(true)
 
-    const cached =
-      client.getQueryData<getRuntimeInterfacesResponseSuccess>(
-        getGetRuntimeInterfacesQueryKey()
-      )
+    const cached = client.getQueryData<getRuntimeInterfacesResponseSuccess>(
+      getGetRuntimeInterfacesQueryKey()
+    )
     expect(cached?.data.interfaces[0]?.traffic).toMatchObject({
       sampled_at_unix_ms: 3_000,
       rx_bytes: 130,
@@ -294,7 +298,9 @@ describe("status event cache bridge", () => {
       })
     )
 
-    expect(client.getQueryData(getGetRuntimeInterfacesQueryKey())).toMatchObject({
+    expect(
+      client.getQueryData(getGetRuntimeInterfacesQueryKey())
+    ).toMatchObject({
       data: {
         interfaces: [
           {
@@ -308,5 +314,71 @@ describe("status event cache bridge", () => {
         ],
       },
     })
+  })
+
+  test("only terminal config lifecycle events request a config resync", () => {
+    expect(
+      getTerminalConfigLifecycleOperationKey(
+        JSON.stringify({
+          type: "service",
+          data: {
+            lifecycle_operation: {
+              id: "apply-1",
+              type: "apply_config",
+              status: "running",
+            },
+          },
+        })
+      )
+    ).toBeNull()
+
+    expect(
+      getTerminalConfigLifecycleOperationKey(
+        JSON.stringify({
+          type: "service",
+          data: {
+            lifecycle_operation: {
+              id: "start-1",
+              type: "start",
+              status: "succeeded",
+            },
+          },
+        })
+      )
+    ).toBeNull()
+
+    expect(
+      getTerminalConfigLifecycleOperationKey(
+        JSON.stringify({
+          type: "service",
+          data: {
+            lifecycle_operation: {
+              id: "apply-1",
+              type: "apply_config",
+              status: "succeeded",
+            },
+          },
+        })
+      )
+    ).toBe("apply-1:succeeded")
+
+    expect(
+      getTerminalConfigLifecycleOperationKey(
+        JSON.stringify({
+          type: "snapshot",
+          data: {
+            service: {
+              lifecycle_operation: {
+                id: "rollback-1",
+                type: "rollback_config",
+                status: "failed",
+              },
+            },
+            outbounds: {},
+            interfaces: {},
+          },
+        })
+      )
+    ).toBe("rollback-1:failed")
   })
 })
