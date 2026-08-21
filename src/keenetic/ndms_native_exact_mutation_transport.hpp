@@ -26,6 +26,7 @@ inline constexpr auto kNdmsNativeExactMutationRequiredDispatchWindow =
 
 enum class NdmsNativeExactMutationKind {
     delete_managed_interface,
+    enable_managed_interface,
     save_configuration,
 };
 
@@ -46,12 +47,15 @@ public:
     using std::runtime_error::runtime_error;
 };
 
-// Closed, move-only command vocabulary for the two RCI writes used by panel
-// deletion. Callers cannot supply a URL, a JSON tree or an arbitrary command.
-// A delete target must be a canonical managed candidate (Wireguard5..98).
+// Closed, move-only command vocabulary for the exact RCI writes used by
+// native import activation and panel deletion. Callers cannot supply a URL,
+// a JSON tree or an arbitrary command. A target must be a canonical managed
+// candidate (Wireguard5..98).
 class NdmsNativeExactMutationRequest final {
 public:
     static NdmsNativeExactMutationRequest delete_managed_interface(
+        std::string target);
+    static NdmsNativeExactMutationRequest enable_managed_interface(
         std::string target);
     static NdmsNativeExactMutationRequest save_configuration();
 
@@ -113,7 +117,7 @@ struct NdmsNativeExactMutationBackendTrace final {
 class NdmsNativeExactMutationDispatchCapability;
 struct NdmsNativeExactMutationTransportResult;
 
-// Opaque, move-only authority required by an exact panel-delete transport
+// Opaque, move-only authority required by an exact native-mutation transport
 // entry point. Production construction stays limited to the exact delete
 // executor and the two cooperative coordinators. Their held leases serialize
 // keen-pbr writers only; they cannot exclude Keenetic Web UI, ndmc or
@@ -270,8 +274,9 @@ struct NdmsNativeExactMutationTransportResult final {
 };
 
 // Performs one and only one fixed-loopback POST. A syntactically acknowledged
-// response is never proof that a delete/save happened: the caller must use a
-// fresh independent observation before advancing durable state.
+// response is never proof that a delete/enable happened: the caller must use
+// a fresh independent observation before advancing durable state. The save
+// acknowledgement is accepted only after such an observation.
 NdmsNativeExactMutationTransportResult
 post_ndms_native_exact_mutation_once(
     NdmsNativeExactMutationDispatchCapability&& capability,

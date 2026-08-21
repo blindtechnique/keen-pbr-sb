@@ -224,7 +224,10 @@ class NdmsNativeCooperativeImportCoordinatorTestIssuer;
 // First production-capable create-only coordinator for stock WG/AWG imports.
 // It owns no outer lock: callers must already have acquired maintenance,
 // runtime mutation admission and then NdmsNativeWriterLease in that order.
-// It never calls `system configuration save` and exposes no delete operation.
+// A proved created interface is enabled and saved before ownership is
+// finalized. Both writes are exact, fixed-loopback and idempotent; an
+// interrupted pass leaves the existing import WAL for the same bodyless
+// recovery path. The coordinator exposes no caller-selected RCI operation.
 // Production wiring constructs and retains the hardened stores once, using
 // the intended split layout (not per request): all owner-only mutable stores
 // live below the root-owned /opt/etc/keen-pbr anchor. The snapshot key and
@@ -274,6 +277,9 @@ private:
     NdmsNativeExactMutationTransportResult dispatch_delete_once(
         NdmsNativeExactMutationRequest request,
         NdmsNativeExactMutationPreDispatchGuard& guard);
+    NdmsNativeExactMutationTransportResult dispatch_activation_once(
+        NdmsNativeExactMutationRequest request,
+        NdmsNativeExactMutationPreDispatchGuard& guard);
 
     std::unique_ptr<Impl> impl_;
 
@@ -294,7 +300,8 @@ public:
         NdmsNativeCooperativeImportObservationGateway& gateway,
         NdmsNativeLoopbackRciPostBackend& transport,
         NdmsNativeExactMutationBackend& delete_transport,
-        NdmsNativeImportExecutorClock& clock);
+        NdmsNativeImportExecutorClock& clock,
+        NdmsNativeExactMutationBackend* activation_transport = nullptr);
 };
 #endif
 

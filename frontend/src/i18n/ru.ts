@@ -1223,10 +1223,8 @@ export const ruTranslation = {
           "Сохранены долговечные данные восстановления: операцию нельзя признать завершённой или безопасно отсутствующей.",
         firmwareInterface: "Интерфейс KeeneticOS",
         kernelInterface: "Linux-интерфейс",
-        runningOnly:
-          "Только рабочая конфигурация: глобальная команда Keenetic «system configuration save» не выполнялась.",
-        useInPanel:
-          "Использовать созданный интерфейс в форме панели (без сохранения)",
+        runningOnly: "Туннель включён, а конфигурация KeeneticOS сохранена.",
+        useInPanel: "Использовать созданный интерфейс в панели",
         panelCandidate: "{{firmware}} · Linux {{kernel}} · только что создан",
         stop: "Причина остановки: {{stop}}",
       },

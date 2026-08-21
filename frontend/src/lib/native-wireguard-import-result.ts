@@ -155,16 +155,14 @@ export type NdmsNativeImportStatus =
   (typeof NDMS_NATIVE_IMPORT_STATUSES)[number]
 export type NdmsNativeImportStop = (typeof NDMS_NATIVE_IMPORT_STOPS)[number]
 export type NdmsNativeImportOutcome =
-  | "blocked"
-  | "recovery_required"
-  | "completed"
+  "blocked" | "recovery_required" | "completed"
 
 export type NdmsNativeImportClientResult = Readonly<{
   status: NdmsNativeImportStatus
   stop: NdmsNativeImportStop
   external_ndms_writer_race_excluded: false
   external_ndms_writer_race_accepted: boolean
-  system_configuration_save_performed: false
+  system_configuration_save_performed: boolean
   request_may_have_been_dispatched: boolean
   wal_may_require_recovery: boolean
   rollback_snapshot_may_be_retained: boolean
@@ -317,7 +315,7 @@ export function parseNdmsNativeImportResult(
     !inList(value.stop, NDMS_NATIVE_IMPORT_STOPS) ||
     value.external_ndms_writer_race_excluded !== false ||
     typeof value.external_ndms_writer_race_accepted !== "boolean" ||
-    value.system_configuration_save_performed !== false ||
+    typeof value.system_configuration_save_performed !== "boolean" ||
     typeof value.request_may_have_been_dispatched !== "boolean" ||
     typeof value.wal_may_require_recovery !== "boolean" ||
     typeof value.rollback_snapshot_may_be_retained !== "boolean" ||
@@ -417,6 +415,13 @@ export function parseNdmsNativeImportResult(
   const fullPublicIdentity = kindPresent && expectedPresent
   const noCreatedOrForwardEvidence =
     !createdPairPresent && !value.ownership_published && !hasForwardEvidence
+
+  if (
+    value.system_configuration_save_performed !==
+    (value.status === "completed")
+  ) {
+    return null
+  }
 
   if (value.status === "blocked") {
     const consentRefused = value.stop === "external_writer_race_not_accepted"

@@ -26,7 +26,7 @@ export interface NdmsNativeImportResponse {
   stop: NdmsNativeImportStop;
   external_ndms_writer_race_excluded: boolean;
   external_ndms_writer_race_accepted: boolean;
-  /** Always false for import. A completed interface exists only in the running KeeneticOS configuration until the owner deliberately performs a global system configuration save elsewhere.
+  /** True exactly for a completed import after the interface was enabled and KeeneticOS acknowledged system configuration save.
    */
   system_configuration_save_performed: boolean;
   request_may_have_been_dispatched: boolean;

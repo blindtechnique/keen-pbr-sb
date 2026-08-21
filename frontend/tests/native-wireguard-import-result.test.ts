@@ -11,7 +11,7 @@ const completed = () => ({
   stop: "none",
   external_ndms_writer_race_excluded: false,
   external_ndms_writer_race_accepted: true,
-  system_configuration_save_performed: false,
+  system_configuration_save_performed: true,
   request_may_have_been_dispatched: true,
   wal_may_require_recovery: false,
   rollback_snapshot_may_be_retained: true,
@@ -35,7 +35,7 @@ describe("native WireGuard import public result", () => {
     expect(result && ndmsNativeImportOutcome(result)).toBe("completed")
     expect(result?.created_interface).toBe("Wireguard5")
     expect(result?.created_kernel_interface).toBe("nwg5")
-    expect(result?.system_configuration_save_performed).toBe(false)
+    expect(result?.system_configuration_save_performed).toBe(true)
     expect(result && provedCompletedNativeImportIdentity(result)).toEqual({
       firmwareInterface: "Wireguard5",
       kernelInterface: "nwg5",
@@ -46,7 +46,7 @@ describe("native WireGuard import public result", () => {
   test("rejects every capability overclaim or incomplete completed shape", () => {
     for (const patch of [
       { external_ndms_writer_race_excluded: true },
-      { system_configuration_save_performed: true },
+      { system_configuration_save_performed: false },
       { external_ndms_writer_race_accepted: false },
       { request_may_have_been_dispatched: false },
       { ownership_published: false },
@@ -93,6 +93,7 @@ describe("native WireGuard import public result", () => {
       ...completed(),
       status: "recovery_required",
       stop: "forward_completion_blocked",
+      system_configuration_save_performed: false,
       wal_may_require_recovery: true,
       ownership_published: false,
       created_interface: undefined,
@@ -110,6 +111,7 @@ describe("native WireGuard import public result", () => {
       ...completed(),
       status: "recovery_required",
       stop: "executor_blocked",
+      system_configuration_save_performed: false,
       request_may_have_been_dispatched: false,
       wal_may_require_recovery: true,
       rollback_snapshot_may_be_retained: false,

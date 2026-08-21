@@ -193,6 +193,22 @@ TEST_CASE("exact native save request has a closed canonical grammar") {
     CHECK(request.content_length() == 0U);
 }
 
+TEST_CASE("exact native enable request has a closed canonical grammar") {
+    auto request =
+        NdmsNativeExactMutationRequest::enable_managed_interface(
+            "Wireguard5");
+    CHECK(request.kind() ==
+          NdmsNativeExactMutationKind::enable_managed_interface);
+    CHECK(request.target() == "Wireguard5");
+
+    NdmsNativeSecretBuffer body(request.content_length());
+    CHECK(request.write_body_once(body));
+    CHECK(body.view() ==
+          R"({"interface":{"Wireguard5":{"up":true}}})");
+    CHECK(request.target().empty());
+    CHECK(request.content_length() == 0U);
+}
+
 TEST_CASE("exact mutation request move invalidates the source") {
     auto source =
         NdmsNativeExactMutationRequest::delete_managed_interface(
@@ -214,6 +230,10 @@ TEST_CASE("exact delete rejects protected and noncanonical targets") {
              "Wireguard5/../Wireguard6"}) {
         CHECK_THROWS_AS(
             NdmsNativeExactMutationRequest::delete_managed_interface(
+                target),
+            NdmsNativeExactMutationTransportError);
+        CHECK_THROWS_AS(
+            NdmsNativeExactMutationRequest::enable_managed_interface(
                 target),
             NdmsNativeExactMutationTransportError);
     }
@@ -258,6 +278,40 @@ TEST_CASE("exact mutation transport posts save once") {
     CHECK(result.kind ==
           NdmsNativeExactMutationKind::save_configuration);
     CHECK(result.response_manifest.acknowledged_needs_observation());
+}
+
+TEST_CASE("exact mutation transport accepts measured Keenetic acknowledgements") {
+    FakeBackend backend;
+    FakeGuard guard;
+
+    SUBCASE("interface up response is target bound") {
+        backend.response_body =
+            R"({"interface":{"Wireguard5":{"up":{"status":[{"status":"message","code":"72155286","ident":"Network::Interface::Base","message":"\"Wireguard5\": interface is up."}]}}}})";
+        const auto result = post_for_test(
+            NdmsNativeExactMutationRequest::enable_managed_interface(
+                "Wireguard5"),
+            guard, backend);
+        CHECK(result.response_manifest.acknowledged_needs_observation());
+
+        backend.response_body =
+            R"({"interface":{"Wireguard6":{"up":{"status":[{"status":"message","code":"72155286","ident":"Network::Interface::Base","message":"\"Wireguard6\": interface is up."}]}}}})";
+        const auto wrong_target = post_for_test(
+            NdmsNativeExactMutationRequest::enable_managed_interface(
+                "Wireguard5"),
+            guard, backend);
+        CHECK(wrong_target.response_manifest.outcome ==
+              NdmsNativeExactMutationResponseOutcome::
+                  shape_not_acknowledged);
+    }
+
+    SUBCASE("configuration save response is acknowledged") {
+        backend.response_body =
+            R"({"system":{"configuration":{"save":{"status":[{"status":"message","code":"8912996","ident":"Core::System::StartupConfig","message":"saving (http/rci)."}]}}}})";
+        const auto result = post_for_test(
+            NdmsNativeExactMutationRequest::save_configuration(),
+            guard, backend);
+        CHECK(result.response_manifest.acknowledged_needs_observation());
+    }
 }
 
 TEST_CASE("pre-dispatch guard blocks the exact mutation before perform") {

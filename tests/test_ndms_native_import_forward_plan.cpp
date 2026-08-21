@@ -172,15 +172,14 @@ TEST_CASE("forward completion preserves WG and AWG kind into ownership") {
     }
 }
 
-TEST_CASE("forward completion refuses a world it did not measure at rest") {
+TEST_CASE("forward completion accepts exact owned up state but refuses drift") {
     const auto record = response_recorded_record();
 
     auto moved = verified_observation();
     moved.target_down = false;
-    // An interface somebody already enabled is not ours to finish quietly.
-    CHECK_FALSE(plan_ndms_native_import_forward_completion(
-                    record, moved, kMeasuredRevision)
-                    .actionable());
+    CHECK(plan_ndms_native_import_forward_completion(
+              record, moved, kMeasuredRevision)
+              .actionable());
 
     auto wrong_target = verified_observation();
     wrong_target.marker_target = "Wireguard6";

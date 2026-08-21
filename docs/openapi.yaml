@@ -691,8 +691,8 @@ paths:
         value records explicit acceptance that another tool may change NDMS
         during the operation; it does not exclude that race. The endpoint must
         be called exactly once and must never be retried by a generated client.
-        A completed result proves a newly created runtime interface, but never
-        claims that `system configuration save` was performed. The response is
+        A completed result proves that the new interface was enabled and that
+        KeeneticOS acknowledged `system configuration save`. The response is
         redacted and all responses are served with `Cache-Control: no-store`.
       operationId: postNdmsNativeImportSecret
       parameters:
@@ -8010,7 +8010,10 @@ components:
             rollback delete may have crossed the transport boundary.
         system_configuration_save_performed:
           type: boolean
-          enum: [false]
+          description: >
+            True only for a completed forward recovery that enabled the
+            imported interface and received the exact KeeneticOS save
+            acknowledgement. Cleanup-only recovery never saves.
         external_ndms_writer_race_excluded:
           type: boolean
           enum: [false]
@@ -8172,11 +8175,9 @@ components:
           type: boolean
         system_configuration_save_performed:
           type: boolean
-          enum: [false]
           description: >
-            Always false for import. A completed interface exists only in the
-            running KeeneticOS configuration until the owner deliberately
-            performs a global system configuration save elsewhere.
+            True exactly for a completed import after the interface was
+            enabled and KeeneticOS acknowledged system configuration save.
         request_may_have_been_dispatched:
           type: boolean
         wal_may_require_recovery:

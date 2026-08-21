@@ -243,6 +243,7 @@ NdmsNativeCooperativeImportResult completed_result() {
     NdmsNativeCooperativeImportResult result;
     result.status = NdmsNativeCooperativeImportStatus::completed;
     result.stop = NdmsNativeCooperativeImportStop::none;
+    result.system_configuration_save_performed = true;
     result.external_ndms_writer_race_accepted = true;
     result.request_may_have_been_dispatched = true;
     result.rollback_snapshot_may_be_retained = true;
@@ -267,6 +268,7 @@ NdmsNativeCooperativeImportResumeResult completed_recovery_result() {
     NdmsNativeCooperativeImportResumeResult result;
     result.status = NdmsNativeCooperativeImportResumeStatus::completed;
     result.stop = NdmsNativeCooperativeImportResumeStop::none;
+    result.system_configuration_save_performed = true;
     result.ownership_published = true;
     result.wal_removed = true;
     result.transaction_id = std::string(32U, 'b');
@@ -298,6 +300,7 @@ NdmsNativeCooperativeImportResumeResult no_work_recovery_result() {
 NdmsNativeCooperativeImportResumeResult blocked_recovery_result() {
     auto result = completed_recovery_result();
     result.status = NdmsNativeCooperativeImportResumeStatus::blocked;
+    result.system_configuration_save_performed = false;
     result.stop =
         NdmsNativeCooperativeImportResumeStop::observation_unstable;
     result.wal_may_require_recovery = true;
@@ -414,6 +417,7 @@ void check_no_store(const httplib::Result& response) {
 TEST_CASE("native import API maps only redacted typed evidence") {
     auto result = completed_result();
     result.status = NdmsNativeCooperativeImportStatus::recovery_required;
+    result.system_configuration_save_performed = false;
     result.stop = NdmsNativeCooperativeImportStop::executor_blocked;
     result.request_may_have_been_dispatched = true;
     result.wal_may_require_recovery = true;
@@ -448,6 +452,7 @@ TEST_CASE("native import API maps only redacted typed evidence") {
 TEST_CASE("native import API requires a complete proved created identity") {
     auto result = completed_result();
     result.status = NdmsNativeCooperativeImportStatus::recovery_required;
+    result.system_configuration_save_performed = false;
     result.stop = NdmsNativeCooperativeImportStop::unexpected_failure;
     result.wal_may_require_recovery = true;
     result.forward_admission_state.reset();
@@ -516,6 +521,7 @@ TEST_CASE("native import API rejects incoherent nonterminal evidence") {
         auto recovery = completed_result();
         recovery.status =
             NdmsNativeCooperativeImportStatus::recovery_required;
+        recovery.system_configuration_save_performed = false;
         recovery.stop = NdmsNativeCooperativeImportStop::executor_blocked;
         recovery.wal_may_require_recovery = true;
         recovery.executor_stop =
@@ -539,6 +545,7 @@ TEST_CASE("native import API enforces the fresh import stop matrix") {
         auto result = completed_result();
         result.status =
             NdmsNativeCooperativeImportStatus::recovery_required;
+        result.system_configuration_save_performed = false;
         result.stop = NdmsNativeCooperativeImportStop::executor_blocked;
         result.request_may_have_been_dispatched = false;
         result.wal_may_require_recovery = true;
@@ -666,6 +673,7 @@ TEST_CASE("native import API enforces the fresh import stop matrix") {
         auto result = completed_result();
         result.status =
             NdmsNativeCooperativeImportStatus::recovery_required;
+        result.system_configuration_save_performed = false;
         result.stop = NdmsNativeCooperativeImportStop::
             first_post_observation_failed;
         result.wal_may_require_recovery = true;
@@ -684,6 +692,7 @@ TEST_CASE("native import API enforces the fresh import stop matrix") {
         auto result = completed_result();
         result.status =
             NdmsNativeCooperativeImportStatus::recovery_required;
+        result.system_configuration_save_performed = false;
         result.stop = NdmsNativeCooperativeImportStop::wal_cleanup_failed;
         result.wal_may_require_recovery = true;
         result.forward_dispatch_state =
@@ -1060,7 +1069,7 @@ TEST_CASE("native import consumes at most 512 KiB and invokes once") {
     CHECK(response.at("status") == "completed");
     CHECK(response.at("external_ndms_writer_race_excluded") == false);
     CHECK(response.at("external_ndms_writer_race_accepted") == true);
-    CHECK(response.at("system_configuration_save_performed") == false);
+    CHECK(response.at("system_configuration_save_performed") == true);
 
     const auto oversized = fixture.client().Post(
         std::string{kNdmsNativeImportApiPath},
@@ -1172,7 +1181,7 @@ TEST_CASE("native import recovery maps only coherent redacted evidence") {
     CHECK(response.at("stop") == "none");
     CHECK(response.at("ndms_import_request_dispatched") == false);
     CHECK(response.at("ndms_delete_dispatched") == false);
-    CHECK(response.at("system_configuration_save_performed") == false);
+    CHECK(response.at("system_configuration_save_performed") == true);
     CHECK(response.at("external_ndms_writer_race_excluded") == false);
     CHECK(response.at("external_ndms_writer_race_accepted") == false);
     CHECK(response.at("delete_perform_started") == false);
@@ -1391,7 +1400,7 @@ TEST_CASE("native import recovery rejects unknown or incoherent results") {
     });
     reject([](auto& result) { result.ndms_delete_dispatched = true; });
     reject([](auto& result) {
-        result.system_configuration_save_performed = true;
+        result.system_configuration_save_performed = false;
     });
     reject([](auto& result) {
         result.external_ndms_writer_race_excluded = true;
@@ -1433,6 +1442,7 @@ TEST_CASE("native import recovery rejects unknown or incoherent results") {
     {
         auto result = completed_recovery_result();
         result.status = NdmsNativeCooperativeImportResumeStatus::blocked;
+        result.system_configuration_save_performed = false;
         result.stop = NdmsNativeCooperativeImportResumeStop::writer_missing;
         result.wal_may_require_recovery = true;
         result.wal_removed = false;
@@ -1441,6 +1451,7 @@ TEST_CASE("native import recovery rejects unknown or incoherent results") {
     {
         auto result = completed_recovery_result();
         result.status = NdmsNativeCooperativeImportResumeStatus::blocked;
+        result.system_configuration_save_performed = false;
         result.stop = NdmsNativeCooperativeImportResumeStop::
             first_observation_failed;
         result.wal_may_require_recovery = true;
@@ -1460,6 +1471,7 @@ TEST_CASE("native import recovery rejects unknown or incoherent results") {
     {
         auto result = completed_recovery_result();
         result.status = NdmsNativeCooperativeImportResumeStatus::blocked;
+        result.system_configuration_save_performed = false;
         result.stop = NdmsNativeCooperativeImportResumeStop::
             forward_admission_failed;
         result.phase = NdmsNativeImportWalPhase::prepared;
@@ -1474,6 +1486,7 @@ TEST_CASE("native import recovery rejects unknown or incoherent results") {
     {
         auto result = completed_recovery_result();
         result.status = NdmsNativeCooperativeImportResumeStatus::blocked;
+        result.system_configuration_save_performed = false;
         result.stop = NdmsNativeCooperativeImportResumeStop::
             ownership_publish_failed;
         result.wal_may_require_recovery = true;
@@ -1493,6 +1506,7 @@ TEST_CASE("native import recovery rejects unknown or incoherent results") {
     {
         auto result = completed_recovery_result();
         result.status = NdmsNativeCooperativeImportResumeStatus::blocked;
+        result.system_configuration_save_performed = false;
         result.stop = NdmsNativeCooperativeImportResumeStop::
             forward_admission_failed;
         result.wal_may_require_recovery = true;
@@ -1509,6 +1523,7 @@ TEST_CASE("native import recovery rejects unknown or incoherent results") {
     {
         auto result = completed_recovery_result();
         result.status = NdmsNativeCooperativeImportResumeStatus::blocked;
+        result.system_configuration_save_performed = false;
         result.stop = NdmsNativeCooperativeImportResumeStop::
             forward_admission_failed;
         result.wal_may_require_recovery = true;
@@ -1522,6 +1537,7 @@ TEST_CASE("native import recovery rejects unknown or incoherent results") {
     {
         auto result = completed_recovery_result();
         result.status = NdmsNativeCooperativeImportResumeStatus::blocked;
+        result.system_configuration_save_performed = false;
         result.stop = NdmsNativeCooperativeImportResumeStop::
             ownership_publish_failed;
         result.wal_may_require_recovery = true;

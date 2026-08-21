@@ -1220,9 +1220,8 @@ export const enTranslation = {
         firmwareInterface: "KeeneticOS interface",
         kernelInterface: "Linux interface",
         runningOnly:
-          "Running configuration only: the global Keenetic ‘system configuration save’ was not performed.",
-        useInPanel:
-          "Use this created interface in the panel form (does not save)",
+          "The tunnel is enabled and the KeeneticOS configuration is saved.",
+        useInPanel: "Use this created interface in the panel",
         panelCandidate: "{{firmware}} · Linux {{kernel}} · newly created",
         stop: "Stop: {{stop}}",
       },

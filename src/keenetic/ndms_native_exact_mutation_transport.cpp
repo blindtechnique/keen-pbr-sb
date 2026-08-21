@@ -25,6 +25,9 @@ static_assert(
 constexpr std::string_view kDeletePrefix{
     R"({"interface":{"name":")"};
 constexpr std::string_view kDeleteSuffix{R"(","no":true}})"};
+constexpr std::string_view kEnablePrefix{
+    R"({"interface":{")"};
+constexpr std::string_view kEnableSuffix{R"(":{"up":true}}})"};
 constexpr std::string_view kSaveBody{
     R"({"system":{"configuration":{"save":{}}}})"};
 
@@ -68,6 +71,25 @@ public:
         return true;
     }
 
+    bool quoted_decimal() noexcept {
+        whitespace();
+        if (position_ >= input_.size() || input_[position_] != '"') {
+            return false;
+        }
+        ++position_;
+        const auto first = position_;
+        while (position_ < input_.size() &&
+               input_[position_] >= '0' && input_[position_] <= '9') {
+            ++position_;
+        }
+        if (position_ == first || position_ - first > 20U ||
+            position_ >= input_.size() || input_[position_] != '"') {
+            return false;
+        }
+        ++position_;
+        return true;
+    }
+
     bool finished() noexcept {
         whitespace();
         return position_ == input_.size();
@@ -86,11 +108,12 @@ private:
     std::size_t position_{0U};
 };
 
-bool exact_acknowledgement_body(const std::string_view body) noexcept {
+bool exact_generic_acknowledgement_body(
+    const std::string_view body) noexcept {
     // AWG Manager's canonical save fixture uses {}, and its generic RCI
     // fixture also uses {"status":"ok"}. Accept only those two bounded,
-    // non-secret grammars. Any richer firmware response is deliberately left
-    // ambiguous and must be resolved through an independent observation.
+    // non-secret generic grammars here. Measured operation-specific
+    // KeeneticOS responses are matched separately below.
     {
         ExactAcknowledgementCursor cursor(body);
         if (cursor.punctuation('{') && cursor.punctuation('}') &&
@@ -102,6 +125,65 @@ bool exact_acknowledgement_body(const std::string_view body) noexcept {
     return cursor.punctuation('{') && cursor.quoted("status") &&
            cursor.punctuation(':') && cursor.quoted("ok") &&
            cursor.punctuation('}') && cursor.finished();
+}
+
+bool exact_status_message(
+    ExactAcknowledgementCursor& cursor,
+    const std::string_view ident,
+    const std::string_view message) noexcept {
+    return cursor.punctuation('{') && cursor.quoted("status") &&
+           cursor.punctuation(':') && cursor.quoted("message") &&
+           cursor.punctuation(',') && cursor.quoted("code") &&
+           cursor.punctuation(':') && cursor.quoted_decimal() &&
+           cursor.punctuation(',') && cursor.quoted("ident") &&
+           cursor.punctuation(':') && cursor.quoted(ident) &&
+           cursor.punctuation(',') && cursor.quoted("message") &&
+           cursor.punctuation(':') && cursor.quoted(message) &&
+           cursor.punctuation('}');
+}
+
+bool exact_firmware_acknowledgement_body(
+    const std::string_view body,
+    const NdmsNativeExactMutationKind kind,
+    const std::string_view target) noexcept {
+    if (exact_generic_acknowledgement_body(body)) return true;
+
+    ExactAcknowledgementCursor cursor(body);
+    if (kind == NdmsNativeExactMutationKind::save_configuration) {
+        return cursor.punctuation('{') && cursor.quoted("system") &&
+               cursor.punctuation(':') && cursor.punctuation('{') &&
+               cursor.quoted("configuration") &&
+               cursor.punctuation(':') && cursor.punctuation('{') &&
+               cursor.quoted("save") && cursor.punctuation(':') &&
+               cursor.punctuation('{') && cursor.quoted("status") &&
+               cursor.punctuation(':') && cursor.punctuation('[') &&
+               exact_status_message(
+                   cursor, "Core::System::StartupConfig",
+                   "saving (http/rci).") &&
+               cursor.punctuation(']') && cursor.punctuation('}') &&
+               cursor.punctuation('}') && cursor.punctuation('}') &&
+               cursor.punctuation('}') && cursor.finished();
+    }
+    if (kind ==
+            NdmsNativeExactMutationKind::enable_managed_interface &&
+        !target.empty()) {
+        const std::string message =
+            "\\\"" + std::string(target) +
+            "\\\": interface is up.";
+        return cursor.punctuation('{') && cursor.quoted("interface") &&
+               cursor.punctuation(':') && cursor.punctuation('{') &&
+               cursor.quoted(target) && cursor.punctuation(':') &&
+               cursor.punctuation('{') && cursor.quoted("up") &&
+               cursor.punctuation(':') && cursor.punctuation('{') &&
+               cursor.quoted("status") && cursor.punctuation(':') &&
+               cursor.punctuation('[') &&
+               exact_status_message(
+                   cursor, "Network::Interface::Base", message) &&
+               cursor.punctuation(']') && cursor.punctuation('}') &&
+               cursor.punctuation('}') && cursor.punctuation('}') &&
+               cursor.punctuation('}') && cursor.finished();
+    }
+    return false;
 }
 
 std::string_view trim_ascii_view(std::string_view value) noexcept {
@@ -159,7 +241,9 @@ bool starts_with_case_insensitive(std::string_view value,
 }
 
 NdmsNativeExactMutationResponseManifest inspect_response(
-    const NdmsNativeExactMutationRawResponse& response) noexcept {
+    const NdmsNativeExactMutationRawResponse& response,
+    const NdmsNativeExactMutationKind kind,
+    const std::string_view target) noexcept {
     NdmsNativeExactMutationResponseManifest manifest;
     const auto body = response.body.view();
     manifest.body_bytes = body.size();
@@ -185,7 +269,8 @@ NdmsNativeExactMutationResponseManifest inspect_response(
     } else if (body.empty()) {
         manifest.outcome =
             NdmsNativeExactMutationResponseOutcome::body_empty;
-    } else if (!exact_acknowledgement_body(body)) {
+    } else if (!exact_firmware_acknowledgement_body(
+                   body, kind, target)) {
         manifest.outcome =
             NdmsNativeExactMutationResponseOutcome::
                 shape_not_acknowledged;
@@ -314,6 +399,19 @@ NdmsNativeExactMutationRequest::delete_managed_interface(
 }
 
 NdmsNativeExactMutationRequest
+NdmsNativeExactMutationRequest::enable_managed_interface(
+    std::string target) {
+    if (!ndms_native_created_target_is_eligible(target)) {
+        secure_wipe(target);
+        throw NdmsNativeExactMutationTransportError(
+            "native exact enable target is not an eligible managed candidate");
+    }
+    return NdmsNativeExactMutationRequest{
+        NdmsNativeExactMutationKind::enable_managed_interface,
+        std::move(target)};
+}
+
+NdmsNativeExactMutationRequest
 NdmsNativeExactMutationRequest::save_configuration() {
     return NdmsNativeExactMutationRequest{
         NdmsNativeExactMutationKind::save_configuration, {}};
@@ -363,6 +461,11 @@ NdmsNativeExactMutationRequest::content_length() const noexcept {
         return kDeletePrefix.size() + target_.size() +
                kDeleteSuffix.size();
     }
+    if (kind_ ==
+        NdmsNativeExactMutationKind::enable_managed_interface) {
+        return kEnablePrefix.size() + target_.size() +
+               kEnableSuffix.size();
+    }
     return kSaveBody.size();
 }
 
@@ -378,6 +481,13 @@ bool NdmsNativeExactMutationRequest::write_body_once(
                 sink.write_secret_body_chunk(kDeletePrefix) &&
                 sink.write_secret_body_chunk(target_) &&
                 sink.write_secret_body_chunk(kDeleteSuffix);
+        } else if (kind_ ==
+                   NdmsNativeExactMutationKind::
+                       enable_managed_interface) {
+            written =
+                sink.write_secret_body_chunk(kEnablePrefix) &&
+                sink.write_secret_body_chunk(target_) &&
+                sink.write_secret_body_chunk(kEnableSuffix);
         } else {
             written = sink.write_secret_body_chunk(kSaveBody);
         }
@@ -559,6 +669,7 @@ post_ndms_native_exact_mutation_once(
     }
 
     const auto kind = request.kind();
+    const std::string target{request.target()};
     const std::size_t expected_bytes = request.content_length();
     if (expected_bytes == 0U) {
         throw NdmsNativeExactMutationTransportError(
@@ -578,7 +689,7 @@ post_ndms_native_exact_mutation_once(
         auto response = backend.post_fixed_loopback_once(
             std::move(capability), std::move(request_body),
             pre_dispatch_guard, trace);
-        auto manifest = inspect_response(response);
+        auto manifest = inspect_response(response, kind, target);
         const bool guard_passed =
             trace.pre_dispatch_guard_passed || trace.perform_started;
         const bool guard_evaluated =

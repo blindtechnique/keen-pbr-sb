@@ -30,6 +30,8 @@ export interface NdmsNativeImportRecoveryResponse {
   /** Current-invocation fact. True exactly when an accepted exact rollback delete may have crossed the transport boundary.
    */
   ndms_delete_dispatched: boolean;
+  /** True only for a completed forward recovery that enabled the imported interface and received the exact KeeneticOS save acknowledgement. Cleanup-only recovery never saves.
+   */
   system_configuration_save_performed: boolean;
   external_ndms_writer_race_excluded: boolean;
   /** Whether this invocation carried the exact optional header. */

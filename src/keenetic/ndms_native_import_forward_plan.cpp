@@ -51,13 +51,12 @@ plan_ndms_native_import_forward_completion(
         !observation.target_absent_in_baseline) {
         return completion;
     }
-    // The stock importer creates the interface disabled. One that is up was
-    // enabled by somebody, and an interface somebody already uses is not ours
-    // to finish quietly - or to roll back, which is why this mirrors the
-    // classifier's exact-owned gate instead of relaxing it.
-    if (!observation.target_down) {
-        return completion;
-    }
+    // Administrative up/down is deliberately not an ownership boundary for
+    // forward completion. The exact private marker, baseline absence,
+    // protocol and full measured revision prove which interface the stock
+    // import created. The coordinator itself enables that proved interface
+    // before publishing ownership. Destructive rollback remains stricter and
+    // still requires target_down in the recovery classifier.
     const auto& sighting = *observation.marker_target;
     if (sighting != record.baseline.expected_created_interface) {
         return completion;

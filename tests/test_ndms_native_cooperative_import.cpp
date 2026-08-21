@@ -451,7 +451,11 @@ private:
         trace.perform_started = true;
         ++perform_calls;
         if (apply_effect && gateway != nullptr) {
-            gateway->recovery_target_present = false;
+            if (enable_target) {
+                gateway->recovery_target_down = false;
+            } else {
+                gateway->recovery_target_present = false;
+            }
         }
         if (after_perform) after_perform(calls);
         if (throw_after_perform) {
@@ -473,6 +477,7 @@ public:
     std::size_t calls{0U};
     std::size_t perform_calls{0U};
     bool apply_effect{true};
+    bool enable_target{false};
     bool acknowledged{true};
     bool transport_ok{true};
     bool throw_after_perform{false};
@@ -633,7 +638,7 @@ NdmsNativeDeleteWalRecord unfinished_delete_record() {
 }
 
 struct Fixture final {
-    Fixture()
+    explicit Fixture(const bool activate_and_save = false)
         : faults(std::make_shared<FaultControl>()),
           maintenance(std::make_shared<MaintenanceState>()),
           writer(acquire_writer(
@@ -662,12 +667,15 @@ struct Fixture final {
                   delete_wal,
                   snapshots,
                   ownership,
-                  gateway,
-                  backend,
-                  delete_backend,
-                  clock)) {
+                   gateway,
+                   backend,
+                   delete_backend,
+                   clock,
+                   activate_and_save ? &activation_backend : nullptr)) {
         REQUIRE(writer.state == NdmsNativeWriterAdmissionState::admitted);
         delete_backend.gateway = &gateway;
+        activation_backend.gateway = &gateway;
+        activation_backend.enable_target = true;
     }
 
     NdmsNativeCooperativeImportResult run(
@@ -691,6 +699,7 @@ struct Fixture final {
     FakeObservationGateway gateway;
     FakeBackend backend;
     FakeDeleteBackend delete_backend;
+    FakeDeleteBackend activation_backend;
     FakeClock clock;
     NdmsNativeCooperativeImportCoordinator coordinator;
 };
@@ -1403,6 +1412,33 @@ TEST_CASE("cooperative WG import completes ownership and exact WAL cleanup") {
     REQUIRE(ledger.ledger.has_value());
     CHECK(ledger.ledger->sequence == 3U);
     CHECK(ledger.ledger->mutation_epoch == 1U);
+}
+
+TEST_CASE("cooperative import enables the tunnel and saves KeeneticOS") {
+    Fixture fixture(true);
+
+    const auto result = fixture.run();
+
+    REQUIRE(result.status == NdmsNativeCooperativeImportStatus::completed);
+    CHECK(result.stop == NdmsNativeCooperativeImportStop::none);
+    CHECK(result.system_configuration_save_performed);
+    CHECK_FALSE(fixture.gateway.recovery_target_down);
+    CHECK(fixture.activation_backend.calls == 2U);
+    CHECK(fixture.activation_backend.perform_calls == 2U);
+    REQUIRE(fixture.activation_backend.bodies.size() == 2U);
+    CHECK(fixture.activation_backend.bodies[0] ==
+          R"({"interface":{"Wireguard5":{"up":true}}})");
+    CHECK(fixture.activation_backend.bodies[1] ==
+          R"({"system":{"configuration":{"save":{}}}})");
+    CHECK(fixture.gateway.recovery_calls == 4U);
+    REQUIRE(result.transaction_id.has_value());
+    CHECK(fixture.wal.load(*result.transaction_id).state ==
+          NdmsNativeImportWalLoadState::absent);
+    const auto ownership = fixture.ownership.read("Wireguard5");
+    REQUIRE(ownership.state == NdmsNativeOwnershipReadState::valid);
+    REQUIRE(ownership.record.has_value());
+    CHECK(ownership.record->target_full_revision ==
+          "ndms-rci-full-v1-" + std::string(64U, 'a'));
 }
 
 TEST_CASE("cooperative AWG import binds the measured ASC protocol") {

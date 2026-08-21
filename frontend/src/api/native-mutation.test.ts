@@ -225,6 +225,29 @@ describe("native mutation response trust", () => {
       wal_removed: true,
     } as const
     expect(parseNdmsNativeImportRecoveryResult(stableCleanup)).not.toBeNull()
+
+    const forwardCompleted = {
+      ...record,
+      status: "completed",
+      stop: "none",
+      phase: "response_recorded",
+      recovery_action: undefined,
+      system_configuration_save_performed: true,
+      wal_may_require_recovery: false,
+      ownership_published: true,
+      wal_removed: true,
+      created_interface: "Wireguard5",
+      created_kernel_interface: "nwg5",
+      forward_admission_state: "admitted",
+      forward_dispatch_state: "completed",
+    } as const
+    expect(parseNdmsNativeImportRecoveryResult(forwardCompleted)).not.toBeNull()
+    expect(
+      parseNdmsNativeImportRecoveryResult({
+        ...forwardCompleted,
+        system_configuration_save_performed: false,
+      })
+    ).toBeNull()
   })
 
   test("requires the retained trace after a destructive delete prefix", () => {

@@ -988,6 +988,116 @@ struct ScopedRecoveryPass final {
     }
 };
 
+struct ScopedForwardPass final {
+    NdmsNativeCooperativeImportResumeStop stop{
+        NdmsNativeCooperativeImportResumeStop::observation_unstable};
+    std::optional<NdmsNativeDirectObservationFailure> failure;
+    ScopedForwardProof proof;
+    std::optional<std::string> measured_revision;
+    std::optional<NdmsNativeObservationStamp> latest_stamp;
+
+    bool complete() const noexcept {
+        return stop == NdmsNativeCooperativeImportResumeStop::none &&
+               proof.observation.authoritative &&
+               proof.created_kernel_interface.has_value() &&
+               measured_revision.has_value() &&
+               latest_stamp.has_value();
+    }
+};
+
+ScopedForwardPass observe_scoped_forward_once(
+    NdmsNativeCooperativeImportObservationGateway& gateway,
+    NdmsNativeObservationStore& observations,
+    NdmsNativeWriterLease& writer,
+    const NdmsNativeImportWalRecord& record,
+    const std::optional<std::string>& published_ownership_revision) {
+    ScopedForwardPass pass;
+    writer.verify_held();
+    auto runtime_measured = gateway.observe_recovery(
+        NdmsNativeDirectCatalogScope::runtime_state,
+        record.marker,
+        record.baseline.expected_created_interface);
+    if (!runtime_measured.complete()) {
+        pass.stop = NdmsNativeCooperativeImportResumeStop::
+            first_observation_failed;
+        pass.failure = runtime_measured.failure;
+        return pass;
+    }
+    NdmsNativeObservationStamp runtime_stamp;
+    try {
+        runtime_stamp = observations.record_recovery_observation(
+            writer,
+            record.observation_binding,
+            runtime_measured.catalog_revision);
+    } catch (...) {
+        pass.stop = NdmsNativeCooperativeImportResumeStop::
+            durable_observation_failed;
+        return pass;
+    }
+    const auto runtime_probe = build_ndms_native_import_recovery_probe(
+        *runtime_measured.snapshot,
+        runtime_stamp,
+        record.baseline.expected_target_slot,
+        record.marker,
+        runtime_measured.target_evidence);
+
+    writer.verify_held();
+    auto running_measured = gateway.observe_recovery(
+        NdmsNativeDirectCatalogScope::running_config,
+        record.marker,
+        record.baseline.expected_created_interface);
+    if (!running_measured.complete()) {
+        pass.stop = NdmsNativeCooperativeImportResumeStop::
+            second_observation_failed;
+        pass.failure = running_measured.failure;
+        return pass;
+    }
+    NdmsNativeObservationStamp running_stamp;
+    try {
+        running_stamp = observations.record_recovery_observation(
+            writer,
+            record.observation_binding,
+            running_measured.catalog_revision);
+    } catch (...) {
+        pass.stop = NdmsNativeCooperativeImportResumeStop::
+            durable_observation_failed;
+        return pass;
+    }
+    const auto running_probe = build_ndms_native_import_recovery_probe(
+        *running_measured.snapshot,
+        running_stamp,
+        record.baseline.expected_target_slot,
+        record.marker,
+        running_measured.target_evidence);
+    pass.proof = build_scoped_forward_observation(
+        record,
+        runtime_measured,
+        runtime_probe,
+        running_measured,
+        running_probe,
+        published_ownership_revision);
+    if (!kind_matches_protocol(
+            runtime_measured,
+            record.baseline.expected_created_interface,
+            record.kind) ||
+        !kind_matches_protocol(
+            running_measured,
+            record.baseline.expected_created_interface,
+            record.kind)) {
+        pass.stop = NdmsNativeCooperativeImportResumeStop::
+            observation_kind_mismatch;
+        return pass;
+    }
+    pass.measured_revision = measured_target_revision(
+        running_measured,
+        record.baseline.expected_created_interface);
+    pass.latest_stamp = running_stamp;
+    pass.stop = pass.proof.observation.authoritative
+        ? NdmsNativeCooperativeImportResumeStop::none
+        : NdmsNativeCooperativeImportResumeStop::observation_unstable;
+    return pass;
+}
+
 ScopedRecoveryPass observe_scoped_recovery_once(
     NdmsNativeCooperativeImportObservationGateway& gateway,
     NdmsNativeObservationStore& observations,
@@ -1089,7 +1199,6 @@ bool exact_created_observation(
            *observation.marker_target ==
                record.baseline.expected_created_interface &&
            observation.target_absent_in_baseline &&
-           observation.target_down &&
            observation.target_fingerprint_matches &&
            measured_revision.has_value() &&
            record.target_full_revision.has_value() &&
@@ -1138,11 +1247,14 @@ struct NdmsNativeCooperativeImportCoordinator::Impl final {
                           NdmsNativeLibcurlLoopbackRciPostBackend>()),
           owned_delete_transport(std::make_unique<
                                  NdmsNativeLibcurlExactMutationBackend>()),
+          owned_activation_transport(std::make_unique<
+                                     NdmsNativeLibcurlExactMutationBackend>()),
           owned_clock(
               std::make_unique<NdmsNativeImportSteadyClock>()),
           gateway(owned_gateway.get()),
           transport(owned_transport.get()),
           delete_transport(owned_delete_transport.get()),
+          activation_transport(owned_activation_transport.get()),
           clock(owned_clock.get()) {}
 
     Impl(NdmsNativeObservationStore& observations_value,
@@ -1153,7 +1265,8 @@ struct NdmsNativeCooperativeImportCoordinator::Impl final {
          NdmsNativeCooperativeImportObservationGateway& gateway_value,
          NdmsNativeLoopbackRciPostBackend& transport_value,
          NdmsNativeExactMutationBackend& delete_transport_value,
-         NdmsNativeImportExecutorClock& clock_value)
+         NdmsNativeImportExecutorClock& clock_value,
+         NdmsNativeExactMutationBackend* activation_transport_value)
         : observations(&observations_value),
           wal(&wal_value),
           delete_wal(&delete_wal_value),
@@ -1162,6 +1275,7 @@ struct NdmsNativeCooperativeImportCoordinator::Impl final {
           gateway(&gateway_value),
           transport(&transport_value),
           delete_transport(&delete_transport_value),
+          activation_transport(activation_transport_value),
           clock(&clock_value) {}
 
     NdmsNativeObservationStore* observations{nullptr};
@@ -1174,10 +1288,13 @@ struct NdmsNativeCooperativeImportCoordinator::Impl final {
     std::unique_ptr<NdmsNativeLoopbackRciPostBackend> owned_transport;
     std::unique_ptr<NdmsNativeExactMutationBackend>
         owned_delete_transport;
+    std::unique_ptr<NdmsNativeExactMutationBackend>
+        owned_activation_transport;
     std::unique_ptr<NdmsNativeImportExecutorClock> owned_clock;
     NdmsNativeCooperativeImportObservationGateway* gateway{nullptr};
     NdmsNativeLoopbackRciPostBackend* transport{nullptr};
     NdmsNativeExactMutationBackend* delete_transport{nullptr};
+    NdmsNativeExactMutationBackend* activation_transport{nullptr};
     NdmsNativeImportExecutorClock* clock{nullptr};
 };
 
@@ -1224,6 +1341,25 @@ NdmsNativeCooperativeImportCoordinator::dispatch_delete_once(
         std::move(request),
         guard,
         *impl_->delete_transport);
+}
+
+NdmsNativeExactMutationTransportResult
+NdmsNativeCooperativeImportCoordinator::dispatch_activation_once(
+    NdmsNativeExactMutationRequest request,
+    NdmsNativeExactMutationPreDispatchGuard& guard) {
+    auto authority = NdmsNativeExactMutationDispatchAuthority{
+        NdmsNativeExactMutationDispatchAuthority::ConstructionKey{}};
+    if (!authority.consume()) {
+        throw NdmsNativeExactMutationTransportError(
+            "native import activation authority is invalid");
+    }
+    auto capability = NdmsNativeExactMutationDispatchCapability{
+        NdmsNativeExactMutationDispatchCapability::ConstructionKey{}};
+    return post_ndms_native_exact_mutation_once(
+        std::move(capability),
+        std::move(request),
+        guard,
+        *impl_->activation_transport);
 }
 
 NdmsNativeCooperativeImportResult
@@ -1602,7 +1738,7 @@ NdmsNativeCooperativeImportCoordinator::import_once(
                 marker,
                 later.target_evidence);
 
-        const auto measured_revision = measured_target_revision(
+        auto measured_revision = measured_target_revision(
             later, expected_interface);
         if (!measured_revision.has_value()) {
             mark_recovery_required(
@@ -1611,7 +1747,7 @@ NdmsNativeCooperativeImportCoordinator::import_once(
                     post_observation_unstable);
             return result;
         }
-        const auto scoped_proof =
+        auto scoped_proof =
             build_scoped_forward_observation(
                 record,
                 earlier,
@@ -1620,7 +1756,7 @@ NdmsNativeCooperativeImportCoordinator::import_once(
                 later_probe,
                 std::nullopt);
         const auto& observation = scoped_proof.observation;
-        const auto completion =
+        auto completion =
             plan_ndms_native_import_forward_completion(
                 record, observation, *measured_revision);
         const std::vector<NdmsNativeImportRecoveryStep> expected_steps{
@@ -1639,6 +1775,96 @@ NdmsNativeCooperativeImportCoordinator::import_once(
                 NdmsNativeCooperativeImportStop::
                     forward_completion_blocked);
             return result;
+        }
+
+        bool activation_saved = false;
+        if (impl_->activation_transport != nullptr) {
+            ImportRecoveryDispatchGuard enable_guard{
+                [this, &writer, &record, &later_stamp]() {
+                    writer.verify_held();
+                    const auto current = impl_->wal->load(
+                        record.transaction_id);
+                    return current.recovery_permitted() &&
+                           current.record.has_value() &&
+                           *current.record == record &&
+                           durable_forward_observation_is_current(
+                               *impl_->observations,
+                               record.observation_binding,
+                               later_stamp);
+                }};
+            const auto enabled = dispatch_activation_once(
+                NdmsNativeExactMutationRequest::
+                    enable_managed_interface(expected_interface),
+                enable_guard);
+            if (!enabled.pre_dispatch_guard_passed ||
+                !enabled.perform_started) {
+                mark_recovery_required(
+                    result,
+                    NdmsNativeCooperativeImportStop::
+                        forward_completion_blocked);
+                return result;
+            }
+
+            auto activated = observe_scoped_forward_once(
+                *impl_->gateway,
+                *impl_->observations,
+                writer,
+                record,
+                std::nullopt);
+            if (!activated.complete() ||
+                activated.proof.observation.target_down ||
+                !activated.measured_revision.has_value() ||
+                !activated.latest_stamp.has_value()) {
+                mark_recovery_required(
+                    result,
+                    NdmsNativeCooperativeImportStop::
+                        forward_completion_blocked);
+                return result;
+            }
+            scoped_proof = std::move(activated.proof);
+            measured_revision = std::move(
+                activated.measured_revision);
+            later_stamp = *activated.latest_stamp;
+            completion = plan_ndms_native_import_forward_completion(
+                record,
+                scoped_proof.observation,
+                *measured_revision);
+            if (!scoped_proof.created_kernel_interface.has_value() ||
+                !completion.actionable() ||
+                completion.plan.steps != expected_steps) {
+                mark_recovery_required(
+                    result,
+                    NdmsNativeCooperativeImportStop::
+                        forward_completion_blocked);
+                return result;
+            }
+
+            ImportRecoveryDispatchGuard save_guard{
+                [this, &writer, &record, &later_stamp]() {
+                    writer.verify_held();
+                    const auto current = impl_->wal->load(
+                        record.transaction_id);
+                    return current.recovery_permitted() &&
+                           current.record.has_value() &&
+                           *current.record == record &&
+                           durable_forward_observation_is_current(
+                               *impl_->observations,
+                               record.observation_binding,
+                               later_stamp);
+                }};
+            const auto saved = dispatch_activation_once(
+                NdmsNativeExactMutationRequest::save_configuration(),
+                save_guard);
+            if (!saved.pre_dispatch_guard_passed ||
+                !saved.response_manifest.
+                    acknowledged_needs_observation()) {
+                mark_recovery_required(
+                    result,
+                    NdmsNativeCooperativeImportStop::
+                        forward_completion_blocked);
+                return result;
+            }
+            activation_saved = true;
         }
 
         // Only now is "created" a measured fact rather than the stock
@@ -1727,6 +1953,7 @@ NdmsNativeCooperativeImportCoordinator::import_once(
 
         result.status = NdmsNativeCooperativeImportStatus::completed;
         result.stop = NdmsNativeCooperativeImportStop::none;
+        result.system_configuration_save_performed = activation_saved;
         result.wal_may_require_recovery = false;
         result.rollback_snapshot_may_be_retained = true;
         return result;
@@ -1915,14 +2142,14 @@ NdmsNativeCooperativeImportCoordinator::resume_once(
                 ? existing_ownership.revision
                 : std::optional<std::string>{};
 
-        const auto scoped_proof = build_scoped_forward_observation(
+        auto scoped_proof = build_scoped_forward_observation(
             record,
             runtime_measured,
             runtime_probe,
             running_measured,
             running_probe,
             published_ownership_revision);
-        const auto running_revision = measured_target_revision(
+        auto running_revision = measured_target_revision(
             running_measured,
             record.baseline.expected_created_interface);
         auto recovery_proof = build_scoped_recovery_observation(
@@ -2368,6 +2595,8 @@ NdmsNativeCooperativeImportCoordinator::resume_once(
 
         NdmsNativeImportWalRecord dispatch_record = record;
         NdmsNativeImportRecoveryPlan forward_plan;
+        std::optional<NdmsNativeImportForwardCompletion>
+            forward_completion;
         std::optional<NdmsNativeImportRecoveryAdmission>
             forward_admission;
         std::optional<NdmsNativeOwnershipRecord> expected_ownership;
@@ -2410,14 +2639,6 @@ NdmsNativeCooperativeImportCoordinator::resume_once(
                     recovery_action_not_forward_only;
                 return result;
             }
-            result.created_interface =
-                record.baseline.expected_created_interface;
-            result.created_kernel_interface =
-                scoped_proof.created_kernel_interface;
-            result.ownership_published = true;
-            forward_admission.emplace(
-                admit_ndms_native_import_recovery(
-                    *impl_->wal, record, observation));
         } else {
             const auto completion = preplanned_forward_completion.has_value()
                 ? *preplanned_forward_completion
@@ -2449,18 +2670,149 @@ NdmsNativeCooperativeImportCoordinator::resume_once(
                     ownership_not_exact;
                 return result;
             }
-            result.created_interface =
-                record.baseline.expected_created_interface;
-            result.created_kernel_interface =
-                scoped_proof.created_kernel_interface;
-            result.ownership_published =
-                existing_ownership.state ==
-                NdmsNativeOwnershipReadState::valid;
-            forward_admission.emplace(
-                admit_ndms_native_import_forward(
-                    *impl_->wal, record, completion));
+            forward_completion = completion;
             dispatch_record = completion.enriched;
             forward_plan = completion.plan;
+        }
+
+        bool activation_saved = false;
+        if (impl_->activation_transport != nullptr) {
+            ImportRecoveryDispatchGuard enable_guard{
+                [this, &writer, &record, &running_stamp]() {
+                    writer.verify_held();
+                    const auto current = impl_->wal->load(
+                        record.transaction_id);
+                    return current.recovery_permitted() &&
+                           current.record.has_value() &&
+                           *current.record == record &&
+                           durable_forward_observation_is_current(
+                               *impl_->observations,
+                               record.observation_binding,
+                               running_stamp);
+                }};
+            const auto enabled = dispatch_activation_once(
+                NdmsNativeExactMutationRequest::
+                    enable_managed_interface(
+                        record.baseline.expected_created_interface),
+                enable_guard);
+            if (!enabled.pre_dispatch_guard_passed ||
+                !enabled.perform_started) {
+                result.stop = NdmsNativeCooperativeImportResumeStop::
+                    unexpected_failure;
+                return result;
+            }
+
+            auto activated = observe_scoped_forward_once(
+                *impl_->gateway,
+                *impl_->observations,
+                writer,
+                record,
+                published_ownership_revision);
+            if (!activated.complete() ||
+                activated.proof.observation.target_down ||
+                !activated.measured_revision.has_value() ||
+                !activated.latest_stamp.has_value()) {
+                result.stop = NdmsNativeCooperativeImportResumeStop::
+                    unexpected_failure;
+                return result;
+            }
+            scoped_proof = std::move(activated.proof);
+            running_revision = std::move(
+                activated.measured_revision);
+            running_stamp = *activated.latest_stamp;
+
+            if (record.phase ==
+                NdmsNativeImportWalPhase::ownership_published) {
+                if (!exact_created_observation(
+                        record,
+                        scoped_proof.observation,
+                        running_revision)) {
+                    result.stop =
+                        NdmsNativeCooperativeImportResumeStop::
+                            recovery_action_not_forward_only;
+                    return result;
+                }
+            } else {
+                const auto completion =
+                    plan_ndms_native_import_forward_completion(
+                        record,
+                        scoped_proof.observation,
+                        running_revision.value_or(std::string{}));
+                if (!completion.actionable() ||
+                    !expected_forward_steps(
+                        record.phase, completion.plan.steps)) {
+                    result.stop =
+                        NdmsNativeCooperativeImportResumeStop::
+                            recovery_action_not_forward_only;
+                    return result;
+                }
+                expected_ownership = ownership_claim_from(
+                    completion.enriched);
+                if (!expected_ownership.has_value() ||
+                    !exact_existing_claim_or_absent(
+                        existing_ownership, *expected_ownership)) {
+                    result.stop =
+                        NdmsNativeCooperativeImportResumeStop::
+                            ownership_not_exact;
+                    return result;
+                }
+                forward_completion = completion;
+                dispatch_record = completion.enriched;
+                forward_plan = completion.plan;
+            }
+
+            ImportRecoveryDispatchGuard save_guard{
+                [this, &writer, &record, &running_stamp]() {
+                    writer.verify_held();
+                    const auto current = impl_->wal->load(
+                        record.transaction_id);
+                    return current.recovery_permitted() &&
+                           current.record.has_value() &&
+                           *current.record == record &&
+                           durable_forward_observation_is_current(
+                               *impl_->observations,
+                               record.observation_binding,
+                               running_stamp);
+                }};
+            const auto saved = dispatch_activation_once(
+                NdmsNativeExactMutationRequest::save_configuration(),
+                save_guard);
+            if (!saved.pre_dispatch_guard_passed ||
+                !saved.response_manifest.
+                    acknowledged_needs_observation()) {
+                result.stop = NdmsNativeCooperativeImportResumeStop::
+                    unexpected_failure;
+                return result;
+            }
+            activation_saved = true;
+        }
+
+        result.created_interface =
+            record.baseline.expected_created_interface;
+        result.created_kernel_interface =
+            scoped_proof.created_kernel_interface;
+        result.ownership_published =
+            existing_ownership.state ==
+            NdmsNativeOwnershipReadState::valid;
+
+        if (record.phase ==
+            NdmsNativeImportWalPhase::ownership_published) {
+            forward_admission.emplace(
+                admit_ndms_native_import_recovery(
+                    *impl_->wal,
+                    record,
+                    scoped_proof.observation));
+        } else {
+            if (!forward_completion.has_value()) {
+                result.stop = NdmsNativeCooperativeImportResumeStop::
+                    recovery_action_not_forward_only;
+                return result;
+            }
+            forward_admission.emplace(
+                admit_ndms_native_import_forward(
+                    *impl_->wal,
+                    record,
+                    *forward_completion));
         }
 
         result.forward_admission_state = forward_admission->state;
@@ -2514,6 +2866,7 @@ NdmsNativeCooperativeImportCoordinator::resume_once(
         result.status =
             NdmsNativeCooperativeImportResumeStatus::completed;
         result.stop = NdmsNativeCooperativeImportResumeStop::none;
+        result.system_configuration_save_performed = activation_saved;
         result.wal_may_require_recovery = false;
         result.ownership_published = true;
         result.wal_removed = true;
@@ -2562,7 +2915,8 @@ NdmsNativeCooperativeImportCoordinatorTestIssuer::issue(
     NdmsNativeCooperativeImportObservationGateway& gateway,
     NdmsNativeLoopbackRciPostBackend& transport,
     NdmsNativeExactMutationBackend& delete_transport,
-    NdmsNativeImportExecutorClock& clock) {
+    NdmsNativeImportExecutorClock& clock,
+    NdmsNativeExactMutationBackend* activation_transport) {
     return NdmsNativeCooperativeImportCoordinator{
         std::make_unique<NdmsNativeCooperativeImportCoordinator::Impl>(
             observations,
@@ -2573,7 +2927,8 @@ NdmsNativeCooperativeImportCoordinatorTestIssuer::issue(
             gateway,
             transport,
             delete_transport,
-            clock)};
+            clock,
+            activation_transport)};
 }
 #endif
 

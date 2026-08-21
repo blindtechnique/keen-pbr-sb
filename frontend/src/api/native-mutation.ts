@@ -283,7 +283,7 @@ export type NdmsNativeImportRecoveryResult = Readonly<{
   stop: NdmsNativeImportRecoveryStop
   ndms_import_request_dispatched: false
   ndms_delete_dispatched: boolean
-  system_configuration_save_performed: false
+  system_configuration_save_performed: boolean
   external_ndms_writer_race_excluded: false
   external_ndms_writer_race_accepted: boolean
   delete_perform_started: boolean
@@ -731,7 +731,7 @@ export function parseNdmsNativeImportRecoveryResult(
     !inList(value.stop, NDMS_NATIVE_IMPORT_RECOVERY_STOPS) ||
     value.ndms_import_request_dispatched !== false ||
     typeof value.ndms_delete_dispatched !== "boolean" ||
-    value.system_configuration_save_performed !== false ||
+    typeof value.system_configuration_save_performed !== "boolean" ||
     value.external_ndms_writer_race_excluded !== false ||
     typeof value.external_ndms_writer_race_accepted !== "boolean" ||
     typeof value.delete_perform_started !== "boolean" ||
@@ -785,6 +785,12 @@ export function parseNdmsNativeImportRecoveryResult(
   const hasCreated =
     result.created_interface !== undefined &&
     result.created_kernel_interface !== undefined
+  if (
+    result.system_configuration_save_performed !==
+    (result.status === "completed" && hasCreated)
+  ) {
+    return null
+  }
   if (
     hasAnyRecord !== hasRecord ||
     hasAnyCreated !== hasCreated ||

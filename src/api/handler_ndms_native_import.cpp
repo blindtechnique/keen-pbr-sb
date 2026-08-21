@@ -384,10 +384,14 @@ void validate_public_import_result(
     if (!known_public_import_enums(result)) {
         throw std::runtime_error("invalid native import result enum");
     }
-    if (result.external_ndms_writer_race_excluded ||
-        result.system_configuration_save_performed) {
+    if (result.external_ndms_writer_race_excluded) {
         throw std::runtime_error(
             "native import result overclaimed router authority");
+    }
+    if (result.system_configuration_save_performed !=
+        (result.status == NdmsNativeCooperativeImportStatus::completed)) {
+        throw std::runtime_error(
+            "native import result save evidence is incoherent");
     }
 
     const bool any_prepared_identity =
@@ -1044,7 +1048,6 @@ void validate_public_import_recovery_result(
             "invalid native import recovery result enum");
     }
     if (result.ndms_import_request_dispatched ||
-        result.system_configuration_save_performed ||
         result.external_ndms_writer_race_excluded) {
         throw std::runtime_error(
             "native import recovery overclaimed router mutation");
@@ -1077,6 +1080,11 @@ void validate_public_import_recovery_result(
           *result.created_interface != *result.expected_interface))) {
         throw std::runtime_error(
             "invalid native import recovery created identity");
+    }
+    if (result.system_configuration_save_performed !=
+        (result.status == Status::completed && has_created_identity)) {
+        throw std::runtime_error(
+            "native import recovery save evidence is incoherent");
     }
 
     if (has_record_identity) {
@@ -1635,7 +1643,7 @@ nlohmann::json ndms_native_import_api_response(
         {"external_ndms_writer_race_accepted",
          result.external_ndms_writer_race_accepted},
         {"system_configuration_save_performed",
-         false},
+         result.system_configuration_save_performed},
         {"request_may_have_been_dispatched",
          result.request_may_have_been_dispatched},
         {"wal_may_require_recovery", result.wal_may_require_recovery},
@@ -1715,7 +1723,8 @@ nlohmann::json ndms_native_import_recovery_api_response(
                      result.stop)},
         {"ndms_import_request_dispatched", false},
         {"ndms_delete_dispatched", result.ndms_delete_dispatched},
-        {"system_configuration_save_performed", false},
+        {"system_configuration_save_performed",
+         result.system_configuration_save_performed},
         {"external_ndms_writer_race_excluded", false},
         {"external_ndms_writer_race_accepted",
          result.external_ndms_writer_race_accepted},
