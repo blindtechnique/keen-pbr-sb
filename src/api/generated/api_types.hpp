@@ -358,6 +358,8 @@ namespace api {
         std::optional<bool> clear_dynamic_sets_on_apply;
         std::optional<DaemonConfigFirewallBackend> firewall_backend;
         std::optional<int64_t> firewall_verify_max_bytes;
+        std::optional<int64_t> ipset_hashsize;
+        std::optional<int64_t> ipset_maxelem;
         std::optional<bool> ipv6_enabled;
         std::optional<int64_t> max_file_size_bytes;
         std::optional<MetaUdp443Policy> meta_udp443_policy;
@@ -3676,6 +3678,8 @@ namespace api {
         x.clear_dynamic_sets_on_apply = get_stack_optional<bool>(j, "clear_dynamic_sets_on_apply");
         x.firewall_backend = get_stack_optional<DaemonConfigFirewallBackend>(j, "firewall_backend");
         x.firewall_verify_max_bytes = get_stack_optional<int64_t>(j, "firewall_verify_max_bytes");
+        x.ipset_hashsize = get_stack_optional<int64_t>(j, "ipset_hashsize");
+        x.ipset_maxelem = get_stack_optional<int64_t>(j, "ipset_maxelem");
         x.ipv6_enabled = get_stack_optional<bool>(j, "ipv6_enabled");
         x.max_file_size_bytes = get_stack_optional<int64_t>(j, "max_file_size_bytes");
         x.meta_udp443_policy = get_stack_optional<MetaUdp443Policy>(j, "meta_udp443_policy");
@@ -3695,6 +3699,8 @@ namespace api {
         j["clear_dynamic_sets_on_apply"] = x.clear_dynamic_sets_on_apply;
         j["firewall_backend"] = x.firewall_backend;
         j["firewall_verify_max_bytes"] = x.firewall_verify_max_bytes;
+        j["ipset_hashsize"] = x.ipset_hashsize;
+        j["ipset_maxelem"] = x.ipset_maxelem;
         j["ipv6_enabled"] = x.ipv6_enabled;
         j["max_file_size_bytes"] = x.max_file_size_bytes;
         j["meta_udp443_policy"] = x.meta_udp443_policy;

@@ -2330,7 +2330,8 @@ void Daemon::dispatch_meta_udp443_activation_cleanup(
 void Daemon::apply_firewall(
     FirewallApplyMode mode,
     std::shared_ptr<const ListCacheGenerationSnapshot>
-        list_cache_snapshot) {
+        list_cache_snapshot,
+    bool force_clear_dynamic_sets) {
     // Every backend apply may flush the runtime-only pair sets. Invalidate the
     // observer epoch before touching live chains so an outstanding worker can
     // never acknowledge an old pair after a URLTest or recovery rebuild.
@@ -2389,7 +2390,8 @@ void Daemon::apply_firewall(
         &native_vpn_direct_egress_snat_selectors,
         opts_.udp_call_affinity_ipset_available,
         active_keenetic_dns_.snapshot,
-        std::move(list_cache_snapshot));
+        std::move(list_cache_snapshot),
+        force_clear_dynamic_sets);
     // The backend may already have repaired its ordinary mangle dispatcher
     // during prepare_apply(). Meta-specific preflight still completes before
     // any Meta filter publication or exact conntrack deletion, so failure
@@ -7614,6 +7616,13 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
     };
     const AppliedListContentState previous_list_content_state =
         applied_list_content_state_;
+    const auto firewall_apply_policy = firewall_config_apply_policy(
+        firewall_->backend(), config_, prepared.config);
+    if (firewall_apply_policy.force_clear_dynamic_sets) {
+        Logger::instance().warn(
+            "iptables IPSet capacity changed; recreating keen-pbr sets and "
+            "clearing dnsmasq-learned entries");
+    }
     // Repair and retire any flows from a previously observed SNAT loss before
     // publishing `applying` or reassigning numerical marks. A transient
     // firmware race here must reject the save while the old runtime remains
@@ -7687,13 +7696,14 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
     const auto list_cache_snapshot =
         capture_relevant_list_cache_generation(config_);
     retry_hot_apply_firewall(
-        [this, &list_cache_snapshot]() {
+        [this, &list_cache_snapshot, &firewall_apply_policy]() {
             // apply_firewall rebuilds the complete pending transaction on
             // every call. A retry therefore never reuses the one-shot backend
             // state from the failed attempt.
             apply_firewall(
-                FirewallApplyMode::PreserveSets,
-                list_cache_snapshot);
+                firewall_apply_policy.mode,
+                list_cache_snapshot,
+                firewall_apply_policy.force_clear_dynamic_sets);
         },
         [](std::chrono::milliseconds delay) {
             std::this_thread::sleep_for(delay);

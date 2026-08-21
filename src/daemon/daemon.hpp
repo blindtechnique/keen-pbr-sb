@@ -629,7 +629,8 @@ private:
     void apply_firewall(
         FirewallApplyMode mode,
         std::shared_ptr<const ListCacheGenerationSnapshot>
-            list_cache_snapshot = nullptr);
+            list_cache_snapshot = nullptr,
+        bool force_clear_dynamic_sets = false);
     std::optional<MetaUdp443ActivationPlan>
     prepare_meta_udp443_activation_or_throw(
         const std::vector<RuleState>& candidate_rules,

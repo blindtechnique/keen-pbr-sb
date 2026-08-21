@@ -2818,6 +2818,42 @@ TEST_CASE("daemon.clear_dynamic_sets_on_apply: rejects non-boolean value") {
     CHECK(issues[0].path == "daemon.clear_dynamic_sets_on_apply");
 }
 
+TEST_CASE("daemon ipset capacities accept positive values and null defaults") {
+    const auto configured = parse_test_config(
+        R"({"daemon":{"ipset_hashsize":1024,"ipset_maxelem":131072}})");
+    REQUIRE(configured.daemon.has_value());
+    CHECK(configured.daemon->ipset_hashsize == 1024);
+    CHECK(configured.daemon->ipset_maxelem == 131072);
+
+    const auto defaults = parse_test_config(
+        R"({"daemon":{"ipset_hashsize":null,"ipset_maxelem":null}})");
+    REQUIRE(defaults.daemon.has_value());
+    CHECK_FALSE(defaults.daemon->ipset_hashsize.has_value());
+    CHECK_FALSE(defaults.daemon->ipset_maxelem.has_value());
+}
+
+TEST_CASE("daemon ipset capacities reject invalid values") {
+    for (const auto& field : {"ipset_hashsize", "ipset_maxelem"}) {
+        for (const auto& value : {"0", "-1", "4294967296"}) {
+            const auto issues = validate_issues(
+                std::string("{\"daemon\":{\"") + field + "\":" + value + "}}");
+            REQUIRE(issues.size() == 1);
+            CHECK(issues[0].path == std::string("daemon.") + field);
+        }
+    }
+
+    const auto hashsize_overflow = validate_issues(
+        R"({"daemon":{"ipset_hashsize":2147483649}})");
+    REQUIRE(hashsize_overflow.size() == 1);
+    CHECK(hashsize_overflow[0].path == "daemon.ipset_hashsize");
+
+    const auto wrong_types = parse_issues(
+        R"({"daemon":{"ipset_hashsize":"1024","ipset_maxelem":1.5}})");
+    REQUIRE(wrong_types.size() == 2);
+    CHECK(wrong_types[0].path == "daemon.ipset_hashsize");
+    CHECK(wrong_types[1].path == "daemon.ipset_maxelem");
+}
+
 TEST_CASE(
     "daemon.reconnect_unmarked_flows_on_routing_change: accepts explicit policy") {
     auto enabled = parse_test_config(

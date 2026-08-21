@@ -38,6 +38,20 @@ export interface DaemonConfig {
   /** Whether a full config apply or runtime restart should clear dynamic dnsmasq-managed firewall sets. Defaults to `true` when omitted or set to `null`. Preserve-set reconciles never clear learned entries.
    */
   clear_dynamic_sets_on_apply?: boolean | null;
+  /**
+     * Optional initial hash table size for ipsets created by the iptables backend. This has no effect when the nftables backend is selected. Omit or set to null to use the ipset default (1024). Changing this value on a running iptables backend recreates owned ipsets and clears dnsmasq-learned entries.
+
+     * @minimum 1
+     * @maximum 2147483648
+     */
+  ipset_hashsize?: number | null;
+  /**
+     * Optional maximum number of elements for ipsets created by the iptables backend. This has no effect when the nftables backend is selected. Omit or set to null to use the ipset default (65536). Changing this value on a running iptables backend recreates owned ipsets and clears dnsmasq-learned entries.
+
+     * @minimum 1
+     * @maximum 4294967295
+     */
+  ipset_maxelem?: number | null;
   /** After a successfully committed destination-routing change, terminate only observed forwarded flows whose complete conntrack mark is zero and whose destination is newly governed by the changed route. Applications can then reconnect immediately through the new route. This never flushes the conntrack table or removes foreign marks. Defaults to `true` when omitted or set to `null`.
    */
   reconnect_unmarked_flows_on_routing_change?: boolean | null;

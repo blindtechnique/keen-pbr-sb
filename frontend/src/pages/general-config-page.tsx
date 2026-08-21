@@ -123,6 +123,8 @@ type SettingsDraft = {
   reconnectOwnedFlowsOnRoutingChangeLists: string[] | undefined
   metaUdp443Policy: MetaUdp443Policy
   ipv6Enabled: boolean
+  ipsetHashsize: string
+  ipsetMaxelem: string
   clientDnsEnforcement: boolean
   inboundInterfaces: string[]
   internalVpnServers?: InternalVpnServer[]
@@ -147,6 +149,8 @@ const fallbackDraft: SettingsDraft = {
   reconnectOwnedFlowsOnRoutingChangeLists: undefined,
   metaUdp443Policy: "balanced",
   ipv6Enabled: true,
+  ipsetHashsize: "",
+  ipsetMaxelem: "",
   clientDnsEnforcement: false,
   inboundInterfaces: [],
   listsAutoupdateEnabled: false,
@@ -171,6 +175,8 @@ const SETTINGS_FIELD_NAMES = {
     "reconnectOwnedFlowsOnRoutingChangeLists",
   metaUdp443Policy: "metaUdp443Policy",
   ipv6Enabled: "ipv6Enabled",
+  ipsetHashsize: "ipsetHashsize",
+  ipsetMaxelem: "ipsetMaxelem",
   clientDnsEnforcement: "clientDnsEnforcement",
   inboundInterfaces: "inboundInterfaces",
   internalVpnServers: "internalVpnServers",
@@ -1392,9 +1398,7 @@ function LoadedGeneralConfigPage({
 
               <FieldSeparator />
 
-              <form.Field
-                name={SETTINGS_FIELD_NAMES.ppeDeoffloadQuicEnabled}
-              >
+              <form.Field name={SETTINGS_FIELD_NAMES.ppeDeoffloadQuicEnabled}>
                 {(field) => (
                   <form.Subscribe
                     selector={(state) => state.values.ppeDeoffloadMode}
@@ -1807,6 +1811,82 @@ function LoadedGeneralConfigPage({
 
               <FieldSeparator />
 
+              <form.Field name={SETTINGS_FIELD_NAMES.ipsetHashsize}>
+                {(field) => {
+                  const error = getFirstFieldError(field.state.meta.errors)
+
+                  return (
+                    <Field width="short" invalid={Boolean(error)}>
+                      <FieldLabel htmlFor="ipset-hashsize">
+                        {t("pages.settings.advanced.ipsetHashsizeLabel")}
+                      </FieldLabel>
+                      <FieldContent>
+                        <Input
+                          aria-invalid={Boolean(error)}
+                          id="ipset-hashsize"
+                          inputMode="numeric"
+                          max={2147483648}
+                          min={1}
+                          onBlur={field.handleBlur}
+                          onChange={(event) =>
+                            field.handleChange(event.target.value)
+                          }
+                          placeholder="1024"
+                          type="number"
+                          value={field.state.value}
+                        />
+                        <FieldHint
+                          description={t(
+                            "pages.settings.advanced.ipsetHashsizeHint"
+                          )}
+                          error={error ?? null}
+                        />
+                      </FieldContent>
+                    </Field>
+                  )
+                }}
+              </form.Field>
+
+              <FieldSeparator />
+
+              <form.Field name={SETTINGS_FIELD_NAMES.ipsetMaxelem}>
+                {(field) => {
+                  const error = getFirstFieldError(field.state.meta.errors)
+
+                  return (
+                    <Field width="short" invalid={Boolean(error)}>
+                      <FieldLabel htmlFor="ipset-maxelem">
+                        {t("pages.settings.advanced.ipsetMaxelemLabel")}
+                      </FieldLabel>
+                      <FieldContent>
+                        <Input
+                          aria-invalid={Boolean(error)}
+                          id="ipset-maxelem"
+                          inputMode="numeric"
+                          max={4294967295}
+                          min={1}
+                          onBlur={field.handleBlur}
+                          onChange={(event) =>
+                            field.handleChange(event.target.value)
+                          }
+                          placeholder="65536"
+                          type="number"
+                          value={field.state.value}
+                        />
+                        <FieldHint
+                          description={t(
+                            "pages.settings.advanced.ipsetMaxelemHint"
+                          )}
+                          error={error ?? null}
+                        />
+                      </FieldContent>
+                    </Field>
+                  )
+                }}
+              </form.Field>
+
+              <FieldSeparator />
+
               <form.Field name={SETTINGS_FIELD_NAMES.tableStart}>
                 {(field) => {
                   const error = getFirstFieldError(field.state.meta.errors)
@@ -2007,6 +2087,8 @@ function getDraftFromConfig(config: ConfigObject): SettingsDraft {
       fallbackDraft.reconnectOwnedFlowsOnRoutingChangeLists,
     metaUdp443Policy: getMetaUdp443Policy(config.daemon),
     ipv6Enabled: config.daemon?.ipv6_enabled ?? fallbackDraft.ipv6Enabled,
+    ipsetHashsize: toStringInt(config.daemon?.ipset_hashsize, ""),
+    ipsetMaxelem: toStringInt(config.daemon?.ipset_maxelem, ""),
     clientDnsEnforcement:
       config.dns?.client_dns_enforcement?.enabled ??
       fallbackDraft.clientDnsEnforcement,
@@ -2060,13 +2142,14 @@ function buildUpdatedConfig(
         ttl_bypass_enabled: draft.ttlBypassEnabled,
         ppe_deoffload_mode: draft.ppeDeoffloadMode,
         ppe_deoffload_quic_enabled:
-          draft.ppeDeoffloadMode === "auto" &&
-          draft.ppeDeoffloadQuicEnabled,
+          draft.ppeDeoffloadMode === "auto" && draft.ppeDeoffloadQuicEnabled,
         reconnect_unmarked_flows_on_routing_change:
           draft.reconnectUnmarkedFlowsOnRoutingChange,
         reconnect_owned_flows_on_routing_change_lists:
           draft.reconnectOwnedFlowsOnRoutingChangeLists,
         ipv6_enabled: draft.ipv6Enabled,
+        ipset_hashsize: toOptionalBackendInteger(draft.ipsetHashsize),
+        ipset_maxelem: toOptionalBackendInteger(draft.ipsetMaxelem),
       },
       draft.metaUdp443Policy
     ),
@@ -2127,7 +2210,7 @@ function toHex32(value: string | undefined, fallback: string) {
   return `0x${normalized.padStart(8, "0")}`
 }
 
-function toStringInt(value: number | undefined, fallback: string) {
+function toStringInt(value: number | null | undefined, fallback: string) {
   if (!Number.isInteger(value)) {
     return fallback
   }
@@ -2150,6 +2233,15 @@ function toBackendIntegerValue(parsed: number | null, raw: string): number {
   }
 
   return raw as unknown as number
+}
+
+function toOptionalBackendInteger(raw: string): number | undefined {
+  if (!raw.trim()) {
+    return undefined
+  }
+
+  const parsed = parseStrictDecimalToNumber(raw)
+  return parsed ?? (raw as unknown as number)
 }
 
 function resolveSettingsFieldPath(path: string): SettingsFieldName | undefined {
@@ -2204,6 +2296,10 @@ function resolveSettingsFieldPath(path: string): SettingsFieldName | undefined {
       return SETTINGS_FIELD_NAMES.metaUdp443Policy
     case "daemon.ipv6_enabled":
       return SETTINGS_FIELD_NAMES.ipv6Enabled
+    case "daemon.ipset_hashsize":
+      return SETTINGS_FIELD_NAMES.ipsetHashsize
+    case "daemon.ipset_maxelem":
+      return SETTINGS_FIELD_NAMES.ipsetMaxelem
     case "dns.client_dns_enforcement.enabled":
       return SETTINGS_FIELD_NAMES.clientDnsEnforcement
     case "lists_autoupdate.enabled":

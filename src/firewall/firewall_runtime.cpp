@@ -15,6 +15,7 @@
 #include <arpa/inet.h>
 
 #include <algorithm>
+#include <limits>
 #include <map>
 #include <optional>
 #include <set>
@@ -26,6 +27,31 @@
 namespace keen_pbr3 {
 
 namespace {
+
+std::optional<uint32_t> canonical_ipset_hashsize(
+    const std::optional<int64_t>& value) {
+    const int64_t effective = value.value_or(1024);
+    if (effective < 1 ||
+        effective > std::numeric_limits<uint32_t>::max()) {
+        return std::nullopt;
+    }
+    return normalize_ipset_hashsize(static_cast<uint32_t>(effective));
+}
+
+bool ipset_hashsize_changed(const std::optional<int64_t>& current,
+                            const std::optional<int64_t>& candidate) {
+    const auto current_canonical = canonical_ipset_hashsize(current);
+    const auto candidate_canonical = canonical_ipset_hashsize(candidate);
+    if (current_canonical.has_value() && candidate_canonical.has_value()) {
+        return current_canonical != candidate_canonical;
+    }
+    return current != candidate;
+}
+
+bool ipset_maxelem_changed(const std::optional<int64_t>& current,
+                           const std::optional<int64_t>& candidate) {
+    return current.value_or(65536) != candidate.value_or(65536);
+}
 
 const Outbound* find_outbound_by_tag(const std::vector<Outbound>& outbounds,
                                      const std::string& tag) {
@@ -61,6 +87,26 @@ bool needs_native_vpn_direct_egress_snat(std::string_view stable_id) {
 }
 
 } // namespace
+
+FirewallConfigApplyPolicy firewall_config_apply_policy(
+    FirewallBackend backend,
+    const Config& current,
+    const Config& candidate) {
+    if (backend != FirewallBackend::iptables) {
+        return {};
+    }
+
+    const auto current_daemon = current.daemon.value_or(DaemonConfig{});
+    const auto candidate_daemon = candidate.daemon.value_or(DaemonConfig{});
+    if (!ipset_hashsize_changed(current_daemon.ipset_hashsize,
+                                candidate_daemon.ipset_hashsize) &&
+        !ipset_maxelem_changed(current_daemon.ipset_maxelem,
+                               candidate_daemon.ipset_maxelem)) {
+        return {};
+    }
+
+    return {FirewallApplyMode::Destructive, true};
+}
 
 PpeDeoffloadDesired ppe_deoffload_desired_from_observation(
     PpeDeoffloadMode mode,
@@ -201,7 +247,8 @@ StagedRuntimeFirewall stage_runtime_firewall(
     bool udp_call_affinity_ipset_available,
     const std::optional<KeeneticDnsSnapshot>& keenetic_dns_snapshot,
     std::shared_ptr<const ListCacheGenerationSnapshot>
-        list_cache_snapshot) {
+        list_cache_snapshot,
+    bool force_clear_dynamic_sets) {
     // Resolve and validate the complete DNS registry before preparing the
     // backend transaction.  In particular, a Keenetic DNS server without a
     // prepared snapshot must fail before any firewall state is touched.
@@ -219,8 +266,20 @@ StagedRuntimeFirewall stage_runtime_firewall(
     const Ipv6SupportDecision ipv6_decision = resolve_ipv6_support(config);
     log_ipv6_support_decision_once(ipv6_decision);
     firewall.set_ipv6_enabled(ipv6_decision.enabled);
+    const auto daemon_config = config.daemon.value_or(DaemonConfig{});
     firewall.set_clear_dynamic_sets_on_apply(
-        config.daemon.value_or(DaemonConfig{}).clear_dynamic_sets_on_apply.value_or(true));
+        force_clear_dynamic_sets ||
+        daemon_config.clear_dynamic_sets_on_apply.value_or(true));
+    firewall.set_ipset_hashsize(
+        daemon_config.ipset_hashsize.has_value()
+            ? std::optional<uint32_t>{static_cast<uint32_t>(
+                  *daemon_config.ipset_hashsize)}
+            : std::nullopt);
+    firewall.set_ipset_maxelem(
+        daemon_config.ipset_maxelem.has_value()
+            ? std::optional<uint32_t>{static_cast<uint32_t>(
+                  *daemon_config.ipset_maxelem)}
+            : std::nullopt);
     firewall.set_ttl_bypass_enabled(
         config.daemon.value_or(DaemonConfig{}).ttl_bypass_enabled.value_or(true));
     firewall.set_ppe_deoffload_desired(
@@ -611,7 +670,8 @@ std::vector<RuleState> apply_runtime_firewall(
     bool udp_call_affinity_ipset_available,
     const std::optional<KeeneticDnsSnapshot>& keenetic_dns_snapshot,
     std::shared_ptr<const ListCacheGenerationSnapshot>
-        list_cache_snapshot) {
+        list_cache_snapshot,
+    bool force_clear_dynamic_sets) {
     auto staged = stage_runtime_firewall(
         config,
         outbound_marks,
@@ -624,7 +684,8 @@ std::vector<RuleState> apply_runtime_firewall(
         native_vpn_direct_egress_snat_selectors,
         udp_call_affinity_ipset_available,
         keenetic_dns_snapshot,
-        std::move(list_cache_snapshot));
+        std::move(list_cache_snapshot),
+        force_clear_dynamic_sets);
     commit_runtime_firewall(firewall, staged);
     // Published only after the commit, exactly as before: a transaction that
     // never reached the kernel must not advertise the list content it was

@@ -40,6 +40,18 @@ struct StagedRuntimeFirewall {
     FirewallApplyMode mode{FirewallApplyMode::Destructive};
 };
 
+struct FirewallConfigApplyPolicy {
+    FirewallApplyMode mode{FirewallApplyMode::PreserveSets};
+    bool force_clear_dynamic_sets{false};
+};
+
+// Capacity changes alter the schema of existing ipsets. Only iptables needs
+// a destructive replacement; nftables ignores these optional hints.
+FirewallConfigApplyPolicy firewall_config_apply_policy(
+    FirewallBackend backend,
+    const Config& current,
+    const Config& candidate);
+
 // Convert one stable active-runtime observation into the typed firewall
 // desired state. The overload taking an observation is deterministic for
 // tests; the production overload performs the bounded read-only observation.
@@ -74,7 +86,8 @@ StagedRuntimeFirewall stage_runtime_firewall(
     const std::optional<KeeneticDnsSnapshot>& keenetic_dns_snapshot =
         std::nullopt,
     std::shared_ptr<const ListCacheGenerationSnapshot>
-        list_cache_snapshot = nullptr);
+        list_cache_snapshot = nullptr,
+    bool force_clear_dynamic_sets = false);
 
 // Hand the staged transaction to the kernel. This is the one blocking step:
 // every child process of a firewall apply originates here.
@@ -106,7 +119,8 @@ std::vector<RuleState> apply_runtime_firewall(
     const std::optional<KeeneticDnsSnapshot>& keenetic_dns_snapshot =
         std::nullopt,
     std::shared_ptr<const ListCacheGenerationSnapshot>
-        list_cache_snapshot = nullptr);
+        list_cache_snapshot = nullptr,
+    bool force_clear_dynamic_sets = false);
 
 // Build the source-scoped direct-egress SNAT contract for Keenetic's SSTP,
 // OpenConnect, L2TP and IKEv1 servers. Their clients need this on the ordinary

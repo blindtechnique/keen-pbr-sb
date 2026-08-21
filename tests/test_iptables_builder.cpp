@@ -232,13 +232,39 @@ public:
   static std::string build_ipset_create_line(const std::string &name,
                                              const std::string &family_str,
                                              uint32_t timeout,
-                                             bool source_udp_peer = false) {
+                                             bool source_udp_peer = false,
+                                             std::optional<uint32_t> hashsize =
+                                                 std::nullopt,
+                                             std::optional<uint32_t> maxelem =
+                                                 std::nullopt) {
     IptablesFirewall::PendingSet ps;
     ps.name = name;
     ps.family_str = family_str;
     ps.timeout = timeout;
+    ps.hashsize = hashsize;
+    ps.maxelem = maxelem;
     ps.source_udp_peer = source_udp_peer;
     return IptablesFirewall::build_ipset_create_line(ps);
+  }
+
+  static std::optional<uint32_t> normalize_ipset_hashsize(
+      uint32_t requested) {
+    return keen_pbr3::normalize_ipset_hashsize(requested);
+  }
+
+  static std::string create_ipset_line_from_config(
+      const std::string& name,
+      int family,
+      uint32_t timeout,
+      std::optional<uint32_t> hashsize,
+      std::optional<uint32_t> maxelem) {
+    IptablesFirewall firewall;
+    firewall.set_ipset_hashsize(hashsize);
+    firewall.set_ipset_maxelem(maxelem);
+    firewall.create_ipset(name, family, timeout);
+    REQUIRE(firewall.pending_sets_.size() == 1);
+    return IptablesFirewall::build_ipset_create_line(
+        firewall.pending_sets_.front());
   }
 
   static std::string build_forward_udp_reject_script(
@@ -286,11 +312,15 @@ public:
       const std::string& xml,
       const std::string& name,
       const std::string& family,
-      uint32_t timeout) {
+      uint32_t timeout,
+      std::optional<uint32_t> hashsize = std::nullopt,
+      std::optional<uint32_t> maxelem = std::nullopt) {
     IptablesFirewall::PendingSet expected;
     expected.name = name;
     expected.family_str = family;
     expected.timeout = timeout;
+    expected.hashsize = hashsize;
+    expected.maxelem = maxelem;
     return IptablesFirewall::dynamic_set_schema_compatible(xml, expected);
   }
 
@@ -2633,6 +2663,33 @@ TEST_CASE("build_ipset_create_line: IPv6 without timeout") {
   CHECK(line == "create myset hash:net family inet6 -exist\n");
 }
 
+TEST_CASE("build_ipset_create_line: capacity options precede timeout") {
+  const auto line = T::build_ipset_create_line(
+      "myset", "inet", 60, false, 2048, 131072);
+  CHECK(line ==
+        "create myset hash:net family inet hashsize 2048 maxelem 131072 "
+        "timeout 60 -exist\n");
+}
+
+TEST_CASE("configured ipset capacity applies to static and dynamic sets") {
+  CHECK(T::create_ipset_line_from_config(
+            "kpbr4s_static", AF_INET, 0, 2048, 131072) ==
+        "create kpbr4s_static hash:net family inet hashsize 2048 maxelem "
+        "131072 -exist\n");
+  CHECK(T::create_ipset_line_from_config(
+            "kpbr4d_dynamic", AF_INET, 300, 2048, 131072) ==
+        "create kpbr4d_dynamic hash:net family inet hashsize 2048 maxelem "
+        "131072 timeout 300 -exist\n");
+}
+
+TEST_CASE("ipset hashsize uses kernel power-of-two normalization") {
+  CHECK(*T::normalize_ipset_hashsize(1) == 64);
+  CHECK(*T::normalize_ipset_hashsize(1024) == 1024);
+  CHECK(*T::normalize_ipset_hashsize(1025) == 2048);
+  CHECK(*T::normalize_ipset_hashsize(2147483648U) == 2147483648U);
+  CHECK_FALSE(T::normalize_ipset_hashsize(4294967295U).has_value());
+}
+
 TEST_CASE("UDP peer ipset is exact and expiring") {
   auto line = T::build_ipset_create_line(
       "kpbr4m_meta_whatsapp_ip", "inet", 90, true);
@@ -2775,8 +2832,25 @@ TEST_CASE("ipset reconcile: dynamic schema accepts terse ipset XML") {
 </ipsets>)",
       "kpbr4d_domains", "inet", 300));
   CHECK(T::dynamic_set_schema_compatible(
-      R"(<ipsets><ipset name="kpbr6d_domains"><type>hash:net</type><header><family>inet6</family></header></ipset></ipsets>)",
+      R"(<ipsets><ipset name="kpbr6d_domains"><type>hash:net</type><header><family>inet6</family><hashsize>1024</hashsize><maxelem>65536</maxelem></header></ipset></ipsets>)",
       "kpbr6d_domains", "inet6", 0));
+}
+
+TEST_CASE("ipset schema validates configured capacity") {
+  const auto xml = [](uint32_t hashsize, uint32_t maxelem) {
+    return "<ipsets><ipset name=\"kpbr4d_domains\"><type>hash:net</type>"
+           "<header><family>inet</family><hashsize>" +
+           std::to_string(hashsize) + "</hashsize><maxelem>" +
+           std::to_string(maxelem) +
+           "</maxelem></header></ipset></ipsets>";
+  };
+
+  CHECK(T::dynamic_set_schema_compatible(
+      xml(256, 131072), "kpbr4d_domains", "inet", 0, 129, 131072));
+  CHECK_FALSE(T::dynamic_set_schema_compatible(
+      xml(128, 131072), "kpbr4d_domains", "inet", 0, 129, 131072));
+  CHECK_FALSE(T::dynamic_set_schema_compatible(
+      xml(256, 65536), "kpbr4d_domains", "inet", 0, 129, 131072));
 }
 
 TEST_CASE("ipset reconcile: dynamic schema rejects incompatible live sets") {

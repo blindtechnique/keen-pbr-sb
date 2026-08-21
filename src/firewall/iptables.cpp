@@ -199,6 +199,8 @@ void IptablesFirewall::create_ipset(const std::string& set_name, int family,
     ps.name = set_name;
     ps.family_str = (family == AF_INET6) ? "inet6" : "inet";
     ps.timeout = timeout;
+    ps.hashsize = ipset_hashsize();
+    ps.maxelem = ipset_maxelem();
     const auto existing = std::find_if(
         pending_sets_.begin(), pending_sets_.end(),
         [&set_name](const PendingSet& pending) { return pending.name == set_name; });
@@ -206,6 +208,8 @@ void IptablesFirewall::create_ipset(const std::string& set_name, int family,
         pending_sets_.push_back(std::move(ps));
     } else if (existing->family_str != ps.family_str ||
                existing->timeout != ps.timeout ||
+               existing->hashsize != ps.hashsize ||
+               existing->maxelem != ps.maxelem ||
                existing->source_udp_peer != ps.source_udp_peer) {
         throw FirewallError("conflicting ipset declaration for " + set_name);
     }
@@ -226,6 +230,8 @@ void IptablesFirewall::create_udp_peer_set(const std::string& set_name,
     ps.name = set_name;
     ps.family_str = family == AF_INET6 ? "inet6" : "inet";
     ps.timeout = timeout;
+    ps.hashsize = ipset_hashsize();
+    ps.maxelem = ipset_maxelem();
     ps.source_udp_peer = true;
     const auto existing = std::find_if(
         pending_sets_.begin(), pending_sets_.end(),
@@ -236,6 +242,8 @@ void IptablesFirewall::create_udp_peer_set(const std::string& set_name,
         pending_sets_.push_back(std::move(ps));
     } else if (existing->family_str != ps.family_str ||
                existing->timeout != ps.timeout ||
+               existing->hashsize != ps.hashsize ||
+               existing->maxelem != ps.maxelem ||
                !existing->source_udp_peer) {
         throw FirewallError("conflicting ipset declaration for " + set_name);
     }
@@ -1540,13 +1548,18 @@ std::string IptablesFirewall::build_ipset_create_line(const PendingSet& ps) {
     const char* type = ps.source_udp_peer
         ? "hash:ip,port,ip"
         : "hash:net";
-    if (ps.timeout > 0) {
-        return keen_pbr3::format("create {} {} family {} timeout {} -exist\n",
-                                 ps.name, type, ps.family_str, ps.timeout);
-    } else {
-        return keen_pbr3::format("create {} {} family {} -exist\n",
-                                 ps.name, type, ps.family_str);
+    std::string line = keen_pbr3::format(
+        "create {} {} family {}", ps.name, type, ps.family_str);
+    if (ps.hashsize.has_value()) {
+        line += keen_pbr3::format(" hashsize {}", *ps.hashsize);
     }
+    if (ps.maxelem.has_value()) {
+        line += keen_pbr3::format(" maxelem {}", *ps.maxelem);
+    }
+    if (ps.timeout > 0) {
+        line += keen_pbr3::format(" timeout {}", ps.timeout);
+    }
+    return line + " -exist\n";
 }
 
 bool IptablesFirewall::dynamic_set_schema_compatible(
@@ -1594,7 +1607,13 @@ bool IptablesFirewall::dynamic_set_schema_compatible(
     }
     auto* family = header->first_node("family");
     auto* timeout_node = header->first_node("timeout");
+    auto* hashsize_node = header->first_node("hashsize");
+    auto* maxelem_node = header->first_node("maxelem");
     if (family == nullptr || header->last_node("family") != family ||
+        hashsize_node == nullptr ||
+        hashsize_node->next_sibling("hashsize") != nullptr ||
+        maxelem_node == nullptr ||
+        maxelem_node->next_sibling("maxelem") != nullptr ||
         (timeout_node != nullptr &&
          header->last_node("timeout") != timeout_node)) {
         return false;
@@ -1612,6 +1631,31 @@ bool IptablesFirewall::dynamic_set_schema_compatible(
         if (parsed.ec != std::errc{} || parsed.ptr != end) {
             return false;
         }
+    }
+    uint32_t live_hashsize = 0;
+    {
+        const char* begin = hashsize_node->value();
+        const char* end = begin + hashsize_node->value_size();
+        const auto parsed = std::from_chars(begin, end, live_hashsize);
+        if (parsed.ec != std::errc{} || parsed.ptr != end) {
+            return false;
+        }
+    }
+    uint32_t live_maxelem = 0;
+    {
+        const char* begin = maxelem_node->value();
+        const char* end = begin + maxelem_node->value_size();
+        const auto parsed = std::from_chars(begin, end, live_maxelem);
+        if (parsed.ec != std::errc{} || parsed.ptr != end) {
+            return false;
+        }
+    }
+    const auto requested_hashsize =
+        normalize_ipset_hashsize(expected.hashsize.value_or(1024));
+    if (!requested_hashsize.has_value() ||
+        live_hashsize < *requested_hashsize ||
+        live_maxelem != expected.maxelem.value_or(65536)) {
+        return false;
     }
     return live_name == expected.name &&
            live_type == (expected.source_udp_peer

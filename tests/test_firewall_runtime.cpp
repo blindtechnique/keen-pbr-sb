@@ -356,6 +356,46 @@ Config keenetic_detour_config() {
 
 } // namespace
 
+TEST_CASE("iptables capacity changes force one destructive replacement") {
+    Config current;
+    Config candidate;
+    candidate.daemon = DaemonConfig{};
+    candidate.daemon->ipset_maxelem = 131072;
+
+    const auto policy = firewall_config_apply_policy(
+        FirewallBackend::iptables, current, candidate);
+    CHECK(policy.mode == FirewallApplyMode::Destructive);
+    CHECK(policy.force_clear_dynamic_sets);
+}
+
+TEST_CASE("ipset defaults and normalized hashsize preserve existing sets") {
+    Config defaults;
+    Config explicit_defaults;
+    explicit_defaults.daemon = DaemonConfig{};
+    explicit_defaults.daemon->ipset_hashsize = 1024;
+    explicit_defaults.daemon->ipset_maxelem = 65536;
+    const auto unchanged_defaults = firewall_config_apply_policy(
+        FirewallBackend::iptables, defaults, explicit_defaults);
+    CHECK(unchanged_defaults.mode == FirewallApplyMode::PreserveSets);
+    CHECK_FALSE(unchanged_defaults.force_clear_dynamic_sets);
+
+    Config rounded_low;
+    rounded_low.daemon = DaemonConfig{};
+    rounded_low.daemon->ipset_hashsize = 1536;
+    Config rounded_high;
+    rounded_high.daemon = DaemonConfig{};
+    rounded_high.daemon->ipset_hashsize = 2048;
+    const auto unchanged_rounded = firewall_config_apply_policy(
+        FirewallBackend::iptables, rounded_low, rounded_high);
+    CHECK(unchanged_rounded.mode == FirewallApplyMode::PreserveSets);
+    CHECK_FALSE(unchanged_rounded.force_clear_dynamic_sets);
+
+    const auto nftables = firewall_config_apply_policy(
+        FirewallBackend::nftables, rounded_low, defaults);
+    CHECK(nftables.mode == FirewallApplyMode::PreserveSets);
+    CHECK_FALSE(nftables.force_clear_dynamic_sets);
+}
+
 TEST_CASE("Runtime firewall consumes one pinned remote-list generation") {
     constexpr const char* url = "https://example.test/remote.txt";
     const auto config = parse_config(R"json({

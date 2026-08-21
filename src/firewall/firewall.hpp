@@ -252,6 +252,10 @@ enum class FirewallApplyMode : uint8_t {
 
 enum class FirewallSetGeneration : uint8_t { A, B };
 
+// Return the kernel-normalized initial hashsize for an ipset declaration.
+// The result is absent when the next power of two cannot fit in uint32.
+std::optional<uint32_t> normalize_ipset_hashsize(uint32_t requested);
+
 // Read-only health of the backend-owned tunnel SNAT scaffold.
 // Missing means the last applied contract required SNAT but its scaffold no
 // longer matches. Stale means SNAT is intentionally disabled but owned
@@ -488,6 +492,24 @@ public:
         return clear_dynamic_sets_on_apply_;
     }
 
+    // Optional ipset capacity hints. The iptables backend applies them to its
+    // owned hash sets; nftables deliberately ignores them.
+    void set_ipset_hashsize(std::optional<uint32_t> hashsize) {
+        ipset_hashsize_ = std::move(hashsize);
+    }
+
+    const std::optional<uint32_t>& ipset_hashsize() const {
+        return ipset_hashsize_;
+    }
+
+    void set_ipset_maxelem(std::optional<uint32_t> maxelem) {
+        ipset_maxelem_ = std::move(maxelem);
+    }
+
+    const std::optional<uint32_t>& ipset_maxelem() const {
+        return ipset_maxelem_;
+    }
+
     // Defaults to on. Every nfqws2 strategy this project ships uses a
     // TTL-dependent desync, so a router with `ip ttl-fix` enabled breaks all of
     // them at once; an opt-in switch would leave the fix off for everyone who
@@ -578,6 +600,8 @@ protected:
     uint32_t fwmark_mask_{0xFFFFFFFFu};
     bool ipv6_enabled_{true};
     bool clear_dynamic_sets_on_apply_{true};
+    std::optional<uint32_t> ipset_hashsize_;
+    std::optional<uint32_t> ipset_maxelem_;
     bool ttl_bypass_enabled_{true};
     mutable std::mutex ppe_deoffload_desired_mutex_;
     PpeDeoffloadDesired ppe_deoffload_desired_;

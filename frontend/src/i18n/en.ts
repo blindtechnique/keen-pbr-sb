@@ -2760,6 +2760,12 @@ export const enTranslation = {
         tableStartLabel: "IP routing table starting value",
         tableStartHint:
           "The routing table ID assigned to your first route. Each additional route gets the next ID.",
+        ipsetHashsizeLabel: "IPSet hash table size",
+        ipsetHashsizeHint:
+          "Optional for iptables. Leave empty for 1024. Changing it recreates keen-pbr IP sets and clears addresses learned by dnsmasq.",
+        ipsetMaxelemLabel: "IPSet maximum elements",
+        ipsetMaxelemHint:
+          "Optional for iptables. Leave empty for 65536. Increase it for very large lists; changing it recreates keen-pbr IP sets and clears addresses learned by dnsmasq.",
       },
       actions: {
         saving: "Saving...",

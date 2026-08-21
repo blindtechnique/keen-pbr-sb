@@ -148,6 +148,8 @@ private:
         std::string name;
         std::string family_str; // "inet" or "inet6"
         uint32_t timeout;       // entry TTL in seconds (0 = no timeout)
+        std::optional<uint32_t> hashsize;
+        std::optional<uint32_t> maxelem;
         bool source_udp_peer{false};
     };
 

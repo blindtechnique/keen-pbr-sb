@@ -2779,6 +2779,12 @@ export const ruTranslation = {
         tableStartLabel: "Начальное значение таблицы маршрутизации IP",
         tableStartHint:
           "ID таблицы маршрутизации для первого маршрута. Каждый следующий маршрут получает следующий ID.",
+        ipsetHashsizeLabel: "Размер хеш-таблицы IPSet",
+        ipsetHashsizeHint:
+          "Необязательно, только для iptables. Пустое поле означает 1024. Изменение пересоздаёт IP-наборы keen-pbr и очищает адреса, изученные dnsmasq.",
+        ipsetMaxelemLabel: "Максимум элементов IPSet",
+        ipsetMaxelemHint:
+          "Необязательно, только для iptables. Пустое поле означает 65536. Увеличьте для очень больших списков; изменение пересоздаёт IP-наборы keen-pbr и очищает адреса, изученные dnsmasq.",
       },
       actions: {
         saving: "Сохранение...",
