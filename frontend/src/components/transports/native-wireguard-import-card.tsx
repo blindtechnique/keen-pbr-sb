@@ -102,6 +102,7 @@ type ImportOperationState =
   | { readonly status: "preflighting" }
   | { readonly status: "sending" }
   | { readonly status: "preflight-error" }
+  | { readonly status: "not-imported" }
   | { readonly status: "selection-expired" }
   | { readonly status: "unknown" }
   | { readonly status: "recovery-locked" }
@@ -110,6 +111,32 @@ type ImportOperationState =
       readonly outcome: NdmsNativeImportOutcome
       readonly result: NdmsNativeImportClientResult
     }
+
+const importWasDefinitelyNotStarted = (
+  response: Response,
+  payload: unknown
+): boolean => {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return false
+  }
+  const error = (payload as Record<string, unknown>).error
+  if (typeof error !== "string") return false
+
+  if (response.status === 401 && error === "authentication required") {
+    return true
+  }
+  if (
+    response.status === 403 &&
+    (error === "step_up_required" ||
+      error === "protected_secret_transport_unavailable")
+  ) {
+    return true
+  }
+  return (
+    error === "sensitive_request_rejected" &&
+    [400, 413, 415, 428, 503].includes(response.status)
+  )
+}
 
 export type NativeWireGuardImportedIdentity = Readonly<{
   firmwareInterface: string
@@ -601,6 +628,15 @@ function NativeWireGuardImportFieldsContent({
               },
             })
             const payload = await response.json().catch(() => null)
+            if (
+              !response.ok &&
+              importWasDefinitelyNotStarted(response, payload)
+            ) {
+              return {
+                disposition: { state: "clear" } as const,
+                value: { status: "not-imported" } as ImportOperationState,
+              }
+            }
             const result = response.ok
               ? parseNdmsNativeImportResult(payload)
               : null
@@ -1054,6 +1090,20 @@ function NativeWireGuardImportFieldsContent({
             </AlertTitle>
             <AlertDescription>
               {t("transports.nativeImport.selectionExpiredDescription")}
+            </AlertDescription>
+          </Alert>
+        </div>
+      ) : null}
+
+      {operation.status === "not-imported" ? (
+        <div ref={summaryRef} role="alert" tabIndex={-1}>
+          <Alert role="presentation" variant="warning">
+            <ShieldAlertIcon />
+            <AlertTitle>
+              {t("transports.nativeImport.notImportedTitle")}
+            </AlertTitle>
+            <AlertDescription>
+              {t("transports.nativeImport.notImportedDescription")}
             </AlertDescription>
           </Alert>
         </div>

@@ -103,10 +103,11 @@ export function NativeMutationRecovery({
   const deleteNeedsRecovery =
     deleteState === "recovery_required" || lockMatches(lock, "delete")
   const forgetNeedsRecovery = lockMatches(lock, "forget")
-  const importJournalUnsafe =
-    importState === "unsafe" || importState === "unavailable"
-  const deleteJournalUnsafe =
-    deleteState === "unsafe" || deleteState === "unavailable"
+  // A temporarily unavailable status is handled at the action that needs it.
+  // Do not turn a transient inventory/read failure into a permanent page-wide
+  // alarm. The global alarm is reserved for an explicitly unsafe journal.
+  const importJournalUnsafe = importState === "unsafe"
+  const deleteJournalUnsafe = deleteState === "unsafe"
   const show =
     pending ||
     importNeedsRecovery ||

@@ -301,16 +301,16 @@ Daemon::Daemon(Config config,
     , list_service_(config.daemon.value_or(DaemonConfig{}).cache_dir.value_or("/var/cache/keen-pbr"),
                     max_file_size_bytes(config))
     , ndms_native_import_wal_store_(
-          "/opt/var/lib/keen-pbr/native-import-wal")
+          "/opt/etc/keen-pbr/native-import-wal")
     , ndms_native_delete_wal_store_(
-          "/opt/var/lib/keen-pbr/native-delete-wal")
+          "/opt/etc/keen-pbr/native-delete-wal")
     , ndms_native_ownership_store_(
-          "/opt/var/lib/keen-pbr/native-import-ownership")
+          "/opt/etc/keen-pbr/native-import-ownership")
     , ndms_native_observation_store_(
-          "/opt/var/lib/keen-pbr/native-mutation")
+          "/opt/etc/keen-pbr/native-mutation")
     , ndms_native_secret_snapshot_store_(
-          "/opt/etc/keen-pbr/native-import-snapshot.key",
-          "/opt/var/lib/keen-pbr/native-import-snapshots")
+          "/opt/etc/keen-pbr/native-import-secrets/snapshot.key",
+          "/opt/etc/keen-pbr/native-import-snapshots")
     , config_(std::move(config))
     , config_path_(std::move(config_path))
     , opts_(std::move(opts))

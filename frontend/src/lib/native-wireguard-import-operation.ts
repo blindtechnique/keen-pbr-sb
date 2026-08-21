@@ -4,6 +4,7 @@ export type NativeWireGuardImportOperationView = Readonly<{
     | "preflighting"
     | "sending"
     | "preflight-error"
+    | "not-imported"
     | "selection-expired"
     | "unknown"
     | "recovery-locked"

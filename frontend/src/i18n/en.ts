@@ -1108,9 +1108,9 @@ export const enTranslation = {
         pendingTitle: "A native VPN operation is pending",
         pendingDescription:
           "This tab or another tab has an outstanding one-shot operation. New native writes remain locked until its typed result or a recovery check resolves it.",
-        unsafeTitle: "Native mutation journal cannot be trusted",
+        unsafeTitle: "VPN creation and deletion are temporarily unavailable",
         unsafeDescription:
-          "The router cannot provide a safe journal view. Native writes remain locked; no automatic cleanup or retry is attempted.",
+          "The router found a damaged or unreadable record of an unfinished operation. Existing VPNs were not changed. Restart keen-pbr; if this message remains, diagnostics are required.",
         importTitle: "Native import recovery is required",
         importDescription:
           "Run one bodyless check. It never resends the VPN profile, deletes an interface or performs a global save.",
@@ -1206,6 +1206,9 @@ export const enTranslation = {
       selectionExpiredTitle: "Select the configuration again",
       selectionExpiredDescription:
         "Authentication, locality, or the selection revision changed before the one-shot request. No secret request was sent; the old in-memory copy was wiped.",
+      notImportedTitle: "Interface was not created",
+      notImportedDescription:
+        "The router rejected the request before import started. Nothing changed on the router. Select the configuration again and retry after refreshing the page.",
       unknownTitle: "The import result is unknown",
       unknownDescription:
         "The panel can no longer prove whether the one-shot request reached Keenetic or completed. Any selected in-memory copy is unavailable and the controls are locked.",

@@ -1226,6 +1226,9 @@ void Daemon::setup_api() {
                 std::move(runtime));
             if (writer.state !=
                 NdmsNativeWriterAdmissionState::admitted) {
+                Logger::instance().warn(
+                    "Native VPN operation was not started: writer admission {}",
+                    ndms_native_writer_admission_state_name(writer.state));
                 publish_unavailable();
                 return {};
             }
@@ -1321,6 +1324,12 @@ void Daemon::setup_api() {
                 const auto result = preflight.check_before_secret_take(
                     reservation->writer());
                 if (!result.secret_body_may_be_taken()) {
+                    Logger::instance().warn(
+                        "Native VPN import was not started: preflight {} ({})",
+                        ndms_native_fresh_import_preflight_status_name(
+                            result.status),
+                        ndms_native_fresh_import_preflight_stop_name(
+                            result.stop));
                     return std::shared_ptr<SensitiveRequestReservation>{};
                 }
                 return opaque_reservation;

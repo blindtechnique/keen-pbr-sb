@@ -226,11 +226,11 @@ class NdmsNativeCooperativeImportCoordinatorTestIssuer;
 // runtime mutation admission and then NdmsNativeWriterLease in that order.
 // It never calls `system configuration save` and exposes no delete operation.
 // Production wiring constructs and retains the hardened stores once, using
-// the intended split layout (not per request): writer+observation under
-// /opt/var/lib/keen-pbr/native-mutation, import and delete WALs in their
-// dedicated stores, snapshot state under
-// /opt/var/lib/keen-pbr/native-import-snapshots, and the separate key
-// /opt/etc/keen-pbr/native-import-snapshot.key. The mandatory delete-WAL
+// the intended split layout (not per request): all owner-only mutable stores
+// live below the root-owned /opt/etc/keen-pbr anchor. The snapshot key and
+// encrypted snapshots use separate sibling directories under that anchor.
+// This deliberately avoids assuming that Entware's /opt/var is root-owned.
+// The mandatory delete-WAL
 // dependency is read-only here and supplies symmetric cross-kind admission.
 class NdmsNativeCooperativeImportCoordinator final {
 public:
