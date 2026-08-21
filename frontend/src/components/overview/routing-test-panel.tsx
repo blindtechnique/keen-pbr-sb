@@ -71,14 +71,29 @@ export function RoutingTestPanel({
     registryConsentQuery.isPending || consentMutation.isPending
   const siteAvailabilityMutation = useMutation({
     mutationFn: async ({ target, url }: { target: string; url: string }) => {
-      const response = await nfqwsAction<NfqwsActionResult>({
-        action: "check_url",
-        url,
-      })
-      if (typeof response.reachable !== "boolean") {
-        throw new TypeError()
+      const [browserProbe, routerProbe] = await Promise.allSettled([
+        probeBrowserReachability(url),
+        nfqwsAction<NfqwsActionResult>({
+          action: "check_url",
+          url,
+        }).then((response) => {
+          if (typeof response.reachable !== "boolean") {
+            throw new TypeError()
+          }
+          return response.reachable
+        }),
+      ])
+
+      const browserReachable =
+        browserProbe.status === "fulfilled" && browserProbe.value
+      const routerReachable =
+        routerProbe.status === "fulfilled" && routerProbe.value
+
+      if (!browserReachable && routerProbe.status === "rejected") {
+        throw routerProbe.reason
       }
-      return { reachable: response.reachable, target }
+
+      return { reachable: browserReachable || routerReachable, target }
     },
   })
   const routingDiagnostics =
@@ -258,4 +273,25 @@ function siteCheckUrl(input: string, target: string): string {
   }
   const host = target.includes(":") ? `[${target}]` : target
   return `https://${host}/`
+}
+
+async function probeBrowserReachability(url: string): Promise<boolean> {
+  const controller = new AbortController()
+  const timeout = window.setTimeout(() => controller.abort(), 10_000)
+
+  try {
+    const response = await fetch(url, {
+      cache: "no-store",
+      credentials: "omit",
+      mode: "no-cors",
+      referrerPolicy: "no-referrer",
+      signal: controller.signal,
+    })
+    await response.body?.cancel().catch(() => undefined)
+    return true
+  } catch {
+    return false
+  } finally {
+    window.clearTimeout(timeout)
+  }
 }

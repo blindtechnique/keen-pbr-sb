@@ -2006,10 +2006,10 @@ export const enTranslation = {
       availabilityTitle: "Website availability",
       availability: {
         idle: "The check has not run yet.",
-        checking: "Checking availability from the router…",
-        reachable: "The website is reachable from the router.",
+        checking: "Checking availability…",
+        reachable: "The website responds.",
         unreachable:
-          "The website is unreachable from the router or returned no readable response.",
+          "The website did not respond to either this device or the router.",
         error: "The availability check could not be completed.",
       },
       nfqwsTitle: "nfqws",
@@ -2034,7 +2034,7 @@ export const enTranslation = {
       },
       registryTitle: "Russian blocking registry",
       registryConsent:
-        "Also check the address against the blocking registry. An outside service answers it, so the address you ask about becomes known to it. The setting is kept on the router.",
+        "Also check the address against the blocking registry. An outside service answers it, so the address you ask about becomes known to it.",
       registrySaving: "Saving registry lookup consent",
       registryConsentLoadFailed:
         "The stored consent could not be read. External lookup remains disabled.",
