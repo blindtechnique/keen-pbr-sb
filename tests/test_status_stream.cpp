@@ -80,6 +80,34 @@ TEST_CASE("status stream reports when no live subscribers remain") {
     CHECK_FALSE(stream.has_subscribers());
 }
 
+TEST_CASE("status stream skips snapshot work without live subscribers") {
+    auto current = make_snapshot();
+    std::size_t builds = 0;
+    StatusStream stream([&] {
+        ++builds;
+        return current;
+    });
+
+    stream.reconcile();
+    CHECK(builds == 0);
+
+    auto subscription = stream.subscribe();
+    REQUIRE(subscription);
+    CHECK(builds == 1);
+    (void)pop(subscription);
+
+    stream.unsubscribe(subscription);
+    current.service.version = "2";
+    stream.reconcile();
+    CHECK(builds == 1);
+
+    auto reconnected = stream.subscribe();
+    REQUIRE(reconnected);
+    CHECK(builds == 2);
+    CHECK(pop(reconnected).find("\"version\":\"2\"") !=
+          std::string::npos);
+}
+
 TEST_CASE("status stream reconnect starts with a fresh current snapshot") {
     auto current = make_snapshot("1", 0);
     StatusStream stream([&] { return current; });

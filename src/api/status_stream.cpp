@@ -130,6 +130,14 @@ void StatusStream::reconcile() {
 
     {
         KPBR_LOCK_GUARD(mutex_);
+        // Building the combined service/outbound/interface snapshot can touch
+        // several runtime providers.  There is nothing to reconcile while no
+        // browser is listening, so keep the cache cold and let the next
+        // subscriber build one fresh authoritative snapshot on admission.
+        if (broadcaster_.active_subscriptions() == 0U) {
+            initialized_ = false;
+            return;
+        }
         const auto snapshot = builder_();
         const nlohmann::json service = snapshot.service;
         const nlohmann::json outbounds = snapshot.outbounds;
