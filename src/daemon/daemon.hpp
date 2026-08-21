@@ -5,6 +5,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
@@ -551,6 +552,7 @@ private:
     void setup_control_channel();
     void handle_control_commands();
     void setup_ipc_control_socket();
+    void run_ipc_control_acceptor() noexcept;
     void handle_ipc_control_socket();
     struct RoutingTestSnapshot {
         Config config;
@@ -1065,6 +1067,18 @@ private:
     int ipc_control_fd_{-1};
     gid_t ipc_control_group_id_{static_cast<gid_t>(-1)};
     std::string ipc_control_socket_path_;
+    std::atomic<bool> ipc_accept_running_{false};
+    std::thread ipc_accept_thread_;
+    struct IpcControlRequest {
+        int fd{-1};
+        pid_t peer_pid{0};
+        uid_t peer_uid{0};
+        gid_t peer_gid{0};
+        nlohmann::json request;
+    };
+    TracedMutex ipc_accepted_clients_mutex_;
+    std::deque<IpcControlRequest> ipc_accepted_clients_
+        GUARDED_BY(ipc_accepted_clients_mutex_);
     struct ControlTask {
         std::function<void()> callback;
         std::string label;
