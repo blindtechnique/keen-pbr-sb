@@ -1202,11 +1202,11 @@ export const enTranslation = {
       notImportedTitle: "Interface was not created",
       notImportedDescription:
         "The router rejected the request before import started. Nothing changed on the router. Select the configuration again and retry after refreshing the page.",
-      unknownTitle: "The import result is unknown",
+      unknownTitle: "Checking the new interface",
       unknownDescription:
-        "The panel can no longer prove whether the one-shot request reached Keenetic or completed. Any selected in-memory copy is unavailable and the controls are locked.",
+        "The panel is checking the result with the router. The configuration is not sent again.",
       noBlindRetry:
-        "Do not import the same profile again. Complete the native-import recovery check before any new write.",
+        "Wait a few seconds. The created interface will appear in the list automatically.",
       results: {
         completedTitle: "Interface created in running KeeneticOS",
         completedDescription:
@@ -1214,9 +1214,9 @@ export const enTranslation = {
         blockedTitle: "Import stopped without confirmed completion",
         blockedDescription:
           "The server refused or stopped the operation. Review the typed stop below before selecting the profile again.",
-        recovery_requiredTitle: "Native import recovery is required",
+        recovery_requiredTitle: "Finishing the new interface",
         recovery_requiredDescription:
-          "Durable recovery information was retained because the operation cannot be declared complete or safely absent.",
+          "Keenetic accepted the operation. The panel is finishing its check and refreshing the interface list.",
         firmwareInterface: "KeeneticOS interface",
         kernelInterface: "Linux interface",
         runningOnly:

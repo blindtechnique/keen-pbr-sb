@@ -1150,13 +1150,7 @@ function NativeWireGuardImportFieldsContent({
         >
           <Alert
             role="presentation"
-            variant={
-              operation.outcome === "completed"
-                ? "default"
-                : operation.outcome === "blocked"
-                  ? "warning"
-                  : "destructive"
-            }
+            variant={operation.outcome === "completed" ? "default" : "warning"}
           >
             {operation.outcome === "completed" ? (
               <CheckCircle2Icon />
@@ -1215,11 +1209,13 @@ function NativeWireGuardImportFieldsContent({
                 </>
               ) : (
                 <>
-                  <p className="font-mono text-xs break-all">
-                    {t("transports.nativeImport.results.stop", {
-                      stop: operation.result.stop,
-                    })}
-                  </p>
+                  {operation.outcome === "blocked" ? (
+                    <p className="font-mono text-xs break-all">
+                      {t("transports.nativeImport.results.stop", {
+                        stop: operation.result.stop,
+                      })}
+                    </p>
+                  ) : null}
                   {operation.outcome === "recovery_required" ? (
                     <p>{t("transports.nativeImport.noBlindRetry")}</p>
                   ) : null}

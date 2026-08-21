@@ -119,6 +119,7 @@ type NativeMutationSubscriber = Readonly<{
 let volatileLock: NativeMutationLock | null = null
 const activePendingTokens = new Set<string>()
 const sameDocumentSubscribers = new Set<NativeMutationSubscriber>()
+let fallbackLeaseHeld = false
 
 const isOperation = (value: unknown): value is NativeMutationOperation =>
   value === "import" ||
@@ -661,10 +662,123 @@ const releasePendingAuthority = (authority: PendingAuthority | null) => {
   if (authority) activePendingTokens.delete(authority.token)
 }
 
+const runWithGrantedNativeMutationLease = async <T>(
+  operation: NativeMutationOperation,
+  callback: (
+    context: NativeMutationLeaseContext
+  ) => Promise<NativeMutationLeaseCompletion<T>>
+): Promise<NativeMutationLeaseRunResult<T>> => {
+  const baseline = migrateLegacyImportLockUnderLease()
+  if (
+    baseline.status !== "available" ||
+    !operationEligible(baseline, operation)
+  ) {
+    adoptSnapshot(baseline)
+    return { status: "unavailable" }
+  }
+
+  let authority: PendingAuthority | null = null
+  let beginAttempted = false
+  const beginPending = (): boolean => {
+    if (beginAttempted) return false
+    beginAttempted = true
+    authority = writePending(baseline, operation)
+    return authority !== null
+  }
+
+  if (operation !== "import" && !beginPending()) {
+    return { status: "unavailable" }
+  }
+
+  try {
+    let completion: NativeMutationLeaseCompletion<T>
+    try {
+      completion = await callback({ beginPending })
+    } catch (error) {
+      if (!authority) throw new CallbackBeforePendingError(error)
+      writeTerminal(authority, {
+        version: 2,
+        state: "unknown",
+        operation,
+      })
+      return { status: "outcome_unknown" }
+    }
+
+    if (
+      !completion ||
+      !isDisposition(completion.disposition) ||
+      (beginAttempted && !authority)
+    ) {
+      return authority
+        ? (writeTerminal(authority, {
+            version: 2,
+            state: "unknown",
+            operation,
+          }),
+          { status: "outcome_unknown" })
+        : { status: "unavailable" }
+    }
+
+    if (!authority) {
+      return completion.disposition.state === "not_started"
+        ? { status: "completed", value: completion.value }
+        : { status: "outcome_unknown" }
+    }
+
+    if (completion.disposition.state === "not_started") {
+      writeTerminal(authority, {
+        version: 2,
+        state: "unknown",
+        operation,
+      })
+      return { status: "outcome_unknown" }
+    }
+
+    if (completion.disposition.state === "unknown") {
+      writeTerminal(authority, {
+        version: 2,
+        state: "unknown",
+        operation,
+      })
+      return { status: "outcome_unknown" }
+    }
+
+    let coherentDisposition = true
+    let target: NativeMutationLock | null = null
+    if (completion.disposition.state !== "clear") {
+      const operationRecovery = recoveryForOperation(operation)
+      coherentDisposition =
+        completion.disposition.state === "redirect_recovery"
+          ? !isFreshOperation(operation) &&
+            completion.disposition.recovery !== operationRecovery
+          : completion.disposition.recovery === operationRecovery
+      target = coherentDisposition
+        ? {
+            version: 2,
+            state: "recovery_required",
+            recovery: completion.disposition.recovery,
+          }
+        : {
+            version: 2,
+            state: "unknown",
+            operation,
+          }
+    }
+
+    if (!writeTerminal(authority, target) || !coherentDisposition) {
+      return { status: "outcome_unknown" }
+    }
+    return { status: "completed", value: completion.value }
+  } finally {
+    releasePendingAuthority(authority)
+  }
+}
+
 /**
- * Runs one native mutation under a browser-global exclusive lease. The
- * durable marker is created and terminally committed while the Web Lock is
- * still held. Storage is the crash journal; Web Locks fence live tabs.
+ * Runs one native mutation under a browser-global exclusive lease when the
+ * browser provides Web Locks. Ordinary local HTTP pages do not expose that
+ * API, so they use the same exact-token durable journal plus a same-document
+ * lease; the router-side writer reservation remains the final mutation fence.
  */
 export async function runWithNativeMutationLease<T>(
   operation: NativeMutationOperation,
@@ -673,7 +787,19 @@ export async function runWithNativeMutationLease<T>(
   ) => Promise<NativeMutationLeaseCompletion<T>>
 ): Promise<NativeMutationLeaseRunResult<T>> {
   const manager = getLockManager()
-  if (!manager) return { status: "unavailable" }
+
+  if (!manager) {
+    if (fallbackLeaseHeld) return { status: "busy" }
+    fallbackLeaseHeld = true
+    try {
+      return await runWithGrantedNativeMutationLease(operation, callback)
+    } catch (error) {
+      if (error instanceof CallbackBeforePendingError) throw error.cause
+      return { status: "unavailable" }
+    } finally {
+      fallbackLeaseHeld = false
+    }
+  }
 
   try {
     return await manager.request(
@@ -681,111 +807,7 @@ export async function runWithNativeMutationLease<T>(
       { mode: "exclusive", ifAvailable: true },
       async (lock) => {
         if (!lock) return { status: "busy" } as const
-
-        const baseline = migrateLegacyImportLockUnderLease()
-        if (
-          baseline.status !== "available" ||
-          !operationEligible(baseline, operation)
-        ) {
-          adoptSnapshot(baseline)
-          return { status: "unavailable" } as const
-        }
-
-        let authority: PendingAuthority | null = null
-        let beginAttempted = false
-        const beginPending = (): boolean => {
-          if (beginAttempted) return false
-          beginAttempted = true
-          authority = writePending(baseline, operation)
-          return authority !== null
-        }
-
-        if (operation !== "import" && !beginPending()) {
-          return { status: "unavailable" } as const
-        }
-
-        try {
-          let completion: NativeMutationLeaseCompletion<T>
-          try {
-            completion = await callback({ beginPending })
-          } catch (error) {
-            if (!authority) throw new CallbackBeforePendingError(error)
-            writeTerminal(authority, {
-              version: 2,
-              state: "unknown",
-              operation,
-            })
-            return { status: "outcome_unknown" } as const
-          }
-
-          if (
-            !completion ||
-            !isDisposition(completion.disposition) ||
-            (beginAttempted && !authority)
-          ) {
-            return authority
-              ? (writeTerminal(authority, {
-                  version: 2,
-                  state: "unknown",
-                  operation,
-                }),
-                { status: "outcome_unknown" } as const)
-              : ({ status: "unavailable" } as const)
-          }
-
-          if (!authority) {
-            return completion.disposition.state === "not_started"
-              ? ({ status: "completed", value: completion.value } as const)
-              : ({ status: "outcome_unknown" } as const)
-          }
-
-          if (completion.disposition.state === "not_started") {
-            writeTerminal(authority, {
-              version: 2,
-              state: "unknown",
-              operation,
-            })
-            return { status: "outcome_unknown" } as const
-          }
-
-          if (completion.disposition.state === "unknown") {
-            writeTerminal(authority, {
-              version: 2,
-              state: "unknown",
-              operation,
-            })
-            return { status: "outcome_unknown" } as const
-          }
-
-          let coherentDisposition = true
-          let target: NativeMutationLock | null = null
-          if (completion.disposition.state !== "clear") {
-            const operationRecovery = recoveryForOperation(operation)
-            coherentDisposition =
-              completion.disposition.state === "redirect_recovery"
-                ? !isFreshOperation(operation) &&
-                  completion.disposition.recovery !== operationRecovery
-                : completion.disposition.recovery === operationRecovery
-            target = coherentDisposition
-              ? {
-                  version: 2,
-                  state: "recovery_required",
-                  recovery: completion.disposition.recovery,
-                }
-              : {
-                  version: 2,
-                  state: "unknown",
-                  operation,
-                }
-          }
-
-          if (!writeTerminal(authority, target) || !coherentDisposition) {
-            return { status: "outcome_unknown" } as const
-          }
-          return { status: "completed", value: completion.value } as const
-        } finally {
-          releasePendingAuthority(authority)
-        }
+        return runWithGrantedNativeMutationLease(operation, callback)
       }
     )
   } catch (error) {

@@ -357,16 +357,18 @@ describe("native mutation browser-global lease", () => {
     expect(localStorage.getItem(NATIVE_MUTATION_LOCK_STORAGE_KEY)).toBeNull()
   })
 
-  test("4: missing locks and uncertain storage fail closed before dispatch", async () => {
+  test("4: local HTTP fallback works while uncertain storage fails closed", async () => {
     let callbackCount = 0
     installNavigator(null)
     expect(
-      await runWithNativeMutationLease("delete", async () => {
+      await runWithNativeMutationLease("import", async ({ beginPending }) => {
         callbackCount += 1
-        return complete({ state: "clear" }, undefined)
+        expect(beginPending()).toBe(true)
+        return complete({ state: "clear" }, "local-import")
       })
-    ).toEqual({ status: "unavailable" })
-    expect(callbackCount).toBe(0)
+    ).toEqual({ status: "completed", value: "local-import" })
+    expect(callbackCount).toBe(1)
+    expect(localStorage.getItem(NATIVE_MUTATION_LOCK_STORAGE_KEY)).toBeNull()
 
     lockManager = new FakeLockManager()
     lockManager.rejectRequests = true
@@ -377,7 +379,7 @@ describe("native mutation browser-global lease", () => {
         return complete({ state: "clear" }, undefined)
       })
     ).toEqual({ status: "unavailable" })
-    expect(callbackCount).toBe(0)
+    expect(callbackCount).toBe(1)
 
     lockManager = new FakeLockManager()
     installNavigator(lockManager)
@@ -388,7 +390,7 @@ describe("native mutation browser-global lease", () => {
         return complete({ state: "clear" }, undefined)
       })
     ).toEqual({ status: "unavailable" })
-    expect(callbackCount).toBe(0)
+    expect(callbackCount).toBe(1)
     localStorage.throwGet = false
 
     localStorage.throwSet = true

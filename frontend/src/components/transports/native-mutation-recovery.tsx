@@ -187,8 +187,15 @@ export function NativeMutationRecovery({
       return
     }
     if (busy !== null || automaticImportRecoveryStarted.current) return
-    automaticImportRecoveryStarted.current = true
-    void recoverImport()
+    // The fresh import publishes its terminal browser marker immediately
+    // before releasing the lease. Let that lease unwind before starting the
+    // bodyless reconciliation, otherwise the first and only pass can observe
+    // its own operation as busy and remain stuck until a page reload.
+    const timeout = window.setTimeout(() => {
+      automaticImportRecoveryStarted.current = true
+      void recoverImport()
+    }, 500)
+    return () => window.clearTimeout(timeout)
   }, [busy, importNeedsRecovery, recoverImport])
 
   const recoverDelete = async (withAcknowledgements: boolean) => {
