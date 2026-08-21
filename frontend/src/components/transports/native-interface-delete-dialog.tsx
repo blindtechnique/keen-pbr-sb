@@ -17,7 +17,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { Input } from "@/components/ui/input"
 import { runWithNativeMutationLease } from "@/lib/native-mutation-lock"
 import type { NativeInterfaceModel } from "@/lib/native-interfaces"
 
@@ -26,6 +25,7 @@ type SubmissionState =
   | { readonly status: "sending" }
   | { readonly status: "blocked"; readonly result: NdmsNativeDeleteResult }
   | { readonly status: "preparation_failed" }
+  | { readonly status: "restore_failed" }
   | { readonly status: "rejected" }
   | { readonly status: "recovery_required" }
   | { readonly status: "unknown" }
@@ -37,6 +37,8 @@ type DeleteLeaseValue =
       {
         readonly status:
           | "blocked"
+          | "preparation_failed"
+          | "restore_failed"
           | "rejected"
           | "recovery_required"
           | "unknown"
@@ -47,7 +49,7 @@ export function NativeInterfaceDeleteDialog({
   expectedOwnershipRevision,
   linkedRouteName,
   nativeInterface,
-  onBeforeDelete,
+  prepareLinkedRouteRemoval,
   onInventoryRefresh,
   onOpenChange,
   onTerminal,
@@ -56,16 +58,15 @@ export function NativeInterfaceDeleteDialog({
   readonly expectedOwnershipRevision: string
   readonly linkedRouteName?: string
   readonly nativeInterface?: NativeInterfaceModel
-  readonly onBeforeDelete?: () => Promise<void>
+  readonly prepareLinkedRouteRemoval?: () => Promise<
+    (() => Promise<void>) | undefined
+  >
   readonly onInventoryRefresh: () => Promise<void>
   readonly onOpenChange: (open: boolean) => void
   readonly onTerminal: (result: NdmsNativeDeleteResult) => void
   readonly open: boolean
 }) {
   const { t } = useTranslation()
-  const [confirmLabel, setConfirmLabel] = useState("")
-  const [externalWriterAccepted, setExternalWriterAccepted] = useState(false)
-  const [globalSaveAcknowledged, setGlobalSaveAcknowledged] = useState(false)
   const [submission, setSubmission] = useState<SubmissionState>({
     status: "idle",
   })
@@ -75,22 +76,12 @@ export function NativeInterfaceDeleteDialog({
   const currentRevision = projection?.ownership_revision ?? ""
   const staleOwnership =
     !currentRevision || currentRevision !== expectedOwnershipRevision
-  const exactNameConfirmed = confirmLabel === interfaceName
   const candidate = projection?.delete_candidate === true
   const sending = submission.status === "sending"
-  const canSubmit =
-    candidate &&
-    !staleOwnership &&
-    exactNameConfirmed &&
-    externalWriterAccepted &&
-    globalSaveAcknowledged &&
-    submission.status === "idle"
+  const canSubmit = candidate && !staleOwnership && submission.status === "idle"
 
   useEffect(() => {
     if (!open) return
-    setConfirmLabel("")
-    setExternalWriterAccepted(false)
-    setGlobalSaveAcknowledged(false)
     setSubmission({ status: "idle" })
   }, [expectedOwnershipRevision, interfaceName, open])
 
@@ -103,15 +94,31 @@ export function NativeInterfaceDeleteDialog({
     if (!canSubmit || !nativeInterface) return
     setSubmission({ status: "sending" })
     try {
-      try {
-        await onBeforeDelete?.()
-      } catch {
-        setSubmission({ status: "preparation_failed" })
-        return
-      }
       const leaseResult = await runWithNativeMutationLease<DeleteLeaseValue>(
         "delete",
         async () => {
+          let restoreLinkedRoute: (() => Promise<void>) | undefined
+          try {
+            restoreLinkedRoute = await prepareLinkedRouteRemoval?.()
+          } catch {
+            return {
+              disposition: { state: "clear" } as const,
+              value: { status: "preparation_failed" } as const,
+            }
+          }
+
+          const restoreAfterKnownRefusal = async <T extends DeleteLeaseValue>(
+            value: T
+          ): Promise<DeleteLeaseValue> => {
+            if (!restoreLinkedRoute) return value
+            try {
+              await restoreLinkedRoute()
+              return value
+            } catch {
+              return { status: "restore_failed" }
+            }
+          }
+
           try {
             const result = await postNdmsNativeDeleteOnce({
               interface_name: interfaceName,
@@ -136,18 +143,25 @@ export function NativeInterfaceDeleteDialog({
 
             // The strict parser accepts a blocked initial delete only when
             // this invocation has no dispatch/save trace or durable claim.
+            const value = await restoreAfterKnownRefusal({
+              status: "blocked",
+              result,
+            })
             return {
               disposition: { state: "clear" } as const,
-              value: { status: "blocked", result } as const,
+              value,
             }
           } catch (error) {
             if (
               error instanceof NativeMutationTransportError &&
               error.code === "rejected"
             ) {
+              const value = await restoreAfterKnownRefusal({
+                status: "rejected",
+              })
               return {
                 disposition: { state: "clear" } as const,
-                value: { status: "rejected" } as const,
+                value,
               }
             }
             return {
@@ -197,9 +211,6 @@ export function NativeInterfaceDeleteDialog({
                 )}
               </p>
             ) : null}
-            <p className="mt-1 break-words text-muted-foreground">
-              {t("transports.nativeMutation.deleteDialog.globalSaveWarning")}
-            </p>
           </div>
 
           {staleOwnership || !candidate ? (
@@ -213,64 +224,6 @@ export function NativeInterfaceDeleteDialog({
               </AlertDescription>
             </Alert>
           ) : null}
-
-          <div className="space-y-2">
-            <label
-              className="block text-sm font-medium break-words"
-              htmlFor="native-delete-confirm-label"
-            >
-              {t("transports.nativeMutation.deleteDialog.typeName", {
-                name: interfaceName,
-              })}
-            </label>
-            <Input
-              aria-describedby="native-delete-confirm-help"
-              autoComplete="off"
-              autoFocus
-              className="h-11"
-              disabled={sending || staleOwnership || !candidate}
-              id="native-delete-confirm-label"
-              onChange={(event) => setConfirmLabel(event.target.value)}
-              spellCheck={false}
-              value={confirmLabel}
-            />
-            <p
-              className="text-xs break-words text-muted-foreground"
-              id="native-delete-confirm-help"
-            >
-              {t("transports.nativeMutation.deleteDialog.exactNameHelp")}
-            </p>
-          </div>
-
-          <label className="flex min-h-11 cursor-pointer items-start gap-3 rounded-md p-1 text-sm">
-            <input
-              checked={externalWriterAccepted}
-              className="mt-0.5 size-5 shrink-0 accent-primary"
-              disabled={sending || staleOwnership || !candidate}
-              onChange={(event) =>
-                setExternalWriterAccepted(event.target.checked)
-              }
-              type="checkbox"
-            />
-            <span className="min-w-0 break-words">
-              {t("transports.nativeMutation.acknowledgements.externalWriter")}
-            </span>
-          </label>
-
-          <label className="flex min-h-11 cursor-pointer items-start gap-3 rounded-md p-1 text-sm">
-            <input
-              checked={globalSaveAcknowledged}
-              className="mt-0.5 size-5 shrink-0 accent-primary"
-              disabled={sending || staleOwnership || !candidate}
-              onChange={(event) =>
-                setGlobalSaveAcknowledged(event.target.checked)
-              }
-              type="checkbox"
-            />
-            <span className="min-w-0 break-words">
-              {t("transports.nativeMutation.acknowledgements.globalSave")}
-            </span>
-          </label>
 
           <div aria-atomic="true" aria-live="polite">
             {submission.status === "preparation_failed" ? (
@@ -286,6 +239,19 @@ export function NativeInterfaceDeleteDialog({
                   )}
                 </AlertDescription>
               </Alert>
+            ) : submission.status === "restore_failed" ? (
+              <Alert variant="destructive">
+                <AlertTitle>
+                  {t(
+                    "transports.nativeMutation.deleteDialog.routeRestoreFailedTitle"
+                  )}
+                </AlertTitle>
+                <AlertDescription className="break-words">
+                  {t(
+                    "transports.nativeMutation.deleteDialog.routeRestoreFailedDescription"
+                  )}
+                </AlertDescription>
+              </Alert>
             ) : submission.status === "blocked" ||
               submission.status === "rejected" ? (
               <Alert variant="warning">
@@ -296,6 +262,14 @@ export function NativeInterfaceDeleteDialog({
                   {t(
                     "transports.nativeMutation.deleteDialog.blockedDescription"
                   )}
+                  {submission.status === "blocked" ? (
+                    <span className="mt-1 block font-mono text-xs">
+                      {t(
+                        "transports.nativeMutation.deleteDialog.blockedReason",
+                        { reason: submission.result.stop }
+                      )}
+                    </span>
+                  ) : null}
                 </AlertDescription>
               </Alert>
             ) : submission.status === "recovery_required" ? (

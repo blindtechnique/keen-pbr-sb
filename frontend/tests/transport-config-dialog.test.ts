@@ -105,6 +105,46 @@ describe("transport form semantics", () => {
     expect(value.spec.interface).toBe("kpbrabcd1234")
   })
 
+  test("opens an existing native interface as a create seed without duplicating its route", () => {
+    const seed: TransportSpec = {
+      tag: "native_amsterdam",
+      type: TransportSpecType.native,
+      interface: "nwg5",
+      display_name: "Amsterdam",
+      auto_start: false,
+      geo_mode: "disabled",
+    }
+
+    const value = createTransportFormValue(undefined, undefined, "default", {
+      seed,
+      createOutbound: false,
+    })
+
+    expect(value.spec).toEqual(seed)
+    expect(value.spec).not.toBe(seed)
+    expect(value.createOutbound).toBe(false)
+  })
+
+  test("can recreate the missing linked route while editing a native tracker", () => {
+    const value = createTransportFormValue(
+      {
+        tag: "native_amsterdam",
+        type: TransportSpecType.native,
+        interface: "nwg5",
+        display_name: "Amsterdam",
+        auto_start: false,
+        geo_mode: "disabled",
+      },
+      undefined,
+      "default",
+      { createOutbound: true }
+    )
+
+    expect(
+      normalizeTransportFormValue(value, true).options.createOutbound
+    ).toBe(true)
+  })
+
   test("suggests an endpoint alias without mutating the transport", () => {
     const value = createTransportFormValue(undefined, {
       interfaceName: "kpbrabcd1234",

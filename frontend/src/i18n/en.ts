@@ -956,16 +956,19 @@ export const enTranslation = {
           "KeeneticOS acknowledged the global save. The deletion tombstone and rollback snapshot are durable, but this is intentionally amber: external writers were not excluded and final startup persistence remains unverified.",
       },
       deleteDialog: {
-        title: "Delete this panel-imported VPN?",
+        title: "Delete VPN?",
         description:
-          "Only the exact panel-owned interface {{name}} will be submitted for authoritative revalidation.",
+          "VPN {{name}} will be deleted. If it has a dedicated route, that route will be deleted with it.",
         globalSaveWarning:
           "Deletion may continue with a global KeeneticOS configuration save. That save includes all pending router changes.",
         linkedRouteWarning:
-          "The linked route “{{name}}” and its direct bindings will be removed and applied before the VPN is deleted.",
+          "The linked route “{{name}}” will be deleted with the VPN. If the router rejects VPN deletion, the route will be restored.",
         routePreparationFailedTitle: "The route was not removed",
         routePreparationFailedDescription:
           "The linked route removal could not be applied, so the VPN was left unchanged. Refresh the page and try again.",
+        routeRestoreFailedTitle: "The route could not be restored",
+        routeRestoreFailedDescription:
+          "The router rejected VPN deletion, but restoration of the linked route was not confirmed. The VPN was not deleted; refresh and inspect the route.",
         staleTitle: "Fresh ownership evidence is required",
         staleDescription:
           "The interface or its ownership revision changed. Close this dialog, refresh the inventory and review the new evidence.",
@@ -974,11 +977,12 @@ export const enTranslation = {
           "The name is case-sensitive and is never corrected automatically.",
         blockedTitle: "Deletion was not started",
         blockedDescription:
-          "The authoritative checks blocked this request. Nothing is retried automatically; close the dialog and review the refreshed evidence.",
+          "The router rejected deletion. The VPN was not changed, and its linked route was restored if one existed.",
+        blockedReason: "Reason: {{reason}}",
         recoveryLatched:
           "A durable transaction may remain. Close this dialog and use the page-level recovery check; do not submit another deletion.",
         deleting: "Submitting once…",
-        delete: "Delete and save",
+        delete: "Delete",
       },
       forget: {
         regionLabel: "Retained native VPN deletions",

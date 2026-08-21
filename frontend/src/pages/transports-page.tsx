@@ -121,11 +121,13 @@ import { countryFlag } from "@/data/countries"
 import { useConfigDependencies } from "@/hooks/use-config-dependencies"
 import { useSectionTab } from "@/hooks/use-section-tab"
 import {
+  buildNativeTransportCreateHref,
   buildTransportEditHref,
   transportCreateHref,
 } from "@/lib/transport-upsert-route"
 import {
   dedupeLegacyNativeTransports,
+  getNativeBindBlockReason,
   mapNativeInterfaces,
   type NativeInterfaceModel,
 } from "@/lib/native-interfaces"
@@ -331,6 +333,10 @@ export function TransportsPage({
       queryClient.invalidateQueries({
         queryKey: queryKeys.runtimeInterfaces(),
       }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.config() }),
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.runtimeOutbounds(),
+      }),
     ])
   }
   const managedItems = useMemo(
@@ -434,6 +440,14 @@ export function TransportsPage({
   const configured: TransportSpec[] =
     configQuery.data?.status === 200 ? configQuery.data.data : []
   const configuredByTag = new Map(configured.map((spec) => [spec.tag, spec]))
+  const nativeTrackerByInterface = new Map(
+    configured
+      .filter(
+        (spec) =>
+          spec.type === TransportSpecType.native && Boolean(spec.interface)
+      )
+      .map((spec) => [spec.interface, spec])
+  )
   const autoGeoHosts = items
     .filter((item) => configuredByTag.get(item.tag)?.geo_mode === "auto")
     .map((item) => item.server ?? "")
@@ -1150,9 +1164,9 @@ export function TransportsPage({
             ? t("transports.nativeInterface.managedByFirmware")
             : t("common.delete")
         }
-        editDisabled={isNative}
+        editDisabled={isNative && !configuredSpec}
         editTitle={
-          isNative
+          isNative && !configuredSpec
             ? t("transports.nativeInterface.managedByFirmware")
             : t("common.edit")
         }
@@ -1161,7 +1175,10 @@ export function TransportsPage({
         onDelete={() =>
           setDeleting(configured.find((entry) => entry.tag === item.tag))
         }
-        onEdit={() => navigate(buildTransportEditHref(item.tag))}
+        onEdit={() => {
+          if (isNative && !configuredSpec) return
+          navigate(buildTransportEditHref(configuredSpec?.tag ?? item.tag))
+        }}
         onToggleExpanded={() => setTransportExpanded(expandedId, !expanded)}
         toggleTitle={
           expanded ? t("transports.details.hide") : t("transports.details.show")
@@ -1284,10 +1301,7 @@ export function TransportsPage({
             onClick={() =>
               navigate(
                 boundOutbound
-                  ? // Тонкая настройка маршрута — только в расширенном
-                    // редакторе (решение владельца): диалог туннеля остаётся
-                    // простым, а kill-switch и шлюзы живут на полной странице.
-                    `/outbounds/${encodeURIComponent(boundOutbound.tag)}/edit?view=page`
+                  ? buildTransportEditHref(item.tag)
                   : `/outbounds/create?type=interface&interface=${encodeURIComponent(item.interface)}`
               )
             }
@@ -1322,6 +1336,9 @@ export function TransportsPage({
     const boundOutbound = nativeInterface.kernelName
       ? interfaceOutboundByInterface.get(nativeInterface.kernelName)
       : undefined
+    const nativeTracker = nativeInterface.kernelName
+      ? nativeTrackerByInterface.get(nativeInterface.kernelName)
+      : undefined
     const expandedId = `native:${nativeInterface.id}`
     const expanded = expandedTransportIds.has(expandedId)
     const latencyMs = nativeInterface.kernelName
@@ -1331,12 +1348,17 @@ export function TransportsPage({
       nativeInterface.live &&
       (typeof latencyMs === "number" || Boolean(boundOutbound))
     const firmwareTitle = t("transports.nativeInterface.managedByFirmware")
-    const displayLabel = boundOutbound
-      ? getOutboundDisplayName(boundOutbound)
-      : nativeInterface.label
+    const displayLabel =
+      nativeTracker?.display_name?.trim() ||
+      (boundOutbound ? getOutboundDisplayName(boundOutbound) : undefined) ||
+      nativeInterface.label
     const deleteReady =
       nativeInterface.source.native_mutation.delete_candidate &&
       Boolean(nativeInterface.source.native_mutation.ownership_revision)
+    const editReady =
+      Boolean(nativeTracker) ||
+      (Boolean(nativeInterface.kernelName) &&
+        getNativeBindBlockReason(nativeInterface) === undefined)
 
     const cells: ReactNode[] = [
       // Выключателем и перезапуском этими интерфейсами управляет прошивка,
@@ -1435,10 +1457,10 @@ export function TransportsPage({
             ? t("transports.nativeMutation.deleteAction")
             : t("transports.nativeMutation.deleteUnavailable")
         }
-        editDisabled={!boundOutbound}
+        editDisabled={!editReady}
         editTitle={
-          boundOutbound
-            ? t("transports.routing.openOutbound")
+          editReady
+            ? t("common.edit")
             : t("transports.nativeInterface.routeNotConfigured")
         }
         expanded={expanded}
@@ -1453,10 +1475,14 @@ export function TransportsPage({
           })
         }}
         onEdit={() => {
-          if (!boundOutbound) return
-          navigate(
-            `/outbounds/${encodeURIComponent(boundOutbound.tag)}/edit?view=page`
-          )
+          if (!editReady) return
+          if (nativeTracker) {
+            navigate(buildTransportEditHref(nativeTracker.tag))
+            return
+          }
+          if (nativeInterface.kernelName) {
+            navigate(buildNativeTransportCreateHref(nativeInterface.kernelName))
+          }
         }}
         onToggleExpanded={() => setTransportExpanded(expandedId, !expanded)}
         toggleTitle={
@@ -1472,9 +1498,7 @@ export function TransportsPage({
         hidden={hiddenNativeIds.has(nativeInterface.id)}
         nativeInterface={nativeInterface}
         onCreateRoute={(interfaceName) =>
-          navigate(
-            `/outbounds/create?type=interface&interface=${encodeURIComponent(interfaceName)}`
-          )
+          navigate(buildNativeTransportCreateHref(interfaceName))
         }
         onHiddenChange={(hidden) => setNativeHidden(nativeInterface.id, hidden)}
         usage={
@@ -1946,29 +1970,40 @@ export function TransportsPage({
             : undefined
         }
         nativeInterface={selectedNativeDeleteTarget}
-        onBeforeDelete={async () => {
+        prepareLinkedRouteRemoval={async () => {
           if (!selectedNativeDeleteOutbound) return
           if (!keenConfig || !selectedNativeDeleteTarget) {
             throw new Error("native delete configuration is unavailable")
           }
-          const staged = await postConfig(
-            buildUpdatedConfigForOutboundsDelete(keenConfig, [
-              selectedNativeDeleteOutbound.tag,
-            ])
-          )
-          if (staged.status !== 200) {
-            throw new Error("native delete route staging failed")
+          const originalConfig = keenConfig
+          const restore = async () => {
+            const restored = await postConfig(originalConfig)
+            if (restored.status !== 200) {
+              throw new Error("native delete route restore staging failed")
+            }
+            const applied = await postConfigSave()
+            if (applied.status !== 200) {
+              throw new Error("native delete route restore apply failed")
+            }
           }
-          const applied = await postConfigSave()
-          if (applied.status !== 200) {
-            throw new Error("native delete route apply failed")
+          try {
+            const staged = await postConfig(
+              buildUpdatedConfigForOutboundsDelete(originalConfig, [
+                selectedNativeDeleteOutbound.tag,
+              ])
+            )
+            if (staged.status !== 200) {
+              throw new Error("native delete route staging failed")
+            }
+            const applied = await postConfigSave()
+            if (applied.status !== 200) {
+              throw new Error("native delete route apply failed")
+            }
+          } catch (error) {
+            await restore().catch(() => undefined)
+            throw error
           }
-          await Promise.all([
-            queryClient.invalidateQueries({ queryKey: queryKeys.config() }),
-            queryClient.invalidateQueries({
-              queryKey: queryKeys.runtimeOutbounds(),
-            }),
-          ])
+          return restore
         }}
         onInventoryRefresh={refreshNativeMutationInventory}
         onOpenChange={(open) => {

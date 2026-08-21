@@ -217,6 +217,57 @@ TEST_CASE("AmneziaWG extensions are complete and visible only by name") {
               "I1", "I5"});
 }
 
+TEST_CASE("WireGuard and AWG 1.0 through 2.0 combinations are accepted") {
+    SUBCASE("legacy automatic MTU is normalised") {
+        auto input = wg_conf();
+        const auto offset = input.find("MTU = 1420");
+        REQUIRE(offset != std::string::npos);
+        input.replace(offset, std::string{"MTU = 1420"}.size(), "MTU = 0");
+        const auto parsed = parse_ndms_native_tunnel_import(std::move(input));
+        CHECK(parsed.mtu == std::optional<std::uint32_t>{1280U});
+    }
+
+    SUBCASE("legacy partial numeric fields use protocol defaults") {
+        auto input = wg_conf();
+        input.insert(input.find("\n\n[Peer]"), "\nJc = 5");
+        const auto parsed = parse_ndms_native_tunnel_import(std::move(input));
+        REQUIRE(parsed.awg.has_value());
+        CHECK(parsed.kind == NdmsNativeTunnelImportKind::amnezia_wireguard);
+        CHECK(parsed.awg->jc == 5U);
+        CHECK(parsed.awg->jmin == 0U);
+        CHECK(parsed.awg->s1 == 0U);
+        CHECK(parsed.awg->h1.empty());
+    }
+
+    SUBCASE("AWG 1.5 CPS is independent from junk packets") {
+        auto input = wg_conf();
+        input.insert(
+            input.find("\n\n[Peer]"),
+            "\nJc = 0\nI1 = <b 0x01020304>");
+        const auto parsed = parse_ndms_native_tunnel_import(std::move(input));
+        REQUIRE(parsed.awg.has_value());
+        CHECK(parsed.awg->jc == 0U);
+        CHECK(parsed.awg->i1 ==
+              std::optional<std::string>{"<b 0x01020304>"});
+    }
+
+    SUBCASE("AWG 2.0 ranges and one extended padding value canonicalize") {
+        auto input = wg_conf();
+        input.insert(
+            input.find("\n\n[Peer]"),
+            "\nJc = 5\nJmin = 10\nJmax = 50"
+            "\nS1 = 63\nS2 = 138\nS3 = 47"
+            "\nH1 = 100-200\nH2 = 300-400"
+            "\nH3 = 500-600\nH4 = 700-800"
+            "\nI1 = <b 0x01020304>");
+        const auto parsed = parse_ndms_native_tunnel_import(std::move(input));
+        REQUIRE(parsed.awg.has_value());
+        CHECK(parsed.awg->s3 == std::optional<std::uint32_t>{47U});
+        CHECK(parsed.awg->s4 == std::optional<std::uint32_t>{0U});
+        CHECK(parsed.awg->h1 == "100-200");
+    }
+}
+
 TEST_CASE("parser rejects executable, unknown, duplicate and URI input precisely") {
     SUBCASE("dangerous directive") {
         auto input = wg_conf();

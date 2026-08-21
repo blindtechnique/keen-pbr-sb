@@ -273,12 +273,17 @@ ObservationMatch inspect_observation(
              NdmsNativeTunnelImportKind::amnezia_wireguard &&
          protocol.asc_class == NdmsNativeAscClass::amnezia_wg);
     if (evidence.interface_name != record.interface_name ||
-        evidence.full_revision != record.target_full_revision ||
         protocol.interface_name != record.interface_name ||
         !kind_matches) {
         match.presence = MeasuredPresence::mismatch;
         return match;
     }
+    // The target revision includes live connection state and the public
+    // description. Both legitimately change after import (connect/disconnect
+    // and a friendly alias), so equality with the import-time revision made a
+    // panel-owned tunnel permanently undeletable. Deletion authority comes
+    // from the exact managed slot, private marker, protocol kind, ownership
+    // claim, encrypted snapshot and fresh dual-scope observation above.
     // An active/connected client is intentionally allowed. `link_down` is a
     // rollback-only condition and is not an ownership fact for panel delete.
     match.kernel_name = target->kernel_name;

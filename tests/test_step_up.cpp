@@ -155,9 +155,11 @@ TEST_CASE("the package and access operations require a step-up") {
         "POST", "/api/system/ndms/interfaces/import/preflight"));
     CHECK_FALSE(requires_step_up(
         "POST", "/api/system/ndms/interfaces/import/recovery/retry"));
-    CHECK(requires_step_up(
+    // An authenticated operator deleting a panel-owned VPN is routine CRUD.
+    // Re-entering the same password added no authority and broke LAN use.
+    CHECK_FALSE(requires_step_up(
         "POST", "/api/system/ndms/interfaces/remove"));
-    CHECK(requires_step_up(
+    CHECK_FALSE(requires_step_up(
         "POST", "/api/system/ndms/interfaces/remove/recovery/retry"));
     CHECK(requires_step_up(
         "POST",

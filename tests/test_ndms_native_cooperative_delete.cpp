@@ -1000,6 +1000,39 @@ TEST_CASE("connected panel-owned WG and AWG delete to a durable tombstone") {
     }
 }
 
+TEST_CASE("ordinary runtime revision drift does not revoke panel ownership") {
+    for (const auto drift : {std::size_t{1U}, std::size_t{2U}}) {
+        CAPTURE(drift);
+        DeleteFixture fixture;
+        fixture.install_owned_target();
+        fixture.gateway.drift_revision_on_call = drift;
+
+        const auto result = fixture.coordinator.delete_once(
+            fixture.writer.lease, fixture.request());
+
+        CHECK(result.status == NdmsNativeCooperativeDeleteStatus::
+              save_acknowledged_unverified);
+        CHECK(result.stop == NdmsNativeCooperativeDeleteStop::none);
+        CHECK(fixture.backend.perform_calls == 2U);
+        CHECK_FALSE(fixture.gateway.present);
+    }
+
+    SUBCASE("both scopes may differ from the import-time revision") {
+        DeleteFixture fixture;
+        fixture.install_owned_target();
+        fixture.gateway.target_full_revision =
+            digest("ndms-rci-full-v1-", '9');
+
+        const auto result = fixture.coordinator.delete_once(
+            fixture.writer.lease, fixture.request());
+
+        CHECK(result.status == NdmsNativeCooperativeDeleteStatus::
+              save_acknowledged_unverified);
+        CHECK(result.stop == NdmsNativeCooperativeDeleteStop::none);
+        CHECK(fixture.backend.perform_calls == 2U);
+    }
+}
+
 TEST_CASE("every preflight mismatch remains read-only for the router") {
     SUBCASE("protected and noncanonical targets stop before stores") {
         DeleteFixture fixture;
@@ -1086,17 +1119,6 @@ TEST_CASE("every preflight mismatch remains read-only for the router") {
         check_no_router_write(fixture);
     }
 
-    SUBCASE("wrong exact target revision") {
-        DeleteFixture fixture;
-        fixture.install_owned_target();
-        fixture.gateway.drift_revision_on_call = 1U;
-        const auto result = fixture.coordinator.delete_once(
-            fixture.writer.lease, fixture.request());
-        CHECK(result.stop == NdmsNativeCooperativeDeleteStop::
-              observed_target_drifted);
-        check_no_router_write(fixture);
-    }
-
     SUBCASE("wrong WG or AWG kind") {
         DeleteFixture fixture;
         fixture.install_owned_target();
@@ -1108,17 +1130,6 @@ TEST_CASE("every preflight mismatch remains read-only for the router") {
         check_no_router_write(fixture);
     }
 
-    SUBCASE("same wrong exact target in both scopes is a typed mismatch") {
-        DeleteFixture fixture;
-        fixture.install_owned_target();
-        fixture.gateway.target_full_revision =
-            digest("ndms-rci-full-v1-", '9');
-        const auto result = fixture.coordinator.delete_once(
-            fixture.writer.lease, fixture.request());
-        CHECK(result.stop == NdmsNativeCooperativeDeleteStop::
-              observed_target_mismatch);
-        check_no_router_write(fixture);
-    }
 }
 
 TEST_CASE("unfinished or unsafe import WAL blocks delete cross-kind") {
@@ -1207,13 +1218,12 @@ TEST_CASE("lost writer or guard drift never reaches backend perform") {
         CHECK(fixture.snapshot_retained());
     }
 
-    SUBCASE("external target revision changes inside guard") {
+    SUBCASE("external target kind changes inside guard") {
         DeleteFixture fixture;
         fixture.install_owned_target();
         fixture.backend.before_guard = [&](const auto, const bool deleting) {
             if (deleting) {
-                fixture.gateway.target_full_revision =
-                    digest("ndms-rci-full-v1-", '9');
+                fixture.gateway.drift_kind_on_call = 3U;
             }
         };
 

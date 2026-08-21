@@ -258,11 +258,13 @@ export function parseNativeWireGuardConfigPreview(
     listenPortValue === undefined
       ? undefined
       : parseInteger(listenPortValue, 0, 65_535)
-  const mtu =
-    mtuValue === undefined ? undefined : parseInteger(mtuValue, 576, 65_535)
+  const parsedMtu =
+    mtuValue === undefined ? undefined : parseInteger(mtuValue, 0, 65_535)
+  const mtu = parsedMtu === 0 ? 1280 : parsedMtu
   if (
     (listenPortValue !== undefined && listenPort === undefined) ||
-    (mtuValue !== undefined && mtu === undefined)
+    (mtuValue !== undefined &&
+      (mtu === undefined || (mtu !== 1280 && mtu < 576)))
   ) {
     return { ok: false, code: "invalid_field" }
   }
@@ -610,9 +612,10 @@ function validateAmneziaFields(
   const numericNames = ["jc", "jmin", "jmax", "s1", "s2"] as const
   const numeric = new Map<string, number>()
   for (const name of numericNames) {
-    const value = requiredField(fields, name)
+    const value = fields.get(name)
     if (value === undefined) {
-      return { ok: false, code: "missing_required_field" }
+      numeric.set(name, 0)
+      continue
     }
     const parsed = parseInteger(value, 0, UINT32_MAX)
     if (parsed === undefined) return { ok: false, code: "invalid_field" }
@@ -629,10 +632,7 @@ function validateAmneziaFields(
 
   const headers = new Map<string, string>()
   for (const name of ["h1", "h2", "h3", "h4"] as const) {
-    if (!fields.has(name)) {
-      return { ok: false, code: "missing_required_field" }
-    }
-    const value = fields.get(name)!
+    const value = fields.get(name) ?? ""
     if (utf8Bytes(value) > MAX_AWG_HEADER_BYTES) {
       return { ok: false, code: "invalid_field" }
     }
@@ -646,27 +646,11 @@ function validateAmneziaFields(
     }
   }
 
-  if (optionalNumeric.has("s3") !== optionalNumeric.has("s4")) {
-    return { ok: false, code: "missing_required_field" }
-  }
-
-  const disabled =
-    numericNames.every((name) => numeric.get(name) === 0) &&
-    [...headers.values()].every((value) => !value)
-  if (
-    !disabled &&
-    (numeric.get("jc") === 0 ||
-      numeric.get("jmin") === 0 ||
-      numeric.get("jmax")! <= numeric.get("jmin")! ||
-      numeric.get("s1") === 0 ||
-      numeric.get("s2") === 0 ||
-      [...headers.values()].some((value) => !value))
-  ) {
-    return { ok: false, code: "invalid_field" }
-  }
-
   const names = ["Jc", "Jmin", "Jmax", "S1", "S2", "H1", "H2", "H3", "H4"]
-  for (const name of ["S3", "S4", "I1", "I2", "I3", "I4", "I5"] as const) {
+  if (optionalNumeric.has("s3") || optionalNumeric.has("s4")) {
+    names.push("S3", "S4")
+  }
+  for (const name of ["I1", "I2", "I3", "I4", "I5"] as const) {
     if (fields.has(asciiLower(name))) names.push(name)
   }
   return { ok: true, value: names }

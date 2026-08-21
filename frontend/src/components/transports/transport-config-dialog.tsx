@@ -55,9 +55,12 @@ import {
 } from "@/lib/technical-id"
 
 type Props = {
+  /** Native interface selected by the pencil before a panel tracker exists. */
+  createSeed?: TransportSpec
   existingInterfaces?: readonly string[]
   existingTags?: readonly string[]
   initial?: TransportSpec
+  initialCreateOutbound?: boolean
   /**
    * Начальное положение переопределения kill-switch связанного маршрута.
    * Туннель и есть маршрут (решение владельца), поэтому настройка маршрута
@@ -67,6 +70,7 @@ type Props = {
   isPending: boolean
   /** Есть ли маршрут, которому можно записать kill-switch. Без него поле — обман. */
   killSwitchAvailable?: boolean
+  linkedOutboundExists?: boolean
   nativeCandidates?: readonly NativeTransportCandidate[]
   nativeImportInterfaces?: readonly NdmsTunnelInterface[]
   nativeImportReadiness?: NdmsNativeImportReadiness
@@ -221,10 +225,15 @@ export function inferTransportAliasSuggestion(
 export function createTransportFormValue(
   initial?: TransportSpec,
   identity?: { interfaceName: string; tag: string },
-  killSwitch: TransportKillSwitchOption = "default"
+  killSwitch: TransportKillSwitchOption = "default",
+  create?: {
+    readonly seed?: TransportSpec
+    readonly createOutbound?: boolean
+  }
 ): TransportFormValue {
-  const spec = initial
-    ? structuredClone(initial)
+  const spec = initial ?? create?.seed
+  const formSpec = spec
+    ? structuredClone(spec)
     : {
         ...emptySpec(),
         interface: identity?.interfaceName ?? "",
@@ -232,12 +241,12 @@ export function createTransportFormValue(
       }
 
   return {
-    spec,
+    spec: formSpec,
     sourceMode:
-      spec.outbound_json && !spec.link
+      formSpec.outbound_json && !formSpec.link
         ? ("json" satisfies SourceMode)
         : ("link" satisfies SourceMode),
-    createOutbound: !initial,
+    createOutbound: create?.createOutbound ?? !initial,
     killSwitch,
   }
 }
@@ -253,6 +262,9 @@ export function normalizeTransportFormValue(
   value: TransportFormValue,
   editing: boolean
 ): TransportFormSubmission {
+  // Kept in the public helper signature because comparable edit semantics use
+  // the same normalizer; linked-route creation is now valid in both modes.
+  void editing
   const { spec, sourceMode } = value
   const bootstrapDns = spec.bootstrap_dns
     ?.map((resolver) => resolver.trim())
@@ -281,7 +293,7 @@ export function normalizeTransportFormValue(
         vless: undefined,
       },
       options: {
-        createOutbound: value.createOutbound && !editing,
+        createOutbound: value.createOutbound,
         killSwitch: value.killSwitch,
       },
     }
@@ -300,7 +312,7 @@ export function normalizeTransportFormValue(
       vless: undefined,
     },
     options: {
-      createOutbound: value.createOutbound && !editing,
+      createOutbound: value.createOutbound,
       killSwitch: value.killSwitch,
     },
   }
@@ -336,12 +348,15 @@ export function normalizeTransportFormComparable(
 }
 
 export function TransportConfigForm({
+  createSeed,
   existingInterfaces = [],
   existingTags = [],
   initial,
+  initialCreateOutbound,
   initialKillSwitch = "default",
   isPending,
   killSwitchAvailable = false,
+  linkedOutboundExists = false,
   nativeCandidates = [],
   nativeImportInterfaces = [],
   nativeImportReadiness,
@@ -362,7 +377,11 @@ export function TransportConfigForm({
             existingInterfaces,
             existingTags,
           }),
-      initialKillSwitch
+      initialKillSwitch,
+      {
+        seed: createSeed,
+        createOutbound: initialCreateOutbound,
+      }
     )
   )
   const [spec, setSpec] = useState<TransportSpec>(() =>
@@ -396,6 +415,8 @@ export function TransportConfigForm({
   )
 
   const isSingBox = spec.type !== TransportSpecType.native
+  const nativeSelectionLocked =
+    Boolean(initial) || createSeed?.type === TransportSpecType.native
   const inferredAliasSuggestion = inferTransportAliasSuggestion(
     sourceMode,
     spec
@@ -664,7 +685,7 @@ export function TransportConfigForm({
         </Field>
         <Field label={t("transports.form.type")}>
           <Select
-            disabled={Boolean(initial)}
+            disabled={nativeSelectionLocked}
             items={typeOptions}
             onValueChange={(value) => {
               const nextType = (value ?? spec.type) as TransportSpec["type"]
@@ -701,7 +722,7 @@ export function TransportConfigForm({
         {spec.type === TransportSpecType.native ? (
           <Field label={t("transports.form.nativeInterface")}>
             <Select
-              disabled={Boolean(initial)}
+              disabled={nativeSelectionLocked}
               items={nativeInterfaceOptions}
               onValueChange={(value) =>
                 setSpec({ ...spec, interface: String(value ?? "") })
@@ -863,7 +884,7 @@ export function TransportConfigForm({
         {/* «Сразу создать маршрут» — только в расширенном редакторе: по
             умолчанию туннель и есть маршрут (решение владельца), и в простом
             диалоге этот выбор лишний — маршрут создаётся всегда. */}
-        {showAdvanced && !initial ? (
+        {showAdvanced && !linkedOutboundExists ? (
           <div className="flex items-center justify-between gap-3 py-1">
             <div className="min-w-0 pr-3">
               <Label htmlFor="transport-create-outbound">
@@ -887,7 +908,8 @@ export function TransportConfigForm({
             маршрут будет: при создании — вместе с туннелем, при
             редактировании — когда он уже есть. Формулировки — те же, что в
             расширенном редакторе маршрута. */}
-        {killSwitchAvailable && (initial || createOutbound) ? (
+        {killSwitchAvailable &&
+        (initial || linkedOutboundExists || createOutbound) ? (
           <Field
             hint={
               <HelpHint

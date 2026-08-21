@@ -1180,17 +1180,15 @@ std::optional<NdmsNativeTunnelImportAwgParameters> parse_awg(
     if (!present) return std::nullopt;
 
     const auto numeric = [&](const char* name) {
-        return parse_decimal(required_field(fields, name), 0U,
+        const auto field = fields.find(name);
+        if (field == fields.end()) return std::uint32_t{0U};
+        return parse_decimal(field->second, 0U,
                              std::numeric_limits<std::uint32_t>::max());
     };
-    const auto text = [&](const char* name, const std::size_t maximum,
-                          const bool allow_empty) {
+    const auto text = [&](const char* name, const std::size_t maximum) {
         const auto field = fields.find(name);
-        if (field == fields.end()) {
-            fail(NdmsNativeTunnelImportErrorCode::missing_required_field);
-        }
-        if ((!allow_empty && field->second.empty()) ||
-            field->second.size() > maximum) {
+        if (field == fields.end()) return std::string{};
+        if (field->second.size() > maximum) {
             fail(NdmsNativeTunnelImportErrorCode::invalid_field);
         }
         return field->second;
@@ -1219,31 +1217,31 @@ std::optional<NdmsNativeTunnelImportAwgParameters> parse_awg(
     awg.jmax = numeric("jmax");
     awg.s1 = numeric("s1");
     awg.s2 = numeric("s2");
-    awg.s3 = optional_numeric("s3");
-    awg.s4 = optional_numeric("s4");
-    awg.h1 = text("h1", kMaximumAwgHeaderBytes, true);
-    awg.h2 = text("h2", kMaximumAwgHeaderBytes, true);
-    awg.h3 = text("h3", kMaximumAwgHeaderBytes, true);
-    awg.h4 = text("h4", kMaximumAwgHeaderBytes, true);
+    const auto s3 = optional_numeric("s3");
+    const auto s4 = optional_numeric("s4");
+    if (s3 || s4) {
+        // AWG Manager and legacy Amnezia exports treat a missing extended
+        // padding mate as its protocol default (zero). Canonicalise the pair
+        // before handing it to Keenetic instead of rejecting a usable 1.x/2.x
+        // client profile in the browser.
+        awg.s3 = s3.value_or(0U);
+        awg.s4 = s4.value_or(0U);
+    }
+    awg.h1 = text("h1", kMaximumAwgHeaderBytes);
+    awg.h2 = text("h2", kMaximumAwgHeaderBytes);
+    awg.h3 = text("h3", kMaximumAwgHeaderBytes);
+    awg.h4 = text("h4", kMaximumAwgHeaderBytes);
     awg.i1 = optional_text("i1");
     awg.i2 = optional_text("i2");
     awg.i3 = optional_text("i3");
     awg.i4 = optional_text("i4");
     awg.i5 = optional_text("i5");
 
-    if (awg.s3.has_value() != awg.s4.has_value()) {
-        fail(NdmsNativeTunnelImportErrorCode::missing_required_field);
-    }
-    const bool disabled =
-        awg.jc == 0U && awg.jmin == 0U && awg.jmax == 0U &&
-        awg.s1 == 0U && awg.s2 == 0U && awg.h1.empty() &&
-        awg.h2.empty() && awg.h3.empty() && awg.h4.empty();
-    if (!disabled &&
-        (awg.jc == 0U || awg.jmin == 0U || awg.jmax <= awg.jmin ||
-         awg.s1 == 0U || awg.s2 == 0U || awg.h1.empty() ||
-         awg.h2.empty() || awg.h3.empty() || awg.h4.empty())) {
-        fail(NdmsNativeTunnelImportErrorCode::invalid_field);
-    }
+    // Jc, junk sizing, packet padding, magic headers and CPS signatures are
+    // independent switches across AWG 1.0, 1.5 and 2.0. In particular Jc=0
+    // with H/I fields and zero S1/S2 are valid profiles. Combination policy
+    // invented here made those profiles impossible to import; value syntax
+    // and bounded sizes are the only parser-level requirements.
     return awg;
 }
 
@@ -1266,7 +1264,13 @@ NdmsNativeTunnelImport parse_conf(
     }
     std::optional<std::uint32_t> mtu;
     if (const auto value = optional_nonempty_field(parsed.interface, "mtu")) {
-        mtu = parse_decimal(*value, 576U, 65535U);
+        const auto parsed_mtu = parse_decimal(*value, 0U, 65535U);
+        if (parsed_mtu != 0U && parsed_mtu < 576U) {
+            fail(NdmsNativeTunnelImportErrorCode::invalid_field);
+        }
+        // AWG Manager treats an explicit MTU=0 as the legacy automatic
+        // default. Preserve that exported form without sending zero to NDMS.
+        mtu = parsed_mtu == 0U ? 1280U : parsed_mtu;
     }
 
     auto private_key_raw = take_secret_field(parsed.interface, "privatekey");

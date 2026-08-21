@@ -161,6 +161,12 @@ Endpoint = vpn.example:51820
 `)
 
     expect(result.ok).toBe(true)
+
+    const automaticMtu = parseNativeWireGuardConfigPreview(
+      nativeConfig({ interfaceExtra: "MTU = 0" })
+    )
+    expect(automaticMtu.ok).toBe(true)
+    if (automaticMtu.ok) expect(automaticMtu.preview.mtu).toBe(1280)
   })
 
   test("rejects directives that could execute commands", () => {
@@ -411,12 +417,25 @@ PersistentKeepalive = 25 # seconds
     }
   })
 
-  test("enforces complete AWG tuples, ranges and S3/S4 pairing", () => {
-    expect(
-      parseNativeWireGuardConfigPreview(
-        nativeConfig({ interfaceExtra: "Jc = 5" })
-      )
-    ).toEqual({ ok: false, code: "missing_required_field" })
+  test("accepts WireGuard plus AWG 1.0, 1.5 and 2.0 parameter combinations", () => {
+    const legacy = parseNativeWireGuardConfigPreview(
+      nativeConfig({ interfaceExtra: "Jc = 5" })
+    )
+    expect(legacy.ok).toBe(true)
+    if (legacy.ok) {
+      expect(legacy.preview.kind).toBe("amnezia_wireguard")
+      expect(legacy.preview.amnezia_parameter_names).toEqual([
+        "Jc",
+        "Jmin",
+        "Jmax",
+        "S1",
+        "S2",
+        "H1",
+        "H2",
+        "H3",
+        "H4",
+      ])
+    }
 
     const awg = [
       "Jc = 5",
@@ -429,22 +448,29 @@ PersistentKeepalive = 25 # seconds
       "H3 = 3",
       "H4 = 4",
     ]
+    const awg2 = parseNativeWireGuardConfigPreview(
+      nativeConfig({
+        interfaceExtra: [
+          ...awg.map((line) => (line.startsWith("H1") ? "H1 = 100-200" : line)),
+          "S3 = 1",
+          "I1 = <b 0x01020304>",
+        ].join("\n"),
+      })
+    )
+    expect(awg2.ok).toBe(true)
+    if (awg2.ok) {
+      expect(awg2.preview.amnezia_parameter_names).toContain("S3")
+      expect(awg2.preview.amnezia_parameter_names).toContain("S4")
+      expect(awg2.preview.amnezia_parameter_names).toContain("I1")
+    }
+
     expect(
       parseNativeWireGuardConfigPreview(
         nativeConfig({
-          interfaceExtra: [...awg, "S3 = 1"].join("\n"),
+          interfaceExtra: ["Jc = 0", "I1 = <b 0x01020304>"].join("\n"),
         })
-      )
-    ).toEqual({ ok: false, code: "missing_required_field" })
-    expect(
-      parseNativeWireGuardConfigPreview(
-        nativeConfig({
-          interfaceExtra: awg
-            .map((line) => (line.startsWith("Jmax") ? "Jmax = 50" : line))
-            .join("\n"),
-        })
-      )
-    ).toEqual({ ok: false, code: "invalid_field" })
+      ).ok
+    ).toBe(true)
     expect(
       parseNativeWireGuardConfigPreview(
         nativeConfig({

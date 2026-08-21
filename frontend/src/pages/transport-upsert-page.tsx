@@ -5,6 +5,7 @@ import { toast } from "sonner"
 import { useLocation } from "wouter"
 
 import type { ApiError } from "@/api/client"
+import { postConfigSave } from "@/api/generated/keen-api"
 import {
   TransportConfigOperationOperation,
   TransportSpecType,
@@ -38,6 +39,8 @@ import { Button } from "@/components/ui/button"
 import { getApiErrorMessage } from "@/lib/api-errors"
 import { buildNativeTransportCandidates } from "@/lib/hidden-native-interfaces"
 import { mapNativeInterfaces } from "@/lib/native-interfaces"
+import { makeTechnicalId } from "@/lib/technical-id"
+import { readNativeTransportCreateInterface } from "@/lib/transport-upsert-route"
 
 type TransportEnvironment = {
   sing_box_installed: boolean
@@ -58,6 +61,7 @@ export function TransportUpsertPage({
   const { t } = useTranslation()
   const [, navigate] = useLocation()
   const [dirty, setDirty] = useState(false)
+  const [linkedRouteApplyPending, setLinkedRouteApplyPending] = useState(false)
   const configQuery = useGetTransportConfig()
   const transportsQuery = useGetTransports()
   const keenConfigQuery = useGetConfig()
@@ -106,6 +110,10 @@ export function TransportUpsertPage({
     nativeInterfaces,
     loadedConfig
   )
+  const requestedNativeInterface =
+    mode === "create"
+      ? readNativeTransportCreateInterface(window.location.search)
+      : undefined
   const configMutation = usePostTransportConfigMutation({
     mutation: {
       onSuccess: (_data, variables) => {
@@ -136,7 +144,8 @@ export function TransportUpsertPage({
   const routeMutation = usePostConfigMutation()
   const close = () => navigate("/transports")
   const editsNativeTracker =
-    mode === "edit" && initial?.type === TransportSpecType.native
+    (mode === "edit" && initial?.type === TransportSpecType.native) ||
+    Boolean(requestedNativeInterface)
   const title =
     mode === "create"
       ? t("transports.form.createTitle")
@@ -223,18 +232,66 @@ export function TransportUpsertPage({
     )
   }
 
+  const existingInterfaces = [
+    ...configured.map((spec) => spec.interface),
+    ...runtimeTransports.map((transport) => transport.interface),
+    ...(loadedConfig.outbounds ?? []).flatMap((outbound) =>
+      typeof outbound.interface === "string" ? [outbound.interface] : []
+    ),
+  ]
+  const existingTags = [
+    ...configured.map((spec) => spec.tag),
+    ...runtimeTransports.map((transport) => transport.tag),
+    ...(loadedConfig.outbounds ?? []).map((outbound) => outbound.tag),
+  ]
+
+  const nativeCreateCandidate = requestedNativeInterface
+    ? nativeCandidates.find(
+        (candidate) =>
+          candidate.selectable &&
+          candidate.interfaceName === requestedNativeInterface
+      )
+    : undefined
+  const nativeSeedLinkedOutbound = nativeCreateCandidate
+    ? (loadedConfig.outbounds ?? []).find(
+        (outbound) =>
+          outbound.type === "interface" &&
+          outbound.interface === nativeCreateCandidate.interfaceName
+      )
+    : undefined
+  const nativeCreateSeed: TransportSpec | undefined = nativeCreateCandidate
+    ? {
+        tag: makeTechnicalId(
+          nativeSeedLinkedOutbound?.display_name?.trim() ||
+            nativeCreateCandidate.label,
+          existingTags,
+          { prefix: "native" }
+        ),
+        type: TransportSpecType.native,
+        interface: nativeCreateCandidate.interfaceName!,
+        display_name:
+          nativeSeedLinkedOutbound?.display_name?.trim() ||
+          nativeCreateCandidate.label,
+        auto_start: false,
+        geo_mode: "disabled",
+      }
+    : undefined
+
   // Маршрут этого туннеля: по интерфейсу либо по тегу — так же, как строит
   // привязку таблица туннелей.
-  const linkedOutbound = initial
+  const editedInterface = initial?.interface ?? nativeCreateSeed?.interface
+  const linkedOutbound = editedInterface
     ? ((loadedConfig.outbounds ?? []).find(
         (outbound) =>
           outbound.type === "interface" &&
-          outbound.interface === initial.interface
+          outbound.interface === editedInterface
       ) ??
-      (loadedConfig.outbounds ?? []).find(
-        (outbound) =>
-          outbound.type === "interface" && outbound.tag === initial.tag
-      ))
+      (initial
+        ? (loadedConfig.outbounds ?? []).find(
+            (outbound) =>
+              outbound.type === "interface" && outbound.tag === initial.tag
+          )
+        : undefined))
     : undefined
   const initialKillSwitch: TransportKillSwitchOption =
     linkedOutbound?.strict_enforcement === undefined
@@ -301,30 +358,67 @@ export function TransportUpsertPage({
               },
       })
 
-    // Kill-switch изменился — сначала изменение маршрута уходит в черновик
-    // (до «Применить» на роутере ничего не меняется), потом обновляется сам
-    // туннель. Тот же порядок, что при удалении: упади второй шаг, черновик
-    // останется виден и его можно применить или отменить, а не потеряться.
-    if (
-      mode === "edit" &&
-      linkedOutbound &&
-      options.killSwitch !== initialKillSwitch
-    ) {
+    const normalizedDisplayName = spec.display_name?.trim() || undefined
+    const strictEnforcement =
+      options.killSwitch === "default"
+        ? undefined
+        : options.killSwitch === "enabled"
+    const routeDisplayNameChanged =
+      linkedOutbound?.display_name?.trim() !== normalizedDisplayName
+    const linkedRouteNeedsUpdate =
+      Boolean(linkedOutbound) &&
+      (routeDisplayNameChanged || options.killSwitch !== initialKillSwitch)
+    const linkedRouteNeedsCreation = !linkedOutbound && options.createOutbound
+
+    if (linkedRouteNeedsCreation || linkedRouteNeedsUpdate) {
+      const nextOutbounds = linkedRouteNeedsCreation
+        ? [
+            ...(loadedConfig.outbounds ?? []),
+            {
+              type: "interface" as const,
+              tag: makeTechnicalId(
+                normalizedDisplayName || spec.tag,
+                (loadedConfig.outbounds ?? []).map((outbound) => outbound.tag),
+                { prefix: "outbound" }
+              ),
+              display_name: normalizedDisplayName,
+              interface: spec.interface,
+              strict_enforcement: strictEnforcement,
+            },
+          ]
+        : (loadedConfig.outbounds ?? []).map((outbound) =>
+            outbound.tag === linkedOutbound?.tag
+              ? {
+                  ...outbound,
+                  display_name: normalizedDisplayName,
+                  strict_enforcement: strictEnforcement,
+                }
+              : outbound
+          )
+
       routeMutation.mutate(
         {
           data: {
             ...loadedConfig,
-            outbounds: (loadedConfig.outbounds ?? []).map((outbound) =>
-              outbound.tag === linkedOutbound.tag
-                ? { ...outbound, strict_enforcement: killSwitchValue }
-                : outbound
-            ),
+            outbounds: nextOutbounds,
           },
         },
         {
-          onSuccess: () => {
-            toast.success(t("transports.killSwitchStaged"))
-            updateTransport()
+          onSuccess: async () => {
+            setLinkedRouteApplyPending(true)
+            try {
+              const applied = await postConfigSave()
+              if (applied.status !== 200) {
+                throw new Error(applied.data.error)
+              }
+              updateTransport()
+            } catch (mutationError) {
+              toast.error(getApiErrorMessage(mutationError as ApiError), {
+                richColors: true,
+              })
+            } finally {
+              setLinkedRouteApplyPending(false)
+            }
           },
           onError: (mutationError) => {
             toast.error(getApiErrorMessage(mutationError as ApiError), {
@@ -339,24 +433,12 @@ export function TransportUpsertPage({
     updateTransport()
   }
 
-  const existingInterfaces = [
-    ...configured.map((spec) => spec.interface),
-    ...runtimeTransports.map((transport) => transport.interface),
-    ...(loadedConfig.outbounds ?? []).flatMap((outbound) =>
-      typeof outbound.interface === "string" ? [outbound.interface] : []
-    ),
-  ]
-  const existingTags = [
-    ...configured.map((spec) => spec.tag),
-    ...runtimeTransports.map((transport) => transport.tag),
-    ...(loadedConfig.outbounds ?? []).map((outbound) => outbound.tag),
-  ]
-
   return (
     <UpsertPage
       cardDescription={description}
       cardTitle={
         initial?.display_name?.trim() ||
+        nativeCreateSeed?.display_name?.trim() ||
         initial?.tag ||
         t("transports.form.createTitle")
       }
@@ -367,17 +449,23 @@ export function TransportUpsertPage({
       title={title}
     >
       <TransportConfigForm
+        createSeed={nativeCreateSeed}
         existingInterfaces={existingInterfaces}
         existingTags={existingTags}
         initial={initial}
+        initialCreateOutbound={!linkedOutbound}
         initialKillSwitch={initialKillSwitch}
         isPending={
           configMutation.isPending ||
           configApplyMutation.isPending ||
-          routeMutation.isPending
+          routeMutation.isPending ||
+          linkedRouteApplyPending
         }
-        key={`${mode}:${transportTag ?? "new"}`}
-        killSwitchAvailable={mode === "create" || Boolean(linkedOutbound)}
+        key={`${mode}:${transportTag ?? nativeCreateSeed?.interface ?? "new"}`}
+        killSwitchAvailable={
+          mode === "create" || Boolean(initial) || Boolean(linkedOutbound)
+        }
+        linkedOutboundExists={Boolean(linkedOutbound)}
         nativeCandidates={nativeCandidates}
         nativeImportInterfaces={
           ndmsInventoryQuery.data?.status === 200
