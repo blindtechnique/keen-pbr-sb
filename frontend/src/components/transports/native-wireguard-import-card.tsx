@@ -145,6 +145,7 @@ export type NativeWireGuardImportedIdentity = Readonly<{
 }>
 
 export function NativeWireGuardImportFields({
+  displayName,
   mode,
   readiness,
   requiredGuards = [],
@@ -152,10 +153,12 @@ export function NativeWireGuardImportFields({
   linkRequired = false,
   linkValue = "",
   onLinkChange,
+  onAliasSuggestionChange,
   onNativeUriActiveChange,
   onImportedIdentityChange,
   onSubscriptionDocument,
 }: {
+  readonly displayName?: string
   readonly mode: "link" | "file"
   readonly readiness?: NdmsNativeImportReadiness
   readonly requiredGuards?: readonly NdmsInterfaceInventoryResponseRequiredGuardsItem[]
@@ -163,6 +166,7 @@ export function NativeWireGuardImportFields({
   readonly linkRequired?: boolean
   readonly linkValue?: string
   readonly onLinkChange?: (value: string) => void
+  readonly onAliasSuggestionChange?: (suggestion?: string) => void
   readonly onNativeUriActiveChange?: (active: boolean) => void
   readonly onImportedIdentityChange?: (
     identity: NativeWireGuardImportedIdentity | null
@@ -178,11 +182,13 @@ export function NativeWireGuardImportFields({
 
   return (
     <NativeWireGuardImportFieldsContent
+      displayName={displayName}
       existingInterfaces={existingInterfaces}
       linkRequired={linkRequired}
       linkValue={linkValue}
       mode={mode}
       onLinkChange={onLinkChange}
+      onAliasSuggestionChange={onAliasSuggestionChange}
       onNativeUriActiveChange={onNativeUriActiveChange}
       onImportedIdentityChange={onImportedIdentityChange}
       onSubscriptionDocument={onSubscriptionDocument}
@@ -202,6 +208,7 @@ export function NativeWireGuardImportFields({
  * Ordinary sing-box links remain editable when native import is unavailable.
  */
 function NativeWireGuardImportFieldsContent({
+  displayName,
   mode,
   readiness,
   requiredGuards = [],
@@ -209,11 +216,13 @@ function NativeWireGuardImportFieldsContent({
   linkRequired,
   linkValue,
   onLinkChange,
+  onAliasSuggestionChange,
   onNativeUriActiveChange,
   onImportedIdentityChange,
   onSubscriptionDocument,
   protectedTransport,
 }: {
+  readonly displayName?: string
   readonly mode: "link" | "file"
   readonly readiness?: NdmsNativeImportReadiness
   readonly requiredGuards?: readonly NdmsInterfaceInventoryResponseRequiredGuardsItem[]
@@ -221,6 +230,7 @@ function NativeWireGuardImportFieldsContent({
   readonly linkRequired: boolean
   readonly linkValue: string
   readonly onLinkChange?: (value: string) => void
+  readonly onAliasSuggestionChange?: (suggestion?: string) => void
   readonly onNativeUriActiveChange?: (active: boolean) => void
   readonly onImportedIdentityChange?: (
     identity: NativeWireGuardImportedIdentity | null
@@ -272,6 +282,27 @@ function NativeWireGuardImportFieldsContent({
     operation.status === "result" && operation.outcome === "completed"
       ? provedCompletedNativeImportIdentity(operation.result)
       : null
+  const completedIdentityReportedRef = useRef<string | undefined>(undefined)
+  const importAliasSuggestion =
+    state.status === "ready"
+      ? suggestNativeWireGuardImportAlias({
+          fileName: state.aliasSourceFileName,
+          endpointHost: state.preview.endpoint_host,
+        })
+      : undefined
+
+  useEffect(() => {
+    onAliasSuggestionChange?.(importAliasSuggestion)
+    return () => onAliasSuggestionChange?.(undefined)
+  }, [importAliasSuggestion, onAliasSuggestionChange])
+
+  useEffect(() => {
+    if (!completedIdentity) return
+    const key = `${completedIdentity.firmwareInterface}\n${completedIdentity.kernelInterface}\n${completedIdentity.kind}`
+    if (completedIdentityReportedRef.current === key) return
+    completedIdentityReportedRef.current = key
+    onImportedIdentityChange?.(completedIdentity)
+  }, [completedIdentity, onImportedIdentityChange])
 
   const resetOperation = () => {
     setOwnerRiskAccepted(false)
@@ -616,6 +647,7 @@ function NativeWireGuardImportFieldsContent({
         async ({ beginPending }) => {
           try {
             const response = await postNdmsNativeImportSecretOnce({
+              displayName,
               vault: vaultRef.current!,
               ticket: state.ticket,
               preflight: async (binding) => {
@@ -962,12 +994,7 @@ function NativeWireGuardImportFieldsContent({
             />
             <PreviewField
               label={t("transports.nativeImport.preview.aliasSuggestion")}
-              value={
-                suggestNativeWireGuardImportAlias({
-                  fileName: state.aliasSourceFileName,
-                  endpointHost: state.preview.endpoint_host,
-                }) ?? t("common.noneShort")
-              }
+              value={importAliasSuggestion ?? t("common.noneShort")}
             />
             <PreviewField
               label={t("transports.nativeImport.preview.amneziaParameters")}
@@ -982,10 +1009,7 @@ function NativeWireGuardImportFieldsContent({
             {t("transports.nativeImport.redactedNotice")}
           </p>
           {findNativeWireGuardAliasConflict(
-            suggestNativeWireGuardImportAlias({
-              fileName: state.aliasSourceFileName,
-              endpointHost: state.preview.endpoint_host,
-            }),
+            importAliasSuggestion,
             existingInterfaces
           ) ? (
             <Alert variant="warning">
@@ -1193,19 +1217,6 @@ function NativeWireGuardImportFieldsContent({
                   <p className="font-medium">
                     {t("transports.nativeImport.results.runningOnly")}
                   </p>
-                  <Button
-                    className="min-h-11 whitespace-normal"
-                    disabled={!completedIdentity}
-                    onClick={() => {
-                      if (completedIdentity) {
-                        onImportedIdentityChange?.(completedIdentity)
-                      }
-                    }}
-                    type="button"
-                    variant="outline"
-                  >
-                    {t("transports.nativeImport.results.useInPanel")}
-                  </Button>
                 </>
               ) : (
                 <>

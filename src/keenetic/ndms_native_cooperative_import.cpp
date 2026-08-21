@@ -1366,7 +1366,8 @@ NdmsNativeCooperativeImportResult
 NdmsNativeCooperativeImportCoordinator::import_once(
     NdmsNativeWriterLease& writer,
     std::string&& raw_configuration,
-    const NdmsNativeExternalWriterRaceAcceptance race_acceptance) noexcept {
+    const NdmsNativeExternalWriterRaceAcceptance race_acceptance,
+    const std::string_view display_name) noexcept {
     // The rvalue-only boundary adopts the secret even when admission stops
     // before parsing. Consent, cross-kind WAL and writer failures therefore
     // cannot return a caller buffer containing the private key.
@@ -1448,7 +1449,7 @@ NdmsNativeCooperativeImportCoordinator::import_once(
 
     try {
         auto prepared = prepare_ndms_native_import(
-            std::move(raw_configuration));
+            std::move(raw_configuration), display_name);
         const auto& identity = prepared.request_identity();
         const auto transaction_id = std::string{identity.transaction_id()};
         const auto marker = std::string{identity.marker()};

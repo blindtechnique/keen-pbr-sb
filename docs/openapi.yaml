@@ -706,6 +706,17 @@ paths:
           schema:
             type: string
             enum: [owner-accepted]
+        - name: X-Keen-Pbr-Native-Import-Display-Name-Base64
+          in: header
+          required: false
+          description: >
+            Optional explicitly chosen panel display name encoded as canonical
+            UTF-8 base64. The server validates the decoded value before reading
+            the secret body and prefixes the private ownership marker with this
+            readable name in KeeneticOS.
+          schema:
+            type: string
+            maxLength: 428
       requestBody:
         required: true
         content:

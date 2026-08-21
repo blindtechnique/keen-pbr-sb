@@ -1340,6 +1340,7 @@ void Daemon::setup_api() {
     api_ctx_->run_ndms_native_import_fn =
         [this](
             std::string&& raw_configuration,
+            const std::string& display_name,
             const NdmsNativeExternalWriterRaceAcceptance acceptance,
             const std::shared_ptr<SensitiveRequestReservation>&
                 opaque_reservation) {
@@ -1367,7 +1368,8 @@ void Daemon::setup_api() {
                 return coordinator.import_once(
                     reservation->writer(),
                     std::move(raw_configuration),
-                    acceptance);
+                    acceptance,
+                    display_name);
             } catch (...) {
                 return blocked_native_import(
                     NdmsNativeCooperativeImportStop::unexpected_failure,

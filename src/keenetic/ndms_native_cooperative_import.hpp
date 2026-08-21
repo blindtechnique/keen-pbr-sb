@@ -13,6 +13,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace keen_pbr3 {
 
@@ -257,7 +258,8 @@ public:
     NdmsNativeCooperativeImportResult import_once(
         NdmsNativeWriterLease& writer,
         std::string&& raw_configuration,
-        NdmsNativeExternalWriterRaceAcceptance race_acceptance) noexcept;
+        NdmsNativeExternalWriterRaceAcceptance race_acceptance,
+        std::string_view display_name = {}) noexcept;
 
     // Completes at most one already-durable cooperative import. The default
     // bodyless/unconfirmed entrance can forward-complete or retire an exact

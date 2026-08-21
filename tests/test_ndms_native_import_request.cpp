@@ -281,10 +281,12 @@ static_assert(std::is_nothrow_move_constructible_v<
 static_assert(std::is_invocable_r_v<
               NdmsNativePreparedImport,
               decltype(&prepare_ndms_native_import),
-              std::string>);
+              std::string,
+              std::string_view>);
 static_assert(!std::is_invocable_v<
               decltype(&prepare_ndms_native_import),
-              std::string&>);
+              std::string&,
+              std::string_view>);
 
 TEST_CASE("native WG request is an exact canonical stock batch") {
     const auto private_key = key('P');
@@ -388,6 +390,28 @@ TEST_CASE("native AWG request emits complete base and extended parameters") {
     CHECK(request.write_stock_rci_body_once(sink));
     CHECK(sink.body() == expected);
     CHECK_FALSE(request.has_pending_secret_body());
+}
+
+TEST_CASE("prepared native import prefixes its private marker with the chosen name") {
+    auto prepared = prepare_ndms_native_import(
+        awg_conf(), "Мой AWG");
+    const auto marker =
+        std::string{prepared.request_identity().marker()};
+    auto request = prepared.take_request();
+    CapturingSecretSink sink(request.content_length());
+    REQUIRE(request.write_stock_rci_body_once(sink));
+
+    const auto body = nlohmann::json::parse(sink.body());
+    const auto encoded = body.at(0)
+                             .at("interface")
+                             .at("wireguard")
+                             .at("import")
+                             .at("import")
+                             .get<std::string>();
+    const auto expected_label = "# Name = Мой AWG · " + marker;
+    REQUIRE(expected_label.size() % 3U == 0U);
+    CHECK(encoded.rfind(
+              base64_encode_for_test(expected_label), 0U) == 0U);
 }
 
 TEST_CASE("native AWG request preserves absent S3 and S4 with signatures") {

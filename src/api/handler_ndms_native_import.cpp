@@ -8,6 +8,8 @@
 #include "../keenetic/ndms_native_import_identity.hpp"
 #include "../keenetic/ndms_native_import_request.hpp"
 #include "../keenetic/ndms_wireguard_identity.hpp"
+#include "../util/base64.hpp"
+#include "../util/display_name.hpp"
 
 #include <httplib.h>
 #include <nlohmann/json.hpp>
@@ -79,6 +81,35 @@ bool accepted_owner_race_header(const httplib::Request& request) {
     return request.get_header_value_count(name) == 1U &&
            request.get_header_value(name) ==
                kNdmsNativeImportRaceAcceptanceValue;
+}
+
+std::string native_import_display_name(
+    const httplib::Request& request) {
+    const std::string name{kNdmsNativeImportDisplayNameHeader};
+    const auto count = request.get_header_value_count(name);
+    if (count == 0U) return {};
+    if (count != 1U) {
+        throw ApiError("native import display name is invalid", 400);
+    }
+    const auto encoded = request.get_header_value(name);
+    // 80 Unicode code points occupy at most 320 UTF-8 bytes and 428 base64
+    // bytes. Refuse oversized input before allocating the decoded value.
+    if (encoded.empty() || encoded.size() > 428U) {
+        throw ApiError("native import display name is invalid", 400);
+    }
+    try {
+        auto decoded = base64_decode(encoded);
+        if (base64_encode(decoded) != encoded ||
+            !display_name::is_valid(decoded)) {
+            throw ApiError(
+                "native import display name is invalid", 400);
+        }
+        return decoded;
+    } catch (const ApiError&) {
+        throw;
+    } catch (...) {
+        throw ApiError("native import display name is invalid", 400);
+    }
 }
 
 NdmsNativeExternalWriterRaceAcceptance recovery_owner_race_acceptance(
@@ -1852,9 +1883,10 @@ void register_ndms_native_import_handler(ApiServer& server,
                     "external NDMS writer race acceptance is required",
                     428);
             }
+            static_cast<void>(native_import_display_name(request));
             return reserve_import(ctx);
         },
-        [&ctx](const httplib::Request&,
+        [&ctx](const httplib::Request& request,
                SensitiveRequestBody body,
                const ApiServer::SensitiveRequestReservationPtr&
                    reservation) {
@@ -1863,8 +1895,11 @@ void register_ndms_native_import_handler(ApiServer& server,
             }
             auto raw_configuration = body.take_string_once();
             WipeSensitiveString wipe_raw{raw_configuration};
+            const auto display_name =
+                native_import_display_name(request);
             const auto result = ctx.run_ndms_native_import_fn(
                 std::move(raw_configuration),
+                display_name,
                 NdmsNativeExternalWriterRaceAcceptance::owner_accepted,
                 reservation);
             return ndms_native_import_api_response(result).dump();

@@ -86,7 +86,9 @@ private:
     friend NdmsNativeWireguardImportRequest
     make_ndms_native_wireguard_import_request(std::string&& raw_conf);
     friend NdmsNativePreparedImport
-    prepare_ndms_native_import(std::string&& raw_conf);
+    prepare_ndms_native_import(
+        std::string&& raw_conf,
+        std::string_view display_name);
 
     NdmsNativeWireguardImportRequest(
         std::string canonical_conf,
@@ -149,10 +151,13 @@ private:
     NdmsNativePanelDeleteSnapshot delete_snapshot_;
 
     friend NdmsNativePreparedImport
-    prepare_ndms_native_import(std::string&& raw_conf);
+    prepare_ndms_native_import(
+        std::string&& raw_conf,
+        std::string_view display_name);
 };
 
 NdmsNativePreparedImport prepare_ndms_native_import(
-    std::string&& raw_conf);
+    std::string&& raw_conf,
+    std::string_view display_name = {});
 
 } // namespace keen_pbr3

@@ -371,6 +371,8 @@ export function TransportConfigForm({
   const [sourceMode, setSourceMode] = useState<SourceMode>(baseline.sourceMode)
   const [displayNameTouched, setDisplayNameTouched] = useState(false)
   const [nativeUriActive, setNativeUriActive] = useState(false)
+  const [nativeImportAliasSuggestion, setNativeImportAliasSuggestion] =
+    useState<string>()
   const [importedNativeIdentity, setImportedNativeIdentity] =
     useState<NativeWireGuardImportedIdentity | null>(null)
   const importedNativeFocusPendingRef = useRef(false)
@@ -394,7 +396,16 @@ export function TransportConfigForm({
   )
 
   const isSingBox = spec.type !== TransportSpecType.native
-  const aliasSuggestion = inferTransportAliasSuggestion(sourceMode, spec)
+  const inferredAliasSuggestion = inferTransportAliasSuggestion(
+    sourceMode,
+    spec
+  )
+  const aliasSuggestion =
+    (nativeUriActive || sourceMode === "file") &&
+    nativeImportAliasSuggestion &&
+    !validateDisplayName(nativeImportAliasSuggestion)
+      ? nativeImportAliasSuggestion
+      : inferredAliasSuggestion
   const displayNameError = validateDisplayName(spec.display_name ?? "")
   const selectedNativeCandidate =
     spec.type === TransportSpecType.native
@@ -532,18 +543,37 @@ export function TransportConfigForm({
       setImportedNativeIdentity(identity)
       if (!identity) return
 
-      // This callback runs only from the explicit post-create action in the
-      // result card. It selects the exact kernel identity proved by the
-      // backend, but deliberately does not save the panel form or accept the
-      // local alias suggestion. The ordinary Save action remains the sole
-      // persistence boundary for the panel transport/outbound.
+      const selected = selectImportedNativeInterface(spec, identity)
       importedNativeFocusPendingRef.current = true
       setTechnicalIdentityAutomatic(false)
       setNativeUriActive(false)
       setSourceMode("link")
-      setSpec((current) => selectImportedNativeInterface(current, identity))
+      setSpec(selected)
+
+      // The native import itself is already complete at this point.  Persist
+      // the panel transport and its linked route immediately when the owner
+      // supplied a valid name; requiring a second hidden Save click was what
+      // discarded that name and let the inventory fallback create
+      // "WireguardN" instead.  A missing/invalid name returns to the ordinary
+      // form so the operator can explicitly accept the domain/IP suggestion.
+      if (!validateDisplayName(selected.display_name ?? "")) {
+        const submission = normalizeTransportFormValue(
+          {
+            spec: selected,
+            sourceMode: "link",
+            createOutbound,
+            killSwitch,
+          },
+          false
+        )
+        onSubmit(submission.spec, submission.options)
+      }
     },
     [
+      createOutbound,
+      killSwitch,
+      onSubmit,
+      spec,
       setImportedNativeIdentity,
       setNativeUriActive,
       setSourceMode,
@@ -950,11 +980,15 @@ export function TransportConfigForm({
             {sourceMode === "link" ? (
               <>
                 <NativeWireGuardImportFields
+                  displayName={
+                    displayNameError ? undefined : spec.display_name?.trim()
+                  }
                   existingInterfaces={nativeImportInterfaces}
                   key={nativeImportFieldsStateBoundaryKey("link")}
                   linkRequired={!initial}
                   linkValue={spec.link ?? ""}
                   mode="link"
+                  onAliasSuggestionChange={setNativeImportAliasSuggestion}
                   onLinkChange={(value) =>
                     setSpec((current) =>
                       withAutomaticTechnicalIdentity({
@@ -992,9 +1026,13 @@ export function TransportConfigForm({
               </>
             ) : sourceMode === "file" ? (
               <NativeWireGuardImportFields
+                displayName={
+                  displayNameError ? undefined : spec.display_name?.trim()
+                }
                 existingInterfaces={nativeImportInterfaces}
                 key={nativeImportFieldsStateBoundaryKey("file")}
                 mode="file"
+                onAliasSuggestionChange={setNativeImportAliasSuggestion}
                 onSubscriptionDocument={(text) =>
                   setSubscriptionSeed({ document: text })
                 }

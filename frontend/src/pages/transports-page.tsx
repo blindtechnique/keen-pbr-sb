@@ -21,6 +21,8 @@ import type { ApiError } from "@/api/client"
 import type { NdmsNativeDeleteResult } from "@/api/native-mutation"
 import {
   getTransportConfigExport,
+  postConfig,
+  postConfigSave,
   postTransportConfig,
 } from "@/api/generated/keen-api"
 import {
@@ -551,6 +553,9 @@ export function TransportsPage({
       )
       .map((outbound) => [outbound.interface!, outbound])
   )
+  const selectedNativeDeleteOutbound = selectedNativeDeleteTarget?.kernelName
+    ? interfaceOutboundByInterface.get(selectedNativeDeleteTarget.kernelName)
+    : undefined
   // Вопрос «использовать новый туннель как VPN?»: владелец добавляет AWG в
   // KeeneticOS и ждёт, что keen-pbr-sb сам предложит привязать маршрут.
   // Спрашиваем только когда конфигурация загружена: иначе на мгновение
@@ -1251,6 +1256,12 @@ export function TransportsPage({
       nativeInterface.live &&
       (typeof latencyMs === "number" || Boolean(boundOutbound))
     const firmwareTitle = t("transports.nativeInterface.managedByFirmware")
+    const displayLabel = boundOutbound
+      ? getOutboundDisplayName(boundOutbound)
+      : nativeInterface.label
+    const deleteReady =
+      nativeInterface.source.native_mutation.delete_candidate &&
+      Boolean(nativeInterface.source.native_mutation.ownership_revision)
 
     const cells: ReactNode[] = [
       // Выключателем и перезапуском этими интерфейсами управляет прошивка,
@@ -1277,8 +1288,8 @@ export function TransportsPage({
         <TransportProtocolIcon protocol={nativeInterface.protocol.label} />
         {/* Пол в 6rem: в тесной колонке имя сжималось до нуля, и от строки
             оставался один бейдж KeeneticOS — без имени он ни о чём. */}
-        <span className="min-w-[6rem] truncate" title={nativeInterface.label}>
-          {nativeInterface.label}
+        <span className="min-w-[6rem] truncate" title={displayLabel}>
+          {displayLabel}
         </span>
         <Badge className="shrink-0" size="xs" variant="secondary">
           {t("transports.nativeInterface.keeneticOwner")}
@@ -1343,14 +1354,35 @@ export function TransportsPage({
         }
       />,
       <RowActions
-        deleteDisabled
-        deleteTitle={firmwareTitle}
-        editDisabled
-        editTitle={firmwareTitle}
+        deleteDisabled={!deleteReady}
+        deleteTitle={
+          deleteReady
+            ? t("transports.nativeMutation.deleteAction")
+            : t("transports.nativeMutation.deleteUnavailable")
+        }
+        editDisabled={!boundOutbound}
+        editTitle={
+          boundOutbound
+            ? t("transports.routing.openOutbound")
+            : t("transports.nativeInterface.routeNotConfigured")
+        }
         expanded={expanded}
         key="actions"
-        onDelete={() => undefined}
-        onEdit={() => undefined}
+        onDelete={() => {
+          const revision =
+            nativeInterface.source.native_mutation.ownership_revision
+          if (!deleteReady || !revision) return
+          setNativeDeleteSelection({
+            id: nativeInterface.id,
+            expectedOwnershipRevision: revision,
+          })
+        }}
+        onEdit={() => {
+          if (!boundOutbound) return
+          navigate(
+            `/outbounds/${encodeURIComponent(boundOutbound.tag)}/edit?view=page`
+          )
+        }}
         onToggleExpanded={() => setTransportExpanded(expandedId, !expanded)}
         toggleTitle={
           expanded ? t("transports.details.hide") : t("transports.details.show")
@@ -1841,7 +1873,36 @@ export function TransportsPage({
         expectedOwnershipRevision={
           nativeDeleteSelection?.expectedOwnershipRevision ?? ""
         }
+        linkedRouteName={
+          selectedNativeDeleteOutbound
+            ? getOutboundDisplayName(selectedNativeDeleteOutbound)
+            : undefined
+        }
         nativeInterface={selectedNativeDeleteTarget}
+        onBeforeDelete={async () => {
+          if (!selectedNativeDeleteOutbound) return
+          if (!keenConfig || !selectedNativeDeleteTarget) {
+            throw new Error("native delete configuration is unavailable")
+          }
+          const staged = await postConfig(
+            buildUpdatedConfigForOutboundsDelete(keenConfig, [
+              selectedNativeDeleteOutbound.tag,
+            ])
+          )
+          if (staged.status !== 200) {
+            throw new Error("native delete route staging failed")
+          }
+          const applied = await postConfigSave()
+          if (applied.status !== 200) {
+            throw new Error("native delete route apply failed")
+          }
+          await Promise.all([
+            queryClient.invalidateQueries({ queryKey: queryKeys.config() }),
+            queryClient.invalidateQueries({
+              queryKey: queryKeys.runtimeOutbounds(),
+            }),
+          ])
+        }}
         onInventoryRefresh={refreshNativeMutationInventory}
         onOpenChange={(open) => {
           if (!open) setNativeDeleteSelection(undefined)

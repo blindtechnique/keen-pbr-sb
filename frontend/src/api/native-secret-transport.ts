@@ -13,6 +13,8 @@ export const NDMS_NATIVE_IMPORT_OWNER_RISK_HEADER =
   "X-Keen-Pbr-External-Ndms-Writer-Race-Acceptance" as const
 export const NDMS_NATIVE_IMPORT_OWNER_RISK_ACCEPTANCE =
   "owner-accepted" as const
+export const NDMS_NATIVE_IMPORT_DISPLAY_NAME_HEADER =
+  "X-Keen-Pbr-Native-Import-Display-Name-Base64" as const
 
 export type NdmsNativeImportSecretEndpoint =
   typeof NDMS_NATIVE_IMPORT_SECRET_ENDPOINT
@@ -100,6 +102,8 @@ export async function preflightNdmsNativeImport({
 export type PostNdmsNativeImportSecretOnceOptions = {
   vault: NativeWireGuardSecretVault
   ticket: NativeWireGuardSecretTicket
+  /** Optional friendly name already validated by the visible panel form. */
+  displayName?: string
   /**
    * Must perform only the bodyless admission phase. The secret stays in the
    * vault until this callback has returned `admitted`.
@@ -128,6 +132,7 @@ export const nativeSecretEndpointIsAllowed = (
 export async function postNdmsNativeImportSecretOnce({
   vault,
   ticket,
+  displayName,
   preflight,
   fetchImpl = fetch,
   signal,
@@ -165,6 +170,13 @@ export async function postNdmsNativeImportSecretOnce({
         "Content-Type": "text/plain; charset=utf-8",
         [NDMS_NATIVE_IMPORT_OWNER_RISK_HEADER]:
           NDMS_NATIVE_IMPORT_OWNER_RISK_ACCEPTANCE,
+        ...(displayName?.trim()
+          ? {
+              [NDMS_NATIVE_IMPORT_DISPLAY_NAME_HEADER]: encodeUtf8Base64(
+                displayName.trim()
+              ),
+            }
+          : {}),
       },
       body: secret,
       signal,
@@ -174,4 +186,11 @@ export async function postNdmsNativeImportSecretOnce({
   } finally {
     secret.fill(0)
   }
+}
+
+function encodeUtf8Base64(value: string): string {
+  const bytes = new TextEncoder().encode(value)
+  let binary = ""
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary)
 }

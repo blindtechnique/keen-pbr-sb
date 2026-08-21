@@ -10,6 +10,7 @@
 #include "../keenetic/ndms_native_import_readiness.hpp"
 #include "../keenetic/ndms_vpn_server_service_cache.hpp"
 #include "../keenetic/ndms_wireguard_identity.hpp"
+#include "../util/display_name.hpp"
 
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -911,19 +912,43 @@ api::NativeMutation unavailable_native_mutation(
     return result;
 }
 
-bool private_native_import_marker_label(
+std::optional<std::string_view> native_import_public_label(
     const std::string_view label) noexcept {
-    return ndms_native_import_transaction_id_from_marker(label).has_value();
+    if (ndms_native_import_transaction_id_from_marker(label)) {
+        return std::string_view{};
+    }
+    constexpr std::string_view separator{" · "};
+    constexpr auto marker_size =
+        kNdmsNativeImportMarkerPrefix.size() +
+        kNdmsNativeImportTransactionIdHexBytes;
+    if (label.size() <= separator.size() + marker_size) {
+        return std::nullopt;
+    }
+    const auto marker_offset = label.size() - marker_size;
+    const auto marker = label.substr(marker_offset);
+    if (!ndms_native_import_transaction_id_from_marker(marker) ||
+        label.substr(
+            marker_offset - separator.size(), separator.size()) !=
+            separator) {
+        return std::nullopt;
+    }
+    const auto friendly = label.substr(
+        0U, marker_offset - separator.size());
+    return display_name::is_valid(friendly)
+        ? std::optional<std::string_view>{friendly}
+        : std::nullopt;
 }
 
-const std::string& public_tunnel_label(
-    const NdmsTunnelInterface& tunnel) noexcept {
+std::string public_tunnel_label(
+    const NdmsTunnelInterface& tunnel) {
     // The stock importer persists its internal ownership marker as the NDMS
     // description. That marker contains the private crash-recovery
     // transaction id and must never become a public inventory label.
-    return private_native_import_marker_label(tunnel.label)
-               ? tunnel.firmware_interface_name
-               : tunnel.label;
+    const auto friendly = native_import_public_label(tunnel.label);
+    if (!friendly.has_value()) return tunnel.label;
+    return friendly->empty()
+        ? tunnel.firmware_interface_name
+        : std::string{*friendly};
 }
 
 nlohmann::json public_interface_names(
@@ -942,9 +967,14 @@ nlohmann::json public_interface_names(
             !firmware_name->is_string()) {
             continue;
         }
-        if (private_native_import_marker_label(
-                label->get_ref<const std::string&>())) {
-            *label = *firmware_name;
+        const auto friendly = native_import_public_label(
+            label->get_ref<const std::string&>());
+        if (friendly.has_value()) {
+            if (friendly->empty()) {
+                *label = *firmware_name;
+            } else {
+                *label = std::string{*friendly};
+            }
         }
     }
     return names;

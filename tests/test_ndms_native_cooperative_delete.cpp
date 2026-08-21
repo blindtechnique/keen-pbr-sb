@@ -215,10 +215,13 @@ public:
 
         nlohmann::json payload = nlohmann::json::object();
         if (observed_present) {
+            const auto description = friendly_name.empty()
+                ? marker
+                : friendly_name + " · " + marker;
             payload[interface_name] = {
                 {"type", "Wireguard"},
                 {"interface-name", interface_name},
-                {"description", marker},
+                {"description", description},
                 {"connected", connected},
                 {"link", connected},
             };
@@ -263,6 +266,7 @@ public:
 
     std::string interface_name{"Wireguard5"};
     std::string marker;
+    std::string friendly_name;
     NdmsNativeTunnelImportKind kind{
         NdmsNativeTunnelImportKind::wireguard};
     std::string target_full_revision;
@@ -923,6 +927,10 @@ TEST_CASE("connected panel-owned WG and AWG delete to a durable tombstone") {
         CAPTURE(static_cast<unsigned int>(kind));
         DeleteFixture fixture;
         fixture.install_owned_target(kind);
+        if (kind ==
+            NdmsNativeTunnelImportKind::amnezia_wireguard) {
+            fixture.gateway.friendly_name = "Мой AWG";
+        }
         REQUIRE(fixture.gateway.connected);
 
         const auto result = fixture.coordinator.delete_once(

@@ -961,6 +961,11 @@ export const enTranslation = {
           "Only the exact panel-owned interface {{name}} will be submitted for authoritative revalidation.",
         globalSaveWarning:
           "Deletion may continue with a global KeeneticOS configuration save. That save includes all pending router changes.",
+        linkedRouteWarning:
+          "The linked route “{{name}}” and its direct bindings will be removed and applied before the VPN is deleted.",
+        routePreparationFailedTitle: "The route was not removed",
+        routePreparationFailedDescription:
+          "The linked route removal could not be applied, so the VPN was left unchanged. Refresh the page and try again.",
         staleTitle: "Fresh ownership evidence is required",
         staleDescription:
           "The interface or its ownership revision changed. Close this dialog, refresh the inventory and review the new evidence.",

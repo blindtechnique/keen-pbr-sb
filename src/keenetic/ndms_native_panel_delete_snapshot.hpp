@@ -75,7 +75,9 @@ private:
         std::string&&,
         const std::string&);
     friend NdmsNativePreparedImport
-    prepare_ndms_native_import(std::string&&);
+    prepare_ndms_native_import(
+        std::string&&,
+        std::string_view);
     friend class NdmsNativeSecretSnapshotStore;
 };
 

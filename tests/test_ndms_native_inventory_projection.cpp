@@ -330,6 +330,26 @@ TEST_CASE("known catalogue and journal blockers prevent candidacy precisely") {
     CHECK(item.deferred_authoritative_checks.size() == 3U);
 }
 
+TEST_CASE("generic Keenetic Wireguard inventory preserves an exact AWG claim") {
+    const auto projected = project_ndms_native_inventory(
+        {tunnel("Wireguard5", NdmsTunnelKind::wireguard)},
+        true,
+        ownership(
+            NdmsNativeOwnershipLifecycle::active_running_only,
+            NdmsNativeTunnelImportKind::amnezia_wireguard),
+        NdmsNativeImportJournalReadinessState::clean,
+        NdmsNativeDeleteWalReadiness::clean);
+
+    REQUIRE(projected.interfaces.size() == 1U);
+    const auto& item = projected.interfaces.front();
+    CHECK(item.ownership_state ==
+          NdmsNativeInventoryOwnershipState::panel_owned_active);
+    CHECK_FALSE(has_blocker(
+        item,
+        NdmsNativeInventoryDeleteBlocker::ownership_kind_mismatch));
+    CHECK(item.delete_candidate);
+}
+
 TEST_CASE("never-activated import state is not authoritative for delete") {
     const auto projected = project_ndms_native_inventory(
         {tunnel("Wireguard5")},

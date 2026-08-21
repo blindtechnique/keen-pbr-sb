@@ -29,6 +29,18 @@ bool known_dependency_kind(
                        native_interface_preference;
 }
 
+bool exact_owned_label(
+    const std::string_view label,
+    const std::string_view marker) noexcept {
+    if (label == marker) return true;
+    constexpr std::string_view separator{" · "};
+    return label.size() > separator.size() + marker.size() &&
+           label.substr(label.size() - marker.size()) == marker &&
+           label.substr(
+               label.size() - marker.size() - separator.size(),
+               separator.size()) == separator;
+}
+
 bool lower_hex(const std::string_view value) noexcept {
     return value.size() == 64U &&
            std::all_of(value.begin(), value.end(), [](const char digit) {
@@ -246,7 +258,7 @@ ObservationMatch inspect_observation(
     if (slot_state != NdmsWireguardCatalogSlotState::occupied ||
         target == nullptr || marker_sightings.size() != 1U ||
         marker_sightings.front() != target ||
-        target->label != record.marker ||
+        !exact_owned_label(target->label, record.marker) ||
         observation.target_evidence.size() != 1U ||
         observation.target_protocols.size() != 1U) {
         match.presence = MeasuredPresence::mismatch;

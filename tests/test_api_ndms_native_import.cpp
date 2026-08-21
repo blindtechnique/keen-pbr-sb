@@ -8,6 +8,7 @@
 #include "api/handler_ndms_native_import.hpp"
 #include "api/server.hpp"
 #include "api/sse_broadcaster.hpp"
+#include "util/base64.hpp"
 
 #include <atomic>
 #include <condition_variable>
@@ -108,11 +109,13 @@ public:
           server_(config()) {
         if (callback) {
             context_.run_ndms_native_import_fn =
-                [callback = std::move(callback)](
+                [this, callback = std::move(callback)](
                     std::string&& raw,
+                    const std::string& display_name,
                     const NdmsNativeExternalWriterRaceAcceptance
                         acceptance,
                     const std::shared_ptr<SensitiveRequestReservation>&) {
+                    last_display_name_ = display_name;
                     return callback(std::move(raw), acceptance);
                 };
         }
@@ -169,6 +172,10 @@ public:
         return headers;
     }
 
+    const std::string& last_display_name() const noexcept {
+        return last_display_name_;
+    }
+
     void set_protected_transport(const bool value) {
         protected_transport_.store(value, std::memory_order_relaxed);
     }
@@ -195,6 +202,7 @@ public:
     }
 
 private:
+    std::string last_display_name_;
     std::shared_ptr<SensitiveRequestReservation> reserve_for_request() {
         reservation_attempts_.fetch_add(1U, std::memory_order_relaxed);
         if (!reservation_available_.load(std::memory_order_acquire)) {
@@ -828,6 +836,42 @@ TEST_CASE("native import requires authentication but not a second password") {
     CHECK(authenticated->status == 200);
     CHECK(sensitive_request_body_stream_count_for_testing() == 1U);
     CHECK(callback_count == 1U);
+}
+
+TEST_CASE("native import binds a validated friendly name before body admission") {
+    NativeImportApiFixture fixture(
+        [](std::string&&,
+           NdmsNativeExternalWriterRaceAcceptance) {
+            return completed_result();
+        });
+    const auto session = fixture.login();
+    fixture.grant_step_up(session);
+
+    auto accepted = fixture.accepted_headers(session);
+    accepted.emplace(
+        std::string{kNdmsNativeImportDisplayNameHeader},
+        base64_encode("Мой AWG"));
+    const auto response = fixture.client().Post(
+        std::string{kNdmsNativeImportApiPath},
+        accepted,
+        "configuration",
+        "text/plain");
+    REQUIRE(response != nullptr);
+    CHECK(response->status == 200);
+    CHECK(fixture.last_display_name() == "Мой AWG");
+
+    auto malformed = fixture.accepted_headers(session);
+    malformed.emplace(
+        std::string{kNdmsNativeImportDisplayNameHeader}, "not-base64");
+    reset_sensitive_request_body_stream_count_for_testing();
+    const auto rejected = fixture.client().Post(
+        std::string{kNdmsNativeImportApiPath},
+        malformed,
+        "must-not-stream",
+        "text/plain");
+    REQUIRE(rejected != nullptr);
+    CHECK(rejected->status == 400);
+    CHECK(sensitive_request_body_stream_count_for_testing() == 0U);
 }
 
 TEST_CASE("native import preflight is bodyless and reports residual risk") {

@@ -24,6 +24,9 @@ inline constexpr std::string_view
         "X-Keen-Pbr-External-Ndms-Writer-Race-Acceptance"};
 inline constexpr std::string_view
     kNdmsNativeImportRaceAcceptanceValue{"owner-accepted"};
+inline constexpr std::string_view
+    kNdmsNativeImportDisplayNameHeader{
+        "X-Keen-Pbr-Native-Import-Display-Name-Base64"};
 
 // Maps the coordinator's already-redacted result into the public envelope.
 // Optional identifiers are independently syntax-checked before exposure so a

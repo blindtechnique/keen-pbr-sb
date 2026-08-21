@@ -2,6 +2,7 @@ import { describe, expect, mock, test } from "bun:test"
 
 import {
   NDMS_NATIVE_IMPORT_PREFLIGHT_ENDPOINT,
+  NDMS_NATIVE_IMPORT_DISPLAY_NAME_HEADER,
   NDMS_NATIVE_IMPORT_OWNER_RISK_ACCEPTANCE,
   NDMS_NATIVE_IMPORT_OWNER_RISK_HEADER,
   NDMS_NATIVE_IMPORT_SECRET_ENDPOINT,
@@ -279,6 +280,28 @@ describe("one-shot native secret transport", () => {
     expect(body).not.toBeNull()
     expect(body).toEqual(new Uint8Array("private-key".length))
     expect(vault.takeOnce(ticket)).toBeNull()
+  })
+
+  test("carries an explicit Unicode display name without putting it in a raw header", async () => {
+    const { vault, ticket } = selectedSecret()
+    const fetchImpl: NativeSecretFetch = mock((_input, init) => {
+      const headers = init?.headers as Record<string, string>
+      expect(headers[NDMS_NATIVE_IMPORT_DISPLAY_NAME_HEADER]).toBe(
+        "0JzQvtC5IEFXRyDwn5qA"
+      )
+      expect(JSON.stringify(headers)).not.toContain("Мой AWG")
+      return Promise.resolve(new Response())
+    })
+
+    await postNdmsNativeImportSecretOnce({
+      vault,
+      ticket,
+      displayName: " Мой AWG 🚀 ",
+      preflight: () => Promise.resolve("admitted"),
+      fetchImpl,
+    })
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
   })
 
   test("does not retry a rejected fetch and wipes its body", async () => {

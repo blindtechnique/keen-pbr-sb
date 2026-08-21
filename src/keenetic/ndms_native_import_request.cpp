@@ -1,5 +1,7 @@
 #include "ndms_native_import_request.hpp"
 
+#include "../util/display_name.hpp"
+
 #include "ndms_native_import_identity.hpp"
 #include "ndms_native_panel_delete_snapshot.hpp"
 
@@ -226,9 +228,9 @@ CanonicalNumberText number_text(
 
 std::size_t canonical_conf_size(
     const NdmsNativeTunnelImport& imported,
-    const std::string_view marker,
+    const std::string_view label,
     const CanonicalNumberText& numbers) {
-    std::size_t size = line_size("# Name = ", marker);
+    std::size_t size = line_size("# Name = ", label);
     size = checked_add(size, std::string_view{"[Interface]\n"}.size());
     size = checked_add(size, line_size(
         "PrivateKey = ",
@@ -314,15 +316,22 @@ void append_joined_line(
 
 std::string build_canonical_conf(
     const NdmsNativeTunnelImport& imported,
-    const std::string_view marker) {
+    const std::string_view marker,
+    const std::string_view friendly_name = {}) {
+    if (!display_name::is_valid(friendly_name, true)) {
+        throw std::invalid_argument("native import display name is invalid");
+    }
+    const auto label = friendly_name.empty()
+        ? std::string{marker}
+        : std::string{friendly_name} + " · " + std::string{marker};
     const auto numbers = number_text(imported);
-    const auto required = canonical_conf_size(imported, marker, numbers);
+    const auto required = canonical_conf_size(imported, label, numbers);
     std::string output;
     // Reserve before the first credential is copied. No old allocation can
     // therefore be released with a partial private key during construction.
     output.reserve(required);
 
-    append_line(output, "# Name = ", marker);
+    append_line(output, "# Name = ", label);
     output.append("[Interface]\n");
     append_line(output, "PrivateKey = ",
                 imported.private_key.reveal_for_typed_rci());
@@ -659,7 +668,8 @@ NdmsNativePreparedImport::take_delete_snapshot() noexcept {
 }
 
 NdmsNativePreparedImport prepare_ndms_native_import(
-    std::string&& raw_conf) {
+    std::string&& raw_conf,
+    const std::string_view display_name) {
     WipeStringGuard raw_guard(raw_conf);
     if (raw_conf.size() >
         kNdmsNativePreparedImportMaximumInputBytes) {
@@ -692,7 +702,8 @@ NdmsNativePreparedImport prepare_ndms_native_import(
     auto filename = marker + ".conf";
     const auto preview =
         build_ndms_native_tunnel_import_preview(imported);
-    auto canonical_conf = build_canonical_conf(imported, marker);
+    auto canonical_conf = build_canonical_conf(
+        imported, marker, display_name);
     WipeStringGuard canonical_guard(canonical_conf);
     if (canonical_conf.size() >
         kNdmsNativeWireguardImportRequestMaximumBytes) {

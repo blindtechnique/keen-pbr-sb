@@ -176,8 +176,9 @@ struct ApiContext {
     // returns the coordinator's redacted result; the API layer neither
     // retries nor serializes internals.
     std::function<NdmsNativeCooperativeImportResult(
-        std::string&&,
-        NdmsNativeExternalWriterRaceAcceptance,
+          std::string&&,
+          const std::string&,
+          NdmsNativeExternalWriterRaceAcceptance,
         const std::shared_ptr<SensitiveRequestReservation>&)>
         run_ndms_native_import_fn;
     // A recovery reservation uses the same ordered maintenance/runtime/native

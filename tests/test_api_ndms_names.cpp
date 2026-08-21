@@ -829,6 +829,11 @@ TEST_CASE(
               {"interface-name", "Wireguard6"},
               {"description", "Normal VPN"},
               {"role", "client"}}},
+            {"Wireguard7",
+             {{"type", "Wireguard"},
+              {"interface-name", "Wireguard7"},
+              {"description", "Мой AWG · " + private_marker},
+              {"role", "client"}}},
         }.dump();
     });
 
@@ -836,7 +841,7 @@ TEST_CASE(
     config.listen = std::string("127.0.0.1:18201");
     ApiServer server(config);
     register_ndms_names_handler_for_tests(
-        server, cache, {"nwg5", "nwg6"});
+        server, cache, {"nwg5", "nwg6", "nwg7"});
     server.start();
 
     httplib::Client client("127.0.0.1", 18201);
@@ -854,10 +859,13 @@ TEST_CASE(
     const auto inventory = nlohmann::json::parse(inventory_response->body);
     CHECK(names["names"]["nwg5"]["label"] == "Wireguard5");
     CHECK(names["names"]["nwg6"]["label"] == "Normal VPN");
+    CHECK(names["names"]["nwg7"]["label"] == "Мой AWG");
     CHECK(inventory_row(inventory, "Wireguard5")["label"] ==
           "Wireguard5");
     CHECK(inventory_row(inventory, "Wireguard6")["label"] ==
           "Normal VPN");
+    CHECK(inventory_row(inventory, "Wireguard7")["label"] ==
+          "Мой AWG");
     CHECK(names_response->body.find(private_marker) == std::string::npos);
     CHECK(names_response->body.find(private_transaction_id) ==
           std::string::npos);

@@ -23,8 +23,16 @@ bool known_import_kind(const NdmsNativeTunnelImportKind kind) noexcept {
 
 bool matching_kind(const NdmsTunnelKind observed,
                    const NdmsNativeTunnelImportKind claimed) noexcept {
+    // KeeneticOS exposes an imported AmneziaWG client through the generic
+    // Wireguard catalogue kind on the measured 5.1.1 RCI surface.  The
+    // durable ownership record retains the exact parsed import kind and the
+    // delete coordinator rechecks the ASC protocol before dispatch, so this
+    // one-way compatibility is truthful without treating an explicitly
+    // observed AmneziaWG row as a plain-WireGuard claim.
     return (observed == NdmsTunnelKind::wireguard &&
-            claimed == NdmsNativeTunnelImportKind::wireguard) ||
+            (claimed == NdmsNativeTunnelImportKind::wireguard ||
+             claimed ==
+                 NdmsNativeTunnelImportKind::amnezia_wireguard)) ||
            (observed == NdmsTunnelKind::amnezia_wireguard &&
             claimed ==
                 NdmsNativeTunnelImportKind::amnezia_wireguard);

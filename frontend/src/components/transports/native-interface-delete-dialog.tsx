@@ -25,6 +25,7 @@ type SubmissionState =
   | { readonly status: "idle" }
   | { readonly status: "sending" }
   | { readonly status: "blocked"; readonly result: NdmsNativeDeleteResult }
+  | { readonly status: "preparation_failed" }
   | { readonly status: "rejected" }
   | { readonly status: "recovery_required" }
   | { readonly status: "unknown" }
@@ -44,14 +45,18 @@ type DeleteLeaseValue =
 
 export function NativeInterfaceDeleteDialog({
   expectedOwnershipRevision,
+  linkedRouteName,
   nativeInterface,
+  onBeforeDelete,
   onInventoryRefresh,
   onOpenChange,
   onTerminal,
   open,
 }: {
   readonly expectedOwnershipRevision: string
+  readonly linkedRouteName?: string
   readonly nativeInterface?: NativeInterfaceModel
+  readonly onBeforeDelete?: () => Promise<void>
   readonly onInventoryRefresh: () => Promise<void>
   readonly onOpenChange: (open: boolean) => void
   readonly onTerminal: (result: NdmsNativeDeleteResult) => void
@@ -98,6 +103,12 @@ export function NativeInterfaceDeleteDialog({
     if (!canSubmit || !nativeInterface) return
     setSubmission({ status: "sending" })
     try {
+      try {
+        await onBeforeDelete?.()
+      } catch {
+        setSubmission({ status: "preparation_failed" })
+        return
+      }
       const leaseResult = await runWithNativeMutationLease<DeleteLeaseValue>(
         "delete",
         async () => {
@@ -178,6 +189,14 @@ export function NativeInterfaceDeleteDialog({
         <div className="space-y-4">
           <div className="rounded-lg border bg-muted/30 p-3 text-sm">
             <p className="font-medium break-all">{interfaceName}</p>
+            {linkedRouteName ? (
+              <p className="mt-1 break-words text-muted-foreground">
+                {t(
+                  "transports.nativeMutation.deleteDialog.linkedRouteWarning",
+                  { name: linkedRouteName }
+                )}
+              </p>
+            ) : null}
             <p className="mt-1 break-words text-muted-foreground">
               {t("transports.nativeMutation.deleteDialog.globalSaveWarning")}
             </p>
@@ -254,8 +273,21 @@ export function NativeInterfaceDeleteDialog({
           </label>
 
           <div aria-atomic="true" aria-live="polite">
-            {submission.status === "blocked" ||
-            submission.status === "rejected" ? (
+            {submission.status === "preparation_failed" ? (
+              <Alert variant="destructive">
+                <AlertTitle>
+                  {t(
+                    "transports.nativeMutation.deleteDialog.routePreparationFailedTitle"
+                  )}
+                </AlertTitle>
+                <AlertDescription className="break-words">
+                  {t(
+                    "transports.nativeMutation.deleteDialog.routePreparationFailedDescription"
+                  )}
+                </AlertDescription>
+              </Alert>
+            ) : submission.status === "blocked" ||
+              submission.status === "rejected" ? (
               <Alert variant="warning">
                 <AlertTitle>
                   {t("transports.nativeMutation.deleteDialog.blockedTitle")}
