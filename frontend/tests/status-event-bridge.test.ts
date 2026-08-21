@@ -362,23 +362,5 @@ describe("status event cache bridge", () => {
       )
     ).toBe("apply-1:succeeded")
 
-    expect(
-      getTerminalConfigLifecycleOperationKey(
-        JSON.stringify({
-          type: "snapshot",
-          data: {
-            service: {
-              lifecycle_operation: {
-                id: "rollback-1",
-                type: "rollback_config",
-                status: "failed",
-              },
-            },
-            outbounds: {},
-            interfaces: {},
-          },
-        })
-      )
-    ).toBe("rollback-1:failed")
   })
 })

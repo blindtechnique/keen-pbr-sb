@@ -123,8 +123,7 @@ export function getTerminalConfigLifecycleOperationKey(
   const operation = service?.lifecycle_operation
   if (
     !operation ||
-    (operation.type !== "apply_config" &&
-      operation.type !== "rollback_config") ||
+    operation.type !== "apply_config" ||
     (operation.status !== "succeeded" && operation.status !== "failed")
   ) {
     return null
