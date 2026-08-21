@@ -233,7 +233,9 @@ bool catalog_slot_evidence_is_safe(
     return false;
 }
 
-bool catalog_is_safe(const NdmsInterfaceCatalog& catalog) noexcept {
+bool catalog_is_safe(
+    const NdmsInterfaceCatalog& catalog,
+    const NdmsNativeDirectCatalogScope scope) noexcept {
     if (!catalog.firmware_available ||
         !catalog.wireguard_slot_evidence_complete ||
         !std::all_of(
@@ -243,10 +245,12 @@ bool catalog_is_safe(const NdmsInterfaceCatalog& catalog) noexcept {
         return false;
     }
 
-    // A structurally occupied numbered slot in the runtime catalog must also
-    // have exactly one typed WG/AWG tunnel view.  Otherwise a marker could be
-    // hidden in a canonical WireguardN record whose discriminator was
-    // malformed and therefore omitted from catalog.tunnels.
+    // Runtime state must expose a typed WG/AWG tunnel. Current Keenetic
+    // running-config instead exposes the same occupied slot under its exact
+    // WireguardN key without repeating `type` or `interface-name`. For that
+    // scope, exactly one canonical metadata row is the complete marker-scan
+    // surface; exact target config/runtime/ASC reads below still prove the
+    // protocol before any recovery action can become authoritative.
     for (std::size_t slot = 0U;
          slot < catalog.wireguard_slots.size(); ++slot) {
         if (catalog.wireguard_slots[slot].state !=
@@ -254,14 +258,22 @@ bool catalog_is_safe(const NdmsInterfaceCatalog& catalog) noexcept {
             continue;
         }
         const auto expected = "Wireguard" + std::to_string(slot);
-        const auto matches = std::count_if(
-            catalog.tunnels.begin(), catalog.tunnels.end(),
-            [&expected](const NdmsTunnelInterface& tunnel) {
-                return tunnel.firmware_interface_name == expected &&
-                       (tunnel.kind == NdmsTunnelKind::wireguard ||
-                        tunnel.kind ==
-                            NdmsTunnelKind::amnezia_wireguard);
-            });
+        const auto matches = scope ==
+                NdmsNativeDirectCatalogScope::runtime_state
+            ? std::count_if(
+                  catalog.tunnels.begin(), catalog.tunnels.end(),
+                  [&expected](const NdmsTunnelInterface& tunnel) {
+                      return tunnel.firmware_interface_name == expected &&
+                             (tunnel.kind == NdmsTunnelKind::wireguard ||
+                              tunnel.kind ==
+                                  NdmsTunnelKind::amnezia_wireguard);
+                  })
+            : std::count_if(
+                  catalog.interface_metadata.begin(),
+                  catalog.interface_metadata.end(),
+                  [&expected](const NdmsInterfaceMetadata& metadata) {
+                      return metadata.firmware_interface_name == expected;
+                  });
         if (matches != 1) return false;
     }
     return true;
@@ -270,6 +282,13 @@ bool catalog_is_safe(const NdmsInterfaceCatalog& catalog) noexcept {
 bool is_wireguard_kind(const NdmsTunnelKind kind) noexcept {
     return kind == NdmsTunnelKind::wireguard ||
            kind == NdmsTunnelKind::amnezia_wireguard;
+}
+
+NdmsTunnelKind tunnel_kind_from_asc(
+    const NdmsNativeAscClass asc_class) noexcept {
+    return asc_class == NdmsNativeAscClass::amnezia_wg
+        ? NdmsTunnelKind::amnezia_wireguard
+        : NdmsTunnelKind::wireguard;
 }
 
 std::string target_endpoint(const std::string_view path) {
@@ -462,16 +481,30 @@ NdmsNativeDirectObservationGateway::observe_recovery(
             return result;
         }
         result.snapshot = std::move(catalog_read.snapshot);
-        if (!catalog_is_safe(result.snapshot->catalog)) {
+        if (!catalog_is_safe(result.snapshot->catalog, scope)) {
             result.failure =
                 NdmsNativeDirectObservationFailure::catalog_unsafe;
             return result;
         }
 
-        std::vector<const NdmsTunnelInterface*> marker_sightings;
-        for (const auto& tunnel : result.snapshot->catalog.tunnels) {
-            if (tunnel.label.find(marker) != std::string::npos) {
-                marker_sightings.push_back(&tunnel);
+        std::vector<std::string> marker_sightings;
+        if (scope == NdmsNativeDirectCatalogScope::runtime_state) {
+            for (const auto& tunnel : result.snapshot->catalog.tunnels) {
+                if (tunnel.label.find(marker) != std::string::npos) {
+                    marker_sightings.push_back(
+                        tunnel.firmware_interface_name);
+                }
+            }
+        } else {
+            for (const auto& metadata :
+                 result.snapshot->catalog.interface_metadata) {
+                const auto identity = parse_ndms_wireguard_identity(
+                    metadata.firmware_interface_name);
+                if (identity &&
+                    metadata.label.find(marker) != std::string::npos) {
+                    marker_sightings.push_back(
+                        metadata.firmware_interface_name);
+                }
             }
         }
         if (marker_sightings.size() >
@@ -483,14 +516,12 @@ NdmsNativeDirectObservationGateway::observe_recovery(
 
         std::set<std::string> evidence_targets;
         if (!marker_sightings.empty()) {
-            const auto* tunnel = marker_sightings.front();
             const auto identity = parse_ndms_wireguard_identity(
-                tunnel->firmware_interface_name);
+                marker_sightings.front());
             if (!identity ||
                 identity->canonical_name() !=
-                    tunnel->firmware_interface_name ||
+                    marker_sightings.front() ||
                 !ndms_wireguard_identity_is_managed_candidate(*identity) ||
-                !is_wireguard_kind(tunnel->kind) ||
                 result.snapshot->catalog
                         .wireguard_slots[identity->slot]
                         .state !=
@@ -499,7 +530,22 @@ NdmsNativeDirectObservationGateway::observe_recovery(
                     marker_target_not_managed_wireguard;
                 return result;
             }
-            evidence_targets.insert(tunnel->firmware_interface_name);
+            if (scope == NdmsNativeDirectCatalogScope::runtime_state) {
+                const auto typed = std::find_if(
+                    result.snapshot->catalog.tunnels.begin(),
+                    result.snapshot->catalog.tunnels.end(),
+                    [&](const NdmsTunnelInterface& tunnel) {
+                        return tunnel.firmware_interface_name ==
+                                   marker_sightings.front() &&
+                               is_wireguard_kind(tunnel.kind);
+                    });
+                if (typed == result.snapshot->catalog.tunnels.end()) {
+                    result.failure = NdmsNativeDirectObservationFailure::
+                        marker_target_not_managed_wireguard;
+                    return result;
+                }
+            }
+            evidence_targets.insert(marker_sightings.front());
         }
 
         if (expected_identity &&
@@ -529,6 +575,72 @@ NdmsNativeDirectObservationGateway::observe_recovery(
             result.target_evidence.push_back(*target.evidence);
             result.target_protocols.push_back(
                 {interface_name, *target.asc_class});
+        }
+
+        if (scope == NdmsNativeDirectCatalogScope::running_config) {
+            // Materialize only the bounded, directly measured targets. This
+            // lets the common recovery probe scan the real running-config
+            // label while keeping protocol and kernel identity sourced from
+            // the exact target reads and local interface inventory.
+            for (const auto& protocol : result.target_protocols) {
+                const auto existing = std::find_if(
+                    result.snapshot->catalog.tunnels.begin(),
+                    result.snapshot->catalog.tunnels.end(),
+                    [&](const NdmsTunnelInterface& tunnel) {
+                        return tunnel.firmware_interface_name ==
+                            protocol.interface_name;
+                    });
+                if (existing != result.snapshot->catalog.tunnels.end()) {
+                    continue;
+                }
+                const auto metadata = std::find_if(
+                    result.snapshot->catalog.interface_metadata.begin(),
+                    result.snapshot->catalog.interface_metadata.end(),
+                    [&](const NdmsInterfaceMetadata& item) {
+                        return item.firmware_interface_name ==
+                            protocol.interface_name;
+                    });
+                const auto identity = parse_ndms_wireguard_identity(
+                    protocol.interface_name);
+                if (metadata ==
+                        result.snapshot->catalog.interface_metadata.end() ||
+                    !identity ||
+                    result.snapshot->catalog
+                            .wireguard_slots[identity->slot]
+                            .state !=
+                        NdmsWireguardCatalogSlotState::occupied) {
+                    result.target_evidence.clear();
+                    result.target_protocols.clear();
+                    result.failure = NdmsNativeDirectObservationFailure::
+                        catalog_unsafe;
+                    return result;
+                }
+                result.snapshot->catalog.tunnels.push_back(
+                    NdmsTunnelInterface{
+                        metadata->id,
+                        metadata->firmware_interface_name,
+                        std::nullopt,
+                        metadata->label,
+                        metadata->firmware_type,
+                        tunnel_kind_from_asc(protocol.asc_class),
+                        NdmsInterfaceRole::unknown,
+                        false,
+                        false,
+                        metadata->connected,
+                        metadata->link,
+                        result.snapshot->catalog
+                            .wireguard_slots[identity->slot]
+                            .structural_revision,
+                    });
+            }
+            std::sort(
+                result.snapshot->catalog.tunnels.begin(),
+                result.snapshot->catalog.tunnels.end(),
+                [](const NdmsTunnelInterface& left,
+                   const NdmsTunnelInterface& right) {
+                    return left.firmware_interface_name <
+                        right.firmware_interface_name;
+                });
         }
 
         result.catalog_revision =

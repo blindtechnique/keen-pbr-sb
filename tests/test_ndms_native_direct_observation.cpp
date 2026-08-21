@@ -290,6 +290,38 @@ TEST_CASE("recovery completeness binds requested and observed catalog scope") {
     CHECK_FALSE(measured.complete());
 }
 
+TEST_CASE("running-config recovery accepts canonical untyped Keenetic slot") {
+    auto transport = std::make_shared<QueueTransport>();
+    transport->responses.push_back(response(nlohmann::json{
+        {"Wireguard5",
+         {{"description", std::string{kMarker}},
+          {"wireguard",
+           {{"peer",
+             nlohmann::json::array(
+                 {{{"preshared-key", "firmware-secret"}}})}}}}},
+    }.dump()));
+    enqueue_target(*transport, "Wireguard5");
+
+    const auto measured = gateway_for(transport).observe_recovery(
+        NdmsNativeDirectCatalogScope::running_config,
+        kMarker,
+        std::optional<std::string>{"Wireguard5"});
+    REQUIRE(measured.complete());
+    REQUIRE(measured.snapshot.has_value());
+    REQUIRE(measured.snapshot->catalog.tunnels.size() == 1U);
+    const auto& synthesized = measured.snapshot->catalog.tunnels.front();
+    CHECK(synthesized.firmware_interface_name == "Wireguard5");
+    CHECK(synthesized.label == kMarker);
+    CHECK(synthesized.kind == NdmsTunnelKind::wireguard);
+    REQUIRE(measured.target_evidence.size() == 1U);
+    REQUIRE(measured.target_protocols.size() == 1U);
+    CHECK(measured.target_protocols.front().asc_class ==
+          NdmsNativeAscClass::plain_wireguard);
+    CHECK(transport->requests.size() == 4U);
+    CHECK(transport->requests.front().url ==
+          kNdmsNativeDirectRunningConfigCatalogEndpoint);
+}
+
 TEST_CASE("ASC is measured directly rather than inferred from a name") {
     auto transport = std::make_shared<QueueTransport>();
     transport->responses.push_back(response(nlohmann::json{
