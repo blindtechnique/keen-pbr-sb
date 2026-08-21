@@ -1401,15 +1401,6 @@ export function TransportsPage({
             `/outbounds/create?type=interface&interface=${encodeURIComponent(interfaceName)}`
           )
         }
-        onDelete={() => {
-          const revision =
-            nativeInterface.source.native_mutation.ownership_revision
-          if (!revision) return
-          setNativeDeleteSelection({
-            id: nativeInterface.id,
-            expectedOwnershipRevision: revision,
-          })
-        }}
         onHiddenChange={(hidden) => setNativeHidden(nativeInterface.id, hidden)}
         usage={
           boundOutbound ? (

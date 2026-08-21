@@ -3,7 +3,6 @@ import {
   AlertTriangleIcon,
   EyeIcon,
   EyeOffIcon,
-  Trash2Icon,
   WorkflowIcon,
 } from "lucide-react"
 import type { ReactNode } from "react"
@@ -46,7 +45,6 @@ export function NativeInterfaceDetails({
   hasConfig,
   hidden,
   onCreateRoute,
-  onDelete,
   onHiddenChange,
   usage,
 }: {
@@ -55,7 +53,6 @@ export function NativeInterfaceDetails({
   readonly hasConfig: boolean
   readonly hidden: boolean
   readonly onCreateRoute: (interfaceName: string) => void
-  readonly onDelete?: () => void
   readonly onHiddenChange: (hidden: boolean) => void
   /** «Кто этим пользуется» — тот же блок категорий, что у своих туннелей. */
   readonly usage?: ReactNode
@@ -70,9 +67,7 @@ export function NativeInterfaceDetails({
   const managementReadiness = nativeInterface.source.management_readiness
   const mutation = nativeInterface.source.native_mutation
   const deleteEnabled =
-    mutation.delete_candidate &&
-    Boolean(mutation.ownership_revision) &&
-    Boolean(onDelete)
+    mutation.delete_candidate && Boolean(mutation.ownership_revision)
 
   return (
     <div className="space-y-3 text-sm">
@@ -252,24 +247,6 @@ export function NativeInterfaceDetails({
             ? t("transports.nativeInterface.restore")
             : t("transports.nativeInterface.hide")}
         </Button>
-        {mutation.ownership_state !== "not_applicable" ? (
-          <Button
-            className="min-h-11 max-w-full whitespace-normal"
-            disabled={!deleteEnabled}
-            onClick={() => {
-              if (deleteEnabled) onDelete?.()
-            }}
-            title={
-              deleteEnabled
-                ? t("transports.nativeMutation.deleteAction")
-                : t("transports.nativeMutation.deleteUnavailable")
-            }
-            variant="destructive"
-          >
-            <Trash2Icon />
-            {t("transports.nativeMutation.deleteAction")}
-          </Button>
-        ) : null}
         {/* Последней в ряду, как и у своих туннелей. Работает и без маршрута
             keen-pbr: у нативного его обычно нет, а измерение делает
             атрибутируемым привязка к устройству, а не метка. Имя берётся
