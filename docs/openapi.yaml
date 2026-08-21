@@ -640,8 +640,8 @@ paths:
       tags: [Native interface import]
       summary: Admit a native WireGuard import without sending its secret
       description: >
-        Performs the replay-safe, bodyless authentication, step-up and native
-        mutation admission phase. The request body must be empty. A successful
+        Performs the bodyless authentication and native mutation admission
+        phase. The request body must be empty. A successful
         response reports only that the one-shot import may be attempted; it
         neither reserves nor authorizes the later secret-bearing request, whose
         admission is checked again. It does not claim that other NDMS writers
@@ -668,7 +668,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         "403":
-          description: Protected transport or step-up authentication is required
+          description: Protected transport is required
           content:
             application/json:
               schema:
@@ -738,7 +738,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         "403":
-          description: Protected transport or step-up authentication is required
+          description: Protected transport is required
           content:
             application/json:
               schema:
@@ -818,7 +818,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         "403":
-          description: Protected transport or step-up authentication is required
+          description: Protected transport is required
           content:
             application/json:
               schema:

@@ -2481,7 +2481,7 @@ export function useGetNdmsInterfaceInventory<TData = Awaited<ReturnType<typeof g
 
 
 /**
- * Performs the replay-safe, bodyless authentication, step-up and native mutation admission phase. The request body must be empty. A successful response reports only that the one-shot import may be attempted; it neither reserves nor authorizes the later secret-bearing request, whose admission is checked again. It does not claim that other NDMS writers are excluded. Both successful and error responses are served with `Cache-Control: no-store`.
+ * Performs the bodyless authentication and native mutation admission phase. The request body must be empty. A successful response reports only that the one-shot import may be attempted; it neither reserves nor authorizes the later secret-bearing request, whose admission is checked again. It does not claim that other NDMS writers are excluded. Both successful and error responses are served with `Cache-Control: no-store`.
 
  * @summary Admit a native WireGuard import without sending its secret
  */

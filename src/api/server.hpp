@@ -138,16 +138,17 @@ public:
     void post(const std::string& path, BodyRouteHandler handler);
 
     // Register a bounded, no-store POST whose body is read only after the
-    // request has passed authentication, step-up and the protected-secret
-    // transport check. ContentReader avoids retaining a second req.body copy.
+    // request has passed authentication, the protected-secret transport
+    // check, and any route-specific step-up policy. ContentReader avoids
+    // retaining a second req.body copy.
     void post_sensitive(const std::string& path,
                         std::size_t maximum_body_bytes,
                         SensitiveBodyRouteHandler handler);
 
-    // Optional route-specific admission runs after authentication, step-up
-    // and protected-transport checks but before ContentReader is entered or a
-    // body buffer is allocated. Existing callers use the overload above and
-    // retain their previous behavior.
+    // Optional route-specific admission runs after authentication,
+    // protected-transport and any route-specific step-up checks but before
+    // ContentReader is entered or a body buffer is allocated. Existing
+    // callers use the overload above and retain their previous behavior.
     void post_sensitive(const std::string& path,
                         std::size_t maximum_body_bytes,
                         SensitivePreBodyAdmission pre_body_admission,

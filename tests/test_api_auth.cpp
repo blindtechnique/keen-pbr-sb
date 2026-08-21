@@ -2288,14 +2288,15 @@ TEST_CASE("native secret imports are admitted before bounded body streaming") {
     std::atomic<const SensitiveRequestReservation*> last_reservation{nullptr};
     std::atomic<unsigned int> null_admissions{0U};
     std::atomic<unsigned int> null_route_handled{0U};
-    CHECK_THROWS_AS(
-        server.post_sensitive(
-            "/api/unprotected-sensitive-route",
-            32U,
-            [](const httplib::Request&, SensitiveRequestBody) {
-                return std::string{"{}"};
-            }),
-        std::invalid_argument);
+    // Sensitive streaming and step-up are independent policies. A route may
+    // keep the authenticated protected-transport boundary without requiring
+    // the user to enter the same password a second time.
+    server.post_sensitive(
+        "/api/unprotected-sensitive-route",
+        32U,
+        [](const httplib::Request&, SensitiveRequestBody) {
+            return std::string{"{}"};
+        });
     server.post_sensitive(
         "/api/system/ndms/interfaces/import/preflight",
         32U,
@@ -2377,20 +2378,19 @@ TEST_CASE("native secret imports are admitted before bounded body streaming") {
     const httplib::Headers session{{"Cookie", cookie}};
 
     reset_sensitive_request_body_wipe_count_for_testing();
-    const auto denied = client.Post(
+    const auto accepted_without_step_up = client.Post(
         "/api/system/ndms/interfaces/import",
         session,
         "never-read-secret",
         "text/plain");
-    REQUIRE(denied != nullptr);
-    CHECK(denied->status == 403);
-    CHECK(denied->get_header_value("Cache-Control") == "no-store");
-    CHECK(handled.load(std::memory_order_relaxed) == 0U);
-    CHECK(sensitive_request_body_wipe_count_for_testing() == 0U);
-    CHECK(reservations_created.load(std::memory_order_acquire) == 0U);
-    CHECK(reservations_destroyed.load(std::memory_order_acquire) == 0U);
-
-    grant_local_step_up(client, session, "admin", "secret");
+    REQUIRE(accepted_without_step_up != nullptr);
+    CHECK(accepted_without_step_up->status == 200);
+    CHECK(accepted_without_step_up->get_header_value("Cache-Control") ==
+          "no-store");
+    CHECK(handled.load(std::memory_order_relaxed) == 1U);
+    CHECK(sensitive_request_body_wipe_count_for_testing() >= 1U);
+    CHECK(reservations_created.load(std::memory_order_acquire) == 1U);
+    CHECK(reservations_destroyed.load(std::memory_order_acquire) == 1U);
 
     reset_sensitive_request_body_stream_count_for_testing();
     const auto null_reservation = post_headers_without_body(
@@ -2418,12 +2418,12 @@ TEST_CASE("native secret imports are admitted before bounded body streaming") {
     CHECK(accepted->get_header_value("Cache-Control") == "no-store");
     CHECK(nlohmann::json::parse(accepted->body).at("accepted_bytes") ==
           15U);
-    CHECK(handled.load(std::memory_order_relaxed) == 1U);
+    CHECK(handled.load(std::memory_order_relaxed) == 2U);
     CHECK(sensitive_request_body_wipe_count_for_testing() >= 1U);
-    CHECK(reservations_created.load(std::memory_order_acquire) == 1U);
-    CHECK(reservations_destroyed.load(std::memory_order_acquire) == 1U);
+    CHECK(reservations_created.load(std::memory_order_acquire) == 2U);
+    CHECK(reservations_destroyed.load(std::memory_order_acquire) == 2U);
     CHECK(live_reservations_seen_by_handler.load(
-              std::memory_order_relaxed) == 1U);
+              std::memory_order_relaxed) == 2U);
 
     throw_before_consume.store(true, std::memory_order_relaxed);
     reset_sensitive_request_body_wipe_count_for_testing();
@@ -2440,12 +2440,12 @@ TEST_CASE("native secret imports are admitted before bounded body streaming") {
           std::string::npos);
     CHECK(nlohmann::json::parse(failed->body).at("error") ==
           "sensitive_request_failed");
-    CHECK(handled.load(std::memory_order_relaxed) == 2U);
+    CHECK(handled.load(std::memory_order_relaxed) == 3U);
     CHECK(sensitive_request_body_wipe_count_for_testing() >= 1U);
-    CHECK(reservations_created.load(std::memory_order_acquire) == 2U);
-    CHECK(reservations_destroyed.load(std::memory_order_acquire) == 2U);
+    CHECK(reservations_created.load(std::memory_order_acquire) == 3U);
+    CHECK(reservations_destroyed.load(std::memory_order_acquire) == 3U);
     CHECK(live_reservations_seen_by_handler.load(
-              std::memory_order_relaxed) == 2U);
+              std::memory_order_relaxed) == 3U);
     throw_before_consume.store(false, std::memory_order_relaxed);
 
     reset_sensitive_request_body_wipe_count_for_testing();
@@ -2457,15 +2457,15 @@ TEST_CASE("native secret imports are admitted before bounded body streaming") {
     REQUIRE(oversized != nullptr);
     CHECK(oversized->status == 413);
     CHECK(oversized->get_header_value("Cache-Control") == "no-store");
-    CHECK(handled.load(std::memory_order_relaxed) == 2U);
+    CHECK(handled.load(std::memory_order_relaxed) == 3U);
     // cpp-httplib delivered this small request as one oversized chunk. The
     // route rejected it before copying even one byte into its own buffer, so
     // there is deliberately nothing owned here to wipe.
     CHECK(sensitive_request_body_wipe_count_for_testing() == 0U);
-    CHECK(reservations_created.load(std::memory_order_acquire) == 3U);
-    CHECK(reservations_destroyed.load(std::memory_order_acquire) == 3U);
+    CHECK(reservations_created.load(std::memory_order_acquire) == 4U);
+    CHECK(reservations_destroyed.load(std::memory_order_acquire) == 4U);
     CHECK(live_reservations_seen_by_handler.load(
-              std::memory_order_relaxed) == 2U);
+              std::memory_order_relaxed) == 3U);
 
     reset_sensitive_request_body_wipe_count_for_testing();
     const auto truncated = post_truncated_body(
@@ -2477,12 +2477,12 @@ TEST_CASE("native secret imports are admitted before bounded body streaming") {
               R"({"error":"sensitive_request_read_failed"})") !=
           std::string::npos);
     CHECK(truncated.peer_closed);
-    CHECK(handled.load(std::memory_order_relaxed) == 2U);
+    CHECK(handled.load(std::memory_order_relaxed) == 3U);
     CHECK(sensitive_request_body_wipe_count_for_testing() >= 1U);
-    CHECK(reservations_created.load(std::memory_order_acquire) == 4U);
-    CHECK(reservations_destroyed.load(std::memory_order_acquire) == 4U);
+    CHECK(reservations_created.load(std::memory_order_acquire) == 5U);
+    CHECK(reservations_destroyed.load(std::memory_order_acquire) == 5U);
     CHECK(live_reservations_seen_by_handler.load(
-              std::memory_order_relaxed) == 2U);
+              std::memory_order_relaxed) == 3U);
 
     protected_transport.store(false, std::memory_order_relaxed);
     reset_sensitive_request_body_wipe_count_for_testing();
@@ -2494,10 +2494,10 @@ TEST_CASE("native secret imports are admitted before bounded body streaming") {
     REQUIRE(unprotected != nullptr);
     CHECK(unprotected->status == 403);
     CHECK(unprotected->get_header_value("Cache-Control") == "no-store");
-    CHECK(handled.load(std::memory_order_relaxed) == 2U);
+    CHECK(handled.load(std::memory_order_relaxed) == 3U);
     CHECK(sensitive_request_body_wipe_count_for_testing() == 0U);
-    CHECK(reservations_created.load(std::memory_order_acquire) == 4U);
-    CHECK(reservations_destroyed.load(std::memory_order_acquire) == 4U);
+    CHECK(reservations_created.load(std::memory_order_acquire) == 5U);
+    CHECK(reservations_destroyed.load(std::memory_order_acquire) == 5U);
 }
 
 TEST_CASE("sing-box install requires step-up before its handler runs") {

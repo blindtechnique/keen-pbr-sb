@@ -3083,10 +3083,6 @@ void ApiServer::post_sensitive(
     const std::size_t maximum_body_bytes,
     SensitivePreBodyReservation pre_body_reservation,
     ReservedSensitiveBodyRouteHandler handler) {
-    if (!requires_step_up("POST", path)) {
-        throw std::invalid_argument(
-            "sensitive route must be registered for step-up");
-    }
     if (maximum_body_bytes == 0U) {
         throw std::invalid_argument(
             "sensitive route body limit must be positive");

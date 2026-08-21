@@ -2,7 +2,6 @@ import type {
   NativeWireGuardSecretTicket,
   NativeWireGuardSecretVault,
 } from "@/lib/native-wireguard-secret-vault"
-import { fetchWithStepUp } from "@/lib/step-up"
 
 export type NativeSecretPreflightVerdict = "admitted" | "denied"
 
@@ -57,9 +56,9 @@ export type PreflightNdmsNativeImportOptions = Readonly<{
 }>
 
 /**
- * Runs the replay-safe half of native import before the one-shot vault is
- * opened. A 403 may therefore be replayed once by the shared step-up flow;
- * there is no request body to duplicate and no secret has left the vault.
+ * Runs the bodyless admission check before the one-shot vault is opened.
+ * The authenticated HTTPS/local session is sufficient; the import flow must
+ * not interrupt an ordinary create action with a second password prompt.
  */
 export async function preflightNdmsNativeImport({
   binding,
@@ -73,21 +72,17 @@ export async function preflightNdmsNativeImport({
     return "denied"
   }
 
-  const response = await fetchWithStepUp(
-    NDMS_NATIVE_IMPORT_PREFLIGHT_ENDPOINT,
-    {
-      method: "POST",
-      credentials: "same-origin",
-      mode: "same-origin",
-      cache: "no-store",
-      redirect: "error",
-      referrerPolicy: "no-referrer",
-      keepalive: false,
-      headers: { Accept: "application/json" },
-      signal,
-    },
-    fetchImpl
-  )
+  const response = await fetchImpl(NDMS_NATIVE_IMPORT_PREFLIGHT_ENDPOINT, {
+    method: "POST",
+    credentials: "same-origin",
+    mode: "same-origin",
+    cache: "no-store",
+    redirect: "error",
+    referrerPolicy: "no-referrer",
+    keepalive: false,
+    headers: { Accept: "application/json" },
+    signal,
+  })
   if (!response.ok) return "denied"
 
   const payload = await response.json().catch(() => null)
@@ -106,8 +101,8 @@ export type PostNdmsNativeImportSecretOnceOptions = {
   vault: NativeWireGuardSecretVault
   ticket: NativeWireGuardSecretTicket
   /**
-   * Must perform only the bodyless admission/step-up phase. The secret stays
-   * in the vault until this callback has returned `admitted`.
+   * Must perform only the bodyless admission phase. The secret stays in the
+   * vault until this callback has returned `admitted`.
    */
   preflight: NativeSecretBodylessPreflight
   fetchImpl?: NativeSecretFetch

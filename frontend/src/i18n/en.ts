@@ -1194,7 +1194,7 @@ export const enTranslation = {
       ownerRiskConsent:
         "Keenetic can be changed by another tool during this operation; by continuing, I accept this risk.",
       ownerRiskExplanation:
-        "The operation excludes other keen-pbr writers only. It cannot lock every Keenetic tool. A bodyless admission and step-up check runs before the one-shot secret is consumed.",
+        "The operation excludes other keen-pbr changes only. It cannot lock every Keenetic tool. Access is checked without sending the configuration before the one-shot request.",
       preflighting: "Checking…",
       sending: "Creating…",
       preflightStatus: "Checking access without sending the configuration…",

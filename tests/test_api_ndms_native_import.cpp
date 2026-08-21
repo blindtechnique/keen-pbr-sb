@@ -789,7 +789,7 @@ TEST_CASE("native import rejects incoherent or unknown callback results") {
     CHECK(callback_count == 18U);
 }
 
-TEST_CASE("native import authentication and step-up reject before streaming") {
+TEST_CASE("native import requires authentication but not a second password") {
     std::size_t callback_count = 0U;
     NativeImportApiFixture fixture(
         [&](std::string&&,
@@ -810,17 +810,15 @@ TEST_CASE("native import authentication and step-up reject before streaming") {
 
     const auto session = fixture.login();
     reset_sensitive_request_body_stream_count_for_testing();
-    const auto no_step_up = fixture.client().Post(
+    const auto authenticated = fixture.client().Post(
         std::string{kNdmsNativeImportApiPath},
         fixture.accepted_headers(session),
         "must-not-stream",
         "text/plain");
-    check_no_store(no_step_up);
-    CHECK(no_step_up->status == 403);
-    CHECK(nlohmann::json::parse(no_step_up->body).at("error") ==
-          "step_up_required");
-    CHECK(sensitive_request_body_stream_count_for_testing() == 0U);
-    CHECK(callback_count == 0U);
+    check_no_store(authenticated);
+    CHECK(authenticated->status == 200);
+    CHECK(sensitive_request_body_stream_count_for_testing() == 1U);
+    CHECK(callback_count == 1U);
 }
 
 TEST_CASE("native import preflight is bodyless and reports residual risk") {
@@ -1709,16 +1707,16 @@ TEST_CASE("native import recovery guards precede reservation and callback") {
     CHECK(fixture.reservation_attempts() == 0U);
 
     const auto session = fixture.login();
-    const auto no_step_up = fixture.client().Post(
+    const auto authenticated = fixture.client().Post(
         std::string{kNdmsNativeImportRecoveryApiPath},
         session,
         "",
         "application/octet-stream");
-    check_no_store(no_step_up);
-    CHECK(no_step_up->status == 403);
-    CHECK(fixture.reservation_attempts() == 0U);
+    check_no_store(authenticated);
+    CHECK(authenticated->status == 200);
+    CHECK(fixture.reservation_attempts() == 1U);
+    CHECK(callback_count == 1U);
 
-    fixture.grant_step_up(session);
     fixture.set_protected_transport(false);
     const auto unprotected = fixture.client().Post(
         std::string{kNdmsNativeImportRecoveryApiPath},
@@ -1727,8 +1725,8 @@ TEST_CASE("native import recovery guards precede reservation and callback") {
         "application/octet-stream");
     check_no_store(unprotected);
     CHECK(unprotected->status == 403);
-    CHECK(fixture.reservation_attempts() == 0U);
-    CHECK(callback_count == 0U);
+    CHECK(fixture.reservation_attempts() == 1U);
+    CHECK(callback_count == 1U);
 }
 
 TEST_CASE("native import recovery reservation refusal is pre-body") {

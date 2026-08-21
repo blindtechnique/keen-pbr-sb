@@ -1,5 +1,5 @@
-import { AlertTriangleIcon, RotateCcwIcon, ShieldAlertIcon } from "lucide-react"
-import { useEffect, useState } from "react"
+import { AlertTriangleIcon, RotateCcwIcon } from "lucide-react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 
 import type { NdmsNativeMutationInventoryStatus } from "@/api/generated/model"
@@ -89,6 +89,7 @@ export function NativeMutationRecovery({
   const [deleteReconfirmation, setDeleteReconfirmation] = useState(false)
   const [externalWriterAccepted, setExternalWriterAccepted] = useState(false)
   const [globalSaveAcknowledged, setGlobalSaveAcknowledged] = useState(false)
+  const automaticImportRecoveryStarted = useRef(false)
 
   useEffect(
     () => subscribeNativeMutationLock((nextLock) => setLock(nextLock)),
@@ -103,32 +104,21 @@ export function NativeMutationRecovery({
   const deleteNeedsRecovery =
     deleteState === "recovery_required" || lockMatches(lock, "delete")
   const forgetNeedsRecovery = lockMatches(lock, "forget")
-  // A temporarily unavailable status is handled at the action that needs it.
-  // Do not turn a transient inventory/read failure into a permanent page-wide
-  // alarm. The global alarm is reserved for an explicitly unsafe journal.
-  const importJournalUnsafe = importState === "unsafe"
-  const deleteJournalUnsafe = deleteState === "unsafe"
   const show =
-    pending ||
-    importNeedsRecovery ||
-    deleteNeedsRecovery ||
-    forgetNeedsRecovery ||
-    importJournalUnsafe ||
-    deleteJournalUnsafe ||
-    outcome !== null
+    pending || deleteNeedsRecovery || forgetNeedsRecovery || outcome !== null
   const outcomeCopy = outcome ? recoveryOutcomeCopy(outcome, t) : null
 
-  const syncLock = () => setLock(readNativeMutationLock())
+  const syncLock = useCallback(() => setLock(readNativeMutationLock()), [])
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     try {
       await onInventoryRefresh()
     } finally {
       syncLock()
     }
-  }
+  }, [onInventoryRefresh, syncLock])
 
-  const recoverImport = async () => {
+  const recoverImport = useCallback(async () => {
     if (busy) return
     setBusy("import")
     setOutcome(null)
@@ -175,14 +165,31 @@ export function NativeMutationRecovery({
             }
           }
         )
-      setOutcome(
+      const nextOutcome =
         leaseResult.status === "completed" ? leaseResult.value : "unknown"
+      // A clean/no-work result is ordinary automatic reconciliation. The
+      // refreshed inventory is the useful outcome; do not replace it with a
+      // recovery lecture or a manual button.
+      setOutcome(
+        nextOutcome === "import_no_work" || nextOutcome === "import_completed"
+          ? null
+          : nextOutcome
       )
     } finally {
       setBusy(null)
       await refresh().catch(() => undefined)
     }
-  }
+  }, [busy, refresh])
+
+  useEffect(() => {
+    if (!importNeedsRecovery) {
+      automaticImportRecoveryStarted.current = false
+      return
+    }
+    if (busy !== null || automaticImportRecoveryStarted.current) return
+    automaticImportRecoveryStarted.current = true
+    void recoverImport()
+  }, [busy, importNeedsRecovery, recoverImport])
 
   const recoverDelete = async (withAcknowledgements: boolean) => {
     if (busy) return
@@ -294,42 +301,6 @@ export function NativeMutationRecovery({
           </AlertTitle>
           <AlertDescription className="break-words">
             {t("transports.nativeMutation.recovery.pendingDescription")}
-          </AlertDescription>
-        </Alert>
-      ) : null}
-
-      {importJournalUnsafe || deleteJournalUnsafe ? (
-        <Alert variant="destructive" aria-atomic="true" aria-live="polite">
-          <ShieldAlertIcon />
-          <AlertTitle>
-            {t("transports.nativeMutation.recovery.unsafeTitle")}
-          </AlertTitle>
-          <AlertDescription className="break-words">
-            {t("transports.nativeMutation.recovery.unsafeDescription")}
-          </AlertDescription>
-        </Alert>
-      ) : null}
-
-      {importNeedsRecovery ? (
-        <Alert variant="warning" aria-atomic="true" aria-live="polite">
-          <AlertTriangleIcon />
-          <AlertTitle>
-            {t("transports.nativeMutation.recovery.importTitle")}
-          </AlertTitle>
-          <AlertDescription className="space-y-3 break-words">
-            <p>{t("transports.nativeMutation.recovery.importDescription")}</p>
-            <Button
-              className="min-h-11 max-w-full whitespace-normal"
-              disabled={busy !== null}
-              onClick={() => void recoverImport()}
-              type="button"
-              variant="outline"
-            >
-              <RotateCcwIcon />
-              {busy === "import"
-                ? t("transports.nativeMutation.recovery.checking")
-                : t("transports.nativeMutation.recovery.checkImport")}
-            </Button>
           </AlertDescription>
         </Alert>
       ) : null}

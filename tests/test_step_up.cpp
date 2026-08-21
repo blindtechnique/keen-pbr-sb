@@ -146,11 +146,14 @@ TEST_CASE("the package and access operations require a step-up") {
     CHECK(requires_step_up("POST", "/api/backup/rollback"));
     CHECK(requires_step_up("POST", "/api/auth/settings"));
     CHECK(requires_step_up("POST", "/api/system/remote-access"));
-    CHECK(requires_step_up(
+    // Native import still requires an authenticated session and the
+    // protected-secret transport. Re-entering the same router password adds
+    // no useful authority here and made the ordinary import flow unusable.
+    CHECK_FALSE(requires_step_up(
         "POST", "/api/system/ndms/interfaces/import"));
-    CHECK(requires_step_up(
+    CHECK_FALSE(requires_step_up(
         "POST", "/api/system/ndms/interfaces/import/preflight"));
-    CHECK(requires_step_up(
+    CHECK_FALSE(requires_step_up(
         "POST", "/api/system/ndms/interfaces/import/recovery/retry"));
     CHECK(requires_step_up(
         "POST", "/api/system/ndms/interfaces/remove"));

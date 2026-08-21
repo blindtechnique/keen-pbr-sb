@@ -36,7 +36,7 @@ const std::vector<StepUpProtectedRoute>& step_up_protected_routes() {
     //   POST /api/backup/restore          - replaces configuration wholesale
     //   POST /api/backup/rollback         - the same, in the other direction
     //
-    // NDMS/access operations, because they change how the router itself can be
+    // Access operations, because they change how the router itself can be
     // reached:
     //   POST /api/system/remote-access
     //   POST /api/auth/settings - rotates or replaces the authority itself
@@ -63,9 +63,6 @@ const std::vector<StepUpProtectedRoute>& step_up_protected_routes() {
         {"POST", "/api/backup/rollback"},
         {"POST", "/api/auth/settings"},
         {"POST", "/api/system/remote-access"},
-        {"POST", "/api/system/ndms/interfaces/import"},
-        {"POST", "/api/system/ndms/interfaces/import/preflight"},
-        {"POST", "/api/system/ndms/interfaces/import/recovery/retry"},
         {"POST", "/api/system/ndms/interfaces/remove"},
         {"POST", "/api/system/ndms/interfaces/remove/recovery/retry"},
         {"POST", "/api/system/ndms/interfaces/retained-deletions/forget"},
