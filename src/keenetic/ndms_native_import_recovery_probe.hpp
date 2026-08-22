@@ -17,6 +17,16 @@ struct NdmsNativeImportRecoveryTargetEvidence {
     std::string interface_name;
     bool link_down{false};
     std::string full_revision;
+    // A completed panel import may move its private ownership marker out of
+    // the user-visible interface description and into exactly one peer
+    // comment.  This bit is derived from the redacted running-config target
+    // read; the marker and peer key themselves never cross this evidence
+    // boundary.
+    bool ownership_marker_present{false};
+    // Public (never secret) key of the first measured peer. It is used only
+    // by the import coordinator to attach the marker before replacing the
+    // visible description with the owner's friendly name.
+    std::string primary_peer_public_key;
 };
 
 // Canonical secret-independent revision of exactly the full slot scan and the

@@ -2,10 +2,13 @@
 
 #include "keenetic/ndms_native_exact_mutation_transport.hpp"
 
+#include <nlohmann/json.hpp>
+
 #include <new>
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 using namespace keen_pbr3;
 
@@ -207,6 +210,45 @@ TEST_CASE("exact native enable request has a closed canonical grammar") {
           R"({"interface":{"Wireguard5":{"up":true}}})");
     CHECK(request.target().empty());
     CHECK(request.content_length() == 0U);
+}
+
+TEST_CASE("exact native identity request keeps the marker out of the description") {
+    const std::string marker{
+        "kpbr-ni-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"};
+    const std::string peer_key{
+        "E6E1kIJLnMIXinj5Ebs2qHCHWRUNoJyrEJ0tTJ7tbDs="};
+    auto request =
+        NdmsNativeExactMutationRequest::
+            set_managed_interface_identity(
+                "Wireguard5", "Мой VPN", peer_key, marker);
+    CHECK(request.kind() ==
+          NdmsNativeExactMutationKind::set_managed_interface_identity);
+    CHECK(request.target() == "Wireguard5");
+
+    NdmsNativeSecretBuffer body(request.content_length());
+    CHECK(request.write_body_once(body));
+    const auto parsed = nlohmann::json::parse(body.view());
+    CHECK(parsed["interface"]["Wireguard5"]["description"] ==
+          "Мой VPN");
+    const auto& peer = parsed["interface"]["Wireguard5"]
+                             ["wireguard"]["peer"][0];
+    CHECK(peer["key"] == peer_key);
+    CHECK(peer["comment"] == marker);
+    CHECK(body.view().find("Мой VPN-kpbr") == std::string_view::npos);
+    CHECK(request.content_length() == 0U);
+
+    for (const auto& invalid : std::vector<std::string>{
+             "Wireguard4", "Wireguard99"}) {
+        CHECK_THROWS_AS(
+            NdmsNativeExactMutationRequest::
+                set_managed_interface_identity(
+                    invalid, "VPN", peer_key, marker),
+            NdmsNativeExactMutationTransportError);
+    }
+    CHECK_THROWS_AS(
+        NdmsNativeExactMutationRequest::set_managed_interface_identity(
+            "Wireguard5", "VPN", "not-a-key", marker),
+        NdmsNativeExactMutationTransportError);
 }
 
 TEST_CASE("existing native lifecycle requests use the measured Wireguard identity") {

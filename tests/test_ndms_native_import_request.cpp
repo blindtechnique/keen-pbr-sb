@@ -395,6 +395,10 @@ TEST_CASE("native AWG request emits complete base and extended parameters") {
 TEST_CASE("prepared native import prefixes its private marker with the chosen name") {
     auto prepared = prepare_ndms_native_import(
         awg_conf(), "Мой AWG");
+    CHECK(prepared.delete_snapshot_metadata().display_name() ==
+          "Мой AWG");
+    CHECK(prepared.delete_snapshot_metadata().
+              primary_peer_public_key().size() == 44U);
     const auto marker =
         std::string{prepared.request_identity().marker()};
     auto request = prepared.take_request();

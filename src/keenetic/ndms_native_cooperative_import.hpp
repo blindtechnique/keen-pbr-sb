@@ -282,6 +282,11 @@ private:
     NdmsNativeExactMutationTransportResult dispatch_activation_once(
         NdmsNativeExactMutationRequest request,
         NdmsNativeExactMutationPreDispatchGuard& guard);
+    bool normalize_completed_identity(
+        NdmsNativeWriterLease& writer,
+        const NdmsNativeOwnershipRecord& ownership,
+        std::string_view display_name,
+        std::string_view primary_peer_public_key) noexcept;
 
     std::unique_ptr<Impl> impl_;
 

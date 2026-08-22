@@ -67,12 +67,19 @@ std::string ndms_native_import_recovery_catalog_revision(
             if (left->link_down != right->link_down) {
                 return left->link_down < right->link_down;
             }
+            if (left->ownership_marker_present !=
+                right->ownership_marker_present) {
+                return left->ownership_marker_present <
+                       right->ownership_marker_present;
+            }
             return left->full_revision < right->full_revision;
         });
     update_revision_field(hasher, std::to_string(ordered.size()));
     for (const auto* item : ordered) {
         update_revision_field(hasher, item->interface_name);
         update_revision_field(hasher, item->link_down ? "1" : "0");
+        update_revision_field(
+            hasher, item->ownership_marker_present ? "1" : "0");
         update_revision_field(hasher, item->full_revision);
     }
     return std::string{kNdmsNativeObservationCatalogRevisionPrefix} +

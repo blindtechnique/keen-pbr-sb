@@ -310,6 +310,21 @@ public:
                 ? std::optional<std::uint8_t>{
                       second_marker_identity->slot}
                 : std::nullopt);
+        if (identity_finalized) {
+            for (auto& tunnel : result.snapshot->catalog.tunnels) {
+                if (tunnel.firmware_interface_name ==
+                    recovery_marker_target) {
+                    tunnel.label = finalized_display_name;
+                }
+            }
+            for (auto& metadata :
+                 result.snapshot->catalog.interface_metadata) {
+                if (metadata.firmware_interface_name ==
+                    recovery_marker_target) {
+                    metadata.label = finalized_display_name;
+                }
+            }
+        }
         if ((running_extra_structural_drift &&
              scope == NdmsNativeDirectCatalogScope::running_config) ||
             (runtime_extra_structural_drift &&
@@ -348,6 +363,10 @@ public:
              recovery_target_down,
              "ndms-rci-full-v1-" +
                  std::string(64U, revision_digit)});
+        result.target_evidence.back().ownership_marker_present =
+            identity_finalized;
+        result.target_evidence.back().primary_peer_public_key =
+            "E6E1kIJLnMIXinj5Ebs2qHCHWRUNoJyrEJ0tTJ7tbDs=";
         result.target_protocols.push_back(
             {observed_target, protocol});
         if (recovery_target_present &&
@@ -383,6 +402,8 @@ public:
     bool omit_running_marker{false};
     bool recovery_target_present{true};
     bool recovery_target_down{true};
+    bool identity_finalized{false};
+    std::string finalized_display_name;
     bool running_extra_structural_drift{false};
     bool runtime_extra_structural_drift{false};
     std::string recovery_marker_target{"Wireguard5"};
@@ -451,10 +472,27 @@ private:
         trace.perform_started = true;
         ++perform_calls;
         if (apply_effect && gateway != nullptr) {
-            if (enable_target) {
+            const auto body = nlohmann::json::parse(bodies.back());
+            const auto identity = body.contains("interface") &&
+                    body["interface"].is_object() &&
+                    body["interface"].contains("Wireguard5")
+                ? &body["interface"]["Wireguard5"]
+                : nullptr;
+            if (identity != nullptr &&
+                identity->is_object() &&
+                identity->contains("description") &&
+                (*identity)["description"].is_string()) {
+                gateway->identity_finalized = true;
+                gateway->finalized_display_name =
+                    (*identity)["description"].get<std::string>();
+            } else if (enable_target && identity != nullptr &&
+                       identity->contains("up")) {
                 gateway->recovery_target_down = false;
             } else {
-                gateway->recovery_target_present = false;
+                const bool save = body.contains("system");
+                if (!enable_target && !save) {
+                    gateway->recovery_target_present = false;
+                }
             }
         }
         if (after_perform) after_perform(calls);
@@ -681,9 +719,10 @@ struct Fixture final {
     NdmsNativeCooperativeImportResult run(
         std::string config = plain_config(),
         const NdmsNativeExternalWriterRaceAcceptance acceptance =
-            NdmsNativeExternalWriterRaceAcceptance::owner_accepted) {
+            NdmsNativeExternalWriterRaceAcceptance::owner_accepted,
+        const std::string_view display_name = {}) {
         return coordinator.import_once(
-            writer.lease, std::move(config), acceptance);
+            writer.lease, std::move(config), acceptance, display_name);
     }
 
     TempDirectory directory;
@@ -1440,6 +1479,31 @@ TEST_CASE("cooperative import enables the tunnel and saves KeeneticOS") {
     REQUIRE(ownership.record.has_value());
     CHECK(ownership.record->target_full_revision ==
           "ndms-rci-full-v1-" + std::string(64U, 'a'));
+}
+
+TEST_CASE("cooperative import moves its marker out of the KeeneticOS name") {
+    Fixture fixture(true);
+
+    const auto result = fixture.run(
+        plain_config(),
+        NdmsNativeExternalWriterRaceAcceptance::owner_accepted,
+        "vpn-sdd45");
+
+    REQUIRE(result.status == NdmsNativeCooperativeImportStatus::completed);
+    CHECK(result.stop == NdmsNativeCooperativeImportStop::none);
+    CHECK(result.system_configuration_save_performed);
+    CHECK(fixture.gateway.identity_finalized);
+    CHECK(fixture.gateway.finalized_display_name == "vpn-sdd45");
+    REQUIRE(fixture.activation_backend.bodies.size() == 4U);
+    const auto identity = nlohmann::json::parse(
+        fixture.activation_backend.bodies[2]);
+    CHECK(identity["interface"]["Wireguard5"]["description"] ==
+          "vpn-sdd45");
+    CHECK(identity["interface"]["Wireguard5"]["wireguard"]
+                  ["peer"][0]["comment"] ==
+          "kpbr-ni-v1-" + *result.transaction_id);
+    CHECK(fixture.activation_backend.bodies[3] ==
+          R"({"system":{"configuration":{"save":{}}}})");
 }
 
 TEST_CASE("cooperative AWG import binds the measured ASC protocol") {

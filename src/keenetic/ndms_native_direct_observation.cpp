@@ -306,9 +306,44 @@ struct TargetReadResult final {
         evidence_failure;
 };
 
+struct PeerIdentityEvidence final {
+    bool ownership_marker_present{false};
+    std::string primary_public_key;
+};
+
+PeerIdentityEvidence peer_identity_evidence(
+    const nlohmann::json& config,
+    const std::string_view marker) {
+    PeerIdentityEvidence result;
+    if (!config.contains("wireguard") ||
+        !config["wireguard"].is_object() ||
+        !config["wireguard"].contains("peer") ||
+        !config["wireguard"]["peer"].is_array()) {
+        return result;
+    }
+
+    std::size_t marker_count = 0U;
+    for (const auto& peer : config["wireguard"]["peer"]) {
+        if (!peer.is_object()) continue;
+        if (result.primary_public_key.empty() &&
+            peer.contains("key") && peer["key"].is_string()) {
+            result.primary_public_key =
+                peer["key"].get<std::string>();
+        }
+        if (peer.contains("comment") &&
+            peer["comment"].is_string() &&
+            peer["comment"].get_ref<const std::string&>() == marker) {
+            ++marker_count;
+        }
+    }
+    result.ownership_marker_present = marker_count == 1U;
+    return result;
+}
+
 TargetReadResult read_target(
     const std::shared_ptr<HttpTransport>& transport,
-    const std::string& interface_name) {
+    const std::string& interface_name,
+    const std::string_view marker) {
     const auto config_path =
         "show/rc/interface/" + interface_name;
     const auto runtime_path = "show/interface/" + interface_name;
@@ -347,7 +382,7 @@ TargetReadResult read_target(
     // builder; the raw body and DOM strings are overwritten on every return.
     const auto redacted_config = redact_ndms_secret_material(
         *config.document, interface_name);
-    const auto built = build_ndms_native_target_evidence(
+    auto built = build_ndms_native_target_evidence(
         interface_name, redacted_config, *runtime.document, *asc.document);
     if (!built.evidence || !built.asc_class) {
         return {{}, {},
@@ -358,6 +393,11 @@ TargetReadResult read_target(
                           built.failure->reason}
                     : std::nullopt};
     }
+    const auto identity = peer_identity_evidence(redacted_config, marker);
+    built.evidence->ownership_marker_present =
+        identity.ownership_marker_present;
+    built.evidence->primary_peer_public_key =
+        identity.primary_public_key;
     return {built.evidence, built.asc_class,
             NdmsNativeDirectObservationFailure::none,
             NdmsNativeDirectDocumentKind::none, {}};
@@ -562,7 +602,8 @@ NdmsNativeDirectObservationGateway::observe_recovery(
         }
 
         for (const auto& interface_name : evidence_targets) {
-            const auto target = read_target(transport_, interface_name);
+            const auto target = read_target(
+                transport_, interface_name, marker);
             if (!target.evidence || !target.asc_class) {
                 result.target_evidence.clear();
                 result.target_protocols.clear();

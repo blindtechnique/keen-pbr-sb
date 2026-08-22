@@ -30,6 +30,7 @@ enum class NdmsNativeExactMutationKind {
     enable_managed_interface,
     enable_existing_interface,
     disable_existing_interface,
+    set_managed_interface_identity,
     save_configuration,
 };
 
@@ -64,6 +65,11 @@ public:
         std::string target);
     static NdmsNativeExactMutationRequest disable_existing_interface(
         std::string target);
+    static NdmsNativeExactMutationRequest set_managed_interface_identity(
+        std::string target,
+        std::string friendly_name,
+        std::string primary_peer_public_key,
+        std::string ownership_marker);
     static NdmsNativeExactMutationRequest save_configuration();
 
     NdmsNativeExactMutationRequest(
@@ -88,11 +94,16 @@ private:
     NdmsNativeExactMutationRequest(
         NdmsNativeExactMutationKind kind,
         std::string target) noexcept;
+    NdmsNativeExactMutationRequest(
+        NdmsNativeExactMutationKind kind,
+        std::string target,
+        std::string payload) noexcept;
     void invalidate() noexcept;
 
     NdmsNativeExactMutationKind kind_{
         NdmsNativeExactMutationKind::save_configuration};
     std::string target_;
+    std::string payload_;
     bool available_{false};
 };
 

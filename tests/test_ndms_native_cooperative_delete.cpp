@@ -215,9 +215,11 @@ public:
 
         nlohmann::json payload = nlohmann::json::object();
         if (observed_present) {
-            const auto description = friendly_name.empty()
-                ? marker
-                : friendly_name + " · " + marker;
+            const auto description = peer_marker_identity
+                ? friendly_name
+                : (friendly_name.empty()
+                       ? marker
+                       : friendly_name + " · " + marker);
             payload[interface_name] = {
                 {"type", "Wireguard"},
                 {"interface-name", interface_name},
@@ -247,6 +249,8 @@ public:
                 : target_full_revision;
             result.target_evidence.push_back(
                 {interface_name, !connected, revision});
+            result.target_evidence.back().ownership_marker_present =
+                peer_marker_identity;
             result.target_protocols.push_back(
                 {interface_name,
                  drift_kind_on_call == calls
@@ -275,6 +279,7 @@ public:
     std::size_t presence_override_on_call{0U};
     bool presence_override_value{false};
     bool connected{true};
+    bool peer_marker_identity{false};
     std::size_t calls{0U};
     std::size_t fail_on_call{0U};
     std::size_t scope_mismatch_on_call{0U};
@@ -998,6 +1003,23 @@ TEST_CASE("connected panel-owned WG and AWG delete to a durable tombstone") {
         CHECK(save_perform < tombstone);
         CHECK(tombstone < wal_remove);
     }
+}
+
+TEST_CASE("clean friendly label with a private peer marker remains deletable") {
+    DeleteFixture fixture;
+    fixture.install_owned_target(
+        NdmsNativeTunnelImportKind::amnezia_wireguard);
+    fixture.gateway.friendly_name = "vpn-sdd45";
+    fixture.gateway.peer_marker_identity = true;
+
+    const auto result = fixture.coordinator.delete_once(
+        fixture.writer.lease, fixture.request());
+
+    CHECK(result.status == NdmsNativeCooperativeDeleteStatus::
+          save_acknowledged_unverified);
+    CHECK(result.stop == NdmsNativeCooperativeDeleteStop::none);
+    CHECK(result.ownership_tombstone_durable);
+    CHECK(fixture.backend.perform_calls == 2U);
 }
 
 TEST_CASE(

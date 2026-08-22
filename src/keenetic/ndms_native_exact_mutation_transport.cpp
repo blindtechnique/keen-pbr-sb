@@ -1,8 +1,14 @@
 #include "ndms_native_exact_mutation_transport.hpp"
 
 #include "ndms_native_create_policy.hpp"
+#include "ndms_native_import_identity.hpp"
 #include "ndms_wireguard_identity.hpp"
 
+#include "../util/display_name.hpp"
+
+#include <nlohmann/json.hpp>
+
+#include <algorithm>
 #include <curl/curl.h>
 
 #include <climits>
@@ -34,6 +40,18 @@ constexpr std::string_view kDisablePrefix{
 constexpr std::string_view kDisableSuffix{R"(":{"down":true}}})"};
 constexpr std::string_view kSaveBody{
     R"({"system":{"configuration":{"save":{}}}})"};
+
+bool valid_wireguard_public_key(const std::string_view value) noexcept {
+    if (value.size() != 44U || value.back() != '=') return false;
+    return std::all_of(
+        value.begin(), value.end() - 1,
+        [](const unsigned char character) {
+            return (character >= 'A' && character <= 'Z') ||
+                   (character >= 'a' && character <= 'z') ||
+                   (character >= '0' && character <= '9') ||
+                   character == '+' || character == '/';
+        });
+}
 
 void secure_wipe(std::string& value) noexcept {
     volatile char* bytes = value.empty() ? nullptr : value.data();
@@ -410,6 +428,15 @@ NdmsNativeExactMutationRequest::NdmsNativeExactMutationRequest(
     std::string target) noexcept
     : kind_(kind), target_(std::move(target)), available_(true) {}
 
+NdmsNativeExactMutationRequest::NdmsNativeExactMutationRequest(
+    const NdmsNativeExactMutationKind kind,
+    std::string target,
+    std::string payload) noexcept
+    : kind_(kind),
+      target_(std::move(target)),
+      payload_(std::move(payload)),
+      available_(true) {}
+
 NdmsNativeExactMutationRequest
 NdmsNativeExactMutationRequest::delete_managed_interface(
     std::string target) {
@@ -463,6 +490,51 @@ NdmsNativeExactMutationRequest::disable_existing_interface(
 }
 
 NdmsNativeExactMutationRequest
+NdmsNativeExactMutationRequest::set_managed_interface_identity(
+    std::string target,
+    std::string friendly_name,
+    std::string primary_peer_public_key,
+    std::string ownership_marker) {
+    const auto identity = parse_ndms_wireguard_identity(target);
+    if (!identity ||
+        !ndms_wireguard_identity_is_managed_candidate(*identity) ||
+        !display_name::is_valid(friendly_name) ||
+        !valid_wireguard_public_key(primary_peer_public_key) ||
+        !ndms_native_import_transaction_id_from_marker(
+            ownership_marker)) {
+        secure_wipe(target);
+        secure_wipe(friendly_name);
+        secure_wipe(primary_peer_public_key);
+        secure_wipe(ownership_marker);
+        throw NdmsNativeExactMutationTransportError(
+            "native exact identity request is invalid");
+    }
+
+    nlohmann::json peer = {
+        {"key", primary_peer_public_key},
+        {"comment", ownership_marker},
+    };
+    nlohmann::json body = {
+        {"interface", {
+            {target, {
+                {"description", friendly_name},
+                {"wireguard", {
+                    {"peer", nlohmann::json::array({std::move(peer)})},
+                }},
+            }},
+        }},
+    };
+    auto payload = body.dump();
+    secure_wipe(friendly_name);
+    secure_wipe(primary_peer_public_key);
+    secure_wipe(ownership_marker);
+    return NdmsNativeExactMutationRequest{
+        NdmsNativeExactMutationKind::set_managed_interface_identity,
+        std::move(target),
+        std::move(payload)};
+}
+
+NdmsNativeExactMutationRequest
 NdmsNativeExactMutationRequest::save_configuration() {
     return NdmsNativeExactMutationRequest{
         NdmsNativeExactMutationKind::save_configuration, {}};
@@ -472,6 +544,7 @@ NdmsNativeExactMutationRequest::NdmsNativeExactMutationRequest(
     NdmsNativeExactMutationRequest&& other) noexcept
     : kind_(other.kind_),
       target_(std::move(other.target_)),
+      payload_(std::move(other.payload_)),
       available_(other.available_) {
     other.invalidate();
 }
@@ -486,6 +559,7 @@ NdmsNativeExactMutationRequest::operator=(
     invalidate();
     kind_ = other.kind_;
     target_ = std::move(other.target_);
+    payload_ = std::move(other.payload_);
     available_ = other.available_;
     other.invalidate();
     return *this;
@@ -524,6 +598,10 @@ NdmsNativeExactMutationRequest::content_length() const noexcept {
         return kDisablePrefix.size() + target_.size() +
                kDisableSuffix.size();
     }
+    if (kind_ ==
+        NdmsNativeExactMutationKind::set_managed_interface_identity) {
+        return payload_.size();
+    }
     return kSaveBody.size();
 }
 
@@ -556,6 +634,10 @@ bool NdmsNativeExactMutationRequest::write_body_once(
                 sink.write_secret_body_chunk(kDisablePrefix) &&
                 sink.write_secret_body_chunk(target_) &&
                 sink.write_secret_body_chunk(kDisableSuffix);
+        } else if (kind_ ==
+                   NdmsNativeExactMutationKind::
+                       set_managed_interface_identity) {
+            written = sink.write_secret_body_chunk(payload_);
         } else {
             written = sink.write_secret_body_chunk(kSaveBody);
         }
@@ -563,12 +645,14 @@ bool NdmsNativeExactMutationRequest::write_body_once(
         written = false;
     }
     secure_wipe(target_);
+    secure_wipe(payload_);
     return written;
 }
 
 void NdmsNativeExactMutationRequest::invalidate() noexcept {
     available_ = false;
     secure_wipe(target_);
+    secure_wipe(payload_);
 }
 
 NdmsNativeExactMutationRawResponse::

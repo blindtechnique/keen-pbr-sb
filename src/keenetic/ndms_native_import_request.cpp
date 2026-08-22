@@ -769,6 +769,10 @@ NdmsNativePreparedImport prepare_ndms_native_import(
     NdmsNativePanelDeleteSnapshot snapshot{
         imported.kind,
         marker,
+        std::string{display_name},
+        imported.peers.empty()
+            ? std::string{}
+            : imported.peers.front().public_key,
         preview.revision,
         preview.preshared_key_count,
         imported.kind ==
@@ -789,12 +793,16 @@ NdmsNativePreparedImport prepare_ndms_native_import(
 NdmsNativePanelDeleteSnapshot::NdmsNativePanelDeleteSnapshot(
     const NdmsNativeTunnelImportKind kind,
     std::string marker,
+    std::string display_name,
+    std::string primary_peer_public_key,
     std::string canonical_revision,
     const std::size_t preshared_key_count,
     const bool has_complete_awg_parameters,
     std::string sealed_payload) noexcept
     : kind_(kind),
       marker_(std::move(marker)),
+      display_name_(std::move(display_name)),
+      primary_peer_public_key_(std::move(primary_peer_public_key)),
       canonical_revision_(std::move(canonical_revision)),
       preshared_key_count_(preshared_key_count),
       has_complete_awg_parameters_(has_complete_awg_parameters) {
@@ -806,6 +814,9 @@ NdmsNativePanelDeleteSnapshot::NdmsNativePanelDeleteSnapshot(
     NdmsNativePanelDeleteSnapshot&& other) noexcept
     : kind_(other.kind_),
       marker_(std::move(other.marker_)),
+      display_name_(std::move(other.display_name_)),
+      primary_peer_public_key_(
+          std::move(other.primary_peer_public_key_)),
       canonical_revision_(std::move(other.canonical_revision_)),
       preshared_key_count_(other.preshared_key_count_),
       has_complete_awg_parameters_(
@@ -824,6 +835,9 @@ NdmsNativePanelDeleteSnapshot::operator=(
     wipe();
     kind_ = other.kind_;
     marker_ = std::move(other.marker_);
+    display_name_ = std::move(other.display_name_);
+    primary_peer_public_key_ =
+        std::move(other.primary_peer_public_key_);
     canonical_revision_ = std::move(other.canonical_revision_);
     preshared_key_count_ = other.preshared_key_count_;
     has_complete_awg_parameters_ =
@@ -845,6 +859,16 @@ NdmsNativePanelDeleteSnapshot::kind() const noexcept {
 std::string_view
 NdmsNativePanelDeleteSnapshot::marker() const noexcept {
     return marker_;
+}
+
+std::string_view
+NdmsNativePanelDeleteSnapshot::display_name() const noexcept {
+    return display_name_;
+}
+
+std::string_view
+NdmsNativePanelDeleteSnapshot::primary_peer_public_key() const noexcept {
+    return primary_peer_public_key_;
 }
 
 std::string_view
@@ -875,6 +899,8 @@ NdmsNativePanelDeleteSnapshot::sealed_payload_for_store() const noexcept {
 void NdmsNativePanelDeleteSnapshot::wipe() noexcept {
     secure_wipe(sealed_payload_);
     secure_wipe(marker_);
+    secure_wipe(display_name_);
+    secure_wipe(primary_peer_public_key_);
     secure_wipe(canonical_revision_);
     preshared_key_count_ = 0U;
     has_complete_awg_parameters_ = false;
@@ -917,6 +943,10 @@ NdmsNativePanelDeleteSnapshot make_ndms_native_panel_delete_snapshot(
     return NdmsNativePanelDeleteSnapshot{
         imported.kind,
         ownership_marker,
+        {},
+        imported.peers.empty()
+            ? std::string{}
+            : imported.peers.front().public_key,
         preview.revision,
         preview.preshared_key_count,
         imported.kind ==
@@ -992,6 +1022,10 @@ NdmsNativePanelDeleteSnapshot::from_sealed_payload(
     NdmsNativePanelDeleteSnapshot decoded{
         imported.kind,
         expected_marker,
+        display_name,
+        imported.peers.empty()
+            ? std::string{}
+            : imported.peers.front().public_key,
         preview.revision,
         preview.preshared_key_count,
         imported.kind ==

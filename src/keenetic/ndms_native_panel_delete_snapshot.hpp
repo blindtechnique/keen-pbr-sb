@@ -37,6 +37,8 @@ public:
 
     NdmsNativeTunnelImportKind kind() const noexcept;
     std::string_view marker() const noexcept;
+    std::string_view display_name() const noexcept;
+    std::string_view primary_peer_public_key() const noexcept;
     // Digest of this canonical secret-bearing snapshot. This is deliberately
     // not the firmware RCI full revision used for target CAS.
     std::string_view canonical_revision() const noexcept;
@@ -51,6 +53,8 @@ private:
     NdmsNativePanelDeleteSnapshot(
         NdmsNativeTunnelImportKind kind,
         std::string marker,
+        std::string display_name,
+        std::string primary_peer_public_key,
         std::string canonical_revision,
         std::size_t preshared_key_count,
         bool has_complete_awg_parameters,
@@ -65,6 +69,8 @@ private:
     NdmsNativeTunnelImportKind kind_{
         NdmsNativeTunnelImportKind::wireguard};
     std::string marker_;
+    std::string display_name_;
+    std::string primary_peer_public_key_;
     std::string canonical_revision_;
     std::size_t preshared_key_count_{0U};
     bool has_complete_awg_parameters_{false};

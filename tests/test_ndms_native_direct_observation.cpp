@@ -60,6 +60,16 @@ nlohmann::json config_document(const std::string& description) {
     };
 }
 
+nlohmann::json config_document_with_marker(
+    const std::string& description,
+    const std::string_view marker) {
+    auto document = config_document(description);
+    document["wireguard"]["peer"][0]["key"] =
+        "E6E1kIJLnMIXinj5Ebs2qHCHWRUNoJyrEJ0tTJ7tbDs=";
+    document["wireguard"]["peer"][0]["comment"] = marker;
+    return document;
+}
+
 nlohmann::json runtime_document(const std::string& name) {
     return {
         {"id", name},
@@ -257,6 +267,30 @@ TEST_CASE("one marker yields one exact redacted target measurement") {
             transport->requests[index],
             kNdmsNativeDirectTargetMaximumBytes);
     }
+}
+
+TEST_CASE("a clean interface label retains exact ownership in one peer comment") {
+    auto transport = std::make_shared<QueueTransport>();
+    transport->responses.push_back(response(nlohmann::json{
+        {"Wireguard5", tunnel("Wireguard5", "Мой VPN")},
+    }.dump()));
+    transport->responses.push_back(response(
+        config_document_with_marker("Мой VPN", kMarker).dump()));
+    transport->responses.push_back(
+        response(runtime_document("Wireguard5").dump()));
+    transport->responses.push_back(
+        response(nlohmann::json::object().dump()));
+
+    const auto measured = gateway_for(transport).observe_recovery(
+        kMarker, std::optional<std::string>{"Wireguard5"});
+    REQUIRE(measured.complete());
+    REQUIRE(measured.target_evidence.size() == 1U);
+    CHECK(measured.target_evidence.front().ownership_marker_present);
+    CHECK(measured.target_evidence.front().primary_peer_public_key ==
+          "E6E1kIJLnMIXinj5Ebs2qHCHWRUNoJyrEJ0tTJ7tbDs=");
+    REQUIRE(measured.snapshot.has_value());
+    REQUIRE(measured.snapshot->catalog.tunnels.size() == 1U);
+    CHECK(measured.snapshot->catalog.tunnels.front().label == "Мой VPN");
 }
 
 TEST_CASE("recovery completeness binds requested and observed catalog scope") {

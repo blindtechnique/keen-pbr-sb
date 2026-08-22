@@ -1098,6 +1098,98 @@ ScopedForwardPass observe_scoped_forward_once(
     return pass;
 }
 
+bool exact_marker_label(
+    const std::string_view label,
+    const std::string_view marker) noexcept {
+    if (label == marker) return true;
+    constexpr std::string_view separator{" · "};
+    return label.size() > separator.size() + marker.size() &&
+           label.substr(label.size() - marker.size()) == marker &&
+           label.substr(
+               label.size() - marker.size() - separator.size(),
+               separator.size()) == separator;
+}
+
+const NdmsNativeImportRecoveryTargetEvidence* unique_target_evidence(
+    const NdmsNativeDirectRecoveryObservation& measured,
+    const std::string_view expected_interface) noexcept {
+    const NdmsNativeImportRecoveryTargetEvidence* found = nullptr;
+    for (const auto& evidence : measured.target_evidence) {
+        if (evidence.interface_name != expected_interface) continue;
+        if (found != nullptr) return nullptr;
+        found = &evidence;
+    }
+    return found;
+}
+
+const NdmsTunnelInterface* unique_target_tunnel(
+    const NdmsNativeDirectRecoveryObservation& measured,
+    const std::string_view expected_interface) noexcept {
+    if (!measured.snapshot) return nullptr;
+    const NdmsTunnelInterface* found = nullptr;
+    for (const auto& tunnel : measured.snapshot->catalog.tunnels) {
+        if (tunnel.firmware_interface_name != expected_interface) continue;
+        if (found != nullptr) return nullptr;
+        found = &tunnel;
+    }
+    return found;
+}
+
+bool import_identity_observation_matches(
+    const NdmsNativeDirectRecoveryObservation& measured,
+    const std::string& expected_interface,
+    const NdmsNativeTunnelImportKind kind,
+    const std::string_view marker,
+    const std::string_view display_name,
+    const std::string_view primary_peer_public_key,
+    const bool finalized) noexcept {
+    if (!measured.complete() ||
+        !kind_matches_protocol(measured, expected_interface, kind)) {
+        return false;
+    }
+    const auto* evidence = unique_target_evidence(
+        measured, expected_interface);
+    const auto* tunnel = unique_target_tunnel(
+        measured, expected_interface);
+    if (evidence == nullptr || tunnel == nullptr ||
+        evidence->primary_peer_public_key != primary_peer_public_key) {
+        return false;
+    }
+    if (finalized) {
+        return evidence->ownership_marker_present &&
+               tunnel->label == display_name;
+    }
+    return exact_marker_label(tunnel->label, marker);
+}
+
+bool import_identity_pair_matches(
+    NdmsNativeCooperativeImportObservationGateway& gateway,
+    const std::string& expected_interface,
+    const NdmsNativeTunnelImportKind kind,
+    const std::string& marker,
+    const std::string_view display_name,
+    const std::string_view primary_peer_public_key,
+    const bool finalized) noexcept {
+    try {
+        const auto runtime = gateway.observe_recovery(
+            NdmsNativeDirectCatalogScope::runtime_state,
+            marker, expected_interface);
+        if (!import_identity_observation_matches(
+                runtime, expected_interface, kind, marker,
+                display_name, primary_peer_public_key, finalized)) {
+            return false;
+        }
+        const auto running = gateway.observe_recovery(
+            NdmsNativeDirectCatalogScope::running_config,
+            marker, expected_interface);
+        return import_identity_observation_matches(
+            running, expected_interface, kind, marker,
+            display_name, primary_peer_public_key, finalized);
+    } catch (...) {
+        return false;
+    }
+}
+
 ScopedRecoveryPass observe_scoped_recovery_once(
     NdmsNativeCooperativeImportObservationGateway& gateway,
     NdmsNativeObservationStore& observations,
@@ -1360,6 +1452,91 @@ NdmsNativeCooperativeImportCoordinator::dispatch_activation_once(
         std::move(request),
         guard,
         *impl_->activation_transport);
+}
+
+bool NdmsNativeCooperativeImportCoordinator::normalize_completed_identity(
+    NdmsNativeWriterLease& writer,
+    const NdmsNativeOwnershipRecord& ownership,
+    const std::string_view display_name,
+    const std::string_view primary_peer_public_key) noexcept {
+    if (!impl_ || impl_->activation_transport == nullptr ||
+        display_name.empty() || primary_peer_public_key.empty()) {
+        return false;
+    }
+    try {
+        const auto ownership_is_exact = [this, &ownership]() {
+            const auto current =
+                impl_->ownership->read(ownership.interface_name);
+            return current.state ==
+                       NdmsNativeOwnershipReadState::valid &&
+                   current.record.has_value() &&
+                   *current.record == ownership;
+        };
+        ImportRecoveryDispatchGuard identity_guard{
+            [this, &writer, &ownership, display_name,
+             primary_peer_public_key, &ownership_is_exact]() {
+                writer.verify_held();
+                return ownership_is_exact() &&
+                       import_identity_pair_matches(
+                           *impl_->gateway,
+                           ownership.interface_name,
+                           ownership.kind,
+                           ownership.marker,
+                           display_name,
+                           primary_peer_public_key,
+                           false);
+            }};
+        const auto identity_update = dispatch_activation_once(
+            NdmsNativeExactMutationRequest::
+                set_managed_interface_identity(
+                    ownership.interface_name,
+                    std::string{display_name},
+                    std::string{primary_peer_public_key},
+                    ownership.marker),
+            identity_guard);
+        if (!identity_update.pre_dispatch_guard_passed ||
+            !identity_update.perform_started ||
+            !import_identity_pair_matches(
+                *impl_->gateway,
+                ownership.interface_name,
+                ownership.kind,
+                ownership.marker,
+                display_name,
+                primary_peer_public_key,
+                true)) {
+            return false;
+        }
+
+        ImportRecoveryDispatchGuard save_guard{
+            [this, &writer, &ownership, display_name,
+             primary_peer_public_key, &ownership_is_exact]() {
+                writer.verify_held();
+                return ownership_is_exact() &&
+                       import_identity_pair_matches(
+                           *impl_->gateway,
+                           ownership.interface_name,
+                           ownership.kind,
+                           ownership.marker,
+                           display_name,
+                           primary_peer_public_key,
+                           true);
+            }};
+        const auto saved = dispatch_activation_once(
+            NdmsNativeExactMutationRequest::save_configuration(),
+            save_guard);
+        return saved.pre_dispatch_guard_passed &&
+               saved.response_manifest.acknowledged_needs_observation() &&
+               import_identity_pair_matches(
+                   *impl_->gateway,
+                   ownership.interface_name,
+                   ownership.kind,
+                   ownership.marker,
+                   display_name,
+                   primary_peer_public_key,
+                   true);
+    } catch (...) {
+        return false;
+    }
 }
 
 NdmsNativeCooperativeImportResult
@@ -1951,6 +2128,31 @@ NdmsNativeCooperativeImportCoordinator::import_once(
         // ownership-revision WAL advance and exact WAL removal. The dispatcher
         // cannot report completed if any of those steps failed.
         result.ownership_published = true;
+
+        // Keep the private recovery marker out of the user-visible KeeneticOS
+        // interface name.  The import must retain it through every ambiguous
+        // creation/recovery phase, so this cosmetic normalization happens
+        // only after the exact ownership claim is durable and the WAL is
+        // gone.  The marker moves to one measured peer comment first; delete
+        // admission accepts that private binding only together with the same
+        // claim, snapshot, target, protocol and fresh dual-scope observation.
+        // Failure here never turns a working import into an unknown mutation:
+        // the already-completed interface remains usable with its legacy
+        // marker-suffixed description and can be normalized on a later edit.
+        if (!display_name.empty()) {
+            const auto* identity_evidence = unique_target_evidence(
+                later, expected_interface);
+            const auto primary_peer_public_key = identity_evidence
+                ? identity_evidence->primary_peer_public_key
+                : std::string{};
+            if (normalize_completed_identity(
+                    writer,
+                    expected_ownership,
+                    display_name,
+                    primary_peer_public_key)) {
+                activation_saved = true;
+            }
+        }
 
         result.status = NdmsNativeCooperativeImportStatus::completed;
         result.stop = NdmsNativeCooperativeImportStop::none;
@@ -2862,6 +3064,23 @@ NdmsNativeCooperativeImportCoordinator::resume_once(
             result.stop = resume_dispatch_stop(
                 dispatched.failed_step);
             return result;
+        }
+
+        if (expected_ownership.has_value()) {
+            const auto snapshot =
+                impl_->snapshots->read_panel_delete_snapshot(
+                    expected_ownership->interface_name,
+                    expected_ownership->transaction_id,
+                    expected_ownership->marker);
+            if (snapshot.state == NdmsNativeSecretReadState::valid &&
+                snapshot.snapshot.has_value() &&
+                normalize_completed_identity(
+                    writer,
+                    *expected_ownership,
+                    snapshot.snapshot->display_name(),
+                    snapshot.snapshot->primary_peer_public_key())) {
+                activation_saved = true;
+            }
         }
 
         result.status =

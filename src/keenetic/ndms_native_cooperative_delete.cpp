@@ -285,9 +285,9 @@ ObservationMatch inspect_observation(
         return match;
     }
     if (slot_state != NdmsWireguardCatalogSlotState::occupied ||
-        target == nullptr || marker_sightings.size() != 1U ||
-        marker_sightings.front() != target ||
-        !exact_owned_label(target->label, record.marker) ||
+        target == nullptr || marker_sightings.size() > 1U ||
+        (!marker_sightings.empty() &&
+         marker_sightings.front() != target) ||
         observation.target_evidence.size() != 1U ||
         observation.target_protocols.size() != 1U) {
         match.presence = MeasuredPresence::mismatch;
@@ -295,13 +295,17 @@ ObservationMatch inspect_observation(
     }
     const auto& evidence = observation.target_evidence.front();
     const auto& protocol = observation.target_protocols.front();
+    const bool marker_bound =
+        exact_owned_label(target->label, record.marker) ||
+        evidence.ownership_marker_present;
     const bool kind_matches =
         (record.kind == NdmsNativeTunnelImportKind::wireguard &&
          protocol.asc_class == NdmsNativeAscClass::plain_wireguard) ||
         (record.kind ==
              NdmsNativeTunnelImportKind::amnezia_wireguard &&
          protocol.asc_class == NdmsNativeAscClass::amnezia_wg);
-    if (evidence.interface_name != record.interface_name ||
+    if (!marker_bound ||
+        evidence.interface_name != record.interface_name ||
         protocol.interface_name != record.interface_name ||
         !kind_matches) {
         match.presence = MeasuredPresence::mismatch;
