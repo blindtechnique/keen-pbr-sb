@@ -1352,6 +1352,8 @@ export function TransportsPage({
       nativeTracker?.display_name?.trim() ||
       (boundOutbound ? getOutboundDisplayName(boundOutbound) : undefined) ||
       nativeInterface.label
+    const nativeLocation = transportLocation(nativeTracker, undefined)
+    const nativeCountryFlag = countryMark(nativeLocation)
     const deleteReady =
       nativeInterface.source.native_mutation.delete_candidate &&
       Boolean(nativeInterface.source.native_mutation.ownership_revision)
@@ -1383,6 +1385,20 @@ export function TransportsPage({
       </span>,
       <span className="flex min-w-0 items-center gap-2" key="name">
         <TransportProtocolIcon protocol={nativeInterface.protocol.label} />
+        {nativeCountryFlag ? (
+          <span
+            aria-label={
+              nativeLocation?.country ?? nativeLocation?.country_code ?? ""
+            }
+            className="shrink-0 text-base leading-none"
+            role="img"
+            title={
+              nativeLocation?.country ?? nativeLocation?.country_code ?? ""
+            }
+          >
+            {nativeCountryFlag}
+          </span>
+        ) : null}
         {/* Пол в 6rem: в тесной колонке имя сжималось до нуля, и от строки
             оставался один бейдж KeeneticOS — без имени он ни о чём. */}
         <span className="min-w-[6rem] truncate" title={displayLabel}>

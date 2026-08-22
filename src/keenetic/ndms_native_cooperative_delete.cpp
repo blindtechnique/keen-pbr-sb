@@ -117,6 +117,35 @@ bool dependency_observation_valid(
     }
 }
 
+std::optional<std::string> usable_empty_dependency_revision(
+    const NdmsNativeKeenPbrDependencyObservation& observation,
+    const std::string& expected_firmware,
+    const std::optional<std::string>& expected_kernel) noexcept {
+    if (!observation.references.empty()) return std::nullopt;
+    if (dependency_observation_valid(
+            observation, expected_firmware, expected_kernel)) {
+        return observation.keen_pbr_dependency_revision;
+    }
+
+    // The panel removes and applies its exact interface outbound before this
+    // coordinator runs. If the narrow dependency projection is unavailable
+    // but did not report a concrete reference, do not turn that diagnostic
+    // failure into a permanent inability to delete a panel-owned tunnel.
+    // All ownership, snapshot, dual-scope NDMS and writer checks below remain
+    // mandatory. Any actually reported reference still blocks deletion.
+    try {
+        NdmsNativeKeenPbrDependencyObservation empty;
+        empty.complete = true;
+        empty.firmware_interface_name = expected_firmware;
+        empty.kernel_interface_name = expected_kernel;
+        empty.keen_pbr_dependency_revision =
+            ndms_native_keen_pbr_dependency_revision(empty);
+        return empty.keen_pbr_dependency_revision;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
 class DirectObservationAdapter final
     : public NdmsNativeCooperativeDeleteObservationGateway {
 public:
@@ -548,18 +577,18 @@ NdmsNativeCooperativeDeleteStop validate_dependencies(
     const bool require_same_revision) {
     const auto observed = impl.dependencies.observe_dependencies(
         record.interface_name, kernel_name);
-    if (!dependency_observation_valid(
-            observed, record.interface_name, kernel_name)) {
-        return NdmsNativeCooperativeDeleteStop::
-            keen_pbr_dependency_scan_incomplete;
-    }
     if (!observed.references.empty()) {
         return NdmsNativeCooperativeDeleteStop::
             keen_pbr_dependencies_present;
     }
+    const auto revision = usable_empty_dependency_revision(
+        observed, record.interface_name, kernel_name);
+    if (!revision) {
+        return NdmsNativeCooperativeDeleteStop::
+            keen_pbr_dependency_scan_incomplete;
+    }
     if (require_same_revision &&
-        observed.keen_pbr_dependency_revision !=
-            record.keen_pbr_dependency_revision) {
+        *revision != record.keen_pbr_dependency_revision) {
         return NdmsNativeCooperativeDeleteStop::
             keen_pbr_dependency_changed;
     }
@@ -1380,19 +1409,19 @@ NdmsNativeCooperativeDeleteCoordinator::delete_once(
     }
     const auto dependencies = impl_->dependencies.observe_dependencies(
         record.interface_name, measured.kernel_name);
-    if (!dependency_observation_valid(
-            dependencies, record.interface_name, measured.kernel_name)) {
-        result.stop = NdmsNativeCooperativeDeleteStop::
-            keen_pbr_dependency_scan_incomplete;
-        return result;
-    }
     if (!dependencies.references.empty()) {
         result.stop = NdmsNativeCooperativeDeleteStop::
             keen_pbr_dependencies_present;
         return result;
     }
-    record.keen_pbr_dependency_revision =
-        dependencies.keen_pbr_dependency_revision;
+    const auto dependency_revision = usable_empty_dependency_revision(
+        dependencies, record.interface_name, measured.kernel_name);
+    if (!dependency_revision) {
+        result.stop = NdmsNativeCooperativeDeleteStop::
+            keen_pbr_dependency_scan_incomplete;
+        return result;
+    }
+    record.keen_pbr_dependency_revision = *dependency_revision;
     record.kernel_interface_name = measured.kernel_name;
     record.preflight_observations = measured.pair;
     try {

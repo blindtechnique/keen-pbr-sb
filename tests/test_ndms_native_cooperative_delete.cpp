@@ -1084,17 +1084,6 @@ TEST_CASE("every preflight mismatch remains read-only for the router") {
         check_no_router_write(fixture);
     }
 
-    SUBCASE("keen-pbr dependency scan incomplete") {
-        DeleteFixture fixture;
-        fixture.install_owned_target();
-        fixture.dependencies.complete = false;
-        const auto result = fixture.coordinator.delete_once(
-            fixture.writer.lease, fixture.request());
-        CHECK(result.stop == NdmsNativeCooperativeDeleteStop::
-              keen_pbr_dependency_scan_incomplete);
-        check_no_router_write(fixture);
-    }
-
     SUBCASE("keen-pbr references present") {
         DeleteFixture fixture;
         fixture.install_owned_target();
@@ -1130,6 +1119,21 @@ TEST_CASE("every preflight mismatch remains read-only for the router") {
         check_no_router_write(fixture);
     }
 
+}
+
+TEST_CASE("an unavailable empty dependency projection does not brick delete") {
+    DeleteFixture fixture;
+    fixture.install_owned_target();
+    fixture.dependencies.complete = false;
+
+    const auto result = fixture.coordinator.delete_once(
+        fixture.writer.lease, fixture.request());
+
+    CHECK(result.status == NdmsNativeCooperativeDeleteStatus::
+          save_acknowledged_unverified);
+    CHECK(result.stop == NdmsNativeCooperativeDeleteStop::none);
+    CHECK(fixture.backend.perform_calls == 2U);
+    CHECK_FALSE(fixture.gateway.present);
 }
 
 TEST_CASE("unfinished or unsafe import WAL blocks delete cross-kind") {
