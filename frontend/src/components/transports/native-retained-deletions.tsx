@@ -18,7 +18,12 @@ export function NativeRetainedDeletions({
 }) {
   const inFlight = useRef(false)
   const attempts = useRef(new Map<string, number>())
+  const refreshInventory = useRef(onInventoryRefresh)
   const [pass, setPass] = useState(0)
+
+  useEffect(() => {
+    refreshInventory.current = onInventoryRefresh
+  }, [onInventoryRefresh])
 
   useEffect(() => {
     if (inFlight.current) return
@@ -53,14 +58,14 @@ export function NativeRetainedDeletions({
           attempts.current.set(key, attempt + 1)
         })
         .finally(async () => {
-          await onInventoryRefresh().catch(() => undefined)
+          await refreshInventory.current().catch(() => undefined)
           inFlight.current = false
           setPass((value) => value + 1)
         })
     }, delay)
 
     return () => window.clearTimeout(timeout)
-  }, [onInventoryRefresh, pass, retainedDeletions])
+  }, [pass, retainedDeletions])
 
   return null
 }
