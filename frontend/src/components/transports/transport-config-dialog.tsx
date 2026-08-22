@@ -396,6 +396,7 @@ export function TransportConfigForm({
     useState<string>()
   const [importedNativeIdentity, setImportedNativeIdentity] =
     useState<NativeWireGuardImportedIdentity | null>(null)
+  const [nativeImportSubmitted, setNativeImportSubmitted] = useState(false)
   const importedNativeFocusPendingRef = useRef(false)
   const nativeInterfaceTriggerRef = useRef<HTMLButtonElement>(null)
   // What the operator handed over that turned out to be a subscription rather
@@ -609,6 +610,11 @@ export function TransportConfigForm({
     (endpointHost?: string) => {
       const displayName = spec.display_name?.trim()
       if (!displayName) return
+      // The secret has already been handed to Keenetic at this boundary and
+      // the non-secret completion plan is durable for this tab. Closing the
+      // modal no longer discards a draft, so the ordinary unsaved-form prompt
+      // would be false and used to trap the operator in a completed import.
+      setNativeImportSubmitted(true)
       stageNativeWireGuardImportCompletion({
         tag: spec.tag,
         displayName,
@@ -653,8 +659,8 @@ export function TransportConfigForm({
     Boolean(displayNameError) && (displayNameTouched || isDirty)
 
   useEffect(() => {
-    onDirtyChange(isDirty)
-  }, [isDirty, onDirtyChange])
+    onDirtyChange(isDirty && !nativeImportSubmitted)
+  }, [isDirty, nativeImportSubmitted, onDirtyChange])
 
   const submit = (event: FormEvent) => {
     event.preventDefault()

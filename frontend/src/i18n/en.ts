@@ -1196,8 +1196,6 @@ export const enTranslation = {
       analyzing: "Checking: {{name}}",
       clear: "Remove the selected file",
       errorTitle: "Input was not accepted",
-      redactedNotice:
-        "This is a local structural preview, not confirmation that the router will accept the configuration. Key values stay hidden, but the endpoint may be shown. The suggested name is never accepted automatically.",
       aliasConflictTitle: "The suggested name is already in use",
       aliasConflictDescription:
         "KeeneticOS already has an interface with this display or technical name. A different name must be explicitly chosen before a future save; the existing interface was not changed.",

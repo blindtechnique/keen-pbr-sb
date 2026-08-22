@@ -1,5 +1,7 @@
 import { useQuery } from "@tanstack/react-query"
 
+import { resolveNativeWireGuardInterfaceLocation } from "@/lib/native-wireguard-import-geo"
+
 export type ServerLocation = {
   country: string
   country_code?: string
@@ -63,5 +65,32 @@ export function useServerLocations(
   return {
     locations,
     locationOf: (host?: string) => (host ? locations[host] : undefined),
+  }
+}
+
+export function useNativeInterfaceLocations(interfaces: string[]) {
+  const unique = Array.from(
+    new Set(interfaces.map((value) => value.trim()).filter(Boolean))
+  ).sort()
+  const query = useQuery<Record<string, ServerLocation>>({
+    queryKey: ["native-interface-locations", unique],
+    enabled: unique.length > 0,
+    queryFn: async () => {
+      const locations: Record<string, ServerLocation> = {}
+      // The exit-check backend serializes probes. Keep this loop sequential so
+      // several auto-labelled native tunnels do not turn each other into 409s.
+      for (const device of unique) {
+        const location = await resolveNativeWireGuardInterfaceLocation(device)
+        if (location) locations[device] = location
+      }
+      return locations
+    },
+    staleTime: 30 * 24 * 60 * 60 * 1000,
+    retry: false,
+  })
+  const locations = query.data ?? {}
+  return {
+    locations,
+    locationOf: (device?: string) => (device ? locations[device] : undefined),
   }
 }

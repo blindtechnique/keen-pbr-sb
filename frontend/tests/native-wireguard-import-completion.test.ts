@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test"
 
 import {
   buildStagedNativeWireGuardTransport,
+  cancelActiveNativeWireGuardImportCompletion,
   clearStagedNativeWireGuardImportCompletion,
+  findStagedNativeWireGuardImportIdentity,
   offerNativeWireGuardImportCompletion,
   readStagedNativeWireGuardImportCompletion,
   registerActiveNativeWireGuardImportCompletion,
@@ -41,6 +43,22 @@ describe("active native import completion hand-off", () => {
     second()
   })
 
+  test("cancels a waiting form after authoritative no-work absence", () => {
+    let cancelled = false
+    const unsubscribe = registerActiveNativeWireGuardImportCompletion(
+      (next) => {
+        cancelled = next === null
+        return true
+      }
+    )
+    try {
+      cancelActiveNativeWireGuardImportCompletion()
+      expect(cancelled).toBe(true)
+    } finally {
+      unsubscribe()
+    }
+  })
+
   test("keeps the non-secret operator plan after the import form closes", () => {
     stageNativeWireGuardImportCompletion({
       tag: "vpn_sdd45",
@@ -75,5 +93,42 @@ describe("active native import completion hand-off", () => {
 
     clearStagedNativeWireGuardImportCompletion()
     expect(readStagedNativeWireGuardImportCompletion()).toBeUndefined()
+  })
+
+  test("recovers one exact untracked panel-owned interface after no-work", () => {
+    const plan = {
+      tag: "fraystor_awg",
+      displayName: "fraystor AWG",
+      createOutbound: true,
+      autoStart: false,
+    }
+    const row = {
+      firmware_interface_name: "Wireguard5",
+      kernel_name: "nwg5",
+      label: "fraystor AWG",
+      kind: "amnezia_wireguard",
+      native_mutation: { ownership_state: "panel_owned_active" },
+    }
+
+    expect(
+      findStagedNativeWireGuardImportIdentity(plan, [row as never], [])
+    ).toEqual({
+      firmwareInterface: "Wireguard5",
+      kernelInterface: "nwg5",
+      kind: "amnezia_wireguard",
+    })
+    expect(
+      findStagedNativeWireGuardImportIdentity(plan, [row as never], ["nwg5"])
+    ).toBeUndefined()
+    expect(
+      findStagedNativeWireGuardImportIdentity(
+        plan,
+        [
+          row as never,
+          { ...row, firmware_interface_name: "Wireguard6" } as never,
+        ],
+        []
+      )
+    ).toBeUndefined()
   })
 })

@@ -69,3 +69,47 @@ export async function resolveNativeWireGuardImportLocation(
   }
   return undefined
 }
+
+/**
+ * Existing native trackers do not retain their secret endpoint. Determine the
+ * country from the public address actually observed through the exact kernel
+ * interface instead. This is both more useful to the operator and lets Auto
+ * work after editing an already imported WG/AWG tunnel.
+ */
+export async function resolveNativeWireGuardInterfaceLocation(
+  interfaceName: string,
+  options: ResolveNativeWireGuardImportLocationOptions = {}
+): Promise<NativeWireGuardImportLocation | undefined> {
+  const device = interfaceName.trim()
+  if (!device) return undefined
+  const fetchImpl = options.fetchImpl ?? fetch
+  let response: Response
+  try {
+    response = await fetchImpl("/api/transports/exit-check", {
+      method: "POST",
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ interface: device }),
+    })
+  } catch {
+    return undefined
+  }
+  if (!response.ok) return undefined
+  const payload = (await response.json().catch(() => null)) as {
+    verdict?: unknown
+    through?: { ok?: unknown; attributed?: unknown; address?: unknown }
+  } | null
+  const address =
+    payload?.verdict === "working" &&
+    payload.through?.ok === true &&
+    payload.through.attributed === true &&
+    typeof payload.through.address === "string"
+      ? payload.through.address.trim()
+      : ""
+  if (!address) return undefined
+  return resolveNativeWireGuardImportLocation(address, {
+    ...options,
+    fetchImpl,
+  })
+}

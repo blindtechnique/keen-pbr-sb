@@ -109,12 +109,14 @@ import { makeTechnicalId } from "@/lib/technical-id"
 import {
   buildStagedNativeWireGuardTransport,
   clearStagedNativeWireGuardImportCompletion,
+  findStagedNativeWireGuardImportIdentity,
   offerNativeWireGuardImportCompletion,
   readStagedNativeWireGuardImportCompletion,
   type NativeWireGuardImportedIdentity,
 } from "@/lib/native-wireguard-import-completion"
 import { resolveNativeWireGuardImportLocation } from "@/lib/native-wireguard-import-geo"
 import {
+  useNativeInterfaceLocations,
   useServerLocations,
   type ServerLocation,
 } from "@/hooks/use-server-locations"
@@ -473,6 +475,16 @@ export function TransportsPage({
     // the external lookup warning in the transport form.
     allowExternalLookup: autoGeoHosts.length > 0,
   })
+  const nativeAutoGeoInterfaces = configured
+    .filter(
+      (transport) =>
+        transport.type === TransportSpecType.native &&
+        transport.geo_mode === "auto"
+    )
+    .map((transport) => transport.interface)
+  const { locationOf: locationOfNativeInterface } = useNativeInterfaceLocations(
+    nativeAutoGeoInterfaces
+  )
 
   // libcronet.so — сетевой стек Chromium, без которого sing-box не умеет
   // naive. Он весит десятки мегабайт, поэтому не ставится вместе с пакетом:
@@ -964,39 +976,18 @@ export function TransportsPage({
     )
   }
 
-  const createRouteAfterRecoveredImport = async (
-    result: NdmsNativeImportRecoveryResult
-  ) => {
-    const firmwareInterface = result.created_interface
-    const kernelInterface = result.created_kernel_interface
-    if (
-      !firmwareInterface ||
-      !kernelInterface ||
-      !result.kind ||
-      result.status !== "completed"
-    ) {
-      return
-    }
-
+  const completeRecoveredImportIdentity = async (
+    identity: NativeWireGuardImportedIdentity
+  ): Promise<boolean> => {
+    const { firmwareInterface, kernelInterface } = identity
     // A bodyless recovery can complete while the original import dialog is
     // still open. Let that dialog persist the operator's alias, country and
     // linked route; only a reload/crash with no active dialog needs the
     // inventory-derived fallback below.
-    if (
-      offerNativeWireGuardImportCompletion({
-        firmwareInterface,
-        kernelInterface,
-        kind: result.kind,
-      })
-    ) {
-      return
+    if (offerNativeWireGuardImportCompletion(identity)) {
+      return true
     }
 
-    const identity: NativeWireGuardImportedIdentity = {
-      firmwareInterface,
-      kernelInterface,
-      kind: result.kind,
-    }
     const stagedPlan = readStagedNativeWireGuardImportCompletion()
     if (stagedPlan) {
       const transport = buildStagedNativeWireGuardTransport(
@@ -1030,12 +1021,12 @@ export function TransportsPage({
             name: stagedPlan.displayName,
           })
         )
-        return
+        return true
       } catch (mutationError) {
         toast.error(getApiErrorMessage(mutationError as ApiError), {
           richColors: true,
         })
-        return
+        return false
       }
     }
 
@@ -1044,7 +1035,7 @@ export function TransportsPage({
       keenConfigQuery.refetch(),
     ])
     const refreshedConfig = selectConfig(configResult.data)
-    if (!refreshedConfig) return
+    if (!refreshedConfig) return false
     const existingOutbounds = refreshedConfig.outbounds ?? []
     if (
       existingOutbounds.some(
@@ -1053,7 +1044,7 @@ export function TransportsPage({
           outbound.interface === kernelInterface
       )
     ) {
-      return
+      return true
     }
 
     const inventory =
@@ -1087,11 +1078,63 @@ export function TransportsPage({
         }),
       })
       toast.success(t("transports.routeOffer.created", { name: label }))
+      return true
     } catch (mutationError) {
       toast.error(getApiErrorMessage(mutationError as ApiError), {
         richColors: true,
       })
+      return false
     }
+  }
+
+  const createRouteAfterRecoveredImport = async (
+    result: NdmsNativeImportRecoveryResult
+  ) => {
+    if (
+      !result.created_interface ||
+      !result.created_kernel_interface ||
+      !result.kind ||
+      result.status !== "completed"
+    ) {
+      return
+    }
+    await completeRecoveredImportIdentity({
+      firmwareInterface: result.created_interface,
+      kernelInterface: result.created_kernel_interface,
+      kind: result.kind,
+    })
+  }
+
+  const reconnectNoWorkImportFromInventory = async (): Promise<
+    boolean | undefined
+  > => {
+    const stagedPlan = readStagedNativeWireGuardImportCompletion()
+    if (!stagedPlan) return false
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const [inventoryResult, configuredResult] = await Promise.all([
+        ndmsInventoryQuery.refetch(),
+        configQuery.refetch(),
+      ])
+      if (
+        inventoryResult.data?.status !== 200 ||
+        !inventoryResult.data.data.available ||
+        configuredResult.data?.status !== 200
+      ) {
+        return undefined
+      }
+      const identity = findStagedNativeWireGuardImportIdentity(
+        stagedPlan,
+        inventoryResult.data.data.interfaces,
+        configuredResult.data.data
+          .filter((item) => item.type === TransportSpecType.native)
+          .map((item) => item.interface)
+      )
+      if (identity) return completeRecoveredImportIdentity(identity)
+      if (attempt < 2) {
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 250))
+      }
+    }
+    return false
   }
   const dismissRouteOffer = (candidate: NativeRouteOfferCandidate) => {
     setDismissedRouteOffers((current) =>
@@ -1467,7 +1510,10 @@ export function TransportsPage({
       nativeTracker?.display_name?.trim() ||
       (boundOutbound ? getOutboundDisplayName(boundOutbound) : undefined) ||
       nativeInterface.label
-    const nativeLocation = transportLocation(nativeTracker, undefined)
+    const nativeLocation = transportLocation(
+      nativeTracker,
+      locationOfNativeInterface(nativeInterface.kernelName)
+    )
     const nativeCountryFlag = countryMark(nativeLocation)
     const deleteReady =
       nativeInterface.source.native_mutation.delete_candidate &&
@@ -1925,6 +1971,7 @@ export function TransportsPage({
         inventoryStatus={nativeMutationStatus}
         onDeleteTerminal={() => undefined}
         onImportCompleted={createRouteAfterRecoveredImport}
+        onImportNoWork={reconnectNoWorkImportFromInventory}
         onInventoryRefresh={refreshNativeMutationInventory}
       />
 

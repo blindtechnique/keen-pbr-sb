@@ -20,7 +20,10 @@ import {
   type NativeMutationOperation,
   type NativeMutationRecoveryKind,
 } from "@/lib/native-mutation-lock"
-import { clearStagedNativeWireGuardImportCompletion } from "@/lib/native-wireguard-import-completion"
+import {
+  cancelActiveNativeWireGuardImportCompletion,
+  clearStagedNativeWireGuardImportCompletion,
+} from "@/lib/native-wireguard-import-completion"
 
 import {
   nativeDeleteRecoveryDisposition,
@@ -75,6 +78,7 @@ export function NativeMutationRecovery({
   inventoryStatus,
   onDeleteTerminal,
   onImportCompleted,
+  onImportNoWork,
   onInventoryRefresh,
 }: {
   readonly inventoryStatus?: NdmsNativeMutationInventoryStatus
@@ -82,6 +86,10 @@ export function NativeMutationRecovery({
   readonly onImportCompleted?: (
     result: NdmsNativeImportRecoveryResult
   ) => void | Promise<void>
+  readonly onImportNoWork?: () =>
+    | boolean
+    | undefined
+    | Promise<boolean | undefined>
   readonly onInventoryRefresh: () => Promise<void>
 }) {
   const { t } = useTranslation()
@@ -134,7 +142,6 @@ export function NativeMutationRecovery({
             try {
               const result = await postNdmsNativeImportRecoveryOnce()
               if (result.status === "no_work") {
-                clearStagedNativeWireGuardImportCompletion()
                 return {
                   disposition: nativeImportRecoveryDisposition(result),
                   value: { outcome: "import_no_work" } as const,
@@ -182,6 +189,18 @@ export function NativeMutationRecovery({
           onImportCompleted?.(leaseResult.value.result)
         ).catch(() => undefined)
       }
+      if (
+        leaseResult.status === "completed" &&
+        leaseResult.value.outcome === "import_no_work"
+      ) {
+        const reconnected = await Promise.resolve(onImportNoWork?.()).catch(
+          () => undefined
+        )
+        if (reconnected === false) {
+          clearStagedNativeWireGuardImportCompletion()
+          cancelActiveNativeWireGuardImportCompletion()
+        }
+      }
       // Import recovery is automatic and bodyless. Keep the ordinary progress
       // state visible while another pass is required instead of replacing it
       // with a frightening terminal lecture or a manual recovery button.
@@ -196,7 +215,7 @@ export function NativeMutationRecovery({
       setBusy(null)
       await refresh().catch(() => undefined)
     }
-  }, [busy, importNeedsRecovery, onImportCompleted, refresh])
+  }, [busy, importNeedsRecovery, onImportCompleted, onImportNoWork, refresh])
 
   useEffect(() => {
     if (!importNeedsRecovery) {
@@ -209,10 +228,10 @@ export function NativeMutationRecovery({
     // bounded backoff. A partial first pass must not require a page reload to
     // run the next bodyless pass.
     const attempt = automaticImportRecoveryAttempts.current
-    const delay =
-      attempt === 0
-        ? 500
-        : Math.min(1_000 * 2 ** Math.min(attempt - 1, 4), 15_000)
+    // A successful import advances through a small bounded set of durable
+    // phases. Finish those passes promptly while the dialog is open; only a
+    // genuinely persistent block falls back to a slower polling cadence.
+    const delay = attempt < 8 ? 400 : 5_000
     const timeout = window.setTimeout(() => {
       automaticImportRecoveryAttempts.current += 1
       void recoverImport()

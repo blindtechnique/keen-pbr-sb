@@ -315,6 +315,10 @@ function NativeWireGuardImportFieldsContent({
   useEffect(
     () =>
       registerActiveNativeWireGuardImportCompletion((identity) => {
+        if (identity === null) {
+          awaitingRecoveredCompletionRef.current = false
+          return true
+        }
         if (!mountedRef.current || !awaitingRecoveredCompletionRef.current) {
           return false
         }
@@ -1046,9 +1050,6 @@ function NativeWireGuardImportFieldsContent({
               }
             />
           </dl>
-          <p className="text-xs text-muted-foreground">
-            {t("transports.nativeImport.redactedNotice")}
-          </p>
           {findNativeWireGuardAliasConflict(
             importAliasSuggestion,
             existingInterfaces

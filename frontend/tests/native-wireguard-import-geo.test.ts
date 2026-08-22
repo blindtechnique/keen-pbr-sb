@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test"
 
-import { resolveNativeWireGuardImportLocation } from "@/lib/native-wireguard-import-geo"
+import {
+  resolveNativeWireGuardImportLocation,
+  resolveNativeWireGuardInterfaceLocation,
+} from "@/lib/native-wireguard-import-geo"
 
 describe("native WireGuard import auto country", () => {
   test("polls a pending lookup and returns a normalized country snapshot", async () => {
@@ -55,5 +58,54 @@ describe("native WireGuard import auto country", () => {
       sleep: async () => undefined,
     })
     expect(location).toBeUndefined()
+  })
+
+  test("resolves an existing native tunnel from its attributed exit address", async () => {
+    const requests: Array<{ url: string; body: unknown }> = []
+    const location = await resolveNativeWireGuardInterfaceLocation(" nwg5 ", {
+      fetchImpl: async (input, init) => {
+        const url = String(input)
+        requests.push({ url, body: JSON.parse(String(init?.body)) })
+        return url.endsWith("exit-check")
+          ? new Response(
+              JSON.stringify({
+                verdict: "working",
+                through: {
+                  ok: true,
+                  attributed: true,
+                  address: "203.0.113.7",
+                },
+              }),
+              { status: 200 }
+            )
+          : new Response(
+              JSON.stringify({
+                locations: {
+                  "203.0.113.7": {
+                    country: "Estonia",
+                    country_code: "EE",
+                  },
+                },
+                pending: false,
+              }),
+              { status: 200 }
+            )
+      },
+    })
+
+    expect(location).toEqual({ country: "Estonia", country_code: "EE" })
+    expect(requests).toEqual([
+      {
+        url: "/api/transports/exit-check",
+        body: { interface: "nwg5" },
+      },
+      {
+        url: "/api/system/geo",
+        body: {
+          hosts: ["203.0.113.7"],
+          allow_external_lookup: true,
+        },
+      },
+    ])
   })
 })
