@@ -1359,7 +1359,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
     post:
-      summary: Start or stop a transport
+      summary: Start, stop or restart a managed or native WG/AWG transport
       operationId: postTransportAction
       requestBody:
         required: true
@@ -4643,7 +4643,7 @@ components:
       properties:
         tag:
           type: string
-          pattern: "^[a-z][a-z0-9_]{0,23}$"
+          pattern: "^(?:[a-z][a-z0-9_]{0,23}|Wireguard(?:0|[1-9][0-9]?|1[01][0-9]|12[0-6]))$"
         action:
           type: string
           enum: [up, down, restart]

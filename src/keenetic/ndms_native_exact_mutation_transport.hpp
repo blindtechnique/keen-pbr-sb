@@ -15,6 +15,7 @@ struct NdmsNativePanelDeleteExecutionResult;
 class NdmsNativePanelDeleteExecutorDependencies;
 class NdmsNativeCooperativeDeleteCoordinator;
 class NdmsNativeCooperativeImportCoordinator;
+class NdmsNativeInterfaceLifecycleCoordinator;
 #ifdef KEEN_PBR3_TESTING
 class NdmsNativeExactMutationDispatchAuthorityTestIssuer;
 #endif
@@ -27,6 +28,8 @@ inline constexpr auto kNdmsNativeExactMutationRequiredDispatchWindow =
 enum class NdmsNativeExactMutationKind {
     delete_managed_interface,
     enable_managed_interface,
+    enable_existing_interface,
+    disable_existing_interface,
     save_configuration,
 };
 
@@ -56,6 +59,10 @@ public:
     static NdmsNativeExactMutationRequest delete_managed_interface(
         std::string target);
     static NdmsNativeExactMutationRequest enable_managed_interface(
+        std::string target);
+    static NdmsNativeExactMutationRequest enable_existing_interface(
+        std::string target);
+    static NdmsNativeExactMutationRequest disable_existing_interface(
         std::string target);
     static NdmsNativeExactMutationRequest save_configuration();
 
@@ -149,6 +156,7 @@ private:
         const NdmsNativePanelDeleteExecutorDependencies&);
     friend class NdmsNativeCooperativeDeleteCoordinator;
     friend class NdmsNativeCooperativeImportCoordinator;
+    friend class NdmsNativeInterfaceLifecycleCoordinator;
 #ifdef KEEN_PBR3_TESTING
     friend class NdmsNativeExactMutationDispatchAuthorityTestIssuer;
 #endif
@@ -229,6 +237,7 @@ private:
         const NdmsNativePanelDeleteExecutorDependencies&);
     friend class NdmsNativeCooperativeDeleteCoordinator;
     friend class NdmsNativeCooperativeImportCoordinator;
+    friend class NdmsNativeInterfaceLifecycleCoordinator;
 #ifdef KEEN_PBR3_TESTING
     friend class NdmsNativeExactMutationDispatchCapabilityTestIssuer;
 #endif

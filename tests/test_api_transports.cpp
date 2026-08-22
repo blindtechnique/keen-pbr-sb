@@ -322,6 +322,18 @@ TEST_CASE("transports handler proxies authenticated companion response") {
     api_config.listen = "127.0.0.1:" + std::to_string(api_port);
     ApiServer server(api_config);
     auto context = make_transports_test_context(broadcaster, config_path);
+    std::string native_lifecycle_target;
+    NdmsNativeInterfaceLifecycleAction native_lifecycle_action{
+        NdmsNativeInterfaceLifecycleAction::down};
+    context.run_ndms_native_interface_lifecycle_fn =
+        [&](std::string target,
+            const NdmsNativeInterfaceLifecycleAction action) {
+            native_lifecycle_target = std::move(target);
+            native_lifecycle_action = action;
+            return NdmsNativeInterfaceLifecycleResult{
+                NdmsNativeInterfaceLifecycleStatus::completed,
+                true};
+        };
     std::string traffic_target_source;
     std::vector<std::string> traffic_targets;
     context.replace_interface_traffic_targets_fn =
@@ -341,6 +353,11 @@ TEST_CASE("transports handler proxies authenticated companion response") {
     const auto invalid_action_response = client.Post(
         "/api/transports",
         nlohmann::json{{"tag", "../escape"}, {"action", "up"}}.dump(),
+        "application/json");
+    const auto native_action_response = client.Post(
+        "/api/transports",
+        nlohmann::json{{"tag", "Wireguard6"}, {"action", "restart"}}
+            .dump(),
         "application/json");
     const auto config_response = client.Get("/api/transports/config");
     const auto create_response = client.Post(
@@ -386,6 +403,11 @@ TEST_CASE("transports handler proxies authenticated companion response") {
     CHECK(action_response->status == 200);
     const auto action_body = nlohmann::json::parse(action_response->body);
     CHECK(action_body["status"] == "accepted");
+    REQUIRE(native_action_response != nullptr);
+    CHECK(native_action_response->status == 200);
+    CHECK(native_lifecycle_target == "Wireguard6");
+    CHECK(native_lifecycle_action ==
+          NdmsNativeInterfaceLifecycleAction::restart);
     REQUIRE(invalid_action_response != nullptr);
     CHECK(invalid_action_response->status == 400);
     REQUIRE(config_response != nullptr);

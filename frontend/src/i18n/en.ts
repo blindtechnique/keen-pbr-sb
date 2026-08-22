@@ -841,11 +841,11 @@ export const enTranslation = {
     stopped: "VPN or proxy stop requested",
     restarted: "VPN or proxy restart requested",
     nativeManagedExternally:
-      "This is an existing KeeneticOS interface. keen-pbr-sb only tracks it and links it to a route; the interface itself is not created or edited here.",
+      "This is a KeeneticOS interface. You can start, stop, restart and link it to a route here; creation and parameter editing stay in KeeneticOS.",
     nativeInterface: {
       keeneticOwner: "KeeneticOS",
       managedByFirmware:
-        "Existing KeeneticOS interface: create, edit, start and restart remain in KeeneticOS; deletion is offered only for an exact panel-owned import",
+        "Creation and parameter editing stay in KeeneticOS; start, stop and restart are available here",
       logicalName: "Keenetic interface",
       kernelName: "System interface",
       protocol: "Protocol",
@@ -872,12 +872,14 @@ export const enTranslation = {
       routeNotConfigured: "Not configured",
       management: "Management",
       managementReadOnly: "Read only",
+      managementLifecycle: "Start and restart",
       managementUnsupported: "Not supported",
+      managementLifecycleDescription:
+        "You can start, stop and restart the interface from this row. Creation and parameter editing stay in KeeneticOS; an exact panel import can also be deleted here.",
       managementReadOnlyDescription:
         "keen-pbr-sb shows this KeeneticOS interface and can create a route to it. Creating and editing stay in KeeneticOS; only an exact panel-owned import can become a deletion candidate here.",
       managementBlockersTitle: "Why management is disabled",
-      managementReady:
-        "Candidate checks passed, but operations remain disabled in this version",
+      managementReady: "Start, stop and restart are available",
       managementReadinessUnavailable:
         "The installed backend does not report management readiness yet.",
       managementBlockers: {
@@ -1116,9 +1118,9 @@ export const enTranslation = {
         importTitle: "Native import recovery is required",
         importDescription:
           "Run one bodyless check. It never resends the VPN profile, deletes an interface or performs a global save.",
-        deleteTitle: "Native deletion recovery is required",
+        deleteTitle: "Finishing deletion",
         deleteDescription:
-          "Run one explicit recovery pass for the already-durable exact transaction. It never selects another target and is never repeated automatically.",
+          "Keenetic has already handled the request. The panel is refreshing the list; do not delete the interface again.",
         unknownTitle: "The operation outcome is unknown",
         unknownDescription:
           "Do not repeat the import or deletion. Use the matching page-level recovery check after the router is reachable.",

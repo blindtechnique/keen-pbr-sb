@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cctype>
 #include <string>
+#include <utility>
 
 namespace keen_pbr3 {
 
@@ -111,6 +112,144 @@ const char* ndms_interface_management_blocker_name(
         return "optimistic_revision_unavailable";
     }
     return "unknown";
+}
+
+namespace {
+
+class LifecycleWriterGuard final
+    : public NdmsNativeExactMutationPreDispatchGuard {
+public:
+    explicit LifecycleWriterGuard(NdmsNativeWriterLease& writer) noexcept
+        : writer_(writer) {}
+
+    bool authorize_dispatch() noexcept override {
+        try {
+            writer_.verify_held();
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+private:
+    NdmsNativeWriterLease& writer_;
+};
+
+bool acknowledged(
+    const NdmsNativeExactMutationTransportResult& result) noexcept {
+    return result.pre_dispatch_guard_passed &&
+           result.response_manifest.acknowledged_needs_observation();
+}
+
+} // namespace
+
+NdmsNativeInterfaceLifecycleCoordinator::
+NdmsNativeInterfaceLifecycleCoordinator(
+    NdmsNativeExactMutationBackend& backend) noexcept
+    : backend_(&backend) {}
+
+NdmsNativeExactMutationTransportResult
+NdmsNativeInterfaceLifecycleCoordinator::dispatch_once(
+    NdmsNativeExactMutationRequest request,
+    NdmsNativeExactMutationPreDispatchGuard& guard) {
+    auto authority = NdmsNativeExactMutationDispatchAuthority{
+        NdmsNativeExactMutationDispatchAuthority::ConstructionKey{}};
+    if (!authority.consume()) {
+        throw NdmsNativeExactMutationTransportError(
+            "native lifecycle authority is invalid");
+    }
+    auto capability = NdmsNativeExactMutationDispatchCapability{
+        NdmsNativeExactMutationDispatchCapability::ConstructionKey{}};
+    return post_ndms_native_exact_mutation_once(
+        std::move(capability),
+        std::move(request),
+        guard,
+        *backend_);
+}
+
+NdmsNativeInterfaceLifecycleResult
+NdmsNativeInterfaceLifecycleCoordinator::apply_once(
+    NdmsNativeWriterLease& writer,
+    std::string interface_name,
+    const NdmsNativeInterfaceLifecycleAction action) noexcept {
+    NdmsNativeInterfaceLifecycleResult result;
+    if (backend_ == nullptr) return result;
+    try {
+        writer.verify_held();
+        LifecycleWriterGuard guard{writer};
+        const auto dispatch = [this, &guard, &result](
+                                  NdmsNativeExactMutationRequest request) {
+            auto current = dispatch_once(std::move(request), guard);
+            result.request_may_have_been_dispatched =
+                result.request_may_have_been_dispatched ||
+                current.request_may_have_been_dispatched;
+            return current;
+        };
+
+        if (action == NdmsNativeInterfaceLifecycleAction::down) {
+            const auto down = dispatch(
+                NdmsNativeExactMutationRequest::
+                    disable_existing_interface(interface_name));
+            if (!acknowledged(down)) {
+                result.status = result.request_may_have_been_dispatched
+                                    ? NdmsNativeInterfaceLifecycleStatus::
+                                          outcome_unknown
+                                    : NdmsNativeInterfaceLifecycleStatus::
+                                          not_started;
+                return result;
+            }
+        } else if (action == NdmsNativeInterfaceLifecycleAction::up) {
+            const auto up = dispatch(
+                NdmsNativeExactMutationRequest::
+                    enable_existing_interface(interface_name));
+            if (!acknowledged(up)) {
+                result.status = result.request_may_have_been_dispatched
+                                    ? NdmsNativeInterfaceLifecycleStatus::
+                                          outcome_unknown
+                                    : NdmsNativeInterfaceLifecycleStatus::
+                                          not_started;
+                return result;
+            }
+        } else {
+            const auto down = dispatch(
+                NdmsNativeExactMutationRequest::
+                    disable_existing_interface(interface_name));
+            if (!down.pre_dispatch_guard_passed &&
+                !down.request_may_have_been_dispatched) {
+                return result;
+            }
+            // Even if the down acknowledgement was lost, always issue the
+            // exact up command so a restart cannot strand a working VPN down.
+            const auto up = dispatch(
+                NdmsNativeExactMutationRequest::
+                    enable_existing_interface(interface_name));
+            if (!acknowledged(up)) {
+                result.status = result.request_may_have_been_dispatched
+                                    ? NdmsNativeInterfaceLifecycleStatus::
+                                          outcome_unknown
+                                    : NdmsNativeInterfaceLifecycleStatus::
+                                          not_started;
+                return result;
+            }
+        }
+
+        const auto save = dispatch(
+            NdmsNativeExactMutationRequest::save_configuration());
+        result.status = acknowledged(save)
+                            ? NdmsNativeInterfaceLifecycleStatus::completed
+                            : result.request_may_have_been_dispatched
+                                  ? NdmsNativeInterfaceLifecycleStatus::
+                                        outcome_unknown
+                                  : NdmsNativeInterfaceLifecycleStatus::
+                                        not_started;
+        return result;
+    } catch (...) {
+        result.status = result.request_may_have_been_dispatched
+                            ? NdmsNativeInterfaceLifecycleStatus::
+                                  outcome_unknown
+                            : NdmsNativeInterfaceLifecycleStatus::not_started;
+        return result;
+    }
 }
 
 } // namespace keen_pbr3

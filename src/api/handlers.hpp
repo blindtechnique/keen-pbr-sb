@@ -13,6 +13,7 @@
 #include "../keenetic/ndms_native_cooperative_import.hpp"
 #include "../keenetic/ndms_native_inventory_projection.hpp"
 #include "../keenetic/ndms_native_tombstone_forget.hpp"
+#include "../keenetic/ndms_interface_management.hpp"
 #include "../log/logger.hpp"
 #include "../runtime/lifecycle_operation.hpp"
 #include "../runtime/runtime_mutation_admission.hpp"
@@ -220,6 +221,13 @@ struct ApiContext {
         const NdmsNativeTombstoneForgetRequest&,
         const std::shared_ptr<SensitiveRequestReservation>&)>
         run_ndms_native_tombstone_forget_fn;
+    // Ordinary start/stop/restart for an already discovered native WG/AWG
+    // interface. Creation, editing, renaming and deletion use their separate
+    // workflows.
+    std::function<NdmsNativeInterfaceLifecycleResult(
+        std::string,
+        NdmsNativeInterfaceLifecycleAction)>
+        run_ndms_native_interface_lifecycle_fn;
 
     Config get_visible_config() const {
         return get_visible_config_fn();

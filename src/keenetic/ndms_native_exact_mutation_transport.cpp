@@ -1,6 +1,7 @@
 #include "ndms_native_exact_mutation_transport.hpp"
 
 #include "ndms_native_create_policy.hpp"
+#include "ndms_wireguard_identity.hpp"
 
 #include <curl/curl.h>
 
@@ -28,6 +29,9 @@ constexpr std::string_view kDeleteSuffix{R"(","no":true}})"};
 constexpr std::string_view kEnablePrefix{
     R"({"interface":{")"};
 constexpr std::string_view kEnableSuffix{R"(":{"up":true}}})"};
+constexpr std::string_view kDisablePrefix{
+    R"({"interface":{")"};
+constexpr std::string_view kDisableSuffix{R"(":{"down":true}}})"};
 constexpr std::string_view kSaveBody{
     R"({"system":{"configuration":{"save":{}}}})"};
 
@@ -164,8 +168,10 @@ bool exact_firmware_acknowledgement_body(
                cursor.punctuation('}') && cursor.punctuation('}') &&
                cursor.punctuation('}') && cursor.finished();
     }
-    if (kind ==
-            NdmsNativeExactMutationKind::enable_managed_interface &&
+    if ((kind ==
+             NdmsNativeExactMutationKind::enable_managed_interface ||
+         kind ==
+             NdmsNativeExactMutationKind::enable_existing_interface) &&
         !target.empty()) {
         const std::string message =
             "\\\"" + std::string(target) +
@@ -174,6 +180,25 @@ bool exact_firmware_acknowledgement_body(
                cursor.punctuation(':') && cursor.punctuation('{') &&
                cursor.quoted(target) && cursor.punctuation(':') &&
                cursor.punctuation('{') && cursor.quoted("up") &&
+               cursor.punctuation(':') && cursor.punctuation('{') &&
+               cursor.quoted("status") && cursor.punctuation(':') &&
+               cursor.punctuation('[') &&
+               exact_status_message(
+                   cursor, "Network::Interface::Base", message) &&
+               cursor.punctuation(']') && cursor.punctuation('}') &&
+               cursor.punctuation('}') && cursor.punctuation('}') &&
+               cursor.punctuation('}') && cursor.finished();
+    }
+    if (kind ==
+            NdmsNativeExactMutationKind::disable_existing_interface &&
+        !target.empty()) {
+        const std::string message =
+            "\\\"" + std::string(target) +
+            "\\\": interface is down.";
+        return cursor.punctuation('{') && cursor.quoted("interface") &&
+               cursor.punctuation(':') && cursor.punctuation('{') &&
+               cursor.quoted(target) && cursor.punctuation(':') &&
+               cursor.punctuation('{') && cursor.quoted("down") &&
                cursor.punctuation(':') && cursor.punctuation('{') &&
                cursor.quoted("status") && cursor.punctuation(':') &&
                cursor.punctuation('[') &&
@@ -412,6 +437,32 @@ NdmsNativeExactMutationRequest::enable_managed_interface(
 }
 
 NdmsNativeExactMutationRequest
+NdmsNativeExactMutationRequest::enable_existing_interface(
+    std::string target) {
+    if (!parse_ndms_wireguard_identity(target).has_value()) {
+        secure_wipe(target);
+        throw NdmsNativeExactMutationTransportError(
+            "native exact enable target is not an existing Wireguard interface");
+    }
+    return NdmsNativeExactMutationRequest{
+        NdmsNativeExactMutationKind::enable_existing_interface,
+        std::move(target)};
+}
+
+NdmsNativeExactMutationRequest
+NdmsNativeExactMutationRequest::disable_existing_interface(
+    std::string target) {
+    if (!parse_ndms_wireguard_identity(target).has_value()) {
+        secure_wipe(target);
+        throw NdmsNativeExactMutationTransportError(
+            "native exact disable target is not an existing Wireguard interface");
+    }
+    return NdmsNativeExactMutationRequest{
+        NdmsNativeExactMutationKind::disable_existing_interface,
+        std::move(target)};
+}
+
+NdmsNativeExactMutationRequest
 NdmsNativeExactMutationRequest::save_configuration() {
     return NdmsNativeExactMutationRequest{
         NdmsNativeExactMutationKind::save_configuration, {}};
@@ -462,9 +513,16 @@ NdmsNativeExactMutationRequest::content_length() const noexcept {
                kDeleteSuffix.size();
     }
     if (kind_ ==
-        NdmsNativeExactMutationKind::enable_managed_interface) {
+            NdmsNativeExactMutationKind::enable_managed_interface ||
+        kind_ ==
+            NdmsNativeExactMutationKind::enable_existing_interface) {
         return kEnablePrefix.size() + target_.size() +
                kEnableSuffix.size();
+    }
+    if (kind_ ==
+        NdmsNativeExactMutationKind::disable_existing_interface) {
+        return kDisablePrefix.size() + target_.size() +
+               kDisableSuffix.size();
     }
     return kSaveBody.size();
 }
@@ -482,12 +540,22 @@ bool NdmsNativeExactMutationRequest::write_body_once(
                 sink.write_secret_body_chunk(target_) &&
                 sink.write_secret_body_chunk(kDeleteSuffix);
         } else if (kind_ ==
-                   NdmsNativeExactMutationKind::
-                       enable_managed_interface) {
+                       NdmsNativeExactMutationKind::
+                           enable_managed_interface ||
+                   kind_ ==
+                       NdmsNativeExactMutationKind::
+                           enable_existing_interface) {
             written =
                 sink.write_secret_body_chunk(kEnablePrefix) &&
                 sink.write_secret_body_chunk(target_) &&
                 sink.write_secret_body_chunk(kEnableSuffix);
+        } else if (kind_ ==
+                   NdmsNativeExactMutationKind::
+                       disable_existing_interface) {
+            written =
+                sink.write_secret_body_chunk(kDisablePrefix) &&
+                sink.write_secret_body_chunk(target_) &&
+                sink.write_secret_body_chunk(kDisableSuffix);
         } else {
             written = sink.write_secret_body_chunk(kSaveBody);
         }

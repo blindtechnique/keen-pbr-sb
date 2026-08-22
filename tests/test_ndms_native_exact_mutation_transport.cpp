@@ -209,6 +209,37 @@ TEST_CASE("exact native enable request has a closed canonical grammar") {
     CHECK(request.content_length() == 0U);
 }
 
+TEST_CASE("existing native lifecycle requests use the measured Wireguard identity") {
+    auto enable =
+        NdmsNativeExactMutationRequest::enable_existing_interface(
+            "Wireguard0");
+    NdmsNativeSecretBuffer enable_body(enable.content_length());
+    CHECK(enable.write_body_once(enable_body));
+    CHECK(enable_body.view() ==
+          R"({"interface":{"Wireguard0":{"up":true}}})");
+
+    auto disable =
+        NdmsNativeExactMutationRequest::disable_existing_interface(
+            "Wireguard126");
+    NdmsNativeSecretBuffer disable_body(disable.content_length());
+    CHECK(disable.write_body_once(disable_body));
+    CHECK(disable_body.view() ==
+          R"({"interface":{"Wireguard126":{"down":true}}})");
+
+    for (const char* target : {
+             "Wireguard127", "Wireguard05", "AmneziaWireguard5",
+             "Wireguard5/../Wireguard6"}) {
+        CHECK_THROWS_AS(
+            NdmsNativeExactMutationRequest::enable_existing_interface(
+                target),
+            NdmsNativeExactMutationTransportError);
+        CHECK_THROWS_AS(
+            NdmsNativeExactMutationRequest::disable_existing_interface(
+                target),
+            NdmsNativeExactMutationTransportError);
+    }
+}
+
 TEST_CASE("exact mutation request move invalidates the source") {
     auto source =
         NdmsNativeExactMutationRequest::delete_managed_interface(
@@ -302,6 +333,16 @@ TEST_CASE("exact mutation transport accepts measured Keenetic acknowledgements")
         CHECK(wrong_target.response_manifest.outcome ==
               NdmsNativeExactMutationResponseOutcome::
                   shape_not_acknowledged);
+    }
+
+    SUBCASE("interface down response is target bound") {
+        backend.response_body =
+            R"({"interface":{"Wireguard6":{"down":{"status":[{"status":"message","code":"72155286","ident":"Network::Interface::Base","message":"\"Wireguard6\": interface is down."}]}}}})";
+        const auto result = post_for_test(
+            NdmsNativeExactMutationRequest::disable_existing_interface(
+                "Wireguard6"),
+            guard, backend);
+        CHECK(result.response_manifest.acknowledged_needs_observation());
     }
 
     SUBCASE("configuration save response is acknowledged") {

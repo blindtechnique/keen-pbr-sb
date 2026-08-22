@@ -24,6 +24,7 @@
 #include "../health/routing_health_checker.hpp"
 #include "../health/runtime_interface_inventory.hpp"
 #include "../keenetic/ndms_catalog_cache.hpp"
+#include "../keenetic/ndms_interface_management.hpp"
 #include "../keenetic/ndms_interface_inventory.hpp"
 #include "../keenetic/ndms_native_config_dependencies.hpp"
 #include "../keenetic/ndms_native_cooperative_delete.hpp"
@@ -119,6 +120,7 @@ enum class NativeMutationReservationPurpose : std::uint8_t {
     new_delete,
     delete_recovery,
     tombstone_forget,
+    lifecycle,
 };
 
 class NativeMutationRequestReservation final
@@ -1451,8 +1453,15 @@ void Daemon::setup_api() {
                     ndms_native_secret_snapshot_store_,
                     ndms_native_ownership_store_,
                     dependencies};
-                return coordinator.delete_once(
+                auto result = coordinator.delete_once(
                     reservation->writer(), request);
+                if (result.request_may_have_been_dispatched ||
+                    result.status ==
+                        NdmsNativeCooperativeDeleteStatus::
+                            save_acknowledged_unverified) {
+                    shared_ndms_catalog_cache().invalidate();
+                }
+                return result;
             } catch (...) {
                 return blocked_native_delete(
                     NdmsNativeCooperativeDeleteStop::unexpected_failure);
@@ -1492,8 +1501,15 @@ void Daemon::setup_api() {
                     ndms_native_secret_snapshot_store_,
                     ndms_native_ownership_store_,
                     dependencies};
-                return coordinator.resume_once(
+                auto result = coordinator.resume_once(
                     reservation->writer(), acknowledgement);
+                if (result.request_may_have_been_dispatched ||
+                    result.status ==
+                        NdmsNativeCooperativeDeleteStatus::
+                            save_acknowledged_unverified) {
+                    shared_ndms_catalog_cache().invalidate();
+                }
+                return result;
             } catch (...) {
                 return blocked_native_delete(
                     NdmsNativeCooperativeDeleteStop::unexpected_failure);
@@ -1539,6 +1555,43 @@ void Daemon::setup_api() {
                 return blocked_native_tombstone_forget(
                     NdmsNativeTombstoneForgetStop::unexpected_failure,
                     request.interface_name);
+            }
+        };
+    api_ctx_->run_ndms_native_interface_lifecycle_fn =
+        [this, reserve_native_mutation](
+            std::string interface_name,
+            const NdmsNativeInterfaceLifecycleAction action) {
+            NdmsNativeInterfaceLifecycleResult unavailable;
+            auto opaque_reservation = reserve_native_mutation(
+                "ndms-native-interface-lifecycle",
+                NativeMutationReservationPurpose::lifecycle,
+                false);
+            auto* reservation = dynamic_cast<
+                NativeMutationRequestReservation*>(
+                    opaque_reservation.get());
+            if (reservation == nullptr ||
+                !reservation->owned_by(
+                    this,
+                    NativeMutationReservationPurpose::lifecycle)) {
+                return unavailable;
+            }
+            try {
+                reservation->writer().verify_held();
+                NdmsNativeLibcurlExactMutationBackend backend;
+                NdmsNativeInterfaceLifecycleCoordinator coordinator{
+                    backend};
+                auto result = coordinator.apply_once(
+                    reservation->writer(),
+                    std::move(interface_name),
+                    action);
+                if (result.request_may_have_been_dispatched ||
+                    result.status ==
+                        NdmsNativeInterfaceLifecycleStatus::completed) {
+                    shared_ndms_catalog_cache().invalidate();
+                }
+                return result;
+            } catch (...) {
+                return unavailable;
             }
         };
 #endif

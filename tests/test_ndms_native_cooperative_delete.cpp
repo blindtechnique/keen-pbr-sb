@@ -1369,34 +1369,8 @@ TEST_CASE("delete and save ambiguity resume only from durable observation") {
 
         fixture.backend.throw_after_perform_call = 0U;
         auto restarted = fixture.restarted_coordinator();
-        const auto no_current_ack = restarted.resume_once(
-            fixture.writer.lease);
-        CHECK(no_current_ack.status ==
-              NdmsNativeCooperativeDeleteStatus::recovery_required);
-        CHECK(no_current_ack.stop == NdmsNativeCooperativeDeleteStop::
-              save_reconfirmation_required);
-        CHECK(fixture.backend.perform_calls == 2U);
-
-        NdmsNativeCooperativeDeleteResumeAcknowledgement save_only;
-        save_only.global_save_consent = NdmsNativeOwnerGlobalSaveConsent::
-            acknowledged_all_pending_keenetic_changes;
-        const auto missing_race_ack = restarted.resume_once(
-            fixture.writer.lease, save_only);
-        CHECK(missing_race_ack.stop == NdmsNativeCooperativeDeleteStop::
-              save_reconfirmation_required);
-        CHECK(fixture.backend.perform_calls == 2U);
-
-        NdmsNativeCooperativeDeleteResumeAcknowledgement race_only;
-        race_only.external_writer_race =
-            NdmsNativeDeleteExternalWriterRaceAcceptance::owner_accepted;
-        const auto missing_save_ack = restarted.resume_once(
-            fixture.writer.lease, race_only);
-        CHECK(missing_save_ack.stop == NdmsNativeCooperativeDeleteStop::
-              save_reconfirmation_required);
-        CHECK(fixture.backend.perform_calls == 2U);
-
         const auto second = restarted.resume_once(
-            fixture.writer.lease, fixture.resume_acknowledgement());
+            fixture.writer.lease);
         CHECK(second.status == NdmsNativeCooperativeDeleteStatus::
               save_acknowledged_unverified);
         CHECK(fixture.backend.perform_calls == 3U);
@@ -1404,7 +1378,7 @@ TEST_CASE("delete and save ambiguity resume only from durable observation") {
     }
 }
 
-TEST_CASE("recovery never carries original save consent into a new invocation") {
+TEST_CASE("recovery reuses the original explicit delete acknowledgements") {
     for (const auto recovered_phase : {
              NdmsNativeDeleteWalPhase::prepared,
              NdmsNativeDeleteWalPhase::delete_may_be_inflight}) {
@@ -1429,37 +1403,15 @@ TEST_CASE("recovery never carries original save consent into a new invocation") 
         const auto saves_before = std::count(
             fixture.events.begin(), fixture.events.end(), "save.perform");
         auto restarted = fixture.restarted_coordinator();
-        const auto without_current_ack = restarted.resume_once(
+        const auto recovered_result = restarted.resume_once(
             fixture.writer.lease);
 
-        CHECK(without_current_ack.status ==
-              NdmsNativeCooperativeDeleteStatus::recovery_required);
-        CHECK(without_current_ack.stop ==
-              NdmsNativeCooperativeDeleteStop::
-                  save_reconfirmation_required);
-        CHECK(without_current_ack.delete_perform_started);
-        CHECK_FALSE(without_current_ack.save_perform_started);
-        CHECK(without_current_ack.request_may_have_been_dispatched);
-        CHECK_FALSE(
-            without_current_ack.system_configuration_save_acknowledged);
-        CHECK(std::count(
-                  fixture.events.begin(),
-                  fixture.events.end(),
-                  "save.perform") == saves_before);
-        const auto waiting = fixture.delete_wal.load();
-        REQUIRE(waiting.record.has_value());
-        CHECK(waiting.record->phase ==
-              NdmsNativeDeleteWalPhase::running_absence_verified);
-
-        const auto confirmed = restarted.resume_once(
-            fixture.writer.lease, fixture.resume_acknowledgement());
-        CHECK(confirmed.status == NdmsNativeCooperativeDeleteStatus::
+        CHECK(recovered_result.status == NdmsNativeCooperativeDeleteStatus::
               save_acknowledged_unverified);
-        CHECK(confirmed.stop == NdmsNativeCooperativeDeleteStop::none);
-        CHECK_FALSE(confirmed.delete_perform_started);
-        CHECK(confirmed.save_perform_started);
-        CHECK(confirmed.request_may_have_been_dispatched);
-        CHECK(confirmed.system_configuration_save_acknowledged);
+        CHECK(recovered_result.stop == NdmsNativeCooperativeDeleteStop::none);
+        CHECK(recovered_result.save_perform_started);
+        CHECK(recovered_result.request_may_have_been_dispatched);
+        CHECK(recovered_result.system_configuration_save_acknowledged);
         CHECK(std::count(
                   fixture.events.begin(),
                   fixture.events.end(),

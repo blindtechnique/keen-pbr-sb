@@ -95,9 +95,9 @@ struct NdmsNativeCooperativeDeleteRequest final {
         NdmsNativeDeleteExternalWriterRaceAcceptance::not_accepted};
 };
 
-// Fresh owner decisions for this single recovery invocation. They are never
-// persisted as reusable authority: a later invocation must ask again before
-// it can dispatch or re-dispatch Keenetic's global configuration save.
+// Compatibility acknowledgements for records created before the original
+// delete retained the user's decisions. Current records reuse the decisions
+// already stored by that delete instead of asking the user twice.
 struct NdmsNativeCooperativeDeleteResumeAcknowledgement final {
     NdmsNativeOwnerGlobalSaveConsent global_save_consent{
         NdmsNativeOwnerGlobalSaveConsent::not_acknowledged};

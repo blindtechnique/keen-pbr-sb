@@ -1514,11 +1514,13 @@ NdmsNativeCooperativeDeleteCoordinator::resume_once(
             NdmsNativeCooperativeDeleteStop::delete_wal_unsafe);
     }
     const bool current_save_reconfirmed =
-        current_acknowledgement.global_save_consent ==
-            NdmsNativeOwnerGlobalSaveConsent::
-                acknowledged_all_pending_keenetic_changes &&
-        current_acknowledgement.external_writer_race ==
-            NdmsNativeDeleteExternalWriterRaceAcceptance::owner_accepted;
+        (loaded.record->owner_global_save_acknowledged &&
+         loaded.record->external_writer_race_accepted) ||
+        (current_acknowledgement.global_save_consent ==
+             NdmsNativeOwnerGlobalSaveConsent::
+                 acknowledged_all_pending_keenetic_changes &&
+         current_acknowledgement.external_writer_race ==
+             NdmsNativeDeleteExternalWriterRaceAcceptance::owner_accepted);
     try {
         return run_record(
             writer, *loaded.record, current_save_reconfirmed);

@@ -14,7 +14,7 @@ describe("native Keenetic interface wording", () => {
       "не создаёт и не изменяет"
     )
     expect(ruTranslation.transports.nativeManagedExternally).toContain(
-      "уже существующий"
+      "интерфейс KeeneticOS"
     )
     expect(ruTranslation.transports.routeOffer.question).toContain(
       "только маршрут"
@@ -28,7 +28,7 @@ describe("native Keenetic interface wording", () => {
       "does not create or edit"
     )
     expect(enTranslation.transports.nativeManagedExternally).toContain(
-      "existing"
+      "KeeneticOS interface"
     )
     expect(enTranslation.transports.routeOffer.question).toContain(
       "Create only a route"
@@ -59,6 +59,12 @@ describe("native Keenetic interface wording", () => {
     expect(
       enTranslation.transports.nativeInterface.managementReadOnlyDescription
     ).toContain("only an exact panel-owned import")
+    expect(
+      ruTranslation.transports.nativeInterface.managementLifecycleDescription
+    ).toContain("включить, выключить и перезапустить")
+    expect(
+      enTranslation.transports.nativeInterface.managementLifecycleDescription
+    ).toContain("start, stop and restart")
   })
 
   test("previews locally and sends once only after protected explicit consent", () => {
@@ -128,10 +134,10 @@ describe("native Keenetic interface wording", () => {
       "another tool"
     )
     expect(ruTranslation.transports.nativeImport.results.runningOnly).toContain(
-      "system configuration save"
+      "конфигурация KeeneticOS сохранена"
     )
     expect(enTranslation.transports.nativeImport.results.runningOnly).toContain(
-      "system configuration save"
+      "KeeneticOS configuration is saved"
     )
   })
 })

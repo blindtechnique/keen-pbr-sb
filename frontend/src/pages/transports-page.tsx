@@ -18,10 +18,7 @@ import { toast } from "sonner"
 import { useLocation } from "wouter"
 
 import type { ApiError } from "@/api/client"
-import type {
-  NdmsNativeDeleteResult,
-  NdmsNativeImportRecoveryResult,
-} from "@/api/native-mutation"
+import type { NdmsNativeImportRecoveryResult } from "@/api/native-mutation"
 import {
   getTransportConfigExport,
   postConfig,
@@ -250,8 +247,6 @@ export function TransportsPage({
   const [deleting, setDeleting] = useState<TransportSpec | undefined>()
   const [nativeDeleteSelection, setNativeDeleteSelection] =
     useState<NativeDeleteSelection>()
-  const [nativeDeleteTerminal, setNativeDeleteTerminal] =
-    useState<NdmsNativeDeleteResult>()
   const [transportExportPending, setTransportExportPending] = useState(false)
   const [expandedTransportIds, setExpandedTransportIds] = useState(
     () => new Set<string>()
@@ -687,6 +682,9 @@ export function TransportsPage({
         toast.error(getApiErrorMessage(mutationError as ApiError), {
           richColors: true,
         })
+      },
+      onSettled: async () => {
+        await refreshNativeMutationInventory().catch(() => undefined)
       },
     },
   })
@@ -1361,23 +1359,46 @@ export function TransportsPage({
       Boolean(nativeTracker) ||
       (Boolean(nativeInterface.kernelName) &&
         getNativeBindBlockReason(nativeInterface) === undefined)
+    const lifecycleReady =
+      nativeInterface.source.role !== "server" &&
+      (nativeInterface.source.kind === "wireguard" ||
+        nativeInterface.source.kind === "amnezia_wireguard") &&
+      nativeInterface.logicalName.length > 0
 
     const cells: ReactNode[] = [
-      // Выключателем и перезапуском этими интерфейсами управляет прошивка,
-      // поэтому кнопки неактивны — но место занято, иначе колонки разъезжаются.
       <span className="flex items-center gap-1" key="power">
         <Switch
-          aria-label={firmwareTitle}
+          aria-label={
+            nativeInterface.live ? t("transports.stop") : t("transports.start")
+          }
           checked={nativeInterface.live}
-          disabled
+          disabled={!lifecycleReady || actionMutation.isPending}
+          onCheckedChange={(checked) =>
+            actionMutation.mutate({
+              data: {
+                tag: nativeInterface.logicalName,
+                action: checked
+                  ? TransportActionRequestAction.up
+                  : TransportActionRequestAction.down,
+              },
+            })
+          }
           title={firmwareTitle}
         />
         <Button
           aria-label={t("transports.restart")}
           className="size-7"
-          disabled
+          disabled={!lifecycleReady || actionMutation.isPending}
+          onClick={() =>
+            actionMutation.mutate({
+              data: {
+                tag: nativeInterface.logicalName,
+                action: TransportActionRequestAction.restart,
+              },
+            })
+          }
           size="icon"
-          title={firmwareTitle}
+          title={lifecycleReady ? t("transports.restart") : firmwareTitle}
           variant="ghost"
         >
           <RefreshCwIcon className="size-4" />
@@ -1785,7 +1806,7 @@ export function TransportsPage({
 
       <NativeMutationRecovery
         inventoryStatus={nativeMutationStatus}
-        onDeleteTerminal={setNativeDeleteTerminal}
+        onDeleteTerminal={() => undefined}
         onImportCompleted={createRouteAfterRecoveredImport}
         onInventoryRefresh={refreshNativeMutationInventory}
       />
@@ -1794,22 +1815,6 @@ export function TransportsPage({
         onInventoryRefresh={refreshNativeMutationInventory}
         retainedDeletions={nativeRetainedDeletions}
       />
-
-      {nativeDeleteTerminal ? (
-        <Alert
-          aria-atomic="true"
-          aria-live="polite"
-          className="border-warning/50"
-          variant="warning"
-        >
-          <AlertTitle>
-            {t("transports.nativeMutation.unverifiedSave.title")}
-          </AlertTitle>
-          <AlertDescription className="break-words">
-            {t("transports.nativeMutation.unverifiedSave.deleteResult")}
-          </AlertDescription>
-        </Alert>
-      ) : null}
 
       {error ? (
         <Alert variant="destructive">
@@ -2025,7 +2030,7 @@ export function TransportsPage({
         onOpenChange={(open) => {
           if (!open) setNativeDeleteSelection(undefined)
         }}
-        onTerminal={setNativeDeleteTerminal}
+        onTerminal={() => undefined}
         open={Boolean(nativeDeleteSelection)}
       />
       <DeleteImpactDialog
@@ -2269,9 +2274,14 @@ function RowActions({
           aria-label={editTitle}
           className="keen-row-action size-8 rounded-[4px]"
           disabled={editDisabled}
-          onClick={onEdit}
+          onClick={(event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            onEdit()
+          }}
           size="icon"
           title={editTitle}
+          type="button"
           variant="outline"
         >
           <KeenPencilIcon className="size-4" />
@@ -2283,9 +2293,14 @@ function RowActions({
             !deleteDisabled && "keen-row-action--danger"
           )}
           disabled={deleteDisabled}
-          onClick={onDelete}
+          onClick={(event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            onDelete()
+          }}
           size="icon"
           title={deleteTitle}
+          type="button"
           variant="outline"
         >
           <KeenTrashIcon className="size-4" />
@@ -2295,9 +2310,14 @@ function RowActions({
         aria-expanded={expanded}
         aria-label={toggleTitle}
         className="size-8"
-        onClick={onToggleExpanded}
+        onClick={(event) => {
+          event.preventDefault()
+          event.stopPropagation()
+          onToggleExpanded()
+        }}
         size="icon"
         title={toggleTitle}
+        type="button"
         variant="ghost"
       >
         <ChevronDownIcon

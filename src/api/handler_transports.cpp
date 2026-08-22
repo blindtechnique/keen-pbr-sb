@@ -8,6 +8,7 @@
 
 #include "../config/config_writer.hpp"
 #include "../crypto/sha256.hpp"
+#include "../keenetic/ndms_wireguard_identity.hpp"
 #include "../util/display_name.hpp"
 #include "../util/safe_exec.hpp"
 #include "../update/sing_box_install_observation.hpp"
@@ -1472,11 +1473,41 @@ static void register_transports_handler_impl(
         }
         const auto tag = request["tag"].get<std::string>();
         const auto action = request["action"].get<std::string>();
-        if (!valid_transport_tag(tag)) {
-            throw ApiError("invalid transport tag", 400);
-        }
         if (action != "up" && action != "down" && action != "restart") {
             throw ApiError("transport action must be up, down, or restart", 400);
+        }
+
+        if (parse_ndms_wireguard_identity(tag).has_value()) {
+            if (!ctx.run_ndms_native_interface_lifecycle_fn) {
+                throw ApiError("native VPN lifecycle is unavailable", 503);
+            }
+            const auto native_action =
+                action == "up"
+                    ? NdmsNativeInterfaceLifecycleAction::up
+                    : action == "down"
+                          ? NdmsNativeInterfaceLifecycleAction::down
+                          : NdmsNativeInterfaceLifecycleAction::restart;
+            const auto result =
+                ctx.run_ndms_native_interface_lifecycle_fn(
+                    tag, native_action);
+            if (result.status ==
+                NdmsNativeInterfaceLifecycleStatus::completed) {
+                return nlohmann::json{
+                    {"status", "accepted"},
+                    {"tag", tag},
+                    {"action", action},
+                }.dump();
+            }
+            if (result.status ==
+                NdmsNativeInterfaceLifecycleStatus::outcome_unknown) {
+                throw ApiError(
+                    "native VPN lifecycle result is unknown", 502);
+            }
+            throw ApiError("native VPN lifecycle was not started", 503);
+        }
+
+        if (!valid_transport_tag(tag)) {
+            throw ApiError("invalid transport tag", 400);
         }
 
         try {

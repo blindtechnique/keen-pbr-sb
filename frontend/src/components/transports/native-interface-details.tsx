@@ -9,7 +9,6 @@ import type { ReactNode } from "react"
 import { useTranslation } from "react-i18next"
 
 import type {
-  NdmsManagementBlocker,
   NdmsNativeInventoryDeleteBlocker,
   NdmsNativeInventoryOwnershipState,
   NdmsNativeOwnershipLifecycle,
@@ -64,10 +63,13 @@ export function NativeInterfaceDetails({
     hasConfig,
     boundOutboundTag,
   })
-  const managementReadiness = nativeInterface.source.management_readiness
   const mutation = nativeInterface.source.native_mutation
   const deleteEnabled =
     mutation.delete_candidate && Boolean(mutation.ownership_revision)
+  const lifecycleAvailable =
+    (nativeInterface.source.kind === "wireguard" ||
+      nativeInterface.source.kind === "amnezia_wireguard") &&
+    nativeInterface.source.role !== "server"
 
   return (
     <div className="space-y-3 text-sm">
@@ -146,10 +148,9 @@ export function NativeInterfaceDetails({
         />
         <NativeInterfaceField
           label={t("transports.nativeInterface.management")}
-          title={managementReadinessTitle(managementReadiness?.blockers, t)}
           value={
-            !managementReadiness || managementReadiness.candidate
-              ? t("transports.nativeInterface.managementReadOnly")
+            lifecycleAvailable
+              ? t("transports.nativeInterface.managementLifecycle")
               : t("transports.nativeInterface.managementUnsupported")
           }
         />
@@ -165,16 +166,6 @@ export function NativeInterfaceDetails({
               : t("transports.nativeMutation.deleteUnavailable")
           }
         />
-      </div>
-
-      <div className="space-y-1 rounded-md bg-muted/50 p-3 text-xs text-muted-foreground">
-        <p>{t("transports.nativeInterface.managementReadOnlyDescription")}</p>
-        <p>
-          <span className="font-medium text-foreground">
-            {t("transports.nativeInterface.managementBlockersTitle")}:
-          </span>{" "}
-          {managementReadinessTitle(managementReadiness?.blockers, t)}
-        </p>
       </div>
 
       {mutation.delete_blockers.length > 0 ? (
@@ -285,23 +276,6 @@ function NativeInterfaceField({
       </span>
     </div>
   )
-}
-
-function managementReadinessTitle(
-  blockers: readonly NdmsManagementBlocker[] | undefined,
-  t: (key: string) => string
-): string {
-  if (!blockers) {
-    return t("transports.nativeInterface.managementReadinessUnavailable")
-  }
-  if (blockers.length === 0) {
-    return t("transports.nativeInterface.managementReady")
-  }
-  return blockers
-    .map((blocker) =>
-      t(`transports.nativeInterface.managementBlockers.${blocker}`)
-    )
-    .join("; ")
 }
 
 function ownershipLabel(

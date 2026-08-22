@@ -46,12 +46,8 @@ type DeleteRecoveryLeaseValue =
   | Readonly<{
       outcome: "delete_terminal"
       result: NdmsNativeDeleteResult
-      reconfirm: false
     }>
-  | Readonly<{
-      outcome: "delete_no_work" | "delete_blocked" | "unknown"
-      reconfirm: boolean
-    }>
+  | Readonly<{ outcome: "delete_no_work" | "delete_blocked" | "unknown" }>
 
 const operationRecoveryKind = (
   operation: NativeMutationOperation
@@ -93,10 +89,8 @@ export function NativeMutationRecovery({
   )
   const [busy, setBusy] = useState<NativeMutationRecoveryKind | null>(null)
   const [outcome, setOutcome] = useState<RecoveryOutcome | null>(null)
-  const [deleteReconfirmation, setDeleteReconfirmation] = useState(false)
-  const [externalWriterAccepted, setExternalWriterAccepted] = useState(false)
-  const [globalSaveAcknowledged, setGlobalSaveAcknowledged] = useState(false)
   const automaticImportRecoveryAttempts = useRef(0)
+  const automaticDeleteRecoveryAttempts = useRef(0)
 
   useEffect(
     () => subscribeNativeMutationLock((nextLock) => setLock(nextLock)),
@@ -222,33 +216,23 @@ export function NativeMutationRecovery({
     return () => window.clearTimeout(timeout)
   }, [busy, importNeedsRecovery, recoverImport])
 
-  const recoverDelete = async (withAcknowledgements: boolean) => {
+  const recoverDelete = useCallback(async () => {
     if (busy) return
-    if (
-      withAcknowledgements &&
-      (!externalWriterAccepted || !globalSaveAcknowledged)
-    ) {
-      return
-    }
     setBusy("delete")
     setOutcome(null)
-    setExternalWriterAccepted(false)
-    setGlobalSaveAcknowledged(false)
     try {
       const leaseResult =
         await runWithNativeMutationLease<DeleteRecoveryLeaseValue>(
           "delete_recovery",
           async () => {
             try {
-              const result =
-                await postNdmsNativeDeleteRecoveryOnce(withAcknowledgements)
+              const result = await postNdmsNativeDeleteRecoveryOnce(false)
               if (result.status === "save_acknowledged_unverified") {
                 return {
                   disposition: nativeDeleteRecoveryDisposition(result),
                   value: {
                     outcome: "delete_terminal",
                     result,
-                    reconfirm: false,
                   } as const,
                 }
               }
@@ -258,18 +242,12 @@ export function NativeMutationRecovery({
               ) {
                 return {
                   disposition: nativeDeleteRecoveryDisposition(result),
-                  value: {
-                    outcome: "delete_no_work",
-                    reconfirm: false,
-                  } as const,
+                  value: { outcome: "delete_no_work" } as const,
                 }
               }
               return {
                 disposition: nativeDeleteRecoveryDisposition(result),
-                value: {
-                  outcome: "delete_blocked",
-                  reconfirm: result.stop === "save_reconfirmation_required",
-                } as const,
+                value: { outcome: "delete_blocked" } as const,
               }
             } catch (error) {
               if (
@@ -281,29 +259,27 @@ export function NativeMutationRecovery({
                     state: "recovery",
                     recovery: "delete",
                   } as const,
-                  value: {
-                    outcome: "delete_blocked",
-                    reconfirm: false,
-                  } as const,
+                  value: { outcome: "delete_blocked" } as const,
                 }
               }
               return {
                 disposition: { state: "unknown" } as const,
-                value: {
-                  outcome: "unknown",
-                  reconfirm: false,
-                } as const,
+                value: { outcome: "unknown" } as const,
               }
             }
           }
         )
 
       if (leaseResult.status !== "completed") {
-        setDeleteReconfirmation(false)
-        setOutcome("unknown")
+        setOutcome(null)
       } else {
-        setDeleteReconfirmation(leaseResult.value.reconfirm)
-        setOutcome(leaseResult.value.outcome)
+        setOutcome(
+          leaseResult.value.outcome === "delete_terminal" ||
+            leaseResult.value.outcome === "delete_no_work" ||
+            deleteNeedsRecovery
+            ? null
+            : leaseResult.value.outcome
+        )
         if (
           leaseResult.value.outcome === "delete_terminal" &&
           "result" in leaseResult.value
@@ -315,7 +291,25 @@ export function NativeMutationRecovery({
       setBusy(null)
       await refresh().catch(() => undefined)
     }
-  }
+  }, [busy, deleteNeedsRecovery, onDeleteTerminal, refresh])
+
+  useEffect(() => {
+    if (!deleteNeedsRecovery) {
+      automaticDeleteRecoveryAttempts.current = 0
+      return
+    }
+    if (busy !== null) return
+    const attempt = automaticDeleteRecoveryAttempts.current
+    const delay =
+      attempt === 0
+        ? 500
+        : Math.min(1_000 * 2 ** Math.min(attempt - 1, 4), 15_000)
+    const timeout = window.setTimeout(() => {
+      automaticDeleteRecoveryAttempts.current += 1
+      void recoverDelete()
+    }, delay)
+    return () => window.clearTimeout(timeout)
+  }, [busy, deleteNeedsRecovery, recoverDelete])
 
   if (!show) return null
 
@@ -349,70 +343,13 @@ export function NativeMutationRecovery({
       ) : null}
 
       {deleteNeedsRecovery ? (
-        <Alert variant="warning" aria-atomic="true" aria-live="polite">
-          <AlertTriangleIcon />
+        <Alert aria-atomic="true" aria-live="polite">
+          <RotateCcwIcon className="animate-spin" />
           <AlertTitle>
             {t("transports.nativeMutation.recovery.deleteTitle")}
           </AlertTitle>
-          <AlertDescription className="space-y-3 break-words">
-            <p>{t("transports.nativeMutation.recovery.deleteDescription")}</p>
-
-            {deleteReconfirmation ? (
-              <div className="space-y-2 rounded-md border border-warning/40 p-2">
-                <p className="font-medium text-foreground">
-                  {t("transports.nativeMutation.recovery.reconfirmTitle")}
-                </p>
-                <label className="flex min-h-11 cursor-pointer items-start gap-3 rounded-md p-1">
-                  <input
-                    checked={externalWriterAccepted}
-                    className="mt-0.5 size-5 shrink-0 accent-primary"
-                    disabled={busy !== null}
-                    onChange={(event) =>
-                      setExternalWriterAccepted(event.target.checked)
-                    }
-                    type="checkbox"
-                  />
-                  <span className="min-w-0 break-words">
-                    {t(
-                      "transports.nativeMutation.acknowledgements.externalWriter"
-                    )}
-                  </span>
-                </label>
-                <label className="flex min-h-11 cursor-pointer items-start gap-3 rounded-md p-1">
-                  <input
-                    checked={globalSaveAcknowledged}
-                    className="mt-0.5 size-5 shrink-0 accent-primary"
-                    disabled={busy !== null}
-                    onChange={(event) =>
-                      setGlobalSaveAcknowledged(event.target.checked)
-                    }
-                    type="checkbox"
-                  />
-                  <span className="min-w-0 break-words">
-                    {t("transports.nativeMutation.acknowledgements.globalSave")}
-                  </span>
-                </label>
-              </div>
-            ) : null}
-
-            <Button
-              className="min-h-11 max-w-full whitespace-normal"
-              disabled={
-                busy !== null ||
-                (deleteReconfirmation &&
-                  (!externalWriterAccepted || !globalSaveAcknowledged))
-              }
-              onClick={() => void recoverDelete(deleteReconfirmation)}
-              type="button"
-              variant="outline"
-            >
-              <RotateCcwIcon />
-              {busy === "delete"
-                ? t("transports.nativeMutation.recovery.checking")
-                : deleteReconfirmation
-                  ? t("transports.nativeMutation.recovery.continueDelete")
-                  : t("transports.nativeMutation.recovery.checkDelete")}
-            </Button>
+          <AlertDescription className="break-words">
+            {t("transports.nativeMutation.recovery.deleteDescription")}
           </AlertDescription>
         </Alert>
       ) : null}
