@@ -105,8 +105,10 @@ export function NativeMutationRecovery({
   const deleteNeedsRecovery =
     deleteState === "recovery_required" || lockMatches(lock, "delete")
   const forgetNeedsRecovery = lockMatches(lock, "forget")
-  const show =
-    pending || deleteNeedsRecovery || forgetNeedsRecovery || outcome !== null
+  // Recovery passes remain automatic and bodyless. Their journals and
+  // intermediate states are implementation details, not a second workflow
+  // the operator has to understand or click through.
+  const show = false
   const outcomeCopy = outcome ? recoveryOutcomeCopy(outcome, t) : null
 
   const syncLock = useCallback(() => setLock(readNativeMutationLock()), [])

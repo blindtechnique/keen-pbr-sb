@@ -983,7 +983,12 @@ export const enTranslation = {
         blockedReason: "Reason: {{reason}}",
         recoveryLatched:
           "A durable transaction may remain. Close this dialog and use the page-level recovery check; do not submit another deletion.",
-        deleting: "Submitting once…",
+        deleting: "Deleting VPN…",
+        deleted: "VPN deleted",
+        finishing: "Finishing deletion. The list will update automatically.",
+        deleteFailed: "The VPN could not be deleted. Refresh and try again.",
+        refreshAndRetry:
+          "The list changed and is being refreshed. Press the trash button again.",
         delete: "Delete",
       },
       forget: {

@@ -465,7 +465,18 @@ const operationEligible = (
   if (snapshot.corrupt) {
     return operation === "import_recovery" || operation === "delete_recovery"
   }
-  if (isFreshOperation(operation)) return snapshot.lock === null
+  if (isFreshOperation(operation)) {
+    if (snapshot.lock === null) return true
+    // Tombstone retirement changes only panel-local rollback metadata. A
+    // stale browser marker from that invisible cleanup must not brick the
+    // next visible import or deletion. The origin-wide Web Lock still keeps a
+    // currently running cleanup mutually exclusive; after it releases, a
+    // fresh operation may replace its obsolete journal entry.
+    if (snapshot.lock.state === "recovery_required") {
+      return snapshot.lock.recovery === "forget"
+    }
+    return recoveryForOperation(snapshot.lock.operation) === "forget"
+  }
   if (snapshot.lock === null) return true
 
   const recovery = recoveryForOperation(operation)

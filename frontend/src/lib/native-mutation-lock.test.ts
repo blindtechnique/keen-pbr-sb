@@ -1013,6 +1013,34 @@ describe("native mutation browser-global lease", () => {
     expect(readNativeMutationLock()).toBeNull()
   })
 
+  test("a stale metadata-cleanup marker cannot block visible import or delete", async () => {
+    localStorage.setItem(
+      NATIVE_MUTATION_LOCK_STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        state: "recovery_required",
+        recovery: "forget",
+      })
+    )
+    expect(
+      await runWithNativeMutationLease("import", async ({ beginPending }) => {
+        expect(beginPending()).toBe(true)
+        return complete({ state: "clear" }, "imported")
+      })
+    ).toEqual({ status: "completed", value: "imported" })
+
+    localStorage.setItem(
+      NATIVE_MUTATION_LOCK_STORAGE_KEY,
+      JSON.stringify({ version: 2, state: "unknown", operation: "forget" })
+    )
+    expect(
+      await runWithNativeMutationLease("delete", async () =>
+        complete({ state: "clear" }, "deleted")
+      )
+    ).toEqual({ status: "completed", value: "deleted" })
+    expect(readNativeMutationLock()).toBeNull()
+  })
+
   test("19: a v1 record cannot smuggle the forget family", async () => {
     const invalidV1 = JSON.stringify({
       version: 1,

@@ -161,7 +161,9 @@ TEST_CASE("the package and access operations require a step-up") {
         "POST", "/api/system/ndms/interfaces/remove"));
     CHECK_FALSE(requires_step_up(
         "POST", "/api/system/ndms/interfaces/remove/recovery/retry"));
-    CHECK(requires_step_up(
+    // Retiring panel-local rollback metadata is part of the same completed
+    // deletion. It must never cause a second password prompt on page load.
+    CHECK_FALSE(requires_step_up(
         "POST",
         "/api/system/ndms/interfaces/retained-deletions/forget"));
     CHECK_FALSE(requires_step_up(
