@@ -1455,6 +1455,12 @@ void Daemon::setup_api() {
                     dependencies};
                 auto result = coordinator.delete_once(
                     reservation->writer(), request);
+                Logger::instance().info(
+                    "Native VPN delete {}: status={}, stop={}",
+                    request.interface_name,
+                    ndms_native_cooperative_delete_status_name(
+                        result.status),
+                    ndms_native_cooperative_delete_stop_name(result.stop));
                 if (result.request_may_have_been_dispatched ||
                     result.status ==
                         NdmsNativeCooperativeDeleteStatus::
@@ -1549,8 +1555,20 @@ void Daemon::setup_api() {
                     ndms_native_secret_snapshot_store_,
                     ndms_native_ownership_store_,
                     dependencies};
-                return coordinator.forget_once(
+                auto result = coordinator.forget_once(
                     reservation->writer(), request);
+                Logger::instance().info(
+                    "Native VPN tombstone forget {}: status={}, stop={}, "
+                    "snapshot={}, tombstone={}",
+                    request.interface_name,
+                    ndms_native_tombstone_forget_status_name(
+                        result.status),
+                    ndms_native_tombstone_forget_stop_name(result.stop),
+                    ndms_native_tombstone_forget_artifact_state_name(
+                        result.snapshot_state),
+                    ndms_native_tombstone_forget_artifact_state_name(
+                        result.tombstone_state));
+                return result;
             } catch (...) {
                 return blocked_native_tombstone_forget(
                     NdmsNativeTombstoneForgetStop::unexpected_failure,

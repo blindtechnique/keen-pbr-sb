@@ -181,29 +181,38 @@ public:
         nlohmann::json payload = nlohmann::json::object();
         for (std::uint8_t slot = 0U; slot <= 4U; ++slot) {
             const auto name = "Wireguard" + std::to_string(slot);
-            payload[name] = {
-                {"type", "Wireguard"},
-                {"interface-name", name},
-                {"description", "foreign"},
-            };
+            payload[name] = scope ==
+                    NdmsNativeDirectCatalogScope::runtime_state
+                ? nlohmann::json{
+                      {"type", "Wireguard"},
+                      {"interface-name", name},
+                      {"description", "foreign"},
+                  }
+                : nlohmann::json{{"description", "foreign"}};
         }
         const bool target_present =
             target_present_call == 0U || target_present_call == calls;
         if (target_present) {
-            payload[interface_name] = {
-                {"type", "Wireguard"},
-                {"interface-name", interface_name},
-                {"description", "external"},
-            };
+            payload[interface_name] = scope ==
+                    NdmsNativeDirectCatalogScope::runtime_state
+                ? nlohmann::json{
+                      {"type", "Wireguard"},
+                      {"interface-name", interface_name},
+                      {"description", "external"},
+                  }
+                : nlohmann::json{{"description", "external"}};
         }
         const bool marker_present =
             marker_present_call != 0U && marker_present_call == calls;
         if (marker_present) {
-            payload["Wireguard6"] = {
-                {"type", "Wireguard"},
-                {"interface-name", "Wireguard6"},
-                {"description", marker},
-            };
+            payload["Wireguard6"] = scope ==
+                    NdmsNativeDirectCatalogScope::runtime_state
+                ? nlohmann::json{
+                      {"type", "Wireguard"},
+                      {"interface-name", "Wireguard6"},
+                      {"description", marker},
+                  }
+                : nlohmann::json{{"description", marker}};
         }
         NdmsCatalogSnapshot snapshot;
         snapshot.catalog = parse_ndms_interface_catalog(payload);

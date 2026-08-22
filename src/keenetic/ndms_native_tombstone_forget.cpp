@@ -222,7 +222,9 @@ enum class AbsenceObservation : std::uint8_t {
     marker_present,
 };
 
-bool catalog_slots_safe(const NdmsInterfaceCatalog& catalog) noexcept {
+bool catalog_slots_safe(
+    const NdmsInterfaceCatalog& catalog,
+    const NdmsNativeDirectCatalogScope scope) noexcept {
     if (!catalog.firmware_available ||
         !catalog.wireguard_slot_evidence_complete) {
         return false;
@@ -242,14 +244,22 @@ bool catalog_slots_safe(const NdmsInterfaceCatalog& catalog) noexcept {
             }
             const auto expected =
                 "Wireguard" + std::to_string(slot);
-            const auto matches = std::count_if(
-                catalog.tunnels.begin(), catalog.tunnels.end(),
-                [&expected](const NdmsTunnelInterface& tunnel) {
-                    return tunnel.firmware_interface_name == expected &&
-                           (tunnel.kind == NdmsTunnelKind::wireguard ||
-                            tunnel.kind ==
-                                NdmsTunnelKind::amnezia_wireguard);
-                });
+            const auto matches = scope ==
+                    NdmsNativeDirectCatalogScope::runtime_state
+                ? std::count_if(
+                      catalog.tunnels.begin(), catalog.tunnels.end(),
+                      [&expected](const NdmsTunnelInterface& tunnel) {
+                          return tunnel.firmware_interface_name == expected &&
+                                 (tunnel.kind == NdmsTunnelKind::wireguard ||
+                                  tunnel.kind ==
+                                      NdmsTunnelKind::amnezia_wireguard);
+                      })
+                : std::count_if(
+                      catalog.interface_metadata.begin(),
+                      catalog.interface_metadata.end(),
+                      [&expected](const NdmsInterfaceMetadata& metadata) {
+                          return metadata.firmware_interface_name == expected;
+                      });
             if (matches != 1) return false;
             break;
         }
@@ -276,7 +286,7 @@ AbsenceObservation inspect_absence_observation(
         const auto& snapshot = *observation.snapshot;
         if (snapshot.status != NdmsCatalogCacheStatus::fresh ||
             !snapshot.refreshed || !snapshot.observed_at.has_value() ||
-            !catalog_slots_safe(snapshot.catalog) ||
+            !catalog_slots_safe(snapshot.catalog, expected_scope) ||
             observation.catalog_revision !=
                 ndms_native_import_recovery_catalog_revision(
                     snapshot.catalog, observation.target_evidence)) {

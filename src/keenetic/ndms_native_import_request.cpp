@@ -897,10 +897,64 @@ NdmsNativePanelDeleteSnapshot::from_sealed_payload(
         throw NdmsNativePanelDeleteSnapshotError(
             "encrypted panel delete snapshot schema is invalid");
     }
-    auto configuration = payload.substr(kPanelDeleteSnapshotMagic.size());
+    const auto configuration_view = std::string_view(payload).substr(
+        kPanelDeleteSnapshotMagic.size());
+    constexpr std::string_view name_prefix{"# Name = "};
+    const auto name_end = configuration_view.find('\n');
+    if (name_end == std::string_view::npos ||
+        configuration_view.substr(0U, name_prefix.size()) != name_prefix) {
+        throw NdmsNativePanelDeleteSnapshotError(
+            "encrypted panel delete snapshot label is invalid");
+    }
+    const auto label = configuration_view.substr(
+        name_prefix.size(), name_end - name_prefix.size());
+    std::string display_name;
+    if (label != expected_marker) {
+        const auto marker_suffix =
+            std::string{" · "} + expected_marker;
+        if (label.size() <= marker_suffix.size() ||
+            label.substr(label.size() - marker_suffix.size()) !=
+                marker_suffix) {
+            throw NdmsNativePanelDeleteSnapshotError(
+                "encrypted panel delete snapshot label is not bound");
+        }
+        display_name.assign(
+            label.substr(0U, label.size() - marker_suffix.size()));
+        if (!display_name::is_valid(display_name)) {
+            throw NdmsNativePanelDeleteSnapshotError(
+                "encrypted panel delete snapshot display name is invalid");
+        }
+    }
+    auto configuration = std::string{configuration_view};
     WipeStringGuard configuration_guard(configuration);
-    auto decoded = make_ndms_native_panel_delete_snapshot(
-        std::move(configuration), expected_marker);
+    auto imported =
+        parse_ndms_native_tunnel_import(std::move(configuration));
+    if (imported.source !=
+        NdmsNativeTunnelImportSource::wireguard_conf) {
+        throw NdmsNativePanelDeleteSnapshotError(
+            "panel delete snapshot must be a WG/AWG configuration");
+    }
+    const auto preview =
+        build_ndms_native_tunnel_import_preview(imported);
+    auto canonical = build_canonical_conf(
+        imported, expected_marker, display_name);
+    WipeStringGuard canonical_guard(canonical);
+    std::string rebuilt_payload;
+    rebuilt_payload.reserve(
+        kPanelDeleteSnapshotMagic.size() + canonical.size());
+    rebuilt_payload.append(kPanelDeleteSnapshotMagic.data(),
+                           kPanelDeleteSnapshotMagic.size());
+    rebuilt_payload.append(canonical);
+    WipeStringGuard rebuilt_payload_guard(rebuilt_payload);
+    NdmsNativePanelDeleteSnapshot decoded{
+        imported.kind,
+        expected_marker,
+        preview.revision,
+        preview.preshared_key_count,
+        imported.kind ==
+                NdmsNativeTunnelImportKind::amnezia_wireguard &&
+            imported.awg.has_value(),
+        std::move(rebuilt_payload)};
     if (decoded.sealed_payload_ != payload) {
         throw NdmsNativePanelDeleteSnapshotError(
             "encrypted panel delete snapshot is not canonical");

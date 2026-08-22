@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include "../src/keenetic/ndms_native_import_request.hpp"
 #include "../src/keenetic/ndms_native_secret_snapshot.hpp"
 
 #include <cerrno>
@@ -255,6 +256,32 @@ TEST_CASE("typed panel delete snapshots preserve complete WG and AWG state") {
         CHECK(read.snapshot->has_complete_awg_parameters());
         CHECK(read.snapshot->canonical_revision() == revision);
     }
+}
+
+TEST_CASE("typed panel delete snapshots preserve a chosen display name") {
+    TempDirectory directory;
+    auto store = store_for(directory);
+    auto prepared = prepare_ndms_native_import(
+        full_configuration(true), "Мой AWG");
+    const auto transaction =
+        std::string{prepared.request_identity().transaction_id()};
+    const auto marker =
+        std::string{prepared.request_identity().marker()};
+    const auto revision = std::string{
+        prepared.delete_snapshot_metadata().canonical_revision()};
+
+    store.publish_panel_delete_snapshot(
+        "Wireguard6", transaction, marker,
+        prepared.take_delete_snapshot());
+
+    const auto read = store.read_panel_delete_snapshot(
+        "Wireguard6", transaction, marker);
+    REQUIRE(read.state == NdmsNativeSecretReadState::valid);
+    REQUIRE(read.snapshot.has_value());
+    CHECK(read.snapshot->kind() ==
+          NdmsNativeTunnelImportKind::amnezia_wireguard);
+    CHECK(read.snapshot->canonical_revision() == revision);
+    CHECK(read.snapshot->marker() == marker);
 }
 
 TEST_CASE("every partial extended AWG shape round-trips canonically") {
