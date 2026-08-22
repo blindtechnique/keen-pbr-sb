@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test"
 
 import {
+  buildStagedNativeWireGuardTransport,
+  clearStagedNativeWireGuardImportCompletion,
   offerNativeWireGuardImportCompletion,
+  readStagedNativeWireGuardImportCompletion,
   registerActiveNativeWireGuardImportCompletion,
+  stageNativeWireGuardImportCompletion,
 } from "@/lib/native-wireguard-import-completion"
 
 const identity = {
@@ -35,5 +39,41 @@ describe("active native import completion hand-off", () => {
     first()
     expect(offerNativeWireGuardImportCompletion(identity)).toBe(true)
     second()
+  })
+
+  test("keeps the non-secret operator plan after the import form closes", () => {
+    stageNativeWireGuardImportCompletion({
+      tag: "vpn_sdd45",
+      displayName: "  vpn-sdd45  ",
+      createOutbound: true,
+      strictEnforcement: false,
+      autoStart: false,
+      geoMode: "auto",
+      endpointHost: " 95.85.242.33 ",
+    })
+
+    const plan = readStagedNativeWireGuardImportCompletion()
+    expect(plan).toEqual({
+      tag: "vpn_sdd45",
+      displayName: "vpn-sdd45",
+      createOutbound: true,
+      strictEnforcement: false,
+      autoStart: false,
+      geoMode: "auto",
+      endpointHost: "95.85.242.33",
+    })
+    expect(buildStagedNativeWireGuardTransport(plan!, identity)).toEqual({
+      tag: "vpn_sdd45",
+      display_name: "vpn-sdd45",
+      type: "native",
+      interface: "nwg6",
+      auto_start: false,
+      geo_mode: "auto",
+      country_code: undefined,
+      country: undefined,
+    })
+
+    clearStagedNativeWireGuardImportCompletion()
+    expect(readStagedNativeWireGuardImportCompletion()).toBeUndefined()
   })
 })

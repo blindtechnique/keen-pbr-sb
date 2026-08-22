@@ -398,6 +398,8 @@ TEST_CASE("prepared native import prefixes its private marker with the chosen na
     const auto marker =
         std::string{prepared.request_identity().marker()};
     auto request = prepared.take_request();
+    CHECK(request.filename() ==
+          "Мой AWG · " + marker + ".conf");
     CapturingSecretSink sink(request.content_length());
     REQUIRE(request.write_stock_rci_body_once(sink));
 
@@ -412,6 +414,21 @@ TEST_CASE("prepared native import prefixes its private marker with the chosen na
     REQUIRE(expected_label.size() % 3U == 0U);
     CHECK(encoded.rfind(
               base64_encode_for_test(expected_label), 0U) == 0U);
+}
+
+TEST_CASE("prepared native import keeps its RCI filename readable and JSON safe") {
+    auto prepared = prepare_ndms_native_import(
+        awg_conf(), "  Мой / AWG \\\" test.  ");
+    const auto marker =
+        std::string{prepared.request_identity().marker()};
+    auto request = prepared.take_request();
+    CHECK(request.filename() ==
+          "  Мой - AWG -- test · " + marker + ".conf");
+
+    CapturingSecretSink sink(request.content_length());
+    REQUIRE(request.write_stock_rci_body_once(sink));
+    const auto parsed = nlohmann::json::parse(sink.body());
+    CHECK(parsed.is_array());
 }
 
 TEST_CASE("native AWG request preserves absent S3 and S4 with signatures") {

@@ -5,6 +5,7 @@
 #include "ndms_native_import_identity.hpp"
 #include "ndms_native_panel_delete_snapshot.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstdint>
@@ -392,6 +393,48 @@ std::string build_canonical_conf(
     return output;
 }
 
+std::string native_import_filename(
+    const std::string_view marker,
+    const std::string_view friendly_name) {
+    if (friendly_name.empty()) return std::string{marker} + ".conf";
+    if (!display_name::is_valid(friendly_name)) {
+        throw std::invalid_argument("native import display name is invalid");
+    }
+
+    // KeeneticOS 5.1 derives the visible interface description from this
+    // filename, not from the otherwise canonical `# Name` comment. Keep the
+    // owner-selected prefix readable while retaining the exact private marker
+    // suffix used by the measured ownership/delete proof. The RCI field is
+    // emitted into JSON without a generic string serializer, so replace the
+    // small set of JSON/path delimiters and bound the UTF-8 prefix without
+    // cutting a code point.
+    constexpr std::size_t kMaximumFriendlyFilenameBytes = 96U;
+    std::string safe;
+    safe.reserve(std::min(
+        friendly_name.size(), kMaximumFriendlyFilenameBytes));
+    for (std::size_t offset = 0U; offset < friendly_name.size();) {
+        const auto first = static_cast<unsigned char>(friendly_name[offset]);
+        const std::size_t length = first <= 0x7FU ? 1U :
+            first <= 0xDFU ? 2U : first <= 0xEFU ? 3U : 4U;
+        if (safe.size() + length > kMaximumFriendlyFilenameBytes) break;
+        if (length == 1U &&
+            (first == '"' || first == '\\' || first == '/' ||
+             first == ':' || first == '*' || first == '?' ||
+             first == '<' || first == '>' || first == '|')) {
+            safe.push_back('-');
+        } else {
+            safe.append(friendly_name.substr(offset, length));
+        }
+        offset += length;
+    }
+
+    while (!safe.empty() && (safe.back() == ' ' || safe.back() == '.')) {
+        safe.pop_back();
+    }
+    if (safe.empty()) return std::string{marker} + ".conf";
+    return safe + " · " + std::string{marker} + ".conf";
+}
+
 std::size_t base64_encoded_size(const std::size_t raw_size) {
     return checked_add(raw_size, 2U) / 3U * 4U;
 }
@@ -699,7 +742,7 @@ NdmsNativePreparedImport prepare_ndms_native_import(
     auto transaction_id = generate_transaction_id();
     auto marker = std::string{kNdmsNativeImportMarkerPrefix} +
                   transaction_id;
-    auto filename = marker + ".conf";
+    auto filename = native_import_filename(marker, display_name);
     const auto preview =
         build_ndms_native_tunnel_import_preview(imported);
     auto canonical_conf = build_canonical_conf(

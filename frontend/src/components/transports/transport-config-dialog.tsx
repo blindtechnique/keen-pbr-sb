@@ -44,7 +44,10 @@ import {
 import { isSemanticallyDirty } from "@/lib/semantic-dirty"
 import { semanticJsonEqual } from "@/lib/semantic-json"
 import { NativeWireGuardImportFields } from "@/components/transports/native-wireguard-import-card"
-import type { NativeWireGuardImportedIdentity } from "@/lib/native-wireguard-import-completion"
+import {
+  stageNativeWireGuardImportCompletion,
+  type NativeWireGuardImportedIdentity,
+} from "@/lib/native-wireguard-import-completion"
 import { SubscriptionImportDialog } from "@/components/transports/subscription-import-dialog"
 import { classifyPastedLink } from "@/components/transports/subscription-import-model"
 import {
@@ -267,16 +270,17 @@ export function normalizeTransportFormValue(
   const bootstrapDns = spec.bootstrap_dns
     ?.map((resolver) => resolver.trim())
     .filter(Boolean)
+  const keepsCountrySnapshot =
+    spec.geo_mode === "manual" || spec.geo_mode === "auto"
   const normalizedSpec: TransportSpec = {
     ...spec,
     display_name: spec.display_name?.trim() || undefined,
     auto_start: spec.auto_start ?? false,
     geo_mode: spec.geo_mode ?? "disabled",
-    country_code:
-      spec.geo_mode === "manual"
-        ? spec.country_code?.trim().toUpperCase()
-        : undefined,
-    country: spec.geo_mode === "manual" ? spec.country?.trim() : undefined,
+    country_code: keepsCountrySnapshot
+      ? spec.country_code?.trim().toUpperCase()
+      : undefined,
+    country: keepsCountrySnapshot ? spec.country?.trim() : undefined,
   }
 
   if (spec.type === TransportSpecType.native) {
@@ -599,6 +603,26 @@ export function TransportConfigForm({
       setSpec,
       setTechnicalIdentityAutomatic,
     ]
+  )
+
+  const stageCurrentNativeImportCompletion = useCallback(
+    (endpointHost?: string) => {
+      const displayName = spec.display_name?.trim()
+      if (!displayName) return
+      stageNativeWireGuardImportCompletion({
+        tag: spec.tag,
+        displayName,
+        createOutbound,
+        strictEnforcement:
+          killSwitch === "default" ? undefined : killSwitch === "enabled",
+        autoStart: false,
+        geoMode: spec.geo_mode ?? "disabled",
+        countryCode: spec.country_code?.trim().toUpperCase() || undefined,
+        country: spec.country?.trim() || undefined,
+        endpointHost,
+      })
+    },
+    [createOutbound, killSwitch, spec]
   )
 
   useEffect(() => {
@@ -1009,6 +1033,7 @@ export function TransportConfigForm({
                   linkValue={spec.link ?? ""}
                   mode="link"
                   onAliasSuggestionChange={setNativeImportAliasSuggestion}
+                  onImportPending={stageCurrentNativeImportCompletion}
                   onLinkChange={(value) =>
                     setSpec((current) =>
                       withAutomaticTechnicalIdentity({
@@ -1053,6 +1078,7 @@ export function TransportConfigForm({
                 key={nativeImportFieldsStateBoundaryKey("file")}
                 mode="file"
                 onAliasSuggestionChange={setNativeImportAliasSuggestion}
+                onImportPending={stageCurrentNativeImportCompletion}
                 onSubscriptionDocument={(text) =>
                   setSubscriptionSeed({ document: text })
                 }

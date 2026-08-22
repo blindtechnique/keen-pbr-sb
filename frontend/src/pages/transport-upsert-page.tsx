@@ -1,11 +1,11 @@
-import { useQuery } from "@tanstack/react-query"
+import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 import { useLocation } from "wouter"
 
 import type { ApiError } from "@/api/client"
-import { postConfigSave } from "@/api/generated/keen-api"
+import { postConfigSave, postTransportConfig } from "@/api/generated/keen-api"
 import {
   TransportConfigOperationOperation,
   TransportSpecType,
@@ -41,6 +41,12 @@ import { buildNativeTransportCandidates } from "@/lib/hidden-native-interfaces"
 import { mapNativeInterfaces } from "@/lib/native-interfaces"
 import { makeTechnicalId } from "@/lib/technical-id"
 import { readNativeTransportCreateInterface } from "@/lib/transport-upsert-route"
+import {
+  clearStagedNativeWireGuardImportCompletion,
+  readStagedNativeWireGuardImportCompletion,
+} from "@/lib/native-wireguard-import-completion"
+import { resolveNativeWireGuardImportLocation } from "@/lib/native-wireguard-import-geo"
+import { queryKeys } from "@/api/query-keys"
 
 type TransportEnvironment = {
   sing_box_installed: boolean
@@ -60,6 +66,7 @@ export function TransportUpsertPage({
 }) {
   const { t } = useTranslation()
   const [, navigate] = useLocation()
+  const queryClient = useQueryClient()
   const [dirty, setDirty] = useState(false)
   const [linkedRouteApplyPending, setLinkedRouteApplyPending] = useState(false)
   const configQuery = useGetTransportConfig()
@@ -114,11 +121,47 @@ export function TransportUpsertPage({
     mode === "create"
       ? readNativeTransportCreateInterface(window.location.search)
       : undefined
+
+  const finishNativeImport = (transport: TransportSpec) => {
+    if (transport.type !== TransportSpecType.native) return
+    const plan = readStagedNativeWireGuardImportCompletion()
+    if (!plan || plan.tag !== transport.tag) return
+    if (plan.geoMode !== "auto" || !plan.endpointHost) {
+      clearStagedNativeWireGuardImportCompletion(plan.tag)
+      return
+    }
+
+    void resolveNativeWireGuardImportLocation(plan.endpointHost)
+      .then(async (location) => {
+        if (!location) return
+        const response = await postTransportConfig({
+          operation: TransportConfigOperationOperation.update,
+          tag: transport.tag,
+          transport: {
+            ...transport,
+            country_code: location.country_code,
+            country: location.country,
+          },
+        })
+        if (response.status !== 200) return
+        await Promise.all([
+          queryClient.invalidateQueries({
+            queryKey: queryKeys.transportConfig(),
+          }),
+          queryClient.invalidateQueries({ queryKey: queryKeys.transports() }),
+        ])
+      })
+      .catch(() => undefined)
+      .finally(() => clearStagedNativeWireGuardImportCompletion(plan.tag))
+  }
   const configMutation = usePostTransportConfigMutation({
     mutation: {
       onSuccess: (_data, variables) => {
         const isNativeTracker =
           variables.data.transport?.type === TransportSpecType.native
+        if (variables.data.transport) {
+          finishNativeImport(variables.data.transport)
+        }
         toast.success(
           isNativeTracker
             ? t(
@@ -324,6 +367,7 @@ export function TransportUpsertPage({
         { data: createLinkedTransportApplyRequest(spec, killSwitchValue) },
         {
           onSuccess: () => {
+            finishNativeImport(spec)
             toast.success(
               t(
                 spec.type === TransportSpecType.native

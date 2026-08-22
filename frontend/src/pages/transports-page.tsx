@@ -106,7 +106,14 @@ import {
   type NativeRouteOfferCandidate,
 } from "@/lib/native-route-offers"
 import { makeTechnicalId } from "@/lib/technical-id"
-import { offerNativeWireGuardImportCompletion } from "@/lib/native-wireguard-import-completion"
+import {
+  buildStagedNativeWireGuardTransport,
+  clearStagedNativeWireGuardImportCompletion,
+  offerNativeWireGuardImportCompletion,
+  readStagedNativeWireGuardImportCompletion,
+  type NativeWireGuardImportedIdentity,
+} from "@/lib/native-wireguard-import-completion"
+import { resolveNativeWireGuardImportLocation } from "@/lib/native-wireguard-import-geo"
 import {
   useServerLocations,
   type ServerLocation,
@@ -892,6 +899,36 @@ export function TransportsPage({
   })
   const recoveredImportApplyMutation = usePostTransportConfigApplyMutation()
 
+  const persistRecoveredImportCountry = (
+    transport: TransportSpec,
+    endpointHost?: string,
+    completionTag?: string
+  ) => {
+    if (transport.geo_mode !== "auto" || !endpointHost) {
+      clearStagedNativeWireGuardImportCompletion(completionTag)
+      return
+    }
+    void resolveNativeWireGuardImportLocation(endpointHost)
+      .then(async (location) => {
+        if (!location) return
+        const response = await postTransportConfig({
+          operation: TransportConfigOperationOperation.update,
+          tag: transport.tag,
+          transport: {
+            ...transport,
+            country_code: location.country_code,
+            country: location.country,
+          },
+        })
+        if (response.status !== 200) return
+        await queryClient.invalidateQueries({
+          queryKey: queryKeys.transportConfig(),
+        })
+      })
+      .catch(() => undefined)
+      .finally(() => clearStagedNativeWireGuardImportCompletion(completionTag))
+  }
+
   // «Да» из вопроса о новом туннеле: маршрут создаётся сразу, с настройками
   // по умолчанию — имя от туннеля, тег порождается из имени. Тонкая
   // настройка (kill-switch, шлюзы) остаётся в редакторе маршрута.
@@ -953,6 +990,53 @@ export function TransportsPage({
       })
     ) {
       return
+    }
+
+    const identity: NativeWireGuardImportedIdentity = {
+      firmwareInterface,
+      kernelInterface,
+      kind: result.kind,
+    }
+    const stagedPlan = readStagedNativeWireGuardImportCompletion()
+    if (stagedPlan) {
+      const transport = buildStagedNativeWireGuardTransport(
+        stagedPlan,
+        identity
+      )
+      try {
+        if (stagedPlan.createOutbound) {
+          await recoveredImportApplyMutation.mutateAsync({
+            data: createLinkedTransportApplyRequest(
+              transport,
+              stagedPlan.strictEnforcement
+            ),
+          })
+        } else {
+          const response = await postTransportConfig({
+            operation: TransportConfigOperationOperation.create,
+            transport,
+          })
+          if (response.status !== 200) {
+            throw new Error("native import tracker creation failed")
+          }
+        }
+        persistRecoveredImportCountry(
+          transport,
+          stagedPlan.endpointHost,
+          stagedPlan.tag
+        )
+        toast.success(
+          t("transports.routeOffer.created", {
+            name: stagedPlan.displayName,
+          })
+        )
+        return
+      } catch (mutationError) {
+        toast.error(getApiErrorMessage(mutationError as ApiError), {
+          richColors: true,
+        })
+        return
+      }
     }
 
     const [inventoryResult, configResult] = await Promise.all([
@@ -2399,7 +2483,14 @@ function transportLocation(
   spec: TransportSpec | undefined,
   automatic: ServerLocation | undefined
 ): ServerLocation | undefined {
-  if (spec?.geo_mode === "auto") return automatic
+  if (spec?.geo_mode === "auto") {
+    if (automatic) return automatic
+    if (!spec.country_code) return undefined
+    return {
+      country: spec.country ?? spec.country_code.toUpperCase(),
+      country_code: spec.country_code,
+    }
+  }
   if (spec?.geo_mode !== "manual" || !spec.country_code) return undefined
   return {
     country: spec.country ?? spec.country_code.toUpperCase(),

@@ -292,6 +292,23 @@ describe("transport form semantics", () => {
 })
 
 describe("transport geo selection", () => {
+  test("keeps a resolved auto-country snapshot for native trackers", () => {
+    const value = createTransportFormValue(undefined)
+    value.spec = {
+      ...value.spec,
+      type: TransportSpecType.native,
+      interface: "nwg6",
+      display_name: "vpn-sdd45",
+      geo_mode: "auto",
+      country_code: "nl",
+      country: " Netherlands ",
+    }
+
+    const submission = normalizeTransportFormValue(value, false)
+    expect(submission.spec.country_code).toBe("NL")
+    expect(submission.spec.country).toBe("Netherlands")
+  })
+
   test("manual geo without a country cannot be saved", () => {
     // The native <select required> used to block this; the styled Select has
     // no browser validation, so the rule has to live in code.

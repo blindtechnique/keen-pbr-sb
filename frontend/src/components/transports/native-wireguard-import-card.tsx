@@ -153,6 +153,7 @@ export function NativeWireGuardImportFields({
   linkValue = "",
   onLinkChange,
   onAliasSuggestionChange,
+  onImportPending,
   onNativeUriActiveChange,
   onImportedIdentityChange,
   onSubscriptionDocument,
@@ -166,6 +167,7 @@ export function NativeWireGuardImportFields({
   readonly linkValue?: string
   readonly onLinkChange?: (value: string) => void
   readonly onAliasSuggestionChange?: (suggestion?: string) => void
+  readonly onImportPending?: (endpointHost?: string) => void
   readonly onNativeUriActiveChange?: (active: boolean) => void
   readonly onImportedIdentityChange?: (
     identity: NativeWireGuardImportedIdentity | null
@@ -188,6 +190,7 @@ export function NativeWireGuardImportFields({
       mode={mode}
       onLinkChange={onLinkChange}
       onAliasSuggestionChange={onAliasSuggestionChange}
+      onImportPending={onImportPending}
       onNativeUriActiveChange={onNativeUriActiveChange}
       onImportedIdentityChange={onImportedIdentityChange}
       onSubscriptionDocument={onSubscriptionDocument}
@@ -216,6 +219,7 @@ function NativeWireGuardImportFieldsContent({
   linkValue,
   onLinkChange,
   onAliasSuggestionChange,
+  onImportPending,
   onNativeUriActiveChange,
   onImportedIdentityChange,
   onSubscriptionDocument,
@@ -230,6 +234,7 @@ function NativeWireGuardImportFieldsContent({
   readonly linkValue: string
   readonly onLinkChange?: (value: string) => void
   readonly onAliasSuggestionChange?: (suggestion?: string) => void
+  readonly onImportPending?: (endpointHost?: string) => void
   readonly onNativeUriActiveChange?: (active: boolean) => void
   readonly onImportedIdentityChange?: (
     identity: NativeWireGuardImportedIdentity | null
@@ -673,6 +678,7 @@ function NativeWireGuardImportFieldsContent({
                 if (!mountedRef.current || !beginPending()) return "denied"
                 pendingStarted = true
                 awaitingRecoveredCompletionRef.current = true
+                onImportPending?.(state.preview.endpoint_host)
                 setOperation({ status: "sending" })
                 return verdict
               },

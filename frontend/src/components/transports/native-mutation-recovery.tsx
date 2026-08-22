@@ -20,6 +20,7 @@ import {
   type NativeMutationOperation,
   type NativeMutationRecoveryKind,
 } from "@/lib/native-mutation-lock"
+import { clearStagedNativeWireGuardImportCompletion } from "@/lib/native-wireguard-import-completion"
 
 import {
   nativeDeleteRecoveryDisposition,
@@ -133,6 +134,7 @@ export function NativeMutationRecovery({
             try {
               const result = await postNdmsNativeImportRecoveryOnce()
               if (result.status === "no_work") {
+                clearStagedNativeWireGuardImportCompletion()
                 return {
                   disposition: nativeImportRecoveryDisposition(result),
                   value: { outcome: "import_no_work" } as const,
