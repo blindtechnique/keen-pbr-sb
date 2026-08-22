@@ -43,10 +43,8 @@ import {
 } from "@/lib/hidden-native-interfaces"
 import { isSemanticallyDirty } from "@/lib/semantic-dirty"
 import { semanticJsonEqual } from "@/lib/semantic-json"
-import {
-  NativeWireGuardImportFields,
-  type NativeWireGuardImportedIdentity,
-} from "@/components/transports/native-wireguard-import-card"
+import { NativeWireGuardImportFields } from "@/components/transports/native-wireguard-import-card"
+import type { NativeWireGuardImportedIdentity } from "@/lib/native-wireguard-import-completion"
 import { SubscriptionImportDialog } from "@/components/transports/subscription-import-dialog"
 import { classifyPastedLink } from "@/components/transports/subscription-import-model"
 import {

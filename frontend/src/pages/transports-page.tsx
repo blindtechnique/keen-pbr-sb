@@ -106,6 +106,7 @@ import {
   type NativeRouteOfferCandidate,
 } from "@/lib/native-route-offers"
 import { makeTechnicalId } from "@/lib/technical-id"
+import { offerNativeWireGuardImportCompletion } from "@/lib/native-wireguard-import-completion"
 import {
   useServerLocations,
   type ServerLocation,
@@ -917,7 +918,22 @@ export function TransportsPage({
     if (
       !firmwareInterface ||
       !kernelInterface ||
+      !result.kind ||
       result.status !== "completed"
+    ) {
+      return
+    }
+
+    // A bodyless recovery can complete while the original import dialog is
+    // still open. Let that dialog persist the operator's alias, country and
+    // linked route; only a reload/crash with no active dialog needs the
+    // inventory-derived fallback below.
+    if (
+      offerNativeWireGuardImportCompletion({
+        firmwareInterface,
+        kernelInterface,
+        kind: result.kind,
+      })
     ) {
       return
     }

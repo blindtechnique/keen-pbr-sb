@@ -13,6 +13,26 @@ export type AuthStatus = Readonly<{
 
 export type KeeneticEndpointMode = "auto" | "manual"
 
+const AUTH_STATUS_POLL_INTERVAL_MS = 30_000
+const TRUSTED_LOCAL_REFRESH_NOW_MS = 500
+
+/** Refresh a short-lived LAN proof well before its hard expiry. */
+export function authStatusRefreshDelayMs(
+  status: AuthStatus | null,
+  nowMs = Date.now()
+): number {
+  if (
+    !status?.trustedLocalConnection ||
+    status.trustedLocalConnectionGeneration === null
+  ) {
+    return AUTH_STATUS_POLL_INTERVAL_MS
+  }
+  const remainingMs = status.trustedLocalConnectionValidUntilMs - nowMs
+  if (remainingMs <= 0) return 0
+  if (remainingMs <= TRUSTED_LOCAL_REFRESH_NOW_MS) return 0
+  return Math.min(AUTH_STATUS_POLL_INTERVAL_MS, Math.floor(remainingMs / 2))
+}
+
 export function confirmAuthEnabledChange(
   currentEnabled: boolean,
   nextEnabled: boolean,

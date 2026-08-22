@@ -23,6 +23,7 @@ import {
 import { Input } from "@/components/ui/input"
 import {
   authCredentialsMayBeCollected,
+  authStatusRefreshDelayMs,
   parseAuthStatus,
   refreshCredentialTransportStatus,
   type AuthStatus,
@@ -237,9 +238,15 @@ export function AuthGate({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     void refresh()
-    const timer = window.setInterval(() => void refresh(), 30_000)
-    return () => window.clearInterval(timer)
   }, [refresh])
+
+  useEffect(() => {
+    const timer = window.setTimeout(
+      () => void refresh(),
+      authStatusRefreshDelayMs(status)
+    )
+    return () => window.clearTimeout(timer)
+  }, [refresh, status])
 
   useEffect(() => {
     if (

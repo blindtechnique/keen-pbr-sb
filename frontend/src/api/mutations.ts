@@ -98,8 +98,11 @@ export const usePostTransportConfigApplyMutation = () => {
 
   return usePostTransportConfigApply<ApiError>({
     mutation: {
-      onSuccess: async () => {
-        await Promise.all([
+      onSuccess: () => {
+        // Per-call success closes the editor. Refetching runtime/inventory is
+        // useful but must not keep a successfully committed modal open when a
+        // slow status endpoint is still answering.
+        void Promise.all([
           queryClient.invalidateQueries({
             queryKey: queryKeys.transportConfig(),
           }),
@@ -121,7 +124,7 @@ export const usePostTransportConfigApplyMutation = () => {
           queryClient.invalidateQueries({
             queryKey: queryKeys.healthRouting(),
           }),
-        ])
+        ]).catch(() => undefined)
       },
     },
   })

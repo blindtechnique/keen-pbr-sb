@@ -7,6 +7,7 @@ import {
 } from "lucide-react"
 import { useQueryClient } from "@tanstack/react-query"
 import {
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -75,6 +76,10 @@ import {
 import { parseNativeWireGuardInputPreview } from "@/lib/native-wireguard-vpn-uri-preview"
 import { looksLikeWireGuardConfig } from "@/components/transports/subscription-import-model"
 import { cn } from "@/lib/utils"
+import {
+  registerActiveNativeWireGuardImportCompletion,
+  type NativeWireGuardImportedIdentity,
+} from "@/lib/native-wireguard-import-completion"
 
 type ImportState =
   | { readonly status: "empty" }
@@ -137,12 +142,6 @@ const importWasDefinitelyNotStarted = (
     [400, 413, 415, 428, 503].includes(response.status)
   )
 }
-
-export type NativeWireGuardImportedIdentity = Readonly<{
-  firmwareInterface: string
-  kernelInterface: string
-  kind: "wireguard" | "amnezia_wireguard"
-}>
 
 export function NativeWireGuardImportFields({
   displayName,
@@ -283,6 +282,7 @@ function NativeWireGuardImportFieldsContent({
       ? provedCompletedNativeImportIdentity(operation.result)
       : null
   const completedIdentityReportedRef = useRef<string | undefined>(undefined)
+  const awaitingRecoveredCompletionRef = useRef(false)
   const importAliasSuggestion =
     state.status === "ready"
       ? suggestNativeWireGuardImportAlias({
@@ -296,15 +296,31 @@ function NativeWireGuardImportFieldsContent({
     return () => onAliasSuggestionChange?.(undefined)
   }, [importAliasSuggestion, onAliasSuggestionChange])
 
-  useEffect(() => {
-    if (!completedIdentity) return
-    const key = `${completedIdentity.firmwareInterface}\n${completedIdentity.kernelInterface}\n${completedIdentity.kind}`
-    if (completedIdentityReportedRef.current === key) return
-    completedIdentityReportedRef.current = key
-    onImportedIdentityChange?.(completedIdentity)
-  }, [completedIdentity, onImportedIdentityChange])
+  const reportImportedIdentity = useCallback(
+    (identity: NativeWireGuardImportedIdentity): boolean => {
+      const key = `${identity.firmwareInterface}\n${identity.kernelInterface}\n${identity.kind}`
+      if (completedIdentityReportedRef.current === key) return true
+      completedIdentityReportedRef.current = key
+      onImportedIdentityChange?.(identity)
+      return true
+    },
+    [onImportedIdentityChange]
+  )
+
+  useEffect(
+    () =>
+      registerActiveNativeWireGuardImportCompletion((identity) => {
+        if (!mountedRef.current || !awaitingRecoveredCompletionRef.current) {
+          return false
+        }
+        awaitingRecoveredCompletionRef.current = false
+        return reportImportedIdentity(identity)
+      }),
+    [reportImportedIdentity]
+  )
 
   const resetOperation = () => {
+    awaitingRecoveredCompletionRef.current = false
     setOwnerRiskAccepted(false)
     setOperation({ status: "idle" })
     onImportedIdentityChange?.(null)
@@ -656,6 +672,7 @@ function NativeWireGuardImportFieldsContent({
                 if (verdict !== "admitted") return verdict
                 if (!mountedRef.current || !beginPending()) return "denied"
                 pendingStarted = true
+                awaitingRecoveredCompletionRef.current = true
                 setOperation({ status: "sending" })
                 return verdict
               },
@@ -724,8 +741,25 @@ function NativeWireGuardImportFieldsContent({
 
       if (!mountedRef.current) return
       if (leaseResult.status === "completed") {
-        setOperation(leaseResult.value)
+        const nextOperation = leaseResult.value
+        if (
+          nextOperation.status !== "result" ||
+          nextOperation.outcome !== "recovery_required"
+        ) {
+          awaitingRecoveredCompletionRef.current = false
+        }
+        if (
+          nextOperation.status === "result" &&
+          nextOperation.outcome === "completed"
+        ) {
+          const identity = provedCompletedNativeImportIdentity(
+            nextOperation.result
+          )
+          if (identity) reportImportedIdentity(identity)
+        }
+        setOperation(nextOperation)
       } else {
+        if (!pendingStarted) awaitingRecoveredCompletionRef.current = false
         const durableLock = readNativeWireGuardImportLock()
         setOperation(
           durableLock === "recovery_required"

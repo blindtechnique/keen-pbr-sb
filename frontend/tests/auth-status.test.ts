@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 
 import {
   authCredentialsMayBeCollected,
+  authStatusRefreshDelayMs,
   authEndpointModeLabelKey,
   authSettingsRestartRequired,
   confirmAuthEnabledChange,
@@ -13,6 +14,25 @@ import { enTranslation } from "../src/i18n/en"
 import { ruTranslation } from "../src/i18n/ru"
 
 describe("authentication status contract", () => {
+  test("refreshes a trusted LAN proof before it can visibly expire", () => {
+    const status = parseAuthStatus(
+      {
+        enabled: true,
+        authenticated: true,
+        provider: "keenetic",
+        trusted_local_connection: true,
+        trusted_local_connection_generation: "19",
+        trusted_local_connection_valid_for_seconds: 5,
+      },
+      1_000
+    )
+
+    expect(authStatusRefreshDelayMs(status, 1_000)).toBe(2_500)
+    expect(authStatusRefreshDelayMs(status, 5_800)).toBe(0)
+    expect(authStatusRefreshDelayMs(status, 6_000)).toBe(0)
+    expect(authStatusRefreshDelayMs(null, 1_000)).toBe(30_000)
+  })
+
   test("requires an explicit warning before disabling network authentication", () => {
     let confirmations = 0
     const deny = () => {
