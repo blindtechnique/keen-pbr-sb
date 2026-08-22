@@ -55,6 +55,7 @@ import { nativeWireGuardImportAdmissionRevision } from "@/lib/native-wireguard-i
 import {
   nativeWireGuardImportIntakeIsLocked,
   nativeWireGuardImportOperationSurvivesContextChange,
+  nativeWireGuardImportShouldContinueInBackground,
 } from "@/lib/native-wireguard-import-operation"
 import {
   readNativeWireGuardImportLock,
@@ -153,6 +154,7 @@ export function NativeWireGuardImportFields({
   linkValue = "",
   onLinkChange,
   onAliasSuggestionChange,
+  onImportHandedOff,
   onImportPending,
   onNativeUriActiveChange,
   onImportedIdentityChange,
@@ -167,6 +169,7 @@ export function NativeWireGuardImportFields({
   readonly linkValue?: string
   readonly onLinkChange?: (value: string) => void
   readonly onAliasSuggestionChange?: (suggestion?: string) => void
+  readonly onImportHandedOff?: () => void
   readonly onImportPending?: (endpointHost?: string) => void
   readonly onNativeUriActiveChange?: (active: boolean) => void
   readonly onImportedIdentityChange?: (
@@ -190,6 +193,7 @@ export function NativeWireGuardImportFields({
       mode={mode}
       onLinkChange={onLinkChange}
       onAliasSuggestionChange={onAliasSuggestionChange}
+      onImportHandedOff={onImportHandedOff}
       onImportPending={onImportPending}
       onNativeUriActiveChange={onNativeUriActiveChange}
       onImportedIdentityChange={onImportedIdentityChange}
@@ -219,6 +223,7 @@ function NativeWireGuardImportFieldsContent({
   linkValue,
   onLinkChange,
   onAliasSuggestionChange,
+  onImportHandedOff,
   onImportPending,
   onNativeUriActiveChange,
   onImportedIdentityChange,
@@ -234,6 +239,7 @@ function NativeWireGuardImportFieldsContent({
   readonly linkValue: string
   readonly onLinkChange?: (value: string) => void
   readonly onAliasSuggestionChange?: (suggestion?: string) => void
+  readonly onImportHandedOff?: () => void
   readonly onImportPending?: (endpointHost?: string) => void
   readonly onNativeUriActiveChange?: (active: boolean) => void
   readonly onImportedIdentityChange?: (
@@ -768,14 +774,26 @@ function NativeWireGuardImportFieldsContent({
           if (identity) reportImportedIdentity(identity)
         }
         setOperation(nextOperation)
+        if (
+          pendingStarted &&
+          nativeWireGuardImportShouldContinueInBackground(nextOperation)
+        ) {
+          onImportHandedOff?.()
+        }
       } else {
         if (!pendingStarted) awaitingRecoveredCompletionRef.current = false
         const durableLock = readNativeWireGuardImportLock()
-        setOperation(
+        const nextOperation: ImportOperationState =
           durableLock === "recovery_required"
             ? { status: "recovery-locked" }
             : { status: "unknown" }
-        )
+        setOperation(nextOperation)
+        if (
+          pendingStarted &&
+          nativeWireGuardImportShouldContinueInBackground(nextOperation)
+        ) {
+          onImportHandedOff?.()
+        }
       }
     } finally {
       submissionActiveRef.current = false

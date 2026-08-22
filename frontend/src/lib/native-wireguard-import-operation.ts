@@ -24,6 +24,14 @@ export const nativeWireGuardImportOperationIsWriteLocked = (
   operation.status === "recovery-locked" ||
   (operation.status === "result" && operation.outcome === "recovery_required")
 
+// Once the one-shot body has been handed off, these states can only be
+// completed by the page-level bodyless reconciler. Keeping the create dialog
+// open adds no useful action and used to delay route binding until the operator
+// closed it manually.
+export const nativeWireGuardImportShouldContinueInBackground = (
+  operation: NativeWireGuardImportOperationView
+): boolean => nativeWireGuardImportOperationIsWriteLocked(operation)
+
 export const nativeWireGuardImportOperationSurvivesContextChange = (
   operation: NativeWireGuardImportOperationView
 ): boolean =>

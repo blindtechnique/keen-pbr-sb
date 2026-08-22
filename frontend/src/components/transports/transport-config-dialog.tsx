@@ -1039,6 +1039,7 @@ export function TransportConfigForm({
                   linkValue={spec.link ?? ""}
                   mode="link"
                   onAliasSuggestionChange={setNativeImportAliasSuggestion}
+                  onImportHandedOff={close}
                   onImportPending={stageCurrentNativeImportCompletion}
                   onLinkChange={(value) =>
                     setSpec((current) =>
@@ -1084,6 +1085,7 @@ export function TransportConfigForm({
                 key={nativeImportFieldsStateBoundaryKey("file")}
                 mode="file"
                 onAliasSuggestionChange={setNativeImportAliasSuggestion}
+                onImportHandedOff={close}
                 onImportPending={stageCurrentNativeImportCompletion}
                 onSubscriptionDocument={(text) =>
                   setSubscriptionSeed({ document: text })
