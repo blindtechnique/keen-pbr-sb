@@ -797,6 +797,27 @@ void refresh_integrity(NdmsNativeDeleteWalRecord& record) {
     record.integrity = ndms_native_delete_wal_integrity(record);
 }
 
+std::string deleted_kernel_identity(
+    const NdmsNativeDeleteWalRecord& record) {
+    if (record.kernel_interface_name) {
+        return *record.kernel_interface_name;
+    }
+
+    const auto identity =
+        parse_ndms_wireguard_identity(record.interface_name);
+    if (!identity ||
+        !ndms_wireguard_identity_is_managed_candidate(*identity)) {
+        throw std::invalid_argument(
+            "native delete target has no canonical kernel identity");
+    }
+
+    // A disconnected WG/AWG row may already have disappeared from if_nameindex
+    // when the delete WAL is created. Keenetic's measured numbered client
+    // mapping is still deterministic, so retain that identity instead of
+    // stranding the already completed delete in save_acknowledged_unverified.
+    return "nwg" + std::to_string(identity->slot);
+}
+
 NdmsNativeOwnershipRecord make_tombstone(
     const NdmsNativeOwnershipRecord& active,
     const NdmsNativeDeleteWalRecord& record) {
@@ -818,7 +839,7 @@ NdmsNativeOwnershipRecord make_tombstone(
             observed.runtime_sequence,
             observed.running_config_catalog_revision,
             observed.running_config_sequence,
-            record.kernel_interface_name,
+            deleted_kernel_identity(record),
         };
     return tombstone;
 }

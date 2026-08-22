@@ -1000,6 +1000,31 @@ TEST_CASE("connected panel-owned WG and AWG delete to a durable tombstone") {
     }
 }
 
+TEST_CASE(
+    "disconnected panel-owned AWG delete retains its numbered kernel identity") {
+    DeleteFixture fixture;
+    fixture.install_owned_target(
+        NdmsNativeTunnelImportKind::amnezia_wireguard);
+    fixture.gateway.connected = false;
+    fixture.gateway.kernel_name.reset();
+
+    const auto result = fixture.coordinator.delete_once(
+        fixture.writer.lease, fixture.request());
+
+    CHECK(result.status == NdmsNativeCooperativeDeleteStatus::
+          save_acknowledged_unverified);
+    CHECK(result.stop == NdmsNativeCooperativeDeleteStop::none);
+    CHECK(result.ownership_tombstone_durable);
+    CHECK(fixture.delete_wal.readiness() ==
+          NdmsNativeDeleteWalReadiness::clean);
+    const auto claim = fixture.ownership.read("Wireguard5");
+    REQUIRE(claim.record.has_value());
+    REQUIRE(claim.record->lifecycle_evidence.has_value());
+    CHECK(claim.record->lifecycle_evidence->
+              deleted_kernel_interface_name ==
+          std::optional<std::string>{"nwg5"});
+}
+
 TEST_CASE("ordinary runtime revision drift does not revoke panel ownership") {
     for (const auto drift : {std::size_t{1U}, std::size_t{2U}}) {
         CAPTURE(drift);

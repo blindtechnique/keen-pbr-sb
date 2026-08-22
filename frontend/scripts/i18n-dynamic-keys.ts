@@ -279,10 +279,34 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
     reason: "The three file categories are a closed local tuple.",
   },
   {
-    file: "src/components/transports/native-interface-details.tsx",
-    argument: "`transports.nativeInterface.managementBlockers.${*}`",
-    keys: ["transports.nativeInterface.managementBlockers.*"],
-    reason: "Management blockers are a finite backend enum.",
+    file: "src/components/transports/native-retained-deletions.tsx",
+    argument: "retainedDeletionBlockerKey(*)",
+    keys: ["transports.nativeMutation.forget.blockers.*"],
+    reason: "Retained-deletion blockers are a finite generated enum.",
+  },
+  {
+    file: "src/components/transports/native-retained-deletions.tsx",
+    argument: "retainedDeletionDeferredCheckKey(*)",
+    keys: ["transports.nativeMutation.forget.deferred.*"],
+    reason: "Deferred retained-deletion checks are a finite generated enum.",
+  },
+  {
+    file: "src/components/transports/native-retained-deletions.tsx",
+    argument: "tombstoneForgetOutcomeKey(*)",
+    keys: ["transports.nativeMutation.forget.outcomes.*"],
+    reason: "Forget outcomes are a finite response enum.",
+  },
+  {
+    file: "src/components/transports/native-retained-deletions.tsx",
+    argument: "tombstoneForgetStopKey(*)",
+    keys: ["transports.nativeMutation.forget.stops.*"],
+    reason: "Forget stops are a finite response enum.",
+  },
+  {
+    file: "src/components/transports/native-retained-deletions.tsx",
+    argument: "tombstoneForgetArtifactStateKey(*)",
+    keys: ["transports.nativeMutation.forget.artifactStates.*"],
+    reason: "Forget artifact states are a finite response enum.",
   },
   {
     file: "src/components/transports/sing-box-process-mode-dialog.tsx",

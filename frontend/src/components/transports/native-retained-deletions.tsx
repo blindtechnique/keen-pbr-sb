@@ -1,5 +1,5 @@
 import { AlertTriangleIcon, ShieldAlertIcon, Trash2Icon } from "lucide-react"
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 
 import type { NdmsNativeRetainedDeletion } from "@/api/generated/model"
@@ -53,6 +53,41 @@ type ForgetLeaseValue =
     }>
   | Readonly<{ status: "rejected" | "unknown" }>
 
+const automaticForgetAttemptLimit = 4
+
+async function forgetRetainedDeletion(selection: ForgetSelection) {
+  return runWithNativeMutationLease<ForgetLeaseValue>("forget", async () => {
+    try {
+      const result = await postNdmsNativeTombstoneForgetOnce({
+        interface_name: selection.interfaceName,
+        expected_ownership_revision: selection.expectedOwnershipRevision,
+        confirm_interface_name: selection.interfaceName,
+        rollback_discard_acknowledgement: "permanently_discard_rollback_data",
+        foreign_reappearance_acknowledgement:
+          "accepted_reappearance_is_foreign",
+      })
+      return {
+        disposition: tombstoneForgetDisposition(result),
+        value: { status: "result", result } as const,
+      }
+    } catch (error) {
+      if (
+        error instanceof NativeMutationTransportError &&
+        error.code === "rejected"
+      ) {
+        return {
+          disposition: { state: "clear" } as const,
+          value: { status: "rejected" } as const,
+        }
+      }
+      return {
+        disposition: { state: "unknown" } as const,
+        value: { status: "unknown" } as const,
+      }
+    }
+  })
+}
+
 export function NativeRetainedDeletions({
   retainedDeletions,
   onInventoryRefresh,
@@ -69,6 +104,9 @@ export function NativeRetainedDeletions({
     status: "idle",
   })
   const [lastForgotten, setLastForgotten] = useState<string>()
+  const automaticAttempts = useRef(new Map<string, number>())
+  const automaticInFlight = useRef(false)
+  const [automaticPass, setAutomaticPass] = useState(0)
 
   const selected = selection
     ? retainedDeletions.find(
@@ -100,7 +138,51 @@ export function NativeRetainedDeletions({
     setSubmission({ status: "idle" })
   }, [selection])
 
-  if (retainedDeletions.length === 0 && !lastForgotten) return null
+  useEffect(() => {
+    if (automaticInFlight.current || selection) return
+    const retained = retainedDeletions.find((candidate) => {
+      if (!candidate.forget_candidate) return false
+      const key = `${candidate.interface_name}:${candidate.ownership_revision}`
+      return (
+        (automaticAttempts.current.get(key) ?? 0) < automaticForgetAttemptLimit
+      )
+    })
+    if (!retained) return
+
+    const key = `${retained.interface_name}:${retained.ownership_revision}`
+    const attempt = automaticAttempts.current.get(key) ?? 0
+    const timeout = window.setTimeout(
+      () => {
+        automaticInFlight.current = true
+        automaticAttempts.current.set(key, attempt + 1)
+        void forgetRetainedDeletion({
+          interfaceName: retained.interface_name,
+          expectedOwnershipRevision: retained.ownership_revision,
+        }).finally(async () => {
+          await onInventoryRefresh().catch(() => undefined)
+          automaticInFlight.current = false
+          setAutomaticPass((value) => value + 1)
+        })
+      },
+      attempt === 0 ? 0 : Math.min(500 * 2 ** (attempt - 1), 4_000)
+    )
+    return () => window.clearTimeout(timeout)
+  }, [automaticPass, onInventoryRefresh, retainedDeletions, selection])
+
+  const automaticCleanupPending = retainedDeletions.some((retained) => {
+    if (!retained.forget_candidate) return false
+    const key = `${retained.interface_name}:${retained.ownership_revision}`
+    return (
+      (automaticAttempts.current.get(key) ?? 0) < automaticForgetAttemptLimit
+    )
+  })
+
+  if (
+    (retainedDeletions.length === 0 && !lastForgotten) ||
+    (automaticCleanupPending && !selection)
+  ) {
+    return null
+  }
 
   const close = () => {
     if (sending) return
@@ -111,40 +193,7 @@ export function NativeRetainedDeletions({
     if (!canSubmit || !selection) return
     setSubmission({ status: "sending" })
     try {
-      const lease = await runWithNativeMutationLease<ForgetLeaseValue>(
-        "forget",
-        async () => {
-          try {
-            const result = await postNdmsNativeTombstoneForgetOnce({
-              interface_name: selection.interfaceName,
-              expected_ownership_revision: selection.expectedOwnershipRevision,
-              confirm_interface_name: selection.interfaceName,
-              rollback_discard_acknowledgement:
-                "permanently_discard_rollback_data",
-              foreign_reappearance_acknowledgement:
-                "accepted_reappearance_is_foreign",
-            })
-            return {
-              disposition: tombstoneForgetDisposition(result),
-              value: { status: "result", result } as const,
-            }
-          } catch (error) {
-            if (
-              error instanceof NativeMutationTransportError &&
-              error.code === "rejected"
-            ) {
-              return {
-                disposition: { state: "clear" } as const,
-                value: { status: "rejected" } as const,
-              }
-            }
-            return {
-              disposition: { state: "unknown" } as const,
-              value: { status: "unknown" } as const,
-            }
-          }
-        }
-      )
+      const lease = await forgetRetainedDeletion(selection)
 
       if (lease.status !== "completed") {
         setSubmission({ status: "unknown" })

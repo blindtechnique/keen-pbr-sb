@@ -49,7 +49,7 @@ export function SectionTabs<T extends string>({
     }
 
     const updateIndicator = () => {
-      indicator.style.left = `${activeTab.offsetLeft}px`
+      indicator.style.transform = `translate3d(${activeTab.offsetLeft}px, 0, 0)`
       indicator.style.width = `${activeTab.offsetWidth}px`
     }
 
@@ -207,7 +207,7 @@ function MobileSectionTabs<T extends string>({
     }
 
     const updateIndicator = () => {
-      indicator.style.left = `${activeTab.offsetLeft}px`
+      indicator.style.transform = `translate3d(${activeTab.offsetLeft}px, 0, 0)`
       indicator.style.width = `${activeTab.offsetWidth}px`
     }
 
