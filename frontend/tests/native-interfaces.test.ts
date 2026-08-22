@@ -134,6 +134,25 @@ describe("native Keenetic interfaces", () => {
     ).toEqual(["managed_proxy", "newer_fallback"])
   })
 
+  test("drops orphan native trackers when NDMS inventory is authoritative", () => {
+    const transports = [
+      transport({
+        tag: "deleted_native_tracker",
+        interface: "nwg6",
+        type: "native",
+      }),
+      transport({
+        tag: "managed_proxy",
+        interface: "nwg6",
+        type: "sing-box",
+      }),
+    ]
+
+    expect(dedupeLegacyNativeTransports(transports, [], true)).toEqual([
+      transports[1],
+    ])
+  })
+
   test("never makes an unresolved interface actionable", () => {
     const [unresolved] = mapNativeInterfaces(
       [

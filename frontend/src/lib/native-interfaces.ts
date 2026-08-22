@@ -125,7 +125,8 @@ export function mapNativeInterfaces(
  */
 export function dedupeLegacyNativeTransports(
   transports: readonly TransportStatus[],
-  nativeInterfaces: readonly NativeInterfaceModel[]
+  nativeInterfaces: readonly NativeInterfaceModel[],
+  inventoryAuthoritative = false
 ): TransportStatus[] {
   const representedKernelNames = new Set(
     nativeInterfaces.flatMap((nativeInterface) =>
@@ -159,6 +160,15 @@ export function dedupeLegacyNativeTransports(
   return transports.filter((transport, index) => {
     if (!isLegacyNativeTransport(transport)) {
       return true
+    }
+
+    // When the typed NDMS inventory is available it is the complete source
+    // of native interfaces, including stopped ones. A legacy tracker that is
+    // absent from that inventory is therefore deleted local metadata, not a
+    // live KeeneticOS tunnel. Keeping it would resurrect a removed VPN as an
+    // unusable "KeeneticOS" row.
+    if (inventoryAuthoritative) {
+      return false
     }
 
     const interfaceName = nonEmpty(transport.interface)

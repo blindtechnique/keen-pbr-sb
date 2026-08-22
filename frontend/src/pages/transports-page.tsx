@@ -308,6 +308,9 @@ export function TransportsPage({
       ),
     [ndmsInventoryQuery.data, runtimeInterfacesQuery.data]
   )
+  const nativeInventoryAuthoritative =
+    ndmsInventoryQuery.data?.status === 200 &&
+    ndmsInventoryQuery.data.data.available
   const nativeMutationStatus =
     ndmsInventoryQuery.data?.status === 200
       ? ndmsInventoryQuery.data.data.native_mutation_status
@@ -333,11 +336,22 @@ export function TransportsPage({
       queryClient.invalidateQueries({
         queryKey: queryKeys.runtimeOutbounds(),
       }),
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.transports(),
+      }),
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.transportConfig(),
+      }),
     ])
   }
   const managedItems = useMemo(
-    () => dedupeLegacyNativeTransports(items, nativeInterfaces),
-    [items, nativeInterfaces]
+    () =>
+      dedupeLegacyNativeTransports(
+        items,
+        nativeInterfaces,
+        nativeInventoryAuthoritative
+      ),
+    [items, nativeInterfaces, nativeInventoryAuthoritative]
   )
   const hiddenNativeCount = nativeInterfaces.filter((nativeInterface) =>
     hiddenNativeIds.has(nativeInterface.id)
@@ -571,6 +585,9 @@ export function TransportsPage({
   )
   const selectedNativeDeleteOutbound = selectedNativeDeleteTarget?.kernelName
     ? interfaceOutboundByInterface.get(selectedNativeDeleteTarget.kernelName)
+    : undefined
+  const selectedNativeDeleteTracker = selectedNativeDeleteTarget?.kernelName
+    ? nativeTrackerByInterface.get(selectedNativeDeleteTarget.kernelName)
     : undefined
   // Вопрос «использовать новый туннель как VPN?»: владелец добавляет AWG в
   // KeeneticOS и ждёт, что keen-pbr-sb сам предложит привязать маршрут.
@@ -2008,33 +2025,64 @@ export function TransportsPage({
         }
         nativeInterface={selectedNativeDeleteTarget}
         prepareLinkedRouteRemoval={async () => {
-          if (!selectedNativeDeleteOutbound) return
-          if (!keenConfig || !selectedNativeDeleteTarget) {
+          if (!selectedNativeDeleteOutbound && !selectedNativeDeleteTracker) {
+            return
+          }
+          if (!selectedNativeDeleteTarget) {
             throw new Error("native delete configuration is unavailable")
           }
+          if (selectedNativeDeleteOutbound && !keenConfig) {
+            throw new Error("native delete route configuration is unavailable")
+          }
           const originalConfig = keenConfig
+          let routeRemoved = false
+          let trackerRemoved = false
           const restore = async () => {
-            const restored = await postConfig(originalConfig)
-            if (restored.status !== 200) {
-              throw new Error("native delete route restore staging failed")
+            if (routeRemoved && originalConfig) {
+              const restored = await postConfig(originalConfig)
+              if (restored.status !== 200) {
+                throw new Error("native delete route restore staging failed")
+              }
+              const applied = await postConfigSave()
+              if (applied.status !== 200) {
+                throw new Error("native delete route restore apply failed")
+              }
             }
-            const applied = await postConfigSave()
-            if (applied.status !== 200) {
-              throw new Error("native delete route restore apply failed")
+            if (trackerRemoved && selectedNativeDeleteTracker) {
+              const restored = await postTransportConfig({
+                operation: TransportConfigOperationOperation.create,
+                transport: selectedNativeDeleteTracker,
+              })
+              if (restored.status !== 200) {
+                throw new Error("native delete tracker restore failed")
+              }
             }
           }
           try {
-            const staged = await postConfig(
-              buildUpdatedConfigForOutboundsDelete(originalConfig, [
-                selectedNativeDeleteOutbound.tag,
-              ])
-            )
-            if (staged.status !== 200) {
-              throw new Error("native delete route staging failed")
+            if (selectedNativeDeleteOutbound && originalConfig) {
+              const staged = await postConfig(
+                buildUpdatedConfigForOutboundsDelete(originalConfig, [
+                  selectedNativeDeleteOutbound.tag,
+                ])
+              )
+              if (staged.status !== 200) {
+                throw new Error("native delete route staging failed")
+              }
+              routeRemoved = true
+              const applied = await postConfigSave()
+              if (applied.status !== 200) {
+                throw new Error("native delete route apply failed")
+              }
             }
-            const applied = await postConfigSave()
-            if (applied.status !== 200) {
-              throw new Error("native delete route apply failed")
+            if (selectedNativeDeleteTracker) {
+              const removed = await postTransportConfig({
+                operation: TransportConfigOperationOperation.delete,
+                tag: selectedNativeDeleteTracker.tag,
+              })
+              if (removed.status !== 200) {
+                throw new Error("native delete tracker removal failed")
+              }
+              trackerRemoved = true
             }
           } catch (error) {
             await restore().catch(() => undefined)
