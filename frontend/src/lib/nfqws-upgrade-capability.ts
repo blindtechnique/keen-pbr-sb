@@ -1,5 +1,16 @@
 import { classifyNfqwsUpdateNotice, type NfqwsUpdateStatus } from "@/api/nfqws"
 
+// What the daemon's boot-time recovery decided and did after the last
+// reboot that found an interrupted package transaction. Absent (null) until
+// one ever ran.
+export type NfqwsBootRecoveryLast = {
+  at: number
+  outcome: string
+  plan: string
+  reason: string
+  journal_cleared: boolean
+}
+
 export type NfqwsUpgradeCapability = {
   available: boolean
   mode: string
@@ -7,6 +18,7 @@ export type NfqwsUpgradeCapability = {
   verified_target_ipk: boolean
   exact_opkg_metadata_rollback: boolean
   boot_recovery: boolean
+  boot_recovery_last?: NfqwsBootRecoveryLast | null
   reason?: string
   blocked_reason?: string
   limitation?: string

@@ -77,15 +77,21 @@ constexpr const char* kNfqwsFeedList = "/opt/var/opkg-lists/nfqws2-keenetic";
 constexpr const char* kNfqwsUpgradeLimitationExact =
     "Runs opkg under the shared maintenance lease with the target IPK "
     "verified against the feed index and an exact copy of the installed "
-    "version retained for reinstall, but an interrupted transaction is not "
-    "yet recovered after reboot and the upstream maintainer script may still "
-    "start the service before verification.";
+    "version retained for reinstall; an interrupted transaction is recovered "
+    "at the next daemon start from its journal. The upstream maintainer "
+    "script may still start the service before verification.";
 constexpr const char* kNfqwsUpgradeLimitationInexact =
     "Runs opkg under the shared maintenance lease with the target IPK "
     "verified against the feed index, but no exact copy of the installed "
-    "version is retained (the feed no longer serves it), so a failed upgrade "
-    "restores captured files without exact opkg metadata; an interrupted "
-    "transaction is not recovered after reboot.";
+    "version is retained (the feed no longer serves it), so a failed or "
+    "interrupted upgrade restores captured files without exact opkg "
+    "metadata and stays blocked until the package state is repaired.";
+// Where the last boot-time recovery wrote its decision and outcome, so the
+// status page can say what happened after a reboot. Written by the daemon's
+// startup task, read on every status poll; absent until the first run that
+// found a journal.
+constexpr const char* kNfqwsBootRecoveryRecord =
+    "/opt/var/lib/keen-pbr/nfqws-boot-recovery.json";
 constexpr const char* kListsDir = "/opt/etc/nfqws2/lists";
 constexpr const char* kLuaDir = "/opt/etc/nfqws2/lua";
 constexpr const char* kLogDir = "/opt/var/log";
@@ -990,9 +996,24 @@ bool cached_exact_previous_ipk(const std::string& installed_version,
     return exact;
 }
 
+std::optional<nlohmann::json> read_nfqws_boot_recovery_record();
+
 nlohmann::json nfqws_upgrade_capability(
     bool package_metadata_verified,
     bool exact_previous_ipk) {
+    // What the last boot-time recovery decided and did, when one ran. The
+    // page cannot tell "nothing ran" from "ran and had to keep the journal"
+    // by the journal alone; this is the difference.
+    nlohmann::json boot_recovery_last = nullptr;
+    if (const auto record = read_nfqws_boot_recovery_record()) {
+        boot_recovery_last = nlohmann::json{
+            {"at", record->value("at", std::int64_t{0})},
+            {"outcome", record->value("outcome", std::string{})},
+            {"plan", record->value("plan", std::string{})},
+            {"reason", record->value("reason", std::string{})},
+            {"journal_cleared", record->value("journal_cleared", false)},
+        };
+    }
     return nlohmann::json{
         {"available", package_metadata_verified},
         {"mode", "guarded_opkg"},
@@ -1003,7 +1024,10 @@ nlohmann::json nfqws_upgrade_capability(
         // from the feed index, and installs from the verified file.
         {"verified_target_ipk", true},
         {"exact_opkg_metadata_rollback", exact_previous_ipk},
-        {"boot_recovery", false},
+        // The daemon's startup task reads the journal and acts on it; see
+        // run_nfqws_boot_recovery.
+        {"boot_recovery", true},
+        {"boot_recovery_last", boot_recovery_last},
         {"package_metadata_verified", package_metadata_verified},
         {"blocked_reason",
          package_metadata_verified
@@ -1938,7 +1962,308 @@ void validate_candidate_or_throw(const std::string& name,
         "the nfqws2 binary changed during validation; nothing was changed");
 }
 
+
+// ---------------------------------------------------------------------------
+// Boot-time recovery of an interrupted package transaction.
+//
+// A reboot in the middle of `opkg install` leaves the journal, the exact-IPK
+// store, the restore point and whatever opkg managed to write. Nothing used
+// to look at them: the next boot brought up whatever was on disk and the web
+// page said "a previous operation did not finish" until an operator repaired
+// the package by hand. decide_component_boot_recovery turns that evidence
+// into one plan; this runs the plan with the same helpers the interactive
+// rollback uses, under the same maintenance lease, in the same lock order.
+// ---------------------------------------------------------------------------
+
+std::optional<nlohmann::json> read_nfqws_boot_recovery_record() {
+    constexpr std::size_t kMaxRecordBytes = 16U * 1024U;
+    std::error_code error;
+    const auto path = fs::path(kNfqwsBootRecoveryRecord);
+    if (!fs::is_regular_file(fs::symlink_status(path, error)) || error) {
+        return std::nullopt;
+    }
+    const auto size = fs::file_size(path, error);
+    if (error || size > kMaxRecordBytes) return std::nullopt;
+    std::ifstream input(path, std::ios::binary);
+    std::string body((std::istreambuf_iterator<char>(input)),
+                     std::istreambuf_iterator<char>());
+    try {
+        auto parsed = nlohmann::json::parse(body);
+        if (!parsed.is_object()) return std::nullopt;
+        return parsed;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+void write_nfqws_boot_recovery_record(
+    const NfqwsBootRecoveryResult& result) noexcept {
+    constexpr std::size_t kMaxOutputBytes = 4U * 1024U;
+    try {
+        std::string output = result.output;
+        if (output.size() > kMaxOutputBytes) {
+            output = "...\n" + output.substr(output.size() - kMaxOutputBytes);
+        }
+        const nlohmann::json body{
+            {"at", static_cast<std::int64_t>(std::time(nullptr))},
+            {"outcome", nfqws_boot_recovery_outcome_name(result.outcome)},
+            {"plan", result.plan},
+            {"reason", result.reason},
+            {"journal_cleared", result.journal_cleared},
+            {"output", output},
+        };
+        AtomicFileWriteOptions options;
+        options.create_parent_directories = true;
+        options.default_file_mode = 0600;
+        options.file_mode = static_cast<mode_t>(0600);
+        write_file_atomically(kNfqwsBootRecoveryRecord, body.dump(2) + "\n",
+                              options);
+    } catch (...) {
+        // The record is for the status page; losing it loses a sentence,
+        // not the recovery.
+    }
+}
+
+// The orchestration proper. Every input and effect is a hook so the mapping
+// from plan to action, the lease handling and what gets recorded can be
+// exercised without a router; production (below) binds the real helpers.
+NfqwsBootRecoveryResult run_nfqws_boot_recovery_with(
+    const NfqwsBootRecoveryHooks& hooks) {
+    NfqwsBootRecoveryResult result;
+    const auto finish = [&](NfqwsBootRecoveryOutcome outcome) {
+        result.outcome = outcome;
+        if (hooks.record_result) hooks.record_result(result);
+        return result;
+    };
+    const auto note = [&](const std::string& line) {
+        if (!result.output.empty() && result.output.back() != '\n') {
+            result.output += '\n';
+        }
+        result.output += line;
+        result.output += '\n';
+    };
+
+    // A free look first: no journal means no lease, no log, nothing.
+    {
+        const auto glance = hooks.read_journal();
+        if (glance.state == ComponentTransactionState::none ||
+            glance.state == ComponentTransactionState::in_flight) {
+            result.plan = component_boot_recovery_action_name(
+                ComponentBootRecoveryAction::none);
+            result.outcome = NfqwsBootRecoveryOutcome::nothing_to_do;
+            return result;
+        }
+    }
+
+    // Lease first, then the in-process mutex: the order every nfqws
+    // mutation uses. Busy is not an error here - S80 may still hold the
+    // lease while it finishes our own start - so it is reported for a
+    // retry rather than recorded as a result.
+    std::unique_ptr<MaintenanceLease> lease;
+    try {
+        lease = hooks.acquire_lease();
+    } catch (const MaintenanceLockError& error) {
+        if (error.kind() == MaintenanceLockErrorKind::busy) {
+            lease.reset();
+        } else {
+            note(std::string("The maintenance lease could not be taken: ") +
+                 error.what());
+            result.plan = "none";
+            result.reason = "maintenance lease unavailable";
+            return finish(NfqwsBootRecoveryOutcome::failed);
+        }
+    }
+    if (!lease) {
+        result.outcome = NfqwsBootRecoveryOutcome::lease_busy;
+        return result;
+    }
+    const std::lock_guard lock(nfqws_operation_mutex());
+
+    // Everything is re-read under the lease: the glance above may have
+    // raced an operator's repair.
+    ComponentBootRecoveryEvidence evidence;
+    evidence.journal = hooks.read_journal();
+    evidence.previous_ipk = hooks.inspect_current_ipk();
+    evidence.capture = hooks.capture_state();
+    evidence.installed_version = hooks.installed_version();
+    evidence.installed_binary_sha256 = hooks.installed_binary_sha256();
+    const auto plan = decide_component_boot_recovery(evidence);
+    result.plan = component_boot_recovery_action_name(plan.action);
+    result.reason = plan.reason;
+    note("Boot recovery plan: " + result.plan + " (" + plan.reason + ").");
+
+    switch (plan.action) {
+    case ComponentBootRecoveryAction::none:
+        return finish(NfqwsBootRecoveryOutcome::nothing_to_do);
+
+    case ComponentBootRecoveryAction::clear_journal:
+        if (hooks.clear_journal()) {
+            result.journal_cleared = true;
+            note("Transaction journal cleared.");
+            return finish(NfqwsBootRecoveryOutcome::recovered);
+        }
+        note("The transaction journal could not be removed; it stays as "
+             "the marker of an unfinished operation.");
+        return finish(NfqwsBootRecoveryOutcome::failed);
+
+    case ComponentBootRecoveryAction::manual:
+        note("Nothing on disk can put the component back; the journal "
+             "stays and web upgrades remain blocked until the package is "
+             "repaired by hand.");
+        return finish(NfqwsBootRecoveryOutcome::journal_retained);
+
+    case ComponentBootRecoveryAction::restore_files:
+    case ComponentBootRecoveryAction::reinstall_previous:
+    case ComponentBootRecoveryAction::restore_files_inexact:
+        break;
+    }
+
+    const auto& record = *evidence.journal.record;
+    NfqwsBootRecoveryStepResult step;
+    try {
+        step = hooks.execute_restore(plan, record, result.output);
+    } catch (const std::exception& error) {
+        note(std::string("Recovery step failed: ") + error.what());
+        step = NfqwsBootRecoveryStepResult{};
+    } catch (...) {
+        note("Recovery step failed with an unknown error.");
+        step = NfqwsBootRecoveryStepResult{};
+    }
+    const bool exact_required =
+        plan.action == ComponentBootRecoveryAction::reinstall_previous;
+    const bool succeeded =
+        step.rolled_back && (!exact_required || step.package_metadata_restored);
+    if (!succeeded) {
+        note(exact_required && step.rolled_back
+                 ? "Captured files and runtime were restored, but the exact "
+                   "previous package was not reinstalled; package metadata "
+                   "stays unverified."
+                 : "The component could not be restored; the journal stays.");
+        return finish(NfqwsBootRecoveryOutcome::failed);
+    }
+    if (exact_required && hooks.discard_candidate) hooks.discard_candidate();
+    if (!plan.clear_journal_on_success) {
+        note("Captured files and runtime restored, but without the exact "
+             "previous package opkg metadata stays unverified; the journal "
+             "stays until the package is repaired.");
+        return finish(NfqwsBootRecoveryOutcome::journal_retained);
+    }
+    if (!hooks.clear_journal()) {
+        note("The component is restored, but the transaction journal could "
+             "not be removed.");
+        return finish(NfqwsBootRecoveryOutcome::failed);
+    }
+    result.journal_cleared = true;
+    note("Component restored to version " + record.previous_version +
+         "; transaction journal cleared.");
+    return finish(NfqwsBootRecoveryOutcome::recovered);
+}
+
+NfqwsBootRecoveryHooks production_nfqws_boot_recovery_hooks(ApiContext& ctx) {
+    NfqwsBootRecoveryHooks hooks;
+    hooks.read_journal = [] {
+        return read_component_transaction(kNfqwsJournal);
+    };
+    hooks.acquire_lease = [&ctx]() -> std::unique_ptr<MaintenanceLease> {
+        return ctx.acquire_maintenance_lease("nfqws-boot-recovery");
+    };
+    hooks.inspect_current_ipk = []() -> IpkSlotInspection {
+        try {
+            const ComponentIpkStore store(kComponentStoreRoot, kNfqwsPackage);
+            return store.inspect(IpkSlot::current);
+        } catch (...) {
+            IpkSlotInspection inspection;
+            inspection.state = IpkSlotState::corrupt;
+            inspection.detail = "the component store could not be inspected";
+            return inspection;
+        }
+    };
+    hooks.capture_state = [] {
+        return verify_component_capture(kNfqwsCapture);
+    };
+    hooks.installed_version = []() -> std::string {
+        try {
+            return installed_version();
+        } catch (...) {
+            return {};
+        }
+    };
+    hooks.installed_binary_sha256 = []() -> std::string {
+        return rescue_integrity::sha256_file(kBinary).value_or(std::string{});
+    };
+    hooks.execute_restore = [&ctx](const ComponentBootRecoveryPlan& plan,
+                                   const ComponentTransactionRecord& record,
+                                   std::string& output) {
+        NfqwsBootRecoveryStepResult step;
+        TransactionProgress progress(ctx, "boot-recovery");
+        // Stopping, restoring and starting nfqws2 changes its netfilter
+        // footprint and possibly its process image: ask the control loop to
+        // reconcile PPE/netfilter state afterwards, as the interactive path
+        // does at its own mutation boundary.
+        NfqwsNetfilterRefreshGuard refresh_guard(ctx);
+        try {
+            step.rolled_back = restore_nfqws_capture_after_failed_upgrade(
+                record, progress, output, record.previous_version,
+                plan.action == ComponentBootRecoveryAction::reinstall_previous,
+                step.package_metadata_restored);
+        } catch (const std::exception& error) {
+            output += std::string("\nBoot recovery step failed: ") +
+                      error.what() + "\n";
+            step.rolled_back = false;
+        }
+        progress.finish(step.rolled_back ? "recovered" : "failed");
+        (void)cached_restore_point_state(/*force=*/true);
+        return step;
+    };
+    hooks.clear_journal = [] { return clear_nfqws_transaction(); };
+    hooks.discard_candidate = [] {
+        try {
+            ComponentIpkStore store(kComponentStoreRoot, kNfqwsPackage);
+            store.discard(IpkSlot::candidate);
+        } catch (...) {
+        }
+    };
+    hooks.record_result = [](const NfqwsBootRecoveryResult& result) {
+        write_nfqws_boot_recovery_record(result);
+    };
+    return hooks;
+}
 } // namespace
+
+const char* nfqws_boot_recovery_outcome_name(
+    NfqwsBootRecoveryOutcome outcome) noexcept {
+    switch (outcome) {
+    case NfqwsBootRecoveryOutcome::nothing_to_do: return "nothing_to_do";
+    case NfqwsBootRecoveryOutcome::lease_busy: return "lease_busy";
+    case NfqwsBootRecoveryOutcome::recovered: return "recovered";
+    case NfqwsBootRecoveryOutcome::journal_retained: return "journal_retained";
+    case NfqwsBootRecoveryOutcome::failed: return "failed";
+    }
+    return "unknown";
+}
+
+NfqwsBootRecoveryResult run_nfqws_boot_recovery(ApiContext& ctx) noexcept {
+    try {
+        return run_nfqws_boot_recovery_with(
+            production_nfqws_boot_recovery_hooks(ctx));
+    } catch (const std::exception& error) {
+        NfqwsBootRecoveryResult result;
+        result.outcome = NfqwsBootRecoveryOutcome::failed;
+        result.plan = "none";
+        result.reason = "boot recovery threw";
+        result.output = std::string("Boot recovery failed: ") + error.what();
+        write_nfqws_boot_recovery_record(result);
+        return result;
+    } catch (...) {
+        NfqwsBootRecoveryResult result;
+        result.outcome = NfqwsBootRecoveryOutcome::failed;
+        result.plan = "none";
+        result.reason = "boot recovery threw";
+        result.output = "Boot recovery failed with an unknown error";
+        write_nfqws_boot_recovery_record(result);
+        return result;
+    }
+}
 
 void register_nfqws_handler_impl(
     ApiServer& server,
@@ -3082,6 +3407,11 @@ void register_nfqws_handler(ApiServer& server, ApiContext& ctx) {
 }
 
 #ifdef KEEN_PBR3_TESTING
+NfqwsBootRecoveryResult run_nfqws_boot_recovery_for_testing(
+    const NfqwsBootRecoveryHooks& hooks) {
+    return run_nfqws_boot_recovery_with(hooks);
+}
+
 NfqwsPostUpgradeFootprintAssessment
 assess_nfqws_post_upgrade_footprint_for_testing(
     const PackageFootprint& before,

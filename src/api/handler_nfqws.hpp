@@ -5,6 +5,13 @@
 #include "handlers.hpp"
 #include "server.hpp"
 
+#include "../update/component_boot_recovery.hpp"
+#include "../update/maintenance_lock.hpp"
+
+#include <functional>
+#include <memory>
+#include <string>
+
 #ifdef KEEN_PBR3_TESTING
 #include "../update/package_footprint.hpp"
 #include "../util/nfqws_file_writer.hpp"
@@ -13,15 +20,85 @@
 
 #include <chrono>
 #include <filesystem>
-#include <functional>
-#include <string>
 #include <vector>
 #endif
 
 namespace keen_pbr3 {
 void register_nfqws_handler(ApiServer& server, ApiContext& ctx);
 
+// What one run of the boot-time component recovery amounted to.
+enum class NfqwsBootRecoveryOutcome {
+    // No journal, or one a live process owns: nothing to recover.
+    nothing_to_do,
+    // The maintenance lease was held by someone else (S80 still starting,
+    // an operator's update). Nothing was read under the lease; the caller
+    // retries later.
+    lease_busy,
+    // The plan ran to completion and the journal was cleared: the component
+    // is a known quantity again.
+    recovered,
+    // The plan ran, or nothing could run, and the journal stays: package
+    // metadata is still unverified and web upgrades stay blocked, on
+    // purpose. `plan`/`reason` say which.
+    journal_retained,
+    // The plan ran and did not get the component back. Journal retained.
+    failed,
+};
+
+const char* nfqws_boot_recovery_outcome_name(
+    NfqwsBootRecoveryOutcome outcome) noexcept;
+
+struct NfqwsBootRecoveryResult {
+    NfqwsBootRecoveryOutcome outcome{NfqwsBootRecoveryOutcome::nothing_to_do};
+    // decide_component_boot_recovery's action name and reason.
+    std::string plan;
+    std::string reason;
+    // The operator log of what ran, bounded.
+    std::string output;
+    bool journal_cleared{false};
+};
+
+// Runs the boot-time recovery of an interrupted nfqws2 package transaction:
+// reads the journal; under the maintenance lease (the same one the web
+// upgrade and S80 take, in the same order: lease, then the nfqws mutex)
+// decides from the journal, the exact-IPK store, the capture and opkg, and
+// executes the decision with the very helpers the interactive rollback
+// uses. Blocking for up to minutes when opkg runs: call from a worker
+// thread, never from the control loop. Never throws.
+NfqwsBootRecoveryResult run_nfqws_boot_recovery(ApiContext& ctx) noexcept;
+
+// The boot recovery as orchestration over its inputs and effects, so the
+// decision-to-action mapping, the lease handling and the recorded outcome can
+// be driven without a router. Production wires every hook to the real helper.
+struct NfqwsBootRecoveryStepResult {
+    bool rolled_back{false};
+    bool package_metadata_restored{false};
+};
+
+struct NfqwsBootRecoveryHooks {
+    std::function<ComponentTransactionStatus()> read_journal;
+    // nullptr means busy; other failures throw MaintenanceLockError.
+    std::function<std::unique_ptr<MaintenanceLease>()> acquire_lease;
+    std::function<IpkSlotInspection()> inspect_current_ipk;
+    std::function<ComponentCaptureState()> capture_state;
+    // Empty when unknown; never throw.
+    std::function<std::string()> installed_version;
+    std::function<std::string()> installed_binary_sha256;
+    // Runs restore_files / reinstall_previous / restore_files_inexact.
+    std::function<NfqwsBootRecoveryStepResult(
+        const ComponentBootRecoveryPlan&,
+        const ComponentTransactionRecord&,
+        std::string& output)>
+        execute_restore;
+    std::function<bool()> clear_journal;
+    std::function<void()> discard_candidate;
+    std::function<void(const NfqwsBootRecoveryResult&)> record_result;
+};
+
 #ifdef KEEN_PBR3_TESTING
+NfqwsBootRecoveryResult run_nfqws_boot_recovery_for_testing(
+    const NfqwsBootRecoveryHooks& hooks);
+
 struct NfqwsApplyStrategyTestHooks {
     std::function<bool()> installed;
     std::function<std::vector<ConfigValidationIssue>(

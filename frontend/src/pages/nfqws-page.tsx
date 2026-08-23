@@ -637,6 +637,22 @@ export function NfqwsPage() {
                   </AlertTitle>
                   <AlertDescription>
                     {t("nfqws.interruptedTransactionDescription")}
+                    {/* The daemon already looked at this journal at boot.
+                        Without this line "did not finish" reads as "nobody
+                        did anything", when in truth a recovery ran and
+                        deliberately kept the journal. */}
+                    {status.upgrade_capability?.boot_recovery_last ? (
+                      <>
+                        {" "}
+                        {t("nfqws.bootRecoveryRan", {
+                          plan: status.upgrade_capability.boot_recovery_last
+                            .plan,
+                          outcome:
+                            status.upgrade_capability.boot_recovery_last
+                              .outcome,
+                        })}
+                      </>
+                    ) : null}
                   </AlertDescription>
                 </Alert>
               ) : null}

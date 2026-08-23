@@ -3,6 +3,7 @@
 #ifdef WITH_API
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -14,6 +15,7 @@
 #include "../api/handlers.hpp"
 #include "../api/handler_connections.hpp"
 #include "../api/handler_health_service.hpp"
+#include "../api/handler_nfqws.hpp"
 #include "../api/server.hpp"
 #include "../api/status_stream.hpp"
 #include "../connections/conntrack_event_monitor.hpp"
@@ -1783,6 +1785,104 @@ void Daemon::setup_api() {
                                  listen_addr,
                                  e.what());
         throw;
+    }
+}
+
+namespace {
+
+// First look 15 s after startup: S80 usually observes our PID file and
+// releases the lifecycle lease within seconds. Then back off; after the last
+// entry the attempt is abandoned and the journal stays, exactly as visible
+// as before this task existed - the web page keeps saying the operation did
+// not finish.
+constexpr std::array<std::chrono::seconds, 6> kNfqwsBootRecoveryDelays{
+    std::chrono::seconds{15},  std::chrono::seconds{30},
+    std::chrono::seconds{60},  std::chrono::seconds{120},
+    std::chrono::seconds{300}, std::chrono::seconds{600},
+};
+
+} // namespace
+
+void Daemon::schedule_nfqws_boot_recovery(std::size_t attempt) {
+    if (!api_ctx_ || !scheduler_) return;
+    if (attempt >= kNfqwsBootRecoveryDelays.size()) {
+        Logger::instance().warn(
+            "nfqws2 boot recovery: the maintenance lease stayed busy through "
+            "{} attempts; an interrupted package transaction, if any, is left "
+            "for the operator",
+            attempt);
+        return;
+    }
+    cancel_nfqws_boot_recovery();
+    const auto schedule_serial = ++nfqws_boot_recovery_schedule_serial_;
+    const auto delay = kNfqwsBootRecoveryDelays[attempt];
+    try {
+        nfqws_boot_recovery_task_id_ = scheduler_->schedule_oneshot(
+            delay,
+            [this, attempt, schedule_serial]() {
+                if (schedule_serial != nfqws_boot_recovery_schedule_serial_) {
+                    return;
+                }
+                nfqws_boot_recovery_task_id_ = -1;
+                if (!running_.load(std::memory_order_acquire) || !api_ctx_) {
+                    return;
+                }
+                // opkg may run for minutes: never on the control loop. The
+                // worker hands the verdict back through a posted task, and
+                // only a busy lease schedules another look.
+                const bool posted = blocking_executor_.try_post(
+                    "nfqws-boot-recovery",
+                    [this, attempt, schedule_serial]() {
+                        const auto result = run_nfqws_boot_recovery(*api_ctx_);
+                        if (result.outcome ==
+                            NfqwsBootRecoveryOutcome::lease_busy) {
+                            (void)post_control_task(
+                                [this, attempt, schedule_serial]() {
+                                    if (schedule_serial !=
+                                        nfqws_boot_recovery_schedule_serial_) {
+                                        return;
+                                    }
+                                    schedule_nfqws_boot_recovery(attempt + 1);
+                                },
+                                "nfqws-boot-recovery-retry");
+                            return;
+                        }
+                        if (result.outcome !=
+                            NfqwsBootRecoveryOutcome::nothing_to_do) {
+                            Logger::instance().info(
+                                "nfqws2 boot recovery: plan={} outcome={} "
+                                "journal_cleared={} ({})",
+                                result.plan,
+                                nfqws_boot_recovery_outcome_name(
+                                    result.outcome),
+                                result.journal_cleared,
+                                result.reason);
+                        }
+                    });
+                if (!posted) {
+                    // The pool is saturated right after start; try again on
+                    // the next delay rather than losing the look entirely.
+                    schedule_nfqws_boot_recovery(attempt + 1);
+                }
+            },
+            "nfqws-boot-recovery");
+    } catch (const std::exception& error) {
+        nfqws_boot_recovery_task_id_ = -1;
+        Logger::instance().info(
+            "nfqws2 boot recovery timer could not be installed: {}",
+            error.what());
+    }
+}
+
+void Daemon::cancel_nfqws_boot_recovery() noexcept {
+    ++nfqws_boot_recovery_schedule_serial_;
+    if (nfqws_boot_recovery_task_id_ < 0) return;
+    const int task_id = nfqws_boot_recovery_task_id_;
+    nfqws_boot_recovery_task_id_ = -1;
+    if (!scheduler_) return;
+    try {
+        scheduler_->cancel(task_id);
+    } catch (...) {
     }
 }
 

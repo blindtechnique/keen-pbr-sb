@@ -291,7 +291,10 @@ TEST_CASE("nfqws guarded upgrade acquires the lease before every mutation") {
     // promise without the store is an exact copy of the installed version.
     CHECK(capability.at("verified_target_ipk").get<bool>());
     CHECK_FALSE(capability.at("exact_opkg_metadata_rollback").get<bool>());
-    CHECK_FALSE(capability.at("boot_recovery").get<bool>());
+    // The daemon acts on an interrupted journal at startup; what it decided
+    // last time (if ever) rides along for the page.
+    CHECK(capability.at("boot_recovery").get<bool>());
+    CHECK(capability.contains("boot_recovery_last"));
     CHECK_FALSE(capability.at("limitation").get<std::string>().empty());
     CHECK_FALSE(status_payload.at("restore_capability")
                     .at("exact_package_state")
@@ -761,6 +764,235 @@ TEST_CASE("uncertain post-opkg recovery retains a broken result") {
     CHECK(guarded.recovery_error == "restore verification failed");
 }
 
+namespace {
+
+class BootRecoveryFakeLease final : public MaintenanceLease {
+public:
+    std::uint32_t base_generation() const noexcept override { return 1U; }
+    std::uint32_t reserve(std::uint32_t expected) override {
+        return expected + 1U;
+    }
+    void verify_held() override {}
+};
+
+// Every input and effect of the boot-recovery orchestration, scripted.
+struct BootRecoveryFixture {
+    ComponentTransactionStatus journal;
+    bool lease_busy{false};
+    int lease_acquisitions{0};
+    IpkSlotInspection current_ipk;
+    ComponentCaptureState capture{ComponentCaptureState::usable};
+    std::string version{"1.2.5"};
+    std::string binary_sha{std::string(64, 'b')};
+    NfqwsBootRecoveryStepResult step;
+    int execute_calls{0};
+    int clear_calls{0};
+    int discard_calls{0};
+    bool clear_ok{true};
+    ComponentBootRecoveryPlan executed_plan;
+    std::vector<NfqwsBootRecoveryResult> recorded;
+
+    void abandoned_journal(ComponentTransactionPhase phase,
+                           bool exact_previous = true) {
+        journal.state = ComponentTransactionState::abandoned;
+        ComponentTransactionRecord record;
+        record.component = "nfqws2-keenetic";
+        record.operation = "upgrade";
+        record.phase = phase;
+        record.binary_sha256 = std::string(64, 'a');
+        record.previous_version = "1.2.4";
+        record.target_version = "1.2.5";
+        record.exact_previous_ipk = exact_previous;
+        journal.record = record;
+    }
+
+    void exact_copy_retained() {
+        current_ipk.state = IpkSlotState::usable;
+        RetainedIpk retained;
+        retained.version = "1.2.4";
+        retained.sha256 = std::string(64, 'c');
+        retained.size = 10;
+        retained.filename = "x.ipk";
+        current_ipk.retained = retained;
+    }
+
+    NfqwsBootRecoveryHooks hooks() {
+        NfqwsBootRecoveryHooks wired;
+        wired.read_journal = [this] { return journal; };
+        wired.acquire_lease =
+            [this]() -> std::unique_ptr<MaintenanceLease> {
+            ++lease_acquisitions;
+            if (lease_busy) {
+                throw MaintenanceLockError(MaintenanceLockErrorKind::busy,
+                                           "held by S80");
+            }
+            return std::make_unique<BootRecoveryFakeLease>();
+        };
+        wired.inspect_current_ipk = [this] { return current_ipk; };
+        wired.capture_state = [this] { return capture; };
+        wired.installed_version = [this] { return version; };
+        wired.installed_binary_sha256 = [this] { return binary_sha; };
+        wired.execute_restore = [this](const ComponentBootRecoveryPlan& plan,
+                                       const ComponentTransactionRecord&,
+                                       std::string& output) {
+            ++execute_calls;
+            executed_plan = plan;
+            output += "restore ran\n";
+            return step;
+        };
+        wired.clear_journal = [this] {
+            ++clear_calls;
+            return clear_ok;
+        };
+        wired.discard_candidate = [this] { ++discard_calls; };
+        wired.record_result = [this](const NfqwsBootRecoveryResult& result) {
+            recorded.push_back(result);
+        };
+        return wired;
+    }
+};
+
+} // namespace
+
+TEST_CASE("boot recovery does nothing, and takes no lease, without a journal") {
+    BootRecoveryFixture fixture;
+    const auto result =
+        run_nfqws_boot_recovery_for_testing(fixture.hooks());
+    CHECK(result.outcome == NfqwsBootRecoveryOutcome::nothing_to_do);
+    CHECK(fixture.lease_acquisitions == 0);
+    CHECK(fixture.execute_calls == 0);
+    CHECK(fixture.clear_calls == 0);
+    // Nothing happened, so nothing is recorded for the page either.
+    CHECK(fixture.recorded.empty());
+}
+
+TEST_CASE("a busy maintenance lease is a retry, not a result") {
+    BootRecoveryFixture fixture;
+    fixture.abandoned_journal(ComponentTransactionPhase::mutating);
+    fixture.lease_busy = true;
+    const auto result =
+        run_nfqws_boot_recovery_for_testing(fixture.hooks());
+    CHECK(result.outcome == NfqwsBootRecoveryOutcome::lease_busy);
+    CHECK(fixture.lease_acquisitions == 1);
+    CHECK(fixture.execute_calls == 0);
+    CHECK(fixture.recorded.empty());
+}
+
+TEST_CASE("interrupted before mutation: the journal is cleared and recorded") {
+    BootRecoveryFixture fixture;
+    fixture.abandoned_journal(ComponentTransactionPhase::started);
+    const auto result =
+        run_nfqws_boot_recovery_for_testing(fixture.hooks());
+    CHECK(result.outcome == NfqwsBootRecoveryOutcome::recovered);
+    CHECK(result.plan == "clear_journal");
+    CHECK(result.journal_cleared);
+    CHECK(fixture.clear_calls == 1);
+    CHECK(fixture.execute_calls == 0);
+    REQUIRE(fixture.recorded.size() == 1U);
+    CHECK(fixture.recorded.front().journal_cleared);
+}
+
+TEST_CASE("exact previous package: reinstall plan runs, candidate dropped, journal cleared") {
+    BootRecoveryFixture fixture;
+    fixture.abandoned_journal(ComponentTransactionPhase::mutating);
+    fixture.exact_copy_retained();
+    // The install replaced the package before the crash.
+    fixture.version = "1.2.5";
+    fixture.step.rolled_back = true;
+    fixture.step.package_metadata_restored = true;
+
+    const auto result =
+        run_nfqws_boot_recovery_for_testing(fixture.hooks());
+    CHECK(result.outcome == NfqwsBootRecoveryOutcome::recovered);
+    CHECK(result.plan == "reinstall_previous");
+    CHECK(fixture.execute_calls == 1);
+    CHECK(fixture.executed_plan.action ==
+          ComponentBootRecoveryAction::reinstall_previous);
+    CHECK(fixture.executed_plan.reinstall_version == "1.2.4");
+    CHECK(fixture.discard_calls == 1);
+    CHECK(fixture.clear_calls == 1);
+    CHECK(result.journal_cleared);
+    CHECK(result.output.find("restore ran") != std::string::npos);
+
+}
+
+TEST_CASE("a reinstall that only restored files is a failure, not a recovery") {
+    BootRecoveryFixture fixture;
+    fixture.abandoned_journal(ComponentTransactionPhase::mutating);
+    fixture.exact_copy_retained();
+    fixture.version = "1.2.5";
+    fixture.step.rolled_back = true;
+    fixture.step.package_metadata_restored = false;
+
+    const auto result =
+        run_nfqws_boot_recovery_for_testing(fixture.hooks());
+    CHECK(result.outcome == NfqwsBootRecoveryOutcome::failed);
+    CHECK(fixture.clear_calls == 0);
+    CHECK(fixture.discard_calls == 0);
+    CHECK_FALSE(result.journal_cleared);
+    REQUIRE(fixture.recorded.size() == 1U);
+}
+
+TEST_CASE("without an exact copy the files come back but the journal stays") {
+    BootRecoveryFixture fixture;
+    // The journal never promised an exact copy.
+    fixture.abandoned_journal(ComponentTransactionPhase::verifying,
+                              /*exact_previous=*/false);
+    fixture.version = "1.2.5";
+    fixture.step.rolled_back = true;
+
+    const auto result =
+        run_nfqws_boot_recovery_for_testing(fixture.hooks());
+    CHECK(result.outcome == NfqwsBootRecoveryOutcome::journal_retained);
+    CHECK(result.plan == "restore_files_inexact");
+    CHECK(fixture.execute_calls == 1);
+    // No exact reinstall happened, so no candidate is stale and the journal
+    // must stay: package metadata is still unverified.
+    CHECK(fixture.discard_calls == 0);
+    CHECK(fixture.clear_calls == 0);
+    CHECK_FALSE(result.journal_cleared);
+}
+
+TEST_CASE("a manual verdict runs nothing and keeps the journal") {
+    BootRecoveryFixture fixture;
+    fixture.abandoned_journal(ComponentTransactionPhase::mutating,
+                              /*exact_previous=*/false);
+    fixture.version = "1.2.5";
+    fixture.capture = ComponentCaptureState::absent;
+
+    const auto result =
+        run_nfqws_boot_recovery_for_testing(fixture.hooks());
+    CHECK(result.outcome == NfqwsBootRecoveryOutcome::journal_retained);
+    CHECK(result.plan == "manual");
+    CHECK(fixture.execute_calls == 0);
+    CHECK(fixture.clear_calls == 0);
+    REQUIRE(fixture.recorded.size() == 1U);
+    CHECK(fixture.recorded.front().plan == "manual");
+}
+
+TEST_CASE("a journal that survives its own clear is reported as a failure") {
+    BootRecoveryFixture fixture;
+    fixture.abandoned_journal(ComponentTransactionPhase::verified);
+    fixture.clear_ok = false;
+    const auto result =
+        run_nfqws_boot_recovery_for_testing(fixture.hooks());
+    CHECK(result.outcome == NfqwsBootRecoveryOutcome::failed);
+    CHECK_FALSE(result.journal_cleared);
+}
+
+TEST_CASE("every boot recovery outcome has a distinct stable name") {
+    CHECK(std::string(nfqws_boot_recovery_outcome_name(
+              NfqwsBootRecoveryOutcome::nothing_to_do)) == "nothing_to_do");
+    CHECK(std::string(nfqws_boot_recovery_outcome_name(
+              NfqwsBootRecoveryOutcome::lease_busy)) == "lease_busy");
+    CHECK(std::string(nfqws_boot_recovery_outcome_name(
+              NfqwsBootRecoveryOutcome::recovered)) == "recovered");
+    CHECK(std::string(nfqws_boot_recovery_outcome_name(
+              NfqwsBootRecoveryOutcome::journal_retained)) ==
+          "journal_retained");
+    CHECK(std::string(nfqws_boot_recovery_outcome_name(
+              NfqwsBootRecoveryOutcome::failed)) == "failed");
+}
 } // namespace keen_pbr3
 
 #endif // WITH_API

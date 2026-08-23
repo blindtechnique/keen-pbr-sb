@@ -925,6 +925,13 @@ private:
     void resume_unscheduled_remote_access_retry() noexcept;
     void request_remote_access_reconcile_from_control(
         std::string_view source) noexcept;
+    // Boot-time recovery of an interrupted nfqws2 package transaction: a
+    // scheduler one-shot hands the work to a blocking worker, which runs
+    // run_nfqws_boot_recovery under the maintenance lease. A busy lease
+    // (S80 still finishing our own start, an operator's update) comes back
+    // as a retry with growing delay, bounded; everything else is final.
+    void schedule_nfqws_boot_recovery(std::size_t attempt);
+    void cancel_nfqws_boot_recovery() noexcept;
 #endif
 
     // DNS probe integration
@@ -1306,6 +1313,9 @@ private:
     // routing-runtime/SNAT health timer, which is canceled by Stop.
     int remote_access_recovery_watchdog_task_id_{-1};
     std::uint64_t remote_access_retry_schedule_serial_{0U};
+    // Control-loop-owned, like the remote-access slots above.
+    int nfqws_boot_recovery_task_id_{-1};
+    std::uint64_t nfqws_boot_recovery_schedule_serial_{0U};
     std::atomic<std::uint64_t> remote_access_retry_bridge_epoch_{0U};
     std::optional<std::uint64_t>
         unscheduled_remote_access_retry_generation_;
