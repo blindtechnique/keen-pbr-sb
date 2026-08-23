@@ -177,9 +177,20 @@ void IptablesFirewall::prepare_apply(FirewallApplyMode mode) {
         // must not mutate anything before apply() has preflighted every set
         // it intends to reuse, so a dispatcher that needs repair is simply not
         // eligible and the caller restages with PreserveSets, which repairs.
+        // The static generations are deliberately NOT recomputed here. They
+        // keep whatever the previous apply of this process left, because
+        // that is the slot the live rules actually name: after one
+        // successful rules-only flip the rules live in the opposite slot
+        // from the sets they reference, and deriving "the static slot" from
+        // the live rules generation would demand sets that never existed -
+        // measured on the router as every second refresh refusing and
+        // falling back to a full restream. RulesOnly is never the first
+        // apply of a process (the caller gates it on fingerprints recorded
+        // by an earlier apply), so the previous values always describe a
+        // real apply; the set preflight still verifies each named set is
+        // live before anything runs.
         const auto plan_family = [this](bool ipv6,
-                                        FirewallSetGeneration& target,
-                                        FirewallSetGeneration& target_static) {
+                                        FirewallSetGeneration& target) {
             const auto primary = inspect_live_generation(ipv6);
             if (primary != LiveGenerationState::A &&
                 primary != LiveGenerationState::B) {
@@ -202,18 +213,13 @@ void IptablesFirewall::prepare_apply(FirewallApplyMode mode) {
                     " dispatchers: OUTPUT and PREROUTING generations "
                     "disagree and need repair");
             }
-            target_static = primary == LiveGenerationState::A
-                ? FirewallSetGeneration::A
-                : FirewallSetGeneration::B;
             target = target_generation_for_states(primary, secondary);
         };
-        plan_family(false, target_v4_generation_, target_static_v4_generation_);
+        plan_family(false, target_v4_generation_);
         if (!ipv6_enabled() || !ipv6_backend_available()) {
             target_v6_generation_ = FirewallSetGeneration::A;
-            target_static_v6_generation_ = FirewallSetGeneration::A;
         } else {
-            plan_family(
-                true, target_v6_generation_, target_static_v6_generation_);
+            plan_family(true, target_v6_generation_);
         }
     } else {
         target_v4_generation_ = mode == FirewallApplyMode::Destructive

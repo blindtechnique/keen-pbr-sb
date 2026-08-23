@@ -15,6 +15,7 @@
 #include <iterator>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <set>
 #include <array>
 #include <algorithm>
@@ -578,6 +579,22 @@ public:
     fw.prepared_mode_ = FirewallApplyMode::PreserveSets;
     const std::string unpinned = fw.static_set_name("list", AF_INET);
     return {pinned, unpinned};
+  }
+
+  // The state one successful rules-only flip leaves behind: live rules in
+  // generation B, static sets still in the A slot from the apply before the
+  // flip. The next RulesOnly prepare must keep those static generations
+  // rather than re-derive them from the live rules generation - the
+  // re-derivation demanded kpbr4S_* sets that never existed, measured on
+  // the router as every second refresh refusing and restreaming.
+  static std::tuple<FirewallSetGeneration, FirewallSetGeneration, std::string>
+  rules_only_prepare_with_live_generation_b() {
+    IptablesFirewall fw;
+    fw.target_v4_generation_ = FirewallSetGeneration::B;
+    fw.target_static_v4_generation_ = FirewallSetGeneration::A;
+    fw.prepare_apply(FirewallApplyMode::RulesOnly);
+    return {fw.target_v4_generation_, fw.target_static_v4_generation_,
+            fw.static_set_name("meta_whatsapp_ip", AF_INET)};
   }
 
   static bool rules_only_loader_refused() {
@@ -2461,6 +2478,29 @@ TEST_CASE("persistent generation verification mismatch stays transient") {
       T::verify_applied_generation(FirewallSetGeneration::A),
       TransientFirewallError);
   CHECK(read_iptables_test_file(calls).size() == 10);
+}
+
+TEST_CASE("RulesOnly keeps the static generations of the previous apply") {
+  IptablesTestTempDir temp;
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "echo '-A KeenPbrTable -j KeenPbrTable_B'\n"
+      "echo '-A PREROUTING -j KeenPbrTable'\n"
+      "echo '-A KeenPbrOutput -j KeenPbrOutput_B'\n"
+      "echo '-A OUTPUT -j KeenPbrOutput'\n");
+  IptablesTestEnvironment path("PATH");
+  use_iptables_test_path(path, temp.path());
+
+  const auto [target, static_generation, set_name] =
+      T::rules_only_prepare_with_live_generation_b();
+  // The rules flip away from the live B...
+  CHECK(target == FirewallSetGeneration::A);
+  // ...while the static sets stay exactly where the previous apply put
+  // them. Deriving this from the live rules generation instead produced
+  // kpbr4S_* names for sets that never existed.
+  CHECK(static_generation == FirewallSetGeneration::A);
+  CHECK(set_name == "kpbr4s_meta_whatsapp_ip");
 }
 
 TEST_CASE("generation ipset names alternate and stay within the kernel limit") {

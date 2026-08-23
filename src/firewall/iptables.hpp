@@ -518,7 +518,11 @@ private:
     // Under RulesOnly the rule chains still flip to the inactive A/B slot, but
     // the static sets they name must stay the live ones: nothing recreates a
     // set, so a name from the target slot would point at a set that is not
-    // there. Every other mode keeps the two in step.
+    // there. Every other mode keeps the two in step; RulesOnly leaves these
+    // untouched from the previous apply - after one rules-only flip the live
+    // rules name the opposite slot's sets, so "the live rules generation" is
+    // NOT the static slot, and recomputing these from it demands sets that
+    // never existed.
     FirewallSetGeneration target_static_v4_generation_{FirewallSetGeneration::A};
     FirewallSetGeneration target_static_v6_generation_{FirewallSetGeneration::A};
     RawPreroutingMode raw_prerouting_{};
