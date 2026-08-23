@@ -2327,6 +2327,13 @@ void Daemon::dispatch_meta_udp443_activation_cleanup(
     }
 }
 
+FirewallApplyMode Daemon::runtime_refresh_firewall_mode() const {
+    const auto daemon_config = config_.daemon.value_or(DaemonConfig{});
+    return daemon_config.reuse_static_sets_on_runtime_refresh.value_or(true)
+        ? FirewallApplyMode::RulesOnly
+        : FirewallApplyMode::PreserveSets;
+}
+
 void Daemon::apply_firewall(
     FirewallApplyMode mode,
     std::shared_ptr<const ListCacheGenerationSnapshot>
@@ -2378,20 +2385,65 @@ void Daemon::apply_firewall(
         list_cache_snapshot =
             capture_relevant_list_cache_generation(config_);
     }
-    auto staged = stage_runtime_firewall(
-        config_,
-        outbound_marks_,
-        firewall_state_.get_urltest_selections(),
-        list_service_.cache_manager(),
-        *firewall_,
-        mode,
-        &effective_interface_servers,
-        &runtime_targets,
-        &native_vpn_direct_egress_snat_selectors,
-        opts_.udp_call_affinity_ipset_available,
-        active_keenetic_dns_.snapshot,
-        std::move(list_cache_snapshot),
-        force_clear_dynamic_sets);
+
+    // RulesOnly reuses the live sets, which is only true to do while the
+    // lists those sets were loaded from are byte-for-byte the ones this
+    // refresh would have streamed. Compare digests, not assumptions: a
+    // refresh that races a list download must stream, and this is where it
+    // finds out. Downgrading here is silent by design - it is the ordinary
+    // path, not an error.
+    const auto requested_fingerprints = list_cache_snapshot
+        ? list_cache_snapshot->fingerprints()
+        : std::map<std::string, std::string>{};
+    FirewallApplyMode effective_mode = mode;
+    if (effective_mode == FirewallApplyMode::RulesOnly &&
+        (applied_list_fingerprints_.empty() ||
+         requested_fingerprints != applied_list_fingerprints_)) {
+        Logger::instance().verbose(
+            "Firewall refresh streams lists: cache generation differs from "
+            "the one the live sets were loaded from");
+        effective_mode = FirewallApplyMode::PreserveSets;
+    }
+
+    const auto stage_with = [&](FirewallApplyMode stage_mode) {
+        PreviousRuntimeFirewall previous;
+        if (stage_mode == FirewallApplyMode::RulesOnly) {
+            previous.rule_states = &firewall_state_.get_rules();
+            previous.list_usage = &applied_list_usage_;
+            previous.list_content_state = &applied_list_content_state_;
+        }
+        return stage_runtime_firewall(
+            config_,
+            outbound_marks_,
+            firewall_state_.get_urltest_selections(),
+            list_service_.cache_manager(),
+            *firewall_,
+            stage_mode,
+            &effective_interface_servers,
+            &runtime_targets,
+            &native_vpn_direct_egress_snat_selectors,
+            opts_.udp_call_affinity_ipset_available,
+            active_keenetic_dns_.snapshot,
+            list_cache_snapshot,
+            force_clear_dynamic_sets,
+            previous);
+    };
+    // One fallback, at most: a RulesOnly preflight that fails has touched
+    // nothing, so restaging with PreserveSets is the same transaction the
+    // daemon always used to run. A second RulesOnly failure is impossible by
+    // construction and a PreserveSets failure is a real error.
+    StagedRuntimeFirewall staged;
+    try {
+        staged = stage_with(effective_mode);
+    } catch (const FirewallRulesOnlyError& error) {
+        if (effective_mode != FirewallApplyMode::RulesOnly) throw;
+        Logger::instance().warn(
+            "Set-reusing firewall refresh is not possible, streaming lists "
+            "instead: {}",
+            error.what());
+        effective_mode = FirewallApplyMode::PreserveSets;
+        staged = stage_with(effective_mode);
+    }
     // The backend may already have repaired its ordinary mangle dispatcher
     // during prepare_apply(). Meta-specific preflight still completes before
     // any Meta filter publication or exact conntrack deletion, so failure
@@ -2416,7 +2468,27 @@ void Daemon::apply_firewall(
         staged.list_content_state,
         !has_explicit_inbound_scope && !has_native_vpn_bypass);
 
-    commit_runtime_firewall(*firewall_, staged);
+    try {
+        commit_runtime_firewall(*firewall_, staged);
+    } catch (const FirewallRulesOnlyError& error) {
+        // The backend's own preflight (a reused set missing, a schema that
+        // drifted, dispatchers that need repair) fires before it mutates
+        // anything, so the kernel is exactly as it was. Restage the full
+        // transaction and run the Meta preflight again over it: the content
+        // state is now freshly read rather than carried over.
+        if (staged.mode != FirewallApplyMode::RulesOnly) throw;
+        Logger::instance().warn(
+            "Set-reusing firewall refresh was refused by the backend, "
+            "streaming lists instead: {}",
+            error.what());
+        effective_mode = FirewallApplyMode::PreserveSets;
+        staged = stage_with(effective_mode);
+        meta_activation = prepare_meta_udp443_activation_or_throw(
+            staged.rule_states,
+            staged.list_content_state,
+            !has_explicit_inbound_scope && !has_native_vpn_bypass);
+        commit_runtime_firewall(*firewall_, staged);
+    }
     meta_policy_committed = true;
     if (meta_activation.has_value()) {
         committed_meta_udp443_fwmark_ =
@@ -2449,6 +2521,11 @@ void Daemon::apply_firewall(
     firewall_state_.set_rules(std::move(candidate_rules));
     applied_list_content_state_ =
         std::move(candidate_list_content_state);
+    applied_list_usage_ = std::move(staged.list_usage);
+    // Under RulesOnly the sets were not reloaded, so the digests they were
+    // loaded from are the ones already recorded - and those equal the
+    // requested ones, or the mode would have been downgraded above.
+    applied_list_fingerprints_ = requested_fingerprints;
     reconcile_native_vpn_direct_egress_conntrack(
         native_vpn_direct_egress_snat_selectors);
 
@@ -2881,7 +2958,7 @@ bool Daemon::handle_urltest_selection_change(
         try {
             reconcile_static_routing(RouteReconcileMode::Strict);
             apply_firewall(
-                FirewallApplyMode::PreserveSets,
+                runtime_refresh_firewall_mode(),
                 list_cache_snapshot);
         } catch (const TransientFirewallError& apply_error) {
             // The candidate may have been partially published. Restore the
@@ -2902,7 +2979,7 @@ bool Daemon::handle_urltest_selection_change(
             try {
                 reconcile_static_routing(RouteReconcileMode::Strict);
                 apply_firewall(
-                    FirewallApplyMode::PreserveSets,
+                    runtime_refresh_firewall_mode(),
                     list_cache_snapshot);
                 rollback_verified = true;
             } catch (const TransientFirewallError& rollback_error) {
@@ -2950,7 +3027,7 @@ bool Daemon::handle_urltest_selection_change(
             try {
                 reconcile_static_routing(RouteReconcileMode::Strict);
                 apply_firewall(
-                    FirewallApplyMode::PreserveSets,
+                    runtime_refresh_firewall_mode(),
                     list_cache_snapshot);
                 rollback_verified = true;
             } catch (const TransientFirewallError& rollback_error) {

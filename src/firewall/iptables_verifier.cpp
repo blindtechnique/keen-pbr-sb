@@ -456,9 +456,9 @@ ParsedIptablesState parse_iptables_s(const std::string& output) {
 
 IptablesFirewallVerifier::IptablesFirewallVerifier(
     CommandRunner runner,
-    bool use_raw_prerouting)
+    RawPreroutingMode raw_prerouting)
     : runner_(std::move(runner))
-    , use_raw_prerouting_(use_raw_prerouting) {}
+    , raw_prerouting_(raw_prerouting) {}
 
 const IptablesFirewallVerifier::CachedState& IptablesFirewallVerifier::get_state() const {
     if (!cached_state_.has_value()) {
@@ -516,11 +516,12 @@ const IptablesFirewallVerifier::CachedState& IptablesFirewallVerifier::get_state
             return parse_iptables_s_for_family(combined, ipv6, chain);
         };
 
-        state.v4 = use_raw_prerouting_
+        state.v4 = raw_prerouting_.ipv4
             ? read_table("iptables", "raw", RAW_CHAIN_NAME, false)
             : read_table("iptables", "mangle", CHAIN_NAME, false);
-        state.v6 = read_table(
-            "ip6tables", "mangle", CHAIN_NAME, true);
+        state.v6 = raw_prerouting_.ipv6
+            ? read_table("ip6tables", "raw", RAW_CHAIN_NAME, true)
+            : read_table("ip6tables", "mangle", CHAIN_NAME, true);
         cached_state_ = std::move(state);
     }
     return *cached_state_;
@@ -535,15 +536,20 @@ FirewallChainCheck IptablesFirewallVerifier::verify_chain() {
         v4.has_prerouting_jump || v6.has_prerouting_jump;
 
     if (!result.chain_present) {
-        result.detail = use_raw_prerouting_
-            ? "KeenPbrRaw chain not found in iptables raw table or "
-              "KeenPbrTable in ip6tables mangle table"
-            : "KeenPbrTable chain not found in iptables or ip6tables "
-              "mangle table";
+        // Name each family's expected chain and table: with per-family RAW
+        // the two can legitimately differ, and a message naming only one
+        // shape sends the reader to the wrong table.
+        result.detail = keen_pbr3::format(
+            "{} chain not found in iptables {} table or {} in ip6tables {} "
+            "table",
+            raw_prerouting_.ipv4 ? RAW_CHAIN_NAME : CHAIN_NAME,
+            raw_prerouting_.ipv4 ? "raw" : "mangle",
+            raw_prerouting_.ipv6 ? RAW_CHAIN_NAME : CHAIN_NAME,
+            raw_prerouting_.ipv6 ? "raw" : "mangle");
     } else if (!result.prerouting_hook_present) {
         result.detail = keen_pbr3::format(
             "{} chain exists but PREROUTING jump not found",
-            use_raw_prerouting_ ? RAW_CHAIN_NAME : CHAIN_NAME);
+            raw_prerouting_.ipv4 ? RAW_CHAIN_NAME : CHAIN_NAME);
     } else {
         result.detail = "ok";
     }
@@ -605,7 +611,7 @@ std::vector<FirewallRuleCheck> IptablesFirewallVerifier::verify_rules(
             check.status = CheckStatus::missing;
             check.detail = keen_pbr3::format(
                 "rule not found in iptables {} table (family={} criteria={})",
-                use_raw_prerouting_ && !exp.ipv6 ? "raw" : "mangle",
+                raw_prerouting_.uses(exp.ipv6) ? "raw" : "mangle",
                 exp.ipv6 ? "ipv6" : "ipv4",
                 criteria_summary(exp.criteria));
             checks.push_back(std::move(check));
@@ -654,9 +660,9 @@ std::vector<FirewallRuleCheck> IptablesFirewallVerifier::verify_rules(
 
 std::unique_ptr<FirewallVerifier> create_iptables_verifier(
     CommandRunner runner,
-    bool use_raw_prerouting) {
+    RawPreroutingMode raw_prerouting) {
     return std::make_unique<IptablesFirewallVerifier>(
-        std::move(runner), use_raw_prerouting);
+        std::move(runner), raw_prerouting);
 }
 
 } // namespace keen_pbr3

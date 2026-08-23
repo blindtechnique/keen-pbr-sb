@@ -318,6 +318,8 @@ Config normalize_config_for_api_response(Config config) {
         config.daemon->skip_marked_packets.value_or(true);
     config.daemon->clear_dynamic_sets_on_apply =
         config.daemon->clear_dynamic_sets_on_apply.value_or(true);
+    config.daemon->reuse_static_sets_on_runtime_refresh =
+        config.daemon->reuse_static_sets_on_runtime_refresh.value_or(true);
     config.daemon->ppe_deoffload_mode =
         config.daemon->ppe_deoffload_mode.value_or(api::PpeDeoffloadMode::OFF);
     config.daemon->ppe_deoffload_quic_enabled =

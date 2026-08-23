@@ -547,6 +547,73 @@ public:
         replace_active, prefilter, fw.pending_rules_);
   }
 
+  // A set-less mark rule lands in both families, which is exactly what the
+  // per-family raw builders must then split correctly.
+  static std::pair<std::string, std::string>
+  build_raw_prerouting_scripts_both_families(
+      const FirewallGlobalPrefilter& prefilter = {}) {
+    IptablesFirewall fw;
+    FirewallRuleCriteria criteria;
+    criteria.proto = L4Proto::Udp;
+    criteria.dst_port = "443";
+    fw.create_mark_rule(0x10000, criteria);
+    return {
+        IptablesFirewall::build_raw_prerouting_script(
+            false, "KeenPbrRaw_A", true, fw.pending_rules_, prefilter),
+        IptablesFirewall::build_raw_prerouting_script(
+            true, "KeenPbrRaw_A", true, fw.pending_rules_, prefilter),
+    };
+  }
+
+  // Under RulesOnly the rule chains flip to the inactive slot while static
+  // set names stay pinned to the live one. The two generations are set
+  // directly: the inspection that derives them needs a live kernel.
+  static std::pair<std::string, std::string>
+  static_set_names_with_split_generations() {
+    IptablesFirewall fw;
+    fw.target_v4_generation_ = FirewallSetGeneration::B;
+    fw.target_static_v4_generation_ = FirewallSetGeneration::A;
+    fw.prepared_mode_ = FirewallApplyMode::RulesOnly;
+    const std::string pinned = fw.static_set_name("list", AF_INET);
+    fw.prepared_mode_ = FirewallApplyMode::PreserveSets;
+    const std::string unpinned = fw.static_set_name("list", AF_INET);
+    return {pinned, unpinned};
+  }
+
+  static bool rules_only_loader_refused() {
+    IptablesFirewall fw;
+    fw.prepared_mode_ = FirewallApplyMode::RulesOnly;
+    try {
+      (void)fw.create_batch_loader("kpbr4s_list");
+    } catch (const FirewallRulesOnlyError&) {
+      return true;
+    }
+    return false;
+  }
+
+  static std::string raw_conntrack_for(
+      IptablesFirewall& fw,
+      bool ipv6,
+      const FirewallGlobalPrefilter& prefilter) {
+    return IptablesFirewall::build_raw_conntrack_script(
+        ipv6, false, prefilter, fw.pending_rules_);
+  }
+
+  static std::string build_raw_conntrack_script_v6_transient() {
+    IptablesFirewall fw;
+    fw.create_ipset("kpbr6m_meta_whatsapp_ip", AF_INET6);
+    FirewallRuleCriteria criteria;
+    criteria.src_udp_peer_set_name = "kpbr6m_meta_whatsapp_ip";
+    criteria.proto = L4Proto::Udp;
+    criteria.persist_conntrack_mark = false;
+    fw.create_mark_rule(0x00070000U, criteria);
+    FirewallGlobalPrefilter prefilter;
+    prefilter.restore_conntrack_mark = true;
+    prefilter.conntrack_mark_mask = 0x00FF0000;
+    return IptablesFirewall::build_raw_conntrack_script(
+        true, false, prefilter, fw.pending_rules_);
+  }
+
   static std::pair<std::string, std::string> generation_set_names() {
     IptablesFirewall fw;
     fw.prepare_apply(FirewallApplyMode::Destructive);
@@ -3787,6 +3854,74 @@ TEST_CASE("raw conntrack companion bypasses internal VPN before restore") {
   REQUIRE(bypass != std::string::npos);
   REQUIRE(restore != std::string::npos);
   CHECK(bypass < restore);
+}
+
+TEST_CASE("RulesOnly pins static set names to the live generation") {
+  const auto [pinned, unpinned] = T::static_set_names_with_split_generations();
+  // The rules go to slot B, the sets they name stay in slot A: lowercase
+  // 's' is A, uppercase 'S' is B.
+  CHECK(pinned == "kpbr4s_list");
+  CHECK(unpinned == "kpbr4S_list");
+}
+
+TEST_CASE("iptables RulesOnly refuses a batch loader") {
+  CHECK(T::rules_only_loader_refused());
+}
+
+TEST_CASE("raw PREROUTING builders split a dual-family rule by family") {
+  const auto [v4, v6] = T::build_raw_prerouting_scripts_both_families();
+
+  // Same chain scaffold in both families: the raw table is per netfilter
+  // family, so the names may repeat without colliding.
+  CHECK(v4.find(":KeenPbrRaw - [0:0]") != std::string::npos);
+  CHECK(v6.find(":KeenPbrRaw - [0:0]") != std::string::npos);
+  CHECK(v4.find("-A KeenPbrRaw -j KeenPbrRaw_A") != std::string::npos);
+  CHECK(v6.find("-A KeenPbrRaw -j KeenPbrRaw_A") != std::string::npos);
+
+  // The set-less UDP/443 mark rule exists in both families, so both scripts
+  // must carry their own copy of it.
+  CHECK(v4.find("--dport 443") != std::string::npos);
+  CHECK(v6.find("--dport 443") != std::string::npos);
+  const bool v4_marks =
+      v4.find("MARK --set-xmark") != std::string::npos ||
+      v4.find("MARK --set-mark") != std::string::npos;
+  const bool v6_marks =
+      v6.find("MARK --set-xmark") != std::string::npos ||
+      v6.find("MARK --set-mark") != std::string::npos;
+  CHECK(v4_marks);
+  CHECK(v6_marks);
+}
+
+TEST_CASE("the v6 raw conntrack companion keeps its own transient sets") {
+  // The transient-set RETURN must name the v6 set in the v6 companion; a
+  // family mixup here would exempt the wrong family's flows from ctmark
+  // persistence.
+  const auto script = T::build_raw_conntrack_script_v6_transient();
+  CHECK(script.find(
+            "-A KeenPbrRawCt -p udp -m set --match-set "
+            "kpbr6m_meta_whatsapp_ip src,dst,dst -j RETURN\n") !=
+        std::string::npos);
+  CHECK(script.find(
+            "CONNMARK --save-mark --nfmask 0xff0000 --ctmask 0xff0000") !=
+        std::string::npos);
+}
+
+TEST_CASE("the v4 raw conntrack companion ignores v6 transient sets") {
+  // The same v6-set rule must NOT appear in the v4 companion: before the
+  // family split the filter read `!rule.ipv6`, and a v6-only overlay would
+  // have been silently dropped from both.
+  FirewallGlobalPrefilter prefilter;
+  prefilter.restore_conntrack_mark = true;
+  prefilter.conntrack_mark_mask = 0x00FF0000;
+  IptablesFirewall fw;
+  fw.create_ipset("kpbr6m_meta_whatsapp_ip", AF_INET6);
+  FirewallRuleCriteria criteria;
+  criteria.src_udp_peer_set_name = "kpbr6m_meta_whatsapp_ip";
+  criteria.proto = L4Proto::Udp;
+  criteria.persist_conntrack_mark = false;
+  fw.create_mark_rule(0x00070000U, criteria);
+  const auto v4 = T::raw_conntrack_for(fw, false, prefilter);
+  CHECK(v4.find("kpbr6m_meta_whatsapp_ip") == std::string::npos);
 }
 
 TEST_CASE("raw conntrack companion does not persist expiring UDP peer marks") {

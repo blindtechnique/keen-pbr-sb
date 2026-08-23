@@ -33,6 +33,10 @@ struct StagedRuntimeFirewall {
     std::vector<RuleState> rule_states;
     // Which list content this transaction was built from.
     AppliedListContentState list_content_state;
+    // What each list's content implied for its kernel sets. Kept with the
+    // content state so a later RulesOnly refresh can reuse it instead of
+    // re-deriving it from a list it does not stream.
+    std::map<std::string, ListSetUsage> list_usage;
     // Carried through because the backend needs the same mode for both
     // `prepare_apply()` during staging and `apply()` at commit; splitting them
     // across two different modes would build one transaction and commit
@@ -43,6 +47,15 @@ struct StagedRuntimeFirewall {
 struct FirewallConfigApplyPolicy {
     FirewallApplyMode mode{FirewallApplyMode::PreserveSets};
     bool force_clear_dynamic_sets{false};
+};
+
+// What a RulesOnly stage reuses instead of streaming. All three come from the
+// last committed transaction; a RulesOnly stage that cannot find what it needs
+// in them throws FirewallRulesOnlyError rather than guessing.
+struct PreviousRuntimeFirewall {
+    const std::vector<RuleState>* rule_states{nullptr};
+    const std::map<std::string, ListSetUsage>* list_usage{nullptr};
+    const AppliedListContentState* list_content_state{nullptr};
 };
 
 // Capacity changes alter the schema of existing ipsets. Only iptables needs
@@ -87,7 +100,8 @@ StagedRuntimeFirewall stage_runtime_firewall(
         std::nullopt,
     std::shared_ptr<const ListCacheGenerationSnapshot>
         list_cache_snapshot = nullptr,
-    bool force_clear_dynamic_sets = false);
+    bool force_clear_dynamic_sets = false,
+    const PreviousRuntimeFirewall& previous = {});
 
 // Hand the staged transaction to the kernel. This is the one blocking step:
 // every child process of a firewall apply originates here.

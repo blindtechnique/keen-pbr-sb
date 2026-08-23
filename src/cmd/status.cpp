@@ -811,7 +811,7 @@ int run_status_command(const Config& config, const std::string& config_path) {
 
     RoutingHealthReport report = build_routing_health_report(
         resolve_firewall_backend(firewall_backend_preference(config)),
-        false,
+        RawPreroutingMode{},
         fw_state,
         routes.get_routes(),
         rules.get_rules(),

@@ -327,8 +327,10 @@ Daemon::Daemon(Config config,
     , config_(std::move(config))
     , config_path_(std::move(config_path))
     , opts_(std::move(opts))
-    , firewall_(create_firewall(firewall_backend_preference(config_),
-                                opts_.use_raw_prerouting))
+    , firewall_(create_firewall(
+          firewall_backend_preference(config_),
+          RawPreroutingMode{opts_.use_raw_prerouting,
+                            opts_.use_raw6_prerouting}))
     , interface_monitor_(std::make_unique<InterfaceMonitor>(
           [this](const InterfaceMonitor::Event& event) {
               handle_interface_event(event);
@@ -1586,7 +1588,7 @@ void Daemon::handle_ipc_control_socket() {
                 } else {
                     routing_health = build_routing_health_report(
                         firewall_->backend(),
-                        firewall_->uses_raw_prerouting(),
+                        firewall_->raw_prerouting_mode(),
                         snapshot.firewall_state,
                         snapshot.route_specs,
                         snapshot.policy_rule_specs,
@@ -3450,7 +3452,7 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
                 std::move(snat_recovery));
         reconcile_static_routing(RouteReconcileMode::DeferredRepair);
         apply_firewall(
-            FirewallApplyMode::PreserveSets,
+            runtime_refresh_firewall_mode(),
             list_cache_snapshot);
         const OwnedSnatState inspected_snat_after =
             snat_recovery.requested

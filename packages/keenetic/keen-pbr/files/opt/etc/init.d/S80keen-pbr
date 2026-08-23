@@ -1486,6 +1486,10 @@ probe_raw_table() {
     iptables_with_wait -t raw -S >/dev/null 2>&1
 }
 
+probe_raw6_table() {
+    ip6tables_with_wait -t raw -S >/dev/null 2>&1
+}
+
 ensure_raw_table_available() {
     local raw_module
 
@@ -1510,23 +1514,80 @@ ensure_raw_table_available() {
     fi
 }
 
+# The families probe independently on purpose: Keenetic ships iptable_raw and
+# ip6table_raw as separate modules, and one being absent must not cost the
+# other its NDMS-rebuild immunity.
+ensure_raw6_table_available() {
+    local raw_module
+
+    RAW6_PREROUTING_ERROR=""
+    if probe_raw6_table; then
+        return 0
+    fi
+
+    raw_module="/lib/modules/$(uname -r)/ip6table_raw.ko"
+    if [ ! -f "$raw_module" ]; then
+        RAW6_PREROUTING_ERROR="$raw_module is unavailable"
+        return 1
+    fi
+    if ! insmod "$raw_module" 2>/dev/null &&
+       ! probe_raw6_table; then
+        RAW6_PREROUTING_ERROR="failed to load $raw_module"
+        return 1
+    fi
+    if ! probe_raw6_table; then
+        RAW6_PREROUTING_ERROR="the IPv6 raw table probe failed"
+        return 1
+    fi
+}
+
 configure_raw_prerouting() {
     local mode="${KEEN_PBR_RAW_PREROUTING:-auto}"
+    local want_v4=auto
+    local want_v6=auto
 
     remove_daemon_arg --use-raw-prerouting
+    remove_daemon_arg --use-raw6-prerouting
+    # One knob steers both families (upstream ca5a2e02 semantics): the
+    # historical on/off spellings keep their meaning, and the two -only modes
+    # exist for routers where one family's module is broken rather than
+    # merely absent.
     case "$mode" in
         0|no|off|false|disabled)
-            log "raw PREROUTING disabled; using mangle PREROUTING"
-            return 0
+            want_v4=off
+            want_v6=off
             ;;
         1|yes|on|true|enabled)
+            want_v4=require
+            want_v6=require
+            ;;
+        auto)
+            ;;
+        ipv4-only)
+            want_v4=require
+            want_v6=off
+            ;;
+        ipv6-only)
+            want_v4=off
+            want_v6=require
+            ;;
+        *)
+            log_error "Invalid KEEN_PBR_RAW_PREROUTING value: $mode (expected auto, on, off, ipv4-only, or ipv6-only)"
+            return 1
+            ;;
+    esac
+
+    case "$want_v4" in
+        off)
+            log "raw PREROUTING disabled; using mangle PREROUTING for IPv4"
+            ;;
+        require)
             if ! ensure_raw_table_available; then
                 log_error "raw PREROUTING was explicitly required: $RAW_PREROUTING_ERROR"
                 return 1
             fi
             add_daemon_arg --use-raw-prerouting
             log "raw PREROUTING enabled by configuration"
-            return 0
             ;;
         auto)
             if ensure_raw_table_available; then
@@ -1535,13 +1596,31 @@ configure_raw_prerouting() {
             else
                 log "WARNING: raw PREROUTING unavailable ($RAW_PREROUTING_ERROR); using mangle PREROUTING"
             fi
-            return 0
-            ;;
-        *)
-            log_error "Invalid KEEN_PBR_RAW_PREROUTING value: $mode (expected auto, on, or off)"
-            return 1
             ;;
     esac
+
+    case "$want_v6" in
+        off)
+            log "IPv6 raw PREROUTING disabled; using mangle PREROUTING for IPv6"
+            ;;
+        require)
+            if ! ensure_raw6_table_available; then
+                log_error "IPv6 raw PREROUTING was explicitly required: $RAW6_PREROUTING_ERROR"
+                return 1
+            fi
+            add_daemon_arg --use-raw6-prerouting
+            log "IPv6 raw PREROUTING enabled by configuration"
+            ;;
+        auto)
+            if ensure_raw6_table_available; then
+                add_daemon_arg --use-raw6-prerouting
+                log "IPv6 raw PREROUTING available; enabled automatically"
+            else
+                log "WARNING: IPv6 raw PREROUTING unavailable ($RAW6_PREROUTING_ERROR); using mangle PREROUTING"
+            fi
+            ;;
+    esac
+    return 0
 }
 
 read_fastnat_value() {

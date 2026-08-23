@@ -39,7 +39,12 @@ class IptablesFirewallVerifier : public FirewallVerifier {
 public:
     explicit IptablesFirewallVerifier(
         CommandRunner runner,
-        bool use_raw_prerouting = false);
+        RawPreroutingMode raw_prerouting = {});
+    // Compatibility constructor: the historical bool always meant IPv4 RAW.
+    IptablesFirewallVerifier(CommandRunner runner, bool use_raw_prerouting)
+        : IptablesFirewallVerifier(
+              std::move(runner),
+              RawPreroutingMode{use_raw_prerouting, false}) {}
 
     // Verify KeenPbrTable chain existence and PREROUTING hook for both v4 and v6.
     FirewallChainCheck verify_chain() override;
@@ -60,13 +65,13 @@ private:
     const CachedState& get_state() const;
 
     CommandRunner runner_;
-    bool use_raw_prerouting_{false};
+    RawPreroutingMode raw_prerouting_{};
     mutable std::optional<CachedState> cached_state_;
 };
 
 // Factory function called from firewall_verifier.cpp
 std::unique_ptr<FirewallVerifier> create_iptables_verifier(
     CommandRunner runner,
-    bool use_raw_prerouting = false);
+    RawPreroutingMode raw_prerouting = {});
 
 } // namespace keen_pbr3

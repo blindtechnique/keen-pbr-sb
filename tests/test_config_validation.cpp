@@ -2822,6 +2822,30 @@ TEST_CASE("daemon.clear_dynamic_sets_on_apply: rejects non-boolean value") {
     CHECK(issues[0].path == "daemon.clear_dynamic_sets_on_apply");
 }
 
+TEST_CASE("daemon.reuse_static_sets_on_runtime_refresh: explicit, null, and junk") {
+    auto enabled = parse_test_config(
+        R"({"daemon":{"reuse_static_sets_on_runtime_refresh":true}})");
+    auto disabled = parse_test_config(
+        R"({"daemon":{"reuse_static_sets_on_runtime_refresh":false}})");
+    REQUIRE(enabled.daemon->reuse_static_sets_on_runtime_refresh.has_value());
+    REQUIRE(disabled.daemon->reuse_static_sets_on_runtime_refresh.has_value());
+    CHECK(*enabled.daemon->reuse_static_sets_on_runtime_refresh);
+    CHECK_FALSE(*disabled.daemon->reuse_static_sets_on_runtime_refresh);
+
+    // Null means "the default", which the daemon resolves to true; the
+    // parsed config itself keeps the absence.
+    auto defaulted = parse_test_config(
+        R"({"daemon":{"reuse_static_sets_on_runtime_refresh":null}})");
+    REQUIRE(defaulted.daemon.has_value());
+    CHECK_FALSE(
+        defaulted.daemon->reuse_static_sets_on_runtime_refresh.has_value());
+
+    const auto issues = parse_issues(
+        R"({"daemon":{"reuse_static_sets_on_runtime_refresh":"yes"}})");
+    REQUIRE(issues.size() == 1);
+    CHECK(issues[0].path == "daemon.reuse_static_sets_on_runtime_refresh");
+}
+
 TEST_CASE("daemon ipset capacities accept positive values and null defaults") {
     const auto configured = parse_test_config(
         R"({"daemon":{"ipset_hashsize":1024,"ipset_maxelem":131072}})");

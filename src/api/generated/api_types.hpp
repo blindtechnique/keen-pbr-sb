@@ -368,6 +368,7 @@ namespace api {
         std::optional<bool> ppe_deoffload_quic_enabled;
         std::optional<std::vector<std::string>> reconnect_owned_flows_on_routing_change_lists;
         std::optional<bool> reconnect_unmarked_flows_on_routing_change;
+        std::optional<bool> reuse_static_sets_on_runtime_refresh;
         std::optional<bool> skip_marked_packets;
         std::optional<bool> strict_enforcement;
         std::optional<bool> ttl_bypass_enabled;
@@ -3688,6 +3689,7 @@ namespace api {
         x.ppe_deoffload_quic_enabled = get_stack_optional<bool>(j, "ppe_deoffload_quic_enabled");
         x.reconnect_owned_flows_on_routing_change_lists = get_stack_optional<std::vector<std::string>>(j, "reconnect_owned_flows_on_routing_change_lists");
         x.reconnect_unmarked_flows_on_routing_change = get_stack_optional<bool>(j, "reconnect_unmarked_flows_on_routing_change");
+        x.reuse_static_sets_on_runtime_refresh = get_stack_optional<bool>(j, "reuse_static_sets_on_runtime_refresh");
         x.skip_marked_packets = get_stack_optional<bool>(j, "skip_marked_packets");
         x.strict_enforcement = get_stack_optional<bool>(j, "strict_enforcement");
         x.ttl_bypass_enabled = get_stack_optional<bool>(j, "ttl_bypass_enabled");
@@ -3709,6 +3711,7 @@ namespace api {
         j["ppe_deoffload_quic_enabled"] = x.ppe_deoffload_quic_enabled;
         j["reconnect_owned_flows_on_routing_change_lists"] = x.reconnect_owned_flows_on_routing_change_lists;
         j["reconnect_unmarked_flows_on_routing_change"] = x.reconnect_unmarked_flows_on_routing_change;
+        j["reuse_static_sets_on_runtime_refresh"] = x.reuse_static_sets_on_runtime_refresh;
         j["skip_marked_packets"] = x.skip_marked_packets;
         j["strict_enforcement"] = x.strict_enforcement;
         j["ttl_bypass_enabled"] = x.ttl_bypass_enabled;

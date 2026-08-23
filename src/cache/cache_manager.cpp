@@ -771,6 +771,17 @@ const CacheGenerationHandle* ListCacheGenerationSnapshot::find(
     return &*entry->second;
 }
 
+std::map<std::string, std::string>
+ListCacheGenerationSnapshot::fingerprints() const {
+    std::map<std::string, std::string> result;
+    for (const auto& [name, handle] : entries_) {
+        result.emplace(
+            name, handle.has_value() ? handle->generation().sha256
+                                     : std::string{});
+    }
+    return result;
+}
+
 CacheManager::CacheManager(const std::filesystem::path& cache_dir,
                            size_t max_file_size_bytes,
                            std::shared_ptr<HttpTransport> transport)

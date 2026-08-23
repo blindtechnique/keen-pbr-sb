@@ -224,6 +224,56 @@ public:
         destructive_apply, clear_dynamic_sets);
   }
 
+  // The refresh document under RulesOnly, with the same live table as
+  // build_refresh_document: the rules flip, the sets must stay untouched.
+  static nlohmann::json build_rules_only_refresh_document() {
+    NftablesFirewall fw;
+    fw.pending_sets_.push_back(
+        NftablesFirewall::PendingSet{"kpbr4_static", "ipv4_addr", 0});
+    fw.pending_sets_.push_back(
+        NftablesFirewall::PendingSet{"kpbr4d_dynamic", "ipv4_addr", 300});
+
+    NftablesFirewall::LiveTableState live;
+    live.table_exists = true;
+    live.chain_exists = true;
+    live.output_chain_exists = true;
+    live.set_names = {"kpbr4_static", "kpbr4d_dynamic"};
+    live.set_schemas["kpbr4_static"] = "ipv4_addr:0";
+    live.set_schemas["kpbr4d_dynamic"] = "ipv4_addr:300";
+    fw.preflight_reused_sets(live);
+    return fw.build_apply_document(
+        live, /*emit_full_table=*/false,
+        /*destructive_apply=*/false,
+        /*clear_dynamic_sets=*/false,
+        NftablesFirewall::MarkMergeMode::LegacyConstant,
+        /*rules_only=*/true);
+  }
+
+  static void preflight_reused_sets_with(
+      const std::set<std::string>& live_names,
+      const std::map<std::string, std::string>& live_schemas,
+      bool table_exists = true) {
+    NftablesFirewall fw;
+    fw.pending_sets_.push_back(
+        NftablesFirewall::PendingSet{"kpbr4_static", "ipv4_addr", 0});
+    NftablesFirewall::LiveTableState live;
+    live.table_exists = table_exists;
+    live.set_names = live_names;
+    live.set_schemas = live_schemas;
+    fw.preflight_reused_sets(live);
+  }
+
+  static bool rules_only_loader_refused() {
+    NftablesFirewall fw;
+    fw.prepare_apply(FirewallApplyMode::RulesOnly);
+    try {
+      (void)fw.create_batch_loader("kpbr4_static");
+    } catch (const FirewallRulesOnlyError&) {
+      return true;
+    }
+    return false;
+  }
+
   static nlohmann::json build_bridge_filter_document(
       FirewallGlobalPrefilter prefilter) {
     NftablesFirewall fw;
@@ -484,6 +534,46 @@ TEST_CASE("nft live refresh flushes static set but preserves dynamic entries") {
         std::string::npos);
   CHECK(serialized.find("\"name\":\"kpbr4d_dynamic\"") == std::string::npos);
   CHECK(serialized.find("203.0.113.10") != std::string::npos);
+}
+
+TEST_CASE("nft RulesOnly refresh emits no set command at all") {
+  const auto doc =
+      keen_pbr3::NftablesBuilderTest::build_rules_only_refresh_document();
+  const std::string serialized = doc.dump();
+  // The rule chains are still replaced...
+  CHECK(serialized.find("\"chain\"") != std::string::npos);
+  // ...but no set is created, flushed, deleted or populated: the whole point
+  // of the mode is that the live sets are the ones the rules keep using.
+  CHECK(serialized.find("\"flush\":{\"set\"") == std::string::npos);
+  CHECK(serialized.find("\"delete\":{\"set\"") == std::string::npos);
+  CHECK(serialized.find("\"add\":{\"set\"") == std::string::npos);
+  CHECK(serialized.find("\"element\"") == std::string::npos);
+}
+
+TEST_CASE("nft RulesOnly preflight demands every reused set, live and exact") {
+  using T = keen_pbr3::NftablesBuilderTest;
+  CHECK_NOTHROW(T::preflight_reused_sets_with(
+      {"kpbr4_static"}, {{"kpbr4_static", "ipv4_addr:0"}}));
+  // Missing set: reusing it would let nft reject the rule transaction.
+  CHECK_THROWS_AS(
+      T::preflight_reused_sets_with({}, {}), keen_pbr3::FirewallRulesOnlyError);
+  // Schema drift (a timeout the rules do not expect): not the same set.
+  CHECK_THROWS_AS(
+      T::preflight_reused_sets_with(
+          {"kpbr4_static"}, {{"kpbr4_static", "ipv4_addr:300"}}),
+      keen_pbr3::FirewallRulesOnlyError);
+  // No owned table at all: nothing to reuse, whatever the names say.
+  CHECK_THROWS_AS(
+      T::preflight_reused_sets_with(
+          {"kpbr4_static"}, {{"kpbr4_static", "ipv4_addr:0"}},
+          /*table_exists=*/false),
+      keen_pbr3::FirewallRulesOnlyError);
+}
+
+TEST_CASE("nft RulesOnly refuses a batch loader") {
+  // The loader is the one way elements reach a set; refusing it makes the
+  // no-modification guarantee a property of the backend.
+  CHECK(keen_pbr3::NftablesBuilderTest::rules_only_loader_refused());
 }
 
 TEST_CASE("nft destructive refresh also flushes dynamic entries atomically") {

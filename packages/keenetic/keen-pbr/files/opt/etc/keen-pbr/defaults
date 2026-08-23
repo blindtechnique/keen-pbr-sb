@@ -3,5 +3,13 @@ CONFIG="/opt/etc/keen-pbr/config.json"
 DNSMASQ_HELPER="/opt/usr/lib/keen-pbr/dnsmasq.sh"
 # Optional daemon arguments.
 KEEN_PBR_ARGS=""
-# auto: prefer raw when supported; on: require it; off: retain mangle.
+# RAW PREROUTING placement for forwarded traffic, per IP family (OUTPUT stays
+# in mangle). One knob steers both families:
+#   auto       probe IPv4 and IPv6 independently; each available family uses
+#              raw, each unavailable one keeps mangle.
+#   on         require raw for both families; startup fails if either probe
+#              cannot be satisfied.
+#   off        keep mangle for both families and load no raw modules.
+#   ipv4-only  require IPv4 raw, keep mangle for IPv6.
+#   ipv6-only  require IPv6 raw, keep mangle for IPv4.
 KEEN_PBR_RAW_PREROUTING="auto"

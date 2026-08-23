@@ -706,8 +706,53 @@ TEST_CASE("IptablesFirewallVerifier::verify_chain: missing chain with prerouting
     const auto check = verifier.verify_chain();
     CHECK_FALSE(check.chain_present);
     CHECK(check.prerouting_hook_present);
+    // Each family names its own expected table: with per-family RAW they can
+    // legitimately differ, and a single-shape message would point at the
+    // wrong table.
     CHECK(check.detail ==
-          "KeenPbrTable chain not found in iptables or ip6tables mangle table");
+          "KeenPbrTable chain not found in iptables mangle table or "
+          "KeenPbrTable in ip6tables mangle table");
+}
+
+TEST_CASE("IptablesFirewallVerifier reads the IPv6 raw table when told to") {
+    std::vector<std::vector<std::string>> seen;
+    auto runner = [&seen](const std::vector<std::string>& args) -> CommandResult {
+        seen.push_back(args);
+        if (matches_args(args, {"iptables", "-t", "mangle", "-S", "KeenPbrTable"})) {
+            return command_result("-N KeenPbrTable\n");
+        }
+        if (matches_args(args, {"iptables", "-t", "mangle", "-S", "PREROUTING"})) {
+            return command_result("-A PREROUTING -j KeenPbrTable\n");
+        }
+        if (matches_args(args, {"ip6tables", "-t", "raw", "-S", "KeenPbrRaw"})) {
+            return command_result("-N KeenPbrRaw\n");
+        }
+        if (matches_args(args, {"ip6tables", "-t", "raw", "-S", "PREROUTING"})) {
+            return command_result("-A PREROUTING -j KeenPbrRaw\n");
+        }
+        return command_result({}, 1);
+    };
+    IptablesFirewallVerifier verifier(
+        runner, RawPreroutingMode{/*ipv4=*/false, /*ipv6=*/true});
+
+    const auto check = verifier.verify_chain();
+    CHECK(check.chain_present);
+    CHECK(check.prerouting_hook_present);
+    CHECK(check.detail == "ok");
+
+    // The verifier must have asked ip6tables about the raw table, never the
+    // mangle one: reading the wrong table reports a healthy chain that is not
+    // the one classifying traffic.
+    bool asked_v6_raw = false;
+    bool asked_v6_mangle = false;
+    for (const auto& args : seen) {
+        if (args.size() >= 3 && args[0] == "ip6tables") {
+            if (args[2] == "raw") asked_v6_raw = true;
+            if (args[2] == "mangle") asked_v6_mangle = true;
+        }
+    }
+    CHECK(asked_v6_raw);
+    CHECK_FALSE(asked_v6_mangle);
 }
 
 TEST_CASE("IptablesFirewallVerifier::verify_chain: chain without prerouting jump is degraded") {

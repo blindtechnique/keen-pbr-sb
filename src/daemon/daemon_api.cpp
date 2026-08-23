@@ -986,7 +986,7 @@ void Daemon::setup_api() {
                 const auto runtime_snapshot = runtime_state_store_.snapshot();
                 auto report = build_routing_health_report(
                     firewall_->backend(),
-                    firewall_->uses_raw_prerouting(),
+                    firewall_->raw_prerouting_mode(),
                     runtime_snapshot.firewall_state,
                     runtime_snapshot.route_specs,
                     runtime_snapshot.policy_rule_specs,

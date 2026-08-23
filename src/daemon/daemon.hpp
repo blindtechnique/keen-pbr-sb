@@ -233,6 +233,7 @@ bool erase_exact_control_task_if_still_queued(
 struct DaemonOptions {
     bool no_api{false};
     bool use_raw_prerouting{false};
+    bool use_raw6_prerouting{false};
     // The init script probes the optional three-dimensional ipset type. A
     // missing legacy-kernel feature must disable only the iptables call
     // overlay, never the ordinary list-routing service.
@@ -631,6 +632,11 @@ private:
         std::shared_ptr<const ListCacheGenerationSnapshot>
             list_cache_snapshot = nullptr,
         bool force_clear_dynamic_sets = false);
+    // The mode a runtime refresh - urltest switch, interface event, SIGUSR1 -
+    // should use: RulesOnly when the operator has not disabled set reuse,
+    // PreserveSets otherwise. apply_firewall() itself still verifies the
+    // content is unchanged and falls back when it is not.
+    FirewallApplyMode runtime_refresh_firewall_mode() const;
     std::optional<MetaUdp443ActivationPlan>
     prepare_meta_udp443_activation_or_throw(
         const std::vector<RuleState>& candidate_rules,
@@ -1143,6 +1149,13 @@ private:
     // generation was populated. This follows normalized list entries rather
     // than URL/file metadata and retains only a bounded static selector set.
     AppliedListContentState applied_list_content_state_;
+    // The two companions a RulesOnly refresh reuses instead of streaming:
+    // what each list's content implied for its sets, and the digest of every
+    // list body those sets were loaded from. A refresh may reuse the live
+    // sets only while the requested cache generation carries the same
+    // digests; anything else is a content change and streams as before.
+    std::map<std::string, ListSetUsage> applied_list_usage_;
+    std::map<std::string, std::string> applied_list_fingerprints_;
     ConntrackManager conntrack_manager_;
     bool conntrack_unavailable_warning_emitted_{false};
     std::atomic<std::uint64_t> meta_udp443_cleanup_epoch_{1U};

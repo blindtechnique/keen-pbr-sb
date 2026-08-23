@@ -107,6 +107,11 @@ class ListCacheGenerationSnapshot {
 public:
     bool contains(const std::string& name) const;
     const CacheGenerationHandle* find(const std::string& name) const;
+    // One stable string per pinned list: its generation digest, or empty for
+    // a list the snapshot knows but has no cached body for. Two snapshots
+    // with equal fingerprints pin identical bytes for every list, which is
+    // what a set-reusing firewall refresh needs to know without reading any.
+    std::map<std::string, std::string> fingerprints() const;
 
 private:
     std::map<std::string, std::optional<CacheGenerationHandle>> entries_;

@@ -1320,3 +1320,114 @@ TEST_CASE("a transaction rejected during staging never reaches the backend") {
     CHECK(firewall.events.empty());
     CHECK(firewall.applied_modes.empty());
 }
+
+TEST_CASE("RulesOnly refuses to stage without a previous transaction") {
+    // Nothing to reuse means nothing safe to skip: the error is the
+    // contract the daemon's fallback relies on, not a crash.
+    const auto config = staged_transaction_config();
+    CacheManager cache{"/nonexistent/keen-pbr-test-cache"};
+    RecordingFirewall firewall;
+
+    CHECK_THROWS_AS(
+        stage_runtime_firewall(
+            config,
+            {{"vpn", 0x00070000U}},
+            {},
+            cache,
+            firewall,
+            FirewallApplyMode::RulesOnly),
+        FirewallRulesOnlyError);
+    CHECK(firewall.loaded_entries.empty());
+    CHECK(firewall.applied_modes.empty());
+}
+
+TEST_CASE("RulesOnly reuses the previous transaction and streams nothing") {
+    const auto config = staged_transaction_config();
+    CacheManager cache{"/nonexistent/keen-pbr-test-cache"};
+
+    // First, the ordinary transaction: it streams the inline list and tells
+    // us what it learned.
+    RecordingFirewall first;
+    const auto full = stage_runtime_firewall(
+        config,
+        {{"vpn", 0x00070000U}},
+        {},
+        cache,
+        first,
+        FirewallApplyMode::PreserveSets);
+    REQUIRE(!first.loaded_entries.empty());
+    REQUIRE(full.list_usage.count("seam") == 1);
+    REQUIRE(full.list_content_state.static_destinations.count("seam") == 1);
+
+    // Then the refresh that reuses it.
+    RecordingFirewall refresh;
+    PreviousRuntimeFirewall previous;
+    previous.rule_states = &full.rule_states;
+    previous.list_usage = &full.list_usage;
+    previous.list_content_state = &full.list_content_state;
+    const auto reused = stage_runtime_firewall(
+        config,
+        {{"vpn", 0x00070000U}},
+        {},
+        cache,
+        refresh,
+        FirewallApplyMode::RulesOnly,
+        nullptr, nullptr, nullptr,
+        true,
+        std::nullopt,
+        nullptr,
+        false,
+        previous);
+
+    // No entry reached a loader: the sets were not touched.
+    CHECK(refresh.loaded_entries.empty());
+    // But the rules still name the same sets, in the same shape.
+    REQUIRE(reused.rule_states.size() == full.rule_states.size());
+    CHECK(reused.rule_states.front().set_names ==
+          full.rule_states.front().set_names);
+    CHECK(reused.mode == FirewallApplyMode::RulesOnly);
+    // And the content companions are carried over untouched: a refresh that
+    // read nothing has nothing new to say about what the lists contain.
+    CHECK(reused.list_content_state.static_destinations ==
+          full.list_content_state.static_destinations);
+    CHECK(reused.list_usage.count("seam") == 1);
+}
+
+TEST_CASE("RulesOnly refuses a previous transaction that does not match") {
+    const auto config = staged_transaction_config();
+    CacheManager cache{"/nonexistent/keen-pbr-test-cache"};
+    RecordingFirewall first;
+    auto full = stage_runtime_firewall(
+        config,
+        {{"vpn", 0x00070000U}},
+        {},
+        cache,
+        first,
+        FirewallApplyMode::PreserveSets);
+
+    // The realized state names a different list for rule 0 - the kind of
+    // drift a config change would leave behind. Reusing it would point the
+    // rules at sets the kernel never loaded for this list.
+    full.rule_states.front().list_names = {"somebody_else"};
+    RecordingFirewall refresh;
+    PreviousRuntimeFirewall previous;
+    previous.rule_states = &full.rule_states;
+    previous.list_usage = &full.list_usage;
+    previous.list_content_state = &full.list_content_state;
+    CHECK_THROWS_AS(
+        stage_runtime_firewall(
+            config,
+            {{"vpn", 0x00070000U}},
+            {},
+            cache,
+            refresh,
+            FirewallApplyMode::RulesOnly,
+            nullptr, nullptr, nullptr,
+            true,
+            std::nullopt,
+            nullptr,
+            false,
+            previous),
+        FirewallRulesOnlyError);
+    CHECK(refresh.loaded_entries.empty());
+}

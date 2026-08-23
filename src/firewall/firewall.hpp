@@ -229,6 +229,17 @@ public:
     using FirewallError::FirewallError;
 };
 
+// Raised when an inspection-only RulesOnly apply cannot safely reuse the
+// currently live sets: a set is missing, its schema drifted, or the realized
+// state the reuse was planned from does not match. Callers restage exactly
+// once with PreserveSets. It is deliberately not a TransientFirewallError: a
+// failed preflight has touched nothing, so the transient-recovery machinery,
+// which assumes a half-applied kernel, must not run for it.
+class FirewallRulesOnlyError : public FirewallError {
+public:
+    using FirewallError::FirewallError;
+};
+
 // Concrete firewall backend selected for runtime use.
 enum class FirewallBackend : uint8_t {
     iptables,
@@ -242,12 +253,34 @@ enum class FirewallBackendPreference : uint8_t {
     nftables
 };
 
+// Independent per-family placement of forwarded-traffic classification.
+// OUTPUT always stays in mangle; these flags select only the PREROUTING
+// table, and only for the iptables backend. The families are independent on
+// purpose: Keenetic firmwares ship iptable_raw and ip6table_raw separately,
+// and one being absent must not cost the other its NDMS-rebuild immunity.
+// (Semantic port of upstream ca5a2e02.)
+struct RawPreroutingMode {
+    bool ipv4{false};
+    bool ipv6{false};
+
+    bool uses(bool is_ipv6) const noexcept { return is_ipv6 ? ipv6 : ipv4; }
+    bool any() const noexcept { return ipv4 || ipv6; }
+};
+
 // How pending firewall changes should be applied.
 enum class FirewallApplyMode : uint8_t {
     // Recreate backend-owned firewall state from scratch, including sets.
     Destructive,
     // Refresh chains/rules while preserving existing set contents when possible.
-    PreserveSets
+    PreserveSets,
+    // Rebuild packet-classification rules while reusing the currently live
+    // static and dynamic sets. Nothing touches a set and no list is streamed:
+    // a urltest failover or an interface event changes which rules point at
+    // which sets, not what the sets contain, and restreaming an rkn-sized list
+    // through `ipset restore` on every failover was the cost of not saying so.
+    // Preflight failure falls back to PreserveSets. (Semantic port of upstream
+    // ad4899dc.)
+    RulesOnly
 };
 
 enum class FirewallSetGeneration : uint8_t { A, B };
@@ -541,7 +574,13 @@ public:
 
     // Return the backend type for this firewall instance.
     virtual FirewallBackend backend() const = 0;
-    virtual bool uses_raw_prerouting() const { return false; }
+    // Resolved per-family placement of forwarded-traffic classification.
+    // OUTPUT remains mangle for both families.
+    virtual RawPreroutingMode raw_prerouting_mode() const { return {}; }
+    // Compatibility accessor: the historical flag always meant IPv4 RAW.
+    virtual bool uses_raw_prerouting() const {
+        return raw_prerouting_mode().ipv4;
+    }
 
     // State of the owned TTL bypass rule, as a stable name, or empty when the
     // backend does not implement one. Empty rather than a fabricated "ok":
@@ -616,9 +655,18 @@ const char* firewall_backend_name(FirewallBackend backend);
 
 // Factory function to create the appropriate firewall backend.
 // backend_pref: auto-detect, iptables, or nftables.
+// raw_prerouting: independent per-family RAW PREROUTING placement.
 // Throws FirewallError if requested backend is not available.
 std::unique_ptr<Firewall> create_firewall(
     FirewallBackendPreference backend_pref = FirewallBackendPreference::auto_detect,
-    bool use_raw_prerouting = false);
+    RawPreroutingMode raw_prerouting = {});
+
+// Compatibility overload for callers using the historical IPv4-only flag.
+inline std::unique_ptr<Firewall> create_firewall(
+    FirewallBackendPreference backend_pref,
+    bool use_raw_prerouting) {
+    return create_firewall(
+        backend_pref, RawPreroutingMode{use_raw_prerouting, false});
+}
 
 } // namespace keen_pbr3

@@ -111,7 +111,13 @@ private:
                                         bool destructive_apply,
                                         bool clear_dynamic_sets,
                                         MarkMergeMode mark_merge_mode =
-                                            MarkMergeMode::LegacyConstant);
+                                            MarkMergeMode::LegacyConstant,
+                                        bool rules_only = false);
+    // RulesOnly reuses the live sets untouched, so every set the staged rules
+    // name must already exist with the exact schema the rules assume. Throws
+    // FirewallRulesOnlyError; the caller restages with PreserveSets.
+    void preflight_reused_sets(const LiveTableState& live_state) const;
+    FirewallApplyMode prepared_mode_{FirewallApplyMode::Destructive};
 
     // Describes an nftables named set to be created.
     struct PendingSet {

@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <limits>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -61,6 +62,41 @@ const Outbound* find_outbound_by_tag(const std::vector<Outbound>& outbounds,
         }
     }
     return nullptr;
+}
+
+// Under RulesOnly a list's usage comes from the last committed transaction
+// rather than from reading the list. Before trusting it, the realized rule
+// state is checked to still describe this rule and list: a reuse planned from
+// state that no longer matches would name sets the kernel does not hold.
+ListSetUsage reused_list_set_usage(
+    const PreviousRuntimeFirewall& previous,
+    std::size_t rule_index,
+    const std::string& list_name) {
+    if (previous.rule_states == nullptr ||
+        rule_index >= previous.rule_states->size()) {
+        throw FirewallRulesOnlyError(
+            "no realized firewall state is available for route rule " +
+            std::to_string(rule_index) + " list " + list_name);
+    }
+    const RuleState& realized = previous.rule_states->at(rule_index);
+    if (realized.rule_index != rule_index ||
+        std::find(realized.list_names.begin(),
+                  realized.list_names.end(),
+                  list_name) == realized.list_names.end()) {
+        throw FirewallRulesOnlyError(
+            "realized firewall state does not contain route rule " +
+            std::to_string(rule_index) + " list " + list_name);
+    }
+    if (previous.list_usage == nullptr) {
+        throw FirewallRulesOnlyError(
+            "no applied list usage is available to reuse");
+    }
+    const auto usage = previous.list_usage->find(list_name);
+    if (usage == previous.list_usage->end()) {
+        throw FirewallRulesOnlyError(
+            "applied list usage has no entry for list " + list_name);
+    }
+    return usage->second;
 }
 
 bool needs_native_vpn_direct_egress_snat(std::string_view stable_id) {
@@ -248,7 +284,8 @@ StagedRuntimeFirewall stage_runtime_firewall(
     const std::optional<KeeneticDnsSnapshot>& keenetic_dns_snapshot,
     std::shared_ptr<const ListCacheGenerationSnapshot>
         list_cache_snapshot,
-    bool force_clear_dynamic_sets) {
+    bool force_clear_dynamic_sets,
+    const PreviousRuntimeFirewall& previous) {
     // Resolve and validate the complete DNS registry before preparing the
     // backend transaction.  In particular, a Keenetic DNS server without a
     // prepared snapshot must fail before any firewall state is touched.
@@ -258,9 +295,24 @@ StagedRuntimeFirewall stage_runtime_firewall(
             config.dns.value_or(DnsConfig{}), keenetic_dns_snapshot);
     }
 
-    ListStreamer list_streamer = list_cache_snapshot
-        ? ListStreamer(cache_manager, std::move(list_cache_snapshot))
-        : ListStreamer(cache_manager);
+    const bool rules_only = mode == FirewallApplyMode::RulesOnly;
+    if (rules_only &&
+        (previous.rule_states == nullptr ||
+         previous.list_usage == nullptr ||
+         previous.list_content_state == nullptr)) {
+        throw FirewallRulesOnlyError(
+            "RulesOnly needs the last committed transaction to reuse and "
+            "none was supplied");
+    }
+    // Under RulesOnly no list is read at all. The streamer is what opens the
+    // cache files, so not constructing it is the proof that nothing does.
+    std::unique_ptr<ListStreamer> list_streamer;
+    if (!rules_only) {
+        list_streamer = list_cache_snapshot
+            ? std::make_unique<ListStreamer>(
+                  cache_manager, std::move(list_cache_snapshot))
+            : std::make_unique<ListStreamer>(cache_manager);
+    }
     auto rule_states = build_fw_rule_states(config, outbound_marks, &urltest_selections);
     const RouteConfig route_config = config.route.value_or(RouteConfig{});
     const Ipv6SupportDecision ipv6_decision = resolve_ipv6_support(config);
@@ -354,7 +406,11 @@ StagedRuntimeFirewall stage_runtime_firewall(
                 if (usage_it == list_usage_cache.end()) {
                     usage_it = list_usage_cache.emplace(
                         list_name,
-                        analyze_list_set_usage(list_name, list_cfg, list_streamer)).first;
+                        rules_only
+                            ? reused_list_set_usage(
+                                  previous, rule_idx, list_name)
+                            : analyze_list_set_usage(
+                                  list_name, list_cfg, *list_streamer)).first;
                 }
                 const auto& usage = usage_it->second;
                 ListSetUsage applied_usage = usage;
@@ -364,7 +420,20 @@ StagedRuntimeFirewall stage_runtime_firewall(
                 const std::string set4d = firewall.dynamic_set_name(list_name, AF_INET);
                 const std::string set6d = firewall.dynamic_set_name(list_name, AF_INET6);
 
-                if (usage.has_static_entries) {
+                if (usage.has_static_entries && rules_only) {
+                    // The sets are declared so the backend can preflight them
+                    // and the rules can name them, but nothing is streamed:
+                    // RulesOnly exists because the content did not change.
+                    // The applied usage is therefore the previous one, taken
+                    // as is, and the content state below is carried over
+                    // rather than recomputed from a read that never happens.
+                    firewall.create_ipset(set4, AF_INET, 0);
+                    rule_state.set_names.push_back(set4);
+                    if (ipv6_decision.enabled) {
+                        firewall.create_ipset(set6, AF_INET6, 0);
+                        rule_state.set_names.push_back(set6);
+                    }
+                } else if (usage.has_static_entries) {
                     // The list was inspected once to decide which kernel sets
                     // are required. Track the content actually handed to the
                     // set loaders during this second pass: a cache file may be
@@ -413,7 +482,7 @@ StagedRuntimeFirewall stage_runtime_firewall(
                             loader4->on_entry(type, entry);
                         }
                     });
-                    list_streamer.stream_list(list_name, list_cfg, splitter);
+                    list_streamer->stream_list(list_name, list_cfg, splitter);
                     loader4->finish();
                     if (loader6) {
                         loader6->finish();
@@ -643,7 +712,17 @@ StagedRuntimeFirewall stage_runtime_firewall(
 
     StagedRuntimeFirewall staged;
     staged.rule_states = std::move(rule_states);
-    staged.list_content_state = std::move(candidate_list_content_state);
+    if (rules_only) {
+        // Nothing was read, so nothing about the content is new. Carrying the
+        // previous state forward is what keeps the changed-source conntrack
+        // eviction and the Meta UDP/443 planning seeing "no change", which is
+        // the truth.
+        staged.list_content_state = *previous.list_content_state;
+        staged.list_usage = *previous.list_usage;
+    } else {
+        staged.list_content_state = std::move(candidate_list_content_state);
+        staged.list_usage = std::move(applied_list_usage);
+    }
     staged.mode = mode;
     return staged;
 }

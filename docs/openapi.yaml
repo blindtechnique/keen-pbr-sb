@@ -5292,6 +5292,25 @@ components:
             to `null`. Preserve-set reconciles never clear learned entries.
           default: true
           example: true
+        reuse_static_sets_on_runtime_refresh:
+          type: boolean
+          nullable: true
+          description: >
+            Whether runtime refreshes - a urltest failover, an interface event,
+            a SIGUSR1 refresh - rebuild only the packet-classification rules
+            while reusing the live static and dynamic sets, instead of
+            restreaming every list into fresh sets. Defaults to `true`.
+
+
+            A refresh changes which rules point at which sets, not what the
+            sets contain, so the restream was pure cost: an rkn-sized list is
+            tens of thousands of entries through `ipset restore` on every
+            failover. Before reusing, the daemon checks that every set the
+            rules name is live with the expected schema; if not, that one
+            refresh silently falls back to the full preserve-sets path.
+            Config applies are never affected by this setting.
+          default: true
+          example: true
         ipset_hashsize:
           type: integer
           minimum: 1

@@ -38,6 +38,11 @@ export interface DaemonConfig {
   /** Whether a full config apply or runtime restart should clear dynamic dnsmasq-managed firewall sets. Defaults to `true` when omitted or set to `null`. Preserve-set reconciles never clear learned entries.
    */
   clear_dynamic_sets_on_apply?: boolean | null;
+  /** Whether runtime refreshes - a urltest failover, an interface event, a SIGUSR1 refresh - rebuild only the packet-classification rules while reusing the live static and dynamic sets, instead of restreaming every list into fresh sets. Defaults to `true`.
+
+  A refresh changes which rules point at which sets, not what the sets contain, so the restream was pure cost: an rkn-sized list is tens of thousands of entries through `ipset restore` on every failover. Before reusing, the daemon checks that every set the rules name is live with the expected schema; if not, that one refresh silently falls back to the full preserve-sets path. Config applies are never affected by this setting.
+   */
+  reuse_static_sets_on_runtime_refresh?: boolean | null;
   /**
      * Optional initial hash table size for ipsets created by the iptables backend. This has no effect when the nftables backend is selected. Omit or set to null to use the ipset default (1024). Changing this value on a running iptables backend recreates owned ipsets and clears dnsmasq-learned entries.
 

@@ -5,6 +5,7 @@
     "firewall_backend": "auto",
     "skip_marked_packets": true,
     "clear_dynamic_sets_on_apply": true,
+    "reuse_static_sets_on_runtime_refresh": true,
     "ipv6_enabled": true,
     "reconnect_unmarked_flows_on_routing_change": true,
     "strict_enforcement": false

@@ -31,21 +31,22 @@ const char* firewall_backend_name(FirewallBackend backend) {
 }
 
 // Forward declarations - implemented in iptables.cpp and nftables.cpp
-std::unique_ptr<Firewall> create_iptables_firewall(bool use_raw_prerouting);
+std::unique_ptr<Firewall> create_iptables_firewall(
+    RawPreroutingMode raw_prerouting);
 std::unique_ptr<Firewall> create_nftables_firewall();
 
 std::unique_ptr<Firewall> create_firewall(FirewallBackendPreference backend_pref,
-                                          bool use_raw_prerouting) {
+                                          RawPreroutingMode raw_prerouting) {
     const FirewallBackend backend = resolve_firewall_backend(backend_pref);
 
     switch (backend) {
         case FirewallBackend::iptables:
-            return create_iptables_firewall(use_raw_prerouting);
+            return create_iptables_firewall(raw_prerouting);
         case FirewallBackend::nftables:
-            if (use_raw_prerouting) {
+            if (raw_prerouting.any()) {
                 throw FirewallError(
-                    "--use-raw-prerouting is supported only with the iptables "
-                    "firewall backend");
+                    "--use-raw-prerouting/--use-raw6-prerouting are supported "
+                    "only with the iptables firewall backend");
             }
             return create_nftables_firewall();
     }

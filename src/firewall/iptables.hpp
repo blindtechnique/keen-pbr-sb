@@ -47,7 +47,11 @@ FirewallGlobalPrefilter iptables_effective_prefilter_for_test(
 class IptablesFirewall : public Firewall {
 public:
     // Initialize the iptables backend; does not modify firewall state yet.
-    explicit IptablesFirewall(bool use_raw_prerouting = false);
+    explicit IptablesFirewall(RawPreroutingMode raw_prerouting = {});
+    // Compatibility constructor: the historical bool always meant IPv4 RAW.
+    explicit IptablesFirewall(bool use_raw_prerouting)
+        : IptablesFirewall(
+              RawPreroutingMode{use_raw_prerouting, false}) {}
     // Kernel firewall state is persistent and is removed only by explicit
     // cleanup(), never as a side effect of C++ object destruction.
     ~IptablesFirewall() override = default;
@@ -110,8 +114,11 @@ public:
     void cleanup() override;
     // Returns FirewallBackend::iptables.
     FirewallBackend backend() const override;
+    RawPreroutingMode raw_prerouting_mode() const override {
+        return raw_prerouting_;
+    }
     bool uses_raw_prerouting() const override {
-        return use_raw_prerouting_;
+        return raw_prerouting_.ipv4;
     }
 
 private:
@@ -195,6 +202,11 @@ private:
         const std::string& xml,
         const PendingSet& expected);
     void preflight_dynamic_set_schemas(bool effective_ipv6) const;
+    // RulesOnly never creates a set, so every set the staged rules name must
+    // already be live with the expected family, type and timeout. Throws
+    // FirewallRulesOnlyError, which the caller turns into a PreserveSets
+    // restage; nothing has been touched by then.
+    void preflight_reused_set_schemas(bool effective_ipv6) const;
     // Build a complete iptables-restore script for the given protocol and rules.
     static std::string build_ipt_script(bool ipv6,
                                         const std::vector<PendingRule>& rules,
@@ -207,19 +219,48 @@ private:
         const std::vector<PendingRule>& rules,
         const FirewallGlobalPrefilter& prefilter = {});
     static std::string build_raw_prerouting_script(
+        bool ipv6,
         const std::string& prerouting_chain,
         bool replace_active_chain,
         const std::vector<PendingRule>& rules,
         const FirewallGlobalPrefilter& prefilter = {});
+    // Compatibility helper: IPv4 RAW PREROUTING.
+    static std::string build_raw_prerouting_script(
+        const std::string& prerouting_chain,
+        bool replace_active_chain,
+        const std::vector<PendingRule>& rules,
+        const FirewallGlobalPrefilter& prefilter = {}) {
+        return build_raw_prerouting_script(
+            false, prerouting_chain, replace_active_chain, rules, prefilter);
+    }
     static std::string build_output_generation_script(
+        bool ipv6,
         const std::string& output_chain,
         bool replace_active_chain,
         const std::vector<PendingRule>& rules,
         const FirewallGlobalPrefilter& prefilter = {});
+    // Compatibility helper: IPv4 OUTPUT generation.
+    static std::string build_output_generation_script(
+        const std::string& output_chain,
+        bool replace_active_chain,
+        const std::vector<PendingRule>& rules,
+        const FirewallGlobalPrefilter& prefilter = {}) {
+        return build_output_generation_script(
+            false, output_chain, replace_active_chain, rules, prefilter);
+    }
     static std::string build_raw_conntrack_script(
+        bool ipv6,
         bool replace_active_chain,
         const FirewallGlobalPrefilter& prefilter = {},
         const std::vector<PendingRule>& rules = {});
+    // Compatibility helper: the IPv4 mangle companion.
+    static std::string build_raw_conntrack_script(
+        bool replace_active_chain,
+        const FirewallGlobalPrefilter& prefilter = {},
+        const std::vector<PendingRule>& rules = {}) {
+        return build_raw_conntrack_script(
+            false, replace_active_chain, prefilter, rules);
+    }
     static std::string build_forward_udp_reject_script(
         bool ipv6,
         const std::string& generation_chain,
@@ -473,7 +514,19 @@ private:
     std::vector<PendingForwardUdpReject>
         last_applied_forward_udp_rejects_;
     bool apply_prepared_{false};
-    bool use_raw_prerouting_{false};
+    FirewallApplyMode prepared_mode_{FirewallApplyMode::Destructive};
+    // Under RulesOnly the rule chains still flip to the inactive A/B slot, but
+    // the static sets they name must stay the live ones: nothing recreates a
+    // set, so a name from the target slot would point at a set that is not
+    // there. Every other mode keeps the two in step.
+    FirewallSetGeneration target_static_v4_generation_{FirewallSetGeneration::A};
+    FirewallSetGeneration target_static_v6_generation_{FirewallSetGeneration::A};
+    RawPreroutingMode raw_prerouting_{};
+    // Per-family shorthand: the raw table is per netfilter family, and every
+    // call site already knows which family it is emitting for.
+    bool uses_raw_prerouting(bool ipv6) const noexcept {
+        return raw_prerouting_.uses(ipv6);
+    }
     // Result of the last TTL bypass reconciliation, for health. Guarded
     // because apply() runs on the firewall worker while health is read from
     // an API thread.
@@ -540,7 +593,7 @@ private:
 
 // Factory function called from firewall.cpp
 std::unique_ptr<Firewall> create_iptables_firewall(
-    bool use_raw_prerouting = false);
+    RawPreroutingMode raw_prerouting = {});
 
 // Backend-transition/lifecycle bridge. nftables uses this inside the same
 // serialized firewall apply so an owned legacy IPv4 iptables PPE graph cannot

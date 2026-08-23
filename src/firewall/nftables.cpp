@@ -416,8 +416,9 @@ NftablesFirewall::MarkMergeMode NftablesFirewall::mark_merge_mode() {
         mark_merge_capability_probe_);
 }
 
-void NftablesFirewall::prepare_apply(FirewallApplyMode /*mode*/) {
+void NftablesFirewall::prepare_apply(FirewallApplyMode mode) {
     std::lock_guard<std::mutex> lock(pair_state_mutex_);
+    prepared_mode_ = mode;
     pending_sets_.clear();
     pending_elements_.clear();
     pending_rules_.clear();
@@ -773,6 +774,10 @@ void NftablesFirewall::create_pass_rule(const FirewallRuleCriteria& criteria) {
 
 std::unique_ptr<ListEntryVisitor> NftablesFirewall::create_batch_loader(
     const std::string& set_name) {
+    if (prepared_mode_ == FirewallApplyMode::RulesOnly) {
+        throw FirewallRulesOnlyError(
+            "RulesOnly cannot stream or modify set " + set_name);
+    }
     // Ensure an entry exists in pending_elements_ for this set (as an empty array)
     auto& buf = pending_elements_[set_name];
     if (!buf.is_array()) {
@@ -2568,11 +2573,33 @@ NftablesFirewall::LiveTableState NftablesFirewall::read_live_table_state() const
     return state;
 }
 
+void NftablesFirewall::preflight_reused_sets(
+    const LiveTableState& live_state) const {
+    if (!live_state.table_exists) {
+        throw FirewallRulesOnlyError(
+            "cannot reuse nftables sets: the owned table does not exist");
+    }
+    for (const auto& ps : pending_sets_) {
+        if (live_state.set_names.find(ps.name) == live_state.set_names.end()) {
+            throw FirewallRulesOnlyError(
+                "required reused nftables set " + ps.name + " is missing");
+        }
+        const auto schema = live_state.set_schemas.find(ps.name);
+        if (schema == live_state.set_schemas.end() ||
+            schema->second != set_schema_key(ps)) {
+            throw FirewallRulesOnlyError(
+                "required reused nftables set " + ps.name +
+                " has an incompatible schema");
+        }
+    }
+}
+
 nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live_state,
                                                       bool emit_full_table,
                                                       bool destructive_apply,
                                                       bool clear_dynamic_sets,
-                                                      MarkMergeMode mark_merge_mode) {
+                                                      MarkMergeMode mark_merge_mode,
+                                                      bool rules_only) {
     nlohmann::json doc;
     auto& arr = doc["nftables"];
     arr = nlohmann::json::array();
@@ -2619,8 +2646,14 @@ nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live
     }
 
     // Dynamic dnsmasq sets retain learned elements during a live refresh.
-    // Static sets are refreshed in this same transaction.
+    // Static sets are refreshed in this same transaction - except under
+    // RulesOnly, where preflight_reused_sets() already proved every set is
+    // live with the expected schema and no set command is emitted at all,
+    // affinity flushes included: the rules flip, the sets stay.
     for (const auto& ps : pending_sets_) {
+        if (rules_only) {
+            break;
+        }
         const bool existing = !emit_full_table &&
             live_state.set_names.find(ps.name) != live_state.set_names.end();
         if (existing && is_dynamic_set_name(ps.name)) {
@@ -2703,8 +2736,13 @@ nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live
         arr.push_back(build_forward_udp_reject_rule_json(rule));
     }
 
-    // Elements
+    // Elements. Under RulesOnly no loader ever ran (create_batch_loader
+    // refuses), so this map is empty by construction; the guard states the
+    // intent rather than relying on that.
     for (const auto& [set_name, elems] : pending_elements_) {
+        if (rules_only) {
+            break;
+        }
         if (!emit_full_table && live_state.set_names.find(set_name) != live_state.set_names.end()) {
             if (is_dynamic_set_name(set_name)) {
                 continue;
@@ -2751,6 +2789,12 @@ void NftablesFirewall::apply(FirewallApplyMode mode) {
             "keeping bridged SSTP bypass fail-closed");
     }
     const LiveTableState live_state = read_live_table_state();
+    const bool rules_only = mode == FirewallApplyMode::RulesOnly;
+    if (rules_only) {
+        // Before the transaction is even built: a failure here has touched
+        // nothing and the caller restages with PreserveSets.
+        preflight_reused_sets(live_state);
+    }
     const bool emit_full_table = !live_state.table_exists;
     const bool destructive_apply = mode == FirewallApplyMode::Destructive;
     const bool clear_dynamic_sets =
@@ -2758,7 +2802,7 @@ void NftablesFirewall::apply(FirewallApplyMode mode) {
     nlohmann::json doc =
         build_apply_document(
             live_state, emit_full_table, destructive_apply, clear_dynamic_sets,
-            active_mark_merge_mode);
+            active_mark_merge_mode, rules_only);
 
     std::string json_str = doc.dump();
     Logger::instance().verbose("nft json:\n{}", json_str);
