@@ -21,7 +21,10 @@ import { HelpHint } from "@/components/shared/help-hint"
 import { SegmentedControl } from "@/components/shared/segmented-control"
 import { Button } from "@/components/ui/button"
 import type { UpsertPagePresentation } from "@/components/shared/upsert-page"
-import { useUpsertPageClose } from "@/components/shared/upsert-page-context"
+import {
+  useUpsertPageClose,
+  useUpsertPageComplete,
+} from "@/components/shared/upsert-page-context"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import {
@@ -370,6 +373,7 @@ export function TransportConfigForm({
 }: Props) {
   const { t, i18n } = useTranslation()
   const close = useUpsertPageClose()
+  const complete = useUpsertPageComplete()
   const [baseline] = useState<TransportFormValue>(() =>
     createTransportFormValue(
       initial,
@@ -398,6 +402,7 @@ export function TransportConfigForm({
     useState<NativeWireGuardImportedIdentity | null>(null)
   const [nativeImportSubmitted, setNativeImportSubmitted] = useState(false)
   const importedNativeFocusPendingRef = useRef(false)
+  const nativeImportHandoffCloseTimerRef = useRef<number | null>(null)
   const nativeInterfaceTriggerRef = useRef<HTMLButtonElement>(null)
   // What the operator handed over that turned out to be a subscription rather
   // than one connection. Null until then, so the import UI does not exist for
@@ -629,6 +634,27 @@ export function TransportConfigForm({
       })
     },
     [createOutbound, killSwitch, spec]
+  )
+
+  const finishHandedOffNativeImport = useCallback(() => {
+    // Let the existing progress state paint once, then move completion to the
+    // page. The request and its non-secret plan are already durable here, so a
+    // discard-draft question would be false and would delay route binding.
+    setNativeImportSubmitted(true)
+    if (nativeImportHandoffCloseTimerRef.current !== null) return
+    nativeImportHandoffCloseTimerRef.current = window.setTimeout(() => {
+      nativeImportHandoffCloseTimerRef.current = null
+      complete()
+    }, 900)
+  }, [complete])
+
+  useEffect(
+    () => () => {
+      if (nativeImportHandoffCloseTimerRef.current !== null) {
+        window.clearTimeout(nativeImportHandoffCloseTimerRef.current)
+      }
+    },
+    []
   )
 
   useEffect(() => {
@@ -1039,7 +1065,7 @@ export function TransportConfigForm({
                   linkValue={spec.link ?? ""}
                   mode="link"
                   onAliasSuggestionChange={setNativeImportAliasSuggestion}
-                  onImportHandedOff={close}
+                  onImportHandedOff={finishHandedOffNativeImport}
                   onImportPending={stageCurrentNativeImportCompletion}
                   onLinkChange={(value) =>
                     setSpec((current) =>
@@ -1085,7 +1111,7 @@ export function TransportConfigForm({
                 key={nativeImportFieldsStateBoundaryKey("file")}
                 mode="file"
                 onAliasSuggestionChange={setNativeImportAliasSuggestion}
-                onImportHandedOff={close}
+                onImportHandedOff={finishHandedOffNativeImport}
                 onImportPending={stageCurrentNativeImportCompletion}
                 onSubscriptionDocument={(text) =>
                   setSubscriptionSeed({ document: text })

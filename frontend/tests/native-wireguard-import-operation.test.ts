@@ -64,3 +64,29 @@ test("accepted ambiguous imports leave the form and finish in background", () =>
     )
   }
 })
+
+test("background handoff paints progress and bypasses the discard-draft close", async () => {
+  const formSource = await Bun.file(
+    new URL(
+      "../src/components/transports/transport-config-dialog.tsx",
+      import.meta.url
+    )
+  ).text()
+  const pageSource = await Bun.file(
+    new URL("../src/components/shared/upsert-page.tsx", import.meta.url)
+  ).text()
+  const contextSource = await Bun.file(
+    new URL("../src/components/shared/upsert-page-context.ts", import.meta.url)
+  ).text()
+
+  expect(
+    formSource.match(/onImportHandedOff={finishHandedOffNativeImport}/g)
+  ).toHaveLength(2)
+  expect(formSource).not.toContain("onImportHandedOff={close}")
+  expect(formSource).toContain("}, 900)")
+  expect(pageSource).toContain(
+    "const complete = useCallback(() => onClose?.(), [onClose])"
+  )
+  expect(pageSource).toContain("() => ({ close, complete })")
+  expect(contextSource).toContain("useContext(UpsertCloseContext).complete")
+})

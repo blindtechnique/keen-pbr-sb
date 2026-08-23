@@ -67,7 +67,11 @@ export function UpsertPage({
 
     onClose?.()
   }, [dirty, mutationPending, onClose])
-  const closeContextValue = useMemo(() => close, [close])
+  const complete = useCallback(() => onClose?.(), [onClose])
+  const closeContextValue = useMemo(
+    () => ({ close, complete }),
+    [close, complete]
+  )
 
   useEffect(() => {
     if (!dirty) {
