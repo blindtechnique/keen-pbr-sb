@@ -24,6 +24,7 @@ std::optional<ComponentTransactionPhase> phase_from_name(
     if (name == "started") return ComponentTransactionPhase::started;
     if (name == "mutating") return ComponentTransactionPhase::mutating;
     if (name == "verifying") return ComponentTransactionPhase::verifying;
+    if (name == "verified") return ComponentTransactionPhase::verified;
     return std::nullopt;
 }
 
@@ -244,6 +245,8 @@ const char* component_transaction_phase_name(
             return "mutating";
         case ComponentTransactionPhase::verifying:
             return "verifying";
+        case ComponentTransactionPhase::verified:
+            return "verified";
     }
     return "mutating";
 }

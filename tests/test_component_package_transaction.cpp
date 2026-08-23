@@ -76,31 +76,40 @@ struct FakeOpkg {
     int install_exit{0};
     bool install_uncertain{false};
 
+    // Every working directory the runner was handed, one per command, so a
+    // test can show the download - and only the download - ran inside the
+    // store's staging directory.
+    std::vector<fs::path> working_directories;
+
     ComponentCommandRunner runner() {
         return [this](const std::vector<std::string>& argv,
-                      SafeExecTimeouts) {
+                      SafeExecTimeouts, const fs::path& cwd) {
             commands.push_back(argv);
+            working_directories.push_back(cwd);
             ExecCaptureResult result;
             REQUIRE_FALSE(argv.empty());
+            CHECK(argv[0] == "/opt/bin/opkg");
             if (argv.size() == 2 && argv[1] == "update") {
+                CHECK(cwd.empty());
                 result.exit_code = update_exit;
                 result.stdout_output = "Updated list of available packages\n";
                 return result;
             }
-            if (argv.size() == 7 && argv[1] == "-c") {
-                // The shell wrapper: cd "$1" && exec "$2" download "$3".
-                CHECK(argv[0] == "/bin/sh");
-                CHECK(argv[2] == "cd \"$1\" && exec \"$2\" download \"$3\"");
-                CHECK(argv[5] == "/opt/bin/opkg");
-                CHECK(argv[6] == "nfqws2-keenetic");
+            if (argv.size() == 3 && argv[1] == "download") {
+                // opkg writes into its working directory; the transaction
+                // must have pointed it at the staging directory, never at
+                // the daemon's own cwd.
+                CHECK(argv[2] == "nfqws2-keenetic");
+                REQUIRE_FALSE(cwd.empty());
+                REQUIRE(fs::is_directory(cwd));
                 if (download_exit == 0) {
-                    write_file(fs::path(argv[4]) / served_filename,
-                               served_bytes);
+                    write_file(cwd / served_filename, served_bytes);
                 }
                 result.exit_code = download_exit;
                 return result;
             }
             if (argv.size() >= 3 && argv[1] == "install") {
+                CHECK(cwd.empty());
                 result.exit_code = install_exit;
                 result.termination_uncertain = install_uncertain;
                 result.stdout_output = "Installing\n";
@@ -143,6 +152,12 @@ TEST_CASE("an up-to-date install retains its exact ipk while the feed serves it"
     REQUIRE(opkg.commands.size() == 2U);
     CHECK(opkg.commands[0] ==
           std::vector<std::string>{"/opt/bin/opkg", "update"});
+    CHECK(opkg.commands[1] == std::vector<std::string>{
+                                  "/opt/bin/opkg", "download",
+                                  "nfqws2-keenetic"});
+    REQUIRE(opkg.working_directories.size() == 2U);
+    CHECK(opkg.working_directories[0].empty());
+    CHECK(opkg.working_directories[1] == store.directory() / "staging");
     CHECK(store.inspect(IpkSlot::current).retained->version == "1.2.4");
     CHECK(store.inspect(IpkSlot::candidate).state == IpkSlotState::absent);
     // The staged download was consumed, not left around.
@@ -208,9 +223,11 @@ TEST_CASE("a newer feed version is verified into candidate and installed from th
                                       "/opt/bin/opkg", "install",
                                       "--force-downgrade", "--force-reinstall",
                                       (store.directory() / "current.ipk").string()});
-        // The wrong expectation is refused without running anything.
-        const auto refused = txn.reinstall_current("1.2.3");
-        CHECK(refused.exit_code != 0);
+        // The wrong expectation is refused without running anything, and
+        // the refusal is an exception, not an exit code: a refusal must
+        // never read as a package manager that ran and failed.
+        CHECK_THROWS_AS(txn.reinstall_current("1.2.3"),
+                        ComponentPackageRefused);
         CHECK(opkg.commands.size() == 4U);
     }
 }
@@ -232,9 +249,10 @@ TEST_CASE("without a retained copy the upgrade still stages but says rollback is
     CHECK(prep.retention == IpkRetentionAction::unavailable);
     CHECK(prep.output.find("No exact copy of the installed version 1.2.4") !=
           std::string::npos);
-    const auto refused = txn.reinstall_current("1.2.4");
-    CHECK(refused.exit_code != 0);
-    CHECK(refused.stdout_output.find("no exact copy") != std::string::npos);
+    CHECK_THROWS_WITH_AS(txn.reinstall_current("1.2.4"),
+                         doctest::Contains("no exact copy"),
+                         ComponentPackageRefused);
+    CHECK(opkg.commands.size() == 2U);
 }
 
 TEST_CASE("bytes that differ from the feed index never become a candidate") {
@@ -242,24 +260,33 @@ TEST_CASE("bytes that differ from the feed index never become a candidate") {
     const std::string new_bytes = "ipk 1.2.5";
     write_file(root.path / "feed-list", feed_stanza("1.2.5", new_bytes));
     FakeOpkg opkg;
-    opkg.served_bytes = "ipk 1.2.5 but tampered";
+    // Same length as the feed's bytes, different content: this is the
+    // SHA-256 path, which only a same-size tampering reaches.
+    opkg.served_bytes = "ipk 1.2.X";
+    REQUIRE(opkg.served_bytes.size() == new_bytes.size());
     opkg.served_filename = "nfqws2-keenetic_1.2.5_all_entware.ipk";
     ComponentIpkStore store(root.path / "components", "nfqws2-keenetic");
     ComponentPackageTransaction txn(options_for(root), store, opkg.runner());
 
     const auto prep = txn.prepare("1.2.4");
-    CHECK_FALSE(prep.error.empty());
+    CHECK(prep.error.find("refused") != std::string::npos);
+    CHECK(prep.error.find("digest") != std::string::npos);
     CHECK_FALSE(prep.candidate_verified);
     CHECK(store.inspect(IpkSlot::candidate).state == IpkSlotState::absent);
     // And install refuses rather than running opkg against nothing.
-    const auto install = txn.install_candidate();
-    CHECK(install.exit_code != 0);
+    CHECK_THROWS_AS(txn.install_candidate(), ComponentPackageRefused);
     CHECK(opkg.commands.size() == 2U);
 
-    // Same digest, wrong size - the feed's Size is checked too.
+    // Wrong size is caught before the digest is even computed: the file is
+    // read with the feed's Size as the ceiling.
     opkg.served_bytes = new_bytes + "x";
-    const auto prep2 = txn.prepare("1.2.4");
-    CHECK_FALSE(prep2.error.empty());
+    const auto larger = txn.prepare("1.2.4");
+    CHECK(larger.error.find("not the size the feed promised") !=
+          std::string::npos);
+    CHECK(store.inspect(IpkSlot::candidate).state == IpkSlotState::absent);
+    opkg.served_bytes = new_bytes.substr(0, new_bytes.size() - 1);
+    const auto smaller = txn.prepare("1.2.4");
+    CHECK(smaller.error.find("refused") != std::string::npos);
     CHECK(store.inspect(IpkSlot::candidate).state == IpkSlotState::absent);
 }
 
@@ -365,6 +392,69 @@ TEST_CASE("retain_installed keeps the installed ipk and never fetches a target")
         CHECK(opkg.commands.size() == 1U);
         CHECK(result.output.find("not fetched here") != std::string::npos);
     }
+}
+
+TEST_CASE("an interrupted promotion is finished before anything else is decided") {
+    // The install of 1.2.5 was verified, then the process died before the
+    // candidate became current: 1.2.5 runs, its exact bytes sit in
+    // candidate, current still says 1.2.4, and the feed now serves 1.2.6.
+    TempRoot root;
+    ComponentIpkStore store(root.path / "components", "nfqws2-keenetic");
+    const std::string old_bytes = "ipk 1.2.4";
+    const std::string run_bytes = "ipk 1.2.5";
+    const std::string new_bytes = "ipk 1.2.6";
+    const auto entry = [&](const std::string& version, const std::string& b) {
+        FeedPackageEntry e;
+        e.package = "nfqws2-keenetic";
+        e.version = version;
+        e.filename = "nfqws2-keenetic_" + version + "_all_entware.ipk";
+        e.size = b.size();
+        e.sha256 = digest_of(b);
+        return e;
+    };
+    store.adopt(IpkSlot::current, old_bytes, entry("1.2.4", old_bytes));
+    store.adopt(IpkSlot::candidate, run_bytes, entry("1.2.5", run_bytes));
+    write_file(root.path / "feed-list", feed_stanza("1.2.6", new_bytes));
+    FakeOpkg opkg;
+    ComponentPackageTransaction txn(options_for(root), store, opkg.runner());
+
+    const auto result = txn.retain_installed("1.2.5");
+    CHECK(result.output.find("Finished an interrupted promotion") !=
+          std::string::npos);
+    CHECK(result.previous_exact);
+    CHECK(result.retention == IpkRetentionAction::already_retained);
+    CHECK(store.inspect(IpkSlot::current).retained->version == "1.2.5");
+    CHECK(store.inspect(IpkSlot::previous).retained->version == "1.2.4");
+    CHECK(store.inspect(IpkSlot::candidate).state == IpkSlotState::absent);
+    // Nothing was downloaded: the exact copy was already on disk.
+    CHECK(opkg.commands.size() == 1U);
+}
+
+TEST_CASE("a feed listing several versions is read as its newest") {
+    TempRoot root;
+    const std::string older = "ipk 1.2.4";
+    const std::string newer = "ipk 1.2.5";
+    // Installed version listed first and a newer one after it.
+    write_file(root.path / "feed-list",
+               feed_stanza("1.2.4", older) + feed_stanza("1.2.5", newer));
+    FakeOpkg opkg;
+    opkg.served_bytes = newer;
+    opkg.served_filename = "nfqws2-keenetic_1.2.5_all_entware.ipk";
+    ComponentIpkStore store(root.path / "components", "nfqws2-keenetic");
+    ComponentPackageTransaction txn(options_for(root), store, opkg.runner());
+
+    const auto prep = txn.prepare("1.2.4");
+    REQUIRE(prep.listed.has_value());
+    CHECK(prep.listed->version == "1.2.5");
+    REQUIRE(prep.target.has_value());
+    CHECK(prep.target->version == "1.2.5");
+    CHECK(prep.candidate_verified);
+    // opkg download fetches only the newest, so the installed version -
+    // although listed - cannot be retained through it, and the message
+    // says exactly that rather than "no longer serves".
+    CHECK(prep.retention == IpkRetentionAction::unavailable);
+    const auto retain = txn.retain_installed("1.2.4");
+    CHECK(retain.output.find("behind a newer one") != std::string::npos);
 }
 
 TEST_CASE("feed versions compare numerically") {

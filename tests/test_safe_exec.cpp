@@ -208,6 +208,61 @@ TEST_CASE("safe_exec_capture: stderr is merged only when explicitly requested") 
     CHECK(combined.stdout_output.find("err") != std::string::npos);
 }
 
+TEST_CASE("safe_exec_capture: the child can be moved into a working directory") {
+    // `opkg download` writes into its cwd, and a shell `cd` wrapper is not an
+    // option on KeeneticOS (the NDM /bin/sh wrapper drops positional
+    // parameters), so the chdir happens in the child before exec.
+    std::string pattern = (std::filesystem::temp_directory_path() /
+                           "safe-exec-cwd-XXXXXX").string();
+    REQUIRE(::mkdtemp(&pattern[0]) != nullptr);
+    const std::filesystem::path directory = pattern;
+    const auto resolved = std::filesystem::canonical(directory);
+
+    const auto inside = safe_exec_capture(
+        {"/bin/sh", "-c", "pwd -P; : > created-here"},
+        /*suppress_stderr=*/false,
+        1024,
+        /*capture_stderr=*/true,
+        /*drain_after_limit=*/false,
+        SafeExecFailureLog::Suppressed,
+        std::nullopt,
+        /*child_environment=*/{},
+        directory.string());
+    CHECK(inside.exit_code == 0);
+    CHECK(inside.stdout_output == resolved.string() + "\n");
+    CHECK(std::filesystem::exists(directory / "created-here"));
+
+    // A directory that cannot be entered must not let the command run
+    // somewhere else instead.
+    const auto missing = safe_exec_capture(
+        {"/bin/sh", "-c", ": > should-not-exist"},
+        /*suppress_stderr=*/false,
+        1024,
+        /*capture_stderr=*/true,
+        /*drain_after_limit=*/false,
+        SafeExecFailureLog::Suppressed,
+        std::nullopt,
+        /*child_environment=*/{},
+        (directory / "absent").string());
+    CHECK(missing.exit_code != 0);
+    CHECK_FALSE(std::filesystem::exists(directory / "should-not-exist"));
+    CHECK_FALSE(std::filesystem::exists("should-not-exist"));
+
+    // Empty means the daemon's own cwd, as before.
+    const auto inherited = safe_exec_capture(
+        {"/bin/sh", "-c", "pwd -P"},
+        /*suppress_stderr=*/false,
+        1024);
+    CHECK(inherited.exit_code == 0);
+    CHECK(inherited.stdout_output ==
+          std::filesystem::canonical(std::filesystem::current_path())
+                  .string() +
+              "\n");
+
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+}
+
 TEST_CASE("safe_exec: child process receives devnull stdin") {
     StdinGuard stdin_guard;
     REQUIRE(stdin_guard.saved_stdin >= 0);

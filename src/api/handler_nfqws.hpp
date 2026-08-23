@@ -12,6 +12,7 @@
 #include "../util/nfqws_strategy_assets.hpp"
 
 #include <chrono>
+#include <filesystem>
 #include <functional>
 #include <string>
 #include <vector>
@@ -67,7 +68,8 @@ struct NfqwsBoundedOpkgTestResult {
 // fixed argv and timeout contract.
 NfqwsBoundedOpkgTestResult run_nfqws_bounded_opkg_for_testing(
     std::function<ExecCaptureResult(
-        const std::vector<std::string>&, SafeExecTimeouts)> execute,
+        const std::vector<std::string>&, SafeExecTimeouts,
+        const std::filesystem::path&)> execute,
     const std::string& installed_version,
     const std::string& store_root,
     const std::string& feed_list);
@@ -76,7 +78,8 @@ NfqwsBoundedOpkgTestResult run_nfqws_bounded_opkg_for_testing(
 // and prove it through the injected version reader.
 bool reinstall_exact_previous_nfqws_package_for_testing(
     std::function<ExecCaptureResult(
-        const std::vector<std::string>&, SafeExecTimeouts)> execute,
+        const std::vector<std::string>&, SafeExecTimeouts,
+        const std::filesystem::path&)> execute,
     const std::string& expected_version,
     std::function<std::string()> read_installed_version,
     const std::string& store_root,

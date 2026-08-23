@@ -7,6 +7,8 @@
 #include <nlohmann/json.hpp>
 
 #include <cctype>
+#include <cerrno>
+#include <cstring>
 #include <ctime>
 #include <fstream>
 #include <stdexcept>
@@ -259,16 +261,34 @@ RetainedIpk ComponentIpkStore::adopt(IpkSlot slot,
 }
 
 void ComponentIpkStore::move_slot(IpkSlot from, IpkSlot to) {
-    // Manifest of the destination goes first (destination becomes absent),
-    // the source manifest moves last (source stays usable until the bytes
-    // have arrived). Between them the destination is at worst corrupt, and
-    // corrupt is never acted on.
+    // One commit point, the manifest rename. Before it the bytes are
+    // hard-linked under the destination names, so the source keeps its
+    // manifest and stays usable while the destination is merely absent;
+    // after it the destination is usable and the source holds leftovers
+    // without a manifest, which is absent too. An interruption anywhere
+    // leaves exactly one usable slot, and a re-run either redoes the links
+    // (replacing leftovers) or finds the move already committed.
     std::error_code error;
     fs::remove(manifest_path(to), error);
     sync_directory(directory_);
-    fs::rename(ipk_path(from), ipk_path(to));
-    fs::rename(sidecar_path(from), sidecar_path(to));
+    const std::pair<fs::path, fs::path> bytes[] = {
+        {ipk_path(from), ipk_path(to)},
+        {sidecar_path(from), sidecar_path(to)},
+    };
+    for (const auto& pair : bytes) {
+        fs::remove(pair.second, error);
+        if (::link(pair.first.c_str(), pair.second.c_str()) != 0) {
+            const int failure = errno;
+            throw std::runtime_error("cannot link " + pair.first.string() +
+                                     " to " + pair.second.string() + ": " +
+                                     std::strerror(failure));
+        }
+    }
+    sync_directory(directory_);
     fs::rename(manifest_path(from), manifest_path(to));
+    sync_directory(directory_);
+    fs::remove(ipk_path(from), error);
+    fs::remove(sidecar_path(from), error);
     sync_directory(directory_);
 }
 

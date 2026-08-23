@@ -983,7 +983,17 @@ inline ExecCaptureResult safe_exec_capture(const std::vector<std::string>& args,
                                                timeout_override =
                                                    std::nullopt,
                                            const ChildEnvironmentOverrides&
-                                               child_environment = {}) {
+                                               child_environment = {},
+                                           // Child-only chdir before exec, for
+                                           // tools that write into the working
+                                           // directory (`opkg download`). Going
+                                           // through `sh -c 'cd ...'` is not an
+                                           // option on KeeneticOS: /bin/sh there
+                                           // is the NDM shell wrapper, which
+                                           // forwards only the command text and
+                                           // drops every positional parameter.
+                                           const std::string&
+                                               working_directory = {}) {
     ExecCaptureResult result;
     if (args.empty()) return result;
     if (!child_environment_overrides_are_valid(child_environment)) {
@@ -993,6 +1003,7 @@ inline ExecCaptureResult safe_exec_capture(const std::vector<std::string>& args,
             child_environment, args.front())) {
         return result;
     }
+    if (working_directory.find('\0') != std::string::npos) return result;
     const std::string command = safe_exec_command_string(args);
     const auto started_at = std::chrono::steady_clock::now();
     Logger::instance().trace("safe_exec_capture_start",
@@ -1058,6 +1069,13 @@ inline ExecCaptureResult safe_exec_capture(const std::vector<std::string>& args,
             }
         }
         close(pipefd[1]);
+        // chdir() is async-signal-safe and the path was prepared before
+        // fork(); a directory that cannot be entered must not let the tool
+        // run somewhere else instead.
+        if (!working_directory.empty() &&
+            ::chdir(working_directory.c_str()) != 0) {
+            _exit(127);
+        }
         if (!environment.empty()) {
             ::execve(argv[0],
                      const_cast<char* const*>(argv.data()),

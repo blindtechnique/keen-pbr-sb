@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <functional>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -31,8 +32,17 @@ namespace keen_pbr3 {
 // the handler keeps its bounded executor. The object never writes the
 // transaction journal: the caller owns the phases and records what this
 // reports.
+//
+// `working_directory` is empty for every command except the download:
+// `opkg download` writes into the working directory, and the child is moved
+// there with chdir() before exec. Not with `sh -c 'cd ...'`: on KeeneticOS
+// /bin/sh is the NDM shell wrapper, which forwards only the command text and
+// drops every positional parameter, so a wrapper built that way ran
+// `cd "" && exec ""` on the device.
 using ComponentCommandRunner = std::function<ExecCaptureResult(
-    const std::vector<std::string>& argv, SafeExecTimeouts timeouts)>;
+    const std::vector<std::string>& argv,
+    SafeExecTimeouts timeouts,
+    const std::filesystem::path& working_directory)>;
 
 struct ComponentPackageOptions {
     std::string package;
@@ -40,11 +50,6 @@ struct ComponentPackageOptions {
     // stores it gzip-compressed; a plain file is accepted too.
     std::filesystem::path feed_list;
     std::string opkg{"/opt/bin/opkg"};
-    // `opkg download` writes into the working directory and the executor
-    // has no cwd option, so the download is wrapped in a shell `cd`. The
-    // directory and package travel as positional parameters, never inside
-    // the script text.
-    std::string shell{"/bin/sh"};
     std::size_t max_feed_list_bytes{1U * 1024U * 1024U};
     std::size_t max_feed_index_bytes{4U * 1024U * 1024U};
     SafeExecTimeouts timeouts{std::chrono::minutes{10},
@@ -95,13 +100,14 @@ public:
     ComponentPackagePreparation retain_installed(
         const std::string& installed_version);
 
-    // `opkg install <candidate.ipk>`. Refuses (error result, no command)
-    // unless the candidate slot is usable right now.
+    // `opkg install <candidate.ipk>`. Throws ComponentPackageRefused, with no
+    // command issued, unless the candidate slot is usable right now - a
+    // refusal must never look like a package manager that ran and failed.
     ExecCaptureResult install_candidate();
 
     // `opkg install --force-downgrade --force-reinstall <current.ipk>`.
-    // Refuses unless the current slot is usable and holds exactly
-    // `expected_version`.
+    // Throws ComponentPackageRefused unless the current slot is usable and
+    // holds exactly `expected_version`.
     ExecCaptureResult reinstall_current(const std::string& expected_version);
 
     // The candidate installed and was proven so by the caller: it becomes
@@ -111,8 +117,8 @@ public:
 private:
     ComponentPackagePreparation prepare_impl(
         const std::string& installed_version, bool stage_target);
-    std::vector<std::string> download_argv(
-        const std::filesystem::path& staging) const;
+    void finish_interrupted_promotion(const std::string& installed_version,
+                                      std::string& output);
     std::optional<std::string> read_feed_index(std::string& error) const;
 
     ComponentPackageOptions options_;
@@ -120,10 +126,15 @@ private:
     ComponentCommandRunner run_;
 };
 
-// Builds the argv `prepare` uses for the download, exposed so tests and the
-// handler's diagnostics name the same command.
+// Thrown by install_candidate / reinstall_current when the store does not
+// hold what they would install. No command has run when this is raised.
+class ComponentPackageRefused : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
+// The argv `prepare` runs, in the staging directory, to fetch the package.
 std::vector<std::string> component_download_argv(
-    const ComponentPackageOptions& options,
-    const std::filesystem::path& staging);
+    const ComponentPackageOptions& options);
 
 } // namespace keen_pbr3

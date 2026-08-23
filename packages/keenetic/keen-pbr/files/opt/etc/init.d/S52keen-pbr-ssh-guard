@@ -21,7 +21,7 @@ case "$1" in
             off) exit 0 ;;
         esac
         [ -x "$GUARD" ] || exit 0
-        "$GUARD" >/dev/null 2>&1 &
+        "$GUARD" </dev/null >/dev/null 2>&1 &
         ;;
     check)
         # Foreground, for an operator: prints what it finds and exits with

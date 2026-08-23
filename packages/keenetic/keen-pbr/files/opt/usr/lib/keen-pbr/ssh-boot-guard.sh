@@ -11,15 +11,17 @@
 # other way.
 #
 # This guard trusts neither a name nor a pidfile. It asks who owns the
-# listening socket on the Entware port and compares that process's cmdline
-# with the Entware binary. Only when nobody owns the port does it clear the
-# stale pidfile and start the Entware init script; when another program owns
-# the port it stops and says so. It never touches the stock daemon and never
-# kills anything.
+# listening socket on the Entware port and compares that process's executable
+# with the Entware binary. Only when the socket table was actually read and
+# nobody owns the port does it clear a stale pidfile and start the Entware
+# init script; when another program owns the port, or the pidfile names a
+# live Entware daemon that merely listens elsewhere, it stops and says so. It
+# never kills anything.
 #
-# Exit codes: 0 listener present (found or started); 1 start did not produce a
-# listener; 3 the port belongs to something that is not Entware dropbear;
-# 2 configuration unusable. "Nothing to guard" (no Entware dropbear) is 0.
+# Exit codes: 0 listener present (found or started), or nothing to guard;
+# 1 start did not produce a listener; 2 configuration or socket table
+# unusable (nothing touched); 3 the port, or the recorded daemon, belongs to
+# something this guard must not fight.
 set -u
 
 ROOT=${KEEN_PBR_SSH_GUARD_ROOT:-}
@@ -75,35 +77,67 @@ case "$CONF_PIDFILE" in
     /*) PIDFILE="${ROOT}${CONF_PIDFILE}" ;;
 esac
 
-# The pid that owns a LISTEN socket on the port, for either address family.
-# BusyBox netstat -p prints "pid/program" in the last column; only the pid is
-# used, since the program name is exactly what this guard refuses to trust.
-listener_pid() {
-    netstat -tlnp 2>/dev/null | awk -v suffix=":$PORT" '
+# The socket table, read once per question. Emptiness is trusted only when
+# the table was readable: BusyBox netstat that is missing, failing or
+# printing nothing must never turn into "nobody listens", because the next
+# step after that verdict removes a pidfile.
+read_table() {
+    TABLE=$(netstat -tlnp 2>/dev/null) || TABLE=
+    case "$TABLE" in
+        *tcp*|*Proto*) return 0 ;;
+    esac
+    return 1
+}
+
+# Who owns the LISTEN socket on the port, for either address family: the pid,
+# or "?" when netstat could not attribute it ("-" in its PID column - the
+# socket is real, its owner is unknown, and unknown is not "nobody").
+listener_owner() {
+    printf '%s\n' "$TABLE" | awk -v suffix=":$PORT" '
         $1 ~ /^tcp/ && $6 == "LISTEN" &&
         substr($4, length($4) - length(suffix) + 1) == suffix {
             split($7, owner, "/")
-            if (owner[1] ~ /^[0-9]+$/) { print owner[1]; exit }
+            if (owner[1] ~ /^[0-9]+$/) print owner[1]; else print "?"
+            exit
         }'
+}
+
+# True when the pid owns any LISTEN socket at all.
+pid_listens_somewhere() {
+    printf '%s\n' "$TABLE" | awk -v pid="$1" '
+        $1 ~ /^tcp/ && $6 == "LISTEN" && index($7, pid "/") == 1 { found = 1 }
+        END { exit found ? 0 : 1 }'
 }
 
 pid_cmdline() {
     tr '\0' ' ' < "$PROC/$1/cmdline" 2>/dev/null
 }
 
-# True when the process image is the Entware binary, whatever its arguments.
+# True when the process image is the Entware binary. The executable link is
+# the authority: it does not depend on how the daemon was invoked (rc.func
+# starts it as a bare `dropbear` found on PATH) and survives the binary being
+# replaced by an upgrade ("(deleted)"). The cmdline is only a fallback for a
+# /proc that does not expose exe.
 pid_is_entware_dropbear() {
+    exe=$(readlink "$PROC/$1/exe" 2>/dev/null)
+    if [ -n "$exe" ]; then
+        case "$exe" in
+            "$DROPBEAR"|"$DROPBEAR (deleted)") return 0 ;;
+        esac
+        return 1
+    fi
     case "$(pid_cmdline "$1")" in
         "$DROPBEAR"|"$DROPBEAR "*) return 0 ;;
     esac
     return 1
 }
 
-# Wait up to BIND_WAIT seconds for a listener to appear; prints its pid.
-await_listener() {
+# Wait up to BIND_WAIT seconds for an owner to appear; prints it.
+await_owner() {
     waited=0
     while :; do
-        found=$(listener_pid)
+        read_table || return 2
+        found=$(listener_owner)
         if [ -n "$found" ]; then
             echo "$found"
             return 0
@@ -114,13 +148,25 @@ await_listener() {
     done
 }
 
-owner=$(listener_pid)
+describe() {
+    if [ "$1" = "?" ]; then
+        echo "an unattributed process"
+    else
+        echo "pid $1 ($(pid_cmdline "$1"))"
+    fi
+}
+
+if ! read_table; then
+    say "the socket table could not be read (netstat); nothing touched"
+    exit 2
+fi
+owner=$(listener_owner)
 if [ -n "$owner" ]; then
-    if pid_is_entware_dropbear "$owner"; then
+    if [ "$owner" != "?" ] && pid_is_entware_dropbear "$owner"; then
         say "Entware dropbear (pid $owner) is listening on :$PORT"
         exit 0
     fi
-    say "port :$PORT is held by pid $owner ($(pid_cmdline "$owner")), not by Entware dropbear; leaving it alone"
+    say "port :$PORT is held by $(describe "$owner"), not by Entware dropbear; leaving it alone"
     exit 3
 fi
 
@@ -133,15 +179,26 @@ if [ -f "$PIDFILE" ]; then
             ;;
         *)
             if pid_is_entware_dropbear "$saved"; then
-                # The recorded process is an Entware dropbear that is not
-                # listening: most likely it is still starting. Give it the
-                # bind window before deciding it is a leftover session child.
-                if owner=$(await_listener) && [ -n "$owner" ] &&
-                   pid_is_entware_dropbear "$owner"; then
+                # A live Entware daemon that does not own the port. Give it
+                # the bind window; if it then listens somewhere else, it is
+                # a daemon on another port and not this guard's to replace:
+                # S51dropbear stops it through this very pidfile.
+                owner=$(await_owner)
+                waited_rc=$?
+                if [ "$waited_rc" -eq 2 ]; then
+                    say "the socket table became unreadable while waiting; nothing touched"
+                    exit 2
+                fi
+                if [ "$waited_rc" -eq 0 ] && [ -n "$owner" ] &&
+                   [ "$owner" != "?" ] && pid_is_entware_dropbear "$owner"; then
                     say "Entware dropbear (pid $owner) came up on :$PORT"
                     exit 0
                 fi
-                say "pid $saved from $PIDFILE is an Entware dropbear but nothing listens on :$PORT; treating the pidfile as stale"
+                if pid_listens_somewhere "$saved"; then
+                    say "pid $saved from $PIDFILE is an Entware dropbear listening on another port, not :$PORT; leaving it alone"
+                    exit 3
+                fi
+                say "pid $saved from $PIDFILE is an Entware dropbear but listens nowhere; treating the pidfile as stale"
             else
                 say "removing stale pidfile $PIDFILE: pid $saved is not Entware dropbear"
             fi
@@ -154,12 +211,18 @@ attempt=1
 while :; do
     say "starting Entware dropbear on :$PORT (attempt $attempt of $ATTEMPTS)"
     "$INIT" start >/dev/null 2>&1 || true
-    if owner=$(await_listener) && [ -n "$owner" ]; then
-        if pid_is_entware_dropbear "$owner"; then
+    owner=$(await_owner)
+    waited_rc=$?
+    if [ "$waited_rc" -eq 2 ]; then
+        say "the socket table became unreadable after starting; cannot verify"
+        exit 2
+    fi
+    if [ "$waited_rc" -eq 0 ] && [ -n "$owner" ]; then
+        if [ "$owner" != "?" ] && pid_is_entware_dropbear "$owner"; then
             say "Entware dropbear (pid $owner) now listens on :$PORT"
             exit 0
         fi
-        say "port :$PORT was taken by pid $owner ($(pid_cmdline "$owner")) while starting; leaving it alone"
+        say "port :$PORT was taken by $(describe "$owner") while starting; leaving it alone"
         exit 3
     fi
     [ "$attempt" -lt "$ATTEMPTS" ] || break

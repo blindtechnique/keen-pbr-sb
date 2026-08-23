@@ -487,8 +487,12 @@ struct BoundedOpkgUpgradeResult {
     std::string target_version;
 };
 
+// The third argument is the child's working directory, empty to inherit.
+// `opkg download` writes into it; see ComponentCommandRunner for why this is
+// a chdir and not a shell `cd` on KeeneticOS.
 using NfqwsExecCapture = std::function<ExecCaptureResult(
-    const std::vector<std::string>&, SafeExecTimeouts)>;
+    const std::vector<std::string>&, SafeExecTimeouts,
+    const std::filesystem::path&)>;
 
 struct NfqwsPackagePaths {
     fs::path store_root{kComponentStoreRoot};
@@ -509,9 +513,6 @@ ComponentPackageOptions nfqws_package_options(const NfqwsPackagePaths& paths) {
 }
 
 std::string nfqws_package_command_label(const std::vector<std::string>& argv) {
-    if (argv.size() >= 2 && argv[1] == "-c") {
-        return std::string("opkg download ") + kNfqwsPackage;
-    }
     std::string label = "opkg";
     for (std::size_t index = 1; index < argv.size(); ++index) {
         if (argv[index].empty() || argv[index].front() == '/') continue;
@@ -522,7 +523,8 @@ std::string nfqws_package_command_label(const std::vector<std::string>& argv) {
 }
 
 ExecCaptureResult run_nfqws_package_command(
-    const std::vector<std::string>& argv, SafeExecTimeouts timeouts) {
+    const std::vector<std::string>& argv, SafeExecTimeouts timeouts,
+    const std::filesystem::path& working_directory) {
     return safe_exec_capture(
         argv,
         /*suppress_stderr=*/false,
@@ -530,7 +532,9 @@ ExecCaptureResult run_nfqws_package_command(
         /*capture_stderr=*/true,
         /*drain_after_limit=*/true,
         SafeExecFailureLog::Enabled,
-        timeouts);
+        timeouts,
+        /*child_environment=*/{},
+        working_directory.string());
 }
 
 // Called once the target is verified and staged, immediately before opkg
@@ -554,8 +558,9 @@ BoundedOpkgUpgradeResult run_bounded_nfqws_opkg_upgrade(
     // operator log carries each command's output with the same truncation,
     // deadline and termination annotations whichever step ran it.
     const auto run_annotated = [&](const std::vector<std::string>& argv,
-                                   SafeExecTimeouts timeouts) {
-        auto result = execute(argv, timeouts);
+                                   SafeExecTimeouts timeouts,
+                                   const std::filesystem::path& cwd) {
+        auto result = execute(argv, timeouts, cwd);
         const auto label = nfqws_package_command_label(argv);
         combined.output += result.stdout_output;
         if (!combined.output.empty() && combined.output.back() != '\n') {
@@ -624,8 +629,18 @@ BoundedOpkgUpgradeResult run_bounded_nfqws_opkg_upgrade(
         if (combined.status == 0) combined.status = 1;
         return combined;
     }
-    combined.upgrade_started = true;
-    (void)transaction.install_candidate();
+    try {
+        // upgrade_started flips only once the command is really issued: a
+        // refusal here means the store changed under us between verify and
+        // install, and nothing has been mutated.
+        combined.upgrade_started = true;
+        (void)transaction.install_candidate();
+    } catch (const ComponentPackageRefused& refused) {
+        combined.upgrade_started = false;
+        combined.output += std::string("opkg install was not run: ") +
+                           refused.what() + ".\n";
+        if (combined.status == 0) combined.status = 1;
+    }
     return combined;
 }
 
@@ -656,7 +671,15 @@ bool reinstall_exact_previous_nfqws_package(
     ComponentIpkStore store(paths.store_root, kNfqwsPackage);
     ComponentPackageTransaction transaction(
         nfqws_package_options(paths), store, execute);
-    const auto result = transaction.reinstall_current(expected_version);
+    ExecCaptureResult result;
+    try {
+        result = transaction.reinstall_current(expected_version);
+    } catch (const ComponentPackageRefused& refused) {
+        output += std::string("The exact previous package was not "
+                              "reinstalled: ") +
+                  refused.what() + ".\n";
+        return false;
+    }
     output += result.stdout_output;
     if (!output.empty() && output.back() != '\n') output += '\n';
     if (result.exit_code != 0 || result.timed_out ||
@@ -2173,6 +2196,13 @@ void register_nfqws_handler_impl(
             record.config_sha256 = config_before.active_sha256;
             record.runtime_was_running = runtime_before.process_present;
             record.previous_version = version_before;
+            // Known now, not only after the download: a crash during the
+            // feed refresh must leave a journal that lets recovery consult
+            // the store rather than fall through to a file-only restore.
+            // Preparation cannot change it - retaining the installed
+            // version and staging a newer one are mutually exclusive.
+            record.exact_previous_ipk =
+                cached_exact_previous_ipk(version_before, /*force=*/true);
             record.owner_is_operation_process = false;
             write_nfqws_transaction(record);
 
@@ -2391,6 +2421,24 @@ void register_nfqws_handler_impl(
                         }
                     }
                     if (!component_broken) {
+                        // Everything that could be checked has passed.
+                        // Say so durably before the bookkeeping below: a
+                        // crash between promotion and the journal's removal
+                        // would otherwise read, at boot, as an unfinished
+                        // mutation whose exact previous package is gone
+                        // from `current` - and recovery would restore the
+                        // old files over a verified new package.
+                        record.phase = ComponentTransactionPhase::verified;
+                        try {
+                            write_nfqws_transaction(record);
+                        } catch (const std::exception& error) {
+                            // Not a reason to undo a verified upgrade. The
+                            // journal stays at `verifying`; the ordinary
+                            // clear below still removes it.
+                            output += std::string("The verified phase could "
+                                                  "not be journaled: ") +
+                                      error.what() + "\n";
+                        }
                         // The candidate is proven installed: it is now the
                         // exact copy of the installed version, and what was
                         // installed before becomes the exact copy of the
@@ -3051,7 +3099,8 @@ assess_nfqws_post_upgrade_footprint_for_testing(
 
 NfqwsBoundedOpkgTestResult run_nfqws_bounded_opkg_for_testing(
     std::function<ExecCaptureResult(
-        const std::vector<std::string>&, SafeExecTimeouts)> execute,
+        const std::vector<std::string>&, SafeExecTimeouts,
+        const std::filesystem::path&)> execute,
     const std::string& installed_version,
     const std::string& store_root,
     const std::string& feed_list) {
@@ -3074,7 +3123,8 @@ NfqwsBoundedOpkgTestResult run_nfqws_bounded_opkg_for_testing(
 
 bool reinstall_exact_previous_nfqws_package_for_testing(
     std::function<ExecCaptureResult(
-        const std::vector<std::string>&, SafeExecTimeouts)> execute,
+        const std::vector<std::string>&, SafeExecTimeouts,
+        const std::filesystem::path&)> execute,
     const std::string& expected_version,
     std::function<std::string()> read_installed_version,
     const std::string& store_root,

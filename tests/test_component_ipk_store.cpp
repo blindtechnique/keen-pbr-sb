@@ -215,6 +215,64 @@ TEST_CASE("an interrupted promotion is finished on the next run") {
     CHECK(store.inspect(IpkSlot::previous).retained->version == "1.2.4");
 }
 
+TEST_CASE("a move interrupted inside itself leaves exactly one usable slot") {
+    // move_slot links the bytes under the destination names, renames the
+    // manifest (the commit), then unlinks the source bytes. Each window is
+    // reconstructed by hand and the store is asked what it sees and whether
+    // a re-run converges.
+    TempRoot root;
+    ComponentIpkStore store(root.path / "components", "nfqws2-keenetic");
+    const std::string old_bytes = "bytes 1.2.4";
+    const std::string new_bytes = "bytes 1.2.5";
+    const auto dir = store.directory();
+    const auto link = [&](const char* from, const char* to) {
+        fs::create_hard_link(dir / from, dir / to);
+    };
+
+    SUBCASE("after the first link: candidate still usable, current absent") {
+        store.adopt(IpkSlot::candidate, new_bytes, entry_for("1.2.5", new_bytes));
+        link("candidate.ipk", "current.ipk");
+        CHECK(store.inspect(IpkSlot::candidate).state == IpkSlotState::usable);
+        CHECK(store.inspect(IpkSlot::current).state == IpkSlotState::absent);
+        store.promote_candidate();
+        CHECK(store.inspect(IpkSlot::current).retained->version == "1.2.5");
+        CHECK(store.inspect(IpkSlot::candidate).state == IpkSlotState::absent);
+    }
+    SUBCASE("after both links: same, and the re-run replaces the leftovers") {
+        store.adopt(IpkSlot::candidate, new_bytes, entry_for("1.2.5", new_bytes));
+        link("candidate.ipk", "current.ipk");
+        link("candidate.ipk.sha256", "current.ipk.sha256");
+        CHECK(store.inspect(IpkSlot::current).state == IpkSlotState::absent);
+        store.promote_candidate();
+        CHECK(store.inspect(IpkSlot::current).retained->version == "1.2.5");
+        CHECK_FALSE(fs::exists(dir / "candidate.ipk"));
+    }
+    SUBCASE("after the manifest rename: committed, source bytes are leftovers") {
+        store.adopt(IpkSlot::current, old_bytes, entry_for("1.2.4", old_bytes));
+        store.adopt(IpkSlot::candidate, new_bytes, entry_for("1.2.5", new_bytes));
+        // current -> previous fully done; candidate -> current stopped right
+        // after its manifest moved.
+        link("current.ipk", "previous.ipk");
+        link("current.ipk.sha256", "previous.ipk.sha256");
+        fs::rename(dir / "current.json", dir / "previous.json");
+        fs::remove(dir / "current.ipk");
+        fs::remove(dir / "current.ipk.sha256");
+        link("candidate.ipk", "current.ipk");
+        link("candidate.ipk.sha256", "current.ipk.sha256");
+        fs::rename(dir / "candidate.json", dir / "current.json");
+        CHECK(store.inspect(IpkSlot::current).retained->version == "1.2.5");
+        CHECK(store.inspect(IpkSlot::previous).retained->version == "1.2.4");
+        CHECK(store.inspect(IpkSlot::candidate).state == IpkSlotState::absent);
+        // Leftover candidate bytes carry no claim and a later adopt replaces
+        // them rather than tripping over them.
+        CHECK(fs::exists(dir / "candidate.ipk"));
+        store.adopt(IpkSlot::candidate, "bytes 1.2.6", entry_for("1.2.6", "bytes 1.2.6"));
+        CHECK(store.inspect(IpkSlot::candidate).retained->version == "1.2.6");
+        // And the hard link did not let that adopt change current's bytes.
+        CHECK(store.inspect(IpkSlot::current).state == IpkSlotState::usable);
+    }
+}
+
 TEST_CASE("discard and staging leave no claims behind") {
     TempRoot root;
     ComponentIpkStore store(root.path, "nfqws2-keenetic");

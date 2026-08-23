@@ -53,6 +53,16 @@ ComponentBootRecoveryPlan decide_component_boot_recovery(
         plan.reason = "the transaction was interrupted before any mutation";
         return plan;
     }
+    if (record.phase == ComponentTransactionPhase::verified) {
+        // Package, configuration and runtime were all verified before the
+        // interruption; what did not finish is bookkeeping. Reinstalling
+        // the previous version from here would undo a finished upgrade.
+        plan.action = ComponentBootRecoveryAction::clear_journal;
+        plan.clear_journal_on_success = true;
+        plan.reason = "the upgrade was verified before the interruption; "
+                      "only bookkeeping was left";
+        return plan;
+    }
 
     const bool capture_usable =
         evidence.capture == ComponentCaptureState::usable;

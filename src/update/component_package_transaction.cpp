@@ -42,27 +42,11 @@ void append_line(std::string& output, const std::string& line) {
     output += '\n';
 }
 
-ExecCaptureResult refused(const std::string& reason) {
-    ExecCaptureResult result;
-    result.exit_code = -1;
-    result.stdout_output = reason + "\n";
-    return result;
-}
-
 } // namespace
 
 std::vector<std::string> component_download_argv(
-    const ComponentPackageOptions& options,
-    const fs::path& staging) {
-    return {
-        options.shell,
-        "-c",
-        "cd \"$1\" && exec \"$2\" download \"$3\"",
-        "keen-pbr-component-download",
-        staging.string(),
-        options.opkg,
-        options.package,
-    };
+    const ComponentPackageOptions& options) {
+    return {options.opkg, "download", options.package};
 }
 
 ComponentPackageTransaction::ComponentPackageTransaction(
@@ -70,11 +54,6 @@ ComponentPackageTransaction::ComponentPackageTransaction(
     ComponentIpkStore& store,
     ComponentCommandRunner run)
     : options_(std::move(options)), store_(store), run_(std::move(run)) {}
-
-std::vector<std::string> ComponentPackageTransaction::download_argv(
-    const fs::path& staging) const {
-    return component_download_argv(options_, staging);
-}
 
 std::optional<std::string> ComponentPackageTransaction::read_feed_index(
     std::string& error) const {
@@ -93,6 +72,40 @@ std::optional<std::string> ComponentPackageTransaction::read_feed_index(
         error = std::string("feed index could not be decompressed: ") +
                 failure.what();
         return std::nullopt;
+    }
+}
+
+// A promotion interrupted after the install was verified leaves the
+// installed version's exact bytes in `candidate` while `current` still
+// names the one before. Nothing else would ever move them: the feed has
+// moved on, so they cannot be fetched again, and the next upgrade would
+// overwrite the slot. Finish the move here, where every preparation starts,
+// so the store tells the truth before anything reads it.
+void ComponentPackageTransaction::finish_interrupted_promotion(
+    const std::string& installed_version, std::string& output) {
+    if (installed_version.empty()) return;
+    const auto candidate = store_.inspect(IpkSlot::candidate);
+    if (candidate.state != IpkSlotState::usable ||
+        candidate.retained->version != installed_version) {
+        return;
+    }
+    const auto current = store_.inspect(IpkSlot::current);
+    if (current.state == IpkSlotState::usable &&
+        current.retained->version == installed_version) {
+        // Both hold it; the candidate is a leftover of a finished move.
+        store_.discard(IpkSlot::candidate);
+        return;
+    }
+    try {
+        store_.promote_candidate();
+        append_line(output,
+                    "Finished an interrupted promotion: the exact copy of "
+                    "the installed version " + installed_version +
+                        " is now current.");
+    } catch (const std::exception& failure) {
+        append_line(output,
+                    std::string("An interrupted promotion could not be "
+                                "finished: ") + failure.what());
     }
 }
 
@@ -117,9 +130,12 @@ ComponentPackagePreparation ComponentPackageTransaction::prepare_impl(
         return preparation;
     };
 
+    finish_interrupted_promotion(installed_version, preparation.output);
+
     // 1. Feed metadata. A failure here touched nothing of the component.
     {
-        const auto update = run_({options_.opkg, "update"}, options_.timeouts);
+        const auto update =
+            run_({options_.opkg, "update"}, options_.timeouts, {});
         preparation.timed_out = update.timed_out;
         preparation.termination_uncertain = update.termination_uncertain;
         if (update.timed_out || update.termination_uncertain ||
@@ -130,16 +146,20 @@ ComponentPackagePreparation ComponentPackageTransaction::prepare_impl(
         preparation.feed_updated = true;
     }
 
-    // 2. What the feed names, from the copy opkg just wrote.
+    // 2. What the feed names, from the copy opkg just wrote. `opkg download`
+    // fetches the newest stanza, so that is the one that can be verified;
+    // an older stanza that happens to be the installed version is noted
+    // but cannot be retained through opkg.
     std::string read_error;
     const auto index = read_feed_index(read_error);
     if (!index) return fail(read_error);
     preparation.feed_read = true;
     const auto entries = parse_opkg_packages_index(*index);
     for (const auto& entry : entries) {
-        if (entry.package == options_.package) {
+        if (entry.package != options_.package) continue;
+        if (!preparation.listed ||
+            feed_version_newer(entry.version, preparation.listed->version)) {
             preparation.listed = entry;
-            break;
         }
     }
     if (!preparation.listed) {
@@ -194,10 +214,18 @@ ComponentPackagePreparation ComponentPackageTransaction::prepare_impl(
             append_line(preparation.output,
                         "An exact copy of the installed package is retained.");
         } else if (preparation.retention == IpkRetentionAction::unavailable) {
+            const auto installed_entry = find_feed_entry(
+                entries, options_.package, installed_version);
             append_line(preparation.output,
-                        "The feed no longer serves the installed version " +
-                            installed_version +
-                            "; no exact copy of it can be retained.");
+                        installed_entry
+                            ? "The feed still lists the installed version " +
+                                  installed_version +
+                                  " behind a newer one; opkg download "
+                                  "fetches only the newest, so no exact copy "
+                                  "can be retained."
+                            : "The feed no longer serves the installed "
+                                  "version " + installed_version +
+                                  "; no exact copy of it can be retained.");
         }
         return preparation;
     }
@@ -210,7 +238,8 @@ ComponentPackagePreparation ComponentPackageTransaction::prepare_impl(
         return fail(std::string("package staging directory is unusable: ") +
                     failure.what());
     }
-    const auto download = run_(download_argv(staging), options_.timeouts);
+    const auto download =
+        run_(component_download_argv(options_), options_.timeouts, staging);
     preparation.timed_out = download.timed_out;
     preparation.termination_uncertain = download.termination_uncertain;
     if (download.timed_out || download.termination_uncertain ||
@@ -262,32 +291,34 @@ ComponentPackagePreparation ComponentPackageTransaction::prepare_impl(
 ExecCaptureResult ComponentPackageTransaction::install_candidate() {
     const auto candidate = store_.inspect(IpkSlot::candidate);
     if (candidate.state != IpkSlotState::usable) {
-        return refused(std::string("no verified candidate package to "
-                                   "install (candidate slot is ") +
-                       ipk_slot_state_name(candidate.state) + ")");
+        throw ComponentPackageRefused(
+            std::string("no verified candidate package to install "
+                        "(candidate slot is ") +
+            ipk_slot_state_name(candidate.state) + ")");
     }
     return run_({options_.opkg, "install",
                  store_.ipk_path(IpkSlot::candidate).string()},
-                options_.timeouts);
+                options_.timeouts, {});
 }
 
 ExecCaptureResult ComponentPackageTransaction::reinstall_current(
     const std::string& expected_version) {
     const auto current = store_.inspect(IpkSlot::current);
     if (current.state != IpkSlotState::usable) {
-        return refused(std::string("no exact copy of the previous package "
-                                   "to reinstall (current slot is ") +
-                       ipk_slot_state_name(current.state) + ")");
+        throw ComponentPackageRefused(
+            std::string("no exact copy of the previous package to "
+                        "reinstall (current slot is ") +
+            ipk_slot_state_name(current.state) + ")");
     }
     if (current.retained->version != expected_version) {
-        return refused("the retained package is version " +
-                       current.retained->version + ", not " +
-                       expected_version + "; refusing to reinstall it");
+        throw ComponentPackageRefused(
+            "the retained package is version " + current.retained->version +
+            ", not " + expected_version + "; refusing to reinstall it");
     }
     return run_({options_.opkg, "install", "--force-downgrade",
                  "--force-reinstall",
                  store_.ipk_path(IpkSlot::current).string()},
-                options_.timeouts);
+                options_.timeouts, {});
 }
 
 void ComponentPackageTransaction::promote_installed_candidate() {

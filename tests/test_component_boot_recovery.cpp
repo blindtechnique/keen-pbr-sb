@@ -70,6 +70,23 @@ TEST_CASE("interrupted before mutation: the journal is simply cleared") {
     CHECK(plan.clear_journal_on_success);
 }
 
+TEST_CASE("verified before the interruption: clear, never reinstall the old version") {
+    // The install of 1.2.5 passed every check and the journal said so; the
+    // crash came between store promotion and journal removal. The package
+    // on disk is 1.2.5, the store's current may still be 1.2.4 - exactly the
+    // evidence that would otherwise look like "reinstall the previous one".
+    auto record = mutating_record();
+    record.phase = ComponentTransactionPhase::verified;
+    auto evidence = abandoned_with(record);
+    evidence.installed_version = "1.2.5";
+    evidence.installed_binary_sha256 = std::string(64, 'b');
+    evidence.previous_ipk = usable_ipk("1.2.4");
+    evidence.capture = ComponentCaptureState::usable;
+    const auto plan = decide_component_boot_recovery(evidence);
+    CHECK(plan.action == ComponentBootRecoveryAction::clear_journal);
+    CHECK(plan.clear_journal_on_success);
+}
+
 TEST_CASE("package provably unchanged: restore files, or manual without a capture") {
     auto evidence = abandoned_with(mutating_record());
     evidence.installed_version = "1.2.4";

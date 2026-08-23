@@ -403,13 +403,17 @@ struct NfqwsPackageFixture {
 
     // `install_outcome` shapes the opkg install result; every other command
     // behaves like a healthy opkg.
+    std::vector<std::filesystem::path> working_directories;
     std::function<ExecCaptureResult(const std::vector<std::string>&,
-                                    SafeExecTimeouts)>
+                                    SafeExecTimeouts,
+                                    const std::filesystem::path&)>
     executor(std::function<ExecCaptureResult()> install_outcome) {
         return [this, install_outcome](const std::vector<std::string>& argv,
-                                       SafeExecTimeouts timeout) {
+                                       SafeExecTimeouts timeout,
+                                       const std::filesystem::path& cwd) {
             commands.push_back(argv);
             deadlines.push_back(timeout);
+            working_directories.push_back(cwd);
             ExecCaptureResult execution;
             REQUIRE(argv.size() >= 2U);
             if (argv[1] == "update") {
@@ -417,10 +421,11 @@ struct NfqwsPackageFixture {
                 execution.stdout_output = "feed updated\n";
                 return execution;
             }
-            if (argv[1] == "-c") {
-                REQUIRE(argv.size() == 7U);
-                std::ofstream file(std::filesystem::path(argv[4]) /
-                                       served_filename,
+            if (argv[1] == "download") {
+                // opkg writes into its working directory, which the
+                // transaction must have pointed at the store's staging.
+                REQUIRE_FALSE(cwd.empty());
+                std::ofstream file(cwd / served_filename,
                                    std::ios::binary | std::ios::trunc);
                 file << served_bytes;
                 execution.exit_code = 0;
@@ -452,13 +457,19 @@ TEST_CASE("nfqws opkg upgrade uses fixed argv and classifies timeout as unknown"
     REQUIRE(fixture.commands.size() == 3U);
     CHECK(fixture.commands[0] ==
           std::vector<std::string>{"/opt/bin/opkg", "update"});
-    // The download is wrapped in a shell `cd` because opkg writes into the
-    // working directory; the directory and package are positional, never
-    // part of the script.
-    CHECK(fixture.commands[1][0] == "/bin/sh");
-    CHECK(fixture.commands[1][2] == "cd \"$1\" && exec \"$2\" download \"$3\"");
-    CHECK(fixture.commands[1][5] == "/opt/bin/opkg");
-    CHECK(fixture.commands[1][6] == "nfqws2-keenetic");
+    // opkg writes the download into its working directory, so the child is
+    // moved into the store's staging directory with chdir - not with a
+    // `sh -c 'cd ...'` wrapper, which on KeeneticOS reaches the NDM shell
+    // wrapper and loses every positional parameter.
+    CHECK(fixture.commands[1] == std::vector<std::string>{
+                                     "/opt/bin/opkg", "download",
+                                     "nfqws2-keenetic"});
+    REQUIRE(fixture.working_directories.size() == 3U);
+    CHECK(fixture.working_directories[0].empty());
+    CHECK(fixture.working_directories[1] ==
+          std::filesystem::path(fixture.store_root()) / "nfqws2-keenetic" /
+              "staging");
+    CHECK(fixture.working_directories[2].empty());
     // Installed from the verified file, not from whatever the feed serves
     // by the time opkg looks again.
     CHECK(fixture.commands[2] == std::vector<std::string>{
@@ -495,7 +506,10 @@ TEST_CASE("nfqws opkg upgrade uses fixed argv and classifies timeout as unknown"
 TEST_CASE("nfqws opkg upgrade refuses a target the feed index does not vouch for") {
     NfqwsPackageFixture fixture;
     fixture.serve("1.2.5", "bytes of 1.2.5");
-    fixture.served_bytes = "bytes of something else";
+    // Same size as the feed promised, other content: the one tampering the
+    // size check cannot catch, so this exercises the SHA-256 refusal.
+    fixture.served_bytes = "bytes of 1.2.X";
+    REQUIRE(fixture.served_bytes.size() == std::string("bytes of 1.2.5").size());
     bool install_ran = false;
     const auto result = run_nfqws_bounded_opkg_for_testing(
         fixture.executor([&] {

@@ -32,6 +32,12 @@ enum class ComponentTransactionPhase {
     // The mutation returned and the checks are running. The files are settled;
     // what is unknown is whether they work.
     verifying,
+    // Every check passed: the installed package is the intended one, its
+    // configuration and runtime are verified. Only bookkeeping remains (store
+    // promotion, journal removal). An interruption here has nothing to
+    // restore - recovery that reinstalled the previous version now would
+    // undo a finished, verified upgrade.
+    verified,
 };
 
 struct ComponentTransactionRecord {

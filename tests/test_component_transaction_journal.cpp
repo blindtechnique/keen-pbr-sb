@@ -209,7 +209,8 @@ TEST_CASE("every phase round-trips through its name") {
     const auto path = directory.path / "phase.json";
     for (const auto phase : {ComponentTransactionPhase::started,
                              ComponentTransactionPhase::mutating,
-                             ComponentTransactionPhase::verifying}) {
+                             ComponentTransactionPhase::verifying,
+                             ComponentTransactionPhase::verified}) {
         auto record = sample_record();
         record.phase = phase;
         write_component_transaction(path, record);
@@ -326,7 +327,8 @@ TEST_CASE("every journal name is distinct and stable") {
     std::set<std::string> names;
     for (const auto phase : {ComponentTransactionPhase::started,
                              ComponentTransactionPhase::mutating,
-                             ComponentTransactionPhase::verifying}) {
+                             ComponentTransactionPhase::verifying,
+                             ComponentTransactionPhase::verified}) {
         CHECK(names.insert(component_transaction_phase_name(phase)).second);
     }
     std::set<std::string> states;
