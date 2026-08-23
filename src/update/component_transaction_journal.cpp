@@ -90,6 +90,9 @@ void write_component_transaction(
         {"binary_sha256", record.binary_sha256},
         {"config_sha256", record.config_sha256},
         {"runtime_was_running", record.runtime_was_running},
+        {"previous_version", record.previous_version},
+        {"target_version", record.target_version},
+        {"exact_previous_ipk", record.exact_previous_ipk},
         {"owner_pid", owner_pid},
         {"owner_start", owner_start},
         {"owner_is_operation_process", record.owner_is_operation_process},
@@ -164,6 +167,10 @@ ComponentTransactionStatus read_component_transaction(
         record.config_sha256 = parsed.value("config_sha256", std::string{});
         record.runtime_was_running =
             parsed.value("runtime_was_running", false);
+        record.previous_version =
+            parsed.value("previous_version", std::string{});
+        record.target_version = parsed.value("target_version", std::string{});
+        record.exact_previous_ipk = parsed.value("exact_previous_ipk", false);
         record.owner_pid = parsed.value("owner_pid", std::int64_t{0});
         record.owner_start = parsed.value("owner_start", std::string{});
         record.owner_is_operation_process =

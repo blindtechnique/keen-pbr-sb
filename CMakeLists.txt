@@ -472,6 +472,10 @@ set(SOURCES
   src/update/package_footprint.cpp
   src/update/component_transaction_journal.cpp
   src/update/component_capture.cpp
+  src/update/component_feed_index.cpp
+  src/update/component_ipk_store.cpp
+  src/update/component_package_transaction.cpp
+  src/update/component_boot_recovery.cpp
   src/util/nfqws_config_migration.cpp
   src/util/nfqws_runtime_state.cpp
   src/config/config.cpp

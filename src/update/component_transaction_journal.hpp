@@ -46,6 +46,15 @@ struct ComponentTransactionRecord {
     std::string binary_sha256;
     std::string config_sha256;
     bool runtime_was_running{false};
+    // What the package manager was asked to do, in package-version terms,
+    // and whether the version being replaced is held byte-exact in the
+    // component store. A record carrying these lets recovery after a reboot
+    // decide between reinstalling the exact previous package and a file-only
+    // restore, instead of guessing from whatever opkg now reports. Absent
+    // in records written before they existed; empty then, never invented.
+    std::string previous_version;
+    std::string target_version;
+    bool exact_previous_ipk{false};
     // Who is doing this, so a record left behind can be told from one that is
     // being written right now. Filled by the writer; a record without them is
     // readable but can only ever be classified as abandoned.

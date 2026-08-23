@@ -54,14 +54,33 @@ struct NfqwsBoundedOpkgTestResult {
     bool timed_out{false};
     bool termination_uncertain{false};
     bool upgrade_started{false};
+    bool up_to_date{false};
+    bool previous_exact{false};
+    std::string target_version;
 };
 
-// Runs the production two-command opkg sequence through an injected executor.
-// Tests can force a timeout without starting opkg or waiting for the production
-// deadline, while still checking the fixed argv and timeout contract.
+// Runs the production package sequence (opkg update, feed index read, opkg
+// download into the store's staging directory, verification, opkg install
+// of the verified file) through an injected executor, against a store root
+// and feed index the test owns. Tests can force a timeout without starting
+// opkg or waiting for the production deadline, while still checking the
+// fixed argv and timeout contract.
 NfqwsBoundedOpkgTestResult run_nfqws_bounded_opkg_for_testing(
     std::function<ExecCaptureResult(
-        const std::vector<std::string>&, SafeExecTimeouts)> execute);
+        const std::vector<std::string>&, SafeExecTimeouts)> execute,
+    const std::string& installed_version,
+    const std::string& store_root,
+    const std::string& feed_list);
+
+// The exact-rollback step: reinstall the store's copy of `expected_version`
+// and prove it through the injected version reader.
+bool reinstall_exact_previous_nfqws_package_for_testing(
+    std::function<ExecCaptureResult(
+        const std::vector<std::string>&, SafeExecTimeouts)> execute,
+    const std::string& expected_version,
+    std::function<std::string()> read_installed_version,
+    const std::string& store_root,
+    std::string& output);
 
 struct NfqwsPostMutationGuardTestResult {
     bool operation_completed{false};
@@ -83,7 +102,8 @@ bool should_clear_nfqws_upgrade_journal_for_testing(
     bool component_broken,
     bool package_mutation_started,
     bool rolled_back,
-    bool termination_uncertain);
+    bool termination_uncertain,
+    bool exact_rollback_verified = false);
 
 bool nfqws_package_metadata_verified_for_testing(
     bool transaction_present);

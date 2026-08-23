@@ -4,6 +4,7 @@
 #include "handler_backup.hpp"
 #include "maintenance_api.hpp"
 #include "../update/component_capture.hpp"
+#include "../update/component_package_transaction.hpp"
 #include "../update/component_transaction_journal.hpp"
 #include "../update/package_footprint.hpp"
 #include "../update/rescue_integrity.hpp"
@@ -62,12 +63,29 @@ constexpr const char* kNfqwsJournal =
     "/opt/var/lib/keen-pbr/nfqws-transaction.json";
 constexpr const char* kNfqwsCapture =
     "/opt/var/lib/keen-pbr/nfqws-restore-point";
-constexpr const char* kNfqwsUpgradeLimitation =
-    "Runs the currently configured opkg upgrade path under the shared "
-    "maintenance lease and "
-    "captures the installed files before mutation, but it does not preserve "
-    "an exact previous IPK, pin and verify the target IPK, restore exact opkg "
-    "metadata, or recover an interrupted transaction after reboot.";
+// Exact IPKs for the component, beside the other keen-pbr state. The feed
+// serves only its latest version, so the installed version's bytes are kept
+// here from the moment they can be had: once the feed moves on they cannot
+// be fetched again, and a rollback that cannot reinstall them is file-level
+// only.
+constexpr const char* kComponentStoreRoot = "/opt/var/lib/keen-pbr/components";
+constexpr const char* kNfqwsPackage = "nfqws2-keenetic";
+// opkg's copy of the feed index, rewritten by `opkg update`. It names the
+// exact file, size and SHA-256 the feed serves, which is what a downloaded
+// IPK is checked against before it is allowed anywhere near opkg install.
+constexpr const char* kNfqwsFeedList = "/opt/var/opkg-lists/nfqws2-keenetic";
+constexpr const char* kNfqwsUpgradeLimitationExact =
+    "Runs opkg under the shared maintenance lease with the target IPK "
+    "verified against the feed index and an exact copy of the installed "
+    "version retained for reinstall, but an interrupted transaction is not "
+    "yet recovered after reboot and the upstream maintainer script may still "
+    "start the service before verification.";
+constexpr const char* kNfqwsUpgradeLimitationInexact =
+    "Runs opkg under the shared maintenance lease with the target IPK "
+    "verified against the feed index, but no exact copy of the installed "
+    "version is retained (the feed no longer serves it), so a failed upgrade "
+    "restores captured files without exact opkg metadata; an interrupted "
+    "transaction is not recovered after reboot.";
 constexpr const char* kListsDir = "/opt/etc/nfqws2/lists";
 constexpr const char* kLuaDir = "/opt/etc/nfqws2/lua";
 constexpr const char* kLogDir = "/opt/var/log";
@@ -456,47 +474,108 @@ struct BoundedOpkgUpgradeResult {
     int status{-1};
     bool timed_out{false};
     bool termination_uncertain{false};
+    // opkg install was issued against a verified candidate. Everything
+    // before that (feed refresh, download, verification, retention of the
+    // installed version's own IPK) leaves the installed component untouched.
     bool upgrade_started{false};
+    // The feed serves nothing newer; no install was attempted.
+    bool up_to_date{false};
+    // An exact copy of the version that was installed when this began is in
+    // the store, so a failed install can reinstall it rather than only
+    // restore captured files.
+    bool previous_exact{false};
+    std::string target_version;
 };
 
 using NfqwsExecCapture = std::function<ExecCaptureResult(
     const std::vector<std::string>&, SafeExecTimeouts)>;
 
-BoundedOpkgUpgradeResult run_bounded_nfqws_opkg_upgrade(
-    const NfqwsExecCapture& execute) {
+struct NfqwsPackagePaths {
+    fs::path store_root{kComponentStoreRoot};
+    fs::path feed_list{kNfqwsFeedList};
+};
+
+ComponentPackageOptions nfqws_package_options(const NfqwsPackagePaths& paths) {
     // Updating feed metadata and running maintainer scripts can both be slow on
     // flash-backed routers, so this is deliberately much longer than the
     // ordinary command deadline. It is still finite: the maintenance lease and
     // nfqws mutex must never be held forever by a wedged opkg or descendant.
-    constexpr auto kOpkgCommandTimeout = std::chrono::minutes{10};
-    constexpr auto kOpkgKillGrace = std::chrono::seconds{5};
+    ComponentPackageOptions options;
+    options.package = kNfqwsPackage;
+    options.feed_list = paths.feed_list;
+    options.timeouts =
+        SafeExecTimeouts{std::chrono::minutes{10}, std::chrono::seconds{5}};
+    return options;
+}
+
+std::string nfqws_package_command_label(const std::vector<std::string>& argv) {
+    if (argv.size() >= 2 && argv[1] == "-c") {
+        return std::string("opkg download ") + kNfqwsPackage;
+    }
+    std::string label = "opkg";
+    for (std::size_t index = 1; index < argv.size(); ++index) {
+        if (argv[index].empty() || argv[index].front() == '/') continue;
+        label += ' ';
+        label += argv[index];
+    }
+    return label;
+}
+
+ExecCaptureResult run_nfqws_package_command(
+    const std::vector<std::string>& argv, SafeExecTimeouts timeouts) {
+    return safe_exec_capture(
+        argv,
+        /*suppress_stderr=*/false,
+        64U * 1024U,
+        /*capture_stderr=*/true,
+        /*drain_after_limit=*/true,
+        SafeExecFailureLog::Enabled,
+        timeouts);
+}
+
+// Called once the target is verified and staged, immediately before opkg
+// install: the last moment at which nothing has been mutated and the first
+// at which the transaction knows which versions it is moving between.
+// Returning false refuses the install - used when the journal that would
+// describe the mutation could not be written, because a mutation nobody can
+// later read about is the one this whole path exists to prevent.
+using NfqwsPreparedHook =
+    std::function<bool(const BoundedOpkgUpgradeResult&)>;
+
+BoundedOpkgUpgradeResult run_bounded_nfqws_opkg_upgrade(
+    const NfqwsExecCapture& execute,
+    const std::string& installed_version,
+    const NfqwsPackagePaths& paths = {},
+    const NfqwsPreparedHook& on_prepared = {}) {
     constexpr size_t kMaxOutputPerCommand = 64U * 1024U;
-    const SafeExecTimeouts timeouts{kOpkgCommandTimeout, kOpkgKillGrace};
 
     BoundedOpkgUpgradeResult combined;
-    auto run_step = [&](const std::vector<std::string>& argv,
-                        std::string_view label) {
+    // Every command the transaction issues passes through here, so the
+    // operator log carries each command's output with the same truncation,
+    // deadline and termination annotations whichever step ran it.
+    const auto run_annotated = [&](const std::vector<std::string>& argv,
+                                   SafeExecTimeouts timeouts) {
         auto result = execute(argv, timeouts);
+        const auto label = nfqws_package_command_label(argv);
         combined.output += result.stdout_output;
         if (!combined.output.empty() && combined.output.back() != '\n') {
             combined.output += '\n';
         }
         if (result.truncated) {
-            combined.output += std::string(label) +
-                               " output was truncated after " +
+            combined.output += label + " output was truncated after " +
                                std::to_string(kMaxOutputPerCommand) +
                                " bytes.\n";
         }
         if (result.timed_out) {
             combined.timed_out = true;
-            combined.output += std::string(label) +
+            combined.output += label +
                                " exceeded the 10 minute deadline; the "
                                "package-manager outcome is unknown.\n";
         }
         if (result.termination_uncertain) {
             combined.termination_uncertain = true;
             combined.output +=
-                std::string(label) +
+                label +
                 " could not be proven fully terminated. No component "
                 "inspection or captured-file recovery may run while a "
                 "package-manager descendant could still be mutating it.\n";
@@ -506,33 +585,103 @@ BoundedOpkgUpgradeResult run_bounded_nfqws_opkg_upgrade(
             combined.status == 0) {
             combined.status = -1;
         }
-        return combined.status == 0 && !result.timed_out &&
-               !result.termination_uncertain;
+        return result;
     };
 
-    if (!run_step({"/opt/bin/opkg", "update"}, "opkg update")) {
+    ComponentIpkStore store(paths.store_root, kNfqwsPackage);
+    ComponentPackageTransaction transaction(
+        nfqws_package_options(paths), store, run_annotated);
+
+    const auto preparation = transaction.prepare(installed_version);
+    combined.output += preparation.output;
+    combined.previous_exact = preparation.previous_exact;
+    if (preparation.target) {
+        combined.target_version = preparation.target->version;
+    }
+    if (!preparation.error.empty()) {
+        // Nothing installed was touched. The status is still a failure: the
+        // operator asked for an upgrade and is not getting one.
+        if (combined.status == 0) combined.status = 1;
+        return combined;
+    }
+    if (preparation.up_to_date) {
+        combined.up_to_date = true;
+        combined.status = 0;
+        return combined;
+    }
+    if (!preparation.candidate_verified) {
+        combined.output +=
+            "No verified target package was staged; opkg install was not "
+            "run.\n";
+        if (combined.status == 0) combined.status = 1;
         return combined;
     }
 
+    if (on_prepared && !on_prepared(combined)) {
+        combined.output +=
+            "The transaction journal could not record the prepared install; "
+            "opkg install was not run.\n";
+        if (combined.status == 0) combined.status = 1;
+        return combined;
+    }
     combined.upgrade_started = true;
-    (void)run_step(
-        {"/opt/bin/opkg", "upgrade", "nfqws2-keenetic"},
-        "opkg upgrade nfqws2-keenetic");
+    (void)transaction.install_candidate();
     return combined;
 }
 
-BoundedOpkgUpgradeResult run_bounded_nfqws_opkg_upgrade() {
-    return run_bounded_nfqws_opkg_upgrade(
-        [](const std::vector<std::string>& argv, SafeExecTimeouts timeouts) {
-            return safe_exec_capture(
-                argv,
-                /*suppress_stderr=*/false,
-                64U * 1024U,
-                /*capture_stderr=*/true,
-                /*drain_after_limit=*/true,
-                SafeExecFailureLog::Enabled,
-                timeouts);
-        });
+BoundedOpkgUpgradeResult run_bounded_nfqws_opkg_upgrade(
+    const std::string& installed_version,
+    const NfqwsPreparedHook& on_prepared) {
+    return run_bounded_nfqws_opkg_upgrade(run_nfqws_package_command,
+                                          installed_version, {}, on_prepared);
+}
+
+// Reinstalls the exact IPK of the version that was installed before a
+// failed upgrade, which restores opkg's own record of the package and
+// every file the package owns. Returns true only when opkg reports success
+// and the package database names that version again; the caller still
+// restores captured files and verifies the runtime afterwards, because a
+// reinstall re-runs maintainer scripts that may start the service.
+bool reinstall_exact_previous_nfqws_package(
+    const std::string& expected_version,
+    const std::function<std::string()>& read_installed_version,
+    std::string& output,
+    const NfqwsExecCapture& execute = run_nfqws_package_command,
+    const NfqwsPackagePaths& paths = {}) {
+    if (expected_version.empty()) {
+        output += "The pre-upgrade version was not known; the exact package "
+                  "was not reinstalled.\n";
+        return false;
+    }
+    ComponentIpkStore store(paths.store_root, kNfqwsPackage);
+    ComponentPackageTransaction transaction(
+        nfqws_package_options(paths), store, execute);
+    const auto result = transaction.reinstall_current(expected_version);
+    output += result.stdout_output;
+    if (!output.empty() && output.back() != '\n') output += '\n';
+    if (result.exit_code != 0 || result.timed_out ||
+        result.termination_uncertain) {
+        output += "Reinstalling the exact previous package " +
+                  expected_version + " did not succeed.\n";
+        return false;
+    }
+    std::string now_installed;
+    try {
+        now_installed = read_installed_version();
+    } catch (const std::exception& error) {
+        output += std::string("The reinstalled version could not be read: ") +
+                  error.what() + "\n";
+        return false;
+    }
+    if (now_installed != expected_version) {
+        output += "opkg reports version '" + now_installed +
+                  "' after reinstalling " + expected_version +
+                  "; the package state is not proven restored.\n";
+        return false;
+    }
+    output += "Exact previous package " + expected_version +
+              " reinstalled; opkg metadata restored.\n";
+    return true;
 }
 
 std::array<unsigned long, 3> semantic_version(const std::string& value) {
@@ -572,13 +721,20 @@ bool should_clear_nfqws_upgrade_journal(
     bool component_broken,
     bool package_mutation_started,
     bool rolled_back,
-    bool termination_uncertain) noexcept {
+    bool termination_uncertain,
+    bool exact_rollback_verified = false) noexcept {
+    // An uncertain mutator cannot authorize any finalization.
+    if (termination_uncertain) return false;
+    // A rollback that reinstalled the exact previous IPK, with opkg naming
+    // that version again and the captured files and runtime restored, has
+    // put the package back where it was. The upgrade still failed, but the
+    // component is a known quantity and the journal has nothing left to
+    // guard.
+    if (rolled_back && exact_rollback_verified) return true;
     // A file-only rollback after opkg started cannot reconcile the package
-    // database, and an uncertain mutator cannot authorize any finalization.
-    // In both cases the durable record is the marker that suppresses version
-    // and update claims until manual package repair.
-    return !component_broken && !termination_uncertain &&
-           !(package_mutation_started && rolled_back);
+    // database. The durable record is then the marker that suppresses
+    // version and update claims until manual package repair.
+    return !component_broken && !(package_mutation_started && rolled_back);
 }
 
 struct CapturedRestoreFinalization {
@@ -778,21 +934,61 @@ PostUpgradeFootprintAssessment assess_post_upgrade_footprint(
     return assessment;
 }
 
+// Whether the store holds the exact IPK of `installed_version`. Hashing the
+// retained file costs one pass over a few megabytes, and the nfqws page polls
+// status, so the answer is cached briefly - the same bargain as
+// cached_restore_point_state, for the same reason. `force` is for our own
+// mutations of the store.
+bool cached_exact_previous_ipk(const std::string& installed_version,
+                               bool force = false) {
+    static std::mutex mutex;
+    static std::optional<std::pair<std::string, bool>> cached;
+    static std::chrono::steady_clock::time_point checked_at{};
+    constexpr auto kTtl = std::chrono::seconds{30};
+
+    if (installed_version.empty()) return false;
+    const std::lock_guard lock(mutex);
+    const auto now = std::chrono::steady_clock::now();
+    if (!force && cached && cached->first == installed_version &&
+        now - checked_at < kTtl) {
+        return cached->second;
+    }
+    bool exact = false;
+    try {
+        const ComponentIpkStore store(kComponentStoreRoot, kNfqwsPackage);
+        const auto current = store.inspect(IpkSlot::current);
+        exact = current.state == IpkSlotState::usable &&
+                current.retained->version == installed_version;
+    } catch (...) {
+        exact = false;
+    }
+    cached = std::make_pair(installed_version, exact);
+    checked_at = now;
+    return exact;
+}
+
 nlohmann::json nfqws_upgrade_capability(
-    bool package_metadata_verified) {
+    bool package_metadata_verified,
+    bool exact_previous_ipk) {
     return nlohmann::json{
         {"available", package_metadata_verified},
         {"mode", "guarded_opkg"},
-        {"exact_previous_ipk", false},
-        {"verified_target_ipk", false},
-        {"exact_opkg_metadata_rollback", false},
+        // The installed version's own IPK is in the store, so a failed
+        // upgrade reinstalls it instead of only restoring captured files.
+        {"exact_previous_ipk", exact_previous_ipk},
+        // The upgrade path refuses any target whose size or SHA-256 differs
+        // from the feed index, and installs from the verified file.
+        {"verified_target_ipk", true},
+        {"exact_opkg_metadata_rollback", exact_previous_ipk},
         {"boot_recovery", false},
         {"package_metadata_verified", package_metadata_verified},
         {"blocked_reason",
          package_metadata_verified
              ? ""
              : "nfqws_package_metadata_unverified"},
-        {"limitation", kNfqwsUpgradeLimitation},
+        {"limitation", exact_previous_ipk
+                           ? kNfqwsUpgradeLimitationExact
+                           : kNfqwsUpgradeLimitationInexact},
     };
 }
 
@@ -1262,7 +1458,11 @@ PostMutationGuardResult guard_nfqws_post_mutation(
 bool restore_nfqws_capture_after_failed_upgrade(
     const ComponentTransactionRecord& record,
     TransactionProgress& progress,
-    std::string& output) {
+    std::string& output,
+    const std::string& version_before,
+    bool exact_previous_available,
+    bool& package_metadata_restored) {
+    package_metadata_restored = false;
     const auto capture_state = verify_component_capture(kNfqwsCapture);
     if (capture_state != ComponentCaptureState::usable) {
         output +=
@@ -1274,8 +1474,21 @@ bool restore_nfqws_capture_after_failed_upgrade(
     }
 
     progress.step("rollback");
+    // The exact IPK first, while the service may still be whatever opkg
+    // left: reinstalling re-runs maintainer scripts, and the captured files
+    // must land after those, not before. Only then are the bytes the
+    // operator actually had written back over the package's defaults.
+    if (exact_previous_available) {
+        output += "\nThe upgrade did not finish safely; reinstalling the "
+                  "exact previous package.\n";
+        package_metadata_restored = reinstall_exact_previous_nfqws_package(
+            version_before, [] { return installed_version(); }, output);
+    }
     output +=
-        "\nThe upgrade did not finish safely; restoring the captured bytes.\n";
+        package_metadata_restored
+            ? "Restoring the captured bytes over the reinstalled package.\n"
+            : "\nThe upgrade did not finish safely; restoring the captured "
+              "bytes.\n";
     if (!nfqws_fully_stopped()) {
         int stop_status = 0;
         output += run_nfqws_service_command("stop", stop_status);
@@ -1784,7 +1997,9 @@ void register_nfqws_handler_impl(
                     component_capture_state_name(
                         restore_point_state)},
                    {"upgrade_capability",
-                    nfqws_upgrade_capability(package_metadata_verified)},
+                    nfqws_upgrade_capability(
+                        package_metadata_verified,
+                        cached_exact_previous_ipk(version))},
                    {"restore_capability",
                     nlohmann::json{
                         {"available",
@@ -1936,6 +2151,12 @@ void register_nfqws_handler_impl(
             const auto footprint_before = require_nfqws_footprint();
             const auto config_before = observe_nfqws_config();
             const auto runtime_before = observe_nfqws_runtime();
+            // What opkg says is installed right now. This is the version an
+            // exact rollback must reinstall, and the version whose IPK is
+            // retained while the feed still serves it. Read before the
+            // journal exists: a timeout here refuses the upgrade with
+            // nothing written and nothing touched.
+            const auto version_before = installed_version();
 
             ComponentTransactionRecord record;
             record.component = "nfqws2-keenetic";
@@ -1951,6 +2172,7 @@ void register_nfqws_handler_impl(
             record.binary_sha256 = installed_binary_digest(footprint_before);
             record.config_sha256 = config_before.active_sha256;
             record.runtime_was_running = runtime_before.process_present;
+            record.previous_version = version_before;
             record.owner_is_operation_process = false;
             write_nfqws_transaction(record);
 
@@ -2008,6 +2230,9 @@ void register_nfqws_handler_impl(
             bool package_command_returned = false;
             bool termination_uncertain = false;
             bool recovery_safe = false;
+            bool previous_exact = false;
+            bool package_metadata_restored = false;
+            std::string target_version;
 
             // This is the single exception boundary after the durable journal
             // says opkg may mutate the component. Every command, observation,
@@ -2017,12 +2242,38 @@ void register_nfqws_handler_impl(
             // with a mutated package and only the firewall guard left to run.
             const auto post_mutation = guard_nfqws_post_mutation(
                 [&]() {
-                    const auto opkg = run_bounded_nfqws_opkg_upgrade();
+                    const auto opkg = run_bounded_nfqws_opkg_upgrade(
+                        version_before,
+                        [&](const BoundedOpkgUpgradeResult& prepared) {
+                            // Still nothing mutated. Record which versions
+                            // the install is about to move between and
+                            // whether the previous one is held byte-exact,
+                            // so a reboot from here on leaves a journal a
+                            // recovery can act on rather than guess from.
+                            record.target_version = prepared.target_version;
+                            record.exact_previous_ipk = prepared.previous_exact;
+                            try {
+                                write_nfqws_transaction(record);
+                            } catch (const std::exception& error) {
+                                output += std::string(
+                                              "Journal write failed: ") +
+                                          error.what() + "\n";
+                                return false;
+                            }
+                            return true;
+                        });
                     package_command_returned = true;
                     package_mutation_started = opkg.upgrade_started;
                     termination_uncertain = opkg.termination_uncertain;
+                    previous_exact = opkg.previous_exact;
+                    target_version = opkg.target_version;
                     status = opkg.status;
                     output += opkg.output;
+                    // The store may have gained the installed version's
+                    // own IPK during preparation; the status page should
+                    // not keep saying otherwise for half a minute.
+                    (void)cached_exact_previous_ipk(version_before,
+                                                    /*force=*/true);
 
                     if (termination_uncertain) {
                         output +=
@@ -2044,9 +2295,12 @@ void register_nfqws_handler_impl(
                     // requested upgrade fail.
                     if (!package_mutation_started) {
                         output +=
-                            "\nopkg upgrade nfqws2-keenetic was not started; "
-                            "the installed component was not mutated and no "
-                            "captured-file recovery was needed.\n";
+                            opkg.up_to_date
+                                ? "\nNothing to install; the installed "
+                                  "component was not mutated.\n"
+                                : "\nopkg install was not started; the "
+                                  "installed component was not mutated and "
+                                  "no captured-file recovery was needed.\n";
                         return false;
                     }
 
@@ -2120,11 +2374,43 @@ void register_nfqws_handler_impl(
                                 "\nThe installed nfqws2 version could not be "
                                 "verified; attempting the captured-file "
                                 "restore.\n";
+                        } else if (!target_version.empty() &&
+                                   version != target_version) {
+                            // opkg returned success but the package database
+                            // does not name the file that was installed.
+                            // That is not an upgrade that can be trusted.
+                            component_broken = true;
+                            output +=
+                                "\nopkg reports version " + version +
+                                " after installing " + target_version +
+                                "; attempting the captured-file restore.\n";
                         } else {
                             output +=
                                 "\nInstalled nfqws2 version: " + version +
                                 "\n";
                         }
+                    }
+                    if (!component_broken) {
+                        // The candidate is proven installed: it is now the
+                        // exact copy of the installed version, and what was
+                        // installed before becomes the exact copy of the
+                        // previous one. A store failure here does not undo a
+                        // verified upgrade; the next status read simply finds
+                        // no exact copy and says so.
+                        try {
+                            ComponentIpkStore store(kComponentStoreRoot,
+                                                    kNfqwsPackage);
+                            store.promote_candidate();
+                            output += "Exact copy of " + target_version +
+                                      " retained for future rollback.\n";
+                        } catch (const std::exception& error) {
+                            output +=
+                                std::string("The installed package's exact "
+                                            "copy could not be retained: ") +
+                                error.what() + "\n";
+                        }
+                        (void)cached_exact_previous_ipk(target_version,
+                                                        /*force=*/true);
                     }
                     if (!component_broken) {
                         created = save_updated_default_strategy(
@@ -2135,7 +2421,8 @@ void register_nfqws_handler_impl(
                 },
                 [&]() {
                     return restore_nfqws_capture_after_failed_upgrade(
-                        record, progress, output);
+                        record, progress, output, version_before,
+                        previous_exact, package_metadata_restored);
                 },
                 [&]() { return recovery_safe; });
 
@@ -2165,21 +2452,38 @@ void register_nfqws_handler_impl(
                     "to prove that mutation had stopped. The transaction "
                     "record was retained for manual recovery.\n";
             }
+            const bool exact_rollback_verified =
+                rolled_back && package_metadata_restored;
             const bool package_metadata_unverified =
-                package_mutation_started && rolled_back;
+                package_mutation_started && rolled_back &&
+                !exact_rollback_verified;
             if (package_metadata_unverified) {
                 output +=
                     "\nThe captured files and runtime were restored, but opkg "
                     "metadata and files introduced by the package were not. "
                     "The transaction remains degraded and web upgrades stay "
                     "blocked until the package state is repaired manually.\n";
+            } else if (exact_rollback_verified) {
+                output +=
+                    "\nThe exact previous package, its captured files and "
+                    "the runtime were restored; the component is back to "
+                    "version " + version_before + ".\n";
+                // Leftover candidate bytes are no longer a target for
+                // anything; the next upgrade verifies a fresh download.
+                try {
+                    ComponentIpkStore store(kComponentStoreRoot,
+                                            kNfqwsPackage);
+                    store.discard(IpkSlot::candidate);
+                } catch (...) {
+                }
             }
             bool journal_cleared = false;
             if (should_clear_nfqws_upgrade_journal(
                     component_broken,
                     package_mutation_started,
                     rolled_back,
-                    termination_uncertain)) {
+                    termination_uncertain,
+                    exact_rollback_verified)) {
                 journal_cleared =
                     clear_nfqws_transaction();
             }
@@ -2273,6 +2577,29 @@ void register_nfqws_handler_impl(
             for (const auto& failure : captured.failed) {
                 output += "Could not capture: " + failure + "\n";
             }
+            // The exact IPK belongs to the restore point as much as the
+            // files do, and unlike the files it has an expiry: the feed
+            // serves only its latest version. Fetch it now, while "now" is
+            // still in time. A feed that cannot be reached leaves the file
+            // capture exactly as valid as it was; only the IPK is missing,
+            // and the result says so.
+            bool exact_previous_ipk = false;
+            const auto retained_version = installed_version();
+            if (retained_version.empty()) {
+                output += "The installed version could not be read; no exact "
+                          "package copy was retained.\n";
+            } else {
+                ComponentIpkStore store(kComponentStoreRoot, kNfqwsPackage);
+                ComponentPackageTransaction transaction(
+                    nfqws_package_options(NfqwsPackagePaths{}), store,
+                    run_nfqws_package_command);
+                const auto retention =
+                    transaction.retain_installed(retained_version);
+                output += retention.output;
+                exact_previous_ipk = retention.previous_exact;
+                (void)cached_exact_previous_ipk(retained_version,
+                                                /*force=*/true);
+            }
             // The verdict comes from re-reading the store, not from the write
             // having returned. What matters is whether a restore could use it.
             output += "Restore point: ";
@@ -2290,7 +2617,10 @@ void register_nfqws_handler_impl(
                 {"output", output},
                 {"captured", captured.captured},
                 {"failed", captured.failed.size()},
+                // Manual restore still writes files only; the exact IPK is
+                // used by the upgrade path's rollback.
                 {"exact_package_state", false},
+                {"exact_previous_ipk", exact_previous_ipk},
                 {"restore_point", component_capture_state_name(state)}}
                 .dump();
         }
@@ -2721,15 +3051,38 @@ assess_nfqws_post_upgrade_footprint_for_testing(
 
 NfqwsBoundedOpkgTestResult run_nfqws_bounded_opkg_for_testing(
     std::function<ExecCaptureResult(
-        const std::vector<std::string>&, SafeExecTimeouts)> execute) {
-    const auto result = run_bounded_nfqws_opkg_upgrade(execute);
+        const std::vector<std::string>&, SafeExecTimeouts)> execute,
+    const std::string& installed_version,
+    const std::string& store_root,
+    const std::string& feed_list) {
+    NfqwsPackagePaths paths;
+    paths.store_root = store_root;
+    paths.feed_list = feed_list;
+    const auto result =
+        run_bounded_nfqws_opkg_upgrade(execute, installed_version, paths);
     return NfqwsBoundedOpkgTestResult{
         result.output,
         result.status,
         result.timed_out,
         result.termination_uncertain,
         result.upgrade_started,
+        result.up_to_date,
+        result.previous_exact,
+        result.target_version,
     };
+}
+
+bool reinstall_exact_previous_nfqws_package_for_testing(
+    std::function<ExecCaptureResult(
+        const std::vector<std::string>&, SafeExecTimeouts)> execute,
+    const std::string& expected_version,
+    std::function<std::string()> read_installed_version,
+    const std::string& store_root,
+    std::string& output) {
+    NfqwsPackagePaths paths;
+    paths.store_root = store_root;
+    return reinstall_exact_previous_nfqws_package(
+        expected_version, read_installed_version, output, execute, paths);
 }
 
 NfqwsPostMutationGuardTestResult guard_nfqws_post_mutation_for_testing(
@@ -2755,12 +3108,14 @@ bool should_clear_nfqws_upgrade_journal_for_testing(
     bool component_broken,
     bool package_mutation_started,
     bool rolled_back,
-    bool termination_uncertain) {
+    bool termination_uncertain,
+    bool exact_rollback_verified) {
     return should_clear_nfqws_upgrade_journal(
         component_broken,
         package_mutation_started,
         rolled_back,
-        termination_uncertain);
+        termination_uncertain,
+        exact_rollback_verified);
 }
 
 bool nfqws_package_metadata_verified_for_testing(

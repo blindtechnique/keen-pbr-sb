@@ -17,6 +17,14 @@ add_executable(keen-pbr-tests
   ../src/update/component_transaction_journal.cpp
   test_component_capture.cpp
   ../src/update/component_capture.cpp
+  test_component_feed_index.cpp
+  ../src/update/component_feed_index.cpp
+  test_component_ipk_store.cpp
+  ../src/update/component_ipk_store.cpp
+  test_component_package_transaction.cpp
+  ../src/update/component_package_transaction.cpp
+  test_component_boot_recovery.cpp
+  ../src/update/component_boot_recovery.cpp
   test_targeted_probe_admission.cpp
   test_ttl_bypass.cpp
   test_nftables_builder.cpp

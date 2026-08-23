@@ -53,6 +53,9 @@ ComponentTransactionRecord sample_record() {
     record.binary_sha256 = std::string(64, 'a');
     record.config_sha256 = std::string(64, 'b');
     record.runtime_was_running = true;
+    record.previous_version = "1.2.4";
+    record.target_version = "1.2.5";
+    record.exact_previous_ipk = true;
     return record;
 }
 
@@ -191,6 +194,9 @@ TEST_CASE("a written record survives and reads back exactly") {
     CHECK(status.record->binary_sha256 == written.binary_sha256);
     CHECK(status.record->config_sha256 == written.config_sha256);
     CHECK(status.record->runtime_was_running);
+    CHECK(status.record->previous_version == "1.2.4");
+    CHECK(status.record->target_version == "1.2.5");
+    CHECK(status.record->exact_previous_ipk);
     // The record is private: it names what was installed and can be read to
     // learn what an interrupted upgrade was doing.
     struct stat info {};
@@ -274,6 +280,11 @@ TEST_CASE("optional detail is allowed to be missing without losing the record") 
     CHECK(status.record->started_at == 0);
     CHECK(status.record->binary_sha256.empty());
     CHECK_FALSE(status.record->runtime_was_running);
+    // Records from before the package versions were written carry none, and
+    // recovery must not invent an exact copy it was never promised.
+    CHECK(status.record->previous_version.empty());
+    CHECK(status.record->target_version.empty());
+    CHECK_FALSE(status.record->exact_previous_ipk);
 }
 
 TEST_CASE("clearing is confirmed by looking, not by trusting the call") {

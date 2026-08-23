@@ -7,15 +7,19 @@
 #include "api_context_test_support.hpp"
 #include "api/handler_nfqws.hpp"
 #include "api/sse_broadcaster.hpp"
+#include "crypto/sha256.hpp"
+#include "update/component_ipk_store.hpp"
 #include "util/nfqws_validator.hpp"
 
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <vector>
 #include <unistd.h>
 
@@ -283,7 +287,9 @@ TEST_CASE("nfqws guarded upgrade acquires the lease before every mutation") {
     CHECK(capability.at("available").get<bool>());
     CHECK(capability.at("mode") == "guarded_opkg");
     CHECK_FALSE(capability.at("exact_previous_ipk").get<bool>());
-    CHECK_FALSE(capability.at("verified_target_ipk").get<bool>());
+    // The path verifies every target against the feed index; what it cannot
+    // promise without the store is an exact copy of the installed version.
+    CHECK(capability.at("verified_target_ipk").get<bool>());
     CHECK_FALSE(capability.at("exact_opkg_metadata_rollback").get<bool>());
     CHECK_FALSE(capability.at("boot_recovery").get<bool>());
     CHECK_FALSE(capability.at("limitation").get<std::string>().empty());
@@ -341,39 +347,132 @@ TEST_CASE("post-opkg footprint faults require captured-file recovery") {
     }
 }
 
-TEST_CASE("nfqws opkg upgrade uses fixed argv and classifies timeout as unknown") {
+namespace {
+
+// A feed index and a fake opkg for the package sequence, so the seam tests
+// drive the same verification path production does without a network or a
+// package manager.
+struct NfqwsPackageFixture {
+    std::filesystem::path root;
+    std::string served_bytes;
+    std::string served_filename;
     std::vector<std::vector<std::string>> commands;
     std::vector<SafeExecTimeouts> deadlines;
-    std::size_t call = 0;
-    const auto result = run_nfqws_bounded_opkg_for_testing(
-        [&](const std::vector<std::string>& argv,
-            SafeExecTimeouts timeout) {
+
+    NfqwsPackageFixture() {
+        std::string pattern = "/tmp/keen-pbr-nfqws-pkg-XXXXXX";
+        REQUIRE(::mkdtemp(&pattern[0]) != nullptr);
+        root = pattern;
+    }
+    ~NfqwsPackageFixture() {
+        std::error_code error;
+        std::filesystem::remove_all(root, error);
+    }
+
+    static std::string digest(const std::string& bytes) {
+        Sha256 hasher;
+        hasher.update(bytes);
+        return hasher.hex_digest();
+    }
+
+    std::string store_root() const { return (root / "components").string(); }
+    std::string feed_list() const { return (root / "feed-list").string(); }
+
+    void serve(const std::string& version, const std::string& bytes) {
+        served_bytes = bytes;
+        served_filename = "nfqws2-keenetic_" + version + "_all_entware.ipk";
+        std::ofstream feed(feed_list(), std::ios::trunc);
+        feed << "Package: nfqws2-keenetic\nVersion: " << version
+             << "\nArchitecture: all\nFilename: " << served_filename
+             << "\nSize: " << bytes.size() << "\nSHA256sum: " << digest(bytes)
+             << "\nDescription: test\n\n";
+    }
+
+    // Retain `version` as the store's current slot, the way a finished
+    // earlier transaction would have left it.
+    void retain_current(const std::string& version, const std::string& bytes) {
+        ComponentIpkStore store(store_root(), "nfqws2-keenetic");
+        FeedPackageEntry entry;
+        entry.package = "nfqws2-keenetic";
+        entry.version = version;
+        entry.filename = "nfqws2-keenetic_" + version + "_all_entware.ipk";
+        entry.size = bytes.size();
+        entry.sha256 = digest(bytes);
+        store.adopt(IpkSlot::current, bytes, entry);
+    }
+
+    // `install_outcome` shapes the opkg install result; every other command
+    // behaves like a healthy opkg.
+    std::function<ExecCaptureResult(const std::vector<std::string>&,
+                                    SafeExecTimeouts)>
+    executor(std::function<ExecCaptureResult()> install_outcome) {
+        return [this, install_outcome](const std::vector<std::string>& argv,
+                                       SafeExecTimeouts timeout) {
             commands.push_back(argv);
             deadlines.push_back(timeout);
             ExecCaptureResult execution;
-            if (call++ == 0U) {
+            REQUIRE(argv.size() >= 2U);
+            if (argv[1] == "update") {
                 execution.exit_code = 0;
                 execution.stdout_output = "feed updated\n";
                 return execution;
             }
+            if (argv[1] == "-c") {
+                REQUIRE(argv.size() == 7U);
+                std::ofstream file(std::filesystem::path(argv[4]) /
+                                       served_filename,
+                                   std::ios::binary | std::ios::trunc);
+                file << served_bytes;
+                execution.exit_code = 0;
+                return execution;
+            }
+            if (argv[1] == "install") return install_outcome();
+            FAIL("unexpected package command " << argv[1]);
+            return execution;
+        };
+    }
+};
+
+} // namespace
+
+TEST_CASE("nfqws opkg upgrade uses fixed argv and classifies timeout as unknown") {
+    NfqwsPackageFixture fixture;
+    fixture.retain_current("1.2.4", "bytes of 1.2.4");
+    fixture.serve("1.2.5", "bytes of 1.2.5");
+    const auto result = run_nfqws_bounded_opkg_for_testing(
+        fixture.executor([] {
+            ExecCaptureResult execution;
             execution.exit_code = -1;
             execution.stdout_output = "maintainer script started\n";
             execution.timed_out = true;
             return execution;
-        });
+        }),
+        "1.2.4", fixture.store_root(), fixture.feed_list());
 
-    REQUIRE(commands.size() == 2U);
-    CHECK(commands[0] ==
+    REQUIRE(fixture.commands.size() == 3U);
+    CHECK(fixture.commands[0] ==
           std::vector<std::string>{"/opt/bin/opkg", "update"});
-    CHECK(commands[1] == std::vector<std::string>{
-                              "/opt/bin/opkg",
-                              "upgrade",
-                              "nfqws2-keenetic"});
-    REQUIRE(deadlines.size() == 2U);
-    CHECK(deadlines[0].timeout == std::chrono::minutes{10});
-    CHECK(deadlines[0].kill_grace == std::chrono::seconds{5});
-    CHECK(deadlines[1].timeout == std::chrono::minutes{10});
+    // The download is wrapped in a shell `cd` because opkg writes into the
+    // working directory; the directory and package are positional, never
+    // part of the script.
+    CHECK(fixture.commands[1][0] == "/bin/sh");
+    CHECK(fixture.commands[1][2] == "cd \"$1\" && exec \"$2\" download \"$3\"");
+    CHECK(fixture.commands[1][5] == "/opt/bin/opkg");
+    CHECK(fixture.commands[1][6] == "nfqws2-keenetic");
+    // Installed from the verified file, not from whatever the feed serves
+    // by the time opkg looks again.
+    CHECK(fixture.commands[2] == std::vector<std::string>{
+                                     "/opt/bin/opkg", "install",
+                                     fixture.store_root() +
+                                         "/nfqws2-keenetic/candidate.ipk"});
+    REQUIRE(fixture.deadlines.size() == 3U);
+    for (const auto& deadline : fixture.deadlines) {
+        CHECK(deadline.timeout == std::chrono::minutes{10});
+        CHECK(deadline.kill_grace == std::chrono::seconds{5});
+    }
     CHECK(result.upgrade_started);
+    CHECK(result.previous_exact);
+    CHECK(result.target_version == "1.2.5");
     CHECK(result.timed_out);
     CHECK_FALSE(result.termination_uncertain);
     CHECK(result.status != 0);
@@ -393,21 +492,108 @@ TEST_CASE("nfqws opkg upgrade uses fixed argv and classifies timeout as unknown"
     CHECK(recovery_calls == 1U);
 }
 
-TEST_CASE("uncertain opkg termination forbids observation and recovery") {
-    std::size_t call = 0;
+TEST_CASE("nfqws opkg upgrade refuses a target the feed index does not vouch for") {
+    NfqwsPackageFixture fixture;
+    fixture.serve("1.2.5", "bytes of 1.2.5");
+    fixture.served_bytes = "bytes of something else";
+    bool install_ran = false;
     const auto result = run_nfqws_bounded_opkg_for_testing(
-        [&](const std::vector<std::string>&,
-            SafeExecTimeouts) {
+        fixture.executor([&] {
+            install_ran = true;
+            return ExecCaptureResult{};
+        }),
+        "1.2.4", fixture.store_root(), fixture.feed_list());
+
+    CHECK_FALSE(install_ran);
+    CHECK_FALSE(result.upgrade_started);
+    CHECK(result.status != 0);
+    CHECK(result.output.find("refused") != std::string::npos);
+    CHECK(fixture.commands.size() == 2U);
+    // No exact copy of 1.2.4 could be retained either: the feed serves
+    // only 1.2.5.
+    CHECK_FALSE(result.previous_exact);
+}
+
+TEST_CASE("nfqws opkg upgrade retains the installed ipk while the feed still serves it") {
+    NfqwsPackageFixture fixture;
+    fixture.serve("1.2.4", "bytes of 1.2.4");
+    bool install_ran = false;
+    const auto result = run_nfqws_bounded_opkg_for_testing(
+        fixture.executor([&] {
+            install_ran = true;
+            return ExecCaptureResult{};
+        }),
+        "1.2.4", fixture.store_root(), fixture.feed_list());
+
+    CHECK_FALSE(install_ran);
+    CHECK_FALSE(result.upgrade_started);
+    CHECK(result.up_to_date);
+    CHECK(result.status == 0);
+    CHECK(result.previous_exact);
+    ComponentIpkStore store(fixture.store_root(), "nfqws2-keenetic");
+    const auto current = store.inspect(IpkSlot::current);
+    REQUIRE(current.state == IpkSlotState::usable);
+    CHECK(current.retained->version == "1.2.4");
+}
+
+TEST_CASE("exact previous package reinstall is proven by opkg naming the version again") {
+    NfqwsPackageFixture fixture;
+    fixture.retain_current("1.2.4", "bytes of 1.2.4");
+    std::string reported_version = "1.2.4";
+    std::string output;
+    const auto executor = fixture.executor([] {
+        ExecCaptureResult execution;
+        execution.exit_code = 0;
+        execution.stdout_output = "Installing nfqws2-keenetic (1.2.4)\n";
+        return execution;
+    });
+
+    SUBCASE("success") {
+        CHECK(reinstall_exact_previous_nfqws_package_for_testing(
+            executor, "1.2.4", [&] { return reported_version; },
+            fixture.store_root(), output));
+        REQUIRE(fixture.commands.size() == 1U);
+        CHECK(fixture.commands[0] == std::vector<std::string>{
+                                         "/opt/bin/opkg", "install",
+                                         "--force-downgrade",
+                                         "--force-reinstall",
+                                         fixture.store_root() +
+                                             "/nfqws2-keenetic/current.ipk"});
+        CHECK(output.find("opkg metadata restored") != std::string::npos);
+    }
+    SUBCASE("opkg success but the database names another version") {
+        reported_version = "1.2.5";
+        CHECK_FALSE(reinstall_exact_previous_nfqws_package_for_testing(
+            executor, "1.2.4", [&] { return reported_version; },
+            fixture.store_root(), output));
+        CHECK(output.find("not proven restored") != std::string::npos);
+    }
+    SUBCASE("the store holds a different version than expected") {
+        CHECK_FALSE(reinstall_exact_previous_nfqws_package_for_testing(
+            executor, "1.2.3", [&] { return reported_version; },
+            fixture.store_root(), output));
+        CHECK(fixture.commands.empty());
+    }
+    SUBCASE("the pre-upgrade version was unknown") {
+        CHECK_FALSE(reinstall_exact_previous_nfqws_package_for_testing(
+            executor, "", [&] { return reported_version; },
+            fixture.store_root(), output));
+        CHECK(fixture.commands.empty());
+    }
+}
+
+TEST_CASE("uncertain opkg termination forbids observation and recovery") {
+    NfqwsPackageFixture fixture;
+    fixture.serve("1.2.5", "bytes of 1.2.5");
+    const auto result = run_nfqws_bounded_opkg_for_testing(
+        fixture.executor([] {
             ExecCaptureResult execution;
-            if (call++ == 0U) {
-                execution.exit_code = 0;
-                return execution;
-            }
             execution.exit_code = -1;
             execution.timed_out = true;
             execution.termination_uncertain = true;
             return execution;
-        });
+        }),
+        "1.2.4", fixture.store_root(), fixture.feed_list());
 
     REQUIRE(result.upgrade_started);
     CHECK(result.timed_out);
@@ -454,6 +640,30 @@ TEST_CASE("nfqws journal remains degraded after file-only package recovery") {
             /*package_mutation_started=*/true,
             /*rolled_back=*/true,
             /*termination_uncertain=*/false));
+    }
+
+    SUBCASE("an exact reinstall of the previous ipk does") {
+        CHECK(should_clear_nfqws_upgrade_journal_for_testing(
+            /*component_broken=*/true,
+            /*package_mutation_started=*/true,
+            /*rolled_back=*/true,
+            /*termination_uncertain=*/false,
+            /*exact_rollback_verified=*/true));
+        // But only when the captured files and runtime came back too; the
+        // reinstall alone proves the package database, not the component.
+        CHECK_FALSE(should_clear_nfqws_upgrade_journal_for_testing(
+            /*component_broken=*/true,
+            /*package_mutation_started=*/true,
+            /*rolled_back=*/false,
+            /*termination_uncertain=*/false,
+            /*exact_rollback_verified=*/true));
+        // And never over an uncertain mutator.
+        CHECK_FALSE(should_clear_nfqws_upgrade_journal_for_testing(
+            /*component_broken=*/true,
+            /*package_mutation_started=*/true,
+            /*rolled_back=*/true,
+            /*termination_uncertain=*/true,
+            /*exact_rollback_verified=*/true));
     }
 
     SUBCASE("an uncertain live mutator can never authorize finalization") {
