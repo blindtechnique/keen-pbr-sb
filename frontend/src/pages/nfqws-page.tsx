@@ -637,20 +637,28 @@ export function NfqwsPage() {
                   </AlertTitle>
                   <AlertDescription>
                     {t("nfqws.interruptedTransactionDescription")}
-                    {/* The daemon already looked at this journal at boot.
-                        Without this line "did not finish" reads as "nobody
-                        did anything", when in truth a recovery ran and
-                        deliberately kept the journal. */}
+                    {/* The daemon already looked at this journal at boot -
+                        the backend only publishes the record when it talks
+                        about this very journal. Without this line "did not
+                        finish" reads as "nobody did anything"; the wording
+                        must still not overclaim, so a failed recovery says
+                        failed, not "kept on purpose". */}
                     {status.upgrade_capability?.boot_recovery_last ? (
                       <>
                         {" "}
-                        {t("nfqws.bootRecoveryRan", {
-                          plan: status.upgrade_capability.boot_recovery_last
-                            .plan,
-                          outcome:
-                            status.upgrade_capability.boot_recovery_last
-                              .outcome,
-                        })}
+                        {t(
+                          status.upgrade_capability.boot_recovery_last
+                            .outcome === "failed"
+                            ? "nfqws.bootRecoveryFailed"
+                            : "nfqws.bootRecoveryRan",
+                          {
+                            plan: status.upgrade_capability.boot_recovery_last
+                              .plan,
+                            outcome:
+                              status.upgrade_capability.boot_recovery_last
+                                .outcome,
+                          },
+                        )}
                       </>
                     ) : null}
                   </AlertDescription>

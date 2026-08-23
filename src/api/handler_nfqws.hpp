@@ -8,8 +8,10 @@
 #include "../update/component_boot_recovery.hpp"
 #include "../update/maintenance_lock.hpp"
 
+#include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 
 #ifdef KEEN_PBR3_TESTING
@@ -56,6 +58,21 @@ struct NfqwsBootRecoveryResult {
     // The operator log of what ran, bounded.
     std::string output;
     bool journal_cleared{false};
+    // Which journal this answered: its started_at and operation. A journal
+    // that stays on disk (journal_retained, failed) must not be answered
+    // again at the next daemon start - re-running a reinstall against a
+    // package the operator has since repaired by hand would downgrade the
+    // repair. Zero/empty when the journal carried no record.
+    std::int64_t journal_started_at{0};
+    std::string journal_operation;
+};
+
+// The durable record of a previous run's answer, as much of it as the skip
+// decision needs.
+struct NfqwsBootRecoveryLastAnswer {
+    std::int64_t journal_started_at{0};
+    std::string journal_operation;
+    std::string outcome;
 };
 
 // Runs the boot-time recovery of an interrupted nfqws2 package transaction:
@@ -77,6 +94,9 @@ struct NfqwsBootRecoveryStepResult {
 
 struct NfqwsBootRecoveryHooks {
     std::function<ComponentTransactionStatus()> read_journal;
+    // What a previous run answered, if anything; nullopt when none.
+    std::function<std::optional<NfqwsBootRecoveryLastAnswer>()>
+        read_last_answer;
     // nullptr means busy; other failures throw MaintenanceLockError.
     std::function<std::unique_ptr<MaintenanceLease>()> acquire_lease;
     std::function<IpkSlotInspection()> inspect_current_ipk;

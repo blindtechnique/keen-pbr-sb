@@ -30,6 +30,8 @@ export const enTranslation = {
       "Nothing to restore yet. Files are saved automatically just before an upgrade started from this panel.",
     bootRecoveryRan:
       "The daemon already examined this record at startup: plan \"{{plan}}\", outcome \"{{outcome}}\". The journal is kept on purpose - the exact package state is not proven.",
+    bootRecoveryFailed:
+      "At startup the daemon attempted a recovery (plan \"{{plan}}\") and it did not succeed. The journal is kept: the exact package state is not proven.",
     interruptedTransactionTitle: "A package operation did not finish",
     interruptedTransactionDescription:
       "An upgrade or restore of nfqws2 started and never reported an end — most likely the router restarted while it was running. Check that nfqws2 works before upgrading again; the next upgrade will refuse until this is resolved.",

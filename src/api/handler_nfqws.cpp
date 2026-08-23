@@ -1000,19 +1000,36 @@ std::optional<nlohmann::json> read_nfqws_boot_recovery_record();
 
 nlohmann::json nfqws_upgrade_capability(
     bool package_metadata_verified,
-    bool exact_previous_ipk) {
+    bool exact_previous_ipk,
+    const ComponentTransactionStatus* journal) {
     // What the last boot-time recovery decided and did, when one ran. The
     // page cannot tell "nothing ran" from "ran and had to keep the journal"
-    // by the journal alone; this is the difference.
+    // by the journal alone; this is the difference. Published only when the
+    // record demonstrably talks about the journal being shown: either no
+    // journal remains (the record describes the run that cleared it), or
+    // the identities match. A record about some earlier journal next to a
+    // fresh interruption - or next to one this daemon has not looked at
+    // yet - would claim an examination that never happened.
     nlohmann::json boot_recovery_last = nullptr;
     if (const auto record = read_nfqws_boot_recovery_record()) {
-        boot_recovery_last = nlohmann::json{
-            {"at", record->value("at", std::int64_t{0})},
-            {"outcome", record->value("outcome", std::string{})},
-            {"plan", record->value("plan", std::string{})},
-            {"reason", record->value("reason", std::string{})},
-            {"journal_cleared", record->value("journal_cleared", false)},
-        };
+        const bool describes_shown_journal =
+            journal == nullptr ||
+            journal->state == ComponentTransactionState::none ||
+            (journal->record &&
+             journal->record->started_at != 0 &&
+             record->value("journal_started_at", std::int64_t{0}) ==
+                 journal->record->started_at &&
+             record->value("journal_operation", std::string{}) ==
+                 journal->record->operation);
+        if (describes_shown_journal) {
+            boot_recovery_last = nlohmann::json{
+                {"at", record->value("at", std::int64_t{0})},
+                {"outcome", record->value("outcome", std::string{})},
+                {"plan", record->value("plan", std::string{})},
+                {"reason", record->value("reason", std::string{})},
+                {"journal_cleared", record->value("journal_cleared", false)},
+            };
+        }
     }
     return nlohmann::json{
         {"available", package_metadata_verified},
@@ -2010,6 +2027,12 @@ void write_nfqws_boot_recovery_record(
             {"plan", result.plan},
             {"reason", result.reason},
             {"journal_cleared", result.journal_cleared},
+            // The answered journal's identity, so the next start can tell
+            // "same journal, already answered" from a new interruption, and
+            // the status page can tell whether this record describes the
+            // journal it is showing.
+            {"journal_started_at", result.journal_started_at},
+            {"journal_operation", result.journal_operation},
             {"output", output},
         };
         AtomicFileWriteOptions options;
@@ -2053,6 +2076,29 @@ NfqwsBootRecoveryResult run_nfqws_boot_recovery_with(
             result.outcome = NfqwsBootRecoveryOutcome::nothing_to_do;
             return result;
         }
+        // A journal that stays on disk after an answer (journal_retained,
+        // failed) would otherwise be answered again at every daemon start -
+        // and a reinstall plan re-derived from it would downgrade whatever
+        // the operator has repaired by hand since. One journal gets one
+        // answer; the durable record's identity says whether this is the
+        // same journal.
+        if (glance.record && hooks.read_last_answer) {
+            const auto answered = hooks.read_last_answer();
+            if (answered && answered->journal_started_at != 0 &&
+                answered->journal_started_at == glance.record->started_at &&
+                answered->journal_operation == glance.record->operation) {
+                result.plan = component_boot_recovery_action_name(
+                    ComponentBootRecoveryAction::none);
+                result.reason =
+                    "this journal was already answered at a previous start "
+                    "(outcome " + answered->outcome + "); it stays until the "
+                    "package state is repaired and acknowledged";
+                result.outcome = NfqwsBootRecoveryOutcome::nothing_to_do;
+                // Deliberately not recorded: the matching record must keep
+                // describing the run that actually acted.
+                return result;
+            }
+        }
     }
 
     // Lease first, then the in-process mutex: the order every nfqws
@@ -2087,6 +2133,10 @@ NfqwsBootRecoveryResult run_nfqws_boot_recovery_with(
     evidence.capture = hooks.capture_state();
     evidence.installed_version = hooks.installed_version();
     evidence.installed_binary_sha256 = hooks.installed_binary_sha256();
+    if (evidence.journal.record) {
+        result.journal_started_at = evidence.journal.record->started_at;
+        result.journal_operation = evidence.journal.record->operation;
+    }
     const auto plan = decide_component_boot_recovery(evidence);
     result.plan = component_boot_recovery_action_name(plan.action);
     result.reason = plan.reason;
@@ -2164,6 +2214,18 @@ NfqwsBootRecoveryHooks production_nfqws_boot_recovery_hooks(ApiContext& ctx) {
     hooks.read_journal = [] {
         return read_component_transaction(kNfqwsJournal);
     };
+    hooks.read_last_answer =
+        []() -> std::optional<NfqwsBootRecoveryLastAnswer> {
+        const auto record = read_nfqws_boot_recovery_record();
+        if (!record) return std::nullopt;
+        NfqwsBootRecoveryLastAnswer answer;
+        answer.journal_started_at =
+            record->value("journal_started_at", std::int64_t{0});
+        answer.journal_operation =
+            record->value("journal_operation", std::string{});
+        answer.outcome = record->value("outcome", std::string{});
+        return answer;
+    };
     hooks.acquire_lease = [&ctx]() -> std::unique_ptr<MaintenanceLease> {
         return ctx.acquire_maintenance_lease("nfqws-boot-recovery");
     };
@@ -2191,11 +2253,20 @@ NfqwsBootRecoveryHooks production_nfqws_boot_recovery_hooks(ApiContext& ctx) {
     hooks.installed_binary_sha256 = []() -> std::string {
         return rescue_integrity::sha256_file(kBinary).value_or(std::string{});
     };
-    hooks.execute_restore = [&ctx](const ComponentBootRecoveryPlan& plan,
-                                   const ComponentTransactionRecord& record,
-                                   std::string& output) {
+    // The progress stream must finish with the run's real outcome, which is
+    // known only after the journal-clear decision - not inside the restore
+    // step, whose local success ("files came back") is exactly what the
+    // outcomes journal_retained and failed exist to qualify. The slot hands
+    // the open progress from the step to the final record.
+    auto progress_slot =
+        std::make_shared<std::unique_ptr<TransactionProgress>>();
+    hooks.execute_restore = [&ctx, progress_slot](
+                                const ComponentBootRecoveryPlan& plan,
+                                const ComponentTransactionRecord& record,
+                                std::string& output) {
         NfqwsBootRecoveryStepResult step;
-        TransactionProgress progress(ctx, "boot-recovery");
+        *progress_slot =
+            std::make_unique<TransactionProgress>(ctx, "boot-recovery");
         // Stopping, restoring and starting nfqws2 changes its netfilter
         // footprint and possibly its process image: ask the control loop to
         // reconcile PPE/netfilter state afterwards, as the interactive path
@@ -2203,7 +2274,7 @@ NfqwsBootRecoveryHooks production_nfqws_boot_recovery_hooks(ApiContext& ctx) {
         NfqwsNetfilterRefreshGuard refresh_guard(ctx);
         try {
             step.rolled_back = restore_nfqws_capture_after_failed_upgrade(
-                record, progress, output, record.previous_version,
+                record, **progress_slot, output, record.previous_version,
                 plan.action == ComponentBootRecoveryAction::reinstall_previous,
                 step.package_metadata_restored);
         } catch (const std::exception& error) {
@@ -2211,7 +2282,6 @@ NfqwsBootRecoveryHooks production_nfqws_boot_recovery_hooks(ApiContext& ctx) {
                       error.what() + "\n";
             step.rolled_back = false;
         }
-        progress.finish(step.rolled_back ? "recovered" : "failed");
         (void)cached_restore_point_state(/*force=*/true);
         return step;
     };
@@ -2223,7 +2293,13 @@ NfqwsBootRecoveryHooks production_nfqws_boot_recovery_hooks(ApiContext& ctx) {
         } catch (...) {
         }
     };
-    hooks.record_result = [](const NfqwsBootRecoveryResult& result) {
+    hooks.record_result = [progress_slot](
+                              const NfqwsBootRecoveryResult& result) {
+        if (*progress_slot) {
+            (*progress_slot)
+                ->finish(nfqws_boot_recovery_outcome_name(result.outcome));
+            progress_slot->reset();
+        }
         write_nfqws_boot_recovery_record(result);
     };
     return hooks;
@@ -2347,7 +2423,8 @@ void register_nfqws_handler_impl(
                    {"upgrade_capability",
                     nfqws_upgrade_capability(
                         package_metadata_verified,
-                        cached_exact_previous_ipk(version))},
+                        cached_exact_previous_ipk(version),
+                        &published_snapshot.transaction)},
                    {"restore_capability",
                     nlohmann::json{
                         {"available",

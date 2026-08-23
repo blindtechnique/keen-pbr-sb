@@ -1807,9 +1807,10 @@ void Daemon::schedule_nfqws_boot_recovery(std::size_t attempt) {
     if (!api_ctx_ || !scheduler_) return;
     if (attempt >= kNfqwsBootRecoveryDelays.size()) {
         Logger::instance().warn(
-            "nfqws2 boot recovery: the maintenance lease stayed busy through "
-            "{} attempts; an interrupted package transaction, if any, is left "
-            "for the operator",
+            "nfqws2 boot recovery could not run within {} attempts (the "
+            "maintenance lease stayed busy, or the worker pool was "
+            "saturated); an interrupted package transaction, if any, is "
+            "left for the operator",
             attempt);
         return;
     }
@@ -1861,7 +1862,13 @@ void Daemon::schedule_nfqws_boot_recovery(std::size_t attempt) {
                     });
                 if (!posted) {
                     // The pool is saturated right after start; try again on
-                    // the next delay rather than losing the look entirely.
+                    // the next delay rather than losing the look entirely,
+                    // and say so - the give-up message must not blame the
+                    // lease for attempts that never ran.
+                    Logger::instance().info(
+                        "nfqws2 boot recovery: worker pool busy, attempt {} "
+                        "re-armed",
+                        attempt);
                     schedule_nfqws_boot_recovery(attempt + 1);
                 }
             },

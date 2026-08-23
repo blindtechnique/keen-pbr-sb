@@ -778,7 +778,14 @@ public:
 // Every input and effect of the boot-recovery orchestration, scripted.
 struct BootRecoveryFixture {
     ComponentTransactionStatus journal;
+    // When set, the journal the orchestration re-reads under the lease -
+    // pinning that decisions come from the leased read, not the free glance.
+    std::optional<ComponentTransactionStatus> journal_under_lease;
+    std::optional<NfqwsBootRecoveryLastAnswer> last_answer;
+    bool execute_throws{false};
     bool lease_busy{false};
+    bool lease_unsafe{false};
+    int journal_reads{0};
     int lease_acquisitions{0};
     IpkSlotInspection current_ipk;
     ComponentCaptureState capture{ComponentCaptureState::usable};
@@ -818,13 +825,25 @@ struct BootRecoveryFixture {
 
     NfqwsBootRecoveryHooks hooks() {
         NfqwsBootRecoveryHooks wired;
-        wired.read_journal = [this] { return journal; };
+        wired.read_journal = [this] {
+            ++journal_reads;
+            if (journal_reads > 1 && journal_under_lease) {
+                return *journal_under_lease;
+            }
+            return journal;
+        };
+        wired.read_last_answer = [this] { return last_answer; };
         wired.acquire_lease =
             [this]() -> std::unique_ptr<MaintenanceLease> {
             ++lease_acquisitions;
             if (lease_busy) {
                 throw MaintenanceLockError(MaintenanceLockErrorKind::busy,
                                            "held by S80");
+            }
+            if (lease_unsafe) {
+                throw MaintenanceLockError(
+                    MaintenanceLockErrorKind::unsafe_state,
+                    "helper left an unrecognized record");
             }
             return std::make_unique<BootRecoveryFakeLease>();
         };
@@ -837,6 +856,9 @@ struct BootRecoveryFixture {
                                        std::string& output) {
             ++execute_calls;
             executed_plan = plan;
+            if (execute_throws) {
+                throw std::runtime_error("service refused to stop");
+            }
             output += "restore ran\n";
             return step;
         };
@@ -978,6 +1000,128 @@ TEST_CASE("a journal that survives its own clear is reported as a failure") {
         run_nfqws_boot_recovery_for_testing(fixture.hooks());
     CHECK(result.outcome == NfqwsBootRecoveryOutcome::failed);
     CHECK_FALSE(result.journal_cleared);
+    REQUIRE(fixture.recorded.size() == 1U);
+}
+
+TEST_CASE("one journal gets one answer: an already-answered journal is left alone") {
+    // The journal from the interruption stayed on disk (journal_retained),
+    // the operator repaired the package by hand, the daemon restarted.
+    // Re-deriving a plan now would reinstall the old version over the
+    // repair; the recorded answer's identity forbids it.
+    BootRecoveryFixture fixture;
+    fixture.abandoned_journal(ComponentTransactionPhase::mutating);
+    fixture.journal.record->started_at = 1787500000;
+    fixture.exact_copy_retained();
+    fixture.version = "1.2.6";
+    NfqwsBootRecoveryLastAnswer answered;
+    answered.journal_started_at = 1787500000;
+    answered.journal_operation = "upgrade";
+    answered.outcome = "journal_retained";
+    fixture.last_answer = answered;
+
+    const auto result =
+        run_nfqws_boot_recovery_for_testing(fixture.hooks());
+    CHECK(result.outcome == NfqwsBootRecoveryOutcome::nothing_to_do);
+    CHECK(result.reason.find("already answered") != std::string::npos);
+    CHECK(fixture.lease_acquisitions == 0);
+    CHECK(fixture.execute_calls == 0);
+    CHECK(fixture.clear_calls == 0);
+    // The matching record keeps describing the run that acted.
+    CHECK(fixture.recorded.empty());
+
+    // A DIFFERENT journal (a new interruption) is acted on even though an
+    // old answer exists.
+    fixture.journal.record->started_at = 1787600000;
+    fixture.step.rolled_back = true;
+    fixture.step.package_metadata_restored = true;
+    const auto fresh = run_nfqws_boot_recovery_for_testing(fixture.hooks());
+    CHECK(fresh.outcome == NfqwsBootRecoveryOutcome::recovered);
+    CHECK(fresh.journal_started_at == 1787600000);
+    CHECK(fixture.execute_calls == 1);
+}
+
+TEST_CASE("the decision comes from the journal re-read under the lease") {
+    // Between the free glance and the lease, an operator's repair cleared
+    // the journal. Acting on the stale glance would run a rollback against
+    // a component nobody asked to touch.
+    BootRecoveryFixture fixture;
+    fixture.abandoned_journal(ComponentTransactionPhase::mutating);
+    fixture.exact_copy_retained();
+    fixture.journal_under_lease = ComponentTransactionStatus{};
+
+    const auto result =
+        run_nfqws_boot_recovery_for_testing(fixture.hooks());
+    CHECK(result.outcome == NfqwsBootRecoveryOutcome::nothing_to_do);
+    CHECK(result.plan == "none");
+    CHECK(fixture.execute_calls == 0);
+    CHECK(fixture.clear_calls == 0);
+    CHECK(fixture.journal_reads >= 2);
+}
+
+TEST_CASE("the restore_files plan needs no exact package and discards nothing") {
+    // Package provably unchanged (version and digest match the record):
+    // only the captured files come back, metadata was never in question.
+    BootRecoveryFixture fixture;
+    fixture.abandoned_journal(ComponentTransactionPhase::mutating,
+                              /*exact_previous=*/false);
+    fixture.version = "1.2.4";
+    fixture.binary_sha = std::string(64, 'a');
+    fixture.step.rolled_back = true;
+    fixture.step.package_metadata_restored = false;
+
+    const auto result =
+        run_nfqws_boot_recovery_for_testing(fixture.hooks());
+    CHECK(result.outcome == NfqwsBootRecoveryOutcome::recovered);
+    CHECK(result.plan == "restore_files");
+    CHECK(fixture.execute_calls == 1);
+    CHECK(fixture.discard_calls == 0);
+    CHECK(fixture.clear_calls == 1);
+    CHECK(result.journal_cleared);
+}
+
+TEST_CASE("a restore step that throws is a failure with the journal kept") {
+    BootRecoveryFixture fixture;
+    fixture.abandoned_journal(ComponentTransactionPhase::mutating);
+    fixture.exact_copy_retained();
+    fixture.version = "1.2.5";
+    fixture.execute_throws = true;
+
+    const auto result =
+        run_nfqws_boot_recovery_for_testing(fixture.hooks());
+    CHECK(result.outcome == NfqwsBootRecoveryOutcome::failed);
+    CHECK(result.output.find("service refused to stop") != std::string::npos);
+    CHECK(fixture.clear_calls == 0);
+    CHECK(fixture.discard_calls == 0);
+    REQUIRE(fixture.recorded.size() == 1U);
+}
+
+TEST_CASE("a restored component whose journal cannot be cleared is a failure") {
+    BootRecoveryFixture fixture;
+    fixture.abandoned_journal(ComponentTransactionPhase::mutating);
+    fixture.exact_copy_retained();
+    fixture.version = "1.2.5";
+    fixture.step.rolled_back = true;
+    fixture.step.package_metadata_restored = true;
+    fixture.clear_ok = false;
+
+    const auto result =
+        run_nfqws_boot_recovery_for_testing(fixture.hooks());
+    CHECK(result.outcome == NfqwsBootRecoveryOutcome::failed);
+    CHECK(fixture.execute_calls == 1);
+    CHECK(fixture.clear_calls == 1);
+    CHECK_FALSE(result.journal_cleared);
+}
+
+TEST_CASE("a lease failure that is not busy is final and recorded") {
+    BootRecoveryFixture fixture;
+    fixture.abandoned_journal(ComponentTransactionPhase::mutating);
+    fixture.lease_unsafe = true;
+    const auto result =
+        run_nfqws_boot_recovery_for_testing(fixture.hooks());
+    CHECK(result.outcome == NfqwsBootRecoveryOutcome::failed);
+    CHECK(result.output.find("unrecognized record") != std::string::npos);
+    CHECK(fixture.execute_calls == 0);
+    REQUIRE(fixture.recorded.size() == 1U);
 }
 
 TEST_CASE("every boot recovery outcome has a distinct stable name") {
