@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from "react"
 import { useTranslation } from "react-i18next"
+import { toast } from "sonner"
 
 import {
   TransportSpecType,
@@ -48,6 +49,7 @@ import { isSemanticallyDirty } from "@/lib/semantic-dirty"
 import { semanticJsonEqual } from "@/lib/semantic-json"
 import { NativeWireGuardImportFields } from "@/components/transports/native-wireguard-import-card"
 import {
+  NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID,
   stageNativeWireGuardImportCompletion,
   type NativeWireGuardImportedIdentity,
 } from "@/lib/native-wireguard-import-completion"
@@ -642,11 +644,14 @@ export function TransportConfigForm({
     // discard-draft question would be false and would delay route binding.
     setNativeImportSubmitted(true)
     if (nativeImportHandoffCloseTimerRef.current !== null) return
+    toast.loading(t("transports.nativeImport.importingToast"), {
+      id: NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID,
+    })
     nativeImportHandoffCloseTimerRef.current = window.setTimeout(() => {
       nativeImportHandoffCloseTimerRef.current = null
       complete()
     }, 900)
-  }, [complete])
+  }, [complete, t])
 
   useEffect(
     () => () => {

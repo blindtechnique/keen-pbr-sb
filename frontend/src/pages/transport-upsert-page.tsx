@@ -43,6 +43,7 @@ import { makeTechnicalId } from "@/lib/technical-id"
 import { readNativeTransportCreateInterface } from "@/lib/transport-upsert-route"
 import {
   clearStagedNativeWireGuardImportCompletion,
+  NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID,
   readStagedNativeWireGuardImportCompletion,
 } from "@/lib/native-wireguard-import-completion"
 import { resolveNativeWireGuardImportLocation } from "@/lib/native-wireguard-import-geo"
@@ -371,14 +372,20 @@ export function TransportUpsertPage({
             toast.success(
               t(
                 spec.type === TransportSpecType.native
-                  ? "transports.configMessages.nativeLinked"
+                  ? "transports.nativeImport.importedToast"
                   : "transports.configMessages.create"
-              )
+              ),
+              spec.type === TransportSpecType.native
+                ? { id: NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID }
+                : undefined
             )
             navigate("/transports")
           },
           onError: (mutationError) => {
             toast.error(getApiErrorMessage(mutationError), {
+              ...(spec.type === TransportSpecType.native
+                ? { id: NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID }
+                : {}),
               richColors: true,
             })
           },

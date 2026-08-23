@@ -78,12 +78,34 @@ test("background handoff paints progress and bypasses the discard-draft close", 
   const contextSource = await Bun.file(
     new URL("../src/components/shared/upsert-page-context.ts", import.meta.url)
   ).text()
+  const transportUpsertSource = await Bun.file(
+    new URL("../src/pages/transport-upsert-page.tsx", import.meta.url)
+  ).text()
+  const transportsSource = await Bun.file(
+    new URL("../src/pages/transports-page.tsx", import.meta.url)
+  ).text()
 
   expect(
     formSource.match(/onImportHandedOff={finishHandedOffNativeImport}/g)
   ).toHaveLength(2)
   expect(formSource).not.toContain("onImportHandedOff={close}")
   expect(formSource).toContain("}, 900)")
+  expect(formSource).toContain(
+    'toast.loading(t("transports.nativeImport.importingToast")'
+  )
+  expect(formSource).toContain("id: NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID")
+  expect(transportUpsertSource).toContain(
+    '"transports.nativeImport.importedToast"'
+  )
+  expect(transportUpsertSource).toContain(
+    "id: NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID"
+  )
+  expect(transportsSource).toContain(
+    'toast.success(t("transports.nativeImport.importedToast"), {'
+  )
+  expect(transportsSource).toContain(
+    "id: NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID"
+  )
   expect(pageSource).toContain(
     "const complete = useCallback(() => onClose?.(), [onClose])"
   )

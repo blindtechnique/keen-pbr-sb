@@ -110,6 +110,7 @@ import {
   buildStagedNativeWireGuardTransport,
   clearStagedNativeWireGuardImportCompletion,
   findStagedNativeWireGuardImportIdentity,
+  NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID,
   offerNativeWireGuardImportCompletion,
   readStagedNativeWireGuardImportCompletion,
   type NativeWireGuardImportedIdentity,
@@ -1016,14 +1017,13 @@ export function TransportsPage({
           stagedPlan.endpointHost,
           stagedPlan.tag
         )
-        toast.success(
-          t("transports.routeOffer.created", {
-            name: stagedPlan.displayName,
-          })
-        )
+        toast.success(t("transports.nativeImport.importedToast"), {
+          id: NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID,
+        })
         return true
       } catch (mutationError) {
         toast.error(getApiErrorMessage(mutationError as ApiError), {
+          id: NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID,
           richColors: true,
         })
         return false
@@ -1044,6 +1044,9 @@ export function TransportsPage({
           outbound.interface === kernelInterface
       )
     ) {
+      toast.success(t("transports.nativeImport.importedToast"), {
+        id: NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID,
+      })
       return true
     }
 
@@ -1077,10 +1080,13 @@ export function TransportsPage({
           geo_mode: "disabled",
         }),
       })
-      toast.success(t("transports.routeOffer.created", { name: label }))
+      toast.success(t("transports.nativeImport.importedToast"), {
+        id: NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID,
+      })
       return true
     } catch (mutationError) {
       toast.error(getApiErrorMessage(mutationError as ApiError), {
+        id: NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID,
         richColors: true,
       })
       return false

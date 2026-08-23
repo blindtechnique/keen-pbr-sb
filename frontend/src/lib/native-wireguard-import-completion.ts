@@ -36,6 +36,15 @@ let activeHandler:
 let stagedPlan: NativeWireGuardImportCompletionPlan | undefined
 const COMPLETION_PLAN_KEY = "keen-pbr.native-wireguard-import-completion.v1"
 
+/**
+ * One Sonner entry follows the import across the modal, page recovery and the
+ * atomic tracker + route apply. The successful apply replaces this loading
+ * toast only after transport-manager has restarted and acknowledged the new
+ * revision.
+ */
+export const NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID =
+  "native-wireguard-import-progress"
+
 const completionStorage = (): Storage | undefined => {
   try {
     return typeof window === "undefined" ? undefined : window.sessionStorage

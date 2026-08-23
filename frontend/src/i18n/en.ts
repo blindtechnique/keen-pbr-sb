@@ -1175,6 +1175,8 @@ export const enTranslation = {
     },
     nativeImport: {
       title: "Import WireGuard / AmneziaWG",
+      importingToast: "Importing VPN",
+      importedToast: "VPN added and route connected",
       displayNameRequired:
         "Enter the tunnel name above first. It will be used in KeeneticOS and for the automatically created route.",
       description:
