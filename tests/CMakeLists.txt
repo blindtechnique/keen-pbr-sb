@@ -161,6 +161,7 @@ add_executable(keen-pbr-tests
   test_maintenance_lock.cpp
   test_update_lock_protocol.cpp
   test_rescue_update.cpp
+  test_ssh_boot_guard.cpp
   test_rescue_integrity.cpp
   test_api_static.cpp
   test_resolver_health.cpp
@@ -650,6 +651,7 @@ add_test(
 add_executable(keen-pbr-rescue-tests
   test_main.cpp
   test_rescue_update.cpp
+  test_ssh_boot_guard.cpp
   test_rescue_integrity.cpp
   test_rollback_availability.cpp
   test_package_footprint.cpp
@@ -667,6 +669,7 @@ target_include_directories(keen-pbr-rescue-tests PRIVATE
 target_compile_definitions(keen-pbr-rescue-tests PRIVATE
   KEEN_PBR_RESCUE_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-update.sh"
   KEEN_PBR_RESCUE_STARTUP_GUARD_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-startup-guard.sh"
+  KEEN_PBR_SSH_BOOT_GUARD_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/ssh-boot-guard.sh"
   KEEN_PBR_UPDATE_LOCK_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/update-lock.sh"
   KEEN_PBR_PORTABLE_STAT_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/portable-stat.sh"
   KEEN_PBR_TRANSPORT_INIT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/etc/init.d/S79transport-manager"
@@ -923,6 +926,7 @@ target_compile_definitions(keen-pbr-tests PRIVATE
   KEEN_PBR_NFQWS_STRATEGY_ROOT="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-strategies"
   KEEN_PBR_RESCUE_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-update.sh"
   KEEN_PBR_RESCUE_STARTUP_GUARD_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-startup-guard.sh"
+  KEEN_PBR_SSH_BOOT_GUARD_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/ssh-boot-guard.sh"
   KEEN_PBR_UPDATE_LOCK_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/update-lock.sh"
   KEEN_PBR_PORTABLE_STAT_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/portable-stat.sh"
   KEEN_PBR_TRANSPORT_INIT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/etc/init.d/S79transport-manager"

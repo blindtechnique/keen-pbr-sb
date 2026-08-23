@@ -13,3 +13,11 @@ KEEN_PBR_ARGS=""
 #   ipv4-only  require IPv4 raw, keep mangle for IPv6.
 #   ipv6-only  require IPv6 raw, keep mangle for IPv4.
 KEEN_PBR_RAW_PREROUTING="auto"
+# Boot guard for the Entware SSH listener (S52keen-pbr-ssh-guard). After
+# S51dropbear has run, it checks that the process owning the Entware port is
+# /opt/sbin/dropbear - not a stale pidfile and not the stock daemon - and
+# starts S51dropbear only when nobody listens. Does nothing when Entware
+# dropbear is not installed.
+#   auto   run at boot (default)
+#   off    never run
+KEEN_PBR_SSH_GUARD="auto"

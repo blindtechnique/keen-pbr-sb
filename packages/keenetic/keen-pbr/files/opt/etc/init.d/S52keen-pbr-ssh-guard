@@ -1,0 +1,39 @@
+#!/bin/sh
+# keen-pbr: after Entware's S51dropbear has had its turn, make sure the
+# Entware SSH listener actually exists. See ssh-boot-guard.sh for the boot
+# race this closes. Deliberately a separate init script and not part of
+# S80keen-pbr: remote reachability is not keen-pbr runtime, and it must not
+# wait on keen-pbr's lifecycle lease nor hold it.
+#
+# The guard runs in the background so a slow dropbear start cannot delay the
+# rest of the Entware boot sequence; its verdict goes to the system log under
+# the tag keen-pbr-ssh-guard.
+
+GUARD=/opt/usr/lib/keen-pbr/ssh-boot-guard.sh
+DEFAULTS=/opt/etc/keen-pbr/defaults
+
+KEEN_PBR_SSH_GUARD=auto
+[ ! -f "$DEFAULTS" ] || . "$DEFAULTS"
+
+case "$1" in
+    start|restart)
+        case "${KEEN_PBR_SSH_GUARD:-auto}" in
+            off) exit 0 ;;
+        esac
+        [ -x "$GUARD" ] || exit 0
+        "$GUARD" >/dev/null 2>&1 &
+        ;;
+    check)
+        # Foreground, for an operator: prints what it finds and exits with
+        # the guard's own code.
+        [ -x "$GUARD" ] || exit 0
+        exec "$GUARD"
+        ;;
+    stop|status)
+        ;;
+    *)
+        echo "Usage: $0 {start|restart|check|stop|status}" >&2
+        exit 1
+        ;;
+esac
+exit 0
