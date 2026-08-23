@@ -65,6 +65,20 @@ function isDiagnosticOnlyMessage(text: string): boolean {
     return true
   }
 
+  // A rules-only firewall refresh declining and streaming the lists instead
+  // is the designed fallback, and the very apply that logged the line
+  // performed the repair. Current builds log the routine causes (an NDMS
+  // netfilter rebuild) at info level and use different wording
+  // ("unexpected refusal") for causes that deserve the bell; these two
+  // prefixes are what older builds wrote at warn for both, so they are
+  // history, not a claim about the present.
+  if (
+    text.startsWith("Set-reusing firewall refresh is not possible") ||
+    text.startsWith("Set-reusing firewall refresh was refused by the backend")
+  ) {
+    return true
+  }
+
   if (
     text.startsWith("Runtime iproute and firewall refresh failed:") ||
     text.startsWith("Error rebuilding routing/firewall after urltest change:")

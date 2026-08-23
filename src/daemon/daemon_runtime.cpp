@@ -2437,10 +2437,21 @@ void Daemon::apply_firewall(
         staged = stage_with(effective_mode);
     } catch (const FirewallRulesOnlyError& error) {
         if (effective_mode != FirewallApplyMode::RulesOnly) throw;
-        Logger::instance().warn(
-            "Set-reusing firewall refresh is not possible, streaming lists "
-            "instead: {}",
-            error.what());
+        // An NDMS netfilter rebuild leaving the dispatchers in need of
+        // repair is routine, and this very fallback repairs it - the
+        // operator's bell must not present a designed self-heal as a
+        // warning. A refusal about the daemon's own bookkeeping is one.
+        if (error.external_repair()) {
+            Logger::instance().info(
+                "Set-reusing firewall refresh is not possible, streaming "
+                "lists instead: {}",
+                error.what());
+        } else {
+            Logger::instance().warn(
+                "Set-reusing firewall refresh hit an unexpected refusal, "
+                "streaming lists instead: {}",
+                error.what());
+        }
         effective_mode = FirewallApplyMode::PreserveSets;
         staged = stage_with(effective_mode);
     }
@@ -2477,10 +2488,17 @@ void Daemon::apply_firewall(
         // transaction and run the Meta preflight again over it: the content
         // state is now freshly read rather than carried over.
         if (staged.mode != FirewallApplyMode::RulesOnly) throw;
-        Logger::instance().warn(
-            "Set-reusing firewall refresh was refused by the backend, "
-            "streaming lists instead: {}",
-            error.what());
+        if (error.external_repair()) {
+            Logger::instance().info(
+                "Set-reusing firewall refresh was refused by the backend, "
+                "streaming lists instead: {}",
+                error.what());
+        } else {
+            Logger::instance().warn(
+                "Set-reusing firewall refresh hit an unexpected backend "
+                "refusal, streaming lists instead: {}",
+                error.what());
+        }
         effective_mode = FirewallApplyMode::PreserveSets;
         staged = stage_with(effective_mode);
         meta_activation = prepare_meta_udp443_activation_or_throw(

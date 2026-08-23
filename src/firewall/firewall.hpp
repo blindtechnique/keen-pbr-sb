@@ -237,7 +237,21 @@ public:
 // which assumes a half-applied kernel, must not run for it.
 class FirewallRulesOnlyError : public FirewallError {
 public:
-    using FirewallError::FirewallError;
+    explicit FirewallRulesOnlyError(const std::string& message,
+                                    bool external_repair = false)
+        : FirewallError(message), external_repair_(external_repair) {}
+
+    // True when the refusal describes state an outside actor left behind -
+    // on Keenetic, an NDMS netfilter rebuild wiping the mangle dispatchers
+    // is routine - and the PreserveSets fallback repairs it by design. The
+    // caller logs such a refusal as information, not as a warning: a
+    // completed, designed repair is not something the operator's bell
+    // should claim is wrong. Refusals about the daemon's own bookkeeping
+    // (a reused set missing, a schema that drifted) stay warnings.
+    bool external_repair() const noexcept { return external_repair_; }
+
+private:
+    bool external_repair_{false};
 };
 
 // Concrete firewall backend selected for runtime use.

@@ -194,11 +194,14 @@ void IptablesFirewall::prepare_apply(FirewallApplyMode mode) {
             const auto primary = inspect_live_generation(ipv6);
             if (primary != LiveGenerationState::A &&
                 primary != LiveGenerationState::B) {
+                // External state: an NDMS rebuild wiping the dispatcher is
+                // how this happens in practice, and the fallback repairs it.
                 throw FirewallRulesOnlyError(
                     std::string("cannot reuse static ") +
-                    (ipv6 ? "IPv6" : "IPv4") +
-                    " ipsets: live PREROUTING generation is missing or "
-                    "invalid");
+                        (ipv6 ? "IPv6" : "IPv4") +
+                        " ipsets: live PREROUTING generation is missing or "
+                        "invalid",
+                    /*external_repair=*/true);
             }
             const auto secondary = inspect_dispatcher(
                 ipv6 ? "ip6tables" : "iptables",
@@ -207,11 +210,13 @@ void IptablesFirewall::prepare_apply(FirewallApplyMode mode) {
                 generation_output_chain(FirewallSetGeneration::A),
                 generation_output_chain(FirewallSetGeneration::B));
             if (secondary != primary) {
+                // Same: the mangle OUTPUT dispatcher is the one NDMS wipes.
                 throw FirewallRulesOnlyError(
                     std::string("cannot reuse ") +
-                    (ipv6 ? "IPv6" : "IPv4") +
-                    " dispatchers: OUTPUT and PREROUTING generations "
-                    "disagree and need repair");
+                        (ipv6 ? "IPv6" : "IPv4") +
+                        " dispatchers: OUTPUT and PREROUTING generations "
+                        "disagree and need repair",
+                    /*external_repair=*/true);
             }
             target = target_generation_for_states(primary, secondary);
         };
