@@ -1812,7 +1812,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/NfqwsStatus"
     post:
-      summary: One endpoint, seventeen nfqws2 actions
+      summary: One endpoint, eighteen nfqws2 actions
       description: >
         Dispatches on `action`. The set is closed and listed below, and it is
         worth knowing that this is one route rather than seventeen: it mixes
@@ -1820,7 +1820,7 @@ paths:
         installed package.
 
 
-        Three actions therefore need step-up reauthentication -
+        Four actions therefore need step-up reauthentication - `install`,
         `upgrade`, `capture_restore_point` and `restore_component` - and the
         rest do not. Guarding the whole path instead once put a password
         prompt in front of opening a list, which is why the unit of privilege
@@ -1901,11 +1901,13 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "409":
           description: >
-            nfqws2 is not installed; the file this action would create already
-            exists; another maintenance operation holds the lease; or - for
-            `upgrade` - a previous package operation never reported an end, so
-            what is installed is unknown and running a package manager over it
-            would turn one interrupted upgrade into an unrecoverable one.
+            nfqws2 is not installed; nfqws2 is already installed (for
+            `install`); the file this action would create already exists;
+            another maintenance operation holds the lease; or - for `install`
+            and `upgrade` - a previous package operation never reported an
+            end, so what is installed is unknown and running a package
+            manager over it would turn one interrupted operation into an
+            unrecoverable one.
           content:
             application/json:
               schema:
@@ -3534,16 +3536,29 @@ components:
         batch-saved. Names are validated; a bad one is a 400, not a path.
 
 
-        **Step-up.** `upgrade`, `capture_restore_point` and
+        **Step-up.** `install`, `upgrade`, `capture_restore_point` and
         `restore_component` need a live grant. The rest do not, because
         guarding the whole path once put a password prompt in front of opening
         a list.
+
+
+        **`install`.** A fresh installation of the official
+        `nfqws2-keenetic` package for a router that does not have it:
+        prepares the HTTPS prerequisites and the feed definition the way the
+        shell installer does, then runs the same verified path the upgrade
+        uses - the IPK is downloaded by opkg, checked against the feed
+        index's size and SHA-256 and installed from the verified file, whose
+        exact copy is retained for future rollback from day one. Refused
+        (409) when the package is already installed; `upgrade` is the action
+        for that. A feed definition already present with different content
+        is treated as the operator's mirror choice and left untouched.
       properties:
         action:
           type: string
           description: >
-            `upgrade`, `capture_restore_point` and `restore_component` require
-            a live step-up grant; the rest do not.
+            `install`, `upgrade`, `capture_restore_point` and
+            `restore_component` require a live step-up grant; the rest do
+            not.
           enum:
             - apply_strategy
             - capture_restore_point
@@ -3555,6 +3570,7 @@ components:
             - delete_strategy
             - import_bundle
             - import_lists
+            - install
             - read_file
             - restore_component
             - save_file

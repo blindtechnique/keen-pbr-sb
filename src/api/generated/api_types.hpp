@@ -1149,7 +1149,7 @@ namespace api {
         std::vector<NdmsVpnServerService> services;
     };
 
-    enum class NfqwsActionRequestAction : int { APPLY_STRATEGY, CAPTURE_RESTORE_POINT, CHECK_UPDATE, CHECK_URL, CLEAR_LOG, CREATE_FILE, DELETE_FILE, DELETE_STRATEGY, IMPORT_BUNDLE, IMPORT_LISTS, READ_FILE, RESTORE_COMPONENT, SAVE_FILE, SAVE_FILES, SAVE_STRATEGY, SERVICE, UPGRADE };
+    enum class NfqwsActionRequestAction : int { APPLY_STRATEGY, CAPTURE_RESTORE_POINT, CHECK_UPDATE, CHECK_URL, CLEAR_LOG, CREATE_FILE, DELETE_FILE, DELETE_STRATEGY, IMPORT_BUNDLE, IMPORT_LISTS, INSTALL, READ_FILE, RESTORE_COMPONENT, SAVE_FILE, SAVE_FILES, SAVE_STRATEGY, SERVICE, UPGRADE };
 
     enum class NfqwsActionRequestCategory : int { CONFIG, LIST, LOG, LUA };
 
@@ -8701,6 +8701,7 @@ namespace api {
             {"delete_strategy", NfqwsActionRequestAction::DELETE_STRATEGY},
             {"import_bundle", NfqwsActionRequestAction::IMPORT_BUNDLE},
             {"import_lists", NfqwsActionRequestAction::IMPORT_LISTS},
+            {"install", NfqwsActionRequestAction::INSTALL},
             {"read_file", NfqwsActionRequestAction::READ_FILE},
             {"restore_component", NfqwsActionRequestAction::RESTORE_COMPONENT},
             {"save_file", NfqwsActionRequestAction::SAVE_FILE},
@@ -8728,6 +8729,7 @@ namespace api {
             case NfqwsActionRequestAction::DELETE_STRATEGY: j = "delete_strategy"; break;
             case NfqwsActionRequestAction::IMPORT_BUNDLE: j = "import_bundle"; break;
             case NfqwsActionRequestAction::IMPORT_LISTS: j = "import_lists"; break;
+            case NfqwsActionRequestAction::INSTALL: j = "install"; break;
             case NfqwsActionRequestAction::READ_FILE: j = "read_file"; break;
             case NfqwsActionRequestAction::RESTORE_COMPONENT: j = "restore_component"; break;
             case NfqwsActionRequestAction::SAVE_FILE: j = "save_file"; break;

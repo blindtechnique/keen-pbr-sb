@@ -228,6 +228,7 @@ export function NfqwsPage() {
   // Какой из двух файловых редакторов открыт внутри вкладки «Файлы».
   const [filesCategory, setFilesCategory] = useState<"list" | "lua">("list")
   const [upgradeOpen, setUpgradeOpen] = useState(false)
+  const [installOpen, setInstallOpen] = useState(false)
   const [restoreOpen, setRestoreOpen] = useState(false)
   const [downloadUpgradeBackup, setDownloadUpgradeBackup] = useState(true)
   const [drafts, setDrafts] = useState<Record<string, DraftFile>>({})
@@ -346,6 +347,17 @@ export function NfqwsPage() {
         })
       }
     }
+  }
+
+  const runInstall = async () => {
+    setInstallOpen(false)
+    await runOperation(
+      t("nfqws.install"),
+      () => nfqwsAction({ action: "install" }),
+      t("nfqws.operationCompleted")
+    )
+    // Success or failure, the page's idea of "installed" may have changed;
+    // runOperation already invalidated the status query.
   }
 
   const refreshAll = async () => {
@@ -548,7 +560,16 @@ export function NfqwsPage() {
 
       {query.isLoading ? <TableSkeleton /> : null}
 
-      {!status?.installed && !query.isLoading ? <NotInstalled /> : null}
+      {!status?.installed && !query.isLoading ? (
+        <NotInstalled
+          installBlocked={
+            status !== undefined &&
+            status.transaction_state !== undefined &&
+            status.transaction_state !== "none"
+          }
+          onInstall={() => setInstallOpen(true)}
+        />
+      ) : null}
 
       {status?.installed ? (
         <>
@@ -897,12 +918,6 @@ export function NfqwsPage() {
               readonly
             />
           ) : null}
-          <NfqwsOperationDialog
-            onClose={() =>
-              setOperation((current) => ({ ...current, open: false }))
-            }
-            operation={operation}
-          />
           <NfqwsUpgradeDialog
             capability={status.upgrade_capability}
             downloadBackup={downloadUpgradeBackup}
@@ -935,6 +950,24 @@ export function NfqwsPage() {
           />
         </>
       ) : null}
+      {/* Outside the installed-only branch on purpose: the install runs
+          exactly when nothing is installed, and its progress/result dialog
+          must render then too. */}
+      <NfqwsOperationDialog
+        onClose={() =>
+          setOperation((current) => ({ ...current, open: false }))
+        }
+        operation={operation}
+      />
+      <NfqwsConfirmDialog
+        confirmLabel={t("nfqws.install")}
+        description={t("nfqws.installConfirmDescription")}
+        destructive={false}
+        onConfirm={() => void runInstall()}
+        onOpenChange={setInstallOpen}
+        open={installOpen}
+        title={t("nfqws.installConfirmTitle")}
+      />
     </div>
   )
 }
@@ -1255,13 +1288,35 @@ function NfqwsRestoreComponentDialog({
   )
 }
 
-function NotInstalled() {
+function NotInstalled({
+  installBlocked,
+  onInstall,
+}: {
+  /** Незавершённая транзакция пакета: установка откажет с 409, поэтому
+      кнопка честно выключена, а не даёт нажать и упасть. */
+  installBlocked: boolean
+  onInstall: () => void
+}) {
   const { t } = useTranslation()
   return (
     <Alert variant="destructive">
       <AlertTitle>{t("nfqws.notInstalled.title")}</AlertTitle>
       <AlertDescription className="space-y-3">
         <p>{t("nfqws.notInstalled.description")}</p>
+        <div className="space-y-1">
+          <Button
+            className="w-full sm:w-auto"
+            disabled={installBlocked}
+            onClick={onInstall}
+          >
+            {t("nfqws.install")}
+          </Button>
+          <p className="text-xs">
+            {installBlocked
+              ? t("nfqws.installBlockedByTransaction")
+              : t("nfqws.installHint")}
+          </p>
+        </div>
         <div>
           <p className="mb-1 font-medium">
             {t("nfqws.notInstalled.ourInstaller")}

@@ -552,51 +552,62 @@ ExecCaptureResult run_nfqws_package_command(
 using NfqwsPreparedHook =
     std::function<bool(const BoundedOpkgUpgradeResult&)>;
 
+// Every package command passes through this, so the operator log carries
+// each command's output with the same truncation, deadline and termination
+// annotations whichever step ran it. The referenced fields belong to the
+// caller's combined result (upgrade or install - the same contract).
+ExecCaptureResult run_annotated_package_command(
+    const NfqwsExecCapture& execute,
+    const std::vector<std::string>& argv,
+    SafeExecTimeouts timeouts,
+    const std::filesystem::path& cwd,
+    std::string& output,
+    int& status,
+    bool& timed_out,
+    bool& termination_uncertain) {
+    constexpr size_t kMaxOutputPerCommand = 64U * 1024U;
+    auto result = execute(argv, timeouts, cwd);
+    const auto label = nfqws_package_command_label(argv);
+    output += result.stdout_output;
+    if (!output.empty() && output.back() != '\n') {
+        output += '\n';
+    }
+    if (result.truncated) {
+        output += label + " output was truncated after " +
+                  std::to_string(kMaxOutputPerCommand) + " bytes.\n";
+    }
+    if (result.timed_out) {
+        timed_out = true;
+        output += label +
+                  " exceeded the 10 minute deadline; the "
+                  "package-manager outcome is unknown.\n";
+    }
+    if (result.termination_uncertain) {
+        termination_uncertain = true;
+        output += label +
+                  " could not be proven fully terminated. No component "
+                  "inspection or captured-file recovery may run while a "
+                  "package-manager descendant could still be mutating it.\n";
+    }
+    status = result.exit_code;
+    if ((result.timed_out || result.termination_uncertain) && status == 0) {
+        status = -1;
+    }
+    return result;
+}
+
 BoundedOpkgUpgradeResult run_bounded_nfqws_opkg_upgrade(
     const NfqwsExecCapture& execute,
     const std::string& installed_version,
     const NfqwsPackagePaths& paths = {},
     const NfqwsPreparedHook& on_prepared = {}) {
-    constexpr size_t kMaxOutputPerCommand = 64U * 1024U;
-
     BoundedOpkgUpgradeResult combined;
-    // Every command the transaction issues passes through here, so the
-    // operator log carries each command's output with the same truncation,
-    // deadline and termination annotations whichever step ran it.
     const auto run_annotated = [&](const std::vector<std::string>& argv,
                                    SafeExecTimeouts timeouts,
                                    const std::filesystem::path& cwd) {
-        auto result = execute(argv, timeouts, cwd);
-        const auto label = nfqws_package_command_label(argv);
-        combined.output += result.stdout_output;
-        if (!combined.output.empty() && combined.output.back() != '\n') {
-            combined.output += '\n';
-        }
-        if (result.truncated) {
-            combined.output += label + " output was truncated after " +
-                               std::to_string(kMaxOutputPerCommand) +
-                               " bytes.\n";
-        }
-        if (result.timed_out) {
-            combined.timed_out = true;
-            combined.output += label +
-                               " exceeded the 10 minute deadline; the "
-                               "package-manager outcome is unknown.\n";
-        }
-        if (result.termination_uncertain) {
-            combined.termination_uncertain = true;
-            combined.output +=
-                label +
-                " could not be proven fully terminated. No component "
-                "inspection or captured-file recovery may run while a "
-                "package-manager descendant could still be mutating it.\n";
-        }
-        combined.status = result.exit_code;
-        if ((result.timed_out || result.termination_uncertain) &&
-            combined.status == 0) {
-            combined.status = -1;
-        }
-        return result;
+        return run_annotated_package_command(
+            execute, argv, timeouts, cwd, combined.output, combined.status,
+            combined.timed_out, combined.termination_uncertain);
     };
 
     ComponentIpkStore store(paths.store_root, kNfqwsPackage);
@@ -655,6 +666,176 @@ BoundedOpkgUpgradeResult run_bounded_nfqws_opkg_upgrade(
     const NfqwsPreparedHook& on_prepared) {
     return run_bounded_nfqws_opkg_upgrade(run_nfqws_package_command,
                                           installed_version, {}, on_prepared);
+}
+
+// The official feed definition, exactly as the shell installer writes it.
+// A conf already present with other content is the operator's mirror choice
+// and is never touched.
+constexpr const char* kNfqwsFeedConf = "/opt/etc/opkg/nfqws2-keenetic.conf";
+constexpr const char* kNfqwsFeedConfContent =
+    "src/gz nfqws2-keenetic https://nfqws.github.io/nfqws2-keenetic/all\n";
+
+struct BoundedOpkgInstallResult {
+    std::string output;
+    int status{-1};
+    bool timed_out{false};
+    bool termination_uncertain{false};
+    // opkg install nfqws2-keenetic was issued. Everything before it -
+    // HTTPS prerequisites, the feed definition, feed refreshes, the
+    // download and its verification - is system state, not the component.
+    bool install_started{false};
+    std::string target_version;
+    bool feed_conf_written{false};
+};
+
+// A fresh installation, prepared the way install.sh's configure_nfqws2
+// does and executed the way the guarded upgrade does. The order of the
+// preparation is load-bearing and copied from the shell installer: with the
+// plain Entware wget still installed, a present HTTPS feed definition makes
+// `opkg update` fail as a whole - which is exactly the state an interrupted
+// earlier install leaves behind. So a canonical conf is removed first,
+// HTTPS prerequisites go in, the conf is written back, and only then is the
+// feed read. The package itself is then fetched with `opkg download`,
+// verified against the feed index's size and SHA-256, installed from the
+// verified file, and that file is retained as the exact copy of the
+// installed version from day one.
+BoundedOpkgInstallResult run_bounded_nfqws_opkg_install(
+    const NfqwsExecCapture& execute,
+    const NfqwsPackagePaths& paths = {},
+    const fs::path& feed_conf = kNfqwsFeedConf,
+    const NfqwsPreparedHook& on_prepared = {}) {
+    BoundedOpkgInstallResult combined;
+    const auto run_annotated = [&](const std::vector<std::string>& argv,
+                                   SafeExecTimeouts timeouts,
+                                   const std::filesystem::path& cwd) {
+        return run_annotated_package_command(
+            execute, argv, timeouts, cwd, combined.output, combined.status,
+            combined.timed_out, combined.termination_uncertain);
+    };
+    const auto note = [&](const std::string& line) {
+        if (!combined.output.empty() && combined.output.back() != '\n') {
+            combined.output += '\n';
+        }
+        combined.output += line;
+        combined.output += '\n';
+    };
+    const auto command_failed = [&] {
+        return combined.status != 0 || combined.timed_out ||
+               combined.termination_uncertain;
+    };
+    const auto options = nfqws_package_options(paths);
+
+    // 1. The feed definition, canonical copies first (see above).
+    std::error_code conf_error;
+    bool conf_present =
+        fs::is_regular_file(fs::symlink_status(feed_conf, conf_error)) &&
+        !conf_error;
+    bool conf_is_ours = false;
+    if (conf_present) {
+        std::ifstream input(feed_conf, std::ios::binary);
+        std::string body((std::istreambuf_iterator<char>(input)),
+                         std::istreambuf_iterator<char>());
+        conf_is_ours = body == kNfqwsFeedConfContent ||
+                       body == std::string(kNfqwsFeedConfContent).substr(
+                                   0, std::string(kNfqwsFeedConfContent)
+                                              .size() -
+                                          1);
+        if (conf_is_ours) {
+            fs::remove(feed_conf, conf_error);
+            conf_present = false;
+        } else {
+            note("An nfqws2 feed definition with custom content is already "
+                 "present and is left as it is.");
+        }
+    }
+
+    // 2. HTTPS prerequisites, against the stock Entware feeds.
+    (void)run_annotated({options.opkg, "update"}, options.timeouts, {});
+    if (command_failed()) {
+        note("The Entware package lists could not be refreshed; nothing "
+             "was installed.");
+        return combined;
+    }
+    (void)run_annotated({options.opkg, "install", "ca-certificates",
+                         "wget-ssl"},
+                        options.timeouts, {});
+    if (command_failed()) {
+        note("The HTTPS prerequisites (ca-certificates, wget-ssl) could not "
+             "be installed; nothing else was touched.");
+        return combined;
+    }
+    // Best effort, exactly like the shell installer: a router without
+    // wget-nossl fails this and that is fine. What is not fine is a remove
+    // that timed out or cannot be proven terminated - no more package
+    // manager on top of that.
+    (void)run_annotated({options.opkg, "remove", "wget-nossl"},
+                        options.timeouts, {});
+    if (combined.timed_out || combined.termination_uncertain) {
+        note("The wget-nossl removal did not finish cleanly; stopping "
+             "before the package manager is asked to do more.");
+        if (combined.status == 0) combined.status = -1;
+        return combined;
+    }
+    combined.status = 0;
+
+    // 3. The feed definition itself, durably.
+    if (!conf_present) {
+        try {
+            AtomicFileWriteOptions write_options;
+            write_options.create_parent_directories = true;
+            write_options.file_mode = 0644;
+            write_file_atomically(feed_conf.string(), kNfqwsFeedConfContent,
+                                  write_options);
+            combined.feed_conf_written = true;
+        } catch (const std::exception& error) {
+            combined.status = -1;
+            note(std::string("The nfqws2 feed definition could not be "
+                             "written: ") +
+                 error.what());
+            return combined;
+        }
+    }
+
+    // 4. The verified path the upgrade uses, with nothing installed yet:
+    // prepare refreshes the feed again, downloads the one listed IPK,
+    // verifies it against the index and stages it as the candidate.
+    ComponentIpkStore store(paths.store_root, kNfqwsPackage);
+    ComponentPackageTransaction transaction(options, store, run_annotated);
+    const auto preparation = transaction.prepare(std::string{});
+    combined.output += preparation.output;
+    if (preparation.target) {
+        combined.target_version = preparation.target->version;
+    }
+    if (!preparation.error.empty()) {
+        if (combined.status == 0) combined.status = 1;
+        return combined;
+    }
+    if (!preparation.candidate_verified) {
+        note("No verified package was staged; opkg install was not run.");
+        if (combined.status == 0) combined.status = 1;
+        return combined;
+    }
+
+    if (on_prepared) {
+        BoundedOpkgUpgradeResult prepared_view;
+        prepared_view.target_version = combined.target_version;
+        if (!on_prepared(prepared_view)) {
+            note("The transaction journal could not record the prepared "
+                 "install; opkg install was not run.");
+            if (combined.status == 0) combined.status = 1;
+            return combined;
+        }
+    }
+    try {
+        combined.install_started = true;
+        (void)transaction.install_candidate();
+    } catch (const ComponentPackageRefused& refused) {
+        combined.install_started = false;
+        note(std::string("opkg install was not run: ") + refused.what() +
+             ".");
+        if (combined.status == 0) combined.status = 1;
+    }
+    return combined;
 }
 
 // Reinstalls the exact IPK of the version that was installed before a
@@ -2524,6 +2705,211 @@ void register_nfqws_handler_impl(
                                    firewall_reconcile_pending}}
                 .dump();
         }
+        if (action == "install") {
+            // A fresh installation for a router that does not have the
+            // package: the same lease, the same lock order and the same
+            // verified download path as the upgrade. What it does not have
+            // is a pre-mutation world to capture - nothing is installed -
+            // so the honest rollback of a failed fresh install is removal,
+            // back to the nothing that was there.
+            std::unique_ptr<MaintenanceLease> maintenance;
+            try {
+                maintenance = ctx.acquire_maintenance_lease("nfqws-install");
+            } catch (const MaintenanceLockError& error) {
+                throw_maintenance_api_error(error);
+            }
+            const std::lock_guard lock(nfqws_operation_mutex());
+            std::error_code presence_error;
+            if (fs::is_regular_file(kBinary, presence_error) ||
+                fs::is_regular_file(kOpkgPackageFileList, presence_error)) {
+                throw ApiError(
+                    "nfqws2 is already installed; use the upgrade action",
+                    409);
+            }
+            const auto journal = read_component_transaction(kNfqwsJournal);
+            if (journal.state != ComponentTransactionState::none) {
+                throw ApiError(
+                    std::string("a previous nfqws2 package operation did not "
+                                "finish (") +
+                        component_transaction_state_name(journal.state) +
+                        "); inspect the component before installing",
+                    409);
+            }
+            TransactionProgress progress(ctx, "install");
+            ComponentTransactionRecord record;
+            record.component = kNfqwsPackage;
+            record.operation = "install";
+            record.phase = ComponentTransactionPhase::started;
+            record.started_at = static_cast<std::int64_t>(std::time(nullptr));
+            record.owner_is_operation_process = false;
+            write_nfqws_transaction(record);
+
+            // The package's own postinst starts the service; the firewall
+            // graph must be reconciled whatever happens past this point.
+            NfqwsNetfilterRefreshGuard refresh_guard(ctx);
+            progress.step("install");
+            const auto result = run_bounded_nfqws_opkg_install(
+                run_nfqws_package_command, {}, kNfqwsFeedConf,
+                [&](const BoundedOpkgUpgradeResult& prepared) {
+                    // Verified and staged; nothing mutated yet. The journal
+                    // must say "mutating" durably before opkg install may
+                    // run - a mutation nobody can later read about is what
+                    // this path exists to prevent.
+                    record.target_version = prepared.target_version;
+                    record.phase = ComponentTransactionPhase::mutating;
+                    try {
+                        write_nfqws_transaction(record);
+                    } catch (...) {
+                        return false;
+                    }
+                    return true;
+                });
+            std::string output = result.output;
+            bool journal_cleared = false;
+
+            if (result.termination_uncertain) {
+                output +=
+                    "\nThe package-manager process tree could not be proven "
+                    "stopped. The durable transaction record was retained; "
+                    "stop/inspect the process tree and repair the package "
+                    "state manually.\n";
+                progress.finish("termination_uncertain");
+                return nlohmann::json{{"ok", false},
+                                      {"output", output},
+                                      {"installed", false},
+                                      {"journal_cleared", false}}
+                    .dump();
+            }
+            if (!result.install_started) {
+                // Prerequisites or verification refused; the component was
+                // never touched and the journal has nothing to guard.
+                journal_cleared = clear_nfqws_transaction();
+                if (!journal_cleared) {
+                    output += "\nThe transaction record could not be "
+                              "cleared; the next package operation will "
+                              "refuse until it is inspected.\n";
+                }
+                progress.finish("failed");
+                return nlohmann::json{{"ok", false},
+                                      {"output", output},
+                                      {"installed", false},
+                                      {"journal_cleared", journal_cleared}}
+                    .dump();
+            }
+
+            progress.step("verify");
+            record.phase = ComponentTransactionPhase::verifying;
+            try {
+                write_nfqws_transaction(record);
+            } catch (const std::exception& error) {
+                output += std::string("\nThe verifying phase could not be "
+                                      "journaled: ") +
+                          error.what() + "\n";
+            }
+            std::string installed_now;
+            try {
+                installed_now = installed_version();
+            } catch (...) {
+            }
+            const bool component_broken =
+                result.status != 0 || installed_now.empty() ||
+                (!result.target_version.empty() &&
+                 installed_now != result.target_version);
+
+            if (!component_broken) {
+                record.phase = ComponentTransactionPhase::verified;
+                try {
+                    write_nfqws_transaction(record);
+                } catch (const std::exception& error) {
+                    output += std::string("\nThe verified phase could not "
+                                          "be journaled: ") +
+                              error.what() + "\n";
+                }
+                // The file just installed becomes the exact copy of the
+                // installed version - retention from day one, while the
+                // feed still serves these bytes.
+                try {
+                    ComponentIpkStore store(kComponentStoreRoot,
+                                            kNfqwsPackage);
+                    store.promote_candidate();
+                    output += "Exact copy of " + installed_now +
+                              " retained for future rollback.\n";
+                } catch (const std::exception& error) {
+                    output += std::string("The installed package's exact "
+                                          "copy could not be retained: ") +
+                              error.what() + "\n";
+                }
+                (void)cached_exact_previous_ipk(installed_now,
+                                                /*force=*/true);
+                journal_cleared = clear_nfqws_transaction();
+                output +=
+                    "\nInstalled nfqws2 version: " + installed_now + "\n";
+                if (!journal_cleared) {
+                    output += "The transaction record could not be cleared; "
+                              "package operations stay blocked until it is "
+                              "inspected.\n";
+                }
+                progress.finish(journal_cleared ? "completed"
+                                                : "journal_retained");
+                return nlohmann::json{{"ok", journal_cleared},
+                                      {"output", output},
+                                      {"installed", true},
+                                      {"installed_version", installed_now},
+                                      {"journal_cleared", journal_cleared}}
+                    .dump();
+            }
+
+            // The rollback of a fresh install is removal: the pre-install
+            // state was "not installed", and that is a state this router is
+            // known to work in.
+            progress.step("rollback");
+            output += "\nThe installation did not verify; removing the "
+                      "package to return to the pre-install state.\n";
+            int remove_status = -1;
+            bool remove_timed_out = false;
+            bool remove_uncertain = false;
+            (void)run_annotated_package_command(
+                run_nfqws_package_command,
+                {nfqws_package_options({}).opkg, "remove", kNfqwsPackage},
+                nfqws_package_options({}).timeouts, {}, output,
+                remove_status, remove_timed_out, remove_uncertain);
+            bool removed = false;
+            if (!remove_uncertain && !remove_timed_out) {
+                std::string after;
+                try {
+                    after = installed_version();
+                } catch (...) {
+                }
+                std::error_code binary_error;
+                removed = after.empty() &&
+                          !fs::is_regular_file(kBinary, binary_error);
+            }
+            try {
+                ComponentIpkStore store(kComponentStoreRoot, kNfqwsPackage);
+                store.discard(IpkSlot::candidate);
+            } catch (...) {
+            }
+            if (removed) {
+                journal_cleared = clear_nfqws_transaction();
+                output += journal_cleared
+                              ? "Removed; the router is back to the "
+                                "pre-install state.\n"
+                              : "Removed, but the transaction record could "
+                                "not be cleared; it stays until inspected.\n";
+            } else {
+                output += "The package could not be verified removed; the "
+                          "transaction record was retained for manual "
+                          "repair.\n";
+            }
+            progress.finish(removed && journal_cleared ? "rolled_back"
+                                                       : "failed");
+            return nlohmann::json{{"ok", false},
+                                  {"output", output},
+                                  {"installed", !removed},
+                                  {"journal_cleared", journal_cleared}}
+                .dump();
+        }
+
         if (action == "upgrade") {
             // The only nfqws action that mutates installed packages, and until
             // now the only package mutation in the process that took no
@@ -3525,6 +3911,29 @@ NfqwsBoundedOpkgTestResult run_nfqws_bounded_opkg_for_testing(
         result.up_to_date,
         result.previous_exact,
         result.target_version,
+    };
+}
+
+NfqwsInstallTestResult run_nfqws_install_for_testing(
+    std::function<ExecCaptureResult(
+        const std::vector<std::string>&, SafeExecTimeouts,
+        const std::filesystem::path&)> execute,
+    const std::string& store_root,
+    const std::string& feed_list,
+    const std::string& feed_conf) {
+    NfqwsPackagePaths paths;
+    paths.store_root = store_root;
+    paths.feed_list = feed_list;
+    const auto result =
+        run_bounded_nfqws_opkg_install(execute, paths, feed_conf);
+    return NfqwsInstallTestResult{
+        result.output,
+        result.status,
+        result.timed_out,
+        result.termination_uncertain,
+        result.install_started,
+        result.target_version,
+        result.feed_conf_written,
     };
 }
 

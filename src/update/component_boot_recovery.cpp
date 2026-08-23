@@ -64,6 +64,23 @@ ComponentBootRecoveryPlan decide_component_boot_recovery(
         return plan;
     }
 
+    if (record.operation == "install" &&
+        evidence.installed_version.empty() &&
+        evidence.installed_binary_sha256.empty()) {
+        // An interrupted fresh install, and nothing is installed now: both
+        // the package database and the binary say so. There was nothing
+        // before the install to restore, and there is nothing after it to
+        // repair - the retry is simply installing again. Requiring both
+        // signals keeps a transient opkg failure (version unreadable but
+        // the binary on disk) on the manual path below.
+        plan.action = ComponentBootRecoveryAction::clear_journal;
+        plan.clear_journal_on_success = true;
+        plan.reason = "the interrupted operation was a fresh install and "
+                      "nothing is installed; there was nothing before it "
+                      "to restore";
+        return plan;
+    }
+
     const bool capture_usable =
         evidence.capture == ComponentCaptureState::usable;
 

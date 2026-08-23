@@ -15,6 +15,14 @@ export const enTranslation = {
     stop: "Stop",
     restart: "Restart service",
     reload: "Reload configuration",
+    install: "Install nfqws2",
+    installHint:
+      "The nfqws2-keenetic package from the official nfqws repository, verified against the repository index (size and SHA-256). Takes a minute or two.",
+    installBlockedByTransaction:
+      "A previous package operation did not finish; installation opens up once that record is resolved.",
+    installConfirmTitle: "Install nfqws2 from the official repository?",
+    installConfirmDescription:
+      "HTTPS prerequisites (ca-certificates, wget-ssl) will be installed, the nfqws2-keenetic feed added, the package downloaded, verified against the repository index and installed from the verified file. An exact copy of the installed version is retained for future rollback right away. The service starts itself and begins processing traffic with its default configuration.",
     upgrade: "Update nfqws",
     upgradeUnavailableTitle: "In-panel upgrade is temporarily unavailable",
     upgradeUnavailableDescription:

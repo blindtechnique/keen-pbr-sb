@@ -165,6 +165,37 @@ TEST_CASE("package changed and the exact previous ipk is held: reinstall it") {
     }
 }
 
+TEST_CASE("an interrupted fresh install with nothing on disk simply clears") {
+    ComponentTransactionRecord record;
+    record.component = "nfqws2-keenetic";
+    record.operation = "install";
+    record.phase = ComponentTransactionPhase::mutating;
+    auto evidence = abandoned_with(record);
+    // Nothing before the install to restore, nothing after it to repair:
+    // both the package database and the binary say "not installed".
+    evidence.installed_version.clear();
+    evidence.installed_binary_sha256.clear();
+    const auto plan = decide_component_boot_recovery(evidence);
+    CHECK(plan.action == ComponentBootRecoveryAction::clear_journal);
+    CHECK(plan.clear_journal_on_success);
+
+    SUBCASE("but a binary on disk keeps it manual") {
+        // The version being unreadable while the binary exists is an
+        // unknown mix, not a clean absence.
+        evidence.installed_binary_sha256 = std::string(64, 'e');
+        CHECK(decide_component_boot_recovery(evidence).action ==
+              ComponentBootRecoveryAction::manual);
+    }
+    SUBCASE("and an upgrade journal is never cleared this way") {
+        auto upgrade = mutating_record();
+        auto upgrade_evidence = abandoned_with(upgrade);
+        upgrade_evidence.installed_version.clear();
+        upgrade_evidence.installed_binary_sha256.clear();
+        CHECK(decide_component_boot_recovery(upgrade_evidence).action ==
+              ComponentBootRecoveryAction::manual);
+    }
+}
+
 TEST_CASE("a legacy journal without versions can only restore files inexactly") {
     ComponentTransactionRecord record;
     record.component = "nfqws2-keenetic";

@@ -171,6 +171,27 @@ NfqwsBoundedOpkgTestResult run_nfqws_bounded_opkg_for_testing(
     const std::string& store_root,
     const std::string& feed_list);
 
+struct NfqwsInstallTestResult {
+    std::string output;
+    int status{-1};
+    bool timed_out{false};
+    bool termination_uncertain{false};
+    bool install_started{false};
+    std::string target_version;
+    bool feed_conf_written{false};
+};
+
+// Runs the production fresh-install sequence (feed definition, HTTPS
+// prerequisites, feed refresh, verified download, opkg install of the
+// verified file) through an injected executor against paths the test owns.
+NfqwsInstallTestResult run_nfqws_install_for_testing(
+    std::function<ExecCaptureResult(
+        const std::vector<std::string>&, SafeExecTimeouts,
+        const std::filesystem::path&)> execute,
+    const std::string& store_root,
+    const std::string& feed_list,
+    const std::string& feed_conf);
+
 // The exact-rollback step: reinstall the store's copy of `expected_version`
 // and prove it through the injected version reader.
 bool reinstall_exact_previous_nfqws_package_for_testing(

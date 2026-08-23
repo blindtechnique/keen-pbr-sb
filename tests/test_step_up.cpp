@@ -240,6 +240,7 @@ TEST_CASE("ordinary nfqws actions remain outside the privileged action set") {
     CHECK(requires_step_up("POST", "/api/nfqws",
                            "capture_restore_point"));
     CHECK(requires_step_up("POST", "/api/nfqws", "restore_component"));
+    CHECK(requires_step_up("POST", "/api/nfqws", "install"));
     CHECK_FALSE(requires_step_up("POST", "/api/nfqws", ""));
     CHECK_FALSE(requires_step_up("POST", "/api/nfqws"));
 }
@@ -259,6 +260,7 @@ TEST_CASE("every protected nfqws action is an existing handler action") {
         "delete_file",  "clear_log",       "service",       "upgrade",
         "save_strategy", "apply_strategy", "save_files",    "delete_strategy",
         "import_lists", "import_bundle",   "check_url",     "restore_component",
+        "install",
         "capture_restore_point",
     };
     for (const auto& entry : step_up_protected_actions()) {

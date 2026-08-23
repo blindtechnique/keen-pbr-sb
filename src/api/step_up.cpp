@@ -74,6 +74,7 @@ const std::vector<StepUpProtectedAction>& step_up_protected_actions() {
     // the bounded request body and before the nfqws handler can mutate state.
     // Pre-routing cannot enforce them because req.body does not exist there.
     static const std::vector<StepUpProtectedAction> actions = {
+        {"POST", "/api/nfqws", "install"},
         {"POST", "/api/nfqws", "upgrade"},
         {"POST", "/api/nfqws", "capture_restore_point"},
         {"POST", "/api/nfqws", "restore_component"},

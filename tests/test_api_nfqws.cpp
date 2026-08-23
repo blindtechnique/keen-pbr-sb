@@ -434,12 +434,43 @@ struct NfqwsPackageFixture {
                 execution.exit_code = 0;
                 return execution;
             }
+            if (argv[1] == "install" && argv.size() >= 3 &&
+                argv[2] == "ca-certificates") {
+                // The HTTPS prerequisites of a fresh install.
+                CHECK(argv == std::vector<std::string>{
+                                  "/opt/bin/opkg", "install",
+                                  "ca-certificates", "wget-ssl"});
+                execution.exit_code = deps_exit;
+                execution.stdout_output = "Installing wget-ssl\n";
+                return execution;
+            }
+            if (argv[1] == "remove") {
+                // wget-nossl removal is best effort; a router without it
+                // answers non-zero and that must not fail the install.
+                CHECK(argv == std::vector<std::string>{
+                                  "/opt/bin/opkg", "remove", "wget-nossl"});
+                execution.exit_code = 1;
+                execution.stdout_output = "No packages removed.\n";
+                return execution;
+            }
             if (argv[1] == "install") return install_outcome();
             FAIL("unexpected package command " << argv[1]);
             return execution;
         };
     }
+
+    int deps_exit{0};
+
+    std::string feed_conf() const { return (root / "feed.conf").string(); }
+    std::string read_feed_conf() const {
+        std::ifstream input(root / "feed.conf", std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(input)),
+                           std::istreambuf_iterator<char>());
+    }
 };
+
+constexpr const char* kTestFeedConfContent =
+    "src/gz nfqws2-keenetic https://nfqws.github.io/nfqws2-keenetic/all\n";
 
 } // namespace
 
@@ -597,6 +628,138 @@ TEST_CASE("exact previous package reinstall is proven by opkg naming the version
             fixture.store_root(), output));
         CHECK(fixture.commands.empty());
     }
+}
+
+TEST_CASE("a fresh install prepares https, writes the feed and installs the verified file") {
+    NfqwsPackageFixture fixture;
+    fixture.serve("1.2.4", "bytes of 1.2.4");
+    bool package_installed = false;
+    const auto result = run_nfqws_install_for_testing(
+        fixture.executor([&] {
+            package_installed = true;
+            ExecCaptureResult execution;
+            execution.exit_code = 0;
+            execution.stdout_output = "Installing nfqws2-keenetic (1.2.4)\n";
+            return execution;
+        }),
+        fixture.store_root(), fixture.feed_list(), fixture.feed_conf());
+
+    CHECK(result.status == 0);
+    CHECK(result.install_started);
+    CHECK(package_installed);
+    CHECK(result.target_version == "1.2.4");
+    CHECK(result.feed_conf_written);
+    // The feed definition is exactly what the shell installer writes.
+    CHECK(fixture.read_feed_conf() == kTestFeedConfContent);
+    // Sequence: entware update, https deps, wget-nossl removal (best
+    // effort), the transaction's own update, the download in staging, the
+    // install of the verified file.
+    REQUIRE(fixture.commands.size() == 6U);
+    CHECK(fixture.commands[0] ==
+          std::vector<std::string>{"/opt/bin/opkg", "update"});
+    CHECK(fixture.commands[1][2] == "ca-certificates");
+    CHECK(fixture.commands[2][1] == "remove");
+    CHECK(fixture.commands[3] ==
+          std::vector<std::string>{"/opt/bin/opkg", "update"});
+    CHECK(fixture.commands[4][1] == "download");
+    CHECK(fixture.commands[5] == std::vector<std::string>{
+                                     "/opt/bin/opkg", "install",
+                                     fixture.store_root() +
+                                         "/nfqws2-keenetic/candidate.ipk"});
+    // The verified bytes are staged as the candidate; promotion to the
+    // exact retained copy is the handler's step after verification.
+    ComponentIpkStore store(fixture.store_root(), "nfqws2-keenetic");
+    CHECK(store.inspect(IpkSlot::candidate).retained->version == "1.2.4");
+}
+
+TEST_CASE("an existing feed definition with custom content is left alone") {
+    NfqwsPackageFixture fixture;
+    fixture.serve("1.2.4", "bytes of 1.2.4");
+    const std::string mirror =
+        "src/gz nfqws2-keenetic https://mirror.example/nfqws\n";
+    {
+        std::ofstream conf(fixture.feed_conf(), std::ios::binary);
+        conf << mirror;
+    }
+    const auto result = run_nfqws_install_for_testing(
+        fixture.executor([] {
+            ExecCaptureResult execution;
+            execution.exit_code = 0;
+            return execution;
+        }),
+        fixture.store_root(), fixture.feed_list(), fixture.feed_conf());
+
+    CHECK(result.install_started);
+    CHECK_FALSE(result.feed_conf_written);
+    CHECK(fixture.read_feed_conf() == mirror);
+    CHECK(result.output.find("custom content") != std::string::npos);
+}
+
+TEST_CASE("a canonical feed definition is rewritten through the https-first order") {
+    // An interrupted earlier install leaves the canonical conf with the
+    // plain wget still installed, and a present https feed makes the whole
+    // `opkg update` fail. The order must therefore be: remove ours, update,
+    // deps, write ours back, update.
+    NfqwsPackageFixture fixture;
+    fixture.serve("1.2.4", "bytes of 1.2.4");
+    {
+        std::ofstream conf(fixture.feed_conf(), std::ios::binary);
+        conf << kTestFeedConfContent;
+    }
+    const auto result = run_nfqws_install_for_testing(
+        fixture.executor([] {
+            ExecCaptureResult execution;
+            execution.exit_code = 0;
+            return execution;
+        }),
+        fixture.store_root(), fixture.feed_list(), fixture.feed_conf());
+
+    CHECK(result.install_started);
+    CHECK(result.feed_conf_written);
+    CHECK(fixture.read_feed_conf() == kTestFeedConfContent);
+}
+
+TEST_CASE("failed https prerequisites stop the install before any mutation") {
+    NfqwsPackageFixture fixture;
+    fixture.serve("1.2.4", "bytes of 1.2.4");
+    fixture.deps_exit = 2;
+    bool package_installed = false;
+    const auto result = run_nfqws_install_for_testing(
+        fixture.executor([&] {
+            package_installed = true;
+            return ExecCaptureResult{};
+        }),
+        fixture.store_root(), fixture.feed_list(), fixture.feed_conf());
+
+    CHECK(result.status != 0);
+    CHECK_FALSE(result.install_started);
+    CHECK_FALSE(package_installed);
+    CHECK_FALSE(result.feed_conf_written);
+    // Only entware update and the deps attempt ran.
+    CHECK(fixture.commands.size() == 2U);
+    CHECK(result.output.find("HTTPS prerequisites") != std::string::npos);
+}
+
+TEST_CASE("an install target the feed index does not vouch for is refused") {
+    NfqwsPackageFixture fixture;
+    fixture.serve("1.2.4", "bytes of 1.2.4");
+    fixture.served_bytes = "bytes of 1.2.X";
+    REQUIRE(fixture.served_bytes.size() ==
+            std::string("bytes of 1.2.4").size());
+    bool package_installed = false;
+    const auto result = run_nfqws_install_for_testing(
+        fixture.executor([&] {
+            package_installed = true;
+            return ExecCaptureResult{};
+        }),
+        fixture.store_root(), fixture.feed_list(), fixture.feed_conf());
+
+    CHECK(result.status != 0);
+    CHECK_FALSE(result.install_started);
+    CHECK_FALSE(package_installed);
+    CHECK(result.output.find("refused") != std::string::npos);
+    ComponentIpkStore store(fixture.store_root(), "nfqws2-keenetic");
+    CHECK(store.inspect(IpkSlot::candidate).state == IpkSlotState::absent);
 }
 
 TEST_CASE("uncertain opkg termination forbids observation and recovery") {
