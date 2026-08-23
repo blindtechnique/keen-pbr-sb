@@ -89,6 +89,36 @@ std::chrono::seconds normalize_interval_seconds(const Outbound& outbound) {
 
 } // namespace
 
+bool should_cleanup_retired_urltest_flows(
+    const std::optional<ConntrackOnSwitch>& configured_mode,
+    UrltestSelectionChangeReason reason,
+    bool previous_child_is_selector) noexcept {
+    // The initial selection retires nobody; there is nothing to clean.
+    if (reason == UrltestSelectionChangeReason::initial) return false;
+
+    if (configured_mode.has_value()) {
+        // An explicit mode is validated at config time (nested children are
+        // refused there), so it is taken at its word - including an explicit
+        // "preserve", which keeps flows pinned even through an unhealthy
+        // switch because the operator said so.
+        switch (*configured_mode) {
+            case ConntrackOnSwitch::DELETE:
+                return true;
+            case ConntrackOnSwitch::DELETE_ON_FAILURE:
+                return reason ==
+                       UrltestSelectionChangeReason::previous_unhealthy;
+            case ConntrackOnSwitch::PRESERVE:
+                return false;
+        }
+        return false;
+    }
+
+    // Unset: failure-only cleanup by default, except for a nested selector
+    // whose group mark other traffic may share.
+    return reason == UrltestSelectionChangeReason::previous_unhealthy &&
+           !previous_child_is_selector;
+}
+
 UrltestManager::UrltestManager(URLTester& tester,
                                const OutboundMarkMap& marks,
                                RepeatingTaskScheduler& scheduler,

@@ -5578,7 +5578,6 @@ components:
           example: "priority"
         conntrack_on_switch:
           $ref: "#/components/schemas/ConntrackOnSwitch"
-          default: preserve
           description: >
             URLTEST handling for already established flows when the selected
             child changes. `preserve` keeps existing flows on their original
@@ -5586,9 +5585,16 @@ components:
             conntrack entries owned by this selector after the replacement
             route is active. `delete_on_failure` removes the failed child's
             entries during failover, but preserves established flows when a
-            healthy backup yields to a recovered preferred child. It is valid
-            only with `selection_mode: priority`. No mode performs a global
-            conntrack flush.
+            healthy backup yields to a recovered preferred child. Valid in any
+            selection mode. No mode performs a global conntrack flush.
+
+
+            **Unset behaves as `delete_on_failure`**, except that a nested
+            selector child is never cleaned by the default (its group mark may
+            be shared). A child retired for being unhealthy would otherwise
+            keep every established flow pinned to its dead table until
+            conntrack expiry. Writing `preserve` explicitly restores the old
+            behaviour - the escape hatch is stating it.
         outbound_groups:
           type: array
           description: >

@@ -1481,4 +1481,51 @@ TEST_CASE("stale worker completion cannot abandon a newer urltest generation") {
                                        std::move(current.results)));
 }
 
+TEST_CASE("retired-flow cleanup defaults to failure-only") {
+    using Reason = UrltestSelectionChangeReason;
+    const std::optional<ConntrackOnSwitch> unset;
+
+    // The gap this default closes: a degraded-but-UP child keeps its CONNMARK
+    // on established flows, and preserving them routes traffic into the dead
+    // child's table until conntrack expiry.
+    CHECK(should_cleanup_retired_urltest_flows(
+        unset, Reason::previous_unhealthy, false));
+
+    // A healthy rebalance retires a working child; its flows finish there.
+    CHECK_FALSE(should_cleanup_retired_urltest_flows(
+        unset, Reason::healthy_rebalance, false));
+    // The initial selection retires nobody.
+    CHECK_FALSE(should_cleanup_retired_urltest_flows(
+        unset, Reason::initial, false));
+    // A nested selector's group mark may be shared; the default must not do
+    // what an explicit config is refused at validation.
+    CHECK_FALSE(should_cleanup_retired_urltest_flows(
+        unset, Reason::previous_unhealthy, true));
+}
+
+TEST_CASE("an explicit conntrack mode is taken at its word") {
+    using Reason = UrltestSelectionChangeReason;
+
+    // Explicit preserve is the operator's escape hatch: it holds even through
+    // an unhealthy switch, where the unset default would clean.
+    CHECK_FALSE(should_cleanup_retired_urltest_flows(
+        ConntrackOnSwitch::PRESERVE, Reason::previous_unhealthy, false));
+
+    CHECK(should_cleanup_retired_urltest_flows(
+        ConntrackOnSwitch::DELETE, Reason::previous_unhealthy, false));
+    CHECK(should_cleanup_retired_urltest_flows(
+        ConntrackOnSwitch::DELETE, Reason::healthy_rebalance, false));
+    CHECK_FALSE(should_cleanup_retired_urltest_flows(
+        ConntrackOnSwitch::DELETE, Reason::initial, false));
+
+    CHECK(should_cleanup_retired_urltest_flows(
+        ConntrackOnSwitch::DELETE_ON_FAILURE,
+        Reason::previous_unhealthy,
+        false));
+    CHECK_FALSE(should_cleanup_retired_urltest_flows(
+        ConntrackOnSwitch::DELETE_ON_FAILURE,
+        Reason::healthy_rebalance,
+        false));
+}
+
 } // namespace keen_pbr3

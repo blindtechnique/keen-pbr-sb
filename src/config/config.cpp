@@ -1886,18 +1886,13 @@ void validate_config(const Config& cfg) {
 
         if (ob.type != OutboundType::URLTEST) continue;
 
-        if (ob.conntrack_on_switch.value_or(
-                ConntrackOnSwitch::PRESERVE) ==
-                ConntrackOnSwitch::DELETE_ON_FAILURE &&
-            ob.selection_mode.value_or(
-                UrltestSelectionMode::LATENCY) !=
-                UrltestSelectionMode::PRIORITY) {
-            add_issue(
-                issues,
-                "outbounds." + ob.tag + ".conntrack_on_switch",
-                "conntrack_on_switch='delete_on_failure' requires "
-                "selection_mode='priority'");
-        }
+        // delete_on_failure used to require selection_mode='priority', on the
+        // reasoning that only a priority group has a notion of "failed away
+        // from". That reasoning did not survive: a latency group retires an
+        // unhealthy child for exactly the same reason, and since failure-only
+        // cleanup became the unset default (see
+        // should_cleanup_retired_urltest_flows) the restriction would have
+        // forbidden writing down what the default already does.
 
         if (!ob.url.has_value() || ob.url->empty()) {
             add_issue(issues, "outbounds." + ob.tag + ".url",

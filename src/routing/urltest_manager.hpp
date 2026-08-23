@@ -54,6 +54,26 @@ struct UrltestSelectionChange {
         UrltestSelectionChangeReason::initial};
 };
 
+// Whether the retired child's conntrack entries should be removed after a
+// committed selection switch.
+//
+// The default - no configured mode - removes them when the child was retired
+// for being unhealthy. A degraded-but-UP child keeps its CONNMARK on every
+// established flow, and with the old preserve default those flows kept routing
+// into the dead child's table until conntrack expiry: the exact false-green
+// shape the kill-switch exists to prevent (upstream 8ff85ec2 reached the same
+// conclusion). An explicitly written "preserve" is still honoured - it is the
+// operator's escape hatch, and unlike the default it is a stated choice.
+//
+// A nested selector child never gets the default cleanup: its mark is a group
+// mark that other traffic may share, which is why explicit delete modes refuse
+// nested children at validation. The default must not do what an explicit
+// config is not allowed to say.
+bool should_cleanup_retired_urltest_flows(
+    const std::optional<ConntrackOnSwitch>& configured_mode,
+    UrltestSelectionChangeReason reason,
+    bool previous_child_is_selector) noexcept;
+
 // Callback invoked when the selected outbound changes for a urltest. Returns
 // true only after the controller has synchronously resolved the exact
 // transition (by applying the candidate or converging to its live cursor). A

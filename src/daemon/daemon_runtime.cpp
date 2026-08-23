@@ -2832,14 +2832,26 @@ bool Daemon::handle_urltest_selection_change(
         candidate_selections[change.urltest_tag] = change.new_child_tag;
 
         std::optional<uint32_t> retired_mark;
-        const auto cleanup_mode =
-            urltest_it->conntrack_on_switch.value_or(
-                ConntrackOnSwitch::PRESERVE);
+        // Whether the retired child is itself a selector matters only for the
+        // unset default: explicit delete modes already refused nested children
+        // at validation, and the default must not exceed what an explicit
+        // config may say.
+        bool previous_child_is_selector = false;
+        if (!change.previous_child_tag.empty() &&
+            config_.outbounds.has_value()) {
+            for (const auto& outbound : *config_.outbounds) {
+                if (outbound.tag == change.previous_child_tag) {
+                    previous_child_is_selector =
+                        outbound.type == OutboundType::URLTEST;
+                    break;
+                }
+            }
+        }
         const bool cleanup_retired_flows =
-            cleanup_mode == ConntrackOnSwitch::DELETE ||
-            (cleanup_mode == ConntrackOnSwitch::DELETE_ON_FAILURE &&
-             change.reason ==
-                 UrltestSelectionChangeReason::previous_unhealthy);
+            should_cleanup_retired_urltest_flows(
+                urltest_it->conntrack_on_switch,
+                change.reason,
+                previous_child_is_selector);
         if (cleanup_retired_flows &&
             !change.previous_child_tag.empty() &&
             change.previous_child_tag != change.new_child_tag) {
@@ -3004,9 +3016,30 @@ bool Daemon::handle_urltest_selection_change(
                 } else if (cleanup == ConntrackCleanupResult::Failed) {
                     log.info(
                         "Failed to remove conntrack entries for retired "
-                        "urltest mark {:#x}/{:#x}",
+                        "urltest mark {:#x}/{:#x}; a bounded retry is "
+                        "scheduled",
                         *retired_mark,
                         owned_mask);
+                    // A one-shot failure here used to be final (upstream
+                    // f58e4b58 fixed the same hole with its own retry map).
+                    // The fork already owns a bounded, generation-fenced
+                    // retry for owned-mark cleanup; hand the mark to it
+                    // instead of growing a second retry mechanism. A runtime
+                    // generation change cancels the retry, which is correct:
+                    // the rebuild it implies re-runs cleanup from a fresh
+                    // snapshot anyway.
+                    OwnedConntrackCleanupSnapshot snapshot;
+                    snapshot.runtime_generation =
+                        runtime_generation_.load(std::memory_order_acquire);
+                    snapshot.owned_mask = owned_mask;
+                    snapshot.ipv6_enabled =
+                        resolve_ipv6_support(config_).enabled;
+                    snapshot.marks.insert(*retired_mark);
+                    // The retired child carried live forwarded traffic;
+                    // that is what the priority tier is for.
+                    snapshot.priority_marks.insert(*retired_mark);
+                    schedule_owned_conntrack_cleanup_retry(
+                        snapshot, {*retired_mark});
                 }
             } catch (...) {
             }

@@ -1049,6 +1049,10 @@ TEST_CASE("conntrack_on_switch is accepted only for urltest outbounds") {
     CHECK(*failure_only.outbounds->at(1).conntrack_on_switch ==
           ConntrackOnSwitch::DELETE_ON_FAILURE);
 
+    // delete_on_failure is legal in latency mode too: a latency group retires
+    // an unhealthy child for the same reason a priority group does, and since
+    // failure-only cleanup became the unset default, the old priority-only
+    // restriction would forbid writing down what the default already does.
     const auto latency_failure_only = validate_issues(R"({
         "outbounds": [
             {"tag":"vpn","type":"interface","interface":"wg0"},
@@ -1059,7 +1063,7 @@ TEST_CASE("conntrack_on_switch is accepted only for urltest outbounds") {
     })");
     CHECK(find_issue(
               latency_failure_only,
-              "outbounds.ut.conntrack_on_switch") != nullptr);
+              "outbounds.ut.conntrack_on_switch") == nullptr);
 
     const auto issues = validate_issues(R"({
         "outbounds": [
