@@ -115,6 +115,11 @@ import {
   readStagedNativeWireGuardImportCompletion,
   type NativeWireGuardImportedIdentity,
 } from "@/lib/native-wireguard-import-completion"
+import {
+  readNativeMutationLock,
+  subscribeNativeMutationLock,
+  type NativeMutationLock,
+} from "@/lib/native-mutation-lock"
 import { resolveNativeWireGuardImportLocation } from "@/lib/native-wireguard-import-geo"
 import {
   useNativeInterfaceLocations,
@@ -246,6 +251,12 @@ function groupTransports(
   return [...groups.values()]
 }
 
+function nativeMutationLockIsImport(lock: NativeMutationLock | null): boolean {
+  if (!lock) return false
+  if (lock.state === "recovery_required") return lock.recovery === "import"
+  return lock.operation === "import" || lock.operation === "import_recovery"
+}
+
 export function TransportsPage({
   embedded = false,
 }: { embedded?: boolean } = {}) {
@@ -272,7 +283,11 @@ export function TransportsPage({
   const [dismissedRouteOffers, setDismissedRouteOffers] = useState<Set<string>>(
     () => readDismissedNativeRouteOffers()
   )
+  const [nativeMutationLock, setNativeMutationLock] =
+    useState<NativeMutationLock | null>(() => readNativeMutationLock())
   const transportImportRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => subscribeNativeMutationLock(setNativeMutationLock), [])
   const query = useGetTransports({
     query: {
       refetchInterval: 3_000,
@@ -911,6 +926,9 @@ export function TransportsPage({
     },
   })
   const recoveredImportApplyMutation = usePostTransportConfigApplyMutation()
+  const nativeImportInProgress =
+    nativeMutationLockIsImport(nativeMutationLock) ||
+    recoveredImportApplyMutation.isPending
 
   const persistRecoveredImportCountry = (
     transport: TransportSpec,
@@ -1862,7 +1880,10 @@ export function TransportsPage({
       )}
       <PageActionBar
         primary={
-          <Button onClick={() => navigate(transportCreateHref)}>
+          <Button
+            disabled={nativeImportInProgress}
+            onClick={() => navigate(transportCreateHref)}
+          >
             <PlusIcon />
             {t("transports.add")}
           </Button>
@@ -2038,6 +2059,7 @@ export function TransportsPage({
                 {t("transports.setupWizard")}
               </Button>
               <Button
+                disabled={nativeImportInProgress}
                 onClick={() => navigate(transportCreateHref)}
                 variant="outline"
               >
@@ -2056,7 +2078,7 @@ export function TransportsPage({
       ) : null}
 
       <NativeRouteOffer
-        candidates={routeOfferCandidates}
+        candidates={nativeImportInProgress ? [] : routeOfferCandidates}
         disabled={routeOfferMutation.isPending || !keenConfig}
         onCreate={createRouteFromOffer}
         onDismiss={dismissRouteOffer}

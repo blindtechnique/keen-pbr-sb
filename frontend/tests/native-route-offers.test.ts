@@ -46,6 +46,20 @@ describe("native route offer candidates", () => {
           role: "unknown",
           internalVpnServerCandidate: true,
         }),
+        // Импорт панели завершается собственным atomic apply и не должен на
+        // мгновение выглядеть как внешний туннель KeeneticOS.
+        native({
+          id: "Wireguard7",
+          label: "Panel import",
+          kernelName: "nwg7",
+          ownershipState: "panel_owned_active",
+        }),
+        native({
+          id: "Openvpn0",
+          kind: "openvpn",
+          label: "External OpenVPN",
+          kernelName: "ovpn0",
+        }),
       ],
       boundInterfaceNames: new Set(["nwg0"]),
       hiddenIds: new Set(["Wireguard3"]),
@@ -69,12 +83,16 @@ function native({
   kernelName,
   role = "client",
   internalVpnServerCandidate = false,
+  kind = "amnezia_wireguard",
+  ownershipState = "foreign",
 }: {
   id: string
   label: string
   kernelName: string | undefined
   role?: "client" | "server" | "unknown"
   internalVpnServerCandidate?: boolean
+  kind?: "amnezia_wireguard" | "openvpn"
+  ownershipState?: "foreign" | "panel_owned_active"
 }): NativeInterfaceModel {
   return {
     id,
@@ -94,7 +112,7 @@ function native({
       ...(kernelName ? { kernel_name: kernelName } : {}),
       label,
       firmware_type: "Wireguard",
-      kind: "amnezia_wireguard",
+      kind,
       role,
       internal_vpn_server_candidate: internalVpnServerCandidate,
       owner: "keenetic",
@@ -110,6 +128,9 @@ function native({
         observed_revision: `revision-${id}`,
         configuration_snapshot_available: false,
         blockers: [],
+      },
+      native_mutation: {
+        ownership_state: ownershipState,
       },
     },
   }

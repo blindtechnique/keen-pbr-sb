@@ -156,6 +156,7 @@ export function NativeWireGuardImportFields({
   onAliasSuggestionChange,
   onImportHandedOff,
   onImportPending,
+  onDisplayNameRequired,
   onNativeUriActiveChange,
   onImportedIdentityChange,
   onSubscriptionDocument,
@@ -171,6 +172,7 @@ export function NativeWireGuardImportFields({
   readonly onAliasSuggestionChange?: (suggestion?: string) => void
   readonly onImportHandedOff?: () => void
   readonly onImportPending?: (endpointHost?: string) => void
+  readonly onDisplayNameRequired?: () => void
   readonly onNativeUriActiveChange?: (active: boolean) => void
   readonly onImportedIdentityChange?: (
     identity: NativeWireGuardImportedIdentity | null
@@ -195,6 +197,7 @@ export function NativeWireGuardImportFields({
       onAliasSuggestionChange={onAliasSuggestionChange}
       onImportHandedOff={onImportHandedOff}
       onImportPending={onImportPending}
+      onDisplayNameRequired={onDisplayNameRequired}
       onNativeUriActiveChange={onNativeUriActiveChange}
       onImportedIdentityChange={onImportedIdentityChange}
       onSubscriptionDocument={onSubscriptionDocument}
@@ -225,6 +228,7 @@ function NativeWireGuardImportFieldsContent({
   onAliasSuggestionChange,
   onImportHandedOff,
   onImportPending,
+  onDisplayNameRequired,
   onNativeUriActiveChange,
   onImportedIdentityChange,
   onSubscriptionDocument,
@@ -241,6 +245,7 @@ function NativeWireGuardImportFieldsContent({
   readonly onAliasSuggestionChange?: (suggestion?: string) => void
   readonly onImportHandedOff?: () => void
   readonly onImportPending?: (endpointHost?: string) => void
+  readonly onDisplayNameRequired?: () => void
   readonly onNativeUriActiveChange?: (active: boolean) => void
   readonly onImportedIdentityChange?: (
     identity: NativeWireGuardImportedIdentity | null
@@ -256,6 +261,7 @@ function NativeWireGuardImportFieldsContent({
   const inputRef = useRef<HTMLInputElement>(null)
   const dropzoneRef = useRef<HTMLDivElement>(null)
   const linkInputRef = useRef<HTMLTextAreaElement>(null)
+  const previewRef = useRef<HTMLDivElement>(null)
   const summaryRef = useRef<HTMLDivElement>(null)
   const readGateRef = useRef(createNativeWireGuardFileReadGate())
   const mountedRef = useRef(true)
@@ -288,6 +294,10 @@ function NativeWireGuardImportFieldsContent({
     operation.status === "recovery-locked" ||
     (operation.status === "result" && operation.outcome === "recovery_required")
   const intakeLocked = nativeWireGuardImportIntakeIsLocked(operation)
+  const uriIntakeLocked =
+    intakeLocked ||
+    (mode === "link" &&
+      (state.status === "loading" || state.status === "ready"))
   const completedIdentity =
     operation.status === "result" && operation.outcome === "completed"
       ? provedCompletedNativeImportIdentity(operation.result)
@@ -445,6 +455,11 @@ function NativeWireGuardImportFieldsContent({
       queueMicrotask(() => summaryRef.current?.focus())
     }
   }, [operation.status, state.status])
+
+  useEffect(() => {
+    if (mode !== "link" || state.status !== "ready") return
+    queueMicrotask(() => previewRef.current?.focus())
+  }, [mode, state.status])
 
   const analyzeText = async ({
     text,
@@ -661,14 +676,17 @@ function NativeWireGuardImportFieldsContent({
   const submitImport = async () => {
     if (
       state.status !== "ready" ||
-      !displayName?.trim() ||
-      !ownerRiskAccepted ||
       recoveryLocked ||
       submissionActiveRef.current ||
       (operation.status !== "idle" && operation.status !== "preflight-error")
     ) {
       return
     }
+    if (!displayName?.trim()) {
+      onDisplayNameRequired?.()
+      return
+    }
+    if (!ownerRiskAccepted) return
 
     let pendingStarted = false
     submissionActiveRef.current = true
@@ -900,7 +918,7 @@ function NativeWireGuardImportFieldsContent({
             aria-describedby="native-wireguard-uri-paste-hint"
             className="min-h-28 w-full resize-y rounded-md border border-input bg-background px-3 py-2 font-mono text-xs outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/20"
             id="native-wireguard-uri-paste"
-            disabled={intakeLocked}
+            disabled={uriIntakeLocked}
             onChange={(event) => onLinkInput(event.target.value)}
             onPaste={onUriPaste}
             placeholder="vless://…  vmess://…  trojan://…  vpn://…"
@@ -953,7 +971,11 @@ function NativeWireGuardImportFieldsContent({
       ) : null}
 
       {state.status === "ready" ? (
-        <div className="space-y-3 rounded-lg border border-border p-3">
+        <div
+          className="space-y-3 rounded-lg border border-border p-3 outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/20"
+          ref={previewRef}
+          tabIndex={-1}
+        >
           <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
             <div className="flex min-w-0 items-center gap-2">
               <FileKey2Icon className="size-5 shrink-0 text-primary" />
@@ -1126,8 +1148,7 @@ function NativeWireGuardImportFieldsContent({
             <Button
               className="min-h-11 whitespace-normal"
               disabled={
-                !displayName?.trim() ||
-                !ownerRiskAccepted ||
+                (Boolean(displayName?.trim()) && !ownerRiskAccepted) ||
                 operation.status === "preflighting" ||
                 operation.status === "sending"
               }

@@ -112,3 +112,36 @@ test("background handoff paints progress and bypasses the discard-draft close", 
   expect(pageSource).toContain("() => ({ close, complete })")
   expect(contextSource).toContain("useContext(UpsertCloseContext).complete")
 })
+
+test("native import owns focus and blocks competing create UI until completion", async () => {
+  const cardSource = await Bun.file(
+    new URL(
+      "../src/components/transports/native-wireguard-import-card.tsx",
+      import.meta.url
+    )
+  ).text()
+  const formSource = await Bun.file(
+    new URL(
+      "../src/components/transports/transport-config-dialog.tsx",
+      import.meta.url
+    )
+  ).text()
+  const pageSource = await Bun.file(
+    new URL("../src/pages/transports-page.tsx", import.meta.url)
+  ).text()
+
+  expect(cardSource).toContain("disabled={uriIntakeLocked}")
+  expect(cardSource).toContain("previewRef.current?.focus()")
+  expect(cardSource).toContain("onDisplayNameRequired?.()")
+  expect(formSource).toContain("displayNameInputRef.current?.focus()")
+  expect(
+    formSource.match(/onDisplayNameRequired={focusRequiredDisplayName}/g)
+  ).toHaveLength(2)
+  expect(formSource).toContain(
+    '"border-primary bg-primary/10 shadow-sm ring-2 ring-primary/20"'
+  )
+  expect(pageSource).toContain("disabled={nativeImportInProgress}")
+  expect(pageSource).toContain(
+    "candidates={nativeImportInProgress ? [] : routeOfferCandidates}"
+  )
+})

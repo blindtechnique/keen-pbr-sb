@@ -86,12 +86,6 @@ describe("native Keenetic interface wording", () => {
     expect(
       ruTranslation.transports.nativeImport.transportBlockedDescription
     ).toContain("HTTP заблокирован")
-    expect(ruTranslation.transports.nativeImport.redactedNotice).toContain(
-      "локальное структурное превью"
-    )
-    expect(ruTranslation.transports.nativeImport.redactedNotice).not.toContain(
-      "backend"
-    )
 
     expect(enTranslation.transports.nativeImport.description).toContain(
       "structural preview is local"
@@ -111,20 +105,18 @@ describe("native Keenetic interface wording", () => {
     expect(
       enTranslation.transports.nativeImport.transportBlockedDescription
     ).toContain("HTTP is blocked")
-    expect(enTranslation.transports.nativeImport.redactedNotice).toContain(
-      "local structural preview"
-    )
-    expect(enTranslation.transports.nativeImport.redactedNotice).not.toContain(
-      "backend"
-    )
   })
 
   test("describes every typed readiness blocker and the live owner boundary", () => {
     for (const blocker of Object.values(
       NdmsNativeImportReadinessBlockersItem
     )) {
-      expect(ruTranslation.transports.nativeImport.blockers[blocker]).toBeTruthy()
-      expect(enTranslation.transports.nativeImport.blockers[blocker]).toBeTruthy()
+      expect(
+        ruTranslation.transports.nativeImport.blockers[blocker]
+      ).toBeTruthy()
+      expect(
+        enTranslation.transports.nativeImport.blockers[blocker]
+      ).toBeTruthy()
     }
 
     expect(ruTranslation.transports.nativeImport.ownerRiskConsent).toContain(

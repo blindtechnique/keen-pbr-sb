@@ -80,6 +80,16 @@ export function pickNativeRouteOfferCandidates({
   readonly dismissedIds: ReadonlySet<string>
 }): NativeRouteOfferCandidate[] {
   return nativeInterfaces.flatMap((nativeInterface) => {
+    // Imports owned by this panel are completed by the import pipeline itself.
+    // This offer is only for a WG/AWG tunnel the operator created directly in
+    // KeeneticOS and whose absent panel claim was observed authoritatively.
+    if (
+      nativeInterface.source.native_mutation.ownership_state !== "foreign" ||
+      (nativeInterface.source.kind !== "wireguard" &&
+        nativeInterface.source.kind !== "amnezia_wireguard")
+    ) {
+      return []
+    }
     if (getNativeBindBlockReason(nativeInterface) !== undefined) {
       return []
     }

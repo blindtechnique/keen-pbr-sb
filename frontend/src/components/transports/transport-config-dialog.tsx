@@ -47,6 +47,7 @@ import {
 } from "@/lib/hidden-native-interfaces"
 import { isSemanticallyDirty } from "@/lib/semantic-dirty"
 import { semanticJsonEqual } from "@/lib/semantic-json"
+import { cn } from "@/lib/utils"
 import { NativeWireGuardImportFields } from "@/components/transports/native-wireguard-import-card"
 import {
   NATIVE_WIREGUARD_IMPORT_PROGRESS_TOAST_ID,
@@ -397,6 +398,7 @@ export function TransportConfigForm({
   )
   const [sourceMode, setSourceMode] = useState<SourceMode>(baseline.sourceMode)
   const [displayNameTouched, setDisplayNameTouched] = useState(false)
+  const [displayNameAttention, setDisplayNameAttention] = useState(false)
   const [nativeUriActive, setNativeUriActive] = useState(false)
   const [nativeImportAliasSuggestion, setNativeImportAliasSuggestion] =
     useState<string>()
@@ -404,6 +406,7 @@ export function TransportConfigForm({
     useState<NativeWireGuardImportedIdentity | null>(null)
   const [nativeImportSubmitted, setNativeImportSubmitted] = useState(false)
   const importedNativeFocusPendingRef = useRef(false)
+  const displayNameInputRef = useRef<HTMLInputElement>(null)
   const nativeImportHandoffCloseTimerRef = useRef<number | null>(null)
   const nativeInterfaceTriggerRef = useRef<HTMLButtonElement>(null)
   // What the operator handed over that turned out to be a subscription rather
@@ -681,6 +684,18 @@ export function TransportConfigForm({
     )
   }
 
+  const focusRequiredDisplayName = useCallback(() => {
+    setDisplayNameTouched(true)
+    setDisplayNameAttention(true)
+    queueMicrotask(() => {
+      displayNameInputRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "center",
+      })
+      displayNameInputRef.current?.focus()
+    })
+  }, [])
+
   // Ошибка имени не показывается на открытии: окно встречало пользователя
   // красным полем и строкой о том, что он уже ошибся, — до того как он
   // что-либо напечатал. Показываем, когда поле тронули либо когда в форме уже
@@ -706,9 +721,15 @@ export function TransportConfigForm({
         <Field label={t("transports.form.displayName")}>
           <Input
             aria-invalid={showDisplayNameError}
+            className={cn(
+              displayNameAttention && "border-primary ring-3 ring-primary/20"
+            )}
             onBlur={() => setDisplayNameTouched(true)}
             onChange={(event) => {
               setDisplayNameTouched(true)
+              if (!validateDisplayName(event.target.value)) {
+                setDisplayNameAttention(false)
+              }
               setSpec({
                 ...spec,
                 display_name: event.target.value || undefined,
@@ -716,6 +737,7 @@ export function TransportConfigForm({
             }}
             placeholder={t("transports.form.displayNamePlaceholder")}
             required
+            ref={displayNameInputRef}
             value={spec.display_name ?? ""}
           />
           <p className="text-xs text-muted-foreground">
@@ -728,13 +750,20 @@ export function TransportConfigForm({
           ) : null}
           {aliasSuggestion && aliasSuggestion !== spec.display_name?.trim() ? (
             <Button
-              className="w-fit px-0"
-              onClick={() =>
+              className={cn(
+                "h-auto w-fit max-w-full text-left whitespace-normal",
+                displayNameAttention
+                  ? "border-primary bg-primary/10 shadow-sm ring-2 ring-primary/20"
+                  : "px-0"
+              )}
+              onClick={() => {
+                setDisplayNameTouched(true)
+                setDisplayNameAttention(false)
                 setSpec({ ...spec, display_name: aliasSuggestion })
-              }
+              }}
               size="sm"
               type="button"
-              variant="link"
+              variant={displayNameAttention ? "outline" : "link"}
             >
               {t("transports.form.useAliasSuggestion", {
                 name: aliasSuggestion,
@@ -1072,6 +1101,7 @@ export function TransportConfigForm({
                   onAliasSuggestionChange={setNativeImportAliasSuggestion}
                   onImportHandedOff={finishHandedOffNativeImport}
                   onImportPending={stageCurrentNativeImportCompletion}
+                  onDisplayNameRequired={focusRequiredDisplayName}
                   onLinkChange={(value) =>
                     setSpec((current) =>
                       withAutomaticTechnicalIdentity({
@@ -1118,6 +1148,7 @@ export function TransportConfigForm({
                 onAliasSuggestionChange={setNativeImportAliasSuggestion}
                 onImportHandedOff={finishHandedOffNativeImport}
                 onImportPending={stageCurrentNativeImportCompletion}
+                onDisplayNameRequired={focusRequiredDisplayName}
                 onSubscriptionDocument={(text) =>
                   setSubscriptionSeed({ document: text })
                 }
