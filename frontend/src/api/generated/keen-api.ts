@@ -170,6 +170,7 @@ export const getGetHealthServiceQueryKey = () => {
     ] as const;
     }
 
+
 export const getGetHealthServiceQueryOptions = <TData = Awaited<ReturnType<typeof getHealthService>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getHealthService>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
 ) => {
 
@@ -3552,7 +3553,7 @@ export function useGetTransports<TData = Awaited<ReturnType<typeof getTransports
 
 
 /**
- * @summary Start or stop a transport
+ * @summary Start, stop or restart a managed or native WG/AWG transport
  */
 export type postTransportActionResponse200 = {
   data: TransportActionResponse
@@ -3633,7 +3634,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type PostTransportActionMutationError = ErrorResponse
 
     /**
- * @summary Start or stop a transport
+ * @summary Start, stop or restart a managed or native WG/AWG transport
  */
 export const usePostTransportAction = <TError = ErrorResponse,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postTransportAction>>, TError,{data: TransportActionRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
@@ -8057,3 +8058,4 @@ export const usePostCatalogSetupApply = <TError = ErrorResponse,
       > => {
       return useMutation(getPostCatalogSetupApplyMutationOptions(options), queryClient);
     }
+

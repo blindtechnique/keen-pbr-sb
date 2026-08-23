@@ -8,7 +8,7 @@
 import type { TransportActionRequestAction } from './transportActionRequestAction';
 
 export interface TransportActionRequest {
-  /** @pattern ^[a-z][a-z0-9_]{0,23}$ */
+  /** @pattern ^(?:[a-z][a-z0-9_]{0,23}|Wireguard(?:0|[1-9][0-9]?|1[01][0-9]|12[0-6]))$ */
   tag: string;
   action: TransportActionRequestAction;
 }
