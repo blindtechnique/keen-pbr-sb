@@ -190,7 +190,10 @@ NfqwsInstallTestResult run_nfqws_install_for_testing(
         const std::filesystem::path&)> execute,
     const std::string& store_root,
     const std::string& feed_list,
-    const std::string& feed_conf);
+    const std::string& feed_conf,
+    // The prepared hook production uses to journal "mutating" before opkg
+    // install may run; returning false must refuse the install.
+    std::function<bool(const std::string& target_version)> on_prepared = {});
 
 // The exact-rollback step: reinstall the store's copy of `expected_version`
 // and prove it through the injected version reader.

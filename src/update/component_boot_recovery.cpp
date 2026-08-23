@@ -81,6 +81,22 @@ ComponentBootRecoveryPlan decide_component_boot_recovery(
         return plan;
     }
 
+    if (record.operation == "install") {
+        // Everything below reasons from a pre-mutation world that an
+        // upgrade captured. A fresh install has none: no capture was ever
+        // taken for it, and a capture store that happens to verify belongs
+        // to some earlier epoch of this component - restoring it over a
+        // half-installed package would resurrect old files and call it
+        // recovery. With something on disk and no clean absence above,
+        // only an operator can say what this router should hold.
+        plan.action = ComponentBootRecoveryAction::manual;
+        plan.reason = "the interrupted operation was a fresh install and "
+                      "something of it is on disk; no capture describes a "
+                      "pre-install world, so nothing can be restored "
+                      "mechanically";
+        return plan;
+    }
+
     const bool capture_usable =
         evidence.capture == ComponentCaptureState::usable;
 

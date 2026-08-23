@@ -727,21 +727,35 @@ BoundedOpkgInstallResult run_bounded_nfqws_opkg_install(
 
     // 1. The feed definition, canonical copies first (see above).
     std::error_code conf_error;
-    bool conf_present =
-        fs::is_regular_file(fs::symlink_status(feed_conf, conf_error)) &&
-        !conf_error;
-    bool conf_is_ours = false;
-    if (conf_present) {
+    const auto conf_status = fs::symlink_status(feed_conf, conf_error);
+    bool conf_present = !conf_error && fs::exists(conf_status);
+    if (conf_present && !fs::is_regular_file(conf_status)) {
+        // A symlink or anything else non-regular is somebody's deliberate
+        // arrangement: it stays active for opkg and is not this action's
+        // to rewrite or remove. If it points at an HTTPS feed on a router
+        // without wget-ssl, the update below fails and says so.
+        note("The nfqws2 feed definition is not a regular file; it is left "
+             "as it is.");
+    } else if (conf_present) {
         std::ifstream input(feed_conf, std::ios::binary);
         std::string body((std::istreambuf_iterator<char>(input)),
                          std::istreambuf_iterator<char>());
-        conf_is_ours = body == kNfqwsFeedConfContent ||
-                       body == std::string(kNfqwsFeedConfContent).substr(
-                                   0, std::string(kNfqwsFeedConfContent)
-                                              .size() -
-                                          1);
+        const std::string canonical(kNfqwsFeedConfContent);
+        const bool conf_is_ours =
+            body == canonical ||
+            body == canonical.substr(0, canonical.size() - 1);
         if (conf_is_ours) {
             fs::remove(feed_conf, conf_error);
+            if (conf_error) {
+                combined.status = -1;
+                note("The canonical nfqws2 feed definition could not be "
+                     "removed before the HTTPS prerequisites (" +
+                     conf_error.message() +
+                     "); with the plain wget still possible, refreshing "
+                     "feeds over it would fail as a whole, so nothing was "
+                     "attempted.");
+                return combined;
+            }
             conf_present = false;
         } else {
             note("An nfqws2 feed definition with custom content is already "
@@ -2722,8 +2736,14 @@ void register_nfqws_handler_impl(
             std::error_code presence_error;
             if (fs::is_regular_file(kBinary, presence_error) ||
                 fs::is_regular_file(kOpkgPackageFileList, presence_error)) {
+                // The opkg file list alone also refuses: it means opkg
+                // still holds a record of this package, and installing over
+                // a record is the package manager's decision to make
+                // through upgrade, not this action's.
                 throw ApiError(
-                    "nfqws2 is already installed; use the upgrade action",
+                    "nfqws2 is already installed, or opkg still holds its "
+                    "package record; use the upgrade action, or repair the "
+                    "package record manually",
                     409);
             }
             const auto journal = read_component_transaction(kNfqwsJournal);
@@ -2861,8 +2881,10 @@ void register_nfqws_handler_impl(
 
             // The rollback of a fresh install is removal: the pre-install
             // state was "not installed", and that is a state this router is
-            // known to work in.
-            progress.step("rollback");
+            // known to work in. Its own step name, because the page's
+            // "rollback" wording talks about restoring saved files, and
+            // nothing is being restored here.
+            progress.step("remove");
             output += "\nThe installation did not verify; removing the "
                       "package to return to the pre-install state.\n";
             int remove_status = -1;
@@ -2880,9 +2902,19 @@ void register_nfqws_handler_impl(
                     after = installed_version();
                 } catch (...) {
                 }
-                std::error_code binary_error;
+                // The proof is the post-state, not opkg's exit code: a
+                // remove of a package opkg never registered answers
+                // non-zero while the state may still be clean. All three
+                // traces must be gone - the status entry, the binary, and
+                // opkg's file list, which is written during unpack and is
+                // exactly what a crashed install leaves behind. A leftover
+                // list would make every retry refuse as "already
+                // installed", so "removed" must not be claimed over it.
+                std::error_code trace_error;
                 removed = after.empty() &&
-                          !fs::is_regular_file(kBinary, binary_error);
+                          !fs::is_regular_file(kBinary, trace_error) &&
+                          !fs::is_regular_file(kOpkgPackageFileList,
+                                               trace_error);
             }
             try {
                 ComponentIpkStore store(kComponentStoreRoot, kNfqwsPackage);
@@ -3920,12 +3952,19 @@ NfqwsInstallTestResult run_nfqws_install_for_testing(
         const std::filesystem::path&)> execute,
     const std::string& store_root,
     const std::string& feed_list,
-    const std::string& feed_conf) {
+    const std::string& feed_conf,
+    std::function<bool(const std::string& target_version)> on_prepared) {
     NfqwsPackagePaths paths;
     paths.store_root = store_root;
     paths.feed_list = feed_list;
+    NfqwsPreparedHook hook;
+    if (on_prepared) {
+        hook = [&on_prepared](const BoundedOpkgUpgradeResult& prepared) {
+            return on_prepared(prepared.target_version);
+        };
+    }
     const auto result =
-        run_bounded_nfqws_opkg_install(execute, paths, feed_conf);
+        run_bounded_nfqws_opkg_install(execute, paths, feed_conf, hook);
     return NfqwsInstallTestResult{
         result.output,
         result.status,

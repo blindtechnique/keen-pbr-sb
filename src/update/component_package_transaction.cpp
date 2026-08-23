@@ -186,8 +186,14 @@ ComponentPackagePreparation ComponentPackageTransaction::prepare_impl(
         retained_current && retained_current->version == installed_version;
 
     const bool listed_is_installed = listed.version == installed_version;
+    // With nothing installed (a fresh install prepares with an empty
+    // version) anything the feed serves is the target: a version whose
+    // numerics parse as zeros would otherwise compare "not newer than
+    // nothing" and misreport an empty router as up to date.
     const bool listed_is_newer =
-        feed_version_newer(listed.version, installed_version);
+        installed_version.empty()
+            ? true
+            : feed_version_newer(listed.version, installed_version);
     preparation.retention = decide_ipk_retention(
         installed_version, retained_current,
         listed_is_installed ? preparation.listed : std::nullopt);
@@ -270,7 +276,9 @@ ComponentPackagePreparation ComponentPackageTransaction::prepare_impl(
                     "Target " + listed.version +
                         " verified against the feed index (SHA-256 " +
                         listed.sha256.substr(0, 12) + "...) and staged.");
-        if (!preparation.previous_exact) {
+        if (!preparation.previous_exact && !installed_version.empty()) {
+            // Upgrade wording, and only for an upgrade: a fresh install
+            // has no installed version whose copy could be missed.
             append_line(preparation.output,
                         "No exact copy of the installed version " +
                             installed_version +

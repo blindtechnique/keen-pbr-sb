@@ -103,6 +103,7 @@ export const enTranslation = {
     progressStepInstall: "Installing the package",
     progressStepVerify: "Checking the result",
     progressStepRollback: "Restoring the saved files",
+    progressStepRemove: "Removing the package, back to the pre-install state",
     progressStepStop: "Stopping nfqws2",
     progressStepRestore: "Writing the saved files back",
     progressStepStart: "Starting nfqws2",

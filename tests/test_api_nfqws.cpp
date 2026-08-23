@@ -417,6 +417,8 @@ struct NfqwsPackageFixture {
             commands.push_back(argv);
             deadlines.push_back(timeout);
             working_directories.push_back(cwd);
+            feed_conf_present_at_command.push_back(
+                std::filesystem::exists(root / "feed.conf"));
             ExecCaptureResult execution;
             REQUIRE(argv.size() >= 2U);
             if (argv[1] == "update") {
@@ -446,11 +448,14 @@ struct NfqwsPackageFixture {
             }
             if (argv[1] == "remove") {
                 // wget-nossl removal is best effort; a router without it
-                // answers non-zero and that must not fail the install.
-                CHECK(argv == std::vector<std::string>{
-                                  "/opt/bin/opkg", "remove", "wget-nossl"});
-                execution.exit_code = 1;
-                execution.stdout_output = "No packages removed.\n";
+                // answers non-zero and that must not fail the install. The
+                // component removal (the install's rollback) also lands
+                // here when an action-level test drives it.
+                REQUIRE(argv.size() == 3U);
+                CHECK((argv[2] == "wget-nossl" ||
+                       argv[2] == "nfqws2-keenetic"));
+                execution.exit_code = argv[2] == "wget-nossl" ? 1 : 0;
+                execution.stdout_output = "Removing " + argv[2] + "\n";
                 return execution;
             }
             if (argv[1] == "install") return install_outcome();
@@ -460,6 +465,10 @@ struct NfqwsPackageFixture {
     }
 
     int deps_exit{0};
+    // Whether the feed definition existed at the moment of each command -
+    // the https-first order is about WHEN the conf exists, not only that it
+    // does at the end.
+    std::vector<bool> feed_conf_present_at_command;
 
     std::string feed_conf() const { return (root / "feed.conf").string(); }
     std::string read_feed_conf() const {
@@ -717,9 +726,43 @@ TEST_CASE("a canonical feed definition is rewritten through the https-first orde
     CHECK(result.install_started);
     CHECK(result.feed_conf_written);
     CHECK(fixture.read_feed_conf() == kTestFeedConfContent);
+    // The order is the claim: our conf must be ABSENT while the stock
+    // update, the https prerequisites and the wget-nossl removal run, and
+    // present again from the second update on. A refactor that writes the
+    // conf before the prerequisites would break exactly the interrupted-
+    // install retry this order exists for.
+    REQUIRE(fixture.feed_conf_present_at_command.size() == 6U);
+    CHECK_FALSE(fixture.feed_conf_present_at_command[0]);
+    CHECK_FALSE(fixture.feed_conf_present_at_command[1]);
+    CHECK_FALSE(fixture.feed_conf_present_at_command[2]);
+    CHECK(fixture.feed_conf_present_at_command[3]);
+    CHECK(fixture.feed_conf_present_at_command[4]);
+    CHECK(fixture.feed_conf_present_at_command[5]);
 }
 
-TEST_CASE("failed https prerequisites stop the install before any mutation") {
+TEST_CASE("a prepared-hook refusal stops the install before opkg runs it") {
+    NfqwsPackageFixture fixture;
+    fixture.serve("1.2.4", "bytes of 1.2.4");
+    bool package_installed = false;
+    std::string hook_target;
+    const auto result = run_nfqws_install_for_testing(
+        fixture.executor([&] {
+            package_installed = true;
+            return ExecCaptureResult{};
+        }),
+        fixture.store_root(), fixture.feed_list(), fixture.feed_conf(),
+        [&](const std::string& target) {
+            hook_target = target;
+            return false;
+        });
+    CHECK(hook_target == "1.2.4");
+    CHECK_FALSE(result.install_started);
+    CHECK_FALSE(package_installed);
+    CHECK(result.status != 0);
+    CHECK(result.output.find("journal could not record") != std::string::npos);
+}
+
+TEST_CASE("failed https prerequisites stop the install before the component is touched") {
     NfqwsPackageFixture fixture;
     fixture.serve("1.2.4", "bytes of 1.2.4");
     fixture.deps_exit = 2;

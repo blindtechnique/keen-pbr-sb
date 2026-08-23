@@ -981,6 +981,7 @@ const progressStepKeys: Record<string, string> = {
   install: "progressStepInstall",
   verify: "progressStepVerify",
   rollback: "progressStepRollback",
+  remove: "progressStepRemove",
   stop: "progressStepStop",
   restore: "progressStepRestore",
   start: "progressStepStart",

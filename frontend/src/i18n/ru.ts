@@ -104,6 +104,7 @@ export const ruTranslation = {
     progressStepInstall: "Устанавливаю пакет",
     progressStepVerify: "Проверяю результат",
     progressStepRollback: "Возвращаю сохранённые файлы",
+    progressStepRemove: "Удаляю пакет, возврат к состоянию до установки",
     progressStepStop: "Останавливаю nfqws2",
     progressStepRestore: "Записываю сохранённые файлы обратно",
     progressStepStart: "Запускаю nfqws2",

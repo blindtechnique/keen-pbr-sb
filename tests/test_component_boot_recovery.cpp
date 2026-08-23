@@ -186,6 +186,18 @@ TEST_CASE("an interrupted fresh install with nothing on disk simply clears") {
         CHECK(decide_component_boot_recovery(evidence).action ==
               ComponentBootRecoveryAction::manual);
     }
+    SUBCASE("and a usable capture from an earlier epoch changes nothing") {
+        // A capture store that verifies belongs to some PREVIOUS life of
+        // this component (an old upgrade's restore point) - no capture was
+        // ever taken for a fresh install. Restoring it over a half-installed
+        // package would resurrect old files and call it recovery.
+        evidence.installed_binary_sha256 = std::string(64, 'e');
+        evidence.capture = ComponentCaptureState::usable;
+        evidence.previous_ipk = usable_ipk("1.0.0");
+        const auto verdict = decide_component_boot_recovery(evidence);
+        CHECK(verdict.action == ComponentBootRecoveryAction::manual);
+        CHECK_FALSE(verdict.clear_journal_on_success);
+    }
     SUBCASE("and an upgrade journal is never cleared this way") {
         auto upgrade = mutating_record();
         auto upgrade_evidence = abandoned_with(upgrade);
