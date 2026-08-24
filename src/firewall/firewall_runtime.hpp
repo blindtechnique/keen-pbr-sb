@@ -9,6 +9,7 @@
 #include "../runtime/nfqws_runtime_contract.hpp"
 #include "firewall.hpp"
 
+#include <cstddef>
 #include <functional>
 #include <map>
 #include <optional>
@@ -18,17 +19,12 @@
 namespace keen_pbr3 {
 
 // A firewall transaction that is fully described in memory but has not been
-// handed to the kernel yet.
-//
-// The split exists because the commit step is the only part that spawns child
-// processes - `ipset restore`, `iptables-restore`, `nft -f -` - each with a
-// multi-second timeout and its own bounded retry. Staging primarily reads
-// daemon state and fills backend buffers, although a legacy iptables prepare
-// path may repair its ordinary mangle dispatcher. The strict Meta boundary is
+// committed to the kernel yet. Backend preparation is part of staging and may
+// inspect or repair kernel state, execute helpers, retry, and sleep. A delayed
+// recovery worker must therefore own both stage and commit; moving only commit
+// off the control loop is not sufficient. The strict Meta boundary is
 // narrower: staging never publishes the Meta UDP/443 filter and never deletes
-// conntrack tuples before the caller completes specialized preflight. Naming
-// the boundary is what lets the commit later move off the control loop without
-// the staging following it.
+// conntrack tuples before the caller completes specialized preflight.
 struct StagedRuntimeFirewall {
     // The realized rule-state snapshot to store for verification and status.
     std::vector<RuleState> rule_states;
@@ -104,8 +100,31 @@ StagedRuntimeFirewall stage_runtime_firewall(
     bool force_clear_dynamic_sets = false,
     const PreviousRuntimeFirewall& previous = {});
 
-// Hand the staged transaction to the kernel. This is the one blocking step:
-// every child process of a firewall apply originates here.
+// Worker-safe staging entry point. The list generation and its size limit are
+// immutable values captured on the control loop; no CacheManager reference is
+// retained or consulted while the backend transaction is prepared.
+StagedRuntimeFirewall stage_runtime_firewall_from_snapshot(
+    const Config& config,
+    const OutboundMarkMap& outbound_marks,
+    const std::map<std::string, std::string>& urltest_selections,
+    std::size_t list_max_file_size_bytes,
+    std::shared_ptr<const ListCacheGenerationSnapshot> list_cache_snapshot,
+    Firewall& firewall,
+    FirewallApplyMode mode,
+    const std::vector<InternalVpnServer>*
+        effective_internal_vpn_servers = nullptr,
+    const std::vector<InternalVpnRuntimeTarget>*
+        effective_internal_vpn_targets = nullptr,
+    const std::vector<FirewallSourceEgressSnatSelector>*
+        native_vpn_direct_egress_snat_selectors = nullptr,
+    bool udp_call_affinity_ipset_available = true,
+    const std::optional<KeeneticDnsSnapshot>& keenetic_dns_snapshot =
+        std::nullopt,
+    bool force_clear_dynamic_sets = false,
+    const PreviousRuntimeFirewall& previous = {});
+
+// Hand the staged transaction to the kernel. This is a blocking publication
+// step; staging can also block while the backend prepares the transaction.
 void commit_runtime_firewall(Firewall& firewall,
                              const StagedRuntimeFirewall& staged);
 

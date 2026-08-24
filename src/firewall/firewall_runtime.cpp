@@ -267,11 +267,11 @@ changed_native_vpn_direct_egress_source_cidrs(
     return {changed_sources.begin(), changed_sources.end()};
 }
 
-StagedRuntimeFirewall stage_runtime_firewall(
+static StagedRuntimeFirewall stage_runtime_firewall_with_streamer(
     const Config& config,
     const OutboundMarkMap& outbound_marks,
     const std::map<std::string, std::string>& urltest_selections,
-    const CacheManager& cache_manager,
+    std::unique_ptr<ListStreamer> list_streamer,
     Firewall& firewall,
     FirewallApplyMode mode,
     const std::vector<InternalVpnServer>*
@@ -282,8 +282,6 @@ StagedRuntimeFirewall stage_runtime_firewall(
         native_vpn_direct_egress_snat_selectors,
     bool udp_call_affinity_ipset_available,
     const std::optional<KeeneticDnsSnapshot>& keenetic_dns_snapshot,
-    std::shared_ptr<const ListCacheGenerationSnapshot>
-        list_cache_snapshot,
     bool force_clear_dynamic_sets,
     const PreviousRuntimeFirewall& previous) {
     // Resolve and validate the complete DNS registry before preparing the
@@ -304,14 +302,11 @@ StagedRuntimeFirewall stage_runtime_firewall(
             "RulesOnly needs the last committed transaction to reuse and "
             "none was supplied");
     }
-    // Under RulesOnly no list is read at all. The streamer is what opens the
-    // cache files, so not constructing it is the proof that nothing does.
-    std::unique_ptr<ListStreamer> list_streamer;
-    if (!rules_only) {
-        list_streamer = list_cache_snapshot
-            ? std::make_unique<ListStreamer>(
-                  cache_manager, std::move(list_cache_snapshot))
-            : std::make_unique<ListStreamer>(cache_manager);
+    // Under RulesOnly no list is read at all. The caller omits the streamer as
+    // proof that no cache or local list body can be opened through this path.
+    if (!rules_only && !list_streamer) {
+        throw std::invalid_argument(
+            "runtime firewall staging needs a list streamer");
     }
     auto rule_states = build_fw_rule_states(config, outbound_marks, &urltest_selections);
     const RouteConfig route_config = config.route.value_or(RouteConfig{});
@@ -725,6 +720,84 @@ StagedRuntimeFirewall stage_runtime_firewall(
     }
     staged.mode = mode;
     return staged;
+}
+
+StagedRuntimeFirewall stage_runtime_firewall(
+    const Config& config,
+    const OutboundMarkMap& outbound_marks,
+    const std::map<std::string, std::string>& urltest_selections,
+    const CacheManager& cache_manager,
+    Firewall& firewall,
+    FirewallApplyMode mode,
+    const std::vector<InternalVpnServer>* effective_internal_vpn_servers,
+    const std::vector<InternalVpnRuntimeTarget>*
+        effective_internal_vpn_targets,
+    const std::vector<FirewallSourceEgressSnatSelector>*
+        native_vpn_direct_egress_snat_selectors,
+    bool udp_call_affinity_ipset_available,
+    const std::optional<KeeneticDnsSnapshot>& keenetic_dns_snapshot,
+    std::shared_ptr<const ListCacheGenerationSnapshot> list_cache_snapshot,
+    bool force_clear_dynamic_sets,
+    const PreviousRuntimeFirewall& previous) {
+    std::unique_ptr<ListStreamer> list_streamer;
+    if (mode != FirewallApplyMode::RulesOnly) {
+        list_streamer = list_cache_snapshot
+            ? std::make_unique<ListStreamer>(
+                  cache_manager, std::move(list_cache_snapshot))
+            : std::make_unique<ListStreamer>(cache_manager);
+    }
+    return stage_runtime_firewall_with_streamer(
+        config,
+        outbound_marks,
+        urltest_selections,
+        std::move(list_streamer),
+        firewall,
+        mode,
+        effective_internal_vpn_servers,
+        effective_internal_vpn_targets,
+        native_vpn_direct_egress_snat_selectors,
+        udp_call_affinity_ipset_available,
+        keenetic_dns_snapshot,
+        force_clear_dynamic_sets,
+        previous);
+}
+
+StagedRuntimeFirewall stage_runtime_firewall_from_snapshot(
+    const Config& config,
+    const OutboundMarkMap& outbound_marks,
+    const std::map<std::string, std::string>& urltest_selections,
+    std::size_t list_max_file_size_bytes,
+    std::shared_ptr<const ListCacheGenerationSnapshot> list_cache_snapshot,
+    Firewall& firewall,
+    FirewallApplyMode mode,
+    const std::vector<InternalVpnServer>* effective_internal_vpn_servers,
+    const std::vector<InternalVpnRuntimeTarget>*
+        effective_internal_vpn_targets,
+    const std::vector<FirewallSourceEgressSnatSelector>*
+        native_vpn_direct_egress_snat_selectors,
+    bool udp_call_affinity_ipset_available,
+    const std::optional<KeeneticDnsSnapshot>& keenetic_dns_snapshot,
+    bool force_clear_dynamic_sets,
+    const PreviousRuntimeFirewall& previous) {
+    std::unique_ptr<ListStreamer> list_streamer;
+    if (mode != FirewallApplyMode::RulesOnly) {
+        list_streamer = std::make_unique<ListStreamer>(
+            list_max_file_size_bytes, std::move(list_cache_snapshot));
+    }
+    return stage_runtime_firewall_with_streamer(
+        config,
+        outbound_marks,
+        urltest_selections,
+        std::move(list_streamer),
+        firewall,
+        mode,
+        effective_internal_vpn_servers,
+        effective_internal_vpn_targets,
+        native_vpn_direct_egress_snat_selectors,
+        udp_call_affinity_ipset_available,
+        keenetic_dns_snapshot,
+        force_clear_dynamic_sets,
+        previous);
 }
 
 void commit_runtime_firewall(Firewall& firewall,

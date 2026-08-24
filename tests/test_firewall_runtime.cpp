@@ -1199,11 +1199,10 @@ TEST_CASE(
 
 // --- Seam between staging and commit -----------------------------------
 //
-// Staging primarily reads daemon state and fills backend buffers. A legacy
-// iptables prepare path may repair its ordinary mangle dispatcher, but Meta
+// Staging fills backend buffers and may inspect or repair kernel state. Meta
 // UDP/443 filter publication and exact conntrack deletion remain behind the
-// specialized preflight/commit boundary. These cases keep the broader staged
-// transaction seam explicit without overstating it as process-local only.
+// specialized preflight/commit boundary. These cases keep that transaction
+// seam explicit without pretending staging is process-local or non-blocking.
 
 namespace {
 
@@ -1253,6 +1252,32 @@ TEST_CASE("staging builds the whole transaction without committing it") {
     CHECK(firewall.events.back() == "apply");
     CHECK(std::count(firewall.events.begin(), firewall.events.end(), "apply") ==
           1);
+}
+
+TEST_CASE("worker staging needs only a pinned list generation") {
+    const auto config = staged_transaction_config();
+    FirewallTempDirectory temp;
+    std::shared_ptr<const ListCacheGenerationSnapshot> snapshot;
+    {
+        CacheManager cache{temp.path() / "cache", 1024};
+        cache.ensure_dir();
+        snapshot = cache.capture_generation({"seam"});
+    }
+    RecordingFirewall firewall;
+
+    const auto staged = stage_runtime_firewall_from_snapshot(
+        config,
+        {{"vpn", 0x00070000U}},
+        {},
+        1024,
+        snapshot,
+        firewall,
+        FirewallApplyMode::PreserveSets);
+
+    CHECK(!staged.rule_states.empty());
+    CHECK(firewall.loaded_entries ==
+          std::vector<std::string>{"198.51.100.0/24"});
+    CHECK(firewall.applied_modes.empty());
 }
 
 TEST_CASE("commit uses the mode the transaction was staged with") {
