@@ -932,6 +932,8 @@ private:
     // as a retry with growing delay, bounded; everything else is final.
     void schedule_nfqws_boot_recovery(std::size_t attempt);
     void cancel_nfqws_boot_recovery() noexcept;
+    void schedule_nfqws_retention_backfill(std::size_t attempt);
+    void cancel_nfqws_retention_backfill() noexcept;
 #endif
 
     // DNS probe integration
@@ -1316,6 +1318,8 @@ private:
     // Control-loop-owned, like the remote-access slots above.
     int nfqws_boot_recovery_task_id_{-1};
     std::uint64_t nfqws_boot_recovery_schedule_serial_{0U};
+    int nfqws_retention_backfill_task_id_{-1};
+    std::uint64_t nfqws_retention_backfill_schedule_serial_{0U};
     std::atomic<std::uint64_t> remote_access_retry_bridge_epoch_{0U};
     std::optional<std::uint64_t>
         unscheduled_remote_access_retry_generation_;

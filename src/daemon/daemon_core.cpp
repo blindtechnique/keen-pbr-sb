@@ -444,6 +444,7 @@ Daemon::~Daemon() {
 #ifdef WITH_API
     cleanup_step("cancel nfqws boot recovery", [this] {
         cancel_nfqws_boot_recovery();
+        cancel_nfqws_retention_backfill();
     });
     cleanup_step("cancel remote-access recovery watchdog", [this] {
         cancel_remote_access_recovery_watchdog();
@@ -4538,6 +4539,7 @@ void Daemon::run() {
     // An nfqws2 package transaction interrupted by the reboot is acted on
     // once the event loop runs and S80 has let go of the maintenance lease.
     schedule_nfqws_boot_recovery(0);
+    schedule_nfqws_retention_backfill(0);
 #endif
     if (internal_vpn_resolution_requires_catalog_refresh(
             config_, internal_vpn_resolution_state) ||
@@ -4562,6 +4564,7 @@ void Daemon::run() {
         log.error("Daemon startup failed; rolling back partial runtime state.");
 #ifdef WITH_API
         cancel_nfqws_boot_recovery();
+        cancel_nfqws_retention_backfill();
         cancel_remote_access_recovery_watchdog();
         reset_remote_access_retry_bridge();
 #endif
@@ -4693,6 +4696,7 @@ void Daemon::run() {
     // Fence retry callbacks while posted-control admission and Scheduler are
     // still alive. No API worker may retain a Daemon capture past this point.
     cancel_nfqws_boot_recovery();
+    cancel_nfqws_retention_backfill();
     cancel_remote_access_recovery_watchdog();
     reset_remote_access_retry_bridge();
 #endif

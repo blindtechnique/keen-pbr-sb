@@ -2801,6 +2801,291 @@ NfqwsBootRecoveryResult run_nfqws_boot_recovery(ApiContext& ctx) noexcept {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Retention backfill
+// ---------------------------------------------------------------------------
+
+const char* nfqws_retention_backfill_outcome_name(
+    NfqwsRetentionBackfillOutcome outcome) noexcept {
+    switch (outcome) {
+    case NfqwsRetentionBackfillOutcome::nothing_to_do: return "nothing_to_do";
+    case NfqwsRetentionBackfillOutcome::lease_busy: return "lease_busy";
+    case NfqwsRetentionBackfillOutcome::retained: return "retained";
+    case NfqwsRetentionBackfillOutcome::unavailable: return "unavailable";
+    case NfqwsRetentionBackfillOutcome::failed: return "failed";
+    }
+    return "unknown";
+}
+
+namespace {
+
+constexpr const char* kNfqwsRetentionRecord =
+    "/opt/var/lib/keen-pbr/nfqws-retention-backfill.json";
+
+NfqwsRetentionBackfillResult run_nfqws_retention_backfill_with(
+    const NfqwsRetentionBackfillHooks& hooks) {
+    NfqwsRetentionBackfillResult result;
+    const auto note = [&](const std::string& line) {
+        if (!result.output.empty() && result.output.back() != '\n') {
+            result.output += '\n';
+        }
+        result.output += line;
+        result.output += '\n';
+    };
+    const auto finish = [&](NfqwsRetentionBackfillOutcome outcome) {
+        result.outcome = outcome;
+        if (hooks.record_result) hooks.record_result(result);
+        return result;
+    };
+
+    // Free looks first, in the order that costs least. The steady state of
+    // every healthy router lands in one of these, so the common case takes
+    // no lease and runs no package manager.
+    result.version = hooks.installed_version();
+    if (result.version.empty()) {
+        result.outcome = NfqwsRetentionBackfillOutcome::nothing_to_do;
+        return result;
+    }
+    {
+        const auto current = hooks.inspect_current_ipk();
+        if (current.state == IpkSlotState::usable && current.retained &&
+            current.retained->version == result.version) {
+            result.outcome = NfqwsRetentionBackfillOutcome::nothing_to_do;
+            return result;
+        }
+    }
+    {
+        // A journal means a package operation did not finish. Refreshing
+        // feeds and downloading under that is how a recovery loses the
+        // evidence it was about to act on; boot recovery owns that state.
+        const auto journal = hooks.read_journal();
+        if (journal.state != ComponentTransactionState::none) {
+            result.outcome = NfqwsRetentionBackfillOutcome::nothing_to_do;
+            return result;
+        }
+    }
+    if (hooks.read_last_answer) {
+        // A feed that no longer serves this version will not serve it
+        // tomorrow either, so that answer is permanent until the installed
+        // version changes. Without this the daemon would refresh feeds at
+        // every start for bytes that cannot be had.
+        const auto answered = hooks.read_last_answer();
+        if (answered && !answered->first.empty() &&
+            answered->first == result.version &&
+            answered->second ==
+                nfqws_retention_backfill_outcome_name(
+                    NfqwsRetentionBackfillOutcome::unavailable)) {
+            result.outcome = NfqwsRetentionBackfillOutcome::nothing_to_do;
+            return result;
+        }
+    }
+
+    std::unique_ptr<MaintenanceLease> lease;
+    try {
+        lease = hooks.acquire_lease();
+    } catch (const MaintenanceLockError& error) {
+        if (error.kind() == MaintenanceLockErrorKind::busy) {
+            result.outcome = NfqwsRetentionBackfillOutcome::lease_busy;
+            return result;
+        }
+        note(std::string("The maintenance lease could not be taken: ") +
+             error.what());
+        return finish(NfqwsRetentionBackfillOutcome::failed);
+    }
+    if (!lease) {
+        result.outcome = NfqwsRetentionBackfillOutcome::lease_busy;
+        return result;
+    }
+    // Deliberately NOT taking nfqws_operation_mutex. That mutex serializes
+    // component mutations against the handlers that take no lease - saving
+    // a config file, restarting the service, applying a strategy - and this
+    // job performs none of them: it downloads bytes and files them in the
+    // component store, which nothing outside the maintenance lease ever
+    // writes. Holding it here would block those handlers for as long as
+    // opkg talks to the network, on a job the operator did not ask for and
+    // sees no progress from; a restart click would simply hang. The lease
+    // is the exclusion this work actually needs, and it already refuses
+    // every other package operation with a 409.
+
+    // Re-read under the lease: the free looks above may have raced an
+    // operator upgrade, which would have filled the slot already.
+    result.version = hooks.installed_version();
+    if (result.version.empty()) {
+        result.outcome = NfqwsRetentionBackfillOutcome::nothing_to_do;
+        return result;
+    }
+    const auto current = hooks.inspect_current_ipk();
+    if (current.state == IpkSlotState::usable && current.retained &&
+        current.retained->version == result.version) {
+        result.outcome = NfqwsRetentionBackfillOutcome::nothing_to_do;
+        return result;
+    }
+    const auto journal = hooks.read_journal();
+    if (journal.state != ComponentTransactionState::none) {
+        result.outcome = NfqwsRetentionBackfillOutcome::nothing_to_do;
+        return result;
+    }
+    bool feed_moved_on = false;
+    bool retained = false;
+    try {
+        retained = hooks.retain_installed(result.version, result.output,
+                                          feed_moved_on);
+    } catch (const std::exception& error) {
+        note(std::string("Retaining the installed package failed: ") +
+             error.what());
+        return finish(NfqwsRetentionBackfillOutcome::failed);
+    } catch (...) {
+        note("Retaining the installed package failed with an unknown error.");
+        return finish(NfqwsRetentionBackfillOutcome::failed);
+    }
+    if (retained) {
+        note("Exact copy of the installed version " + result.version +
+             " retained; a failed upgrade can now reinstall it.");
+        return finish(NfqwsRetentionBackfillOutcome::retained);
+    }
+    if (feed_moved_on) {
+        note("The feed's newest build is past the installed version " +
+             result.version +
+             ", and opkg download only ever fetches the newest, so its exact "
+             "bytes cannot be reached from here - now or later. A failed "
+             "upgrade can restore captured files but not the package record. "
+             "Recorded, and not asked again until the installed version "
+             "changes.");
+        return finish(NfqwsRetentionBackfillOutcome::unavailable);
+    }
+    note("The installed version " + result.version +
+         " could not be retained this time; this is not a permanent answer, "
+         "so the next attempt looks again.");
+    return finish(NfqwsRetentionBackfillOutcome::failed);
+}
+
+void write_nfqws_retention_record(
+    const NfqwsRetentionBackfillResult& result) noexcept {
+    constexpr std::size_t kMaxOutputBytes = 4U * 1024U;
+    try {
+        std::string output = result.output;
+        if (output.size() > kMaxOutputBytes) {
+            output = "...\n" + output.substr(output.size() - kMaxOutputBytes);
+        }
+        const nlohmann::json body{
+            {"at", static_cast<std::int64_t>(std::time(nullptr))},
+            {"version", result.version},
+            {"outcome",
+             nfqws_retention_backfill_outcome_name(result.outcome)},
+            {"output", output},
+        };
+        AtomicFileWriteOptions options;
+        options.create_parent_directories = true;
+        options.file_mode = 0600;
+        write_file_atomically(kNfqwsRetentionRecord, body.dump(2) + "\n",
+                              options);
+    } catch (...) {
+        // A missing record only costs one more look at the next start.
+    }
+}
+
+NfqwsRetentionBackfillHooks production_nfqws_retention_hooks(ApiContext& ctx) {
+    NfqwsRetentionBackfillHooks hooks;
+    hooks.installed_version = []() -> std::string {
+        try {
+            return installed_version();
+        } catch (...) {
+            return {};
+        }
+    };
+    hooks.inspect_current_ipk = []() -> IpkSlotInspection {
+        try {
+            const ComponentIpkStore store(kComponentStoreRoot, kNfqwsPackage);
+            return store.inspect(IpkSlot::current);
+        } catch (...) {
+            IpkSlotInspection inspection;
+            inspection.state = IpkSlotState::corrupt;
+            inspection.detail = "the component store could not be inspected";
+            return inspection;
+        }
+    };
+    hooks.read_journal = [] {
+        return read_component_transaction(kNfqwsJournal);
+    };
+    hooks.read_last_answer =
+        []() -> std::optional<std::pair<std::string, std::string>> {
+        try {
+            constexpr std::size_t kMaxRecordBytes = 16U * 1024U;
+            const auto path = fs::path(kNfqwsRetentionRecord);
+            if (!rescue_integrity::regular_file(path)) return std::nullopt;
+            std::error_code error;
+            const auto size = fs::file_size(path, error);
+            if (error || size > kMaxRecordBytes) return std::nullopt;
+            std::ifstream input(path, std::ios::binary);
+            const std::string body(
+                (std::istreambuf_iterator<char>(input)),
+                std::istreambuf_iterator<char>());
+            const auto document = nlohmann::json::parse(body);
+            if (!document.is_object()) return std::nullopt;
+            return std::make_pair(
+                document.value("version", std::string{}),
+                document.value("outcome", std::string{}));
+        } catch (...) {
+            return std::nullopt;
+        }
+    };
+    hooks.acquire_lease = [&ctx]() -> std::unique_ptr<MaintenanceLease> {
+        return ctx.acquire_maintenance_lease("nfqws-retention-backfill");
+    };
+    hooks.retain_installed = [](const std::string& version,
+                                std::string& output,
+                                bool& feed_moved_on) {
+        ComponentIpkStore store(kComponentStoreRoot, kNfqwsPackage);
+        ComponentPackageTransaction transaction(
+            nfqws_package_options({}), store, run_nfqws_package_command);
+        const auto preparation = transaction.retain_installed(version);
+        output += preparation.output;
+        // Permanent means one thing only: the feed's newest build is past
+        // the installed version. `retention == unavailable` cannot be used
+        // for this - prepare_impl reports it for a feed that is BEHIND the
+        // installed version too (an out-of-band newer install, a rolled-back
+        // mirror), and that one becomes retainable the moment the feed
+        // catches up. `target` is set exactly when the feed serves something
+        // newer, which is the case opkg download can never fetch around.
+        feed_moved_on =
+            preparation.error.empty() && preparation.target.has_value();
+        // prepare_impl also finishes an interrupted promotion, so the store
+        // may have changed even when nothing was retained for this version.
+        // Re-read the cached flag either way rather than only on success.
+        const auto current = store.inspect(IpkSlot::current);
+        const bool retained = current.state == IpkSlotState::usable &&
+                              current.retained &&
+                              current.retained->version == version;
+        (void)cached_exact_previous_ipk(version, /*force=*/true);
+        return retained;
+    };
+    hooks.record_result = [](const NfqwsRetentionBackfillResult& result) {
+        write_nfqws_retention_record(result);
+    };
+    return hooks;
+}
+
+} // namespace
+
+NfqwsRetentionBackfillResult run_nfqws_retention_backfill(
+    ApiContext& ctx) noexcept {
+    try {
+        return run_nfqws_retention_backfill_with(
+            production_nfqws_retention_hooks(ctx));
+    } catch (const std::exception& error) {
+        NfqwsRetentionBackfillResult result;
+        result.outcome = NfqwsRetentionBackfillOutcome::failed;
+        result.output =
+            std::string("Retention backfill failed: ") + error.what();
+        return result;
+    } catch (...) {
+        NfqwsRetentionBackfillResult result;
+        result.outcome = NfqwsRetentionBackfillOutcome::failed;
+        result.output = "Retention backfill failed with an unknown error";
+        return result;
+    }
+}
+
 void register_nfqws_handler_impl(
     ApiServer& server,
     ApiContext& ctx,
@@ -4246,6 +4531,11 @@ void register_nfqws_handler(ApiServer& server, ApiContext& ctx) {
 NfqwsBootRecoveryResult run_nfqws_boot_recovery_for_testing(
     const NfqwsBootRecoveryHooks& hooks) {
     return run_nfqws_boot_recovery_with(hooks);
+}
+
+NfqwsRetentionBackfillResult run_nfqws_retention_backfill_for_testing(
+    const NfqwsRetentionBackfillHooks& hooks) {
+    return run_nfqws_retention_backfill_with(hooks);
 }
 
 NfqwsPostUpgradeFootprintAssessment

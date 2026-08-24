@@ -13,6 +13,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 
 #ifdef KEEN_PBR3_TESTING
 #include "../update/component_package_transaction.hpp"
@@ -85,6 +86,54 @@ struct NfqwsBootRecoveryLastAnswer {
 // thread, never from the control loop. Never throws.
 NfqwsBootRecoveryResult run_nfqws_boot_recovery(ApiContext& ctx) noexcept;
 
+// Why the installed version's exact IPK is, or is not, in the store after
+// the daemon looked.
+enum class NfqwsRetentionBackfillOutcome {
+    // The store already holds it, nothing is installed, a package operation
+    // is unfinished, or a previous look already answered for this version.
+    // No lease was taken and no package manager ran.
+    nothing_to_do,
+    // Someone else holds the maintenance lease; the caller retries.
+    lease_busy,
+    // The feed still served the installed version and its exact bytes are
+    // now retained: a failed upgrade can reinstall them.
+    retained,
+    // The feed has moved past the installed version, so its bytes cannot be
+    // had any more. Recorded so the next start does not ask again.
+    unavailable,
+    // The attempt itself failed (feed refresh, download, verification).
+    failed,
+};
+
+const char* nfqws_retention_backfill_outcome_name(
+    NfqwsRetentionBackfillOutcome outcome) noexcept;
+
+struct NfqwsRetentionBackfillResult {
+    NfqwsRetentionBackfillOutcome outcome{
+        NfqwsRetentionBackfillOutcome::nothing_to_do};
+    // The installed version this looked at; empty when nothing is installed.
+    std::string version;
+    std::string output;
+};
+
+// Retains the installed version's exact IPK when the store does not hold it
+// yet - the one moment it can still be had, because the feed serves only its
+// newest build.
+//
+// This exists because the retention that was supposed to happen on demand
+// could not: a router whose nfqws2 came from the upstream installer has an
+// empty store, and by the time anyone presses "save restore point" the feed
+// has usually moved on. The rollback then exists on paper only. Running at
+// start, under the same maintenance lease as boot recovery and on a worker
+// thread (opkg takes minutes), is what makes the exact rollback true rather
+// than promised.
+//
+// Blocking. Never throws. Refuses to run its package manager while a
+// transaction journal is unfinished, and answers once per installed version:
+// a feed that no longer serves it will not serve it tomorrow either.
+NfqwsRetentionBackfillResult run_nfqws_retention_backfill(
+    ApiContext& ctx) noexcept;
+
 // The boot recovery as orchestration over its inputs and effects, so the
 // decision-to-action mapping, the lease handling and the recorded outcome can
 // be driven without a router. Production wires every hook to the real helper.
@@ -129,6 +178,40 @@ struct NfqwsBootRecoveryHooks {
     std::function<void()> discard_candidate;
     std::function<void(const NfqwsBootRecoveryResult&)> record_result;
 };
+
+// The retention backfill as orchestration over its inputs and effects, so
+// the skip decisions, the lease handling and the recorded answer can be
+// driven without a router or a package manager.
+struct NfqwsRetentionBackfillHooks {
+    // Empty when nothing is installed; never throws.
+    std::function<std::string()> installed_version;
+    // What the store's `current` slot holds right now.
+    std::function<IpkSlotInspection()> inspect_current_ipk;
+    std::function<ComponentTransactionStatus()> read_journal;
+    // The version a previous look already answered for, with its outcome;
+    // nullopt when none. Only a permanent answer suppresses a later look.
+    std::function<std::optional<std::pair<std::string, std::string>>()>
+        read_last_answer;
+    // nullptr means busy; other failures throw MaintenanceLockError.
+    std::function<std::unique_ptr<MaintenanceLease>()> acquire_lease;
+    // Runs the transaction's retain_installed and reports what it did.
+    // Returns whether the store now holds the installed version.
+    //
+    // `feed_moved_on` says the answer is permanent: the feed's newest build
+    // is past the installed version, and `opkg download` only ever fetches
+    // the newest, so no later attempt can reach these bytes. Everything else
+    // - a refresh that failed, a feed that has not reached this version yet,
+    // a mirror that was rolled back - is temporary and must stay retryable.
+    std::function<bool(const std::string& version, std::string& output,
+                       bool& feed_moved_on)>
+        retain_installed;
+    std::function<void(const NfqwsRetentionBackfillResult&)> record_result;
+};
+
+#ifdef KEEN_PBR3_TESTING
+NfqwsRetentionBackfillResult run_nfqws_retention_backfill_for_testing(
+    const NfqwsRetentionBackfillHooks& hooks);
+#endif
 
 #ifdef KEEN_PBR3_TESTING
 NfqwsBootRecoveryResult run_nfqws_boot_recovery_for_testing(

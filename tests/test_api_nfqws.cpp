@@ -17,9 +17,11 @@
 #include <functional>
 #include <iterator>
 #include <memory>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <utility>
 #include <vector>
 #include <unistd.h>
 
@@ -1738,6 +1740,272 @@ TEST_CASE("every boot recovery outcome has a distinct stable name") {
           "journal_retained");
     CHECK(std::string(nfqws_boot_recovery_outcome_name(
               NfqwsBootRecoveryOutcome::failed)) == "failed");
+}
+
+namespace {
+
+// Every input and effect of the retention backfill, scripted.
+struct RetentionFixture {
+    std::string version{"1.2.4"};
+    IpkSlotInspection current_ipk;
+    ComponentTransactionStatus journal;
+    std::optional<std::pair<std::string, std::string>> last_answer;
+    bool lease_busy{false};
+    bool lease_unsafe{false};
+    int lease_acquisitions{0};
+    int retain_calls{0};
+    bool retain_succeeds{false};
+    bool feed_moved_on{false};
+    bool retain_throws{false};
+    // Filled by the retain hook so a test can show the slot was re-read
+    // under the lease rather than trusted from the free glance.
+    int version_reads{0};
+    int inspect_reads{0};
+    std::vector<NfqwsRetentionBackfillResult> recorded;
+
+    void retained_slot(const std::string& slot_version) {
+        current_ipk.state = IpkSlotState::usable;
+        RetainedIpk retained;
+        retained.version = slot_version;
+        retained.sha256 = std::string(64, 'c');
+        retained.size = 10;
+        retained.filename = "x.ipk";
+        current_ipk.retained = retained;
+    }
+
+    void unfinished_journal() {
+        journal.state = ComponentTransactionState::abandoned;
+        ComponentTransactionRecord record;
+        record.component = "nfqws2-keenetic";
+        record.operation = "upgrade";
+        record.phase = ComponentTransactionPhase::mutating;
+        journal.record = record;
+    }
+
+    NfqwsRetentionBackfillHooks hooks() {
+        NfqwsRetentionBackfillHooks wired;
+        wired.installed_version = [this] {
+            ++version_reads;
+            return version;
+        };
+        wired.inspect_current_ipk = [this] {
+            ++inspect_reads;
+            return current_ipk;
+        };
+        wired.read_journal = [this] { return journal; };
+        wired.read_last_answer = [this] { return last_answer; };
+        wired.acquire_lease =
+            [this]() -> std::unique_ptr<MaintenanceLease> {
+            ++lease_acquisitions;
+            if (lease_busy) {
+                throw MaintenanceLockError(MaintenanceLockErrorKind::busy,
+                                           "held by S80");
+            }
+            if (lease_unsafe) {
+                throw MaintenanceLockError(
+                    MaintenanceLockErrorKind::unsafe_state,
+                    "helper left an unrecognized record");
+            }
+            return std::make_unique<BootRecoveryFakeLease>();
+        };
+        wired.retain_installed = [this](const std::string&,
+                                        std::string& output,
+                                        bool& moved_on) {
+            ++retain_calls;
+            if (retain_throws) throw std::runtime_error("opkg exploded");
+            output += "retention ran\n";
+            moved_on = feed_moved_on;
+            return retain_succeeds;
+        };
+        wired.record_result = [this](
+                                  const NfqwsRetentionBackfillResult& result) {
+            recorded.push_back(result);
+        };
+        return wired;
+    }
+};
+
+} // namespace
+
+TEST_CASE("retention backfill takes no lease when the store already holds the installed version") {
+    RetentionFixture fixture;
+    fixture.retained_slot("1.2.4");
+    const auto result =
+        run_nfqws_retention_backfill_for_testing(fixture.hooks());
+    CHECK(result.outcome == NfqwsRetentionBackfillOutcome::nothing_to_do);
+    CHECK(fixture.lease_acquisitions == 0);
+    CHECK(fixture.retain_calls == 0);
+    // Nothing happened, so nothing is recorded: the durable answer exists to
+    // stop repeat work, and there was none.
+    CHECK(fixture.recorded.empty());
+}
+
+TEST_CASE("retention backfill does nothing when the component is not installed") {
+    RetentionFixture fixture;
+    fixture.version.clear();
+    const auto result =
+        run_nfqws_retention_backfill_for_testing(fixture.hooks());
+    CHECK(result.outcome == NfqwsRetentionBackfillOutcome::nothing_to_do);
+    CHECK(fixture.lease_acquisitions == 0);
+    CHECK(fixture.recorded.empty());
+}
+
+TEST_CASE("an unfinished package transaction keeps the backfill away from opkg") {
+    // Boot recovery owns that state; refreshing feeds and downloading under
+    // it is how a recovery loses the evidence it was about to act on.
+    RetentionFixture fixture;
+    fixture.unfinished_journal();
+    const auto result =
+        run_nfqws_retention_backfill_for_testing(fixture.hooks());
+    CHECK(result.outcome == NfqwsRetentionBackfillOutcome::nothing_to_do);
+    CHECK(fixture.lease_acquisitions == 0);
+    CHECK(fixture.retain_calls == 0);
+}
+
+TEST_CASE("retention: a feed that moved on is answered once, not at every start") {
+    RetentionFixture fixture;
+    fixture.feed_moved_on = true;
+
+    const auto first =
+        run_nfqws_retention_backfill_for_testing(fixture.hooks());
+    CHECK(first.outcome == NfqwsRetentionBackfillOutcome::unavailable);
+    CHECK(fixture.retain_calls == 1);
+    REQUIRE(fixture.recorded.size() == 1U);
+    CHECK(fixture.recorded.front().version == "1.2.4");
+
+    // The next start reads that record and does not refresh feeds again.
+    fixture.last_answer = std::make_pair(std::string("1.2.4"),
+                                         std::string("unavailable"));
+    const auto second =
+        run_nfqws_retention_backfill_for_testing(fixture.hooks());
+    CHECK(second.outcome == NfqwsRetentionBackfillOutcome::nothing_to_do);
+    CHECK(fixture.retain_calls == 1);
+    CHECK(fixture.lease_acquisitions == 1);
+
+    // An upgrade later changes the installed version: the old answer is
+    // about bytes nobody wants any more, so the look happens again.
+    fixture.version = "1.2.5";
+    fixture.feed_moved_on = false;
+    fixture.retain_succeeds = true;
+    const auto third =
+        run_nfqws_retention_backfill_for_testing(fixture.hooks());
+    CHECK(third.outcome == NfqwsRetentionBackfillOutcome::retained);
+    CHECK(fixture.retain_calls == 2);
+}
+
+TEST_CASE("retention: a failed attempt is not a permanent answer") {
+    RetentionFixture fixture;
+    fixture.retain_succeeds = false;
+    fixture.feed_moved_on = false;
+    const auto result =
+        run_nfqws_retention_backfill_for_testing(fixture.hooks());
+    CHECK(result.outcome == NfqwsRetentionBackfillOutcome::failed);
+    REQUIRE(fixture.recorded.size() == 1U);
+    // Recorded as failed, which the skip only honours for `unavailable`,
+    // so the next start tries again.
+    fixture.last_answer = std::make_pair(std::string("1.2.4"),
+                                         std::string("failed"));
+    fixture.retain_succeeds = true;
+    const auto again =
+        run_nfqws_retention_backfill_for_testing(fixture.hooks());
+    CHECK(again.outcome == NfqwsRetentionBackfillOutcome::retained);
+    CHECK(fixture.retain_calls == 2);
+}
+
+TEST_CASE("retention: a busy maintenance lease is a retry, not an answer") {
+    RetentionFixture fixture;
+    fixture.lease_busy = true;
+    const auto result =
+        run_nfqws_retention_backfill_for_testing(fixture.hooks());
+    CHECK(result.outcome == NfqwsRetentionBackfillOutcome::lease_busy);
+    CHECK(fixture.lease_acquisitions == 1);
+    CHECK(fixture.retain_calls == 0);
+    // Nothing durable: a lease held by someone else says nothing about the
+    // feed, and recording it would suppress the next real look.
+    CHECK(fixture.recorded.empty());
+}
+
+TEST_CASE("retention: a lease failure that is not busy is final and recorded") {
+    RetentionFixture fixture;
+    fixture.lease_unsafe = true;
+    const auto result =
+        run_nfqws_retention_backfill_for_testing(fixture.hooks());
+    CHECK(result.outcome == NfqwsRetentionBackfillOutcome::failed);
+    CHECK(fixture.retain_calls == 0);
+    REQUIRE(fixture.recorded.size() == 1U);
+}
+
+TEST_CASE("a retention step that throws is a failure, not an escape") {
+    RetentionFixture fixture;
+    fixture.retain_throws = true;
+    const auto result =
+        run_nfqws_retention_backfill_for_testing(fixture.hooks());
+    CHECK(result.outcome == NfqwsRetentionBackfillOutcome::failed);
+    CHECK(result.output.find("opkg exploded") != std::string::npos);
+    REQUIRE(fixture.recorded.size() == 1U);
+}
+
+TEST_CASE("retention: the decision comes from the state re-read under the lease") {
+    // The free glance said the slot was empty; by the time the lease was
+    // held an operator upgrade had filled it. Acting on the stale glance
+    // would refresh feeds and download for nothing.
+    RetentionFixture fixture;
+    auto hooks = fixture.hooks();
+    hooks.inspect_current_ipk = [&fixture]() -> IpkSlotInspection {
+        ++fixture.inspect_reads;
+        if (fixture.inspect_reads > 1) {
+            fixture.retained_slot("1.2.4");
+        }
+        return fixture.current_ipk;
+    };
+    const auto result = run_nfqws_retention_backfill_for_testing(hooks);
+    CHECK(result.outcome == NfqwsRetentionBackfillOutcome::nothing_to_do);
+    CHECK(fixture.lease_acquisitions == 1);
+    CHECK(fixture.retain_calls == 0);
+    CHECK(fixture.inspect_reads == 2);
+}
+
+TEST_CASE("retention: a feed that has not reached the installed version stays retryable") {
+    // The out-of-band case: nfqws2 was installed from somewhere ahead of the
+    // feed, or a mirror was rolled back. Retention is impossible right now
+    // and possible the moment the feed catches up, so recording it as the
+    // permanent answer would lose the copy forever.
+    RetentionFixture fixture;
+    fixture.retain_succeeds = false;
+    fixture.feed_moved_on = false;
+
+    const auto first =
+        run_nfqws_retention_backfill_for_testing(fixture.hooks());
+    CHECK(first.outcome == NfqwsRetentionBackfillOutcome::failed);
+    CHECK(first.output.find("not a permanent answer") != std::string::npos);
+
+    // The feed catches up before the next look, which therefore happens.
+    fixture.last_answer = std::make_pair(std::string("1.2.4"),
+                                         std::string("failed"));
+    fixture.retain_succeeds = true;
+    const auto second =
+        run_nfqws_retention_backfill_for_testing(fixture.hooks());
+    CHECK(second.outcome == NfqwsRetentionBackfillOutcome::retained);
+    CHECK(fixture.retain_calls == 2);
+}
+
+TEST_CASE("every retention outcome has a distinct stable name") {
+    const std::vector<NfqwsRetentionBackfillOutcome> outcomes{
+        NfqwsRetentionBackfillOutcome::nothing_to_do,
+        NfqwsRetentionBackfillOutcome::lease_busy,
+        NfqwsRetentionBackfillOutcome::retained,
+        NfqwsRetentionBackfillOutcome::unavailable,
+        NfqwsRetentionBackfillOutcome::failed,
+    };
+    std::set<std::string> names;
+    for (const auto outcome : outcomes) {
+        const std::string name =
+            nfqws_retention_backfill_outcome_name(outcome);
+        CHECK_FALSE(name.empty());
+        CHECK(name != "unknown");
+        names.insert(name);
+    }
+    CHECK(names.size() == outcomes.size());
 }
 } // namespace keen_pbr3
 

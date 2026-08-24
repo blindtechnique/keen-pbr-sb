@@ -1893,6 +1893,126 @@ void Daemon::cancel_nfqws_boot_recovery() noexcept {
     }
 }
 
+
+namespace {
+
+// The retention backfill starts after boot recovery has had its first two
+// looks: both take the same maintenance lease, and losing the race only
+// costs a retry, but there is no reason to spend one. The tail is longer
+// than boot recovery's because nothing here is urgent - the bytes it keeps
+// matter at the next upgrade, not at this boot - while giving up quietly is
+// fine: the next daemon start looks again.
+constexpr std::array<std::chrono::seconds, 5> kNfqwsRetentionDelays{
+    std::chrono::seconds{90},  std::chrono::seconds{180},
+    std::chrono::seconds{420}, std::chrono::seconds{900},
+    std::chrono::seconds{1800},
+};
+
+} // namespace
+
+void Daemon::schedule_nfqws_retention_backfill(std::size_t attempt) {
+    if (!api_ctx_ || !scheduler_) return;
+    if (attempt >= kNfqwsRetentionDelays.size()) {
+        // Deliberately not naming the lease: the attempts that got here may
+        // have been spent on a busy lease, a saturated worker pool or a
+        // package manager that could not reach the feed, and a message that
+        // picks one sends the operator looking in the wrong place.
+        Logger::instance().info(
+            "nfqws2 retention backfill did not complete within {} attempts; "
+            "the next daemon start looks again",
+            attempt);
+        return;
+    }
+    cancel_nfqws_retention_backfill();
+    const auto schedule_serial = ++nfqws_retention_backfill_schedule_serial_;
+    const auto delay = kNfqwsRetentionDelays[attempt];
+    try {
+        nfqws_retention_backfill_task_id_ = scheduler_->schedule_oneshot(
+            delay,
+            [this, attempt, schedule_serial]() {
+                if (schedule_serial !=
+                    nfqws_retention_backfill_schedule_serial_) {
+                    return;
+                }
+                nfqws_retention_backfill_task_id_ = -1;
+                if (!running_.load(std::memory_order_acquire) || !api_ctx_) {
+                    return;
+                }
+                // opkg refreshes feeds and may download megabytes: never on
+                // the control loop.
+                const bool posted = blocking_executor_.try_post(
+                    "nfqws-retention-backfill",
+                    [this, attempt, schedule_serial]() {
+                        // The queue may have held this while the daemon
+                        // began stopping, and cancel cannot reach a task a
+                        // worker already claimed: shutdown would then wait
+                        // out an opkg run nobody is waiting for.
+                        if (!running_.load(std::memory_order_acquire) ||
+                            schedule_serial !=
+                                nfqws_retention_backfill_schedule_serial_) {
+                            return;
+                        }
+                        const auto result =
+                            run_nfqws_retention_backfill(*api_ctx_);
+                        // Busy says nothing about the feed, and a failed
+                        // attempt says nothing permanent either - a router
+                        // that boots before its WAN is up fails the first
+                        // look and must get a later one. Only a real answer
+                        // (retained, unavailable, nothing_to_do) ends the
+                        // chain.
+                        if (result.outcome ==
+                                NfqwsRetentionBackfillOutcome::lease_busy ||
+                            result.outcome ==
+                                NfqwsRetentionBackfillOutcome::failed) {
+                            (void)post_control_task(
+                                [this, attempt, schedule_serial]() {
+                                    if (schedule_serial !=
+                                        nfqws_retention_backfill_schedule_serial_) {
+                                        return;
+                                    }
+                                    schedule_nfqws_retention_backfill(
+                                        attempt + 1);
+                                },
+                                "nfqws-retention-backfill-retry");
+                        }
+                        if (result.outcome !=
+                            NfqwsRetentionBackfillOutcome::nothing_to_do) {
+                            Logger::instance().info(
+                                "nfqws2 retention backfill: version={} "
+                                "outcome={}",
+                                result.version,
+                                nfqws_retention_backfill_outcome_name(
+                                    result.outcome));
+                        }
+                    });
+                if (!posted) {
+                    Logger::instance().info(
+                        "nfqws2 retention backfill: worker pool busy, "
+                        "attempt {} re-armed",
+                        attempt);
+                    schedule_nfqws_retention_backfill(attempt + 1);
+                }
+            },
+            "nfqws-retention-backfill");
+    } catch (const std::exception& error) {
+        nfqws_retention_backfill_task_id_ = -1;
+        Logger::instance().info(
+            "nfqws2 retention backfill timer could not be installed: {}",
+            error.what());
+    }
+}
+
+void Daemon::cancel_nfqws_retention_backfill() noexcept {
+    ++nfqws_retention_backfill_schedule_serial_;
+    if (nfqws_retention_backfill_task_id_ < 0) return;
+    const int task_id = nfqws_retention_backfill_task_id_;
+    nfqws_retention_backfill_task_id_ = -1;
+    if (!scheduler_) return;
+    try {
+        scheduler_->cancel(task_id);
+    } catch (...) {
+    }
+}
 } // namespace keen_pbr3
 
 #endif
