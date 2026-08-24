@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
@@ -717,10 +718,36 @@ struct RuntimeFirewallRetryAdmission {
     OwnedSnatRecovery snat_recovery;
 };
 
-// Event-loop-owned retry state for runtime routing/firewall reconciliation.
-// The coordinator deliberately does not perform reconciliation itself: it
-// only owns the single timer slot, its generation/attempt payload, and the
-// latched owned-SNAT recovery request carried across coalesced attempts.
+enum class RuntimeFirewallOperationPhase : std::uint8_t {
+    timer_pending,
+    worker_queued,
+    worker_running,
+    control_pending,
+};
+
+// Small ownership token passed across the timer, worker and control-loop
+// boundaries. Heavy immutable inputs/results stay in the corresponding
+// closures; this claim only proves which logical operation owns the single
+// retry slot and which hand-off phase may run next.
+struct RuntimeFirewallOperationClaim {
+    std::uint64_t serial{0};
+    std::uint64_t runtime_generation{0};
+    std::size_t attempt{0};
+    RuntimeFirewallOperationPhase phase{
+        RuntimeFirewallOperationPhase::timer_pending};
+
+    explicit operator bool() const noexcept {
+        return serial != 0U;
+    }
+};
+
+// Control-loop-owned retry policy plus a mutex-protected cross-boundary claim
+// for runtime routing/firewall reconciliation. The coordinator deliberately
+// does not perform reconciliation itself: it only owns the single operation
+// slot, its generation/attempt claim, and the latched owned-SNAT recovery
+// request carried across coalesced attempts. The asynchronous API retains that
+// slot through timer -> worker -> control; schedule()/defer_same_attempt()
+// keep their original synchronous behavior.
 class RuntimeFirewallRetryCoordinator {
 public:
     RuntimeFirewallRetryAdmission begin_attempt(
@@ -754,6 +781,7 @@ public:
     }
 
     bool retry_pending() const noexcept {
+        std::lock_guard<std::mutex> lock(operation_mutex_);
         return active_schedule_serial_ != 0U;
     }
 
@@ -783,6 +811,168 @@ public:
         IsCurrent&& is_current,
         RunAttempt&& run_attempt,
         bool persistent_recovery_requested = false) {
+        return schedule_impl</*RetainOperationClaim=*/false>(
+            attempt,
+            runtime_generation,
+            bounded_retry_count,
+            std::move(snat_recovery),
+            std::forward<Schedule>(schedule),
+            std::forward<IsCurrent>(is_current),
+            std::forward<RunAttempt>(run_attempt),
+            persistent_recovery_requested);
+    }
+
+    // Asynchronous counterpart of schedule(). The timer callback receives a
+    // worker_queued claim and the slot remains occupied until the caller walks
+    // it through begin_worker(), begin_control() and complete_operation(), or
+    // explicitly abandons it with cancel_operation().
+    template <typename Schedule, typename IsCurrent, typename QueueOperation>
+    RuntimeFirewallRetryPlan schedule_operation(
+        std::size_t attempt,
+        std::uint64_t runtime_generation,
+        std::size_t bounded_retry_count,
+        OwnedSnatRecovery snat_recovery,
+        Schedule&& schedule,
+        IsCurrent&& is_current,
+        QueueOperation&& queue_operation,
+        bool persistent_recovery_requested = false) {
+        return schedule_impl</*RetainOperationClaim=*/true>(
+            attempt,
+            runtime_generation,
+            bounded_retry_count,
+            std::move(snat_recovery),
+            std::forward<Schedule>(schedule),
+            std::forward<IsCurrent>(is_current),
+            std::forward<QueueOperation>(queue_operation),
+            persistent_recovery_requested);
+    }
+
+    // Admission contention is not a failed firewall attempt. Keep the exact
+    // attempt number and retained recovery payload in the coordinator's one
+    // timer slot, then retry only after the generation fence still matches.
+    // This is deliberately separate from schedule(): it must not advance the
+    // bounded retry budget or manufacture an incident merely because another
+    // admitted runtime writer was active.
+    template <typename Schedule, typename IsCurrent, typename RunAttempt>
+    bool defer_same_attempt(
+        std::size_t attempt,
+        std::uint64_t runtime_generation,
+        OwnedSnatRecovery snat_recovery,
+        Schedule&& schedule,
+        IsCurrent&& is_current,
+        RunAttempt&& run_attempt) {
+        return defer_same_attempt_impl</*RetainOperationClaim=*/false>(
+            attempt,
+            runtime_generation,
+            std::move(snat_recovery),
+            std::forward<Schedule>(schedule),
+            std::forward<IsCurrent>(is_current),
+            std::forward<RunAttempt>(run_attempt));
+    }
+
+    // Admission-contention counterpart of schedule_operation(). It preserves
+    // the exact attempt and recovery payload just like defer_same_attempt(),
+    // but retains the operation claim after the timer fires.
+    template <typename Schedule, typename IsCurrent, typename QueueOperation>
+    bool defer_same_attempt_operation(
+        std::size_t attempt,
+        std::uint64_t runtime_generation,
+        OwnedSnatRecovery snat_recovery,
+        Schedule&& schedule,
+        IsCurrent&& is_current,
+        QueueOperation&& queue_operation) {
+        return defer_same_attempt_impl</*RetainOperationClaim=*/true>(
+            attempt,
+            runtime_generation,
+            std::move(snat_recovery),
+            std::forward<Schedule>(schedule),
+            std::forward<IsCurrent>(is_current),
+            std::forward<QueueOperation>(queue_operation));
+    }
+
+    std::optional<RuntimeFirewallOperationClaim> begin_worker(
+        RuntimeFirewallOperationClaim claim) noexcept {
+        return transition_operation(
+            claim,
+            RuntimeFirewallOperationPhase::worker_queued,
+            RuntimeFirewallOperationPhase::worker_running);
+    }
+
+    std::optional<RuntimeFirewallOperationClaim> begin_control(
+        RuntimeFirewallOperationClaim claim) noexcept {
+        return transition_operation(
+            claim,
+            RuntimeFirewallOperationPhase::worker_running,
+            RuntimeFirewallOperationPhase::control_pending);
+    }
+
+    bool operation_is_current(
+        RuntimeFirewallOperationClaim claim) const noexcept {
+        std::lock_guard<std::mutex> lock(operation_mutex_);
+        return operation_matches_locked(claim);
+    }
+
+    bool complete_operation(
+        RuntimeFirewallOperationClaim claim) noexcept {
+        if (claim.phase != RuntimeFirewallOperationPhase::control_pending) {
+            return false;
+        }
+        return release_retry_slot_if_current(claim);
+    }
+
+    // Cancellation is terminal from any exact phase. Reusing an older phase
+    // copy of a live claim is rejected, so a producer cannot accidentally
+    // retire work already owned by the next boundary.
+    bool cancel_operation(
+        RuntimeFirewallOperationClaim claim) noexcept {
+        return release_retry_slot_if_current(claim);
+    }
+
+    template <typename Cancel>
+    void cancel(Cancel&& cancel) {
+        int task_id = -1;
+        {
+            std::lock_guard<std::mutex> lock(operation_mutex_);
+            if (active_schedule_serial_ == 0U) {
+                return;
+            }
+            if (active_operation_phase_ ==
+                RuntimeFirewallOperationPhase::timer_pending) {
+                task_id = retry_task_id_;
+            }
+            // Invalidate first. Scheduler::cancel may erase the entry and then
+            // throw while unregistering its fd; keeping a ghost task id would
+            // make every periodic recovery owner believe a retry is armed
+            // forever. Later phases have no live timer id, but are invalidated
+            // by the same serial before their queued callbacks can publish.
+            release_retry_slot_locked();
+            (void)next_schedule_serial_locked();
+        }
+        if (task_id >= 0) {
+            std::forward<Cancel>(cancel)(task_id);
+        }
+    }
+
+private:
+    enum class TimerTaskRegistration : std::uint8_t {
+        consumed,
+        installed,
+        rejected,
+    };
+
+    template <bool RetainOperationClaim,
+              typename Schedule,
+              typename IsCurrent,
+              typename RunAttempt>
+    RuntimeFirewallRetryPlan schedule_impl(
+        std::size_t attempt,
+        std::uint64_t runtime_generation,
+        std::size_t bounded_retry_count,
+        OwnedSnatRecovery snat_recovery,
+        Schedule&& schedule,
+        IsCurrent&& is_current,
+        RunAttempt&& run_attempt,
+        bool persistent_recovery_requested) {
         // The coordinator owns the recovery latch, so callers cannot
         // accidentally downgrade an exhausted owned-SNAT recovery to a
         // finished generic retry by passing an empty or stale payload.
@@ -800,61 +990,76 @@ public:
             return retry_plan;
         }
 
-        const auto schedule_serial = next_schedule_serial();
-        active_schedule_serial_ = schedule_serial;
-        retry_task_id_ = -1;
-        const auto retry_attempt = retry_plan.next_attempt;
+        const auto operation_claim = reserve_retry_slot(
+            runtime_generation, retry_plan.next_attempt);
+        if (!operation_claim) {
+            return {};
+        }
         auto scheduled_recovery = std::move(snat_recovery);
         try {
             const int task_id = std::forward<Schedule>(schedule)(
                 retry_plan,
                 [this,
-                 schedule_serial,
-                 retry_attempt,
-                 runtime_generation,
+                 operation_claim,
                  snat_recovery = std::move(scheduled_recovery),
                  is_current = std::forward<IsCurrent>(is_current),
                  run_attempt = std::forward<RunAttempt>(run_attempt)]()
                     mutable {
-                    // Release the single-flight slot before either the stale
-                    // fence or the attempt callback. A reentrant failure may
-                    // therefore install its successor immediately. A canceled
-                    // callback cannot release a successor or borrow its
-                    // payload because both are fenced by this serial and the
-                    // payload is captured per schedule.
-                    if (!release_retry_slot_if_current(schedule_serial)) {
-                        return;
+                    if constexpr (RetainOperationClaim) {
+                        auto queued_claim = transition_operation(
+                            operation_claim,
+                            RuntimeFirewallOperationPhase::timer_pending,
+                            RuntimeFirewallOperationPhase::worker_queued);
+                        if (!queued_claim.has_value()) {
+                            return;
+                        }
+                        try {
+                            if (!is_current(
+                                    queued_claim->runtime_generation)) {
+                                (void)cancel_operation(*queued_claim);
+                                return;
+                            }
+                            run_attempt(
+                                *queued_claim, std::move(snat_recovery));
+                        } catch (...) {
+                            (void)cancel_operation_identity_if_current(
+                                *queued_claim);
+                            throw;
+                        }
+                    } else {
+                        // Compatibility path: release before either the stale
+                        // fence or the synchronous callback, preserving the
+                        // original reentrant-successor behavior.
+                        if (!release_retry_slot_if_current(
+                                operation_claim)) {
+                            return;
+                        }
+                        if (!is_current(
+                                operation_claim.runtime_generation)) {
+                            return;
+                        }
+                        run_attempt(
+                            operation_claim.attempt,
+                            std::move(snat_recovery));
                     }
-                    if (!is_current(runtime_generation)) {
-                        return;
-                    }
-                    run_attempt(
-                        retry_attempt, std::move(snat_recovery));
                 });
-            // Scheduler test hooks may synchronously consume a ready timer
-            // before schedule() returns. Do not resurrect that completed slot
-            // (or overwrite a reentrant successor) with its returned id.
-            if (active_schedule_serial_ == schedule_serial) {
-                retry_task_id_ = task_id;
-                if (retry_task_id_ < 0) {
-                    (void)release_retry_slot_if_current(schedule_serial);
-                }
-            }
+            // Scheduler hooks may synchronously consume a ready timer. Do not
+            // resurrect a completed slot, or attach its id after ownership has
+            // already moved to a worker.
+            (void)register_timer_task_if_current(
+                operation_claim, task_id);
         } catch (...) {
-            (void)release_retry_slot_if_current(schedule_serial);
+            (void)cancel_operation_identity_if_current(operation_claim);
             throw;
         }
         return retry_plan;
     }
 
-    // Admission contention is not a failed firewall attempt. Keep the exact
-    // attempt number and retained recovery payload in the coordinator's one
-    // timer slot, then retry only after the generation fence still matches.
-    // This is deliberately separate from schedule(): it must not advance the
-    // bounded retry budget or manufacture an incident merely because another
-    // admitted runtime writer was active.
-    template <typename Schedule, typename IsCurrent, typename RunAttempt>
-    bool defer_same_attempt(
+    template <bool RetainOperationClaim,
+              typename Schedule,
+              typename IsCurrent,
+              typename RunAttempt>
+    bool defer_same_attempt_impl(
         std::size_t attempt,
         std::uint64_t runtime_generation,
         OwnedSnatRecovery snat_recovery,
@@ -866,80 +1071,167 @@ public:
             return false;
         }
 
-        const auto schedule_serial = next_schedule_serial();
-        active_schedule_serial_ = schedule_serial;
-        retry_task_id_ = -1;
+        const auto operation_claim = reserve_retry_slot(
+            runtime_generation, attempt);
+        if (!operation_claim) {
+            return false;
+        }
         auto scheduled_recovery = std::move(snat_recovery);
         bool accepted = true;
         try {
             const int task_id = std::forward<Schedule>(schedule)(
                 [this,
-                 schedule_serial,
-                 attempt,
-                 runtime_generation,
+                 operation_claim,
                  snat_recovery = std::move(scheduled_recovery),
                  is_current = std::forward<IsCurrent>(is_current),
                  run_attempt = std::forward<RunAttempt>(run_attempt)]()
                     mutable {
-                    if (!release_retry_slot_if_current(schedule_serial)) {
-                        return;
+                    if constexpr (RetainOperationClaim) {
+                        auto queued_claim = transition_operation(
+                            operation_claim,
+                            RuntimeFirewallOperationPhase::timer_pending,
+                            RuntimeFirewallOperationPhase::worker_queued);
+                        if (!queued_claim.has_value()) {
+                            return;
+                        }
+                        try {
+                            if (!is_current(
+                                    queued_claim->runtime_generation)) {
+                                (void)cancel_operation(*queued_claim);
+                                return;
+                            }
+                            run_attempt(
+                                *queued_claim, std::move(snat_recovery));
+                        } catch (...) {
+                            (void)cancel_operation_identity_if_current(
+                                *queued_claim);
+                            throw;
+                        }
+                    } else {
+                        if (!release_retry_slot_if_current(
+                                operation_claim)) {
+                            return;
+                        }
+                        if (!is_current(
+                                operation_claim.runtime_generation)) {
+                            return;
+                        }
+                        run_attempt(
+                            operation_claim.attempt,
+                            std::move(snat_recovery));
                     }
-                    if (!is_current(runtime_generation)) {
-                        return;
-                    }
-                    run_attempt(attempt, std::move(snat_recovery));
                 });
-            // Test schedulers may consume the callback inline. Preserve a
-            // reentrant successor instead of reviving this completed slot.
-            if (active_schedule_serial_ == schedule_serial) {
-                retry_task_id_ = task_id;
-                if (retry_task_id_ < 0) {
-                    (void)release_retry_slot_if_current(schedule_serial);
-                    accepted = false;
-                }
+            const auto registration = register_timer_task_if_current(
+                operation_claim, task_id);
+            if (registration == TimerTaskRegistration::rejected) {
+                accepted = false;
             }
         } catch (...) {
-            (void)release_retry_slot_if_current(schedule_serial);
+            (void)cancel_operation_identity_if_current(operation_claim);
             throw;
         }
         return accepted;
     }
 
-    template <typename Cancel>
-    void cancel(Cancel&& cancel) {
-        if (!retry_pending()) {
-            return;
+    RuntimeFirewallOperationClaim reserve_retry_slot(
+        std::uint64_t runtime_generation,
+        std::size_t attempt) noexcept {
+        std::lock_guard<std::mutex> lock(operation_mutex_);
+        if (active_schedule_serial_ != 0U) {
+            return {};
         }
-        const int task_id = retry_task_id_;
-        // Invalidate first. Scheduler::cancel may erase the entry and then
-        // throw while unregistering its fd; keeping a ghost task id would
-        // make every periodic recovery owner believe a retry is armed forever.
-        active_schedule_serial_ = 0U;
+        active_schedule_serial_ = next_schedule_serial_locked();
+        active_operation_generation_ = runtime_generation;
+        active_operation_attempt_ = attempt;
+        active_operation_phase_ =
+            RuntimeFirewallOperationPhase::timer_pending;
         retry_task_id_ = -1;
-        (void)next_schedule_serial();
-        if (task_id >= 0) {
-            std::forward<Cancel>(cancel)(task_id);
-        }
+        return RuntimeFirewallOperationClaim{
+            active_schedule_serial_,
+            runtime_generation,
+            attempt,
+            RuntimeFirewallOperationPhase::timer_pending};
     }
 
-private:
-    std::uint64_t next_schedule_serial() noexcept {
+    std::optional<RuntimeFirewallOperationClaim> transition_operation(
+        RuntimeFirewallOperationClaim claim,
+        RuntimeFirewallOperationPhase expected,
+        RuntimeFirewallOperationPhase next) noexcept {
+        std::lock_guard<std::mutex> lock(operation_mutex_);
+        if (claim.phase != expected ||
+            !operation_matches_locked(claim)) {
+            return std::nullopt;
+        }
+        active_operation_phase_ = next;
+        retry_task_id_ = -1;
+        claim.phase = next;
+        return claim;
+    }
+
+    TimerTaskRegistration register_timer_task_if_current(
+        RuntimeFirewallOperationClaim claim,
+        int task_id) noexcept {
+        std::lock_guard<std::mutex> lock(operation_mutex_);
+        if (!operation_matches_locked(claim)) {
+            return TimerTaskRegistration::consumed;
+        }
+        if (task_id < 0) {
+            release_retry_slot_locked();
+            return TimerTaskRegistration::rejected;
+        }
+        retry_task_id_ = task_id;
+        return TimerTaskRegistration::installed;
+    }
+
+    std::uint64_t next_schedule_serial_locked() noexcept {
         ++schedule_serial_;
         if (schedule_serial_ == 0U) ++schedule_serial_;
         return schedule_serial_;
     }
 
     bool release_retry_slot_if_current(
-        std::uint64_t schedule_serial) noexcept {
-        if (active_schedule_serial_ != schedule_serial) return false;
-        active_schedule_serial_ = 0U;
-        retry_task_id_ = -1;
+        RuntimeFirewallOperationClaim claim) noexcept {
+        std::lock_guard<std::mutex> lock(operation_mutex_);
+        if (!operation_matches_locked(claim)) return false;
+        release_retry_slot_locked();
         return true;
     }
 
+    bool operation_matches_locked(
+        RuntimeFirewallOperationClaim claim) const noexcept {
+        return claim &&
+               active_schedule_serial_ == claim.serial &&
+               active_operation_generation_ == claim.runtime_generation &&
+               active_operation_attempt_ == claim.attempt &&
+               active_operation_phase_ == claim.phase;
+    }
+
+    bool cancel_operation_identity_if_current(
+        RuntimeFirewallOperationClaim claim) noexcept {
+        std::lock_guard<std::mutex> lock(operation_mutex_);
+        if (!claim ||
+            active_schedule_serial_ != claim.serial ||
+            active_operation_generation_ != claim.runtime_generation ||
+            active_operation_attempt_ != claim.attempt) {
+            return false;
+        }
+        release_retry_slot_locked();
+        return true;
+    }
+
+    void release_retry_slot_locked() noexcept {
+        active_schedule_serial_ = 0U;
+        retry_task_id_ = -1;
+    }
+
+    mutable std::mutex operation_mutex_;
     int retry_task_id_{-1};
     std::uint64_t schedule_serial_{0};
     std::uint64_t active_schedule_serial_{0};
+    std::uint64_t active_operation_generation_{0};
+    std::size_t active_operation_attempt_{0};
+    RuntimeFirewallOperationPhase active_operation_phase_{
+        RuntimeFirewallOperationPhase::timer_pending};
     OwnedSnatRecovery pending_owned_snat_recovery_;
 };
 

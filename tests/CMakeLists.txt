@@ -2,6 +2,7 @@ add_executable(keen-pbr-tests
   test_main.cpp
   test_firewall_verifier.cpp
   test_firewall_runtime.cpp
+  test_runtime_firewall_backend_transaction.cpp
   test_ppe_deoffload.cpp
   test_system_auth_capability.cpp
   test_step_up.cpp
@@ -198,6 +199,7 @@ add_executable(keen-pbr-tests
   ../src/daemon/daemon_resolver.cpp
   ../src/daemon/keenetic_dns_refresh_coordinator.cpp
   ../src/daemon/resolver_stream_coordinator.cpp
+  ../src/daemon/runtime_firewall_backend_transaction.cpp
   ../src/daemon/daemon_api.cpp
   ../src/daemon/daemon_dns_probe.cpp
   ../src/setup/catalog_setup_planner.cpp

@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <functional>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
@@ -866,6 +867,156 @@ TEST_CASE("runtime firewall retry releases its slot before a reentrant successor
     CHECK(successor.next_attempt == 2U);
     CHECK(coordinator.retry_pending());
     CHECK(scheduler.callbacks.size() == 2U);
+}
+
+TEST_CASE(
+    "runtime firewall operation retains one slot through worker and control") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    FakeRuntimeFirewallRetryScheduler scheduler;
+    std::optional<RuntimeFirewallOperationClaim> queued_claim;
+
+    const auto plan = coordinator.schedule_operation(
+        0,
+        /*runtime_generation=*/17,
+        /*bounded_retry_count=*/6,
+        {},
+        [&scheduler](const RuntimeFirewallRetryPlan& retry_plan,
+                     auto callback) {
+            return scheduler.schedule(retry_plan, std::move(callback));
+        },
+        [](std::uint64_t generation) { return generation == 17U; },
+        [&](RuntimeFirewallOperationClaim claim, OwnedSnatRecovery) {
+            queued_claim = claim;
+        });
+    REQUIRE(plan.schedule);
+    REQUIRE(coordinator.retry_pending());
+    REQUIRE(scheduler.callbacks.size() == 1U);
+
+    scheduler.callbacks.front()();
+    REQUIRE(queued_claim.has_value());
+    CHECK(queued_claim->runtime_generation == 17U);
+    CHECK(queued_claim->attempt == 1U);
+    CHECK(queued_claim->phase ==
+          RuntimeFirewallOperationPhase::worker_queued);
+    CHECK(coordinator.operation_is_current(*queued_claim));
+    CHECK(coordinator.retry_pending());
+
+    // The fired timer is still the sole operation owner. A second logical
+    // attempt cannot borrow the slot while its worker is queued.
+    CHECK_FALSE(coordinator.defer_same_attempt(
+        1,
+        /*runtime_generation=*/17,
+        {},
+        [](auto) { return 44; },
+        [](std::uint64_t) { return true; },
+        [](std::size_t, OwnedSnatRecovery) {}));
+
+    const auto running_claim = coordinator.begin_worker(*queued_claim);
+    REQUIRE(running_claim.has_value());
+    CHECK(running_claim->phase ==
+          RuntimeFirewallOperationPhase::worker_running);
+    CHECK(coordinator.retry_pending());
+    CHECK_FALSE(coordinator.begin_worker(*queued_claim).has_value());
+
+    const auto control_claim = coordinator.begin_control(*running_claim);
+    REQUIRE(control_claim.has_value());
+    CHECK(control_claim->phase ==
+          RuntimeFirewallOperationPhase::control_pending);
+    CHECK(coordinator.retry_pending());
+    CHECK_FALSE(coordinator.complete_operation(*running_claim));
+
+    CHECK(coordinator.complete_operation(*control_claim));
+    CHECK_FALSE(coordinator.retry_pending());
+    CHECK_FALSE(coordinator.operation_is_current(*control_claim));
+}
+
+TEST_CASE("stale runtime firewall operation claim cannot affect its successor") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    FakeRuntimeFirewallRetryScheduler scheduler;
+    std::optional<RuntimeFirewallOperationClaim> first_claim;
+    std::optional<RuntimeFirewallOperationClaim> successor_claim;
+    const auto schedule = [&scheduler](
+                              const RuntimeFirewallRetryPlan& retry_plan,
+                              auto callback) {
+        return scheduler.schedule(retry_plan, std::move(callback));
+    };
+
+    REQUIRE(coordinator.schedule_operation(
+        0,
+        /*runtime_generation=*/17,
+        /*bounded_retry_count=*/6,
+        {},
+        schedule,
+        [](std::uint64_t) { return true; },
+        [&](RuntimeFirewallOperationClaim claim, OwnedSnatRecovery) {
+            first_claim = claim;
+        }).schedule);
+    REQUIRE(scheduler.callbacks.size() == 1U);
+    scheduler.callbacks.front()();
+    REQUIRE(first_claim.has_value());
+    REQUIRE(coordinator.cancel_operation(*first_claim));
+
+    REQUIRE(coordinator.schedule_operation(
+        0,
+        /*runtime_generation=*/18,
+        /*bounded_retry_count=*/6,
+        {},
+        schedule,
+        [](std::uint64_t generation) { return generation == 18U; },
+        [&](RuntimeFirewallOperationClaim claim, OwnedSnatRecovery) {
+            successor_claim = claim;
+        }).schedule);
+    REQUIRE(scheduler.callbacks.size() == 2U);
+    scheduler.callbacks.back()();
+    REQUIRE(successor_claim.has_value());
+    REQUIRE(coordinator.retry_pending());
+
+    CHECK_FALSE(coordinator.begin_worker(*first_claim).has_value());
+    CHECK_FALSE(coordinator.cancel_operation(*first_claim));
+    CHECK(coordinator.operation_is_current(*successor_claim));
+    CHECK(coordinator.retry_pending());
+
+    const auto running_claim = coordinator.begin_worker(*successor_claim);
+    REQUIRE(running_claim.has_value());
+    const auto control_claim = coordinator.begin_control(*running_claim);
+    REQUIRE(control_claim.has_value());
+    CHECK(coordinator.complete_operation(*control_claim));
+}
+
+TEST_CASE("runtime firewall cancellation invalidates a running worker claim") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    FakeRuntimeFirewallRetryScheduler scheduler;
+    std::optional<RuntimeFirewallOperationClaim> queued_claim;
+
+    REQUIRE(coordinator.schedule_operation(
+        2,
+        /*runtime_generation=*/17,
+        /*bounded_retry_count=*/6,
+        {},
+        [&scheduler](const RuntimeFirewallRetryPlan& retry_plan,
+                     auto callback) {
+            return scheduler.schedule(retry_plan, std::move(callback));
+        },
+        [](std::uint64_t) { return true; },
+        [&](RuntimeFirewallOperationClaim claim, OwnedSnatRecovery) {
+            queued_claim = claim;
+        }).schedule);
+    REQUIRE(scheduler.callbacks.size() == 1U);
+    scheduler.callbacks.front()();
+    REQUIRE(queued_claim.has_value());
+    const auto running_claim = coordinator.begin_worker(*queued_claim);
+    REQUIRE(running_claim.has_value());
+
+    std::size_t timer_cancel_calls = 0;
+    coordinator.cancel([&](int) { ++timer_cancel_calls; });
+
+    // Once the timer has handed ownership to a worker there is no scheduler
+    // task left to unregister, but shutdown still invalidates the same serial.
+    CHECK(timer_cancel_calls == 0U);
+    CHECK_FALSE(coordinator.retry_pending());
+    CHECK_FALSE(coordinator.operation_is_current(*running_claim));
+    CHECK_FALSE(coordinator.begin_control(*running_claim).has_value());
+    CHECK_FALSE(coordinator.cancel_operation(*running_claim));
 }
 
 TEST_CASE("runtime firewall cancel pre-invalidates an erased timer that throws") {
