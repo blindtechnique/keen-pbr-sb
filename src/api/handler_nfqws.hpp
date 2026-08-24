@@ -256,6 +256,7 @@ struct NfqwsBoundedOpkgTestResult {
     bool scripted{false};
     bool scripted_ok{false};
     bool init_restored{true};
+    bool config_migrated{false};
 };
 
 // Runs the production package sequence (opkg update, feed index read, opkg
@@ -292,6 +293,7 @@ struct NfqwsInstallTestResult {
     bool scripted{false};
     bool scripted_ok{false};
     bool init_restored{true};
+    bool config_migrated{false};
 };
 
 // Runs the production fresh-install sequence (feed definition, HTTPS

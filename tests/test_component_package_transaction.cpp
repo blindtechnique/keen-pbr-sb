@@ -495,15 +495,27 @@ struct ScriptedWorld {
     // Lay a directory at the init-script path while postinst runs, so the
     // restoring rename has somewhere real to fail.
     bool occupy_init_path_during_postinst{false};
+    // What the packaged preinst declares as its CONFIG_VERSION, and whether
+    // running it moves the active configuration aside the way the real one
+    // does when that version has moved past the file's.
+    std::string packaged_config_version;
+    bool preinst_migrates{false};
 
     ScriptedWorld() {
         options = options_for(root);
         options.scripted.init_script = root.path / "init.d" / "S51nfqws2";
         options.scripted.held_init_script =
             root.path / "init.d" / ".S51nfqws2.kpbr-held";
+        options.scripted.config_file = root.path / "etc" / "component.conf";
+        options.scripted.migrated_config_file =
+            root.path / "etc" / "component.conf-old";
         fs::create_directories(root.path / "init.d");
+        fs::create_directories(root.path / "etc");
     }
 
+    void lay_config(const std::string& body) {
+        write_file(options.scripted.config_file, body);
+    }
     void lay_init_script() {
         write_file(options.scripted.init_script, "#!/bin/sh\nexit 0\n");
     }
@@ -553,7 +565,13 @@ struct ScriptedWorld {
                 CHECK(source.filename() == "control.tar.gz");
                 if (control_tar_exit == 0) {
                     if (with_preinst) {
-                        write_file(target / "preinst", "#!/bin/sh\n");
+                        write_file(target / "preinst",
+                                   "#!/bin/sh\n" +
+                                       (packaged_config_version.empty()
+                                            ? std::string()
+                                            : "CURRENT_VERSION=" +
+                                                  packaged_config_version +
+                                                  "  # set by build\n"));
                     }
                     if (with_postinst) {
                         write_file(target / "postinst", "#!/bin/sh\n");
@@ -568,6 +586,15 @@ struct ScriptedWorld {
                 script_runs.push_back(script.filename().string() + " " +
                                       argv[2]);
                 if (script.filename() == "preinst") {
+                    // The real preinst migrates by moving the active
+                    // configuration aside; the transaction is supposed to
+                    // notice that, not to be told.
+                    if (preinst_migrates) {
+                        std::error_code move_error;
+                        fs::rename(options.scripted.config_file,
+                                   options.scripted.migrated_config_file,
+                                   move_error);
+                    }
                     result.exit_code = preinst_exit;
                     return result;
                 }
@@ -932,6 +959,307 @@ TEST_CASE("a restore that fails leaves the held name for boot recovery") {
           std::string::npos);
     std::error_code error;
     CHECK(fs::exists(world.options.scripted.held_init_script, error));
+}
+
+
+TEST_CASE("a config migration is announced before it happens and confirmed after") {
+    // The package's preinst moves the operator's tuned configuration aside
+    // when its CONFIG_VERSION has moved on, and the fresh default lands in
+    // its place. Nothing downstream would ever mention the file again, so
+    // the transaction reads the decision out loud before running the script.
+    ScriptedWorld world;
+    world.adopt_candidate("1.2.5", "ipk 1.2.5");
+    world.lay_init_script();
+    world.lay_config("CONFIG_VERSION=1\nNFQWS_ARGS=\"--tuned-by-hand\"\n");
+    world.packaged_config_version = "2";
+    world.preinst_migrates = true;
+    auto txn = world.transaction();
+
+    ScriptedInstallReport report;
+    txn.scripted_install_candidate(/*upgrade=*/true, report);
+
+    CHECK(report.config_migration_expected);
+    CHECK(report.config_migrated);
+    CHECK(report.config_version_before == "1");
+    CHECK(report.config_version_packaged == "2");
+    // Announced with both versions and both paths, so the operator can find
+    // what was moved and where.
+    CHECK(report.notes.find("configuration version 2") != std::string::npos);
+    CHECK(report.notes.find("declares 1") != std::string::npos);
+    CHECK(report.notes.find(world.options.scripted.migrated_config_file
+                                .string()) != std::string::npos);
+    // What can be done about it is the caller's to say: this layer cannot
+    // see whether a capture was taken, and the fresh-install path takes
+    // none. See "the transaction claims nothing about a restore point it
+    // cannot see".
+    CHECK(report.notes.find("install its own defaults") != std::string::npos);
+}
+
+TEST_CASE("no migration means no warning about the operator's configuration") {
+    ScriptedWorld world;
+    world.adopt_candidate("1.2.5", "ipk 1.2.5");
+    world.lay_init_script();
+    world.lay_config("CONFIG_VERSION=2\nNFQWS_ARGS=\"--tuned-by-hand\"\n");
+    world.packaged_config_version = "2";
+    auto txn = world.transaction();
+
+    ScriptedInstallReport report;
+    txn.scripted_install_candidate(true, report);
+
+    CHECK_FALSE(report.config_migration_expected);
+    CHECK_FALSE(report.config_migrated);
+    CHECK(report.config_version_before == "2");
+    CHECK(report.notes.find("active configuration") == std::string::npos);
+    std::error_code error;
+    CHECK(fs::exists(world.options.scripted.config_file, error));
+}
+
+TEST_CASE("a configuration without a declared version is treated as migrating") {
+    // preinst migrates when it cannot read a version at all, so the
+    // prediction has to agree with it rather than stay silent.
+    ScriptedWorld world;
+    world.adopt_candidate("1.2.5", "ipk 1.2.5");
+    world.lay_config("NFQWS_ARGS=\"--tuned-by-hand\"\n");
+    world.packaged_config_version = "1";
+    world.preinst_migrates = true;
+    auto txn = world.transaction();
+
+    ScriptedInstallReport report;
+    txn.scripted_install_candidate(true, report);
+
+    CHECK(report.config_migration_expected);
+    CHECK(report.config_migrated);
+    CHECK(report.config_version_before.empty());
+    CHECK(report.notes.find("declares none") != std::string::npos);
+}
+
+TEST_CASE("an old migrated copy is not mistaken for one this upgrade performed") {
+    // The -old name may have been lying there since an upgrade months ago.
+    // What proves a migration is the active file being gone afterwards.
+    ScriptedWorld world;
+    world.adopt_candidate("1.2.5", "ipk 1.2.5");
+    world.lay_config("CONFIG_VERSION=2\n");
+    world.packaged_config_version = "2";
+    write_file(world.options.scripted.migrated_config_file,
+               "CONFIG_VERSION=1\n# from a much earlier upgrade\n");
+    auto txn = world.transaction();
+
+    ScriptedInstallReport report;
+    txn.scripted_install_candidate(true, report);
+
+    CHECK_FALSE(report.config_migration_expected);
+    CHECK_FALSE(report.config_migrated);
+    CHECK(report.notes.find("active configuration") == std::string::npos);
+}
+
+TEST_CASE("a migration nobody predicted is still reported") {
+    // The package may migrate for a reason this code does not model - a
+    // rule of its own, a version scheme that changed. The confirmation is
+    // what the operator is told about, not the prediction.
+    ScriptedWorld world;
+    world.adopt_candidate("1.2.5", "ipk 1.2.5");
+    world.lay_config("CONFIG_VERSION=2\n");
+    world.packaged_config_version = "2";
+    world.preinst_migrates = true;
+    auto txn = world.transaction();
+
+    ScriptedInstallReport report;
+    txn.scripted_install_candidate(true, report);
+
+    CHECK_FALSE(report.config_migration_expected);
+    CHECK(report.config_migrated);
+    CHECK(report.notes.find("moved the active configuration") !=
+          std::string::npos);
+}
+
+TEST_CASE("a predicted migration that did not happen is corrected") {
+    ScriptedWorld world;
+    world.adopt_candidate("1.2.5", "ipk 1.2.5");
+    world.lay_config("CONFIG_VERSION=1\n");
+    world.packaged_config_version = "2";
+    world.preinst_migrates = false;
+    auto txn = world.transaction();
+
+    ScriptedInstallReport report;
+    txn.scripted_install_candidate(true, report);
+
+    CHECK(report.config_migration_expected);
+    CHECK_FALSE(report.config_migrated);
+    CHECK(report.notes.find("was not moved aside after all") !=
+          std::string::npos);
+    std::error_code error;
+    CHECK(fs::exists(world.options.scripted.config_file, error));
+}
+
+TEST_CASE("a fresh install has no configuration to lose") {
+    ScriptedWorld world;
+    world.adopt_candidate("1.2.5", "ipk 1.2.5");
+    world.packaged_config_version = "3";
+    auto txn = world.transaction();
+
+    ScriptedInstallReport report;
+    txn.scripted_install_candidate(/*upgrade=*/false, report);
+
+    CHECK_FALSE(report.config_migration_expected);
+    CHECK_FALSE(report.config_migrated);
+    CHECK(report.notes.find("active configuration") == std::string::npos);
+}
+
+
+TEST_CASE("a declared version the preinst's grep cannot use predicts a migration") {
+    // `grep -oE '[0-9]+$'` is anchored to the END of the line, so a trailing
+    // comment, a trailing space or a CRLF line yields nothing at all - and
+    // the preinst migrates unconditionally on nothing. Reading the LEADING
+    // digits instead would predict "no migration" precisely when the shell
+    // replaces the operator's file, and this panel's own apply_strategy will
+    // happily store a line with a trailing comment.
+    const std::vector<std::string> unusable{
+        "CONFIG_VERSION=1 # tuned by hand\n",
+        "CONFIG_VERSION=1 \n",
+        "CONFIG_VERSION=1\r\n",
+        "CONFIG_VERSION=1\t\n",
+    };
+    for (const auto& body : unusable) {
+        ScriptedWorld world;
+        world.adopt_candidate("1.2.5", "ipk 1.2.5");
+        world.lay_config(body);
+        // Same number on both sides: a leading-digit reader would compare
+        // 1 < 1 and stay silent.
+        world.packaged_config_version = "1";
+        world.preinst_migrates = true;
+        auto txn = world.transaction();
+
+        ScriptedInstallReport report;
+        txn.scripted_install_candidate(true, report);
+
+        CHECK_MESSAGE(report.config_migration_expected,
+                      "expected a predicted migration for: " << body);
+        CHECK(report.config_migrated);
+        CHECK(report.config_version_before.empty());
+        CHECK(report.notes.find("declares none usable") != std::string::npos);
+    }
+}
+
+TEST_CASE("a declared version the grep can use is read end-anchored") {
+    // The value the shell would take is the digit run at the end of the
+    // line, which is not always the one right after the '='.
+    ScriptedWorld world;
+    world.adopt_candidate("1.2.5", "ipk 1.2.5");
+    world.lay_config("CONFIG_VERSION=v12\n");
+    world.packaged_config_version = "12";
+    auto txn = world.transaction();
+
+    ScriptedInstallReport report;
+    txn.scripted_install_candidate(true, report);
+
+    CHECK(report.config_version_before == "12");
+    CHECK_FALSE(report.config_migration_expected);
+}
+
+TEST_CASE("the packaged version is read as the shell assignment it is") {
+    // CURRENT_VERSION is evaluated by the preinst itself, so a trailing
+    // comment there is harmless and the digits after '=' are the value -
+    // the opposite rule from the configuration side, on purpose.
+    ScriptedWorld world;
+    world.adopt_candidate("1.2.5", "ipk 1.2.5");
+    world.lay_config("CONFIG_VERSION=1\n");
+    world.packaged_config_version = "3";
+    world.preinst_migrates = true;
+    auto txn = world.transaction();
+
+    ScriptedInstallReport report;
+    txn.scripted_install_candidate(true, report);
+
+    // The fixture writes `CURRENT_VERSION=3  # set by build`.
+    CHECK(report.config_version_packaged == "3");
+    CHECK(report.config_migration_expected);
+}
+
+TEST_CASE("a package without a declared version predicts nothing and still confirms") {
+    ScriptedWorld world;
+    world.adopt_candidate("1.2.5", "ipk 1.2.5");
+    world.lay_config("CONFIG_VERSION=1\n");
+    world.packaged_config_version.clear();
+    world.preinst_migrates = true;
+    auto txn = world.transaction();
+
+    ScriptedInstallReport report;
+    txn.scripted_install_candidate(true, report);
+
+    CHECK_FALSE(report.config_migration_expected);
+    CHECK(report.config_version_packaged.empty());
+    // What the operator is told is what happened, not what was foreseen.
+    CHECK(report.config_migrated);
+    CHECK(report.notes.find("moved the active configuration") !=
+          std::string::npos);
+}
+
+TEST_CASE("a preinst that fails after moving the configuration says the defaults never landed") {
+    // The defaults come from the unpack, and the unpack is not going to run.
+    // Saying "and install its own defaults in its place" would be the last
+    // word on a file that is simply absent.
+    ScriptedWorld world;
+    world.adopt_candidate("1.2.5", "ipk 1.2.5");
+    world.lay_config("CONFIG_VERSION=1\n");
+    world.packaged_config_version = "2";
+    world.preinst_migrates = true;
+    world.preinst_exit = 1;
+    auto txn = world.transaction();
+
+    ScriptedInstallReport report;
+    txn.scripted_install_candidate(true, report);
+
+    CHECK(report.config_migrated);
+    CHECK_FALSE(report.preinst_ok);
+    CHECK_FALSE(report.mutation_started);
+    CHECK(report.notes.find("no defaults were installed") !=
+          std::string::npos);
+    CHECK(report.notes.find("is absent and its contents are at") !=
+          std::string::npos);
+}
+
+TEST_CASE("the transaction claims nothing about a restore point it cannot see") {
+    // The fresh-install path takes no capture at all, so a sentence about
+    // one belongs to the caller that knows, not to this layer.
+    ScriptedWorld world;
+    world.adopt_candidate("1.2.5", "ipk 1.2.5");
+    world.lay_config("CONFIG_VERSION=1\n");
+    world.packaged_config_version = "2";
+    world.preinst_migrates = true;
+    auto txn = world.transaction();
+
+    ScriptedInstallReport report;
+    txn.scripted_install_candidate(true, report);
+
+    CHECK(report.config_migrated);
+    CHECK(report.notes.find("restore point") == std::string::npos);
+}
+
+TEST_CASE("the migration warning reaches the operator log where it happens") {
+    // The whole point is that the operator reads it before the package
+    // manager output, not appended after it.
+    ScriptedWorld world;
+    world.adopt_candidate("1.2.5", "ipk 1.2.5");
+    world.lay_config("CONFIG_VERSION=1\n");
+    world.packaged_config_version = "2";
+    world.preinst_migrates = true;
+    auto txn = world.transaction();
+
+    std::string live_log;
+    ScriptedInstallReport report;
+    txn.scripted_install_candidate(
+        /*upgrade=*/true, report, {},
+        [&live_log](const std::string& line) {
+            live_log += line;
+            live_log += '\n';
+        });
+
+    const auto warning_at = live_log.find("will move the active configuration");
+    REQUIRE(warning_at != std::string::npos);
+    // The fixture's preinst performs the move, so the confirmation of a
+    // predicted migration is silence; what must be there is the warning,
+    // and it must arrive through the caller's own channel.
+    CHECK(live_log.find("component.conf-old") != std::string::npos);
 }
 
 } // namespace keen_pbr3

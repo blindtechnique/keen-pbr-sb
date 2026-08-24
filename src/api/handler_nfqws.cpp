@@ -509,6 +509,10 @@ struct BoundedOpkgUpgradeResult {
     // False only when the init script is still held aside under its
     // kpbr-held name; boot recovery restores it by that name.
     bool init_restored{true};
+    // The package replaced the operator's configuration with its own
+    // defaults during preinst; the captured restore point still holds the
+    // file as it was.
+    bool config_migrated{false};
 };
 
 // The third argument is the child's working directory, empty to inherit.
@@ -640,12 +644,18 @@ ExecCaptureResult run_annotated_package_command(
 // cannot open must still be installable. The distinction is reported so
 // the caller knows who owns the start.
 void run_scripted_or_plain_install(ComponentPackageTransaction& transaction,
+                                   // Where the component's configuration
+                                   // lives, so the plain fallback can read
+                                   // the same migration evidence the
+                                   // scripted path reads for itself.
+                                   const ScriptedInstallPaths& paths,
                                    bool upgrade,
                                    std::string& output,
                                    bool& mutation_started,
                                    bool& scripted,
                                    bool& scripted_ok,
                                    bool& init_restored,
+                                   bool& config_migrated,
                                    int& status,
                                    // The caller's combined command flags,
                                    // updated live by its annotated runner
@@ -681,16 +691,34 @@ void run_scripted_or_plain_install(ComponentPackageTransaction& transaction,
                 return;
             }
             // Nothing has run and nothing was mutated; the plain install
-            // still works the way it always has.
+            // still works the way it always has - including the package's
+            // preinst, which may migrate the configuration. Nobody is
+            // watching that from inside opkg, so the same evidence is read
+            // here: the active file present before and gone after.
             append("Falling back to a plain opkg install; the package's own "
                    "scripts will run, its service start included.");
+            const auto& config_file = paths.config_file;
+            const auto& migrated_file = paths.migrated_config_file;
+            std::error_code config_error;
+            const bool config_present_before =
+                fs::is_regular_file(config_file, config_error);
             mutation_started = true;
             (void)transaction.install_candidate();
+            config_migrated =
+                config_present_before &&
+                !fs::exists(config_file, config_error) &&
+                fs::is_regular_file(migrated_file, config_error);
+            if (config_migrated) {
+                append("The package moved the active configuration to " +
+                       migrated_file.string() +
+                       " and installed its own defaults in its place.");
+            }
             return;
         }
         scripted = true;
         scripted_ok = scripted_install_succeeded(report);
         init_restored = report.init_restored;
+        config_migrated = report.config_migrated;
         // A preinst that ran may already have moved component files around
         // even when the package manager itself never started; recovery must
         // treat that as a mutation.
@@ -756,9 +784,10 @@ BoundedOpkgUpgradeResult run_bounded_nfqws_opkg_upgrade(
         return combined;
     }
     run_scripted_or_plain_install(
-        transaction, /*upgrade=*/true, combined.output,
+        transaction, paths.scripted, /*upgrade=*/true, combined.output,
         combined.upgrade_started, combined.scripted, combined.scripted_ok,
-        combined.init_restored, combined.status, combined.timed_out,
+        combined.init_restored, combined.config_migrated, combined.status,
+        combined.timed_out,
         combined.termination_uncertain, stop_service);
     return combined;
 }
@@ -796,6 +825,9 @@ struct BoundedOpkgInstallResult {
     bool scripted{false};
     bool scripted_ok{false};
     bool init_restored{true};
+    // A fresh install has no operator configuration to lose, but the flag
+    // travels with the result so both paths report the same shape.
+    bool config_migrated{false};
 };
 
 // A fresh installation, prepared the way install.sh's configure_nfqws2
@@ -951,9 +983,10 @@ BoundedOpkgInstallResult run_bounded_nfqws_opkg_install(
         }
     }
     run_scripted_or_plain_install(
-        transaction, /*upgrade=*/false, combined.output,
+        transaction, paths.scripted, /*upgrade=*/false, combined.output,
         combined.install_started, combined.scripted, combined.scripted_ok,
-        combined.init_restored, combined.status, combined.timed_out,
+        combined.init_restored, combined.config_migrated, combined.status,
+        combined.timed_out,
         combined.termination_uncertain);
     return combined;
 }
@@ -3656,6 +3689,7 @@ void register_nfqws_handler_impl(
                 PackageBinaryOutcome::indeterminate;
             bool footprint_verified = false;
             std::string config_outcome_name = "unknown";
+            bool config_migrated = false;
             std::string runtime_outcome_name = "unknown";
             std::string created;
             bool package_mutation_started = false;
@@ -3718,8 +3752,20 @@ void register_nfqws_handler_impl(
                     termination_uncertain = opkg.termination_uncertain;
                     previous_exact = opkg.previous_exact;
                     target_version = opkg.target_version;
+                    config_migrated = opkg.config_migrated;
                     status = opkg.status;
                     output += opkg.output;
+                    if (config_migrated) {
+                        // The transaction reports the replacement; only this
+                        // scope knows a complete capture was taken above and
+                        // that "restore previous files" therefore holds the
+                        // operator's own configuration.
+                        output +=
+                            "The restore point captured before this upgrade "
+                            "still holds the configuration as it was, and "
+                            "the copy the package moved aside remains on "
+                            "disk.\n";
+                    }
                     // The store may have gained the installed version's
                     // own IPK during preparation; the status page should
                     // not keep saying otherwise for half a minute.
@@ -3917,6 +3963,21 @@ void register_nfqws_handler_impl(
                 },
                 [&]() { return recovery_safe; });
 
+
+            // The restore puts the captured configuration back, so a
+            // migration this upgrade performed is no longer the state of the
+            // router. Leaving the flag set would tell the panel the
+            // operator's file was replaced when it has just been returned.
+            if (post_mutation.rolled_back && config_migrated) {
+                std::error_code restored_error;
+                if (fs::is_regular_file(fs::path(kConfigDir) / "nfqws2.conf",
+                                        restored_error)) {
+                    config_migrated = false;
+                    output +=
+                        "The configuration the package moved aside was "
+                        "restored with the rest of the captured files.\n";
+                }
+            }
             const bool component_broken = post_mutation.component_broken;
             const bool rolled_back = post_mutation.rolled_back;
             if (!post_mutation.operation_error.empty()) {
@@ -4029,6 +4090,7 @@ void register_nfqws_handler_impl(
                                    package_binary_outcome_name(binary_outcome)},
                                   {"footprint_verified", footprint_verified},
                                   {"config_outcome", config_outcome_name},
+                                  {"config_migrated", config_migrated},
                                   {"runtime_outcome", runtime_outcome_name},
                                   {"firewall_reconcile_pending",
                                    firewall_reconcile_pending},
@@ -4580,6 +4642,7 @@ NfqwsBoundedOpkgTestResult run_nfqws_bounded_opkg_for_testing(
         result.scripted,
         result.scripted_ok,
         result.init_restored,
+        result.config_migrated,
     };
 }
 
@@ -4615,6 +4678,7 @@ NfqwsInstallTestResult run_nfqws_install_for_testing(
         result.scripted,
         result.scripted_ok,
         result.init_restored,
+        result.config_migrated,
     };
 }
 

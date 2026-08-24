@@ -5,6 +5,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <system_error>
+#include <vector>
 
 namespace keen_pbr3 {
 
@@ -40,6 +41,133 @@ void append_line(std::string& output, const std::string& line) {
     if (!output.empty() && output.back() != '\n') output += '\n';
     output += line;
     output += '\n';
+}
+
+// Read a file the way `grep` would: following symlinks and without the
+// modest ceiling the store's own reads use. These two versions decide
+// whether the operator is warned that their configuration is about to be
+// replaced, and a refusal to read is not a neutral answer here - it changes
+// what we tell them. `nullopt` therefore means "grep would have found
+// nothing either", not "we declined to look".
+std::optional<std::string> read_for_grep(const fs::path& path) {
+    std::error_code error;
+    if (!fs::is_regular_file(path, error) || error) return std::nullopt;
+    const auto size = fs::file_size(path, error);
+    // Generous: the shell has no limit at all, and a configuration this
+    // large is pathological rather than hostile.
+    if (error || size > 8U * 1024U * 1024U) return std::nullopt;
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return std::nullopt;
+    std::string body(static_cast<std::size_t>(size), '\0');
+    input.read(&body[0], static_cast<std::streamsize>(body.size()));
+    if (static_cast<std::size_t>(input.gcount()) != body.size()) {
+        return std::nullopt;
+    }
+    return body;
+}
+
+// Every line of `body` that begins with `prefix`, with the terminating
+// newline dropped and any carriage return kept - busybox grep does not strip
+// it, and a CRLF configuration is exactly one of the cases where the two
+// sides must agree.
+std::vector<std::string> lines_with_prefix(const std::string& body,
+                                           const std::string& prefix) {
+    std::vector<std::string> matches;
+    std::size_t cursor = 0;
+    while (cursor <= body.size()) {
+        const auto line_end = body.find('\n', cursor);
+        const auto line = body.substr(
+            cursor, line_end == std::string::npos ? std::string::npos
+                                                  : line_end - cursor);
+        if (line.rfind(prefix, 0) == 0) matches.push_back(line);
+        if (line_end == std::string::npos) break;
+        cursor = line_end + 1;
+    }
+    return matches;
+}
+
+// What the packaged preinst assigns to CURRENT_VERSION. This is a shell
+// assignment the script evaluates itself, so `CURRENT_VERSION=2  # set by
+// build` really is 2: the digits that count are the ones right after `=`.
+std::optional<std::string> read_packaged_config_version(
+    const fs::path& preinst) {
+    const auto body = read_for_grep(preinst);
+    if (!body) return std::nullopt;
+    for (const auto& line : lines_with_prefix(*body, "CURRENT_VERSION=")) {
+        std::string digits;
+        for (const char character : line.substr(
+                 std::string("CURRENT_VERSION=").size())) {
+            if (character < '0' || character > '9') break;
+            digits += character;
+        }
+        if (!digits.empty()) return digits;
+    }
+    return std::nullopt;
+}
+
+// What the active configuration declares, read exactly as the preinst reads
+// it:
+//
+//     grep -E '^CONFIG_VERSION=' "$CONFFILE" | grep -oE '[0-9]+$'
+//
+// The second grep is anchored to the END of the line, so `CONFIG_VERSION=1`
+// is 1 while `CONFIG_VERSION=1 # tuned`, `CONFIG_VERSION=1 ` and a CRLF line
+// all yield nothing - and the preinst treats nothing as "migrate", whatever
+// the packaged version is. Modelling this with the leading digits instead
+// would predict "no migration" precisely when the shell migrates
+// unconditionally, and our own apply_strategy will happily store a line with
+// a trailing comment.
+std::optional<std::string> read_declared_config_version(
+    const fs::path& config_file) {
+    const auto body = read_for_grep(config_file);
+    if (!body) return std::nullopt;
+    for (const auto& line : lines_with_prefix(*body, "CONFIG_VERSION=")) {
+        std::size_t end = line.size();
+        std::size_t start = end;
+        while (start > 0 && line[start - 1] >= '0' && line[start - 1] <= '9') {
+            --start;
+        }
+        if (start < end) return line.substr(start, end - start);
+    }
+    return std::nullopt;
+}
+// Whether the package is about to replace the operator's configuration,
+// decided the way its own preinst decides it: an unreadable declared version
+// - which includes a line the end-anchored grep cannot use - or one behind
+// what the package carries. Reported rather than prevented; the migration is
+// the package's contract, and this only refuses to let it be a surprise.
+void predict_config_migration(const ScriptedInstallPaths& paths,
+                              const fs::path& preinst,
+                              ScriptedInstallReport& report) {
+    std::error_code error;
+    if (!fs::is_regular_file(paths.config_file, error) || error) {
+        // Nothing installed to lose.
+        return;
+    }
+    const auto packaged = read_packaged_config_version(preinst);
+    if (!packaged) {
+        // Without the packaged version there is nothing to compare against.
+        // The confirmation after preinst still reports what really happened.
+        return;
+    }
+    report.config_version_packaged = *packaged;
+    const auto declared = read_declared_config_version(paths.config_file);
+    if (!declared) {
+        // The preinst's `[ -z "$INSTALLED_VERSION" ]` branch: no usable
+        // declaration means it migrates, whatever the packaged version is.
+        report.config_migration_expected = true;
+        return;
+    }
+    report.config_version_before = *declared;
+    try {
+        report.config_migration_expected =
+            std::stoull(*declared) < std::stoull(*packaged);
+    } catch (const std::exception&) {
+        // The shell compares with `-lt`, which on a number neither side can
+        // hold errors out and leaves NEED_MIGRATION_CONF at 0 - no
+        // migration. Matching that is better than guessing the other way.
+        report.config_migration_expected = false;
+    }
 }
 
 } // namespace
@@ -455,19 +583,70 @@ void ComponentPackageTransaction::scripted_install(
     report.scripts_extracted = true;
 
     // 2. preinst, before the unpack, exactly where opkg runs it: on this
-    // component it decides config migrations by moving the old config aside
-    // so the unpack below lays down the fresh one.
+    // component it decides config migrations by moving the operator's
+    // configuration aside so the unpack below lays down the package default.
+    // That decision belongs to the package - but it is read out loud here,
+    // before it happens, because the file it replaces is the one the
+    // operator tuned and nothing downstream would mention it again.
     const auto preinst = scripts_dir / "preinst";
     if (fs::is_regular_file(preinst, fs_error)) {
+        predict_config_migration(options_.scripted, preinst, report);
+        if (report.config_migration_expected) {
+            // No promise about recovery here: this layer cannot see whether
+            // a capture was taken, and the fresh-install path takes none.
+            // The caller that knows says what can be done about it.
+            emit("The package carries configuration version " +
+                 report.config_version_packaged + " while " +
+                 options_.scripted.config_file.string() +
+                 (report.config_version_before.empty()
+                      ? " declares none usable"
+                      : " declares " + report.config_version_before) +
+                 ", so the package will move the active configuration to " +
+                 options_.scripted.migrated_config_file.string() +
+                 " and install its own defaults in its place.");
+        }
+        // The migration is a `mv`, so what proves it is the active file
+        // being gone afterwards - not the presence of the -old name, which
+        // an earlier migration may have left behind long ago.
+        const bool config_present_before =
+            fs::is_regular_file(options_.scripted.config_file, fs_error);
         report.preinst_ran = true;
         report.preinst_ok = command_ok(
             run_({options_.scripted.shell, preinst.string(),
                   upgrade ? "upgrade" : "install"},
                  options_.timeouts, {}));
+        // What actually happened, not what was predicted: the package may
+        // migrate for a reason this code does not model.
+        report.config_migrated =
+            config_present_before &&
+            !fs::exists(options_.scripted.config_file, fs_error) &&
+            fs::is_regular_file(options_.scripted.migrated_config_file,
+                                fs_error);
+        if (report.config_migrated && !report.config_migration_expected) {
+            emit("The package moved the active configuration to " +
+                 options_.scripted.migrated_config_file.string() +
+                 " and will install its own defaults in its place.");
+        }
+        if (report.config_migration_expected && !report.config_migrated) {
+            // Predicted and did not happen: say so rather than leave the
+            // warning above as the last word on the operator's file.
+            emit("The configuration was not moved aside after all; the "
+                 "active file is the one that was there before.");
+        }
         if (!report.preinst_ok) {
-            emit(
-                        "The package's preinst script failed; the package "
-                        "manager was not run.");
+            if (report.config_migrated) {
+                // The defaults come from the unpack, which is not going to
+                // run: the operator's file is aside and nothing replaced
+                // it, so the earlier line would now be half wrong.
+                emit("The package's preinst script failed after moving the "
+                     "configuration aside, so no defaults were installed "
+                     "over it: " +
+                     options_.scripted.config_file.string() +
+                     " is absent and its contents are at " +
+                     options_.scripted.migrated_config_file.string() + ".");
+            }
+            emit("The package's preinst script failed; the package "
+                 "manager was not run.");
             return;
         }
     }

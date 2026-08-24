@@ -386,11 +386,22 @@ struct NfqwsPackageFixture {
     // Scripted-install paths inside the fixture root, so a test can never
     // rename anything outside its own directory. The init script itself is
     // absent unless a test lays it, which mirrors a build machine.
+    // Every path the scripted flow may read or rename lives inside the
+    // fixture root. Leaving config_file at its production default would
+    // point a unit test at the live /opt/etc/nfqws2 of whatever machine ran
+    // it, and the migration evidence is read by existence.
     ScriptedInstallPaths scripted_paths() const {
         ScriptedInstallPaths paths;
         paths.init_script = root / "init.d" / "S51nfqws2";
         paths.held_init_script = root / "init.d" / ".S51nfqws2.kpbr-held";
+        paths.config_file = root / "etc" / "component.conf";
+        paths.migrated_config_file = root / "etc" / "component.conf-old";
         return paths;
+    }
+    void lay_config(const std::string& body) const {
+        std::filesystem::create_directories(root / "etc");
+        std::ofstream file(root / "etc" / "component.conf", std::ios::trunc);
+        file << body;
     }
     void lay_init_script() {
         std::filesystem::create_directories(root / "init.d");

@@ -58,6 +58,14 @@ struct ScriptedInstallPaths {
     std::filesystem::path offline_root{"/"};
     std::string shell{"/opt/bin/sh"};
     std::string tar{"/opt/bin/tar"};
+    // The component's active configuration, and where its own preinst moves
+    // it when the packaged CONFIG_VERSION has moved past what the file
+    // declares. Both are read, never written, by this code: the package
+    // performs the migration, and the transaction's job is to see it coming
+    // and say so.
+    std::filesystem::path config_file{"/opt/etc/nfqws2/nfqws2.conf"};
+    std::filesystem::path migrated_config_file{
+        "/opt/etc/nfqws2/nfqws2.conf-old"};
 };
 
 struct ComponentPackageOptions {
@@ -130,6 +138,18 @@ struct ScriptedInstallReport {
     // the held copy still exists under ScriptedInstallPaths::
     // held_init_script and boot recovery restores it by name.
     bool init_restored{true};
+    // The package's own preinst moves the active configuration aside when
+    // the packaged CONFIG_VERSION has moved past what the file declares, and
+    // then tells its postinst to treat the upgrade as a fresh install - so
+    // the operator's tuned file is replaced by the package default. That is
+    // the package's decision, not ours to prevent, but it must never be a
+    // surprise: predicted before preinst runs and confirmed after.
+    bool config_migration_expected{false};
+    bool config_migrated{false};
+    // What the file declared and what the package carries, when both could
+    // be read; empty otherwise.
+    std::string config_version_before;
+    std::string config_version_packaged;
     // Human-readable lines about the steps above, for the operator log.
     std::string notes;
 };
