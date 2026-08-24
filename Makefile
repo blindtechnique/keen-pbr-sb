@@ -33,7 +33,8 @@ CLANG_FEATURE_CMAKE_FLAGS := -DWITH_API=ON -DUSE_KEENETIC_API=ON
         firewall-it-images firewall-it \
         clang-build clang-check clang-tidy clang-tidy-curated \
         generate generate-check \
-        check-warnings check-shell check-openapi-parity check-nfqws-assets \
+        check-warnings check-shell check-ndmc-env check-openapi-parity \
+        check-nfqws-assets \
         check-nfqws-rotator-lua \
         sanitize fuzz \
         cross-setup cross-build cross-deploy \
@@ -96,6 +97,9 @@ check-warnings: ## Build with -Wall -Wextra -Werror (native compilers only)
 check-shell: ## Parse every shipped shell script with the target BusyBox and scan for bashisms
 	python3 -m unittest build_scripts.tests.test_mask_awk_for_shell_scan -v
 	bash build_scripts/check-shell-busybox.sh
+
+check-ndmc-env: ## Prove the shipped installer/uninstaller run ndmc with a scrubbed LD_LIBRARY_PATH
+	sh tests/package_it/run-ndmc-env-contract.sh install.sh uninstall.sh
 
 check-openapi-parity: ## Fail when a registered API route is missing from docs/openapi.yaml
 	python3 build_scripts/check-openapi-parity.py
