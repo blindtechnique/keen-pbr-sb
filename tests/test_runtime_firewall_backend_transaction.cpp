@@ -148,13 +148,17 @@ RuntimeFirewallBackendTransactionInput transaction_input(
 
     RuntimeFirewallBackendTransactionInput input;
     input.operation_serial = 17U;
-    input.config_generation = 23U;
+    input.runtime_generation = 23U;
     input.config = std::move(config);
     input.outbound_marks = {{"vpn", 0x00070000U}};
     input.list_max_file_size_bytes = cache.max_file_size();
     input.list_cache_snapshot =
         cache.capture_generation(captured_lists);
     input.requested_mode = mode;
+    if (mode == FirewallApplyMode::RulesOnly) {
+        input.requested_list_fingerprints = {{"seam", "same"}};
+        input.previous_list_fingerprints = {{"seam", "same"}};
+    }
     return input;
 }
 
@@ -173,7 +177,9 @@ TEST_CASE("backend transaction returns one owned committed value") {
 
     CHECK(result.committed());
     CHECK(result.operation_serial == 17U);
-    CHECK(result.config_generation == 23U);
+    CHECK(result.runtime_generation == 23U);
+    CHECK(result.commit_entered);
+    CHECK(result.commit_returned);
     CHECK_FALSE(result.failure.has_value());
     CHECK_FALSE(result.rules_only_fallback.has_value());
     REQUIRE(result.committed_firewall.has_value());
@@ -209,6 +215,29 @@ TEST_CASE("backend transaction repairs one RulesOnly staging refusal") {
               FirewallApplyMode::RulesOnly,
               FirewallApplyMode::PreserveSets});
     CHECK(firewall.applied_modes ==
+          std::vector<FirewallApplyMode>{FirewallApplyMode::PreserveSets});
+}
+
+TEST_CASE("backend transaction streams a changed pinned list generation") {
+    BackendTransactionTempDirectory temp;
+    auto input = transaction_input(
+        temp.path() / "cache",
+        list_transaction_config(),
+        FirewallApplyMode::RulesOnly,
+        {"seam"});
+    input.requested_list_fingerprints = {{"seam", "new"}};
+    input.previous_list_fingerprints = {{"seam", "old"}};
+    BackendTransactionFirewall firewall;
+
+    const auto result =
+        execute_runtime_firewall_backend_transaction(input, firewall);
+
+    CHECK(result.committed());
+    CHECK_FALSE(result.rules_only_fallback.has_value());
+    REQUIRE(result.committed_firewall.has_value());
+    CHECK(result.committed_firewall->mode ==
+          FirewallApplyMode::PreserveSets);
+    CHECK(firewall.prepared_modes ==
           std::vector<FirewallApplyMode>{FirewallApplyMode::PreserveSets});
 }
 
@@ -259,6 +288,8 @@ TEST_CASE("backend transaction never retries a failed fallback commit") {
           RuntimeFirewallBackendTransactionPhase::fallback_commit);
     CHECK(result.failure->kind ==
           RuntimeFirewallBackendFailureKind::rules_only_refusal);
+    CHECK(result.commit_entered);
+    CHECK_FALSE(result.commit_returned);
     CHECK(firewall.applied_modes ==
           std::vector<FirewallApplyMode>{
               FirewallApplyMode::RulesOnly,
@@ -284,5 +315,7 @@ TEST_CASE("backend transaction reports the exact stage failure phase") {
           RuntimeFirewallBackendTransactionPhase::initial_stage);
     CHECK(result.failure->kind ==
           RuntimeFirewallBackendFailureKind::transient_firewall);
+    CHECK_FALSE(result.commit_entered);
+    CHECK_FALSE(result.commit_returned);
     CHECK(firewall.applied_modes.empty());
 }

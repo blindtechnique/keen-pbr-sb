@@ -24,7 +24,17 @@ execute_runtime_firewall_backend_transaction(
     Firewall& firewall) {
     RuntimeFirewallBackendTransactionResult result;
     result.operation_serial = input.operation_serial;
-    result.config_generation = input.config_generation;
+    result.runtime_generation = input.runtime_generation;
+
+    FirewallApplyMode effective_mode = input.requested_mode;
+    if (effective_mode == FirewallApplyMode::RulesOnly &&
+        (input.previous_list_fingerprints.empty() ||
+         input.requested_list_fingerprints !=
+             input.previous_list_fingerprints)) {
+        // This is ordinary generation drift, not a backend refusal: stream
+        // the pinned generation without manufacturing a fallback warning.
+        effective_mode = FirewallApplyMode::PreserveSets;
+    }
 
     auto phase = RuntimeFirewallBackendTransactionPhase::initial_stage;
     const auto stage_with = [&](FirewallApplyMode mode) {
@@ -55,9 +65,9 @@ execute_runtime_firewall_backend_transaction(
     try {
         StagedRuntimeFirewall staged;
         try {
-            staged = stage_with(input.requested_mode);
+            staged = stage_with(effective_mode);
         } catch (const FirewallRulesOnlyError& error) {
-            if (input.requested_mode != FirewallApplyMode::RulesOnly) {
+            if (effective_mode != FirewallApplyMode::RulesOnly) {
                 throw;
             }
             result.rules_only_fallback = RuntimeFirewallRulesOnlyFallback{
@@ -72,10 +82,13 @@ execute_runtime_firewall_backend_transaction(
             // A staging refusal already consumed the one permitted fallback.
             // Passing no callback makes any later refusal terminal.
             phase = RuntimeFirewallBackendTransactionPhase::fallback_commit;
+            result.commit_entered = true;
             staged = commit_runtime_firewall_with_rules_only_fallback(
                 firewall, std::move(staged), {});
+            result.commit_returned = true;
         } else {
             phase = RuntimeFirewallBackendTransactionPhase::initial_commit;
+            result.commit_entered = true;
             staged = commit_runtime_firewall_with_rules_only_fallback(
                 firewall,
                 std::move(staged),
@@ -97,6 +110,7 @@ execute_runtime_firewall_backend_transaction(
                         fallback_commit;
                     return fallback;
                 });
+            result.commit_returned = true;
         }
 
         result.committed_firewall = std::move(staged);

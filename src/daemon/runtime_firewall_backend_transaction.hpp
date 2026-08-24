@@ -59,7 +59,7 @@ struct RuntimeFirewallRulesOnlyFallback {
 // moves one instance into its worker closure and never mutates it afterwards.
 struct RuntimeFirewallBackendTransactionInput {
     std::uint64_t operation_serial{0};
-    std::uint64_t config_generation{0};
+    std::uint64_t runtime_generation{0};
 
     Config config;
     OutboundMarkMap outbound_marks;
@@ -71,6 +71,7 @@ struct RuntimeFirewallBackendTransactionInput {
 
     std::size_t list_max_file_size_bytes{kDefaultMaxFileSizeBytes};
     std::shared_ptr<const ListCacheGenerationSnapshot> list_cache_snapshot;
+    std::map<std::string, std::string> requested_list_fingerprints;
 
     FirewallApplyMode requested_mode{FirewallApplyMode::PreserveSets};
     bool force_clear_dynamic_sets{false};
@@ -82,11 +83,19 @@ struct RuntimeFirewallBackendTransactionInput {
     std::vector<RuleState> previous_rules;
     std::map<std::string, ListSetUsage> previous_list_usage;
     AppliedListContentState previous_list_content_state;
+    std::map<std::string, std::string> previous_list_fingerprints;
+    std::vector<FirewallSourceEgressSnatSelector>
+        previous_native_vpn_direct_egress_snat_selectors;
 };
 
 struct RuntimeFirewallBackendTransactionResult {
     std::uint64_t operation_serial{0};
-    std::uint64_t config_generation{0};
+    std::uint64_t runtime_generation{0};
+    // A failed command can be ambiguous after entering the backend COMMIT
+    // boundary. Keep that distinct from a staging failure so the control loop
+    // never claims that the previous kernel generation is certainly intact.
+    bool commit_entered{false};
+    bool commit_returned{false};
     std::optional<StagedRuntimeFirewall> committed_firewall;
     std::optional<RuntimeFirewallRulesOnlyFallback> rules_only_fallback;
     std::optional<RuntimeFirewallBackendFailure> failure;
