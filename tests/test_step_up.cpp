@@ -139,9 +139,8 @@ TEST_CASE("the package and access operations require a step-up") {
     CHECK(requires_step_up("POST", "/api/system/update/rollback"));
     CHECK(requires_step_up("POST", "/api/system/naive-component"));
     CHECK(requires_step_up("POST", "/api/transports/sing-box/install"));
-    CHECK(requires_step_up("POST", "/api/nfqws", "upgrade"));
-    CHECK(requires_step_up("POST", "/api/nfqws",
-                           "capture_restore_point"));
+    CHECK(requires_step_up("POST", "/api/nfqws", "install"));
+    CHECK(requires_step_up("POST", "/api/nfqws", "restore_component"));
     CHECK(requires_step_up("POST", "/api/backup/restore"));
     CHECK(requires_step_up("POST", "/api/backup/rollback"));
     CHECK(requires_step_up("POST", "/api/auth/settings"));
@@ -206,15 +205,15 @@ TEST_CASE("ordinary routes are untouched") {
 TEST_CASE("the method is part of the decision") {
     // Reading the update endpoint is not applying an update.
     CHECK_FALSE(requires_step_up("GET", "/api/system/update"));
-    CHECK_FALSE(requires_step_up("GET", "/api/nfqws", "upgrade"));
+    CHECK_FALSE(requires_step_up("GET", "/api/nfqws", "install"));
     // There is no GET /api/backup. Guarding the method the endpoint merely
     // looks like it should use protects nothing and reads as if it does.
     CHECK_FALSE(requires_step_up("GET", "/api/backup"));
 }
 
 TEST_CASE("a spare slash or a query string is not a way past the guard") {
-    CHECK(requires_step_up("POST", "/api/nfqws/", "upgrade"));
-    CHECK(requires_step_up("POST", "/api/nfqws///", "upgrade"));
+    CHECK(requires_step_up("POST", "/api/nfqws/", "install"));
+    CHECK(requires_step_up("POST", "/api/nfqws///", "install"));
     CHECK(path_dispatches_on_action("/api/nfqws///"));
     CHECK(requires_step_up("POST", "/api/backup?groups=all"));
     CHECK(requires_step_up("POST", "/api/backup/restore/?force=1"));
@@ -236,9 +235,19 @@ TEST_CASE("ordinary nfqws actions remain outside the privileged action set") {
                       "ordinary nfqws action unexpectedly needs step-up: "
                           << action);
     }
-    CHECK(requires_step_up("POST", "/api/nfqws", "upgrade"));
-    CHECK(requires_step_up("POST", "/api/nfqws",
-                           "capture_restore_point"));
+    // `upgrade` moved here deliberately, at the owner's request: it installs
+    // a file the daemon verified against the feed index, captures the
+    // component before mutating it, and repairs an interrupted attempt at
+    // the next start. Whether a rollback also restores opkg's record depends
+    // on the store holding the installed version's exact IPK, which the
+    // status flags report per router - the panel shows what is missing
+    // rather than promising it.
+    CHECK_FALSE(requires_step_up("POST", "/api/nfqws", "upgrade"));
+    // And the standalone capture with it: the upgrade replaces the same
+    // restore point without prompting, so a step-up here guarded a door
+    // with an open window beside it.
+    CHECK_FALSE(requires_step_up("POST", "/api/nfqws",
+                                 "capture_restore_point"));
     CHECK(requires_step_up("POST", "/api/nfqws", "restore_component"));
     CHECK(requires_step_up("POST", "/api/nfqws", "install"));
     CHECK_FALSE(requires_step_up("POST", "/api/nfqws", ""));

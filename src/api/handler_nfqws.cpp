@@ -3751,9 +3751,12 @@ void register_nfqws_handler_impl(
         }
         if (action == "capture_restore_point") {
             // The snapshot contains configuration and lists as well as the
-            // binary. It is private and never returned, but replacing a known
-            // recovery point still changes the future downgrade target, so
-            // this action is step-up protected alongside restore.
+            // binary, and it is private and never returned. Replacing a
+            // known recovery point does change the future downgrade target
+            // - but the upgrade action captures over it too, and that one
+            // no longer prompts, so a step-up here would guard a door with
+            // an open window beside it. The restore, which decides which
+            // saved bytes go live, is the one that stays protected.
             // The lease is still required: capturing while opkg is midway
             // through replacing files would store a mixture of two versions
             // and call it a restore point.

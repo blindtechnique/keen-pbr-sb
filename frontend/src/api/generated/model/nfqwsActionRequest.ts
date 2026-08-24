@@ -17,11 +17,12 @@ Unknown members are ignored. An unrecognised `action` is a 400.
 
 **Files.** `category` and `name` together identify a file, and the category decides what is allowed: `config` and `log` cannot be deleted, a `log` cannot be created, and only `list` and `lua` can be batch-saved. Names are validated; a bad one is a 400, not a path.
 
-**Step-up.** `upgrade`, `capture_restore_point` and `restore_component` need a live grant. The rest do not, because guarding the whole path once put a password prompt in front of opening a list.
+**Step-up.** `install` and `restore_component` need a live grant. The rest do not, because guarding the whole path once put a password prompt in front of opening a list. `upgrade` is deliberately not among them: it installs a file this daemon verified against the feed index, captures the component before mutating it, and repairs an interrupted attempt at the next start. Whether a failure also restores opkg's record depends on the store holding the installed version's exact IPK - `upgrade_capability` reports that per router. `capture_restore_point` is not protected either: the upgrade's own capture replaces the same restore point without prompting, so guarding the standalone one bought nothing.
+**`install`.** A fresh installation of the official `nfqws2-keenetic` package for a router that does not have it: prepares the HTTPS prerequisites and the feed definition the way the shell installer does, then runs the same verified path the upgrade uses - the IPK is downloaded by opkg, checked against the feed index's size and SHA-256 and installed from the verified file, whose exact copy is retained for future rollback from day one. Refused (409) when the package is already installed; `upgrade` is the action for that. A feed definition already present with different content is treated as the operator's mirror choice and left untouched.
 
  */
 export interface NfqwsActionRequest {
-  /** `upgrade`, `capture_restore_point` and `restore_component` require a live step-up grant; the rest do not.
+  /** `install` and `restore_component` require a live step-up grant; the rest, `upgrade` and `capture_restore_point` included, do not.
    */
   action: NfqwsActionRequestAction;
   /** Which set the file belongs to. Read by `read_file`, `save_file`, `create_file` and `delete_file`.

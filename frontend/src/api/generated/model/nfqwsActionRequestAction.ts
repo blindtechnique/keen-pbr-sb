@@ -7,7 +7,7 @@
  */
 
 /**
- * `upgrade`, `capture_restore_point` and `restore_component` require a live step-up grant; the rest do not.
+ * `install` and `restore_component` require a live step-up grant; the rest, `upgrade` and `capture_restore_point` included, do not.
 
  */
 export type NfqwsActionRequestAction = typeof NfqwsActionRequestAction[keyof typeof NfqwsActionRequestAction];
@@ -24,6 +24,7 @@ export const NfqwsActionRequestAction = {
   delete_strategy: 'delete_strategy',
   import_bundle: 'import_bundle',
   import_lists: 'import_lists',
+  install: 'install',
   read_file: 'read_file',
   restore_component: 'restore_component',
   save_file: 'save_file',

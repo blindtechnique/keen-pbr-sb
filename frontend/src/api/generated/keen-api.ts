@@ -5302,13 +5302,15 @@ export function useGetNfqws<TData = Awaited<ReturnType<typeof getNfqws>>, TError
 /**
  * Dispatches on `action`. The set is closed and listed below, and it is worth knowing that this is one route rather than seventeen: it mixes reads the panel performs constantly with operations that replace the installed package.
 
-Three actions therefore need step-up reauthentication - `upgrade`, `capture_restore_point` and `restore_component` - and the rest do not. Guarding the whole path instead once put a password prompt in front of opening a list, which is why the unit of privilege here is the action, not the path. An action nobody listed needs no step-up, deliberately: the alternative is prompting for a password on everything unknown.
+Two actions therefore need step-up reauthentication - `install` and `restore_component` - and the rest do not. Guarding the whole path instead once put a password prompt in front of opening a list, which is why the unit of privilege here is the action, not the path. An action nobody listed needs no step-up, deliberately: the alternative is prompting for a password on everything unknown.
+
+`upgrade` is not among them, and `capture_restore_point` follows it out. The upgrade installs one file this daemon downloaded and verified against the feed index, captures the component's files before it mutates anything, and repairs an interruption at the next start; whether a failure also restores opkg's own record depends on the store holding the installed version's exact IPK, which `upgrade_capability` reports per router rather than promises. That capture publishes a new generation and removes the earlier ones, so a step-up on the standalone capture guarded a replacement the same session could perform through `upgrade` anyway. What stays protected is what that route cannot reach: the first install of a component, and the restore, which decides which saved bytes become live.
 
 Note the step-up window, because it is not what a per-operation confirmation would give you: a successful step-up opens **every** protected route and action for up to 300 seconds, and using it does not consume it or extend it.
 
 Per-action request and response bodies are not described here yet; this documents the envelope, the action set and the failures they share.
 
- * @summary One endpoint, seventeen nfqws2 actions
+ * @summary One endpoint, eighteen nfqws2 actions
  */
 export type postNfqwsResponse200 = {
   data: NfqwsActionResult
@@ -5404,7 +5406,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type PostNfqwsMutationError = ErrorResponse
 
     /**
- * @summary One endpoint, seventeen nfqws2 actions
+ * @summary One endpoint, eighteen nfqws2 actions
  */
 export const usePostNfqws = <TError = ErrorResponse,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postNfqws>>, TError,{data: NfqwsActionRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}

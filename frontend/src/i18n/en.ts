@@ -100,7 +100,7 @@ export const enTranslation = {
       "What installs is the version the configured Entware sources serve, which need not be {{version}}, the release the panel displays. The downloaded package is checked by size and SHA-256 against that same repository's index and exactly that verified file is installed; the panel does not independently confirm the repository itself.",
     automaticBackupTitle: "Automatic backup",
     automaticBackupDescription:
-      "Before updating, the panel stores a local copy of the configuration, lists, Lua scripts and strategies and captures the currently installed files for recovery during this request. There is no attributable one-click rollback after the operation ends.",
+      "Before updating, the panel stores a local copy of the configuration, lists, Lua scripts and strategies and captures the currently installed files for recovery during this request. That capture replaces the previously saved restore point. There is no attributable one-click rollback after the operation ends.",
     downloadBackupBeforeUpgrade:
       "Also download a copy of the original nfqws2 files to this computer",
     operationResult: "nfqws2 operation result",

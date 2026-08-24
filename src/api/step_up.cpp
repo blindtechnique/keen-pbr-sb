@@ -31,7 +31,7 @@ const std::vector<StepUpProtectedRoute>& step_up_protected_routes() {
     //   POST /api/system/update/rollback  - replaces the running component set
     //   POST /api/system/naive-component  - installs a component
     //   POST /api/transports/sing-box/install - installs or replaces sing-box
-    //   POST /api/nfqws action=upgrade    - action-scoped below because this
+    //   POST /api/nfqws action=install   - action-scoped below because this
     //                                        route also serves routine UI work
     //   POST /api/backup/restore          - replaces configuration wholesale
     //   POST /api/backup/rollback         - the same, in the other direction
@@ -75,8 +75,21 @@ const std::vector<StepUpProtectedAction>& step_up_protected_actions() {
     // Pre-routing cannot enforce them because req.body does not exist there.
     static const std::vector<StepUpProtectedAction> actions = {
         {"POST", "/api/nfqws", "install"},
-        {"POST", "/api/nfqws", "upgrade"},
-        {"POST", "/api/nfqws", "capture_restore_point"},
+        // Neither `upgrade` nor `capture_restore_point` is here, and the
+        // second follows from the first. The owner asked for the upgrade to
+        // stop prompting; that upgrade captures the component's files
+        // itself, before it has even asked the feed whether there is
+        // anything to install, and the capture publishes a new generation
+        // and removes the others. So a step-up on `capture_restore_point`
+        // guarded a replacement anyone holding the session could perform
+        // through `upgrade` anyway - a control that only looks like one is
+        // worse than none, because it is believed.
+        //
+        // What stays protected is what cannot be reached that way: the
+        // first install of a component, and the restore, which chooses
+        // which saved bytes become the live ones. The upgrade's own
+        // rollback is not that - it restores the generation it captured
+        // seconds earlier in the same request, never one the caller picks.
         {"POST", "/api/nfqws", "restore_component"},
     };
     return actions;

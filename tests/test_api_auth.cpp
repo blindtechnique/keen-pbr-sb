@@ -2230,12 +2230,15 @@ TEST_CASE("nfqws action step-up runs after body read and before its handler") {
     REQUIRE(login->status == 200);
     const httplib::Headers session{{"Cookie", session_cookie(*login)}};
 
-    const auto upgrade = client.Post(
-        "/api/nfqws", session, R"({"action":"upgrade"})",
+    // `install` stands in for the protected set here: it is the first
+    // installation of a component, which is what the step-up still guards.
+    // `upgrade` deliberately does not - see the ordinary payloads below.
+    const auto install = client.Post(
+        "/api/nfqws", session, R"({"action":"install"})",
         "application/json");
-    REQUIRE(upgrade != nullptr);
-    CHECK(upgrade->status == 403);
-    CHECK(nlohmann::json::parse(upgrade->body).at("error") ==
+    REQUIRE(install != nullptr);
+    CHECK(install->status == 403);
+    CHECK(nlohmann::json::parse(install->body).at("error") ==
           "step_up_required");
     CHECK(handled.load(std::memory_order_relaxed) == 0U);
 
@@ -2244,6 +2247,10 @@ TEST_CASE("nfqws action step-up runs after body read and before its handler") {
         {{"action", "service"}, {"command", "stop"}},
         {{"action", "service"}, {"command", "restart"}},
         {{"action", "check_update"}},
+        // Reaches its handler on the session alone: the upgrade verifies
+        // what it installs and keeps an exact rollback, so a second
+        // password guarded nothing.
+        {{"action", "upgrade"}},
     };
     for (const auto& payload : ordinary_payloads) {
         const auto ordinary = client.Post(
@@ -2252,15 +2259,15 @@ TEST_CASE("nfqws action step-up runs after body read and before its handler") {
         REQUIRE(ordinary != nullptr);
         CHECK(ordinary->status == 200);
     }
-    CHECK(handled.load(std::memory_order_relaxed) == 4U);
+    CHECK(handled.load(std::memory_order_relaxed) == 5U);
 
     grant_local_step_up(client, session, "admin", "secret");
     const auto granted = client.Post(
-        "/api/nfqws", session, R"({"action":"upgrade"})",
+        "/api/nfqws", session, R"({"action":"install"})",
         "application/json");
     REQUIRE(granted != nullptr);
     CHECK(granted->status == 200);
-    CHECK(handled.load(std::memory_order_relaxed) == 5U);
+    CHECK(handled.load(std::memory_order_relaxed) == 6U);
 }
 
 TEST_CASE("native secret imports are admitted before bounded body streaming") {
