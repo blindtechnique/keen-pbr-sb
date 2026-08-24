@@ -44,6 +44,22 @@ using ComponentCommandRunner = std::function<ExecCaptureResult(
     SafeExecTimeouts timeouts,
     const std::filesystem::path& working_directory)>;
 
+// Everything a scripted install needs to know about the world outside the
+// IPK: where the component's init script lives, where it is renamed to
+// while the package's own postinst runs (same directory, so the rename is
+// atomic; dot-prefixed, so init never globs it), which opkg configuration
+// makes `opkg -o` see the same feeds and architectures as a plain run, and
+// which shell and tar drive the scripts and the extraction.
+struct ScriptedInstallPaths {
+    std::filesystem::path init_script{"/opt/etc/init.d/S51nfqws2"};
+    std::filesystem::path held_init_script{
+        "/opt/etc/init.d/.S51nfqws2.kpbr-held"};
+    std::filesystem::path opkg_conf{"/opt/etc/opkg.conf"};
+    std::filesystem::path offline_root{"/"};
+    std::string shell{"/opt/bin/sh"};
+    std::string tar{"/opt/bin/tar"};
+};
+
 struct ComponentPackageOptions {
     std::string package;
     // opkg's copy of the feed index, refreshed by `opkg update`. Entware
@@ -54,6 +70,7 @@ struct ComponentPackageOptions {
     std::size_t max_feed_index_bytes{4U * 1024U * 1024U};
     SafeExecTimeouts timeouts{std::chrono::minutes{10},
                               std::chrono::seconds{5}};
+    ScriptedInstallPaths scripted;
 };
 
 struct ComponentPackagePreparation {
@@ -83,6 +100,52 @@ struct ComponentPackagePreparation {
     bool candidate_verified{false};
 };
 
+// What a scripted install did, step by step. The `_ok` flags default to
+// "fine" so a step that never had to run (a package without that script, an
+// init script that was never held) reads as passed, not as skipped-looking-
+// failed; `_ran` says whether it actually happened.
+struct ScriptedInstallReport {
+    // The IPK's own maintainer scripts were laid out for running. When this
+    // is false nothing has been mutated and the caller may fall back to a
+    // plain opkg install, which runs the scripts itself - start included.
+    bool scripts_extracted{false};
+    bool preinst_ran{false};
+    bool preinst_ok{true};
+    // The caller's service stop, in the slot where a plain upgrade ran the
+    // old package's prerm: after preinst, before any file is replaced. A
+    // failed stop refuses the unpack - replacing the files of a service
+    // that could not be proven stopped is the plain flow's bug, not a
+    // behavior to keep.
+    bool service_stop_ran{false};
+    bool service_stop_ok{true};
+    // `opkg -o` was issued: from here on the component may have changed.
+    bool mutation_started{false};
+    bool unpack_ok{false};
+    // The init script was renamed aside so the package's postinst finds no
+    // file to start or stop.
+    bool init_held{false};
+    bool postinst_ran{false};
+    bool postinst_ok{true};
+    // False only when the init script was held and the rename back failed:
+    // the held copy still exists under ScriptedInstallPaths::
+    // held_init_script and boot recovery restores it by name.
+    bool init_restored{true};
+    // Human-readable lines about the steps above, for the operator log.
+    std::string notes;
+};
+
+inline bool scripted_install_succeeded(
+    const ScriptedInstallReport& report) noexcept {
+    return report.scripts_extracted && report.preinst_ok &&
+           report.service_stop_ok && report.unpack_ok &&
+           report.postinst_ok && report.init_restored;
+}
+
+// The caller's service stop for a scripted install, run where a plain
+// upgrade ran the old package's prerm. Appends its command output to the
+// notes; returns false when the service could not be proven stopped.
+using ScriptedServiceStop = std::function<bool(std::string& notes)>;
+
 class ComponentPackageTransaction {
 public:
     ComponentPackageTransaction(ComponentPackageOptions options,
@@ -110,6 +173,43 @@ public:
     // holds exactly `expected_version`.
     ExecCaptureResult reinstall_current(const std::string& expected_version);
 
+    // The scripted variants of the two installs above. The slot refusals
+    // are identical; the difference is who runs the maintainer scripts.
+    //
+    // `opkg -o <root>` unpacks the IPK, updates the package database and
+    // marks the package installed, but never runs a maintainer script - and
+    // a later `opkg configure` will not either, because the package is
+    // already marked configured (measured on the target opkg). So this runs
+    // the IPK's own scripts itself, in opkg's order, with one difference:
+    // while postinst runs, the component's init script is renamed aside, so
+    // the script's `[ -f "$INIT_SCRIPT" ]`-guarded start and stop find
+    // nothing to run. Everything else the scripts do - config migrations,
+    // the multiplatform binary copy postinst performs (the real binary is
+    // NOT in data.tar.gz at its final path) - happens exactly as a plain
+    // install would do it. The service start stays with the caller.
+    //
+    //   extract scripts -> preinst <install|upgrade> -> opkg -o unpack
+    //   -> hold init script -> postinst configure -> restore init script
+    //
+    // When the scripts cannot be laid out (report.scripts_extracted stays
+    // false) nothing has run and nothing was mutated; the caller decides
+    // whether to fall back to the plain install.
+    //
+    // `stop_service`, when provided, runs after preinst and before the
+    // unpack - the slot where a plain upgrade ran the old package's
+    // prerm-driven service stop, which this flow otherwise suppresses
+    // entirely (no prerm runs, and the held init script silences
+    // postinst's guarded stop). Without it a running service would keep
+    // executing the old image while its files are replaced underneath.
+    void scripted_install_candidate(bool upgrade,
+                                    ScriptedInstallReport& report,
+                                    const ScriptedServiceStop& stop_service =
+                                        {});
+    void scripted_reinstall_current(const std::string& expected_version,
+                                    ScriptedInstallReport& report,
+                                    const ScriptedServiceStop& stop_service =
+                                        {});
+
     // The candidate installed and was proven so by the caller: it becomes
     // current, current becomes previous.
     void promote_installed_candidate();
@@ -120,6 +220,11 @@ private:
     void finish_interrupted_promotion(const std::string& installed_version,
                                       std::string& output);
     std::optional<std::string> read_feed_index(std::string& error) const;
+    void scripted_install(IpkSlot slot,
+                          const std::vector<std::string>& extra_install_flags,
+                          bool upgrade,
+                          ScriptedInstallReport& report,
+                          const ScriptedServiceStop& stop_service);
 
     ComponentPackageOptions options_;
     ComponentIpkStore& store_;

@@ -333,4 +333,241 @@ void ComponentPackageTransaction::promote_installed_candidate() {
     store_.promote_candidate();
 }
 
+void ComponentPackageTransaction::scripted_install_candidate(
+    bool upgrade, ScriptedInstallReport& report,
+    const ScriptedServiceStop& stop_service) {
+    const auto candidate = store_.inspect(IpkSlot::candidate);
+    if (candidate.state != IpkSlotState::usable) {
+        throw ComponentPackageRefused(
+            std::string("no verified candidate package to install "
+                        "(candidate slot is ") +
+            ipk_slot_state_name(candidate.state) + ")");
+    }
+    scripted_install(IpkSlot::candidate, {}, upgrade, report, stop_service);
+}
+
+void ComponentPackageTransaction::scripted_reinstall_current(
+    const std::string& expected_version, ScriptedInstallReport& report,
+    const ScriptedServiceStop& stop_service) {
+    const auto current = store_.inspect(IpkSlot::current);
+    if (current.state != IpkSlotState::usable) {
+        throw ComponentPackageRefused(
+            std::string("no exact copy of the previous package to "
+                        "reinstall (current slot is ") +
+            ipk_slot_state_name(current.state) + ")");
+    }
+    if (current.retained->version != expected_version) {
+        throw ComponentPackageRefused(
+            "the retained package is version " + current.retained->version +
+            ", not " + expected_version + "; refusing to reinstall it");
+    }
+    // The reinstall is a downgrade or a same-version replay to opkg; the
+    // scripts still see it as an upgrade of an installed package.
+    scripted_install(IpkSlot::current,
+                     {"--force-downgrade", "--force-reinstall"},
+                     /*upgrade=*/true, report, stop_service);
+}
+
+namespace {
+
+// The extraction scratch holds the whole IPK - the multi-arch data.tar.gz
+// included - so it is removed on every exit, early returns and unwinding
+// alike, not only on the straight-through path.
+struct StagingCleanup {
+    fs::path stage;
+    ~StagingCleanup() {
+        std::error_code error;
+        fs::remove_all(stage, error);
+    }
+};
+
+} // namespace
+
+void ComponentPackageTransaction::scripted_install(
+    IpkSlot slot, const std::vector<std::string>& extra_install_flags,
+    bool upgrade, ScriptedInstallReport& report,
+    const ScriptedServiceStop& stop_service) {
+    const auto ipk = store_.ipk_path(slot);
+    const auto command_ok = [](const ExecCaptureResult& result) {
+        return result.exit_code == 0 && !result.timed_out &&
+               !result.termination_uncertain;
+    };
+
+    // 1. Lay the IPK's own maintainer scripts out in the store's staging
+    // directory. Wholesale extraction, because the member names vary
+    // (`control.tar.gz` in the feed's IPKs, `./control.tar.gz` in others)
+    // and the archive holds nothing else of size beyond data.tar.gz.
+    fs::path stage;
+    try {
+        stage = store_.staging_directory();
+    } catch (const std::exception& failure) {
+        append_line(report.notes,
+                    std::string("The staging directory for the package "
+                                "scripts is unavailable: ") +
+                        failure.what());
+        return;
+    }
+    const StagingCleanup staging_cleanup{stage};
+    const auto scripts_dir = stage / "control";
+    if (!command_ok(run_({options_.scripted.tar, "-xzf", ipk.string(), "-C",
+                          stage.string()},
+                         options_.timeouts, {}))) {
+        append_line(report.notes,
+                    "The package archive could not be unpacked for its "
+                    "maintainer scripts; nothing was mutated.");
+        return;
+    }
+    std::error_code fs_error;
+    fs::path control_archive = stage / "control.tar.gz";
+    if (!fs::is_regular_file(control_archive, fs_error)) {
+        append_line(report.notes,
+                    "The package archive holds no control.tar.gz; nothing "
+                    "was mutated.");
+        return;
+    }
+    fs::create_directories(scripts_dir, fs_error);
+    if (fs_error ||
+        !command_ok(run_({options_.scripted.tar, "-xzf",
+                          control_archive.string(), "-C",
+                          scripts_dir.string()},
+                         options_.timeouts, {}))) {
+        append_line(report.notes,
+                    "The package's control archive could not be unpacked; "
+                    "nothing was mutated.");
+        return;
+    }
+    report.scripts_extracted = true;
+
+    // 2. preinst, before the unpack, exactly where opkg runs it: on this
+    // component it decides config migrations by moving the old config aside
+    // so the unpack below lays down the fresh one.
+    const auto preinst = scripts_dir / "preinst";
+    if (fs::is_regular_file(preinst, fs_error)) {
+        report.preinst_ran = true;
+        report.preinst_ok = command_ok(
+            run_({options_.scripted.shell, preinst.string(),
+                  upgrade ? "upgrade" : "install"},
+                 options_.timeouts, {}));
+        if (!report.preinst_ok) {
+            append_line(report.notes,
+                        "The package's preinst script failed; the package "
+                        "manager was not run.");
+            return;
+        }
+    }
+
+    // 2b. The caller's service stop, in the old prerm's slot: a plain
+    // upgrade stopped the running service here, and nothing later in this
+    // flow will (postinst's guarded stop is exactly what the held init
+    // script silences). A service that cannot be proven stopped keeps its
+    // files: the unpack is refused.
+    if (stop_service) {
+        report.service_stop_ran = true;
+        report.service_stop_ok = stop_service(report.notes);
+        if (!report.service_stop_ok) {
+            append_line(report.notes,
+                        "The running service could not be proven stopped; "
+                        "the package manager was not run.");
+            return;
+        }
+    }
+
+    // 3. The unpack. `-o` skips every maintainer script; `-f` names the
+    // real opkg configuration explicitly, because with an offline root opkg
+    // resolves its configuration against that root and would otherwise run
+    // without the architecture and feed lines a plain run sees.
+    std::vector<std::string> install_argv{
+        options_.opkg, "-o", options_.scripted.offline_root.string(), "-f",
+        options_.scripted.opkg_conf.string(), "install"};
+    install_argv.insert(install_argv.end(), extra_install_flags.begin(),
+                        extra_install_flags.end());
+    install_argv.push_back(ipk.string());
+    report.mutation_started = true;
+    report.unpack_ok =
+        command_ok(run_(install_argv, options_.timeouts, {}));
+    if (!report.unpack_ok) {
+        append_line(report.notes,
+                    "opkg could not unpack the package; the maintainer "
+                    "scripts were not run.");
+        return;
+    }
+
+    // 4-6. postinst between holding the init script aside and putting it
+    // back. The script guards its service start and stop with a file
+    // check, so a held-aside init script turns both into silent no-ops
+    // while the config work and the multiplatform binary copy still run.
+    // The unpack above just laid the new init script down, which is why
+    // the hold happens here and not before opkg; a stale held copy from an
+    // interrupted earlier run is replaced by the rename.
+    const auto postinst = scripts_dir / "postinst";
+    if (!fs::is_regular_file(postinst, fs_error)) {
+        append_line(report.notes,
+                    "The package has no postinst script; nothing had to be "
+                    "suppressed.");
+        return;
+    }
+    const auto& init = options_.scripted.init_script;
+    const auto& held = options_.scripted.held_init_script;
+    const auto init_status = fs::symlink_status(init, fs_error);
+    if (fs_error && init_status.type() != fs::file_type::not_found) {
+        // Absence is fine (libstdc++ reports it as not_found, with the
+        // error code set to ENOENT); any other errored stat means the init
+        // script may well be there. Running postinst on that guess would
+        // let its real stop and start escape the transaction, so this
+        // fails closed instead.
+        report.postinst_ok = false;
+        append_line(report.notes,
+                    "The init script could not be inspected (" +
+                        fs_error.message() +
+                        "); postinst was not run and the package's real "
+                        "binary was not installed.");
+        return;
+    }
+    if (fs::exists(init_status)) {
+        fs::rename(init, held, fs_error);
+        if (fs_error) {
+            // Running postinst with the init script in place would start
+            // the service outside the transaction; failing the install is
+            // the smaller harm. The binary has not been switched, which the
+            // caller's verification is built to catch.
+            report.postinst_ok = false;
+            append_line(report.notes,
+                        "The init script could not be held aside (" +
+                            fs_error.message() +
+                            "); postinst was not run and the package's real "
+                            "binary was not installed.");
+            return;
+        }
+        report.init_held = true;
+        report.init_restored = false;
+    }
+    report.postinst_ran = true;
+    const auto restore_init = [&] {
+        if (!report.init_held || report.init_restored) return;
+        std::error_code restore_error;
+        fs::rename(held, init, restore_error);
+        if (restore_error) {
+            append_line(report.notes,
+                        "The init script could not be restored from " +
+                            held.string() + " (" + restore_error.message() +
+                            "); boot recovery restores it by that name.");
+        } else {
+            report.init_restored = true;
+        }
+    };
+    try {
+        report.postinst_ok = command_ok(
+            run_({options_.scripted.shell, postinst.string(), "configure"},
+                 options_.timeouts, {}));
+    } catch (...) {
+        // Whatever the runner threw, the init script must not stay held.
+        restore_init();
+        throw;
+    }
+    if (!report.postinst_ok) {
+        append_line(report.notes, "The package's postinst script failed.");
+    }
+    restore_init();
+}
+
 } // namespace keen_pbr3

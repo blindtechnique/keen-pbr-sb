@@ -15,6 +15,7 @@
 #include <string>
 
 #ifdef KEEN_PBR3_TESTING
+#include "../update/component_package_transaction.hpp"
 #include "../update/package_footprint.hpp"
 #include "../util/nfqws_file_writer.hpp"
 #include "../util/safe_exec.hpp"
@@ -99,6 +100,20 @@ struct NfqwsBootRecoveryHooks {
         read_last_answer;
     // nullptr means busy; other failures throw MaintenanceLockError.
     std::function<std::unique_ptr<MaintenanceLease>()> acquire_lease;
+    // Whether the held-aside init script name exists - a free filesystem
+    // look, no lease. When it does, the run proceeds to the lease and the
+    // heal below even where it would otherwise return early (no journal,
+    // journal already answered): the held name is physical evidence that a
+    // scripted install's hold was never undone, and no early-return gate
+    // may leave the boot sequence without its init script.
+    std::function<bool()> init_script_held;
+    // A scripted install holds the init script aside (renamed to a name
+    // only that code creates) while the package's postinst runs; a crash in
+    // that window leaves the boot without the script. Runs under the lease
+    // before any plan is decided, so the stop/start the plans perform find
+    // the init script where they expect it. Returns a note for the operator
+    // log, empty when there was nothing to heal.
+    std::function<std::string()> heal_init_script;
     std::function<IpkSlotInspection()> inspect_current_ipk;
     std::function<ComponentCaptureState()> capture_state;
     // Empty when unknown; never throw.
@@ -155,6 +170,9 @@ struct NfqwsBoundedOpkgTestResult {
     bool up_to_date{false};
     bool previous_exact{false};
     std::string target_version;
+    bool scripted{false};
+    bool scripted_ok{false};
+    bool init_restored{true};
 };
 
 // Runs the production package sequence (opkg update, feed index read, opkg
@@ -163,13 +181,22 @@ struct NfqwsBoundedOpkgTestResult {
 // and feed index the test owns. Tests can force a timeout without starting
 // opkg or waiting for the production deadline, while still checking the
 // fixed argv and timeout contract.
+// `scripted` points the scripted-install paths (init script, its held
+// name, the shell/tar that run the extraction and the scripts) into
+// directories the test owns; the default is the production layout, whose
+// init script does not exist on a build machine, so the hold step simply
+// finds nothing to hold.
 NfqwsBoundedOpkgTestResult run_nfqws_bounded_opkg_for_testing(
     std::function<ExecCaptureResult(
         const std::vector<std::string>&, SafeExecTimeouts,
         const std::filesystem::path&)> execute,
     const std::string& installed_version,
     const std::string& store_root,
-    const std::string& feed_list);
+    const std::string& feed_list,
+    const ScriptedInstallPaths& scripted = {},
+    // The service stop the production upgrade hands in, run between the
+    // package's preinst and the unpack.
+    std::function<bool(std::string&)> stop_service = {});
 
 struct NfqwsInstallTestResult {
     std::string output;
@@ -179,6 +206,9 @@ struct NfqwsInstallTestResult {
     bool install_started{false};
     std::string target_version;
     bool feed_conf_written{false};
+    bool scripted{false};
+    bool scripted_ok{false};
+    bool init_restored{true};
 };
 
 // Runs the production fresh-install sequence (feed definition, HTTPS
@@ -193,7 +223,8 @@ NfqwsInstallTestResult run_nfqws_install_for_testing(
     const std::string& feed_conf,
     // The prepared hook production uses to journal "mutating" before opkg
     // install may run; returning false must refuse the install.
-    std::function<bool(const std::string& target_version)> on_prepared = {});
+    std::function<bool(const std::string& target_version)> on_prepared = {},
+    const ScriptedInstallPaths& scripted = {});
 
 // The exact-rollback step: reinstall the store's copy of `expected_version`
 // and prove it through the injected version reader.
@@ -204,7 +235,8 @@ bool reinstall_exact_previous_nfqws_package_for_testing(
     const std::string& expected_version,
     std::function<std::string()> read_installed_version,
     const std::string& store_root,
-    std::string& output);
+    std::string& output,
+    const ScriptedInstallPaths& scripted = {});
 
 struct NfqwsPostMutationGuardTestResult {
     bool operation_completed{false};

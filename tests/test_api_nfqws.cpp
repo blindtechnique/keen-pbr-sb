@@ -381,6 +381,21 @@ struct NfqwsPackageFixture {
     std::string store_root() const { return (root / "components").string(); }
     std::string feed_list() const { return (root / "feed-list").string(); }
 
+    // Scripted-install paths inside the fixture root, so a test can never
+    // rename anything outside its own directory. The init script itself is
+    // absent unless a test lays it, which mirrors a build machine.
+    ScriptedInstallPaths scripted_paths() const {
+        ScriptedInstallPaths paths;
+        paths.init_script = root / "init.d" / "S51nfqws2";
+        paths.held_init_script = root / "init.d" / ".S51nfqws2.kpbr-held";
+        return paths;
+    }
+    void lay_init_script() {
+        std::filesystem::create_directories(root / "init.d");
+        std::ofstream file(root / "init.d" / "S51nfqws2", std::ios::trunc);
+        file << "#!/bin/sh\nexit 0\n";
+    }
+
     void serve(const std::string& version, const std::string& bytes) {
         served_bytes = bytes;
         served_filename = "nfqws2-keenetic_" + version + "_all_entware.ipk";
@@ -404,9 +419,24 @@ struct NfqwsPackageFixture {
         store.adopt(IpkSlot::current, bytes, entry);
     }
 
-    // `install_outcome` shapes the opkg install result; every other command
-    // behaves like a healthy opkg.
+    // `install_outcome` shapes the result of the opkg command that mutates
+    // the package - the scripted `-o` unpack, or the plain install when a
+    // test disables the scripted path; every other command behaves like a
+    // healthy opkg, and tar and the shell behave like a package whose
+    // archive and scripts cooperate.
     std::vector<std::filesystem::path> working_directories;
+    // The commands the shell was asked to run, as "<script-name> <arg>".
+    std::vector<std::string> script_runs;
+    // Scripted-flow shaping: a package whose archive cannot be opened
+    // (scripted_supported = false) forces the plain-install fallback; a
+    // tar that times out (tar_times_out) must NOT - a second package
+    // manager on an unproven process tree is refused.
+    bool scripted_supported{true};
+    bool tar_times_out{false};
+    bool with_preinst{true};
+    bool with_postinst{true};
+    int preinst_exit{0};
+    int postinst_exit{0};
     std::function<ExecCaptureResult(const std::vector<std::string>&,
                                     SafeExecTimeouts,
                                     const std::filesystem::path&)>
@@ -421,6 +451,45 @@ struct NfqwsPackageFixture {
                 std::filesystem::exists(root / "feed.conf"));
             ExecCaptureResult execution;
             REQUIRE(argv.size() >= 2U);
+            if (argv[0] == "/opt/bin/tar") {
+                REQUIRE(argv.size() == 5U);
+                const std::filesystem::path source = argv[2];
+                const std::filesystem::path target = argv[4];
+                if (source.extension() == ".ipk") {
+                    if (tar_times_out) {
+                        execution.exit_code = -1;
+                        execution.timed_out = true;
+                        return execution;
+                    }
+                    if (scripted_supported) {
+                        std::ofstream file(target / "control.tar.gz",
+                                           std::ios::trunc);
+                        file << "control";
+                    }
+                    execution.exit_code = scripted_supported ? 0 : 1;
+                    return execution;
+                }
+                if (with_preinst) {
+                    std::ofstream file(target / "preinst", std::ios::trunc);
+                    file << "#!/bin/sh\n";
+                }
+                if (with_postinst) {
+                    std::ofstream file(target / "postinst", std::ios::trunc);
+                    file << "#!/bin/sh\n";
+                }
+                execution.exit_code = 0;
+                return execution;
+            }
+            if (argv[0] == "/opt/bin/sh") {
+                REQUIRE(argv.size() == 3U);
+                const std::filesystem::path script = argv[1];
+                script_runs.push_back(script.filename().string() + " " +
+                                      argv[2]);
+                execution.exit_code = script.filename() == "preinst"
+                                          ? preinst_exit
+                                          : postinst_exit;
+                return execution;
+            }
             if (argv[1] == "update") {
                 execution.exit_code = 0;
                 execution.stdout_output = "feed updated\n";
@@ -458,7 +527,10 @@ struct NfqwsPackageFixture {
                 execution.stdout_output = "Removing " + argv[2] + "\n";
                 return execution;
             }
-            if (argv[1] == "install") return install_outcome();
+            // The mutating opkg command: the scripted unpack (`opkg -o /
+            // -f ... install`) or the plain fallback install.
+            if (argv[1] == "install" || (argv.size() >= 6 && argv[1] == "-o"))
+                return install_outcome();
             FAIL("unexpected package command " << argv[1]);
             return execution;
         };
@@ -495,9 +567,13 @@ TEST_CASE("nfqws opkg upgrade uses fixed argv and classifies timeout as unknown"
             execution.timed_out = true;
             return execution;
         }),
-        "1.2.4", fixture.store_root(), fixture.feed_list());
+        "1.2.4", fixture.store_root(), fixture.feed_list(),
+        fixture.scripted_paths());
 
-    REQUIRE(fixture.commands.size() == 3U);
+    // update, download, the two script extractions, preinst, and the
+    // scripted unpack that timed out; postinst never ran on top of an
+    // unpack whose outcome is unknown.
+    REQUIRE(fixture.commands.size() == 6U);
     CHECK(fixture.commands[0] ==
           std::vector<std::string>{"/opt/bin/opkg", "update"});
     // opkg writes the download into its working directory, so the child is
@@ -507,24 +583,34 @@ TEST_CASE("nfqws opkg upgrade uses fixed argv and classifies timeout as unknown"
     CHECK(fixture.commands[1] == std::vector<std::string>{
                                      "/opt/bin/opkg", "download",
                                      "nfqws2-keenetic"});
-    REQUIRE(fixture.working_directories.size() == 3U);
+    REQUIRE(fixture.working_directories.size() == 6U);
     CHECK(fixture.working_directories[0].empty());
     CHECK(fixture.working_directories[1] ==
           std::filesystem::path(fixture.store_root()) / "nfqws2-keenetic" /
               "staging");
-    CHECK(fixture.working_directories[2].empty());
+    CHECK(fixture.working_directories[5].empty());
+    CHECK(fixture.commands[2][0] == "/opt/bin/tar");
+    CHECK(fixture.commands[3][0] == "/opt/bin/tar");
+    CHECK(fixture.commands[4][0] == "/opt/bin/sh");
+    CHECK(fixture.script_runs ==
+          std::vector<std::string>{"preinst upgrade"});
     // Installed from the verified file, not from whatever the feed serves
-    // by the time opkg looks again.
-    CHECK(fixture.commands[2] == std::vector<std::string>{
-                                     "/opt/bin/opkg", "install",
+    // by the time opkg looks again - unpacked with the maintainer scripts
+    // suppressed and opkg's real configuration named explicitly.
+    CHECK(fixture.commands[5] == std::vector<std::string>{
+                                     "/opt/bin/opkg", "-o", "/", "-f",
+                                     "/opt/etc/opkg.conf", "install",
                                      fixture.store_root() +
                                          "/nfqws2-keenetic/candidate.ipk"});
-    REQUIRE(fixture.deadlines.size() == 3U);
+    REQUIRE(fixture.deadlines.size() == 6U);
     for (const auto& deadline : fixture.deadlines) {
         CHECK(deadline.timeout == std::chrono::minutes{10});
         CHECK(deadline.kill_grace == std::chrono::seconds{5});
     }
     CHECK(result.upgrade_started);
+    CHECK(result.scripted);
+    CHECK_FALSE(result.scripted_ok);
+    CHECK(result.init_restored);
     CHECK(result.previous_exact);
     CHECK(result.target_version == "1.2.5");
     CHECK(result.timed_out);
@@ -608,33 +694,62 @@ TEST_CASE("exact previous package reinstall is proven by opkg naming the version
     SUBCASE("success") {
         CHECK(reinstall_exact_previous_nfqws_package_for_testing(
             executor, "1.2.4", [&] { return reported_version; },
-            fixture.store_root(), output));
-        REQUIRE(fixture.commands.size() == 1U);
-        CHECK(fixture.commands[0] == std::vector<std::string>{
+            fixture.store_root(), output, fixture.scripted_paths()));
+        // The reinstall runs scripted: extract, extract, preinst, the
+        // exact-rollback unpack, postinst.
+        REQUIRE(fixture.commands.size() == 5U);
+        CHECK(fixture.commands[3] == std::vector<std::string>{
+                                         "/opt/bin/opkg", "-o", "/", "-f",
+                                         "/opt/etc/opkg.conf", "install",
+                                         "--force-downgrade",
+                                         "--force-reinstall",
+                                         fixture.store_root() +
+                                             "/nfqws2-keenetic/current.ipk"});
+        CHECK(fixture.script_runs ==
+              std::vector<std::string>{"preinst upgrade",
+                                       "postinst configure"});
+        CHECK(output.find("opkg metadata restored") != std::string::npos);
+    }
+    SUBCASE("a failed postinst is a failed reinstall") {
+        fixture.postinst_exit = 1;
+        CHECK_FALSE(reinstall_exact_previous_nfqws_package_for_testing(
+            executor, "1.2.4", [&] { return reported_version; },
+            fixture.store_root(), output, fixture.scripted_paths()));
+        CHECK(output.find("did not succeed") != std::string::npos);
+    }
+    SUBCASE("a package without usable scripts falls back to the plain reinstall") {
+        fixture.scripted_supported = false;
+        CHECK(reinstall_exact_previous_nfqws_package_for_testing(
+            executor, "1.2.4", [&] { return reported_version; },
+            fixture.store_root(), output, fixture.scripted_paths()));
+        CHECK(output.find("Falling back to a plain opkg reinstall") !=
+              std::string::npos);
+        // One failed extraction attempt, then the plain flagged install.
+        REQUIRE(fixture.commands.size() == 2U);
+        CHECK(fixture.commands[1] == std::vector<std::string>{
                                          "/opt/bin/opkg", "install",
                                          "--force-downgrade",
                                          "--force-reinstall",
                                          fixture.store_root() +
                                              "/nfqws2-keenetic/current.ipk"});
-        CHECK(output.find("opkg metadata restored") != std::string::npos);
     }
     SUBCASE("opkg success but the database names another version") {
         reported_version = "1.2.5";
         CHECK_FALSE(reinstall_exact_previous_nfqws_package_for_testing(
             executor, "1.2.4", [&] { return reported_version; },
-            fixture.store_root(), output));
+            fixture.store_root(), output, fixture.scripted_paths()));
         CHECK(output.find("not proven restored") != std::string::npos);
     }
     SUBCASE("the store holds a different version than expected") {
         CHECK_FALSE(reinstall_exact_previous_nfqws_package_for_testing(
             executor, "1.2.3", [&] { return reported_version; },
-            fixture.store_root(), output));
+            fixture.store_root(), output, fixture.scripted_paths()));
         CHECK(fixture.commands.empty());
     }
     SUBCASE("the pre-upgrade version was unknown") {
         CHECK_FALSE(reinstall_exact_previous_nfqws_package_for_testing(
             executor, "", [&] { return reported_version; },
-            fixture.store_root(), output));
+            fixture.store_root(), output, fixture.scripted_paths()));
         CHECK(fixture.commands.empty());
     }
 }
@@ -651,19 +766,24 @@ TEST_CASE("a fresh install prepares https, writes the feed and installs the veri
             execution.stdout_output = "Installing nfqws2-keenetic (1.2.4)\n";
             return execution;
         }),
-        fixture.store_root(), fixture.feed_list(), fixture.feed_conf());
+        fixture.store_root(), fixture.feed_list(), fixture.feed_conf(), {},
+        fixture.scripted_paths());
 
     CHECK(result.status == 0);
     CHECK(result.install_started);
     CHECK(package_installed);
     CHECK(result.target_version == "1.2.4");
     CHECK(result.feed_conf_written);
+    CHECK(result.scripted);
+    CHECK(result.scripted_ok);
     // The feed definition is exactly what the shell installer writes.
     CHECK(fixture.read_feed_conf() == kTestFeedConfContent);
     // Sequence: entware update, https deps, wget-nossl removal (best
-    // effort), the transaction's own update, the download in staging, the
-    // install of the verified file.
-    REQUIRE(fixture.commands.size() == 6U);
+    // effort), the transaction's own update, the download in staging, then
+    // the scripted install of the verified file: the two script
+    // extractions, preinst told this is an install, the script-free unpack,
+    // postinst.
+    REQUIRE(fixture.commands.size() == 10U);
     CHECK(fixture.commands[0] ==
           std::vector<std::string>{"/opt/bin/opkg", "update"});
     CHECK(fixture.commands[1][2] == "ca-certificates");
@@ -671,10 +791,18 @@ TEST_CASE("a fresh install prepares https, writes the feed and installs the veri
     CHECK(fixture.commands[3] ==
           std::vector<std::string>{"/opt/bin/opkg", "update"});
     CHECK(fixture.commands[4][1] == "download");
-    CHECK(fixture.commands[5] == std::vector<std::string>{
-                                     "/opt/bin/opkg", "install",
+    CHECK(fixture.commands[5][0] == "/opt/bin/tar");
+    CHECK(fixture.commands[6][0] == "/opt/bin/tar");
+    CHECK(fixture.commands[7][0] == "/opt/bin/sh");
+    CHECK(fixture.commands[8] == std::vector<std::string>{
+                                     "/opt/bin/opkg", "-o", "/", "-f",
+                                     "/opt/etc/opkg.conf", "install",
                                      fixture.store_root() +
                                          "/nfqws2-keenetic/candidate.ipk"});
+    CHECK(fixture.commands[9][0] == "/opt/bin/sh");
+    CHECK(fixture.script_runs ==
+          std::vector<std::string>{"preinst install",
+                                   "postinst configure"});
     // The verified bytes are staged as the candidate; promotion to the
     // exact retained copy is the handler's step after verification.
     ComponentIpkStore store(fixture.store_root(), "nfqws2-keenetic");
@@ -696,7 +824,8 @@ TEST_CASE("an existing feed definition with custom content is left alone") {
             execution.exit_code = 0;
             return execution;
         }),
-        fixture.store_root(), fixture.feed_list(), fixture.feed_conf());
+        fixture.store_root(), fixture.feed_list(), fixture.feed_conf(), {},
+        fixture.scripted_paths());
 
     CHECK(result.install_started);
     CHECK_FALSE(result.feed_conf_written);
@@ -721,7 +850,8 @@ TEST_CASE("a canonical feed definition is rewritten through the https-first orde
             execution.exit_code = 0;
             return execution;
         }),
-        fixture.store_root(), fixture.feed_list(), fixture.feed_conf());
+        fixture.store_root(), fixture.feed_list(), fixture.feed_conf(), {},
+        fixture.scripted_paths());
 
     CHECK(result.install_started);
     CHECK(result.feed_conf_written);
@@ -731,13 +861,13 @@ TEST_CASE("a canonical feed definition is rewritten through the https-first orde
     // present again from the second update on. A refactor that writes the
     // conf before the prerequisites would break exactly the interrupted-
     // install retry this order exists for.
-    REQUIRE(fixture.feed_conf_present_at_command.size() == 6U);
+    REQUIRE(fixture.feed_conf_present_at_command.size() == 10U);
     CHECK_FALSE(fixture.feed_conf_present_at_command[0]);
     CHECK_FALSE(fixture.feed_conf_present_at_command[1]);
     CHECK_FALSE(fixture.feed_conf_present_at_command[2]);
-    CHECK(fixture.feed_conf_present_at_command[3]);
-    CHECK(fixture.feed_conf_present_at_command[4]);
-    CHECK(fixture.feed_conf_present_at_command[5]);
+    for (std::size_t index = 3; index < 10U; ++index) {
+        CHECK(fixture.feed_conf_present_at_command[index]);
+    }
 }
 
 TEST_CASE("a prepared-hook refusal stops the install before opkg runs it") {
@@ -816,7 +946,8 @@ TEST_CASE("uncertain opkg termination forbids observation and recovery") {
             execution.termination_uncertain = true;
             return execution;
         }),
-        "1.2.4", fixture.store_root(), fixture.feed_list());
+        "1.2.4", fixture.store_root(), fixture.feed_list(),
+        fixture.scripted_paths());
 
     REQUIRE(result.upgrade_started);
     CHECK(result.timed_out);
@@ -838,6 +969,161 @@ TEST_CASE("uncertain opkg termination forbids observation and recovery") {
     CHECK_FALSE(guarded.recovery_attempted);
     CHECK_FALSE(guarded.rolled_back);
     CHECK(recovery_calls == 0U);
+}
+
+TEST_CASE("a scripted upgrade runs the package's scripts and reports who owns the start") {
+    NfqwsPackageFixture fixture;
+    fixture.retain_current("1.2.4", "bytes of 1.2.4");
+    fixture.serve("1.2.5", "bytes of 1.2.5");
+    fixture.lay_init_script();
+    const auto result = run_nfqws_bounded_opkg_for_testing(
+        fixture.executor([] {
+            ExecCaptureResult execution;
+            execution.exit_code = 0;
+            execution.stdout_output = "Installing to root...\n";
+            return execution;
+        }),
+        "1.2.4", fixture.store_root(), fixture.feed_list(),
+        fixture.scripted_paths());
+
+    CHECK(result.status == 0);
+    CHECK(result.upgrade_started);
+    CHECK(result.scripted);
+    CHECK(result.scripted_ok);
+    CHECK(result.init_restored);
+    CHECK(fixture.script_runs ==
+          std::vector<std::string>{"preinst upgrade", "postinst configure"});
+    // The init script survived the held window.
+    CHECK(std::filesystem::exists(fixture.root / "init.d" / "S51nfqws2"));
+    CHECK_FALSE(std::filesystem::exists(fixture.root / "init.d" /
+                                        ".S51nfqws2.kpbr-held"));
+}
+
+TEST_CASE("a package whose archive cannot be opened falls back to the plain install") {
+    NfqwsPackageFixture fixture;
+    fixture.serve("1.2.5", "bytes of 1.2.5");
+    fixture.scripted_supported = false;
+    bool plain_install_ran = false;
+    const auto result = run_nfqws_bounded_opkg_for_testing(
+        fixture.executor([&] {
+            plain_install_ran = true;
+            ExecCaptureResult execution;
+            execution.exit_code = 0;
+            return execution;
+        }),
+        "1.2.4", fixture.store_root(), fixture.feed_list(),
+        fixture.scripted_paths());
+
+    CHECK(result.status == 0);
+    CHECK(result.upgrade_started);
+    CHECK_FALSE(result.scripted);
+    CHECK(plain_install_ran);
+    CHECK(result.output.find("Falling back to a plain opkg install") !=
+          std::string::npos);
+    // The fallback is the plain flagless install of the verified file.
+    REQUIRE_FALSE(fixture.commands.empty());
+    CHECK(fixture.commands.back() ==
+          std::vector<std::string>{"/opt/bin/opkg", "install",
+                                   fixture.store_root() +
+                                       "/nfqws2-keenetic/candidate.ipk"});
+    CHECK(fixture.script_runs.empty());
+}
+
+TEST_CASE("the upgrade's service stop runs in the old prerm's slot") {
+    NfqwsPackageFixture fixture;
+    fixture.retain_current("1.2.4", "bytes of 1.2.4");
+    fixture.serve("1.2.5", "bytes of 1.2.5");
+    fixture.lay_init_script();
+    int stop_calls = 0;
+    std::size_t commands_at_stop = 0;
+    const auto result = run_nfqws_bounded_opkg_for_testing(
+        fixture.executor([] {
+            ExecCaptureResult execution;
+            execution.exit_code = 0;
+            return execution;
+        }),
+        "1.2.4", fixture.store_root(), fixture.feed_list(),
+        fixture.scripted_paths(), [&](std::string& notes) {
+            ++stop_calls;
+            commands_at_stop = fixture.commands.size();
+            notes += "service stopped for the upgrade\n";
+            return true;
+        });
+
+    CHECK(result.status == 0);
+    CHECK(result.scripted);
+    CHECK(result.scripted_ok);
+    CHECK(stop_calls == 1);
+    // update, download, two extractions, preinst - and only then the stop,
+    // immediately before the unpack.
+    CHECK(commands_at_stop == 5U);
+    CHECK(result.output.find("service stopped for the upgrade") !=
+          std::string::npos);
+}
+
+TEST_CASE("a stop that fails refuses the unpack") {
+    NfqwsPackageFixture fixture;
+    fixture.retain_current("1.2.4", "bytes of 1.2.4");
+    fixture.serve("1.2.5", "bytes of 1.2.5");
+    fixture.lay_init_script();
+    const auto result = run_nfqws_bounded_opkg_for_testing(
+        fixture.executor([]() -> ExecCaptureResult {
+            FAIL("the unpack must not run after a failed stop");
+            return {};
+        }),
+        "1.2.4", fixture.store_root(), fixture.feed_list(),
+        fixture.scripted_paths(),
+        [&](std::string&) { return false; });
+
+    CHECK(result.status != 0);
+    CHECK(result.scripted);
+    CHECK_FALSE(result.scripted_ok);
+    CHECK(result.output.find("could not be proven stopped") !=
+          std::string::npos);
+}
+
+TEST_CASE("an extraction that does not finish cleanly refuses the plain fallback") {
+    NfqwsPackageFixture fixture;
+    fixture.serve("1.2.5", "bytes of 1.2.5");
+    fixture.tar_times_out = true;
+    bool plain_install_ran = false;
+    const auto result = run_nfqws_bounded_opkg_for_testing(
+        fixture.executor([&] {
+            plain_install_ran = true;
+            return ExecCaptureResult{};
+        }),
+        "1.2.4", fixture.store_root(), fixture.feed_list(),
+        fixture.scripted_paths());
+
+    CHECK_FALSE(plain_install_ran);
+    CHECK_FALSE(result.upgrade_started);
+    CHECK(result.status != 0);
+    CHECK(result.timed_out);
+    CHECK(result.output.find("not falling back") != std::string::npos);
+    // The last command issued is the tar that did not finish.
+    REQUIRE_FALSE(fixture.commands.empty());
+    CHECK(fixture.commands.back()[0] == "/opt/bin/tar");
+}
+
+TEST_CASE("an unclean extraction refuses the plain reinstall fallback too") {
+    NfqwsPackageFixture fixture;
+    fixture.retain_current("1.2.4", "bytes of 1.2.4");
+    fixture.tar_times_out = true;
+    std::string output;
+    bool version_read = false;
+    CHECK_FALSE(reinstall_exact_previous_nfqws_package_for_testing(
+        fixture.executor([]() -> ExecCaptureResult {
+            FAIL("no plain reinstall may run after an unclean extraction");
+            return {};
+        }),
+        "1.2.4",
+        [&] {
+            version_read = true;
+            return std::string("1.2.4");
+        },
+        fixture.store_root(), output, fixture.scripted_paths()));
+    CHECK_FALSE(version_read);
+    CHECK(output.find("not falling back") != std::string::npos);
 }
 
 TEST_CASE("nfqws journal remains degraded after file-only package recovery") {
@@ -1001,6 +1287,9 @@ struct BootRecoveryFixture {
     int execute_calls{0};
     int clear_calls{0};
     int discard_calls{0};
+    int heal_calls{0};
+    std::string heal_note;
+    bool init_held_evidence{false};
     bool clear_ok{true};
     ComponentBootRecoveryPlan executed_plan;
     std::vector<NfqwsBootRecoveryResult> recorded;
@@ -1053,6 +1342,16 @@ struct BootRecoveryFixture {
             }
             return std::make_unique<BootRecoveryFakeLease>();
         };
+        wired.init_script_held = [this] { return init_held_evidence; };
+        wired.heal_init_script = [this]() -> std::string {
+            ++heal_calls;
+            // Healing precedes every decision and every plan step, and
+            // never runs without the lease.
+            CHECK(execute_calls == 0);
+            CHECK(clear_calls == 0);
+            CHECK(lease_acquisitions > 0);
+            return heal_note;
+        };
         wired.inspect_current_ipk = [this] { return current_ipk; };
         wired.capture_state = [this] { return capture; };
         wired.installed_version = [this] { return version; };
@@ -1090,6 +1389,9 @@ TEST_CASE("boot recovery does nothing, and takes no lease, without a journal") {
     CHECK(fixture.lease_acquisitions == 0);
     CHECK(fixture.execute_calls == 0);
     CHECK(fixture.clear_calls == 0);
+    // No lease, no healing: the init-script repair also renames files and
+    // must never run outside the lease.
+    CHECK(fixture.heal_calls == 0);
     // Nothing happened, so nothing is recorded for the page either.
     CHECK(fixture.recorded.empty());
 }
@@ -1102,6 +1404,70 @@ TEST_CASE("a busy maintenance lease is a retry, not a result") {
         run_nfqws_boot_recovery_for_testing(fixture.hooks());
     CHECK(result.outcome == NfqwsBootRecoveryOutcome::lease_busy);
     CHECK(fixture.lease_acquisitions == 1);
+    CHECK(fixture.execute_calls == 0);
+    CHECK(fixture.heal_calls == 0);
+    CHECK(fixture.recorded.empty());
+}
+
+TEST_CASE("boot recovery heals a held-aside init script before deciding") {
+    BootRecoveryFixture fixture;
+    fixture.abandoned_journal(ComponentTransactionPhase::mutating);
+    fixture.exact_copy_retained();
+    fixture.version = "1.2.5";
+    fixture.step.rolled_back = true;
+    fixture.step.package_metadata_restored = true;
+    fixture.heal_note =
+        "Restored the nfqws2 init script from its held-aside copy.";
+    const auto result =
+        run_nfqws_boot_recovery_for_testing(fixture.hooks());
+    // Exactly once, under the lease, before the plan ran (asserted inside
+    // the hook), and the note reaches the operator log.
+    CHECK(fixture.heal_calls == 1);
+    CHECK(result.output.find("held-aside copy") != std::string::npos);
+    CHECK(result.outcome == NfqwsBootRecoveryOutcome::recovered);
+}
+
+TEST_CASE("a held init script forces the run through the no-journal gate") {
+    BootRecoveryFixture fixture;
+    fixture.init_held_evidence = true;
+    fixture.heal_note = "Removed a stale held copy of the nfqws2 init "
+                        "script.";
+    const auto result =
+        run_nfqws_boot_recovery_for_testing(fixture.hooks());
+    // The held name is physical evidence; the lease is taken and the heal
+    // runs even with nothing in the journal. No plan is executed and
+    // nothing is recorded - there is no journal to record against.
+    CHECK(fixture.lease_acquisitions == 1);
+    CHECK(fixture.heal_calls == 1);
+    CHECK(result.outcome == NfqwsBootRecoveryOutcome::nothing_to_do);
+    CHECK(result.output.find("stale held copy") != std::string::npos);
+    CHECK(fixture.execute_calls == 0);
+    CHECK(fixture.clear_calls == 0);
+    CHECK(fixture.recorded.empty());
+}
+
+TEST_CASE("a held init script forces the run through the already-answered gate") {
+    BootRecoveryFixture fixture;
+    fixture.abandoned_journal(ComponentTransactionPhase::verifying,
+                              /*exact_previous=*/false);
+    fixture.journal.record->started_at = 1787500000;
+    NfqwsBootRecoveryLastAnswer answered;
+    answered.journal_started_at = fixture.journal.record->started_at;
+    answered.journal_operation = fixture.journal.record->operation;
+    answered.outcome = "failed";
+    fixture.last_answer = answered;
+    fixture.init_held_evidence = true;
+    fixture.heal_note =
+        "Restored the nfqws2 init script from its held-aside copy.";
+    const auto result =
+        run_nfqws_boot_recovery_for_testing(fixture.hooks());
+    // The heal runs - this is exactly the state where the answering run's
+    // own restore failed - but the answered journal still gets no second
+    // plan and the answer record is not overwritten.
+    CHECK(fixture.heal_calls == 1);
+    CHECK(result.outcome == NfqwsBootRecoveryOutcome::nothing_to_do);
+    CHECK(result.output.find("held-aside copy") != std::string::npos);
+    CHECK(result.reason.find("already answered") != std::string::npos);
     CHECK(fixture.execute_calls == 0);
     CHECK(fixture.recorded.empty());
 }

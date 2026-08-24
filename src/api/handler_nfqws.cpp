@@ -55,6 +55,12 @@ namespace {
 namespace fs = std::filesystem;
 constexpr const char* kBinary = "/opt/usr/bin/nfqws2";
 constexpr const char* kInit = "/opt/etc/init.d/S51nfqws2";
+// Where a scripted install renames the init script to while the package's
+// postinst runs (same directory, so the rename is atomic; dot-prefixed, so
+// the init sequence never globs it). Only scripted installs create this
+// name, which is what lets boot recovery restore it on filesystem evidence
+// alone.
+constexpr const char* kInitHeld = "/opt/etc/init.d/.S51nfqws2.kpbr-held";
 constexpr const char* kPidfile = "/opt/var/run/nfqws2.pid";
 constexpr const char* kConfigDir = "/opt/etc/nfqws2";
 constexpr const char* kOpkgPackageFileList =
@@ -491,6 +497,18 @@ struct BoundedOpkgUpgradeResult {
     // restore captured files.
     bool previous_exact{false};
     std::string target_version;
+    // The install ran scripted: the package's own maintainer scripts were
+    // run by the transaction with the init script held aside, so nothing
+    // started the service and the caller owns the start. False means the
+    // scripts could not be laid out and the plain opkg install ran instead,
+    // with its usual autostart.
+    bool scripted{false};
+    // Meaningful only when scripted: every scripted step passed. A false
+    // here already forced a non-zero status.
+    bool scripted_ok{false};
+    // False only when the init script is still held aside under its
+    // kpbr-held name; boot recovery restores it by that name.
+    bool init_restored{true};
 };
 
 // The third argument is the child's working directory, empty to inherit.
@@ -503,6 +521,10 @@ using NfqwsExecCapture = std::function<ExecCaptureResult(
 struct NfqwsPackagePaths {
     fs::path store_root{kComponentStoreRoot};
     fs::path feed_list{kNfqwsFeedList};
+    ScriptedInstallPaths scripted{fs::path{kInit}, fs::path{kInitHeld},
+                                  fs::path{"/opt/etc/opkg.conf"},
+                                  fs::path{"/"}, "/opt/bin/sh",
+                                  "/opt/bin/tar"};
 };
 
 ComponentPackageOptions nfqws_package_options(const NfqwsPackagePaths& paths) {
@@ -515,6 +537,7 @@ ComponentPackageOptions nfqws_package_options(const NfqwsPackagePaths& paths) {
     options.feed_list = paths.feed_list;
     options.timeouts =
         SafeExecTimeouts{std::chrono::minutes{10}, std::chrono::seconds{5}};
+    options.scripted = paths.scripted;
     return options;
 }
 
@@ -528,6 +551,19 @@ std::string nfqws_package_command_label(const std::vector<std::string>& argv) {
     return label;
 }
 
+// Package commands run with a pinned PATH. opkg spawns its downloader by
+// name from PATH, and this router carries two wgets: /opt/bin/wget is the
+// wget-ssl the feeds need, /opt/usr/bin/wget is a busybox applet link that
+// cannot speak HTTPS at all. Which one a child sees would otherwise depend
+// on who started the daemon - the boot init puts /opt/bin first, an
+// operator's ssh shell puts /opt/usr/bin first - and a daemon restarted by
+// hand would fail every feed refresh with "not an http or ftp url". The
+// maintainer scripts a scripted install runs resolve their tools (sed, cp,
+// route, ip) from the same pinned order.
+constexpr const char* kNfqwsPackageCommandPath =
+    "/opt/sbin:/opt/bin:/opt/usr/sbin:/opt/usr/bin:"
+    "/usr/sbin:/usr/bin:/sbin:/bin";
+
 ExecCaptureResult run_nfqws_package_command(
     const std::vector<std::string>& argv, SafeExecTimeouts timeouts,
     const std::filesystem::path& working_directory) {
@@ -539,7 +575,7 @@ ExecCaptureResult run_nfqws_package_command(
         /*drain_after_limit=*/true,
         SafeExecFailureLog::Enabled,
         timeouts,
-        /*child_environment=*/{},
+        /*child_environment=*/{{"PATH", kNfqwsPackageCommandPath}},
         working_directory.string());
 }
 
@@ -596,11 +632,81 @@ ExecCaptureResult run_annotated_package_command(
     return result;
 }
 
+// The one mutation step every install-shaped flow shares: the scripted
+// install (the package's scripts run by the transaction, service start
+// suppressed) with an honest fallback to the plain opkg install when the
+// scripts cannot be laid out - the plain install is exactly yesterday's
+// behavior, autostart included, and a package whose archive this code
+// cannot open must still be installable. The distinction is reported so
+// the caller knows who owns the start.
+void run_scripted_or_plain_install(ComponentPackageTransaction& transaction,
+                                   bool upgrade,
+                                   std::string& output,
+                                   bool& mutation_started,
+                                   bool& scripted,
+                                   bool& scripted_ok,
+                                   bool& init_restored,
+                                   int& status,
+                                   // The caller's combined command flags,
+                                   // updated live by its annotated runner
+                                   // while the scripted attempt runs.
+                                   const bool& timed_out,
+                                   const bool& termination_uncertain,
+                                   const ScriptedServiceStop& stop_service =
+                                       {}) {
+    const auto append = [&output](const std::string& text) {
+        if (text.empty()) return;
+        if (!output.empty() && output.back() != '\n') output += '\n';
+        output += text;
+        if (output.back() != '\n') output += '\n';
+    };
+    try {
+        ScriptedInstallReport report;
+        transaction.scripted_install_candidate(upgrade, report,
+                                               stop_service);
+        append(report.notes);
+        if (!report.scripts_extracted) {
+            if (timed_out || termination_uncertain) {
+                // The extraction did not fail - it did not finish, or its
+                // process tree could not be proven dead. Starting a second
+                // package manager on top of that is exactly what the
+                // termination rules everywhere else refuse.
+                append("The script extraction did not finish cleanly; not "
+                       "falling back to a plain install on top of an "
+                       "unproven process tree.");
+                if (status == 0) status = -1;
+                return;
+            }
+            // Nothing has run and nothing was mutated; the plain install
+            // still works the way it always has.
+            append("Falling back to a plain opkg install; the package's own "
+                   "scripts will run, its service start included.");
+            mutation_started = true;
+            (void)transaction.install_candidate();
+            return;
+        }
+        scripted = true;
+        scripted_ok = scripted_install_succeeded(report);
+        init_restored = report.init_restored;
+        // A preinst that ran may already have moved component files around
+        // even when the package manager itself never started; recovery must
+        // treat that as a mutation.
+        mutation_started = report.preinst_ran || report.mutation_started;
+        if (!scripted_ok && status == 0) status = 1;
+    } catch (const ComponentPackageRefused& refused) {
+        mutation_started = false;
+        append(std::string("opkg install was not run: ") + refused.what() +
+               ".");
+        if (status == 0) status = 1;
+    }
+}
+
 BoundedOpkgUpgradeResult run_bounded_nfqws_opkg_upgrade(
     const NfqwsExecCapture& execute,
     const std::string& installed_version,
     const NfqwsPackagePaths& paths = {},
-    const NfqwsPreparedHook& on_prepared = {}) {
+    const NfqwsPreparedHook& on_prepared = {},
+    const ScriptedServiceStop& stop_service = {}) {
     BoundedOpkgUpgradeResult combined;
     const auto run_annotated = [&](const std::vector<std::string>& argv,
                                    SafeExecTimeouts timeouts,
@@ -646,26 +752,21 @@ BoundedOpkgUpgradeResult run_bounded_nfqws_opkg_upgrade(
         if (combined.status == 0) combined.status = 1;
         return combined;
     }
-    try {
-        // upgrade_started flips only once the command is really issued: a
-        // refusal here means the store changed under us between verify and
-        // install, and nothing has been mutated.
-        combined.upgrade_started = true;
-        (void)transaction.install_candidate();
-    } catch (const ComponentPackageRefused& refused) {
-        combined.upgrade_started = false;
-        combined.output += std::string("opkg install was not run: ") +
-                           refused.what() + ".\n";
-        if (combined.status == 0) combined.status = 1;
-    }
+    run_scripted_or_plain_install(
+        transaction, /*upgrade=*/true, combined.output,
+        combined.upgrade_started, combined.scripted, combined.scripted_ok,
+        combined.init_restored, combined.status, combined.timed_out,
+        combined.termination_uncertain, stop_service);
     return combined;
 }
 
 BoundedOpkgUpgradeResult run_bounded_nfqws_opkg_upgrade(
     const std::string& installed_version,
-    const NfqwsPreparedHook& on_prepared) {
+    const NfqwsPreparedHook& on_prepared,
+    const ScriptedServiceStop& stop_service = {}) {
     return run_bounded_nfqws_opkg_upgrade(run_nfqws_package_command,
-                                          installed_version, {}, on_prepared);
+                                          installed_version, {}, on_prepared,
+                                          stop_service);
 }
 
 // The official feed definition, exactly as the shell installer writes it.
@@ -686,6 +787,12 @@ struct BoundedOpkgInstallResult {
     bool install_started{false};
     std::string target_version;
     bool feed_conf_written{false};
+    // Same trio as the upgrade result: scripted says the transaction ran
+    // the package's scripts itself with the service start suppressed, so
+    // the caller owns the start.
+    bool scripted{false};
+    bool scripted_ok{false};
+    bool init_restored{true};
 };
 
 // A fresh installation, prepared the way install.sh's configure_nfqws2
@@ -840,24 +947,22 @@ BoundedOpkgInstallResult run_bounded_nfqws_opkg_install(
             return combined;
         }
     }
-    try {
-        combined.install_started = true;
-        (void)transaction.install_candidate();
-    } catch (const ComponentPackageRefused& refused) {
-        combined.install_started = false;
-        note(std::string("opkg install was not run: ") + refused.what() +
-             ".");
-        if (combined.status == 0) combined.status = 1;
-    }
+    run_scripted_or_plain_install(
+        transaction, /*upgrade=*/false, combined.output,
+        combined.install_started, combined.scripted, combined.scripted_ok,
+        combined.init_restored, combined.status, combined.timed_out,
+        combined.termination_uncertain);
     return combined;
 }
 
 // Reinstalls the exact IPK of the version that was installed before a
 // failed upgrade, which restores opkg's own record of the package and
-// every file the package owns. Returns true only when opkg reports success
-// and the package database names that version again; the caller still
-// restores captured files and verifies the runtime afterwards, because a
-// reinstall re-runs maintainer scripts that may start the service.
+// every file the package owns. Returns true only when the scripts ran to
+// the end and the package database names that version again; the caller
+// still restores captured files and verifies the runtime afterwards. The
+// reinstall runs scripted - the package's maintainer scripts executed by
+// the transaction with the init script held aside - so the rollback owns
+// the service start instead of racing the package's own.
 bool reinstall_exact_previous_nfqws_package(
     const std::string& expected_version,
     const std::function<std::string()>& read_installed_version,
@@ -870,21 +975,48 @@ bool reinstall_exact_previous_nfqws_package(
         return false;
     }
     ComponentIpkStore store(paths.store_root, kNfqwsPackage);
+    int annotated_status = 0;
+    bool annotated_timed_out = false;
+    bool annotated_uncertain = false;
+    const auto run_annotated = [&](const std::vector<std::string>& argv,
+                                   SafeExecTimeouts timeouts,
+                                   const std::filesystem::path& cwd) {
+        return run_annotated_package_command(
+            execute, argv, timeouts, cwd, output, annotated_status,
+            annotated_timed_out, annotated_uncertain);
+    };
     ComponentPackageTransaction transaction(
-        nfqws_package_options(paths), store, execute);
-    ExecCaptureResult result;
+        nfqws_package_options(paths), store, run_annotated);
+    bool scripted_failed = false;
     try {
-        result = transaction.reinstall_current(expected_version);
+        ScriptedInstallReport report;
+        transaction.scripted_reinstall_current(expected_version, report);
+        if (!report.notes.empty()) {
+            if (!output.empty() && output.back() != '\n') output += '\n';
+            output += report.notes;
+        }
+        if (!report.scripts_extracted) {
+            if (annotated_timed_out || annotated_uncertain) {
+                output += "The script extraction did not finish cleanly; "
+                          "not falling back to a plain reinstall on top of "
+                          "an unproven process tree.\n";
+                return false;
+            }
+            output += "Falling back to a plain opkg reinstall; the "
+                      "package's own scripts will run, its service start "
+                      "included.\n";
+            (void)transaction.reinstall_current(expected_version);
+        } else {
+            scripted_failed = !scripted_install_succeeded(report);
+        }
     } catch (const ComponentPackageRefused& refused) {
         output += std::string("The exact previous package was not "
                               "reinstalled: ") +
                   refused.what() + ".\n";
         return false;
     }
-    output += result.stdout_output;
-    if (!output.empty() && output.back() != '\n') output += '\n';
-    if (result.exit_code != 0 || result.timed_out ||
-        result.termination_uncertain) {
+    if (scripted_failed || annotated_status != 0 || annotated_timed_out ||
+        annotated_uncertain) {
         output += "Reinstalling the exact previous package " +
                   expected_version + " did not succeed.\n";
         return false;
@@ -1734,9 +1866,10 @@ bool restore_nfqws_capture_after_failed_upgrade(
 
     progress.step("rollback");
     // The exact IPK first, while the service may still be whatever opkg
-    // left: reinstalling re-runs maintainer scripts, and the captured files
-    // must land after those, not before. Only then are the bytes the
-    // operator actually had written back over the package's defaults.
+    // left: the reinstall runs the package's maintainer scripts (scripted,
+    // with the service start suppressed), and the captured files must land
+    // after those, not before. Only then are the bytes the operator
+    // actually had written back over the package's defaults.
     if (exact_previous_available) {
         output += "\nThe upgrade did not finish safely; reinstalling the "
                   "exact previous package.\n";
@@ -2261,11 +2394,19 @@ NfqwsBootRecoveryResult run_nfqws_boot_recovery_with(
         result.output += '\n';
     };
 
-    // A free look first: no journal means no lease, no log, nothing.
+    // A free look first: no journal means no lease, no log, nothing. The
+    // one thing that overrides the early returns is a held-aside init
+    // script - physical evidence that a scripted install's hold was never
+    // undone. That evidence forces the run through to the lease and the
+    // heal, whatever the journal says; the gates are then re-applied under
+    // the lease so a healed run still executes no already-answered plan.
+    const bool held_evidence =
+        hooks.init_script_held && hooks.init_script_held();
     {
         const auto glance = hooks.read_journal();
-        if (glance.state == ComponentTransactionState::none ||
-            glance.state == ComponentTransactionState::in_flight) {
+        if ((glance.state == ComponentTransactionState::none ||
+             glance.state == ComponentTransactionState::in_flight) &&
+            !held_evidence) {
             result.plan = component_boot_recovery_action_name(
                 ComponentBootRecoveryAction::none);
             result.outcome = NfqwsBootRecoveryOutcome::nothing_to_do;
@@ -2277,7 +2418,7 @@ NfqwsBootRecoveryResult run_nfqws_boot_recovery_with(
         // the operator has repaired by hand since. One journal gets one
         // answer; the durable record's identity says whether this is the
         // same journal.
-        if (glance.record && hooks.read_last_answer) {
+        if (glance.record && hooks.read_last_answer && !held_evidence) {
             const auto answered = hooks.read_last_answer();
             if (answered && answered->journal_started_at != 0 &&
                 answered->journal_started_at == glance.record->started_at &&
@@ -2320,6 +2461,14 @@ NfqwsBootRecoveryResult run_nfqws_boot_recovery_with(
     }
     const std::lock_guard lock(nfqws_operation_mutex());
 
+    // First, under the lease: if a scripted install crashed while the init
+    // script was held aside, put it back before anything decides or runs a
+    // plan - the plans stop and start the service through that script.
+    if (hooks.heal_init_script) {
+        const auto healed = hooks.heal_init_script();
+        if (!healed.empty()) note(healed);
+    }
+
     // Everything is re-read under the lease: the glance above may have
     // raced an operator's repair.
     ComponentBootRecoveryEvidence evidence;
@@ -2331,6 +2480,40 @@ NfqwsBootRecoveryResult run_nfqws_boot_recovery_with(
     if (evidence.journal.record) {
         result.journal_started_at = evidence.journal.record->started_at;
         result.journal_operation = evidence.journal.record->operation;
+    }
+    // The gates the held evidence bypassed above, re-applied under the
+    // lease: the heal has run, and a healed boot still must not execute a
+    // plan for a journal that is absent or already answered. Neither
+    // return is recorded - there is no unanswered journal to record
+    // against, and the answered record must keep describing the run that
+    // actually acted.
+    if (held_evidence) {
+        if (evidence.journal.state == ComponentTransactionState::none ||
+            evidence.journal.state == ComponentTransactionState::in_flight) {
+            result.plan = component_boot_recovery_action_name(
+                ComponentBootRecoveryAction::none);
+            result.reason = "the held init script was the only evidence";
+            result.outcome = NfqwsBootRecoveryOutcome::nothing_to_do;
+            return result;
+        }
+        if (evidence.journal.record && hooks.read_last_answer) {
+            const auto answered = hooks.read_last_answer();
+            if (answered && answered->journal_started_at != 0 &&
+                answered->journal_started_at ==
+                    evidence.journal.record->started_at &&
+                answered->journal_operation ==
+                    evidence.journal.record->operation) {
+                result.plan = component_boot_recovery_action_name(
+                    ComponentBootRecoveryAction::none);
+                result.reason =
+                    "this journal was already answered at a previous start "
+                    "(outcome " + answered->outcome + "); the held init "
+                    "script has been dealt with above and the journal stays "
+                    "until the package state is repaired and acknowledged";
+                result.outcome = NfqwsBootRecoveryOutcome::nothing_to_do;
+                return result;
+            }
+        }
     }
     const auto plan = decide_component_boot_recovery(evidence);
     result.plan = component_boot_recovery_action_name(plan.action);
@@ -2423,6 +2606,81 @@ NfqwsBootRecoveryHooks production_nfqws_boot_recovery_hooks(ApiContext& ctx) {
     };
     hooks.acquire_lease = [&ctx]() -> std::unique_ptr<MaintenanceLease> {
         return ctx.acquire_maintenance_lease("nfqws-boot-recovery");
+    };
+    hooks.init_script_held = []() -> bool {
+        std::error_code held_error;
+        const auto held_status = fs::symlink_status(kInitHeld, held_error);
+        return !held_error && fs::exists(held_status);
+    };
+    hooks.heal_init_script = []() -> std::string {
+        std::error_code held_error;
+        const auto held_status = fs::symlink_status(kInitHeld, held_error);
+        if (held_error || !fs::exists(held_status)) return {};
+        std::error_code init_error;
+        const auto init_status = fs::symlink_status(kInit, init_error);
+        if (init_error &&
+            init_status.type() != fs::file_type::not_found) {
+            // Absence is the restore case below (libstdc++ reports it as
+            // not_found with ENOENT in the error code); only a stat that
+            // failed some other way leaves the state unknown.
+            return std::string("The nfqws2 init script could not be "
+                               "inspected (") +
+                   init_error.message() +
+                   "); its held-aside copy was left untouched.";
+        }
+        if (fs::exists(init_status)) {
+            if (!fs::is_regular_file(init_status) &&
+                !fs::is_symlink(init_status)) {
+                // Something that is not a script occupies the init path -
+                // which is exactly how a restore rename fails and leaves
+                // the held copy behind. Deleting the copy here would
+                // destroy the one thing that can still put the script
+                // back; the operator has to clear the path first.
+                return std::string("The nfqws2 init script path is occupied "
+                                   "by something that is not a script while "
+                                   "a held-aside copy exists; neither was "
+                                   "touched - clear ") +
+                       kInit + " and the next start restores the script.";
+            }
+            // The real script is in place, so the held name is a leftover
+            // whose window has passed; keeping it would make the next hold
+            // silently overwrite evidence.
+            std::error_code remove_error;
+            fs::remove(kInitHeld, remove_error);
+            return remove_error
+                       ? std::string("A stale held copy of the nfqws2 init "
+                                     "script could not be removed: ") +
+                             remove_error.message()
+                       : std::string("Removed a stale held copy of the "
+                                     "nfqws2 init script.");
+        }
+        // No init script at its place. Putting the held copy back is right
+        // only while the package is still installed; a held copy that
+        // outlived its package (opkg removes only registered paths) would
+        // otherwise be resurrected as a boot-time start script for a binary
+        // that no longer exists.
+        std::error_code list_error;
+        if (!fs::is_regular_file(kOpkgPackageFileList, list_error)) {
+            std::error_code remove_error;
+            fs::remove(kInitHeld, remove_error);
+            return remove_error
+                       ? std::string("The held init script copy of a "
+                                     "removed package could not be "
+                                     "deleted: ") +
+                             remove_error.message()
+                       : std::string("Removed the held init script copy of "
+                                     "a package that is no longer "
+                                     "installed.");
+        }
+        std::error_code rename_error;
+        fs::rename(kInitHeld, kInit, rename_error);
+        return rename_error
+                   ? std::string("The nfqws2 init script is held aside at ") +
+                         kInitHeld + " and could not be restored: " +
+                         rename_error.message()
+                   : std::string("Restored the nfqws2 init script from its "
+                                 "held-aside copy: a scripted install was "
+                                 "interrupted while its postinst ran.");
     };
     hooks.inspect_current_ipk = []() -> IpkSlotInspection {
         try {
@@ -2764,8 +3022,11 @@ void register_nfqws_handler_impl(
             record.owner_is_operation_process = false;
             write_nfqws_transaction(record);
 
-            // The package's own postinst starts the service; the firewall
-            // graph must be reconciled whatever happens past this point.
+            // The install ends with the service started - by this action
+            // after verification when the install ran scripted, by the
+            // package's own postinst on the plain fallback - so the
+            // firewall graph must be reconciled whatever happens past this
+            // point.
             NfqwsNetfilterRefreshGuard refresh_guard(ctx);
             progress.step("install");
             const auto result = run_bounded_nfqws_opkg_install(
@@ -2845,6 +3106,25 @@ void register_nfqws_handler_impl(
                                           "be journaled: ") +
                               error.what() + "\n";
                 }
+                // A scripted install suppressed the package's own start; a
+                // fresh install ends with the service running, so start it
+                // now that the package is verified. A start that fails does
+                // not un-install a verified package - the package's own
+                // postinst ignores its start's outcome the same way - it is
+                // reported and left to the operator, with the component
+                // installed and stopped.
+                if (result.scripted) {
+                    progress.step("start");
+                    int start_status = 0;
+                    output += "\nStarting nfqws2 under the transaction (the "
+                              "package's own start was suppressed).\n";
+                    output += run_nfqws_service_command("start",
+                                                        start_status);
+                    output += start_status == 0
+                                  ? "nfqws2 started.\n"
+                                  : "nfqws2 did not start cleanly; check "
+                                    "its configuration and logs.\n";
+                }
                 // The file just installed becomes the exact copy of the
                 // installed version - retention from day one, while the
                 // feed still serves these bytes.
@@ -2922,6 +3202,16 @@ void register_nfqws_handler_impl(
             } catch (...) {
             }
             if (removed) {
+                // opkg removes only registered paths; the held-aside init
+                // script copy a failed scripted install can leave is ours
+                // to clean. It must not survive the journal below: with no
+                // journal, boot recovery would later read a stale held name
+                // as evidence of an interrupted install that never was.
+                std::error_code held_error;
+                if (fs::remove(kInitHeld, held_error)) {
+                    output += "Removed the held-aside init script copy the "
+                              "failed scripted install left behind.\n";
+                }
                 journal_cleared = clear_nfqws_transaction();
                 output += journal_cleared
                               ? "Removed; the router is back to the "
@@ -3111,6 +3401,23 @@ void register_nfqws_handler_impl(
                                 return false;
                             }
                             return true;
+                        },
+                        // The scripted flow suppresses every stop the
+                        // package's own scripts used to perform, so the
+                        // transaction stops the service itself - in the old
+                        // prerm's slot, with the stragglers-killing verified
+                        // stop - and the controlled start below brings it
+                        // back on the new binary.
+                        [&](std::string& notes) {
+                            if (!runtime_before.process_present) {
+                                return true;
+                            }
+                            notes += "Stopping nfqws2 under the transaction "
+                                     "before its files are replaced.\n";
+                            int stop_status = 0;
+                            notes += run_nfqws_service_command("stop",
+                                                               stop_status);
+                            return stop_status == 0;
                         });
                     package_command_returned = true;
                     package_mutation_started = opkg.upgrade_started;
@@ -3158,6 +3465,28 @@ void register_nfqws_handler_impl(
                     // quiesced process group. Observation failures may safely
                     // enter the single captured-file recovery funnel.
                     recovery_safe = true;
+
+                    // A scripted install suppressed the package's own start,
+                    // so the transaction restores the pre-upgrade runtime
+                    // state itself before judging it: a service that was
+                    // running keeps running, on the new binary, started
+                    // under the same lease that installed it. A start that
+                    // does not come up is left to the runtime verdict below,
+                    // which routes it into the captured-file recovery.
+                    if (opkg.scripted && opkg.scripted_ok && status == 0 &&
+                        runtime_before.process_present) {
+                        progress.step("start");
+                        int start_status = 0;
+                        output += "\nStarting nfqws2 under the transaction "
+                                  "(the package's own start was "
+                                  "suppressed).\n";
+                        output +=
+                            run_nfqws_service_command("start", start_status);
+                        if (start_status != 0) {
+                            output += "The controlled start did not verify; "
+                                      "the runtime check below decides.\n";
+                        }
+                    }
 
                     progress.step("verify");
                     record.phase = ComponentTransactionPhase::verifying;
@@ -3928,12 +4257,15 @@ NfqwsBoundedOpkgTestResult run_nfqws_bounded_opkg_for_testing(
         const std::filesystem::path&)> execute,
     const std::string& installed_version,
     const std::string& store_root,
-    const std::string& feed_list) {
+    const std::string& feed_list,
+    const ScriptedInstallPaths& scripted,
+    std::function<bool(std::string&)> stop_service) {
     NfqwsPackagePaths paths;
     paths.store_root = store_root;
     paths.feed_list = feed_list;
-    const auto result =
-        run_bounded_nfqws_opkg_upgrade(execute, installed_version, paths);
+    paths.scripted = scripted;
+    const auto result = run_bounded_nfqws_opkg_upgrade(
+        execute, installed_version, paths, {}, stop_service);
     return NfqwsBoundedOpkgTestResult{
         result.output,
         result.status,
@@ -3943,6 +4275,9 @@ NfqwsBoundedOpkgTestResult run_nfqws_bounded_opkg_for_testing(
         result.up_to_date,
         result.previous_exact,
         result.target_version,
+        result.scripted,
+        result.scripted_ok,
+        result.init_restored,
     };
 }
 
@@ -3953,10 +4288,12 @@ NfqwsInstallTestResult run_nfqws_install_for_testing(
     const std::string& store_root,
     const std::string& feed_list,
     const std::string& feed_conf,
-    std::function<bool(const std::string& target_version)> on_prepared) {
+    std::function<bool(const std::string& target_version)> on_prepared,
+    const ScriptedInstallPaths& scripted) {
     NfqwsPackagePaths paths;
     paths.store_root = store_root;
     paths.feed_list = feed_list;
+    paths.scripted = scripted;
     NfqwsPreparedHook hook;
     if (on_prepared) {
         hook = [&on_prepared](const BoundedOpkgUpgradeResult& prepared) {
@@ -3973,6 +4310,9 @@ NfqwsInstallTestResult run_nfqws_install_for_testing(
         result.install_started,
         result.target_version,
         result.feed_conf_written,
+        result.scripted,
+        result.scripted_ok,
+        result.init_restored,
     };
 }
 
@@ -3983,9 +4323,11 @@ bool reinstall_exact_previous_nfqws_package_for_testing(
     const std::string& expected_version,
     std::function<std::string()> read_installed_version,
     const std::string& store_root,
-    std::string& output) {
+    std::string& output,
+    const ScriptedInstallPaths& scripted) {
     NfqwsPackagePaths paths;
     paths.store_root = store_root;
+    paths.scripted = scripted;
     return reinstall_exact_previous_nfqws_package(
         expected_version, read_installed_version, output, execute, paths);
 }

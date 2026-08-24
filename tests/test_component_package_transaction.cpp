@@ -467,4 +467,471 @@ TEST_CASE("feed versions compare numerically") {
     CHECK_FALSE(feed_version_newer("", "1.2.4"));
 }
 
+namespace {
+
+// The world a scripted install runs in: an adopted store slot, an init.d
+// directory the test owns, and a runner that plays tar, the shell and opkg.
+// The runner snapshots the init-script state at the moment postinst runs,
+// because the whole point of the hold is what postinst sees, not what is
+// true before or after.
+struct ScriptedWorld {
+    TempRoot root;
+    ComponentIpkStore store{root.path / "components", "nfqws2-keenetic"};
+    ComponentPackageOptions options;
+
+    std::vector<std::vector<std::string>> commands;
+    std::vector<fs::path> working_directories;
+    int outer_tar_exit{0};
+    int control_tar_exit{0};
+    bool lay_control_archive{true};
+    bool with_preinst{true};
+    bool with_postinst{true};
+    int preinst_exit{0};
+    int unpack_exit{0};
+    int postinst_exit{0};
+    // Set while the fake postinst runs.
+    bool init_present_during_postinst{true};
+    bool held_present_during_postinst{false};
+    // Lay a directory at the init-script path while postinst runs, so the
+    // restoring rename has somewhere real to fail.
+    bool occupy_init_path_during_postinst{false};
+
+    ScriptedWorld() {
+        options = options_for(root);
+        options.scripted.init_script = root.path / "init.d" / "S51nfqws2";
+        options.scripted.held_init_script =
+            root.path / "init.d" / ".S51nfqws2.kpbr-held";
+        fs::create_directories(root.path / "init.d");
+    }
+
+    void lay_init_script() {
+        write_file(options.scripted.init_script, "#!/bin/sh\nexit 0\n");
+    }
+
+    void adopt_candidate(const std::string& version,
+                         const std::string& bytes) {
+        store.adopt(IpkSlot::candidate, bytes, entry(version, bytes));
+    }
+    void adopt_current(const std::string& version, const std::string& bytes) {
+        store.adopt(IpkSlot::current, bytes, entry(version, bytes));
+    }
+
+    static FeedPackageEntry entry(const std::string& version,
+                                  const std::string& bytes) {
+        FeedPackageEntry e;
+        e.package = "nfqws2-keenetic";
+        e.version = version;
+        e.filename = "nfqws2-keenetic_" + version + "_all_entware.ipk";
+        e.size = bytes.size();
+        e.sha256 = digest_of(bytes);
+        return e;
+    }
+
+    // The commands the shell was asked to run, as "<script-name> <arg>".
+    std::vector<std::string> script_runs;
+
+    ComponentCommandRunner runner() {
+        return [this](const std::vector<std::string>& argv,
+                      SafeExecTimeouts, const fs::path& cwd) {
+            commands.push_back(argv);
+            working_directories.push_back(cwd);
+            ExecCaptureResult result;
+            REQUIRE_FALSE(argv.empty());
+            if (argv[0] == "/opt/bin/tar") {
+                REQUIRE(argv.size() == 5U);
+                CHECK(argv[1] == "-xzf");
+                CHECK(argv[3] == "-C");
+                const fs::path source = argv[2];
+                const fs::path target = argv[4];
+                if (source.extension() == ".ipk") {
+                    if (outer_tar_exit == 0 && lay_control_archive) {
+                        write_file(target / "control.tar.gz", "control");
+                    }
+                    result.exit_code = outer_tar_exit;
+                    return result;
+                }
+                CHECK(source.filename() == "control.tar.gz");
+                if (control_tar_exit == 0) {
+                    if (with_preinst) {
+                        write_file(target / "preinst", "#!/bin/sh\n");
+                    }
+                    if (with_postinst) {
+                        write_file(target / "postinst", "#!/bin/sh\n");
+                    }
+                }
+                result.exit_code = control_tar_exit;
+                return result;
+            }
+            if (argv[0] == "/opt/bin/sh") {
+                REQUIRE(argv.size() == 3U);
+                const fs::path script = argv[1];
+                script_runs.push_back(script.filename().string() + " " +
+                                      argv[2]);
+                if (script.filename() == "preinst") {
+                    result.exit_code = preinst_exit;
+                    return result;
+                }
+                CHECK(script.filename() == "postinst");
+                std::error_code error;
+                init_present_during_postinst = fs::exists(
+                    fs::symlink_status(options.scripted.init_script, error));
+                held_present_during_postinst = fs::exists(fs::symlink_status(
+                    options.scripted.held_init_script, error));
+                if (occupy_init_path_during_postinst) {
+                    fs::create_directories(options.scripted.init_script /
+                                           "occupied");
+                }
+                result.exit_code = postinst_exit;
+                return result;
+            }
+            REQUIRE(argv[0] == "/opt/bin/opkg");
+            REQUIRE(argv.size() >= 6U);
+            CHECK(argv[1] == "-o");
+            CHECK(argv[2] == "/");
+            CHECK(argv[3] == "-f");
+            CHECK(argv[4] == "/opt/etc/opkg.conf");
+            CHECK(argv[5] == "install");
+            result.exit_code = unpack_exit;
+            result.stdout_output = "Installing to root...\n";
+            return result;
+        };
+    }
+
+    ComponentPackageTransaction transaction() {
+        return ComponentPackageTransaction(options, store, runner());
+    }
+};
+
+} // namespace
+
+TEST_CASE("a scripted install runs the package's scripts around a script-free unpack") {
+    ScriptedWorld world;
+    world.adopt_candidate("1.2.5", "ipk 1.2.5");
+    world.lay_init_script();
+    auto txn = world.transaction();
+
+    ScriptedInstallReport report;
+    txn.scripted_install_candidate(/*upgrade=*/true, report);
+
+    CHECK(report.scripts_extracted);
+    CHECK(report.preinst_ran);
+    CHECK(report.preinst_ok);
+    CHECK(report.mutation_started);
+    CHECK(report.unpack_ok);
+    CHECK(report.init_held);
+    CHECK(report.postinst_ran);
+    CHECK(report.postinst_ok);
+    CHECK(report.init_restored);
+    CHECK(scripted_install_succeeded(report));
+
+    // The exact order: extract, extract, preinst, unpack, postinst.
+    REQUIRE(world.commands.size() == 5U);
+    CHECK(world.commands[0][0] == "/opt/bin/tar");
+    CHECK(world.commands[1][0] == "/opt/bin/tar");
+    CHECK(world.commands[2][0] == "/opt/bin/sh");
+    CHECK(world.commands[3][0] == "/opt/bin/opkg");
+    CHECK(world.commands[4][0] == "/opt/bin/sh");
+    // The unpack installs the candidate's exact file with no extra flags.
+    CHECK(world.commands[3] == std::vector<std::string>{
+                                   "/opt/bin/opkg", "-o", "/", "-f",
+                                   "/opt/etc/opkg.conf", "install",
+                                   world.store.ipk_path(IpkSlot::candidate)
+                                       .string()});
+    CHECK(world.script_runs == std::vector<std::string>{
+                                   "preinst upgrade", "postinst configure"});
+    // While postinst ran, the init script was held aside; afterwards it is
+    // back and the held name is gone.
+    CHECK_FALSE(world.init_present_during_postinst);
+    CHECK(world.held_present_during_postinst);
+    std::error_code error;
+    CHECK(fs::exists(world.options.scripted.init_script, error));
+    CHECK_FALSE(fs::exists(world.options.scripted.held_init_script, error));
+    // The extraction scratch is cleaned up: data.tar.gz is too large to
+    // leave lying around.
+    CHECK_FALSE(fs::exists(world.store.directory() / "staging", error));
+}
+
+TEST_CASE("a scripted fresh install tells preinst it is an install") {
+    ScriptedWorld world;
+    world.adopt_candidate("1.2.5", "ipk 1.2.5");
+    auto txn = world.transaction();
+
+    ScriptedInstallReport report;
+    txn.scripted_install_candidate(/*upgrade=*/false, report);
+
+    CHECK(scripted_install_succeeded(report));
+    REQUIRE_FALSE(world.script_runs.empty());
+    CHECK(world.script_runs.front() == "preinst install");
+    // No init script existed (nothing is installed), so nothing was held
+    // and there was nothing to restore.
+    CHECK_FALSE(report.init_held);
+    CHECK(report.init_restored);
+}
+
+TEST_CASE("a scripted reinstall keeps the exact-rollback opkg flags") {
+    ScriptedWorld world;
+    world.adopt_current("1.2.4", "ipk 1.2.4");
+    world.lay_init_script();
+    auto txn = world.transaction();
+
+    ScriptedInstallReport report;
+    txn.scripted_reinstall_current("1.2.4", report);
+
+    CHECK(scripted_install_succeeded(report));
+    REQUIRE(world.commands.size() == 5U);
+    CHECK(world.commands[3] == std::vector<std::string>{
+                                   "/opt/bin/opkg", "-o", "/", "-f",
+                                   "/opt/etc/opkg.conf", "install",
+                                   "--force-downgrade", "--force-reinstall",
+                                   world.store.ipk_path(IpkSlot::current)
+                                       .string()});
+    // The reinstall is an upgrade to the maintainer scripts: the package is
+    // installed and its files are being replaced.
+    CHECK(world.script_runs.front() == "preinst upgrade");
+}
+
+TEST_CASE("scripted install refusals name the slot and issue no command") {
+    ScriptedWorld world;
+    auto txn = world.transaction();
+    ScriptedInstallReport report;
+    CHECK_THROWS_AS(txn.scripted_install_candidate(true, report),
+                    ComponentPackageRefused);
+    CHECK_THROWS_AS(txn.scripted_reinstall_current("1.2.4", report),
+                    ComponentPackageRefused);
+    world.adopt_current("1.2.4", "ipk 1.2.4");
+    CHECK_THROWS_AS(txn.scripted_reinstall_current("1.2.3", report),
+                    ComponentPackageRefused);
+    CHECK(world.commands.empty());
+}
+
+TEST_CASE("a package whose archive cannot be opened mutates nothing") {
+    ScriptedWorld world;
+    world.adopt_candidate("1.2.5", "ipk 1.2.5");
+    auto txn = world.transaction();
+    ScriptedInstallReport report;
+
+    SUBCASE("the outer extraction fails") { world.outer_tar_exit = 1; }
+    SUBCASE("the archive has no control.tar.gz") {
+        world.lay_control_archive = false;
+    }
+    SUBCASE("the control archive fails to extract") {
+        world.control_tar_exit = 1;
+    }
+
+    txn.scripted_install_candidate(true, report);
+    CHECK_FALSE(report.scripts_extracted);
+    CHECK_FALSE(report.mutation_started);
+    CHECK_FALSE(report.preinst_ran);
+    CHECK_FALSE(scripted_install_succeeded(report));
+    // No opkg command, no shell command: nothing was mutated.
+    for (const auto& argv : world.commands) {
+        CHECK(argv[0] == "/opt/bin/tar");
+    }
+}
+
+TEST_CASE("a failed preinst stops the flow before the package manager") {
+    ScriptedWorld world;
+    world.adopt_candidate("1.2.5", "ipk 1.2.5");
+    world.preinst_exit = 1;
+    auto txn = world.transaction();
+    ScriptedInstallReport report;
+    txn.scripted_install_candidate(true, report);
+
+    CHECK(report.scripts_extracted);
+    CHECK(report.preinst_ran);
+    CHECK_FALSE(report.preinst_ok);
+    CHECK_FALSE(report.mutation_started);
+    CHECK_FALSE(report.postinst_ran);
+    CHECK_FALSE(scripted_install_succeeded(report));
+    for (const auto& argv : world.commands) {
+        CHECK(argv[0] != "/opt/bin/opkg");
+    }
+}
+
+TEST_CASE("a failed unpack skips postinst and never touches the init script") {
+    ScriptedWorld world;
+    world.adopt_candidate("1.2.5", "ipk 1.2.5");
+    world.lay_init_script();
+    world.unpack_exit = 1;
+    auto txn = world.transaction();
+    ScriptedInstallReport report;
+    txn.scripted_install_candidate(true, report);
+
+    CHECK(report.mutation_started);
+    CHECK_FALSE(report.unpack_ok);
+    CHECK_FALSE(report.postinst_ran);
+    CHECK_FALSE(report.init_held);
+    CHECK_FALSE(scripted_install_succeeded(report));
+    std::error_code error;
+    CHECK(fs::exists(world.options.scripted.init_script, error));
+    CHECK_FALSE(fs::exists(world.options.scripted.held_init_script, error));
+}
+
+TEST_CASE("a failed postinst still puts the init script back") {
+    ScriptedWorld world;
+    world.adopt_candidate("1.2.5", "ipk 1.2.5");
+    world.lay_init_script();
+    world.postinst_exit = 1;
+    auto txn = world.transaction();
+    ScriptedInstallReport report;
+    txn.scripted_install_candidate(true, report);
+
+    CHECK(report.unpack_ok);
+    CHECK(report.postinst_ran);
+    CHECK_FALSE(report.postinst_ok);
+    CHECK(report.init_held);
+    CHECK(report.init_restored);
+    CHECK_FALSE(scripted_install_succeeded(report));
+    std::error_code error;
+    CHECK(fs::exists(world.options.scripted.init_script, error));
+    CHECK_FALSE(fs::exists(world.options.scripted.held_init_script, error));
+}
+
+TEST_CASE("a package without a postinst needs no hold at all") {
+    ScriptedWorld world;
+    world.adopt_candidate("1.2.5", "ipk 1.2.5");
+    world.lay_init_script();
+    world.with_postinst = false;
+    auto txn = world.transaction();
+    ScriptedInstallReport report;
+    txn.scripted_install_candidate(true, report);
+
+    CHECK(report.unpack_ok);
+    CHECK_FALSE(report.postinst_ran);
+    CHECK(report.postinst_ok);
+    CHECK_FALSE(report.init_held);
+    CHECK(scripted_install_succeeded(report));
+    CHECK(report.notes.find("no postinst") != std::string::npos);
+}
+
+TEST_CASE("an unholdable init script keeps postinst from running") {
+    ScriptedWorld world;
+    world.adopt_candidate("1.2.5", "ipk 1.2.5");
+    world.lay_init_script();
+    // A non-empty directory at the held name: the hold rename has nowhere
+    // to go.
+    fs::create_directories(world.options.scripted.held_init_script /
+                           "occupied");
+    auto txn = world.transaction();
+    ScriptedInstallReport report;
+    txn.scripted_install_candidate(true, report);
+
+    CHECK(report.unpack_ok);
+    CHECK_FALSE(report.init_held);
+    CHECK_FALSE(report.postinst_ran);
+    CHECK_FALSE(report.postinst_ok);
+    CHECK_FALSE(scripted_install_succeeded(report));
+    CHECK(report.notes.find("could not be held aside") != std::string::npos);
+    // The init script itself was never moved.
+    std::error_code error;
+    CHECK(fs::exists(world.options.scripted.init_script, error));
+}
+
+TEST_CASE("a stale held copy from an interrupted run is replaced by the hold") {
+    ScriptedWorld world;
+    world.adopt_candidate("1.2.5", "ipk 1.2.5");
+    world.lay_init_script();
+    write_file(world.options.scripted.held_init_script, "stale old copy");
+    auto txn = world.transaction();
+    ScriptedInstallReport report;
+    txn.scripted_install_candidate(true, report);
+
+    CHECK(scripted_install_succeeded(report));
+    // The restore consumed the held name; what is at the init path is the
+    // file the unpack laid, not the stale copy.
+    std::error_code error;
+    CHECK(fs::exists(world.options.scripted.init_script, error));
+    CHECK_FALSE(fs::exists(world.options.scripted.held_init_script, error));
+}
+
+TEST_CASE("the caller's service stop runs between preinst and the unpack") {
+    ScriptedWorld world;
+    world.adopt_candidate("1.2.5", "ipk 1.2.5");
+    world.lay_init_script();
+    auto txn = world.transaction();
+
+    ScriptedInstallReport report;
+    std::size_t commands_at_stop = 0;
+    std::size_t scripts_at_stop = 0;
+    int stop_calls = 0;
+    txn.scripted_install_candidate(
+        /*upgrade=*/true, report, [&](std::string& notes) {
+            ++stop_calls;
+            commands_at_stop = world.commands.size();
+            scripts_at_stop = world.script_runs.size();
+            notes += "service stopped\n";
+            return true;
+        });
+
+    CHECK(scripted_install_succeeded(report));
+    CHECK(report.service_stop_ran);
+    CHECK(report.service_stop_ok);
+    CHECK(stop_calls == 1);
+    // After the two extractions and preinst, before opkg: exactly the old
+    // prerm's slot.
+    CHECK(commands_at_stop == 3U);
+    CHECK(scripts_at_stop == 1U);
+    CHECK(report.notes.find("service stopped") != std::string::npos);
+}
+
+TEST_CASE("a service that cannot be stopped keeps its files") {
+    ScriptedWorld world;
+    world.adopt_candidate("1.2.5", "ipk 1.2.5");
+    world.lay_init_script();
+    auto txn = world.transaction();
+
+    ScriptedInstallReport report;
+    txn.scripted_install_candidate(
+        /*upgrade=*/true, report,
+        [&](std::string&) { return false; });
+
+    CHECK(report.service_stop_ran);
+    CHECK_FALSE(report.service_stop_ok);
+    CHECK_FALSE(report.mutation_started);
+    CHECK_FALSE(report.postinst_ran);
+    CHECK_FALSE(scripted_install_succeeded(report));
+    CHECK(report.notes.find("could not be proven stopped") !=
+          std::string::npos);
+    // preinst ran; the package manager did not.
+    for (const auto& argv : world.commands) {
+        CHECK(argv[0] != "/opt/bin/opkg");
+    }
+}
+
+TEST_CASE("the extraction scratch is removed on early exits too") {
+    ScriptedWorld world;
+    world.adopt_candidate("1.2.5", "ipk 1.2.5");
+    world.lay_init_script();
+    auto txn = world.transaction();
+    ScriptedInstallReport report;
+
+    SUBCASE("failed preinst") { world.preinst_exit = 1; }
+    SUBCASE("failed unpack") { world.unpack_exit = 1; }
+    SUBCASE("failed postinst") { world.postinst_exit = 1; }
+    SUBCASE("package without postinst") { world.with_postinst = false; }
+
+    txn.scripted_install_candidate(true, report);
+    std::error_code error;
+    CHECK_FALSE(fs::exists(world.store.directory() / "staging", error));
+}
+
+TEST_CASE("a restore that fails leaves the held name for boot recovery") {
+    ScriptedWorld world;
+    world.adopt_candidate("1.2.5", "ipk 1.2.5");
+    world.lay_init_script();
+    world.occupy_init_path_during_postinst = true;
+    auto txn = world.transaction();
+    ScriptedInstallReport report;
+    txn.scripted_install_candidate(true, report);
+
+    CHECK(report.postinst_ok);
+    CHECK(report.init_held);
+    CHECK_FALSE(report.init_restored);
+    CHECK_FALSE(scripted_install_succeeded(report));
+    CHECK(report.notes.find("boot recovery restores it") !=
+          std::string::npos);
+    std::error_code error;
+    CHECK(fs::exists(world.options.scripted.held_init_script, error));
+}
+
 } // namespace keen_pbr3
