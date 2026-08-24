@@ -2958,7 +2958,8 @@ void Daemon::handle_sighup() {
         }
 
         const std::string config_path = config_path_;
-        const Config rollback_config = config_store_.active_config();
+        const auto rollback_snapshot =
+            config_store_.pin_active_snapshot();
         const std::uint64_t expected_runtime_generation =
             runtime_generation_.load(std::memory_order_acquire);
         const TraceId trace_id = ensure_trace_id();
@@ -2967,7 +2968,7 @@ void Daemon::handle_sighup() {
             "sighup-reload-prepare",
             [this,
              config_path,
-             rollback_config,
+             rollback_snapshot,
              claim,
              mutation_lease,
              expected_runtime_generation,
@@ -3005,7 +3006,7 @@ void Daemon::handle_sighup() {
                             next_config,
                             RemoteListPreparationMode::RefreshAll);
                         *rollback_prepared = prepare_runtime_inputs(
-                            rollback_config,
+                            rollback_snapshot->config,
                             RemoteListPreparationMode::None);
                     } catch (const std::exception& error) {
                         preparation_error = error.what();
