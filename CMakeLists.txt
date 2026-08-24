@@ -609,6 +609,7 @@ if(WITH_API)
     src/api/handler_connections.cpp
     src/api/handler_nfqws.cpp
     src/api/handler_logs.cpp
+    src/api/router_info_cache.cpp
     src/api/handler_router_info.cpp
     src/api/handler_catalog.cpp
     src/api/handler_catalog_setup.cpp

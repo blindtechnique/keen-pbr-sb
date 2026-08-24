@@ -1,6 +1,7 @@
 #ifdef WITH_API
 
 #include "handler_router_info.hpp"
+#include "router_info_cache.hpp"
 
 #include "../http/http_client.hpp"
 #include "../log/logger.hpp"
@@ -8,11 +9,11 @@
 #include <algorithm>
 #include <chrono>
 #include <fstream>
-#include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 #include <sys/statvfs.h>
 
@@ -21,9 +22,12 @@ namespace keen_pbr3 {
 namespace {
 
 constexpr const char* kRciBase = "http://127.0.0.1:79/rci";
-// The overview page polls; without a cache every visitor would fan out into
-// half a dozen RCI calls against the firmware's single-threaded web server.
-constexpr auto kCacheTtl = std::chrono::seconds(5);
+// The overview refetches every 15 seconds. A 30-second accepted snapshot keeps
+// that cadence useful without fanning out five RCI requests on every poll.
+constexpr auto kCacheTtl = std::chrono::seconds(30);
+// Five RCI calls per failed attempt at most twice a minute stays within the
+// router-info ownership budget even when RCI is wholly absent (OpenWrt).
+constexpr auto kFailureRetry = std::chrono::seconds(30);
 
 std::optional<nlohmann::json> rci_get(const std::string& path) {
     try {
@@ -36,6 +40,72 @@ std::optional<nlohmann::json> rci_get(const std::string& path) {
         // is simply absent on OpenWrt builds. Neither is worth logging loudly.
         return std::nullopt;
     }
+}
+
+bool has_string_field(const nlohmann::json& value, const char* field) {
+    const auto found = value.find(field);
+    return found != value.end() && found->is_string();
+}
+
+bool has_number_field(const nlohmann::json& value, const char* field) {
+    const auto found = value.find(field);
+    return found != value.end() && found->is_number();
+}
+
+bool has_boolean_field(const nlohmann::json& value, const char* field) {
+    const auto found = value.find(field);
+    return found != value.end() && found->is_boolean();
+}
+
+bool authoritative_version(const std::optional<nlohmann::json>& value) {
+    if (!value || !value->is_object()) {
+        return false;
+    }
+    return has_string_field(*value, "model") ||
+           has_string_field(*value, "vendor") ||
+           has_string_field(*value, "release") ||
+           has_string_field(*value, "title") ||
+           has_string_field(*value, "arch") ||
+           (value->contains("ndm") && value->at("ndm").is_object());
+}
+
+bool authoritative_system(const std::optional<nlohmann::json>& value) {
+    if (!value || !value->is_object()) {
+        return false;
+    }
+    return has_number_field(*value, "cpuload") ||
+           has_number_field(*value, "conntotal") ||
+           has_number_field(*value, "connfree");
+}
+
+bool authoritative_internet(const std::optional<nlohmann::json>& value) {
+    if (!value || !value->is_object()) {
+        return false;
+    }
+    return has_boolean_field(*value, "internet") ||
+           (value->contains("gateway") &&
+            value->at("gateway").is_object());
+}
+
+bool authoritative_hotspot(const std::optional<nlohmann::json>& value) {
+    if (!value || !value->is_object()) {
+        return false;
+    }
+    const auto hosts = value->find("host");
+    return hosts != value->end() && hosts->is_array();
+}
+
+bool authoritative_interface(const nlohmann::json& value) {
+    if (!value.is_object()) {
+        return false;
+    }
+    return has_string_field(value, "id") ||
+           has_string_field(value, "type") ||
+           has_string_field(value, "description") ||
+           has_string_field(value, "state") ||
+           has_string_field(value, "address") ||
+           has_boolean_field(value, "connected") ||
+           value.contains("link");
 }
 
 std::string read_text_file(const std::string& path) {
@@ -128,28 +198,33 @@ std::optional<int> cpu_temperature() {
 
 // The WAN address is taken from the interface the firmware itself considers
 // the default gateway. Matching on names like "ISP" only works on one router.
-std::optional<std::string> wan_address(const nlohmann::json& internet_status) {
+struct WanAddressResult {
+    std::optional<std::string> address;
+    bool success{true};
+};
+
+WanAddressResult wan_address(const nlohmann::json& internet_status) {
     if (!internet_status.is_object()) {
-        return std::nullopt;
+        return {};
     }
     const auto gateway = internet_status.find("gateway");
     if (gateway == internet_status.end() || !gateway->is_object()) {
-        return std::nullopt;
+        return {};
     }
     const auto interface_id = gateway->value("interface", std::string{});
     if (interface_id.empty()) {
-        return std::nullopt;
+        return {};
     }
 
     const auto interface = rci_get("/show/interface/" + interface_id);
-    if (!interface || !interface->is_object()) {
-        return std::nullopt;
+    if (!interface || !authoritative_interface(*interface)) {
+        return {std::nullopt, false};
     }
     const auto address = interface->value("address", std::string{});
     if (address.empty()) {
-        return std::nullopt;
+        return {};
     }
-    return address;
+    return {address, true};
 }
 
 struct ClientCounts {
@@ -178,14 +253,21 @@ ClientCounts count_clients(const nlohmann::json& hotspot) {
     return counts;
 }
 
-nlohmann::json build_router_info() {
+RouterInfoCache::FetchResult build_router_info() {
     nlohmann::json out;
 
-    const auto version = rci_get("/show/version").value_or(nlohmann::json::object());
-    const auto system = rci_get("/show/system").value_or(nlohmann::json::object());
+    const auto version_result = rci_get("/show/version");
+    const auto system_result = rci_get("/show/system");
+    const auto internet_result = rci_get("/show/internet/status");
+    const auto hotspot_result = rci_get("/show/ip/hotspot");
+    const auto version =
+        version_result.value_or(nlohmann::json::object());
+    const auto system =
+        system_result.value_or(nlohmann::json::object());
     const auto internet =
-        rci_get("/show/internet/status").value_or(nlohmann::json::object());
-    const auto hotspot = rci_get("/show/ip/hotspot").value_or(nlohmann::json::object());
+        internet_result.value_or(nlohmann::json::object());
+    const auto hotspot =
+        hotspot_result.value_or(nlohmann::json::object());
 
     out["model"] = version.value("model", std::string{});
     out["vendor"] = version.value("vendor", std::string{});
@@ -260,8 +342,9 @@ nlohmann::json build_router_info() {
         online != internet.end() && online->is_boolean()) {
         out["internet"] = online->get<bool>();
     }
-    if (const auto address = wan_address(internet)) {
-        out["wan_address"] = *address;
+    const auto wan = wan_address(internet);
+    if (wan.address.has_value()) {
+        out["wan_address"] = *wan.address;
     }
 
     const auto clients = count_clients(hotspot);
@@ -279,22 +362,25 @@ nlohmann::json build_router_info() {
 
     out["available"] = !out["model"].get<std::string>().empty() ||
                        !out["cpu_model"].get<std::string>().empty();
-    return out;
+    return {
+        std::move(out),
+        authoritative_version(version_result) &&
+            authoritative_system(system_result) &&
+            authoritative_internet(internet_result) &&
+            authoritative_hotspot(hotspot_result) &&
+            wan.success,
+    };
 }
 
 nlohmann::json cached_router_info() {
-    static std::mutex mutex;
-    static nlohmann::json cached;
-    static std::chrono::steady_clock::time_point fetched_at{};
-
-    std::lock_guard<std::mutex> lock(mutex);
-    const auto now = std::chrono::steady_clock::now();
-    if (!cached.is_null() && now - fetched_at < kCacheTtl) {
-        return cached;
-    }
-    cached = build_router_info();
-    fetched_at = now;
-    return cached;
+    // A failed RCI refresh deliberately keeps one whole-generation LKG, so
+    // local /proc metrics freeze with it instead of producing a mixed-age
+    // response. Splitting local and RCI ownership is a separate later slice.
+    static RouterInfoCache cache(
+        [] { return build_router_info(); },
+        kCacheTtl,
+        kFailureRetry);
+    return cache.get();
 }
 
 } // namespace

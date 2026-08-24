@@ -183,6 +183,7 @@ add_executable(keen-pbr-tests
   test_list_refresh_task.cpp
   test_runtime_state_machine.cpp
   test_runtime_state_store.cpp
+  test_router_info_cache.cpp
   test_urltest_manager.cpp
   test_port_spec_util.cpp
   test_policy_rule.cpp
@@ -191,6 +192,7 @@ add_executable(keen-pbr-tests
   test_crash_diagnostics.cpp
   ../src/config/config.cpp
   ../src/daemon/config_store.cpp
+  ../src/api/router_info_cache.cpp
   ../src/daemon/daemon_core.cpp
   ../src/daemon/daemon_runtime.cpp
   ../src/daemon/daemon_resolver.cpp
@@ -720,6 +722,33 @@ keen_pbr_apply_project_options(keen-pbr-keenetic-dns-refresh-tests)
 add_test(
   NAME keen-pbr-keenetic-dns-refresh-tests
   COMMAND keen-pbr-keenetic-dns-refresh-tests
+)
+
+# Keep the router overview's RCI cache independently buildable. These tests
+# exercise cold-load single-flight, stale-while-refresh and failure retry
+# without linking the API server or performing any real network requests.
+add_executable(keen-pbr-router-info-cache-tests
+  test_main.cpp
+  test_router_info_cache.cpp
+  ../src/api/router_info_cache.cpp
+)
+set_target_properties(keen-pbr-router-info-cache-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_include_directories(keen-pbr-router-info-cache-tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+)
+target_link_libraries(keen-pbr-router-info-cache-tests PRIVATE
+  nlohmann_json::nlohmann_json
+  Threads::Threads
+)
+keen_pbr_apply_project_options(keen-pbr-router-info-cache-tests)
+add_test(
+  NAME keen-pbr-router-info-cache-tests
+  COMMAND keen-pbr-router-info-cache-tests
 )
 
 # Keep the resolver hook handoff independently buildable. These tests cover
