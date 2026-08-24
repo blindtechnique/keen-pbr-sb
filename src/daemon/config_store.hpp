@@ -3,6 +3,7 @@
 #include "../config/config.hpp"
 #include "../util/traced_mutex.hpp"
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -13,6 +14,9 @@ struct ActiveConfigSnapshot {
     Config config;
     OutboundMarkMap outbound_marks;
 };
+
+using ActiveConfigSnapshotHandle =
+    std::shared_ptr<const ActiveConfigSnapshot>;
 
 struct VisibleConfigSnapshot {
     Config config;
@@ -31,6 +35,7 @@ class ConfigStore {
 public:
     explicit ConfigStore(Config active_config = {});
 
+    ActiveConfigSnapshotHandle pin_active_snapshot() const;
     ActiveConfigSnapshot active_snapshot() const;
     Config active_config() const;
     OutboundMarkMap outbound_marks() const;
@@ -49,7 +54,7 @@ public:
             std::declval<const std::optional<Config>&>())) {
         KPBR_SHARED_LOCK(lock, mutex_);
         return std::forward<Projection>(projection)(
-            active_config_, staged_config_);
+            active_snapshot_->config, staged_config_);
     }
     bool config_is_draft() const;
 
@@ -66,8 +71,7 @@ public:
 
 private:
     mutable TracedSharedMutex mutex_;
-    Config active_config_ GUARDED_BY(mutex_);
-    OutboundMarkMap active_outbound_marks_ GUARDED_BY(mutex_);
+    ActiveConfigSnapshotHandle active_snapshot_ GUARDED_BY(mutex_);
     std::optional<Config> staged_config_ GUARDED_BY(mutex_);
     std::optional<std::string> staged_config_json_ GUARDED_BY(mutex_);
     std::optional<std::string> staged_base_revision_ GUARDED_BY(mutex_);

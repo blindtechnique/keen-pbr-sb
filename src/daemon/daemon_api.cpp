@@ -1018,8 +1018,8 @@ void Daemon::setup_api() {
         },
         [this]() {
             const auto active_snapshot =
-                config_store_.active_snapshot();
-            const Config& config_snapshot = active_snapshot.config;
+                config_store_.pin_active_snapshot();
+            const Config& config_snapshot = active_snapshot->config;
             const auto runtime_snapshot = runtime_state_store_.snapshot();
 
             return build_runtime_outbounds_response(
@@ -1032,7 +1032,7 @@ void Daemon::setup_api() {
                     }
                     return it->second;
                 },
-                [this, &active_snapshot, &config_snapshot](
+                [this, active_snapshot, &config_snapshot](
                     const std::string& tag)
                     -> std::optional<InterfaceProbeResult> {
                     if (!config_snapshot.outbounds.has_value()) {
@@ -1047,7 +1047,7 @@ void Daemon::setup_api() {
                                    candidate.type == OutboundType::INTERFACE;
                         });
                     const auto& marks =
-                        active_snapshot.outbound_marks;
+                        active_snapshot->outbound_marks;
                     const auto mark = marks.find(tag);
                     if (stable_outbound == outbounds.end() ||
                         mark == marks.end()) {
@@ -1627,8 +1627,9 @@ void Daemon::setup_api() {
     // labelled "measured 12 s ago", and the age belongs to the probe rather
     // than to the outbound state schema.
     api_server_->get("/api/system/probes", [this]() -> std::string {
-        const auto active_snapshot = config_store_.active_snapshot();
-        const Config& config_snapshot = active_snapshot.config;
+        const auto active_snapshot =
+            config_store_.pin_active_snapshot();
+        const Config& config_snapshot = active_snapshot->config;
         const auto now = std::chrono::steady_clock::now();
 
         nlohmann::json response;
@@ -1640,7 +1641,7 @@ void Daemon::setup_api() {
             if (outbound.type != OutboundType::INTERFACE) {
                 continue;
             }
-            const auto& marks = active_snapshot.outbound_marks;
+            const auto& marks = active_snapshot->outbound_marks;
             const auto mark = marks.find(outbound.tag);
             if (mark == marks.end()) {
                 continue;

@@ -2889,9 +2889,9 @@ Daemon::RoutingTestSnapshot Daemon::capture_routing_test_snapshot() {
         throw std::logic_error(
             "routing test snapshot must be captured on the control loop");
     }
-    const auto active = config_store_.active_snapshot();
+    const auto active = config_store_.pin_active_snapshot();
     return RoutingTestSnapshot{
-        active.config,
+        active->config,
         firewall_state_.get_rules(),
         firewall_->backend(),
         config_store_.config_is_draft(),

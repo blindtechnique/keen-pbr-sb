@@ -2,8 +2,15 @@
 
 #include "../src/daemon/config_store.hpp"
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <functional>
+#include <future>
+#include <mutex>
+#include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -191,11 +198,135 @@ TEST_CASE("active snapshot keeps a reused interface tag and mark generation toge
     CHECK(independently_read_marks.at("reused-interface") == new_mark);
 
     // The production probe readers now use this one locked generation.
-    const auto active = store.active_snapshot();
-    REQUIRE(active.config.outbounds.has_value());
-    REQUIRE(active.config.outbounds->front().interface.has_value());
-    CHECK(*active.config.outbounds->front().interface == "nwg-new");
-    CHECK(active.outbound_marks.at("reused-interface") == new_mark);
+    const auto active = store.pin_active_snapshot();
+    REQUIRE(active->config.outbounds.has_value());
+    REQUIRE(active->config.outbounds->front().interface.has_value());
+    CHECK(*active->config.outbounds->front().interface == "nwg-new");
+    CHECK(active->outbound_marks.at("reused-interface") == new_mark);
+}
+
+TEST_CASE("pinned active snapshot remains valid after a replacement") {
+    constexpr std::uint32_t old_mark = 0x10000U;
+    constexpr std::uint32_t new_mark = 0x90000U;
+    const auto old_config =
+        interface_config_named("old-generation", "nwg-old");
+    const auto new_config =
+        interface_config_named("new-generation", "nwg-new");
+    ConfigStore store(old_config);
+    store.replace_active(
+        old_config,
+        OutboundMarkMap{{"reused-interface", old_mark}});
+
+    const auto pinned_old = store.pin_active_snapshot();
+    store.replace_active(
+        new_config,
+        OutboundMarkMap{{"reused-interface", new_mark}});
+    const auto pinned_new = store.pin_active_snapshot();
+
+    REQUIRE(pinned_old != pinned_new);
+    REQUIRE(pinned_old->config.outbounds.has_value());
+    REQUIRE(pinned_new->config.outbounds.has_value());
+    CHECK(
+        pinned_old->config.outbounds->front().interface ==
+        std::optional<std::string>{"nwg-old"});
+    CHECK(
+        pinned_new->config.outbounds->front().interface ==
+        std::optional<std::string>{"nwg-new"});
+    CHECK(
+        pinned_old->outbound_marks.at("reused-interface") ==
+        old_mark);
+    CHECK(
+        pinned_new->outbound_marks.at("reused-interface") ==
+        new_mark);
+}
+
+TEST_CASE(
+    "concurrent active snapshot pins never mix config and mark generations") {
+    constexpr std::uint32_t left_mark = 0x10000U;
+    constexpr std::uint32_t right_mark = 0x90000U;
+    const auto left_config =
+        interface_config_named("left-generation", "nwg-left");
+    const auto right_config =
+        interface_config_named("right-generation", "nwg-right");
+    ConfigStore store(left_config);
+    store.replace_active(
+        left_config,
+        OutboundMarkMap{{"reused-interface", left_mark}});
+
+    std::atomic<bool> stop{false};
+    std::atomic<bool> incoherent{false};
+    std::atomic<std::size_t> observations{0U};
+    std::promise<void> first_ready_signal;
+    std::promise<void> second_ready_signal;
+    auto first_ready = first_ready_signal.get_future();
+    auto second_ready = second_ready_signal.get_future();
+    std::promise<void> start_signal;
+    const auto start = start_signal.get_future().share();
+    std::promise<void> first_observation_signal;
+    auto first_observation = first_observation_signal.get_future();
+    std::once_flag first_observation_once;
+
+    const auto reader = [&](std::promise<void>& ready_signal) {
+        ready_signal.set_value();
+        start.wait();
+        while (!stop.load(std::memory_order_acquire)) {
+            const auto snapshot = store.pin_active_snapshot();
+            if (!snapshot->config.outbounds.has_value() ||
+                snapshot->config.outbounds->empty()) {
+                incoherent.store(true, std::memory_order_release);
+                continue;
+            }
+            const auto& outbound = snapshot->config.outbounds->front();
+            const auto mark =
+                snapshot->outbound_marks.find("reused-interface");
+            const bool is_left =
+                outbound.interface ==
+                    std::optional<std::string>{"nwg-left"} &&
+                mark != snapshot->outbound_marks.end() &&
+                mark->second == left_mark;
+            const bool is_right =
+                outbound.interface ==
+                    std::optional<std::string>{"nwg-right"} &&
+                mark != snapshot->outbound_marks.end() &&
+                mark->second == right_mark;
+            if (!is_left && !is_right) {
+                incoherent.store(true, std::memory_order_release);
+            }
+            observations.fetch_add(1U, std::memory_order_relaxed);
+            std::call_once(first_observation_once, [&]() {
+                first_observation_signal.set_value();
+            });
+        }
+    };
+
+    std::thread first_reader(reader, std::ref(first_ready_signal));
+    std::thread second_reader(reader, std::ref(second_ready_signal));
+    constexpr auto wait_budget = std::chrono::seconds{5};
+    const auto first_ready_status = first_ready.wait_for(wait_budget);
+    const auto second_ready_status = second_ready.wait_for(wait_budget);
+    start_signal.set_value();
+    for (std::size_t index = 0; index < 2000U; ++index) {
+        if (index % 2U == 0U) {
+            store.replace_active(
+                right_config,
+                OutboundMarkMap{{"reused-interface", right_mark}});
+        } else {
+            store.replace_active(
+                left_config,
+                OutboundMarkMap{{"reused-interface", left_mark}});
+        }
+    }
+    const auto observation_status =
+        first_observation.wait_for(wait_budget);
+    stop.store(true, std::memory_order_release);
+    first_reader.join();
+    second_reader.join();
+
+    CHECK(first_ready_status == std::future_status::ready);
+    CHECK(second_ready_status == std::future_status::ready);
+    CHECK(observation_status == std::future_status::ready);
+    CHECK(observations.load(std::memory_order_relaxed) > 0U);
+    CHECK_FALSE(incoherent.load(std::memory_order_acquire));
 }
 
 } // namespace keen_pbr3
