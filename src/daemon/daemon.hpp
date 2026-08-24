@@ -45,6 +45,7 @@
 #include "../routing/route_table.hpp"
 #include "../runtime/lifecycle_operation.hpp"
 #include "../runtime/list_refresh_task.hpp"
+#include "../runtime/meta_udp_443_activation_plan.hpp"
 #include "../runtime/periodic_task_metrics.hpp"
 #include "../runtime/conntrack_manager.hpp"
 #include "../runtime/idle_stall_detector.hpp"
@@ -290,19 +291,6 @@ struct PreparedRuntimeInputs {
     InternalVpnRuntimeResolution internal_vpn_resolution;
     InternalVpnServiceRuntimeResolution internal_vpn_service_resolution;
     bool remote_lists_refreshed{false};
-};
-
-struct MetaUdp443ActivationPlan {
-    std::uint32_t expected_fwmark{0U};
-    std::uint32_t owned_mask{0U};
-    // The current authoritative mark plus, during an in-process route-mark
-    // transition, the one previously committed messages-first mark. No other
-    // owned mark is eligible for destructive cleanup.
-    std::set<std::uint32_t> cleanup_owned_marks;
-    std::vector<std::string> destination_selectors;
-    bool ipv6_enabled{false};
-    bool allow_unmarked_cleanup{false};
-    std::vector<ConntrackExactForwardedFlow> exact_flows;
 };
 
 struct PendingMetaUdp443ActivationCleanup {
