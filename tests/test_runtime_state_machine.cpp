@@ -948,11 +948,606 @@ TEST_CASE(
     CHECK(control_claim->phase ==
           RuntimeFirewallOperationPhase::control_pending);
     CHECK(coordinator.retry_pending());
-    CHECK_FALSE(coordinator.complete_operation(*running_claim));
+    CHECK_FALSE(coordinator.complete_operation(*running_claim).owned);
 
-    CHECK(coordinator.complete_operation(*control_claim));
+    CHECK(coordinator.complete_operation(*control_claim).owned);
     CHECK_FALSE(coordinator.retry_pending());
     CHECK_FALSE(coordinator.operation_is_current(*control_claim));
+}
+
+TEST_CASE(
+    "runtime firewall operation survives an inline handoff then scheduler throw") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    std::optional<RuntimeFirewallOperationClaim> queued_claim;
+
+    CHECK_THROWS_AS(
+        coordinator.schedule_operation(
+            0,
+            /*runtime_generation=*/17,
+            /*bounded_retry_count=*/6,
+            {},
+            [](const RuntimeFirewallRetryPlan&, auto callback) -> int {
+                callback();
+                throw std::runtime_error("post-registration failure");
+            },
+            [](std::uint64_t) { return true; },
+            [&](RuntimeFirewallOperationClaim claim, OwnedSnatRecovery) {
+                queued_claim = claim;
+            }),
+        std::runtime_error);
+
+    REQUIRE(queued_claim.has_value());
+    CHECK(coordinator.operation_is_current(*queued_claim));
+    const auto running_claim = coordinator.begin_worker(*queued_claim);
+    REQUIRE(running_claim.has_value());
+    const auto control_claim = coordinator.begin_control(*running_claim);
+    REQUIRE(control_claim.has_value());
+    CHECK(coordinator.complete_operation(*control_claim).owned);
+}
+
+TEST_CASE(
+    "runtime firewall worker survives an inline queue handoff then throw") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    std::optional<RuntimeFirewallOperationClaim> running_claim;
+
+    CHECK_THROWS_AS(
+        coordinator.schedule_operation(
+            0,
+            /*runtime_generation=*/17,
+            /*bounded_retry_count=*/6,
+            {},
+            [](const RuntimeFirewallRetryPlan&, auto callback) {
+                callback();
+                return 41;
+            },
+            [](std::uint64_t) { return true; },
+            [&](RuntimeFirewallOperationClaim claim, OwnedSnatRecovery) {
+                running_claim = coordinator.begin_worker(claim);
+                if (!running_claim.has_value()) {
+                    throw std::logic_error("worker handoff failed");
+                }
+                throw std::runtime_error("executor failed after handoff");
+            }),
+        std::runtime_error);
+
+    REQUIRE(running_claim.has_value());
+    CHECK(coordinator.operation_is_current(*running_claim));
+    const auto control_claim = coordinator.begin_control(*running_claim);
+    REQUIRE(control_claim.has_value());
+    CHECK(coordinator.complete_operation(*control_claim).owned);
+}
+
+TEST_CASE("runtime firewall async schedule reports task-id rejection") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    const auto plan = coordinator.schedule_operation(
+        0,
+        /*runtime_generation=*/17,
+        /*bounded_retry_count=*/6,
+        {},
+        [](const RuntimeFirewallRetryPlan&, auto) { return -1; },
+        [](std::uint64_t) { return true; },
+        [](RuntimeFirewallOperationClaim, OwnedSnatRecovery) {});
+
+    CHECK_FALSE(plan.schedule);
+    CHECK_FALSE(coordinator.retry_pending());
+}
+
+TEST_CASE(
+    "deferred firewall operation survives inline handoff then scheduler throw") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    std::optional<RuntimeFirewallOperationClaim> queued_claim;
+
+    CHECK_THROWS_AS(
+        coordinator.defer_same_attempt_operation(
+            3,
+            /*runtime_generation=*/17,
+            {},
+            [](auto callback) -> int {
+                callback();
+                throw std::runtime_error("post-registration failure");
+            },
+            [](std::uint64_t) { return true; },
+            [&](RuntimeFirewallOperationClaim claim, OwnedSnatRecovery) {
+                queued_claim = claim;
+            }),
+        std::runtime_error);
+
+    REQUIRE(queued_claim.has_value());
+    CHECK(coordinator.operation_is_current(*queued_claim));
+    CHECK(coordinator.cancel_operation(*queued_claim));
+}
+
+TEST_CASE(
+    "deferred firewall worker survives inline queue handoff then throw") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    std::optional<RuntimeFirewallOperationClaim> running_claim;
+
+    CHECK_THROWS_AS(
+        coordinator.defer_same_attempt_operation(
+            3,
+            /*runtime_generation=*/17,
+            {},
+            [](auto callback) {
+                callback();
+                return 41;
+            },
+            [](std::uint64_t) { return true; },
+            [&](RuntimeFirewallOperationClaim claim, OwnedSnatRecovery) {
+                running_claim = coordinator.begin_worker(claim);
+                if (!running_claim.has_value()) {
+                    throw std::logic_error("worker handoff failed");
+                }
+                throw std::runtime_error("executor failed after handoff");
+            }),
+        std::runtime_error);
+
+    REQUIRE(running_claim.has_value());
+    CHECK(coordinator.operation_is_current(*running_claim));
+    const auto control_claim = coordinator.begin_control(*running_claim);
+    REQUIRE(control_claim.has_value());
+    CHECK(coordinator.complete_operation(*control_claim).owned);
+}
+
+TEST_CASE(
+    "runtime firewall operation coalesces later generic events into one rerun") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    FakeRuntimeFirewallRetryScheduler scheduler;
+    const OwnedSnatRecovery owned{
+        /*requested=*/true,
+        /*missing_observed=*/true};
+    std::optional<RuntimeFirewallOperationClaim> queued_claim;
+    OwnedSnatRecovery worker_recovery;
+
+    REQUIRE(coordinator.schedule_operation(
+        0,
+        /*runtime_generation=*/17,
+        /*bounded_retry_count=*/6,
+        owned,
+        [&scheduler](const RuntimeFirewallRetryPlan& retry_plan,
+                     auto callback) {
+            return scheduler.schedule(retry_plan, std::move(callback));
+        },
+        [](std::uint64_t) { return true; },
+        [&](RuntimeFirewallOperationClaim claim, OwnedSnatRecovery recovery) {
+            queued_claim = claim;
+            worker_recovery = std::move(recovery);
+        }).schedule);
+    REQUIRE(scheduler.callbacks.size() == 1U);
+    scheduler.callbacks.front()();
+    REQUIRE(queued_claim.has_value());
+
+    const auto running_claim = coordinator.begin_worker(*queued_claim);
+    REQUIRE(running_claim.has_value());
+    const auto first_generic = coordinator.begin_attempt(0, {});
+    const auto second_generic = coordinator.begin_attempt(0, {});
+    CHECK(first_generic.coalesced);
+    CHECK(second_generic.coalesced);
+    CHECK(first_generic.recovery_revision ==
+          running_claim->recovery_revision);
+    CHECK(second_generic.recovery_revision ==
+          running_claim->recovery_revision);
+
+    const auto control_claim = coordinator.begin_control(*running_claim);
+    REQUIRE(control_claim.has_value());
+    const auto completion = coordinator.complete_operation(
+        *control_claim,
+        /*succeeded=*/true,
+        worker_recovery);
+    CHECK(completion.owned);
+    CHECK(completion.rerun_requested);
+    CHECK_FALSE(completion.snat_recovery.requested);
+    CHECK_FALSE(coordinator.retry_pending());
+    CHECK_FALSE(coordinator.owned_snat_recovery_pending());
+
+    // Both coalesced events produce one trailing intent, and a stale terminal
+    // callback cannot manufacture another one after ownership was released.
+    const auto stale_completion = coordinator.complete_operation(
+        *control_claim,
+        /*succeeded=*/true,
+        worker_recovery);
+    CHECK_FALSE(stale_completion.owned);
+    CHECK_FALSE(stale_completion.rerun_requested);
+}
+
+TEST_CASE(
+    "later identical SNAT observation survives an older worker success") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    FakeRuntimeFirewallRetryScheduler scheduler;
+    const OwnedSnatRecovery owned{
+        /*requested=*/true,
+        /*missing_observed=*/true};
+    std::optional<RuntimeFirewallOperationClaim> queued_claim;
+    OwnedSnatRecovery worker_recovery;
+
+    REQUIRE(coordinator.schedule_operation(
+        0,
+        /*runtime_generation=*/17,
+        /*bounded_retry_count=*/6,
+        owned,
+        [&scheduler](const RuntimeFirewallRetryPlan& retry_plan,
+                     auto callback) {
+            return scheduler.schedule(retry_plan, std::move(callback));
+        },
+        [](std::uint64_t) { return true; },
+        [&](RuntimeFirewallOperationClaim claim, OwnedSnatRecovery recovery) {
+            queued_claim = claim;
+            worker_recovery = std::move(recovery);
+        }).schedule);
+    REQUIRE(scheduler.callbacks.size() == 1U);
+    scheduler.callbacks.front()();
+    REQUIRE(queued_claim.has_value());
+    const auto running_claim = coordinator.begin_worker(*queued_claim);
+    REQUIRE(running_claim.has_value());
+
+    const auto later = coordinator.begin_attempt(0, owned);
+    CHECK(later.coalesced);
+    CHECK(later.recovery_revision > running_claim->recovery_revision);
+
+    const auto control_claim = coordinator.begin_control(*running_claim);
+    REQUIRE(control_claim.has_value());
+    auto forged_claim = *control_claim;
+    ++forged_claim.recovery_revision;
+    const auto forged_completion = coordinator.complete_operation(
+        forged_claim,
+        /*succeeded=*/true,
+        worker_recovery);
+    CHECK_FALSE(forged_completion.owned);
+    CHECK(coordinator.operation_is_current(*control_claim));
+    CHECK(coordinator.owned_snat_recovery_pending());
+
+    const auto completion = coordinator.complete_operation(
+        *control_claim,
+        /*succeeded=*/true,
+        worker_recovery);
+    CHECK(completion.owned);
+    CHECK(completion.rerun_requested);
+    CHECK(completion.snat_recovery.requested);
+    CHECK(completion.snat_recovery.missing_observed);
+    CHECK(coordinator.owned_snat_recovery_pending());
+}
+
+TEST_CASE(
+    "deferred operation captures the latest recovery without self coalescing") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    std::function<void()> timer_callback;
+    std::optional<RuntimeFirewallOperationClaim> queued_claim;
+    OwnedSnatRecovery worker_recovery;
+
+    REQUIRE(coordinator.defer_same_attempt_operation(
+        0,
+        /*runtime_generation=*/17,
+        OwnedSnatRecovery{
+            /*requested=*/true,
+            /*missing_observed=*/false},
+        [&](auto callback) {
+            timer_callback = std::move(callback);
+            return 41;
+        },
+        [](std::uint64_t) { return true; },
+        [&](RuntimeFirewallOperationClaim claim, OwnedSnatRecovery recovery) {
+            queued_claim = claim;
+            worker_recovery = std::move(recovery);
+        }));
+    REQUIRE(static_cast<bool>(timer_callback));
+
+    (void)coordinator.retain_recovery(OwnedSnatRecovery{
+        /*requested=*/true,
+        /*missing_observed=*/true});
+    timer_callback();
+    REQUIRE(queued_claim.has_value());
+    CHECK(worker_recovery.requested);
+    CHECK(worker_recovery.missing_observed);
+
+    const auto running_claim = coordinator.begin_worker(*queued_claim);
+    REQUIRE(running_claim.has_value());
+    const auto control_claim = coordinator.begin_control(*running_claim);
+    REQUIRE(control_claim.has_value());
+    const auto completion = coordinator.complete_operation(
+        *control_claim,
+        /*succeeded=*/true,
+        worker_recovery);
+    CHECK(completion.owned);
+    CHECK_FALSE(completion.rerun_requested);
+    CHECK_FALSE(coordinator.owned_snat_recovery_pending());
+}
+
+TEST_CASE(
+    "stale terminal callback cannot mutate successor recovery") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    FakeRuntimeFirewallRetryScheduler scheduler;
+    std::optional<RuntimeFirewallOperationClaim> first_claim;
+    OwnedSnatRecovery first_recovery;
+    const OwnedSnatRecovery old_recovery{
+        /*requested=*/true,
+        /*missing_observed=*/true};
+
+    REQUIRE(coordinator.schedule_operation(
+        0,
+        /*runtime_generation=*/17,
+        /*bounded_retry_count=*/6,
+        old_recovery,
+        [&scheduler](const RuntimeFirewallRetryPlan& retry_plan,
+                     auto callback) {
+            return scheduler.schedule(retry_plan, std::move(callback));
+        },
+        [](std::uint64_t) { return true; },
+        [&](RuntimeFirewallOperationClaim claim, OwnedSnatRecovery recovery) {
+            first_claim = claim;
+            first_recovery = std::move(recovery);
+        }).schedule);
+    REQUIRE(scheduler.callbacks.size() == 1U);
+    scheduler.callbacks.front()();
+    REQUIRE(first_claim.has_value());
+    const auto first_running = coordinator.begin_worker(*first_claim);
+    REQUIRE(first_running.has_value());
+    const auto first_control = coordinator.begin_control(*first_running);
+    REQUIRE(first_control.has_value());
+
+    CHECK(coordinator.complete_operation(*first_control).owned);
+    CHECK_FALSE(coordinator.retry_pending());
+
+    coordinator.clear_owned_snat_recovery();
+    const OwnedSnatRecovery successor_recovery{
+        /*requested=*/true,
+        /*missing_observed=*/false};
+    REQUIRE(coordinator.schedule_operation(
+        0,
+        /*runtime_generation=*/18,
+        /*bounded_retry_count=*/6,
+        successor_recovery,
+        [&scheduler](const RuntimeFirewallRetryPlan& retry_plan,
+                     auto callback) {
+            return scheduler.schedule(retry_plan, std::move(callback));
+        },
+        [](std::uint64_t generation) { return generation == 18U; },
+        [](RuntimeFirewallOperationClaim, OwnedSnatRecovery) {}).schedule);
+    REQUIRE(coordinator.retry_pending());
+
+    const auto stale_completion = coordinator.complete_operation(
+        *first_control,
+        /*succeeded=*/true,
+        first_recovery);
+    CHECK_FALSE(stale_completion.owned);
+    CHECK(coordinator.owned_snat_recovery_pending());
+    CHECK_FALSE(
+        coordinator.pending_owned_snat_recovery().missing_observed);
+}
+
+TEST_CASE("stale generation cancels an async operation before queueing") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    FakeRuntimeFirewallRetryScheduler scheduler;
+    std::size_t queued = 0U;
+    const OwnedSnatRecovery owned{
+        /*requested=*/true,
+        /*missing_observed=*/true};
+
+    REQUIRE(coordinator.schedule_operation(
+        0,
+        /*runtime_generation=*/17,
+        /*bounded_retry_count=*/6,
+        owned,
+        [&scheduler](const RuntimeFirewallRetryPlan& retry_plan,
+                     auto callback) {
+            return scheduler.schedule(retry_plan, std::move(callback));
+        },
+        [](std::uint64_t) { return false; },
+        [&](RuntimeFirewallOperationClaim, OwnedSnatRecovery) {
+            ++queued;
+        }).schedule);
+    REQUIRE(scheduler.callbacks.size() == 1U);
+    scheduler.callbacks.front()();
+
+    CHECK(queued == 0U);
+    CHECK_FALSE(coordinator.retry_pending());
+    CHECK(coordinator.owned_snat_recovery_pending());
+}
+
+TEST_CASE(
+    "stale async operation transfers one trailing intent to its terminal owner") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    FakeRuntimeFirewallRetryScheduler scheduler;
+    std::size_t queued = 0U;
+    std::size_t terminal_calls = 0U;
+    std::optional<RuntimeFirewallOperationCompletion> terminal;
+    const OwnedSnatRecovery owned{
+        /*requested=*/true,
+        /*missing_observed=*/true};
+
+    REQUIRE(coordinator.schedule_operation_with_terminal(
+        0,
+        /*runtime_generation=*/17,
+        /*bounded_retry_count=*/6,
+        owned,
+        [&scheduler](const RuntimeFirewallRetryPlan& retry_plan,
+                     auto callback) {
+            return scheduler.schedule(retry_plan, std::move(callback));
+        },
+        [&](std::uint64_t) {
+            const auto newer = coordinator.begin_attempt(0, {});
+            CHECK(newer.coalesced);
+            return false;
+        },
+        [&](RuntimeFirewallOperationClaim, OwnedSnatRecovery) {
+            ++queued;
+        },
+        [&](RuntimeFirewallOperationCompletion completion) {
+            ++terminal_calls;
+            terminal = std::move(completion);
+        }).schedule);
+    REQUIRE(scheduler.callbacks.size() == 1U);
+    scheduler.callbacks.front()();
+
+    CHECK(queued == 0U);
+    CHECK(terminal_calls == 1U);
+    REQUIRE(terminal.has_value());
+    CHECK(terminal->owned);
+    CHECK(terminal->rerun_requested);
+    CHECK_FALSE(terminal->snat_recovery.requested);
+    CHECK(coordinator.owned_snat_recovery_pending());
+    CHECK_FALSE(coordinator.retry_pending());
+}
+
+TEST_CASE(
+    "async queue rejection transfers the exact queued outcome once") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    FakeRuntimeFirewallRetryScheduler scheduler;
+    std::size_t terminal_calls = 0U;
+    std::optional<RuntimeFirewallOperationCompletion> terminal;
+    const OwnedSnatRecovery owned{
+        /*requested=*/true,
+        /*missing_observed=*/true};
+
+    REQUIRE(coordinator.schedule_operation_with_terminal(
+        0,
+        /*runtime_generation=*/17,
+        /*bounded_retry_count=*/6,
+        owned,
+        [&scheduler](const RuntimeFirewallRetryPlan& retry_plan,
+                     auto callback) {
+            return scheduler.schedule(retry_plan, std::move(callback));
+        },
+        [](std::uint64_t) { return true; },
+        [&](RuntimeFirewallOperationClaim, OwnedSnatRecovery) {
+            CHECK(coordinator.begin_attempt(0, {}).coalesced);
+            throw std::runtime_error("executor rejected queued operation");
+        },
+        [&](RuntimeFirewallOperationCompletion completion) {
+            ++terminal_calls;
+            terminal = std::move(completion);
+        }).schedule);
+    REQUIRE(scheduler.callbacks.size() == 1U);
+
+    CHECK_THROWS_AS(
+        scheduler.callbacks.front()(),
+        std::runtime_error);
+    CHECK(terminal_calls == 1U);
+    REQUIRE(terminal.has_value());
+    CHECK(terminal->owned);
+    CHECK(terminal->rerun_requested);
+    CHECK_FALSE(terminal->snat_recovery.requested);
+    CHECK(coordinator.owned_snat_recovery_pending());
+    CHECK_FALSE(coordinator.retry_pending());
+}
+
+TEST_CASE(
+    "deferred stale operation transfers its outcome to one terminal owner") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    std::function<void()> timer_callback;
+    std::size_t terminal_calls = 0U;
+    std::optional<RuntimeFirewallOperationCompletion> terminal;
+
+    REQUIRE(coordinator.defer_same_attempt_operation_with_terminal(
+        0,
+        /*runtime_generation=*/17,
+        {},
+        [&](auto callback) {
+            timer_callback = std::move(callback);
+            return 43;
+        },
+        [&](std::uint64_t) {
+            CHECK(coordinator.begin_attempt(0, {}).coalesced);
+            return false;
+        },
+        [](RuntimeFirewallOperationClaim, OwnedSnatRecovery) {},
+        [&](RuntimeFirewallOperationCompletion completion) {
+            ++terminal_calls;
+            terminal = std::move(completion);
+        }));
+    REQUIRE(static_cast<bool>(timer_callback));
+    timer_callback();
+
+    CHECK(terminal_calls == 1U);
+    REQUIRE(terminal.has_value());
+    CHECK(terminal->owned);
+    CHECK(terminal->rerun_requested);
+    CHECK_FALSE(coordinator.retry_pending());
+}
+
+TEST_CASE(
+    "async scheduler rejection transfers the original request back for one rearm") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    std::size_t queued = 0U;
+
+    const auto rejected = coordinator.schedule_operation(
+        0,
+        /*runtime_generation=*/17,
+        /*bounded_retry_count=*/6,
+        {},
+        [&](const RuntimeFirewallRetryPlan&, auto) {
+            CHECK(coordinator.begin_attempt(0, {}).coalesced);
+            return -1;
+        },
+        [](std::uint64_t) { return true; },
+        [](RuntimeFirewallOperationClaim, OwnedSnatRecovery) {});
+    CHECK_FALSE(rejected.schedule);
+    CHECK_FALSE(coordinator.retry_pending());
+
+    // A false schedule result is an explicit ownership transfer: the caller
+    // re-snapshots and re-arms the complete original request exactly once.
+    std::function<void()> timer_callback;
+    std::optional<RuntimeFirewallOperationClaim> queued_claim;
+    const auto rearmed = coordinator.schedule_operation(
+        0,
+        /*runtime_generation=*/17,
+        /*bounded_retry_count=*/6,
+        {},
+        [&](const RuntimeFirewallRetryPlan&, auto callback) {
+            timer_callback = std::move(callback);
+            return 42;
+        },
+        [](std::uint64_t) { return true; },
+        [&](RuntimeFirewallOperationClaim claim, OwnedSnatRecovery) {
+            ++queued;
+            queued_claim = claim;
+        });
+    REQUIRE(rearmed.schedule);
+    REQUIRE(static_cast<bool>(timer_callback));
+    timer_callback();
+    CHECK(queued == 1U);
+    REQUIRE(queued_claim.has_value());
+    CHECK(coordinator.cancel_operation(*queued_claim));
+}
+
+TEST_CASE(
+    "deferred async scheduler rejection preserves exact attempt and recovery") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    const OwnedSnatRecovery owned{
+        /*requested=*/true,
+        /*missing_observed=*/true};
+
+    CHECK_FALSE(coordinator.defer_same_attempt_operation(
+        3,
+        /*runtime_generation=*/17,
+        owned,
+        [](auto) { return -1; },
+        [](std::uint64_t) { return true; },
+        [](RuntimeFirewallOperationClaim, OwnedSnatRecovery) {}));
+    CHECK_FALSE(coordinator.retry_pending());
+    CHECK(coordinator.owned_snat_recovery_pending());
+
+    std::function<void()> timer_callback;
+    std::optional<RuntimeFirewallOperationClaim> queued_claim;
+    OwnedSnatRecovery queued_recovery;
+    REQUIRE(coordinator.defer_same_attempt_operation(
+        3,
+        /*runtime_generation=*/17,
+        {},
+        [&](auto callback) {
+            timer_callback = std::move(callback);
+            return 42;
+        },
+        [](std::uint64_t) { return true; },
+        [&](RuntimeFirewallOperationClaim claim, OwnedSnatRecovery recovery) {
+            queued_claim = claim;
+            queued_recovery = std::move(recovery);
+        }));
+    REQUIRE(static_cast<bool>(timer_callback));
+    timer_callback();
+    REQUIRE(queued_claim.has_value());
+    CHECK(queued_claim->attempt == 3U);
+    CHECK(queued_recovery.requested);
+    CHECK(queued_recovery.missing_observed);
+    CHECK(coordinator.cancel_operation(*queued_claim));
 }
 
 TEST_CASE("stale runtime firewall operation claim cannot affect its successor") {
@@ -1005,10 +1600,44 @@ TEST_CASE("stale runtime firewall operation claim cannot affect its successor") 
     REQUIRE(running_claim.has_value());
     const auto control_claim = coordinator.begin_control(*running_claim);
     REQUIRE(control_claim.has_value());
-    CHECK(coordinator.complete_operation(*control_claim));
+    CHECK(coordinator.complete_operation(*control_claim).owned);
 }
 
-TEST_CASE("runtime firewall cancellation invalidates a running worker claim") {
+TEST_CASE(
+    "runtime firewall shutdown leaves queued claim to its executor envelope") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    FakeRuntimeFirewallRetryScheduler scheduler;
+    std::optional<RuntimeFirewallOperationClaim> queued_claim;
+
+    REQUIRE(coordinator.schedule_operation(
+        0,
+        /*runtime_generation=*/17,
+        /*bounded_retry_count=*/6,
+        {},
+        [&scheduler](const RuntimeFirewallRetryPlan& retry_plan,
+                     auto callback) {
+            return scheduler.schedule(retry_plan, std::move(callback));
+        },
+        [](std::uint64_t) { return true; },
+        [&](RuntimeFirewallOperationClaim claim, OwnedSnatRecovery) {
+            queued_claim = claim;
+        }).schedule);
+    REQUIRE(scheduler.callbacks.size() == 1U);
+    scheduler.callbacks.front()();
+    REQUIRE(queued_claim.has_value());
+
+    std::size_t timer_cancel_calls = 0U;
+    coordinator.cancel([&](int) { ++timer_cancel_calls; });
+    CHECK(timer_cancel_calls == 0U);
+    CHECK(coordinator.retry_pending());
+    CHECK(coordinator.operation_is_current(*queued_claim));
+
+    // Simulate destruction of a closure which the executor proved never ran.
+    CHECK(coordinator.cancel_operation(*queued_claim));
+    CHECK_FALSE(coordinator.retry_pending());
+}
+
+TEST_CASE("runtime firewall shutdown drains running and control claims") {
     RuntimeFirewallRetryCoordinator coordinator;
     FakeRuntimeFirewallRetryScheduler scheduler;
     std::optional<RuntimeFirewallOperationClaim> queued_claim;
@@ -1035,13 +1664,28 @@ TEST_CASE("runtime firewall cancellation invalidates a running worker claim") {
     std::size_t timer_cancel_calls = 0;
     coordinator.cancel([&](int) { ++timer_cancel_calls; });
 
-    // Once the timer has handed ownership to a worker there is no scheduler
-    // task left to unregister, but shutdown still invalidates the same serial.
+    // Once backend execution begins, shutdown must retain the exact claim so a
+    // possible COMMIT result cannot be discarded before control publication.
     CHECK(timer_cancel_calls == 0U);
-    CHECK_FALSE(coordinator.retry_pending());
-    CHECK_FALSE(coordinator.operation_is_current(*running_claim));
-    CHECK_FALSE(coordinator.begin_control(*running_claim).has_value());
+    CHECK(coordinator.retry_pending());
+    CHECK(coordinator.operation_is_current(*running_claim));
     CHECK_FALSE(coordinator.cancel_operation(*running_claim));
+    CHECK_FALSE(
+        coordinator.terminate_operation_for_resnapshot(
+            *running_claim).owned);
+
+    const auto control_claim = coordinator.begin_control(*running_claim);
+    REQUIRE(control_claim.has_value());
+    coordinator.cancel([&](int) { ++timer_cancel_calls; });
+    CHECK(timer_cancel_calls == 0U);
+    CHECK(coordinator.retry_pending());
+    CHECK(coordinator.operation_is_current(*control_claim));
+    CHECK_FALSE(coordinator.cancel_operation(*control_claim));
+    CHECK_FALSE(
+        coordinator.terminate_operation_for_resnapshot(
+            *control_claim).owned);
+    CHECK(coordinator.complete_operation(*control_claim).owned);
+    CHECK_FALSE(coordinator.retry_pending());
 }
 
 TEST_CASE("runtime firewall cancel pre-invalidates an erased timer that throws") {

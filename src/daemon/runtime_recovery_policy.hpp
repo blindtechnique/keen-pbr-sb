@@ -19,6 +19,7 @@
 #include "../lists/list_set_usage.hpp"
 #include "../routing/firewall_state.hpp"
 #include "../routing/netlink.hpp"
+#include "../runtime/conntrack_destination_retirement.hpp"
 #include "../runtime/runtime_state_machine.hpp"
 #include "../runtime/whatsapp_catalog_identity.hpp"
 #include "../util/ipv6_support.hpp"
@@ -198,26 +199,6 @@ active_destination_only_reconnect_list_names(
     return active;
 }
 
-struct ConntrackDestinationRetirementPlan {
-    std::set<std::string> current_list_names;
-    std::vector<std::string> current_destination_selectors;
-};
-
-struct ConntrackDestinationRetirementCoverage {
-    std::vector<std::string> destination_selectors;
-    // Dynamic DNS-derived members are not available through ListStreamer, and
-    // bounded static tracking deliberately retains only its first selectors.
-    // Callers expose this as quiet diagnostics; neither limitation justifies a
-    // global conntrack flush.
-    std::set<std::string> domain_backed_list_names;
-    std::set<std::string> truncated_static_list_names;
-
-    bool partial() const noexcept {
-        return !domain_backed_list_names.empty() ||
-               !truncated_static_list_names.empty();
-    }
-};
-
 enum class RuntimeReconnectCommitState : std::uint8_t {
     committed,
     failed,
@@ -251,41 +232,6 @@ struct StaleFlowReconnectRequest {
                aggressive.destination_selectors.empty();
     }
 };
-
-namespace runtime_recovery_detail {
-
-inline std::string_view trim_ascii_whitespace(
-    std::string_view value) noexcept {
-    constexpr std::string_view whitespace{" \t\r\n"};
-    const auto first = value.find_first_not_of(whitespace);
-    if (first == std::string_view::npos) {
-        return {};
-    }
-    const auto last = value.find_last_not_of(whitespace);
-    return value.substr(first, last - first + 1U);
-}
-
-inline bool is_global_destination_selector(
-    std::string_view selector) noexcept {
-    selector = trim_ascii_whitespace(selector);
-    const auto slash = selector.rfind('/');
-    if (slash == std::string_view::npos) {
-        return false;
-    }
-    return trim_ascii_whitespace(selector.substr(slash + 1U)) == "0";
-}
-
-inline bool contains_global_destination_selector(
-    const ConntrackDestinationRetirementCoverage& coverage) noexcept {
-    return std::any_of(
-        coverage.destination_selectors.begin(),
-        coverage.destination_selectors.end(),
-        [](const std::string& selector) {
-            return is_global_destination_selector(selector);
-        });
-}
-
-} // namespace runtime_recovery_detail
 
 // Execute targeted stale-flow retirement only for the runtime generation that
 // was successfully committed. Scope preparation may inspect live interfaces or
@@ -399,31 +345,6 @@ plan_conntrack_owned_destination_reconnect(
 }
 
 inline ConntrackDestinationRetirementPlan
-destination_retirement_plan_for_lists(
-    const std::set<std::string>& list_names) {
-    ConntrackDestinationRetirementPlan plan;
-    plan.current_list_names = list_names;
-    return plan;
-}
-
-inline ConntrackDestinationRetirementCoverage
-merge_conntrack_destination_retirement_coverage(
-    ConntrackDestinationRetirementCoverage left,
-    const ConntrackDestinationRetirementCoverage& right) {
-    left.destination_selectors.insert(
-        left.destination_selectors.end(),
-        right.destination_selectors.begin(),
-        right.destination_selectors.end());
-    left.domain_backed_list_names.insert(
-        right.domain_backed_list_names.begin(),
-        right.domain_backed_list_names.end());
-    left.truncated_static_list_names.insert(
-        right.truncated_static_list_names.begin(),
-        right.truncated_static_list_names.end());
-    return left;
-}
-
-inline ConntrackDestinationRetirementPlan
 plan_conntrack_destination_retirement(
     const std::vector<RuleState>& previous_rules,
     const std::vector<RuleState>& current_rules,
@@ -475,32 +396,6 @@ plan_conntrack_destination_retirement(
     }
 
     return plan;
-}
-
-inline ConntrackDestinationRetirementCoverage
-collect_conntrack_destination_retirement_coverage(
-    const ConntrackDestinationRetirementPlan& plan,
-    const AppliedListContentState& content_state) {
-    ConntrackDestinationRetirementCoverage coverage;
-    coverage.destination_selectors = plan.current_destination_selectors;
-    for (const auto& list_name : plan.current_list_names) {
-        const auto static_destinations =
-            content_state.static_destinations.find(list_name);
-        if (static_destinations != content_state.static_destinations.end()) {
-            coverage.destination_selectors.insert(
-                coverage.destination_selectors.end(),
-                static_destinations->second.begin(),
-                static_destinations->second.end());
-        }
-        if (content_state.domain_entry_lists.count(list_name) != 0U) {
-            coverage.domain_backed_list_names.insert(list_name);
-        }
-        if (content_state.truncated_static_destination_lists.count(list_name) !=
-            0U) {
-            coverage.truncated_static_list_names.insert(list_name);
-        }
-    }
-    return coverage;
 }
 
 // Snapshot of the policy which was actually committed to the kernel.  It is
@@ -714,9 +609,34 @@ inline OwnedSnatRecovery merge_owned_snat_recovery(
     };
 }
 
+inline bool owned_conntrack_cleanup_snapshot_equal(
+    const OwnedConntrackCleanupSnapshot& left,
+    const OwnedConntrackCleanupSnapshot& right) noexcept {
+    return left.runtime_generation == right.runtime_generation &&
+           left.owned_mask == right.owned_mask &&
+           left.marks == right.marks &&
+           left.priority_marks == right.priority_marks &&
+           left.ipv6_enabled == right.ipv6_enabled;
+}
+
+inline bool owned_snat_recovery_equal(
+    const OwnedSnatRecovery& left,
+    const OwnedSnatRecovery& right) noexcept {
+    if (left.requested != right.requested ||
+        left.missing_observed != right.missing_observed ||
+        left.cleanup_snapshot.has_value() !=
+            right.cleanup_snapshot.has_value()) {
+        return false;
+    }
+    return !left.cleanup_snapshot.has_value() ||
+           owned_conntrack_cleanup_snapshot_equal(
+               *left.cleanup_snapshot, *right.cleanup_snapshot);
+}
+
 struct RuntimeFirewallRetryAdmission {
     bool coalesced{false};
     OwnedSnatRecovery snat_recovery;
+    std::uint64_t recovery_revision{0U};
 };
 
 // Build exact cleanup authority from one immutable runtime view. Callers can
@@ -834,10 +754,21 @@ struct RuntimeFirewallOperationClaim {
     std::size_t attempt{0};
     RuntimeFirewallOperationPhase phase{
         RuntimeFirewallOperationPhase::timer_pending};
+    // Highest owned-SNAT observation included in this operation's immutable
+    // worker input. A later revision must survive this operation's success.
+    std::uint64_t recovery_revision{0U};
 
     explicit operator bool() const noexcept {
         return serial != 0U;
     }
+};
+
+struct RuntimeFirewallOperationCompletion {
+    bool owned{false};
+    bool rerun_requested{false};
+    OwnedSnatRecovery snat_recovery;
+
+    explicit operator bool() const noexcept { return owned; }
 };
 
 // Control-loop-owned retry policy plus a mutex-protected cross-boundary claim
@@ -852,30 +783,55 @@ public:
     RuntimeFirewallRetryAdmission begin_attempt(
         std::size_t retry_attempt,
         OwnedSnatRecovery snat_recovery) {
-        pending_owned_snat_recovery_ = merge_owned_snat_recovery(
-            std::move(pending_owned_snat_recovery_),
-            std::move(snat_recovery));
+        std::lock_guard<std::mutex> lock(operation_mutex_);
+        const bool temporal_recovery_observation =
+            snat_recovery.requested;
+        const auto recovery_revision_before =
+            pending_recovery_revision_;
+        auto retained = retain_recovery_locked(std::move(snat_recovery));
+        const bool coalesced = runtime_recovery_request_should_coalesce(
+            retry_attempt, active_schedule_serial_ != 0U);
+        // A timer-pending operation has not captured its immutable worker
+        // input yet and consumes the newest recovery revision when it fires.
+        // Once ownership crossed that boundary, remember one fresh trailing
+        // observation instead of losing the event.
+        if (coalesced && active_operation_phase_ !=
+                             RuntimeFirewallOperationPhase::timer_pending) {
+            trailing_attempt_requested_ = true;
+            // Even an identical SNAT observation is a new temporal event
+            // after immutable worker capture. Its revision prevents the older
+            // successful operation from clearing that authority.
+            if (temporal_recovery_observation &&
+                pending_recovery_revision_ ==
+                    recovery_revision_before) {
+                advance_recovery_revision_locked();
+            }
+        }
         return RuntimeFirewallRetryAdmission{
-            runtime_recovery_request_should_coalesce(
-                retry_attempt, retry_pending()),
-            pending_owned_snat_recovery_};
+            coalesced,
+            std::move(retained),
+            pending_recovery_revision_};
     }
 
     OwnedSnatRecovery retain_recovery(
         OwnedSnatRecovery snat_recovery) {
-        pending_owned_snat_recovery_ = merge_owned_snat_recovery(
-            std::move(pending_owned_snat_recovery_),
-            std::move(snat_recovery));
-        return pending_owned_snat_recovery_;
+        std::lock_guard<std::mutex> lock(operation_mutex_);
+        return retain_recovery_locked(std::move(snat_recovery));
     }
 
     void complete_attempt(bool succeeded,
-                          OwnedSnatRecovery snat_recovery) {
+                          OwnedSnatRecovery snat_recovery,
+                          std::uint64_t processed_recovery_revision = 0U) {
         const bool owned_recovery_completed =
             succeeded && snat_recovery.requested;
-        (void)retain_recovery(std::move(snat_recovery));
-        if (owned_recovery_completed) {
+        std::lock_guard<std::mutex> lock(operation_mutex_);
+        (void)retain_recovery_locked(std::move(snat_recovery));
+        if (owned_recovery_completed &&
+            (processed_recovery_revision == 0U ||
+             pending_recovery_revision_ <=
+                 processed_recovery_revision)) {
             pending_owned_snat_recovery_ = {};
+            advance_recovery_revision_locked();
         }
     }
 
@@ -885,6 +841,7 @@ public:
     }
 
     bool owned_snat_recovery_pending() const noexcept {
+        std::lock_guard<std::mutex> lock(operation_mutex_);
         return pending_owned_snat_recovery_.requested;
     }
 
@@ -892,12 +849,19 @@ public:
         return owned_snat_recovery_pending();
     }
 
-    const OwnedSnatRecovery& pending_owned_snat_recovery() const noexcept {
+    OwnedSnatRecovery pending_owned_snat_recovery() const {
+        std::lock_guard<std::mutex> lock(operation_mutex_);
         return pending_owned_snat_recovery_;
     }
 
     void clear_owned_snat_recovery() noexcept {
+        std::lock_guard<std::mutex> lock(operation_mutex_);
+        if (owned_snat_recovery_equal(
+                pending_owned_snat_recovery_, OwnedSnatRecovery{})) {
+            return;
+        }
         pending_owned_snat_recovery_ = {};
+        advance_recovery_revision_locked();
     }
 
     template <typename Schedule, typename IsCurrent, typename RunAttempt>
@@ -918,13 +882,18 @@ public:
             std::forward<Schedule>(schedule),
             std::forward<IsCurrent>(is_current),
             std::forward<RunAttempt>(run_attempt),
+            [](RuntimeFirewallOperationCompletion) {},
             persistent_recovery_requested);
     }
 
     // Asynchronous counterpart of schedule(). The timer callback receives a
     // worker_queued claim and the slot remains occupied until the caller walks
     // it through begin_worker(), begin_control() and complete_operation(), or
-    // explicitly abandons it with cancel_operation().
+    // explicitly abandons it with cancel_operation(). A false schedule result
+    // transfers the complete original request back to the synchronous caller,
+    // which must re-snapshot and re-arm it. A scheduler exception is not an
+    // unconditional rejection: an inline callback may already have handed the
+    // claim forward, so the caller must first observe coordinator ownership.
     template <typename Schedule, typename IsCurrent, typename QueueOperation>
     RuntimeFirewallRetryPlan schedule_operation(
         std::size_t attempt,
@@ -943,6 +912,37 @@ public:
             std::forward<Schedule>(schedule),
             std::forward<IsCurrent>(is_current),
             std::forward<QueueOperation>(queue_operation),
+            [](RuntimeFirewallOperationCompletion) {},
+            persistent_recovery_requested);
+    }
+
+    // Outcome-aware asynchronous form required by production delayed work.
+    // If a queued claim is found stale before worker hand-off, exactly one
+    // terminal callback receives the retained trailing/recovery intent outside
+    // the coordinator lock and must re-snapshot the current generation.
+    template <typename Schedule,
+              typename IsCurrent,
+              typename QueueOperation,
+              typename OnTerminal>
+    RuntimeFirewallRetryPlan schedule_operation_with_terminal(
+        std::size_t attempt,
+        std::uint64_t runtime_generation,
+        std::size_t bounded_retry_count,
+        OwnedSnatRecovery snat_recovery,
+        Schedule&& schedule,
+        IsCurrent&& is_current,
+        QueueOperation&& queue_operation,
+        OnTerminal&& on_terminal,
+        bool persistent_recovery_requested = false) {
+        return schedule_impl</*RetainOperationClaim=*/true>(
+            attempt,
+            runtime_generation,
+            bounded_retry_count,
+            std::move(snat_recovery),
+            std::forward<Schedule>(schedule),
+            std::forward<IsCurrent>(is_current),
+            std::forward<QueueOperation>(queue_operation),
+            std::forward<OnTerminal>(on_terminal),
             persistent_recovery_requested);
     }
 
@@ -966,12 +966,14 @@ public:
             std::move(snat_recovery),
             std::forward<Schedule>(schedule),
             std::forward<IsCurrent>(is_current),
-            std::forward<RunAttempt>(run_attempt));
+            std::forward<RunAttempt>(run_attempt),
+            [](RuntimeFirewallOperationCompletion) {});
     }
 
     // Admission-contention counterpart of schedule_operation(). It preserves
     // the exact attempt and recovery payload just like defer_same_attempt(),
-    // but retains the operation claim after the timer fires.
+    // but retains the operation claim after the timer fires. False means the
+    // unchanged original request is again owned by the synchronous caller.
     template <typename Schedule, typename IsCurrent, typename QueueOperation>
     bool defer_same_attempt_operation(
         std::size_t attempt,
@@ -986,7 +988,30 @@ public:
             std::move(snat_recovery),
             std::forward<Schedule>(schedule),
             std::forward<IsCurrent>(is_current),
-            std::forward<QueueOperation>(queue_operation));
+            std::forward<QueueOperation>(queue_operation),
+            [](RuntimeFirewallOperationCompletion) {});
+    }
+
+    template <typename Schedule,
+              typename IsCurrent,
+              typename QueueOperation,
+              typename OnTerminal>
+    bool defer_same_attempt_operation_with_terminal(
+        std::size_t attempt,
+        std::uint64_t runtime_generation,
+        OwnedSnatRecovery snat_recovery,
+        Schedule&& schedule,
+        IsCurrent&& is_current,
+        QueueOperation&& queue_operation,
+        OnTerminal&& on_terminal) {
+        return defer_same_attempt_impl</*RetainOperationClaim=*/true>(
+            attempt,
+            runtime_generation,
+            std::move(snat_recovery),
+            std::forward<Schedule>(schedule),
+            std::forward<IsCurrent>(is_current),
+            std::forward<QueueOperation>(queue_operation),
+            std::forward<OnTerminal>(on_terminal));
     }
 
     std::optional<RuntimeFirewallOperationClaim> begin_worker(
@@ -1011,19 +1036,86 @@ public:
         return operation_matches_locked(claim);
     }
 
-    bool complete_operation(
-        RuntimeFirewallOperationClaim claim) noexcept {
+    RuntimeFirewallOperationCompletion complete_operation(
+        RuntimeFirewallOperationClaim claim) {
         if (claim.phase != RuntimeFirewallOperationPhase::control_pending) {
-            return false;
+            return {};
         }
-        return release_retry_slot_if_current(claim);
+        std::lock_guard<std::mutex> lock(operation_mutex_);
+        if (!operation_matches_locked(claim)) return {};
+        RuntimeFirewallOperationCompletion completion{
+            /*owned=*/true,
+            trailing_attempt_requested_,
+            pending_owned_snat_recovery_};
+        release_retry_slot_locked();
+        return completion;
     }
 
-    // Cancellation is terminal from any exact phase. Reusing an older phase
-    // copy of a live claim is rejected, so a producer cannot accidentally
-    // retire work already owned by the next boundary.
+    RuntimeFirewallOperationCompletion complete_operation(
+        RuntimeFirewallOperationClaim claim,
+        bool succeeded,
+        OwnedSnatRecovery processed_recovery) {
+        if (claim.phase != RuntimeFirewallOperationPhase::control_pending) {
+            return {};
+        }
+        std::lock_guard<std::mutex> lock(operation_mutex_);
+        if (!operation_matches_locked(claim)) return {};
+
+        const bool newer_observation_pending =
+            pending_recovery_revision_ > claim.recovery_revision;
+        auto completed_recovery = merge_owned_snat_recovery(
+            pending_owned_snat_recovery_, processed_recovery);
+        const bool clear_completed_recovery =
+            succeeded && processed_recovery.requested &&
+            !newer_observation_pending;
+        if (clear_completed_recovery) {
+            completed_recovery = {};
+        }
+        RuntimeFirewallOperationCompletion completion{
+            /*owned=*/true,
+            trailing_attempt_requested_,
+            completed_recovery};
+        // All allocating copies are complete. Publish the terminal recovery
+        // state and release ownership only after the result is ready.
+        pending_owned_snat_recovery_ =
+            std::move(completed_recovery);
+        if (clear_completed_recovery) {
+            advance_recovery_revision_locked();
+        }
+        release_retry_slot_locked();
+        return completion;
+    }
+
+    // Allocation-free pre-worker terminal transfer. Recovery authority remains
+    // latched in the coordinator; the receiver must take a fresh snapshot.
+    RuntimeFirewallOperationCompletion
+    terminate_operation_for_resnapshot(
+        RuntimeFirewallOperationClaim claim,
+        bool force_rerun = false) {
+        if (claim.phase != RuntimeFirewallOperationPhase::timer_pending &&
+            claim.phase != RuntimeFirewallOperationPhase::worker_queued) {
+            return {};
+        }
+        std::lock_guard<std::mutex> lock(operation_mutex_);
+        if (!operation_matches_locked(claim)) return {};
+        RuntimeFirewallOperationCompletion completion{
+            /*owned=*/true,
+            force_rerun || trailing_attempt_requested_ ||
+                pending_owned_snat_recovery_.requested,
+            {}};
+        release_retry_slot_locked();
+        return completion;
+    }
+
+    // Only timer and executor-proven-not-started queue authority can be
+    // abandoned. Running/control claims may already represent a changed kernel
+    // generation and must reach begin_control()+complete_operation().
     bool cancel_operation(
         RuntimeFirewallOperationClaim claim) noexcept {
+        if (claim.phase != RuntimeFirewallOperationPhase::timer_pending &&
+            claim.phase != RuntimeFirewallOperationPhase::worker_queued) {
+            return false;
+        }
         return release_retry_slot_if_current(claim);
     }
 
@@ -1035,15 +1127,19 @@ public:
             if (active_schedule_serial_ == 0U) {
                 return;
             }
-            if (active_operation_phase_ ==
+            // This API owns only timer cancellation. A queued closure may be
+            // abandoned only by the executor envelope which proves that it
+            // never started; running/control work must drain through terminal
+            // publication because COMMIT may already have changed the kernel.
+            if (active_operation_phase_ !=
                 RuntimeFirewallOperationPhase::timer_pending) {
-                task_id = retry_task_id_;
+                return;
             }
+            task_id = retry_task_id_;
             // Invalidate first. Scheduler::cancel may erase the entry and then
             // throw while unregistering its fd; keeping a ghost task id would
             // make every periodic recovery owner believe a retry is armed
-            // forever. Later phases have no live timer id, but are invalidated
-            // by the same serial before their queued callbacks can publish.
+            // forever.
             release_retry_slot_locked();
             (void)next_schedule_serial_locked();
         }
@@ -1062,7 +1158,8 @@ private:
     template <bool RetainOperationClaim,
               typename Schedule,
               typename IsCurrent,
-              typename RunAttempt>
+              typename RunAttempt,
+              typename OnTerminal>
     RuntimeFirewallRetryPlan schedule_impl(
         std::size_t attempt,
         std::uint64_t runtime_generation,
@@ -1071,6 +1168,7 @@ private:
         Schedule&& schedule,
         IsCurrent&& is_current,
         RunAttempt&& run_attempt,
+        OnTerminal&& on_terminal,
         bool persistent_recovery_requested) {
         // The coordinator owns the recovery latch, so callers cannot
         // accidentally downgrade an exhausted owned-SNAT recovery to a
@@ -1102,27 +1200,75 @@ private:
                  operation_claim,
                  snat_recovery = std::move(scheduled_recovery),
                  is_current = std::forward<IsCurrent>(is_current),
-                 run_attempt = std::forward<RunAttempt>(run_attempt)]()
+                 run_attempt = std::forward<RunAttempt>(run_attempt),
+                 on_terminal = std::forward<OnTerminal>(on_terminal)]()
                     mutable {
+                    (void)on_terminal;
                     if constexpr (RetainOperationClaim) {
-                        auto queued_claim = transition_operation(
-                            operation_claim,
-                            RuntimeFirewallOperationPhase::timer_pending,
-                            RuntimeFirewallOperationPhase::worker_queued);
-                        if (!queued_claim.has_value()) {
+                        (void)snat_recovery;
+                        std::optional<OperationRecoverySnapshot>
+                            operation_input;
+                        try {
+                            if (!begin_queued_operation(
+                                    operation_claim,
+                                    operation_input)) {
+                                return;
+                            }
+                        } catch (...) {
+                            // Snapshot copying itself may have failed. Do not
+                            // try to copy the same recovery latch again: exact
+                            // timer cancellation is noexcept, the latch stays
+                            // in the coordinator, and the terminal owner is
+                            // forced to take a fresh snapshot.
+                            auto terminal =
+                                terminate_operation_for_resnapshot(
+                                    operation_claim,
+                                    /*force_rerun=*/true);
+                            if (terminal.owned) {
+                                on_terminal(std::move(terminal));
+                            }
+                            throw;
+                        }
+                        bool current = false;
+                        try {
+                            current = is_current(
+                                operation_input->claim
+                                    .runtime_generation);
+                        } catch (...) {
+                            auto terminal =
+                                terminate_operation_for_resnapshot(
+                                    operation_input->claim,
+                                    /*force_rerun=*/true);
+                            if (terminal.owned) {
+                                on_terminal(std::move(terminal));
+                            }
+                            throw;
+                        }
+                        if (!current) {
+                            auto terminal =
+                                terminate_operation_for_resnapshot(
+                                    operation_input->claim);
+                            if (terminal.owned) {
+                                on_terminal(std::move(terminal));
+                            }
                             return;
                         }
                         try {
-                            if (!is_current(
-                                    queued_claim->runtime_generation)) {
-                                (void)cancel_operation(*queued_claim);
-                                return;
-                            }
                             run_attempt(
-                                *queued_claim, std::move(snat_recovery));
+                                operation_input->claim,
+                                operation_input->snat_recovery);
                         } catch (...) {
-                            (void)cancel_operation_identity_if_current(
-                                *queued_claim);
+                            // If the adapter threw before begin_worker(),
+                            // transfer the exact queued outcome. If it already
+                            // handed off, terminate rejects the older phase and
+                            // the running/control claim survives.
+                            auto terminal =
+                                terminate_operation_for_resnapshot(
+                                    operation_input->claim,
+                                    /*force_rerun=*/true);
+                            if (terminal.owned) {
+                                on_terminal(std::move(terminal));
+                            }
                             throw;
                         }
                     } else {
@@ -1145,10 +1291,21 @@ private:
             // Scheduler hooks may synchronously consume a ready timer. Do not
             // resurrect a completed slot, or attach its id after ownership has
             // already moved to a worker.
-            (void)register_timer_task_if_current(
-                operation_claim, task_id);
+            if constexpr (RetainOperationClaim) {
+                const auto registration = register_timer_task_if_current(
+                    operation_claim, task_id);
+                if (registration == TimerTaskRegistration::rejected) {
+                    return {};
+                }
+            } else {
+                (void)register_timer_task_if_current(
+                    operation_claim, task_id);
+            }
         } catch (...) {
-            (void)cancel_operation_identity_if_current(operation_claim);
+            // The scheduler may invoke a ready callback inline and only then
+            // report a registration failure. Cancel only the original timer
+            // phase; ownership already handed to a worker must survive.
+            (void)cancel_operation(operation_claim);
             throw;
         }
         return retry_plan;
@@ -1157,14 +1314,16 @@ private:
     template <bool RetainOperationClaim,
               typename Schedule,
               typename IsCurrent,
-              typename RunAttempt>
+              typename RunAttempt,
+              typename OnTerminal>
     bool defer_same_attempt_impl(
         std::size_t attempt,
         std::uint64_t runtime_generation,
         OwnedSnatRecovery snat_recovery,
         Schedule&& schedule,
         IsCurrent&& is_current,
-        RunAttempt&& run_attempt) {
+        RunAttempt&& run_attempt,
+        OnTerminal&& on_terminal) {
         snat_recovery = retain_recovery(std::move(snat_recovery));
         if (retry_pending()) {
             return false;
@@ -1183,27 +1342,66 @@ private:
                  operation_claim,
                  snat_recovery = std::move(scheduled_recovery),
                  is_current = std::forward<IsCurrent>(is_current),
-                 run_attempt = std::forward<RunAttempt>(run_attempt)]()
+                 run_attempt = std::forward<RunAttempt>(run_attempt),
+                 on_terminal = std::forward<OnTerminal>(on_terminal)]()
                     mutable {
+                    (void)on_terminal;
                     if constexpr (RetainOperationClaim) {
-                        auto queued_claim = transition_operation(
-                            operation_claim,
-                            RuntimeFirewallOperationPhase::timer_pending,
-                            RuntimeFirewallOperationPhase::worker_queued);
-                        if (!queued_claim.has_value()) {
+                        (void)snat_recovery;
+                        std::optional<OperationRecoverySnapshot>
+                            operation_input;
+                        try {
+                            if (!begin_queued_operation(
+                                    operation_claim,
+                                    operation_input)) {
+                                return;
+                            }
+                        } catch (...) {
+                            auto terminal =
+                                terminate_operation_for_resnapshot(
+                                    operation_claim,
+                                    /*force_rerun=*/true);
+                            if (terminal.owned) {
+                                on_terminal(std::move(terminal));
+                            }
+                            throw;
+                        }
+                        bool current = false;
+                        try {
+                            current = is_current(
+                                operation_input->claim
+                                    .runtime_generation);
+                        } catch (...) {
+                            auto terminal =
+                                terminate_operation_for_resnapshot(
+                                    operation_input->claim,
+                                    /*force_rerun=*/true);
+                            if (terminal.owned) {
+                                on_terminal(std::move(terminal));
+                            }
+                            throw;
+                        }
+                        if (!current) {
+                            auto terminal =
+                                terminate_operation_for_resnapshot(
+                                    operation_input->claim);
+                            if (terminal.owned) {
+                                on_terminal(std::move(terminal));
+                            }
                             return;
                         }
                         try {
-                            if (!is_current(
-                                    queued_claim->runtime_generation)) {
-                                (void)cancel_operation(*queued_claim);
-                                return;
-                            }
                             run_attempt(
-                                *queued_claim, std::move(snat_recovery));
+                                operation_input->claim,
+                                operation_input->snat_recovery);
                         } catch (...) {
-                            (void)cancel_operation_identity_if_current(
-                                *queued_claim);
+                            auto terminal =
+                                terminate_operation_for_resnapshot(
+                                    operation_input->claim,
+                                    /*force_rerun=*/true);
+                            if (terminal.owned) {
+                                on_terminal(std::move(terminal));
+                            }
                             throw;
                         }
                     } else {
@@ -1226,7 +1424,9 @@ private:
                 accepted = false;
             }
         } catch (...) {
-            (void)cancel_operation_identity_if_current(operation_claim);
+            // As above, do not invalidate a claim which an inline callback
+            // already handed to the worker before the scheduler threw.
+            (void)cancel_operation(operation_claim);
             throw;
         }
         return accepted;
@@ -1244,12 +1444,15 @@ private:
         active_operation_attempt_ = attempt;
         active_operation_phase_ =
             RuntimeFirewallOperationPhase::timer_pending;
+        active_operation_recovery_revision_ =
+            pending_recovery_revision_;
         retry_task_id_ = -1;
         return RuntimeFirewallOperationClaim{
             active_schedule_serial_,
             runtime_generation,
             attempt,
-            RuntimeFirewallOperationPhase::timer_pending};
+            RuntimeFirewallOperationPhase::timer_pending,
+            pending_recovery_revision_};
     }
 
     std::optional<RuntimeFirewallOperationClaim> transition_operation(
@@ -1265,6 +1468,38 @@ private:
         retry_task_id_ = -1;
         claim.phase = next;
         return claim;
+    }
+
+    struct OperationRecoverySnapshot {
+        RuntimeFirewallOperationClaim claim;
+        OwnedSnatRecovery snat_recovery;
+
+        OperationRecoverySnapshot(
+            RuntimeFirewallOperationClaim operation_claim,
+            const OwnedSnatRecovery& recovery)
+            : claim(operation_claim), snat_recovery(recovery) {}
+    };
+
+    bool begin_queued_operation(
+        RuntimeFirewallOperationClaim claim,
+        std::optional<OperationRecoverySnapshot>& result) {
+        std::lock_guard<std::mutex> lock(operation_mutex_);
+        if (claim.phase != RuntimeFirewallOperationPhase::timer_pending ||
+            !operation_matches_locked(claim)) {
+            return false;
+        }
+        // Copy all potentially allocating recovery state before publishing the
+        // phase hand-off. If the copy throws, the original timer claim remains
+        // exact and the callback's phase-specific catch can release it.
+        claim.phase = RuntimeFirewallOperationPhase::worker_queued;
+        claim.recovery_revision = pending_recovery_revision_;
+        result.emplace(claim, pending_owned_snat_recovery_);
+        active_operation_phase_ =
+            RuntimeFirewallOperationPhase::worker_queued;
+        active_operation_recovery_revision_ =
+            pending_recovery_revision_;
+        retry_task_id_ = -1;
+        return true;
     }
 
     TimerTaskRegistration register_timer_task_if_current(
@@ -1288,6 +1523,26 @@ private:
         return schedule_serial_;
     }
 
+    void advance_recovery_revision_locked() noexcept {
+        ++pending_recovery_revision_;
+        if (pending_recovery_revision_ == 0U) {
+            ++pending_recovery_revision_;
+        }
+    }
+
+    OwnedSnatRecovery retain_recovery_locked(
+        OwnedSnatRecovery snat_recovery) {
+        auto merged = merge_owned_snat_recovery(
+            pending_owned_snat_recovery_,
+            std::move(snat_recovery));
+        if (!owned_snat_recovery_equal(
+                merged, pending_owned_snat_recovery_)) {
+            pending_owned_snat_recovery_ = std::move(merged);
+            advance_recovery_revision_locked();
+        }
+        return pending_owned_snat_recovery_;
+    }
+
     bool release_retry_slot_if_current(
         RuntimeFirewallOperationClaim claim) noexcept {
         std::lock_guard<std::mutex> lock(operation_mutex_);
@@ -1302,25 +1557,20 @@ private:
                active_schedule_serial_ == claim.serial &&
                active_operation_generation_ == claim.runtime_generation &&
                active_operation_attempt_ == claim.attempt &&
-               active_operation_phase_ == claim.phase;
-    }
-
-    bool cancel_operation_identity_if_current(
-        RuntimeFirewallOperationClaim claim) noexcept {
-        std::lock_guard<std::mutex> lock(operation_mutex_);
-        if (!claim ||
-            active_schedule_serial_ != claim.serial ||
-            active_operation_generation_ != claim.runtime_generation ||
-            active_operation_attempt_ != claim.attempt) {
-            return false;
-        }
-        release_retry_slot_locked();
-        return true;
+               active_operation_phase_ == claim.phase &&
+               active_operation_recovery_revision_ ==
+                   claim.recovery_revision;
     }
 
     void release_retry_slot_locked() noexcept {
         active_schedule_serial_ = 0U;
+        active_operation_generation_ = 0U;
+        active_operation_attempt_ = 0U;
+        active_operation_phase_ =
+            RuntimeFirewallOperationPhase::timer_pending;
+        active_operation_recovery_revision_ = 0U;
         retry_task_id_ = -1;
+        trailing_attempt_requested_ = false;
     }
 
     mutable std::mutex operation_mutex_;
@@ -1331,7 +1581,10 @@ private:
     std::size_t active_operation_attempt_{0};
     RuntimeFirewallOperationPhase active_operation_phase_{
         RuntimeFirewallOperationPhase::timer_pending};
+    std::uint64_t active_operation_recovery_revision_{0U};
     OwnedSnatRecovery pending_owned_snat_recovery_;
+    std::uint64_t pending_recovery_revision_{0U};
+    bool trailing_attempt_requested_{false};
 };
 
 // A transient URLTEST publication failure leaves the last committed cursor
