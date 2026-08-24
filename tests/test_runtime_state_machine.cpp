@@ -370,6 +370,31 @@ TEST_CASE("conntrack cleanup retry cannot cross a runtime generation") {
         true, retry, /*current_generation=*/17));
 }
 
+TEST_CASE("owned conntrack authority is built from one immutable rule view") {
+    Config config;
+    OutboundMarkMap marks{
+        {"selected", 0x00030000U},
+        {"unused", 0x00040000U}};
+    RuleState active_rule;
+    active_rule.action_type = RuleActionType::Mark;
+    active_rule.fwmark = 0x00020000U;
+
+    const auto snapshot = make_owned_conntrack_cleanup_snapshot(
+        /*runtime_generation=*/17U,
+        config,
+        marks,
+        {active_rule},
+        {{"group", "selected"}});
+
+    CHECK(snapshot.runtime_generation == 17U);
+    CHECK(snapshot.marks ==
+          std::set<std::uint32_t>{0x00020000U, 0x00030000U});
+    CHECK(snapshot.priority_marks ==
+          std::set<std::uint32_t>{0x00020000U});
+    CHECK(ordered_owned_conntrack_marks(snapshot) ==
+          std::vector<std::uint32_t>{0x00020000U, 0x00030000U});
+}
+
 TEST_CASE("SNAT recovery retains the owned mark snapshot from confirmed loss") {
     OwnedSnatRecovery recovery{
         /*requested=*/true,

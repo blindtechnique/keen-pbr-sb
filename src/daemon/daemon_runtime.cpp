@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <fstream>
 #include <future>
 #include <iterator>
 #include <map>
@@ -23,6 +22,7 @@
 #include "../log/logger.hpp"
 #include "../routing/urltest_manager.hpp"
 #include "../runtime/meta_udp_443_policy.hpp"
+#include "../runtime/meta_udp_443_activation_contract.hpp"
 #ifdef WITH_API
 #include "../api/handler_catalog.hpp"
 #include "../api/handler_remote_access.hpp"
@@ -102,7 +102,6 @@ constexpr std::size_t IDLE_STALL_MAX_SNAPSHOT_BYTES =
     2U * 1024U * 1024U;
 constexpr std::size_t IDLE_STALL_MAX_SNAPSHOT_LINES = 8192U;
 constexpr std::uint64_t IDLE_STALL_APPLICATION_REPLY_BYTES = 256U;
-constexpr std::size_t META_UDP443_ACTIVATION_MAX_FLOWS = 256U;
 constexpr std::size_t META_UDP443_ACTIVATION_BATCH_SIZE = 4U;
 constexpr auto META_UDP443_ACTIVATION_BATCH_BUDGET =
     std::chrono::seconds{4};
@@ -114,21 +113,6 @@ constexpr std::array<std::chrono::seconds, 3>
     };
 constexpr auto META_UDP443_ACTIVATION_MAINTENANCE_RETRY_DELAY =
     std::chrono::minutes{1};
-
-ConntrackFlowObservationOptions meta_udp443_observation_options(
-    bool ipv6_enabled) {
-    ConntrackFlowObservationOptions options;
-    options.ipv6_enabled = ipv6_enabled;
-    options.max_flows = META_UDP443_ACTIVATION_MAX_FLOWS;
-    options.max_destination_input_cidrs =
-        IDLE_STALL_MAX_DESTINATION_CIDRS;
-    options.max_snapshot_bytes = IDLE_STALL_MAX_SNAPSHOT_BYTES;
-    options.max_snapshot_lines = IDLE_STALL_MAX_SNAPSHOT_LINES;
-    options.allow_foreign_mark_bits_for_media = true;
-    options.include_ordinary_destination_flows = false;
-    options.media_seed_udp_destination_port = 443U;
-    return options;
-}
 
 ConntrackFlowObservationOptions idle_stall_observation_options(
     bool ipv6_enabled,
@@ -412,27 +396,7 @@ bool same_internal_vpn_runtime_targets(
 } // namespace
 
 bool Daemon::fastnat_is_disabled_or_unavailable() {
-    constexpr std::array<const char*, 2> paths{
-        "/proc/sys/net/netfilter/nf_conntrack_fastnat",
-        "/proc/sys/net/ipv4/netfilter/ip_conntrack_fastnat",
-    };
-    for (const char* path : paths) {
-        std::ifstream input(path);
-        if (!input) {
-            if (::access(path, F_OK) == 0) {
-                return false;
-            }
-            continue;
-        }
-        std::string value;
-        std::string extra;
-        if (!(input >> value) || (input >> extra) || value != "0") {
-            return false;
-        }
-    }
-    // Kernels without either control do not provide Keenetic FastNAT and are
-    // therefore already on the ordinary netfilter path.
-    return true;
+    return system_fastnat_is_disabled_or_unavailable();
 }
 
 bool Daemon::run_system_resolver_hook(std::string_view action,
@@ -609,87 +573,12 @@ void Daemon::warn_conntrack_unavailable_once() {
 
 OwnedConntrackCleanupSnapshot
 Daemon::snapshot_owned_conntrack_marks() const {
-    OwnedConntrackCleanupSnapshot snapshot;
-    snapshot.runtime_generation =
-        runtime_generation_.load(std::memory_order_acquire);
-    snapshot.owned_mask =
-        fwmark_mask_value(config_.fwmark.value_or(FwmarkConfig{}));
-    snapshot.ipv6_enabled = resolve_ipv6_support(config_).enabled;
-
-    const auto add_mark = [&](uint32_t mark, bool priority) {
-        if ((mark & snapshot.owned_mask) != 0U) {
-            snapshot.marks.insert(mark);
-            if (priority) {
-                snapshot.priority_marks.insert(mark);
-            }
-        }
-    };
-    const auto add_tag = [&](const std::string& tag, bool priority) {
-        const auto mark = outbound_marks_.find(tag);
-        if (mark != outbound_marks_.end()) {
-            add_mark(mark->second, priority);
-        }
-    };
-
-    // First retire marks that actively carried forwarded or resolver traffic.
-    for (const auto& rule : firewall_state_.get_rules()) {
-        if (rule.action_type == RuleActionType::Mark) {
-            add_mark(rule.fwmark, /*priority=*/true);
-        }
-    }
-    const auto& selections = firewall_state_.get_urltest_selections();
-    const auto& outbounds =
-        config_.outbounds.value_or(std::vector<Outbound>{});
-    if (config_.dns.has_value()) {
-        for (const auto& server :
-             config_.dns->servers.value_or(std::vector<DnsServer>{})) {
-            if (!server.detour.has_value()) {
-                continue;
-            }
-            std::string effective_tag = *server.detour;
-            const auto outbound = std::find_if(
-                outbounds.begin(),
-                outbounds.end(),
-                [&effective_tag](const Outbound& candidate) {
-                    return candidate.tag == effective_tag;
-                });
-            if (outbound != outbounds.end() &&
-                outbound->type == OutboundType::URLTEST) {
-                const auto selected = selections.find(effective_tag);
-                if (selected != selections.end() &&
-                    !selected->second.empty()) {
-                    effective_tag = selected->second;
-                }
-            }
-            add_tag(effective_tag, /*priority=*/true);
-        }
-    }
-
-    // Interface marks are used by health probes even when no route rule
-    // currently references them. Remote-list detours use SO_MARK directly,
-    // including the literal urltest mark when a list points at a selector.
-    for (const auto& outbound : outbounds) {
-        if (outbound.type == OutboundType::INTERFACE) {
-            add_tag(outbound.tag, /*priority=*/false);
-        }
-    }
-    if (config_.lists.has_value()) {
-        for (const auto& [name, list] : *config_.lists) {
-            (void)name;
-            if (!list.url.has_value()) {
-                continue;
-            }
-            for (const auto& detour :
-                 effective_list_refresh_detours(config_, list)) {
-                add_tag(detour, /*priority=*/false);
-            }
-        }
-    }
-    for (const auto& [urltest, selected] : selections) {
-        (void)urltest;
-        add_tag(selected, /*priority=*/false);
-    }
-    return snapshot;
+    return make_owned_conntrack_cleanup_snapshot(
+        runtime_generation_.load(std::memory_order_acquire),
+        config_,
+        outbound_marks_,
+        firewall_state_.get_rules(),
+        firewall_state_.get_urltest_selections());
 }
 
 void Daemon::cleanup_owned_conntrack_marks(const char* context) {
@@ -744,17 +633,8 @@ ConntrackCleanupSummary Daemon::cleanup_owned_conntrack_snapshot(
     if (!snapshot.valid()) {
         return cleanup;
     }
-    std::vector<uint32_t> ordered_marks;
-    ordered_marks.reserve(snapshot.marks.size());
-    ordered_marks.insert(
-        ordered_marks.end(),
-        snapshot.priority_marks.begin(),
-        snapshot.priority_marks.end());
-    for (const auto mark : snapshot.marks) {
-        if (snapshot.priority_marks.count(mark) == 0U) {
-            ordered_marks.push_back(mark);
-        }
-    }
+    const auto ordered_marks =
+        ordered_owned_conntrack_marks(snapshot);
     try {
         cleanup =
             conntrack_manager_.delete_marks_ordered(

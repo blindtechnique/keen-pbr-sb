@@ -21,6 +21,7 @@
 #include "../routing/netlink.hpp"
 #include "../runtime/runtime_state_machine.hpp"
 #include "../runtime/whatsapp_catalog_identity.hpp"
+#include "../util/ipv6_support.hpp"
 
 namespace keen_pbr3 {
 
@@ -717,6 +718,104 @@ struct RuntimeFirewallRetryAdmission {
     bool coalesced{false};
     OwnedSnatRecovery snat_recovery;
 };
+
+// Build exact cleanup authority from one immutable runtime view. Callers can
+// use the last committed rules before a backend transaction and the staged
+// candidate rules after it without consulting mutable Daemon fields from a
+// worker thread.
+inline OwnedConntrackCleanupSnapshot make_owned_conntrack_cleanup_snapshot(
+    std::uint64_t runtime_generation,
+    const Config& config,
+    const OutboundMarkMap& outbound_marks,
+    const std::vector<RuleState>& rules,
+    const std::map<std::string, std::string>& urltest_selections) {
+    OwnedConntrackCleanupSnapshot snapshot;
+    snapshot.runtime_generation = runtime_generation;
+    snapshot.owned_mask =
+        fwmark_mask_value(config.fwmark.value_or(FwmarkConfig{}));
+    snapshot.ipv6_enabled = resolve_ipv6_support(config).enabled;
+
+    const auto add_mark = [&](std::uint32_t mark, bool priority) {
+        if ((mark & snapshot.owned_mask) == 0U) return;
+        snapshot.marks.insert(mark);
+        if (priority) snapshot.priority_marks.insert(mark);
+    };
+    const auto add_tag = [&](const std::string& tag, bool priority) {
+        const auto mark = outbound_marks.find(tag);
+        if (mark != outbound_marks.end()) {
+            add_mark(mark->second, priority);
+        }
+    };
+
+    for (const auto& rule : rules) {
+        if (rule.action_type == RuleActionType::Mark) {
+            add_mark(rule.fwmark, /*priority=*/true);
+        }
+    }
+
+    const auto& outbounds =
+        config.outbounds.value_or(std::vector<Outbound>{});
+    if (config.dns.has_value()) {
+        for (const auto& server :
+             config.dns->servers.value_or(std::vector<DnsServer>{})) {
+            if (!server.detour.has_value()) continue;
+            std::string effective_tag = *server.detour;
+            const auto outbound = std::find_if(
+                outbounds.begin(),
+                outbounds.end(),
+                [&effective_tag](const Outbound& candidate) {
+                    return candidate.tag == effective_tag;
+                });
+            if (outbound != outbounds.end() &&
+                outbound->type == OutboundType::URLTEST) {
+                const auto selected =
+                    urltest_selections.find(effective_tag);
+                if (selected != urltest_selections.end() &&
+                    !selected->second.empty()) {
+                    effective_tag = selected->second;
+                }
+            }
+            add_tag(effective_tag, /*priority=*/true);
+        }
+    }
+
+    for (const auto& outbound : outbounds) {
+        if (outbound.type == OutboundType::INTERFACE) {
+            add_tag(outbound.tag, /*priority=*/false);
+        }
+    }
+    if (config.lists.has_value()) {
+        for (const auto& [name, list] : *config.lists) {
+            (void)name;
+            if (!list.url.has_value()) continue;
+            for (const auto& detour :
+                 effective_list_refresh_detours(config, list)) {
+                add_tag(detour, /*priority=*/false);
+            }
+        }
+    }
+    for (const auto& [urltest, selected] : urltest_selections) {
+        (void)urltest;
+        add_tag(selected, /*priority=*/false);
+    }
+    return snapshot;
+}
+
+inline std::vector<std::uint32_t> ordered_owned_conntrack_marks(
+    const OwnedConntrackCleanupSnapshot& snapshot) {
+    std::vector<std::uint32_t> ordered;
+    ordered.reserve(snapshot.marks.size());
+    ordered.insert(
+        ordered.end(),
+        snapshot.priority_marks.begin(),
+        snapshot.priority_marks.end());
+    for (const auto mark : snapshot.marks) {
+        if (snapshot.priority_marks.count(mark) == 0U) {
+            ordered.push_back(mark);
+        }
+    }
+    return ordered;
+}
 
 enum class RuntimeFirewallOperationPhase : std::uint8_t {
     timer_pending,
