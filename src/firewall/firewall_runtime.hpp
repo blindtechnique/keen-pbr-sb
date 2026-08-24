@@ -9,6 +9,7 @@
 #include "../runtime/nfqws_runtime_contract.hpp"
 #include "firewall.hpp"
 
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -107,6 +108,18 @@ StagedRuntimeFirewall stage_runtime_firewall(
 // every child process of a firewall apply originates here.
 void commit_runtime_firewall(Firewall& firewall,
                              const StagedRuntimeFirewall& staged);
+
+// Own the one safe RulesOnly fallback boundary. A backend refusal is allowed
+// to rebuild exactly one PreserveSets candidate, including any caller-owned
+// preflight that must happen before COMMIT. The returned transaction is the
+// one that actually reached the kernel. Any failure from the fallback stage
+// or its commit propagates without attempting a second fallback.
+using RuntimeFirewallFallbackStage = std::function<StagedRuntimeFirewall(
+    const FirewallRulesOnlyError&)>;
+StagedRuntimeFirewall commit_runtime_firewall_with_rules_only_fallback(
+    Firewall& firewall,
+    StagedRuntimeFirewall staged,
+    RuntimeFirewallFallbackStage fallback_stage);
 
 // Materialize the runtime firewall configuration using the real backend.
 // Returns the realized rule-state snapshot that should be stored for later

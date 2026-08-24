@@ -2492,34 +2492,34 @@ void Daemon::apply_firewall(
         staged.list_content_state,
         !has_explicit_inbound_scope && !has_native_vpn_bypass);
 
-    try {
-        commit_runtime_firewall(*firewall_, staged);
-    } catch (const FirewallRulesOnlyError& error) {
-        // The backend's own preflight (a reused set missing, a schema that
-        // drifted, dispatchers that need repair) fires before it mutates
-        // anything, so the kernel is exactly as it was. Restage the full
-        // transaction and run the Meta preflight again over it: the content
-        // state is now freshly read rather than carried over.
-        if (staged.mode != FirewallApplyMode::RulesOnly) throw;
-        if (error.external_repair()) {
-            Logger::instance().info(
-                "Set-reusing firewall refresh was refused by the backend, "
-                "streaming lists instead: {}",
-                error.what());
-        } else {
-            Logger::instance().warn(
-                "Set-reusing firewall refresh hit an unexpected backend "
-                "refusal, streaming lists instead: {}",
-                error.what());
-        }
-        effective_mode = FirewallApplyMode::PreserveSets;
-        staged = stage_with(effective_mode);
-        meta_activation = prepare_meta_udp443_activation_or_throw(
-            staged.rule_states,
-            staged.list_content_state,
-            !has_explicit_inbound_scope && !has_native_vpn_bypass);
-        commit_runtime_firewall(*firewall_, staged);
-    }
+    staged = commit_runtime_firewall_with_rules_only_fallback(
+        *firewall_,
+        std::move(staged),
+        [&](const FirewallRulesOnlyError& error) {
+            // The backend's own preflight (a reused set missing, a schema that
+            // drifted, dispatchers that need repair) fires before it mutates
+            // anything, so the kernel is exactly as it was. Restage the full
+            // transaction and run the Meta preflight again over it: the
+            // content state is now freshly read rather than carried over.
+            if (error.external_repair()) {
+                Logger::instance().info(
+                    "Set-reusing firewall refresh was refused by the backend, "
+                    "streaming lists instead: {}",
+                    error.what());
+            } else {
+                Logger::instance().warn(
+                    "Set-reusing firewall refresh hit an unexpected backend "
+                    "refusal, streaming lists instead: {}",
+                    error.what());
+            }
+            effective_mode = FirewallApplyMode::PreserveSets;
+            auto fallback = stage_with(effective_mode);
+            meta_activation = prepare_meta_udp443_activation_or_throw(
+                fallback.rule_states,
+                fallback.list_content_state,
+                !has_explicit_inbound_scope && !has_native_vpn_bypass);
+            return fallback;
+        });
     meta_policy_committed = true;
     if (meta_activation.has_value()) {
         committed_meta_udp443_fwmark_ =

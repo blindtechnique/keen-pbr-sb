@@ -36,6 +36,8 @@ public:
     std::vector<std::string> marked_destinations;
     std::vector<std::string> loaded_entries;
     std::function<void()> before_first_ipset;
+    std::optional<FirewallApplyMode> refuse_apply_mode;
+    bool refusal_is_external_repair{false};
 
     void create_ipset(const std::string&, int, uint32_t) override {
         if (before_first_ipset) {
@@ -118,6 +120,12 @@ public:
     void apply(FirewallApplyMode mode) override {
         events.push_back("apply");
         applied_modes.push_back(mode);
+        if (refuse_apply_mode == mode) {
+            refuse_apply_mode.reset();
+            throw FirewallRulesOnlyError(
+                "recorded backend refusal",
+                refusal_is_external_repair);
+        }
     }
     void cleanup() override {}
     FirewallBackend backend() const override {
@@ -1267,6 +1275,59 @@ TEST_CASE("commit uses the mode the transaction was staged with") {
     // Staging one mode and committing another would build one transaction and
     // publish a different one.
     CHECK(firewall.applied_modes.front() == FirewallApplyMode::PreserveSets);
+}
+
+TEST_CASE("runtime firewall commit has one owned RulesOnly fallback") {
+    RecordingFirewall firewall;
+    firewall.refuse_apply_mode = FirewallApplyMode::RulesOnly;
+    firewall.refusal_is_external_repair = true;
+
+    StagedRuntimeFirewall initial;
+    initial.mode = FirewallApplyMode::RulesOnly;
+    std::size_t fallback_calls = 0U;
+    bool observed_external_repair = false;
+
+    const auto committed =
+        commit_runtime_firewall_with_rules_only_fallback(
+            firewall,
+            std::move(initial),
+            [&](const FirewallRulesOnlyError& error) {
+                ++fallback_calls;
+                observed_external_repair = error.external_repair();
+                StagedRuntimeFirewall fallback;
+                fallback.mode = FirewallApplyMode::PreserveSets;
+                return fallback;
+            });
+
+    CHECK(fallback_calls == 1U);
+    CHECK(observed_external_repair);
+    CHECK(committed.mode == FirewallApplyMode::PreserveSets);
+    REQUIRE(firewall.applied_modes.size() == 2U);
+    CHECK(firewall.applied_modes[0] == FirewallApplyMode::RulesOnly);
+    CHECK(firewall.applied_modes[1] == FirewallApplyMode::PreserveSets);
+}
+
+TEST_CASE("runtime firewall commit never retries a non-RulesOnly transaction") {
+    RecordingFirewall firewall;
+    firewall.refuse_apply_mode = FirewallApplyMode::PreserveSets;
+
+    StagedRuntimeFirewall staged;
+    staged.mode = FirewallApplyMode::PreserveSets;
+    std::size_t fallback_calls = 0U;
+
+    CHECK_THROWS_AS(
+        commit_runtime_firewall_with_rules_only_fallback(
+            firewall,
+            std::move(staged),
+            [&](const FirewallRulesOnlyError&) {
+                ++fallback_calls;
+                return StagedRuntimeFirewall{};
+            }),
+        FirewallRulesOnlyError);
+    CHECK(fallback_calls == 0U);
+    REQUIRE(firewall.applied_modes.size() == 1U);
+    CHECK(firewall.applied_modes.front() ==
+          FirewallApplyMode::PreserveSets);
 }
 
 TEST_CASE("staging then committing equals the single-shot apply") {

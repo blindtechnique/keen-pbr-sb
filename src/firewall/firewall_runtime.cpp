@@ -732,6 +732,26 @@ void commit_runtime_firewall(Firewall& firewall,
     firewall.apply(staged.mode);
 }
 
+StagedRuntimeFirewall commit_runtime_firewall_with_rules_only_fallback(
+    Firewall& firewall,
+    StagedRuntimeFirewall staged,
+    RuntimeFirewallFallbackStage fallback_stage) {
+    try {
+        commit_runtime_firewall(firewall, staged);
+    } catch (const FirewallRulesOnlyError& error) {
+        if (staged.mode != FirewallApplyMode::RulesOnly || !fallback_stage) {
+            throw;
+        }
+        staged = fallback_stage(error);
+        if (staged.mode == FirewallApplyMode::RulesOnly) {
+            throw FirewallRulesOnlyError(
+                "RulesOnly fallback produced another RulesOnly transaction");
+        }
+        commit_runtime_firewall(firewall, staged);
+    }
+    return staged;
+}
+
 std::vector<RuleState> apply_runtime_firewall(
     const Config& config,
     const OutboundMarkMap& outbound_marks,
