@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <unistd.h>
@@ -37,15 +38,27 @@ private:
 
 class BackendTransactionFirewall final : public Firewall {
 public:
+    explicit BackendTransactionFirewall(
+        std::vector<std::string>* call_order = nullptr)
+        : call_order_(call_order) {}
+
     std::vector<FirewallApplyMode> prepared_modes;
     std::vector<FirewallApplyMode> applied_modes;
     std::optional<FirewallApplyMode> transient_stage_mode;
+    bool refuse_rules_only_stage{false};
     bool refuse_rules_only_commit{false};
     bool refuse_preserve_sets_commit{false};
     bool refusal_is_external_repair{false};
 
     void prepare_apply(FirewallApplyMode mode) override {
+        record("stage", mode);
         prepared_modes.push_back(mode);
+        if (mode == FirewallApplyMode::RulesOnly &&
+            refuse_rules_only_stage) {
+            throw FirewallRulesOnlyError(
+                "recorded stage refusal",
+                refusal_is_external_repair);
+        }
         if (transient_stage_mode == mode) {
             throw TransientFirewallError("recorded transient stage failure");
         }
@@ -88,6 +101,7 @@ public:
     }
 
     void apply(FirewallApplyMode mode) override {
+        record("commit", mode);
         applied_modes.push_back(mode);
         const bool refuse =
             (mode == FirewallApplyMode::RulesOnly &&
@@ -105,6 +119,81 @@ public:
     FirewallBackend backend() const override {
         return FirewallBackend::nftables;
     }
+
+private:
+    static const char* mode_name(FirewallApplyMode mode) noexcept {
+        switch (mode) {
+        case FirewallApplyMode::Destructive:
+            return "destructive";
+        case FirewallApplyMode::PreserveSets:
+            return "preserve-sets";
+        case FirewallApplyMode::RulesOnly:
+            return "rules-only";
+        }
+        return "unknown";
+    }
+
+    void record(const char* action, FirewallApplyMode mode) {
+        if (call_order_ != nullptr) {
+            call_order_->push_back(
+                std::string{action} + ":" + mode_name(mode));
+        }
+    }
+
+    std::vector<std::string>* call_order_{nullptr};
+};
+
+class BackendTransactionMetaServices final
+    : public MetaUdp443ActivationBackendServices {
+public:
+    explicit BackendTransactionMetaServices(
+        std::vector<std::string>* call_order = nullptr)
+        : call_order_(call_order) {}
+
+    std::size_t fastnat_calls{0U};
+    std::size_t fail_fastnat_on_call{0U};
+
+    bool fastnat_is_disabled_or_unavailable() override {
+        record("meta:fastnat");
+        ++fastnat_calls;
+        return fail_fastnat_on_call == 0U ||
+               fastnat_calls != fail_fastnat_on_call;
+    }
+
+    ConntrackCleanupResult probe_exact_cleanup_capability(
+        bool) override {
+        record("meta:capability");
+        return ConntrackCleanupResult::Succeeded;
+    }
+
+    std::vector<DumpedInterface> dump_interfaces() override {
+        record("meta:interfaces");
+        DumpedInterface interface;
+        interface.name = "br0";
+        interface.ipv4_addresses = {"192.168.1.1/24"};
+        return {std::move(interface)};
+    }
+
+    ConntrackFlowObservation observe_forwarded_destination_flows(
+        const std::vector<std::string>&,
+        const std::vector<std::string>&,
+        std::uint32_t,
+        const ConntrackFlowObservationOptions&,
+        const std::vector<std::string>&,
+        const std::vector<std::string>&,
+        const std::set<std::uint32_t>&) override {
+        record("meta:observation");
+        return {};
+    }
+
+private:
+    void record(const char* event) {
+        if (call_order_ != nullptr) {
+            call_order_->push_back(event);
+        }
+    }
+
+    std::vector<std::string>* call_order_{nullptr};
 };
 
 Config direct_transaction_config() {
@@ -138,6 +227,31 @@ Config list_transaction_config() {
     })json");
 }
 
+Config meta_transaction_config() {
+    return parse_config(R"json({
+      "daemon": {
+        "ipv6_enabled": false,
+        "meta_udp443_policy": "messages_first"
+      },
+      "fwmark": {"mask": "0x00FF0000"},
+      "outbounds": [
+        {"tag": "vpn", "type": "interface", "interface": "nwg0"}
+      ],
+      "lists": {
+        "companion": {
+          "catalog_identity":
+            "0475c85d06ea258343fdda22ee85bfd0a3e1fb2fa88751ab39ee0ffb64efedbe",
+          "ip_cidrs": ["31.13.64.0/18"]
+        }
+      },
+      "route": {
+        "rules": [
+          {"list": ["companion"], "outbound": "vpn"}
+        ]
+      }
+    })json");
+}
+
 RuntimeFirewallBackendTransactionInput transaction_input(
     const std::filesystem::path& cache_path,
     Config config,
@@ -162,7 +276,200 @@ RuntimeFirewallBackendTransactionInput transaction_input(
     return input;
 }
 
+RuntimeFirewallBackendTransactionInput meta_transaction_input(
+    const std::filesystem::path& cache_path,
+    FirewallApplyMode mode) {
+    auto input = transaction_input(
+        cache_path,
+        meta_transaction_config(),
+        mode,
+        {"companion"});
+    input.requested_list_fingerprints = {{"companion", "same"}};
+    input.previous_list_fingerprints = {{"companion", "same"}};
+
+    RuleState previous_rule;
+    previous_rule.rule_index = 0U;
+    previous_rule.list_names = {"companion"};
+    previous_rule.action_type = RuleActionType::Mark;
+    previous_rule.fwmark = 0x00070000U;
+    input.previous_rules = {std::move(previous_rule)};
+
+    ListSetUsage previous_usage;
+    previous_usage.has_static_entries = true;
+    previous_usage.has_static_ipv4_entries = true;
+    previous_usage.static_destinations = {"31.13.64.0/18"};
+    input.previous_list_usage = {
+        {"companion", std::move(previous_usage)}};
+    input.previous_list_content_state.static_destinations["companion"] = {
+        "31.13.64.0/18"};
+    input.forwarded_scope_allows_unmarked_cleanup = true;
+    return input;
+}
+
 } // namespace
+
+TEST_CASE("backend transaction runs Meta preflight before initial commit") {
+    BackendTransactionTempDirectory temp;
+    auto input = meta_transaction_input(
+        temp.path() / "cache",
+        FirewallApplyMode::PreserveSets);
+    std::vector<std::string> call_order;
+    BackendTransactionFirewall firewall{&call_order};
+    BackendTransactionMetaServices meta_services{&call_order};
+
+    const auto result = execute_runtime_firewall_backend_transaction(
+        input, firewall, meta_services);
+
+    CHECK(result.committed());
+    CHECK(result.commit_entered);
+    CHECK(result.commit_returned);
+    REQUIRE(result.meta_activation_plan.has_value());
+    CHECK(result.meta_activation_plan->expected_fwmark == 0x00070000U);
+    CHECK(call_order == std::vector<std::string>{
+        "stage:preserve-sets",
+        "meta:fastnat",
+        "meta:capability",
+        "meta:interfaces",
+        "meta:observation",
+        "commit:preserve-sets",
+    });
+}
+
+TEST_CASE("initial Meta preflight failure never enters commit") {
+    BackendTransactionTempDirectory temp;
+    auto input = meta_transaction_input(
+        temp.path() / "cache",
+        FirewallApplyMode::PreserveSets);
+    std::vector<std::string> call_order;
+    BackendTransactionFirewall firewall{&call_order};
+    BackendTransactionMetaServices meta_services{&call_order};
+    meta_services.fail_fastnat_on_call = 1U;
+
+    const auto result = execute_runtime_firewall_backend_transaction(
+        input, firewall, meta_services);
+
+    CHECK_FALSE(result.committed());
+    CHECK_FALSE(result.commit_entered);
+    CHECK_FALSE(result.commit_returned);
+    CHECK_FALSE(result.meta_activation_plan.has_value());
+    CHECK_FALSE(result.rules_only_fallback.has_value());
+    REQUIRE(result.failure.has_value());
+    CHECK(result.failure->phase ==
+          RuntimeFirewallBackendTransactionPhase::initial_meta_preflight);
+    CHECK(result.failure->kind ==
+          RuntimeFirewallBackendFailureKind::meta_preflight);
+    CHECK(call_order == std::vector<std::string>{
+        "stage:preserve-sets",
+        "meta:fastnat",
+    });
+    CHECK(firewall.applied_modes.empty());
+}
+
+TEST_CASE("RulesOnly commit fallback repeats Meta preflight before commit") {
+    BackendTransactionTempDirectory temp;
+    auto input = meta_transaction_input(
+        temp.path() / "cache",
+        FirewallApplyMode::RulesOnly);
+    std::vector<std::string> call_order;
+    BackendTransactionFirewall firewall{&call_order};
+    BackendTransactionMetaServices meta_services{&call_order};
+    firewall.refuse_rules_only_commit = true;
+
+    const auto result = execute_runtime_firewall_backend_transaction(
+        input, firewall, meta_services);
+
+    CHECK(result.committed());
+    CHECK(result.commit_entered);
+    CHECK(result.commit_returned);
+    REQUIRE(result.rules_only_fallback.has_value());
+    REQUIRE(result.meta_activation_plan.has_value());
+    CHECK(result.meta_activation_plan->expected_fwmark == 0x00070000U);
+    CHECK(meta_services.fastnat_calls == 2U);
+    CHECK(call_order == std::vector<std::string>{
+        "stage:rules-only",
+        "meta:fastnat",
+        "meta:capability",
+        "meta:interfaces",
+        "meta:observation",
+        "commit:rules-only",
+        "stage:preserve-sets",
+        "meta:fastnat",
+        "meta:capability",
+        "meta:interfaces",
+        "meta:observation",
+        "commit:preserve-sets",
+    });
+}
+
+TEST_CASE("RulesOnly stage fallback runs Meta preflight before commit") {
+    BackendTransactionTempDirectory temp;
+    auto input = meta_transaction_input(
+        temp.path() / "cache",
+        FirewallApplyMode::RulesOnly);
+    std::vector<std::string> call_order;
+    BackendTransactionFirewall firewall{&call_order};
+    BackendTransactionMetaServices meta_services{&call_order};
+    firewall.refuse_rules_only_stage = true;
+
+    const auto result = execute_runtime_firewall_backend_transaction(
+        input, firewall, meta_services);
+
+    CHECK(result.committed());
+    CHECK(result.commit_entered);
+    CHECK(result.commit_returned);
+    REQUIRE(result.rules_only_fallback.has_value());
+    CHECK(result.rules_only_fallback->refused_phase ==
+          RuntimeFirewallBackendTransactionPhase::initial_stage);
+    REQUIRE(result.meta_activation_plan.has_value());
+    CHECK(meta_services.fastnat_calls == 1U);
+    CHECK(call_order == std::vector<std::string>{
+        "stage:rules-only",
+        "stage:preserve-sets",
+        "meta:fastnat",
+        "meta:capability",
+        "meta:interfaces",
+        "meta:observation",
+        "commit:preserve-sets",
+    });
+}
+
+TEST_CASE("fallback Meta failure does not enter fallback commit") {
+    BackendTransactionTempDirectory temp;
+    auto input = meta_transaction_input(
+        temp.path() / "cache",
+        FirewallApplyMode::RulesOnly);
+    std::vector<std::string> call_order;
+    BackendTransactionFirewall firewall{&call_order};
+    BackendTransactionMetaServices meta_services{&call_order};
+    firewall.refuse_rules_only_commit = true;
+    meta_services.fail_fastnat_on_call = 2U;
+
+    const auto result = execute_runtime_firewall_backend_transaction(
+        input, firewall, meta_services);
+
+    CHECK_FALSE(result.committed());
+    CHECK(result.commit_entered);
+    CHECK_FALSE(result.commit_returned);
+    CHECK_FALSE(result.meta_activation_plan.has_value());
+    REQUIRE(result.rules_only_fallback.has_value());
+    REQUIRE(result.failure.has_value());
+    CHECK(result.failure->phase ==
+          RuntimeFirewallBackendTransactionPhase::fallback_meta_preflight);
+    CHECK(result.failure->kind ==
+          RuntimeFirewallBackendFailureKind::meta_preflight);
+    CHECK(firewall.applied_modes ==
+          std::vector<FirewallApplyMode>{FirewallApplyMode::RulesOnly});
+    CHECK(call_order == std::vector<std::string>{
+        "stage:rules-only",
+        "meta:fastnat",
+        "meta:capability",
+        "meta:interfaces",
+        "meta:observation",
+        "commit:rules-only",
+        "stage:preserve-sets",
+        "meta:fastnat",
+    });
+}
 
 TEST_CASE("backend transaction returns one owned committed value") {
     BackendTransactionTempDirectory temp;
@@ -171,9 +478,11 @@ TEST_CASE("backend transaction returns one owned committed value") {
         direct_transaction_config(),
         FirewallApplyMode::PreserveSets);
     BackendTransactionFirewall firewall;
+    BackendTransactionMetaServices meta_services;
 
     const auto result =
-        execute_runtime_firewall_backend_transaction(input, firewall);
+        execute_runtime_firewall_backend_transaction(
+            input, firewall, meta_services);
 
     CHECK(result.committed());
     CHECK(result.operation_serial == 17U);
@@ -199,9 +508,11 @@ TEST_CASE("backend transaction repairs one RulesOnly staging refusal") {
         FirewallApplyMode::RulesOnly,
         {"seam"});
     BackendTransactionFirewall firewall;
+    BackendTransactionMetaServices meta_services;
 
     const auto result =
-        execute_runtime_firewall_backend_transaction(input, firewall);
+        execute_runtime_firewall_backend_transaction(
+            input, firewall, meta_services);
 
     CHECK(result.committed());
     REQUIRE(result.rules_only_fallback.has_value());
@@ -228,9 +539,11 @@ TEST_CASE("backend transaction streams a changed pinned list generation") {
     input.requested_list_fingerprints = {{"seam", "new"}};
     input.previous_list_fingerprints = {{"seam", "old"}};
     BackendTransactionFirewall firewall;
+    BackendTransactionMetaServices meta_services;
 
     const auto result =
-        execute_runtime_firewall_backend_transaction(input, firewall);
+        execute_runtime_firewall_backend_transaction(
+            input, firewall, meta_services);
 
     CHECK(result.committed());
     CHECK_FALSE(result.rules_only_fallback.has_value());
@@ -248,11 +561,13 @@ TEST_CASE("backend transaction repairs one RulesOnly commit refusal") {
         direct_transaction_config(),
         FirewallApplyMode::RulesOnly);
     BackendTransactionFirewall firewall;
+    BackendTransactionMetaServices meta_services;
     firewall.refuse_rules_only_commit = true;
     firewall.refusal_is_external_repair = true;
 
     const auto result =
-        execute_runtime_firewall_backend_transaction(input, firewall);
+        execute_runtime_firewall_backend_transaction(
+            input, firewall, meta_services);
 
     CHECK(result.committed());
     REQUIRE(result.rules_only_fallback.has_value());
@@ -275,11 +590,13 @@ TEST_CASE("backend transaction never retries a failed fallback commit") {
         direct_transaction_config(),
         FirewallApplyMode::RulesOnly);
     BackendTransactionFirewall firewall;
+    BackendTransactionMetaServices meta_services;
     firewall.refuse_rules_only_commit = true;
     firewall.refuse_preserve_sets_commit = true;
 
     const auto result =
-        execute_runtime_firewall_backend_transaction(input, firewall);
+        execute_runtime_firewall_backend_transaction(
+            input, firewall, meta_services);
 
     CHECK_FALSE(result.committed());
     REQUIRE(result.rules_only_fallback.has_value());
@@ -303,10 +620,12 @@ TEST_CASE("backend transaction reports the exact stage failure phase") {
         direct_transaction_config(),
         FirewallApplyMode::PreserveSets);
     BackendTransactionFirewall firewall;
+    BackendTransactionMetaServices meta_services;
     firewall.transient_stage_mode = FirewallApplyMode::PreserveSets;
 
     const auto result =
-        execute_runtime_firewall_backend_transaction(input, firewall);
+        execute_runtime_firewall_backend_transaction(
+            input, firewall, meta_services);
 
     CHECK_FALSE(result.committed());
     CHECK_FALSE(result.committed_firewall.has_value());

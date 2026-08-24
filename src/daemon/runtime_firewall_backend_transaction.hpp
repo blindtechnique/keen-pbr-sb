@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../firewall/firewall_runtime.hpp"
+#include "../runtime/meta_udp_443_activation_contract.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -13,12 +14,14 @@
 namespace keen_pbr3 {
 
 // The blocking backend phase which failed. These values deliberately describe
-// only stage/commit work; scheduling, coalescing and daemon-state publication
-// remain control-loop responsibilities.
+// only stage/preflight/commit work; scheduling, coalescing and daemon-state
+// publication remain control-loop responsibilities.
 enum class RuntimeFirewallBackendTransactionPhase : std::uint8_t {
     initial_stage,
+    initial_meta_preflight,
     initial_commit,
     fallback_stage,
+    fallback_meta_preflight,
     fallback_commit,
 };
 
@@ -26,6 +29,7 @@ enum class RuntimeFirewallBackendFailureKind : std::uint8_t {
     rules_only_refusal,
     transient_firewall,
     firewall,
+    meta_preflight,
     unexpected_exception,
     unknown_exception,
 };
@@ -68,6 +72,9 @@ struct RuntimeFirewallBackendTransactionInput {
     std::vector<InternalVpnRuntimeTarget> effective_internal_vpn_targets;
     std::vector<FirewallSourceEgressSnatSelector>
         candidate_native_vpn_direct_egress_snat_selectors;
+    bool forwarded_scope_allows_unmarked_cleanup{false};
+    std::optional<std::uint32_t> committed_meta_udp443_fwmark;
+    std::uint32_t committed_meta_udp443_owned_mask{0U};
 
     std::size_t list_max_file_size_bytes{kDefaultMaxFileSizeBytes};
     std::shared_ptr<const ListCacheGenerationSnapshot> list_cache_snapshot;
@@ -97,6 +104,11 @@ struct RuntimeFirewallBackendTransactionResult {
     bool commit_entered{false};
     bool commit_returned{false};
     std::optional<StagedRuntimeFirewall> committed_firewall;
+    // The candidate authority prepared immediately before the final COMMIT
+    // attempt. It remains available after an ambiguous commit failure, but is
+    // cleared when restaging begins and set again only after the fallback
+    // candidate passes its own Meta preflight.
+    std::optional<MetaUdp443ActivationPlan> meta_activation_plan;
     std::optional<RuntimeFirewallRulesOnlyFallback> rules_only_fallback;
     std::optional<RuntimeFirewallBackendFailure> failure;
 
@@ -105,13 +117,15 @@ struct RuntimeFirewallBackendTransactionResult {
     }
 };
 
-// Execute only the blocking stage+commit core on the already-admitted backend
-// service. No daemon state is read or published here. A RulesOnly refusal may
-// rebuild exactly once with PreserveSets, whether the refusal happened during
-// initial staging or initial commit; every later refusal is terminal.
+// Execute only the blocking stage+Meta-preflight+commit core on the
+// already-admitted backend services. No daemon state is read or published
+// here. A RulesOnly refusal may rebuild exactly once with PreserveSets,
+// whether the refusal happened during initial staging or initial commit;
+// every later refusal is terminal.
 RuntimeFirewallBackendTransactionResult
 execute_runtime_firewall_backend_transaction(
     const RuntimeFirewallBackendTransactionInput& input,
-    Firewall& firewall);
+    Firewall& firewall,
+    MetaUdp443ActivationBackendServices& meta_services);
 
 } // namespace keen_pbr3

@@ -6,12 +6,23 @@
 namespace keen_pbr3 {
 namespace {
 
+bool is_meta_preflight_phase(
+    RuntimeFirewallBackendTransactionPhase phase) noexcept {
+    return phase == RuntimeFirewallBackendTransactionPhase::
+                        initial_meta_preflight ||
+           phase == RuntimeFirewallBackendTransactionPhase::
+                        fallback_meta_preflight;
+}
+
 void record_failure(
     RuntimeFirewallBackendTransactionResult& result,
     RuntimeFirewallBackendTransactionPhase phase,
     RuntimeFirewallBackendFailureKind kind,
     const std::string& message,
     bool external_repair = false) {
+    if (is_meta_preflight_phase(phase)) {
+        kind = RuntimeFirewallBackendFailureKind::meta_preflight;
+    }
     result.failure = RuntimeFirewallBackendFailure{
         phase, kind, message, external_repair};
 }
@@ -21,7 +32,8 @@ void record_failure(
 RuntimeFirewallBackendTransactionResult
 execute_runtime_firewall_backend_transaction(
     const RuntimeFirewallBackendTransactionInput& input,
-    Firewall& firewall) {
+    Firewall& firewall,
+    MetaUdp443ActivationBackendServices& meta_services) {
     RuntimeFirewallBackendTransactionResult result;
     result.operation_serial = input.operation_serial;
     result.runtime_generation = input.runtime_generation;
@@ -61,6 +73,25 @@ execute_runtime_firewall_backend_transaction(
             input.force_clear_dynamic_sets,
             previous);
     };
+    const auto meta_preflight = [
+        &input, &meta_services, &phase](
+        const StagedRuntimeFirewall& staged,
+        RuntimeFirewallBackendTransactionPhase preflight_phase) {
+        phase = preflight_phase;
+        MetaUdp443ActivationInput meta_input;
+        meta_input.config = input.config;
+        meta_input.candidate_rules = staged.rule_states;
+        meta_input.candidate_list_content_state =
+            staged.list_content_state;
+        meta_input.forwarded_scope_allows_unmarked_cleanup =
+            input.forwarded_scope_allows_unmarked_cleanup;
+        meta_input.committed_fwmark =
+            input.committed_meta_udp443_fwmark;
+        meta_input.committed_owned_mask =
+            input.committed_meta_udp443_owned_mask;
+        return prepare_meta_udp443_activation_or_throw(
+            meta_input, meta_services);
+    };
 
     try {
         StagedRuntimeFirewall staged;
@@ -76,6 +107,10 @@ execute_runtime_firewall_backend_transaction(
                 error.external_repair()};
             phase = RuntimeFirewallBackendTransactionPhase::fallback_stage;
             staged = stage_with(FirewallApplyMode::PreserveSets);
+            result.meta_activation_plan = meta_preflight(
+                staged,
+                RuntimeFirewallBackendTransactionPhase::
+                    fallback_meta_preflight);
         }
 
         if (result.rules_only_fallback.has_value()) {
@@ -87,6 +122,10 @@ execute_runtime_firewall_backend_transaction(
                 firewall, std::move(staged), {});
             result.commit_returned = true;
         } else {
+            result.meta_activation_plan = meta_preflight(
+                staged,
+                RuntimeFirewallBackendTransactionPhase::
+                    initial_meta_preflight);
             phase = RuntimeFirewallBackendTransactionPhase::initial_commit;
             result.commit_entered = true;
             staged = commit_runtime_firewall_with_rules_only_fallback(
@@ -101,8 +140,13 @@ execute_runtime_firewall_backend_transaction(
                             error.external_repair()};
                     phase =
                         RuntimeFirewallBackendTransactionPhase::fallback_stage;
+                    result.meta_activation_plan.reset();
                     auto fallback =
                         stage_with(FirewallApplyMode::PreserveSets);
+                    result.meta_activation_plan = meta_preflight(
+                        fallback,
+                        RuntimeFirewallBackendTransactionPhase::
+                            fallback_meta_preflight);
                     // The commit helper performs the fallback commit after the
                     // callback returns. Set the phase before returning so a
                     // backend exception is classified at the exact boundary.
