@@ -117,6 +117,7 @@ import {
   nfqwsUpgradeBlockKind,
   nfqwsUpgradeAllowed,
   nfqwsUpgradeButton,
+  nfqwsUpgradeMissingGuarantees,
   type NfqwsUpgradeCapability,
 } from "@/lib/nfqws-upgrade-capability"
 import {
@@ -1199,6 +1200,9 @@ function NfqwsUpgradeDialog({
   open: boolean
 }) {
   const { t } = useTranslation()
+  // Warn about what this router cannot do, not about what the mode string
+  // meant when the text was written.
+  const missingGuarantees = nfqwsUpgradeMissingGuarantees(capability)
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent showCloseButton={false}>
@@ -1214,11 +1218,17 @@ function NfqwsUpgradeDialog({
             {t("nfqws.automaticBackupDescription")}
           </AlertDescription>
         </Alert>
-        {capability?.mode === "guarded_opkg" ? (
+        {missingGuarantees.length > 0 ? (
           <Alert variant="destructive">
             <AlertTitle>{t("nfqws.upgradeGuardedTitle")}</AlertTitle>
             <AlertDescription>
-              {t("nfqws.upgradeGuardedDescription")}
+              <ul className="list-disc space-y-1 pl-4">
+                {missingGuarantees.map((guarantee) => (
+                  <li key={guarantee}>
+                    {t(`nfqws.upgradeMissing.${guarantee}`)}
+                  </li>
+                ))}
+              </ul>
             </AlertDescription>
           </Alert>
         ) : null}

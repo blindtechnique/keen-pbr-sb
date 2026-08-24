@@ -96,3 +96,39 @@ export function nfqwsUpgradeButton(
 
   return { enabled: true, tooltipKey: "nfqws.upgradeTip.available" }
 }
+
+// Which guarantees the upgrade path does NOT provide right now. The
+// limitation alert exists to warn about what is missing; keying it on the
+// mode string alone made it outlive the guarantees it was written for - the
+// build that pins and verifies the target IPK, keeps the exact previous one
+// and repairs an interrupted attempt at the next start still told the
+// operator that none of that happens. These flags are what the backend
+// publishes for exactly this question, so the warning follows the state
+// rather than the era the text was written in.
+export type NfqwsUpgradeGuarantee =
+  | "exactPrevious"
+  | "verifiedTarget"
+  | "metadataRollback"
+  | "bootRecovery"
+
+export function nfqwsUpgradeMissingGuarantees(
+  capability: NfqwsUpgradeCapability | undefined
+): NfqwsUpgradeGuarantee[] {
+  // No capability at all promises nothing, so everything counts as missing.
+  if (!capability) {
+    return [
+      "exactPrevious",
+      "verifiedTarget",
+      "metadataRollback",
+      "bootRecovery",
+    ]
+  }
+  const missing: NfqwsUpgradeGuarantee[] = []
+  if (!capability.exact_previous_ipk) missing.push("exactPrevious")
+  if (!capability.verified_target_ipk) missing.push("verifiedTarget")
+  if (!capability.exact_opkg_metadata_rollback) {
+    missing.push("metadataRollback")
+  }
+  if (!capability.boot_recovery) missing.push("bootRecovery")
+  return missing
+}

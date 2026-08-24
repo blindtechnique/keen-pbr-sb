@@ -662,9 +662,12 @@ void run_scripted_or_plain_install(ComponentPackageTransaction& transaction,
     };
     try {
         ScriptedInstallReport report;
-        transaction.scripted_install_candidate(upgrade, report,
-                                               stop_service);
-        append(report.notes);
+        // Notes are written into the operator log where they happen, not
+        // collected and appended after every command the package manager
+        // printed: the transaction's own stop ran before the unpack and
+        // must not be shown below it.
+        transaction.scripted_install_candidate(upgrade, report, stop_service,
+                                               append);
         if (!report.scripts_extracted) {
             if (timed_out || termination_uncertain) {
                 // The extraction did not fail - it did not finish, or its
@@ -990,11 +993,15 @@ bool reinstall_exact_previous_nfqws_package(
     bool scripted_failed = false;
     try {
         ScriptedInstallReport report;
-        transaction.scripted_reinstall_current(expected_version, report);
-        if (!report.notes.empty()) {
-            if (!output.empty() && output.back() != '\n') output += '\n';
-            output += report.notes;
-        }
+        // Same interleaving as the install: each step note lands in the
+        // operator log at the point it happened.
+        transaction.scripted_reinstall_current(
+            expected_version, report, {},
+            [&output](const std::string& line) {
+                if (!output.empty() && output.back() != '\n') output += '\n';
+                output += line;
+                output += '\n';
+            });
         if (!report.scripts_extracted) {
             if (annotated_timed_out || annotated_uncertain) {
                 output += "The script extraction did not finish cleanly; "
@@ -3408,15 +3415,17 @@ void register_nfqws_handler_impl(
                         // prerm's slot, with the stragglers-killing verified
                         // stop - and the controlled start below brings it
                         // back on the new binary.
-                        [&](std::string& notes) {
+                        [&](const ScriptedNoteSink& note) {
                             if (!runtime_before.process_present) {
                                 return true;
                             }
-                            notes += "Stopping nfqws2 under the transaction "
-                                     "before its files are replaced.\n";
+                            note("Stopping nfqws2 under the transaction "
+                                 "before its files are replaced.");
                             int stop_status = 0;
-                            notes += run_nfqws_service_command("stop",
-                                                               stop_status);
+                            const auto stopped =
+                                run_nfqws_service_command("stop",
+                                                          stop_status);
+                            if (!stopped.empty()) note(stopped);
                             return stop_status == 0;
                         });
                     package_command_returned = true;
@@ -4259,7 +4268,7 @@ NfqwsBoundedOpkgTestResult run_nfqws_bounded_opkg_for_testing(
     const std::string& store_root,
     const std::string& feed_list,
     const ScriptedInstallPaths& scripted,
-    std::function<bool(std::string&)> stop_service) {
+    ScriptedServiceStop stop_service) {
     NfqwsPackagePaths paths;
     paths.store_root = store_root;
     paths.feed_list = feed_list;

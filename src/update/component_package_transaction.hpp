@@ -141,10 +141,17 @@ inline bool scripted_install_succeeded(
            report.postinst_ok && report.init_restored;
 }
 
+// Where a scripted install's own step notes go as they happen. The report
+// keeps a copy, but a caller that is also collecting command output wants
+// each note at the point it was written, not appended after every command
+// the package manager printed - the transaction's stop would otherwise be
+// shown to the operator below the unpack it ran before.
+using ScriptedNoteSink = std::function<void(const std::string& line)>;
+
 // The caller's service stop for a scripted install, run where a plain
-// upgrade ran the old package's prerm. Appends its command output to the
-// notes; returns false when the service could not be proven stopped.
-using ScriptedServiceStop = std::function<bool(std::string& notes)>;
+// upgrade ran the old package's prerm. Writes through the same note sink;
+// returns false when the service could not be proven stopped.
+using ScriptedServiceStop = std::function<bool(const ScriptedNoteSink& note)>;
 
 class ComponentPackageTransaction {
 public:
@@ -201,14 +208,20 @@ public:
     // entirely (no prerm runs, and the held init script silences
     // postinst's guarded stop). Without it a running service would keep
     // executing the old image while its files are replaced underneath.
+    //
+    // `note`, when provided, receives every step note as it is written, so
+    // a caller interleaving them with command output shows the operator the
+    // order things actually happened in.
     void scripted_install_candidate(bool upgrade,
                                     ScriptedInstallReport& report,
                                     const ScriptedServiceStop& stop_service =
-                                        {});
+                                        {},
+                                    const ScriptedNoteSink& note = {});
     void scripted_reinstall_current(const std::string& expected_version,
                                     ScriptedInstallReport& report,
                                     const ScriptedServiceStop& stop_service =
-                                        {});
+                                        {},
+                                    const ScriptedNoteSink& note = {});
 
     // The candidate installed and was proven so by the caller: it becomes
     // current, current becomes previous.
@@ -224,7 +237,8 @@ private:
                           const std::vector<std::string>& extra_install_flags,
                           bool upgrade,
                           ScriptedInstallReport& report,
-                          const ScriptedServiceStop& stop_service);
+                          const ScriptedServiceStop& stop_service,
+                          const ScriptedNoteSink& note);
 
     ComponentPackageOptions options_;
     ComponentIpkStore& store_;

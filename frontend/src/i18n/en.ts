@@ -30,8 +30,16 @@ export const enTranslation = {
     upgradeMetadataUnverifiedDescription:
       "The panel does not know which nfqws2 version is really installed: the files were put back from a restore point while the package itself stayed as it was. Updates stay unavailable until the package is restored by hand with opkg over SSH.",
     upgradeGuardedTitle: "Recovery limitation",
-    upgradeGuardedDescription:
-      "The upgrade runs the regular opkg path under the shared lock and saves the current nfqws2 files first. This is not an exact package rollback: the previous IPK and opkg state are not preserved, the target IPK is not pinned, and an operation interrupted by reboot is not recovered automatically.",
+    upgradeMissing: {
+      exactPrevious:
+        "There is no exact copy of the installed version: a failure puts the saved files back, but opkg's record will still name the new version.",
+      verifiedTarget:
+        "The downloaded package is not pinned or checked against the feed index, so what installs is whatever the feed serves at that moment.",
+      metadataRollback:
+        "A rollback restores files but not opkg state: the package database will name a version that is no longer on disk.",
+      bootRecovery:
+        "An operation interrupted by a reboot is not sorted out on its own - the package has to be repaired by hand with opkg over SSH.",
+    },
     captureRestorePoint: "Save restore point",
     restoreComponent: "Restore previous files",
     restorePointMissing:
@@ -89,7 +97,7 @@ export const enTranslation = {
       "The package state needs attention. The panel cannot verify the installed nfqws2 version or check for updates until the retained transaction is repaired.",
     upgradeConfirmTitle: "Update nfqws2",
     upgradeConfirmDescription:
-      "The panel reports {{version}} as the latest release, but opkg will install the version selected by the currently configured Entware sources. The panel does not pin or independently cryptographically verify that package or source.",
+      "What installs is the version the configured Entware sources serve, which need not be {{version}}, the release the panel displays. The downloaded package is checked by size and SHA-256 against that same repository's index and exactly that verified file is installed; the panel does not independently confirm the repository itself.",
     automaticBackupTitle: "Automatic backup",
     automaticBackupDescription:
       "Before updating, the panel stores a local copy of the configuration, lists, Lua scripts and strategies and captures the currently installed files for recovery during this request. There is no attributable one-click rollback after the operation ends.",

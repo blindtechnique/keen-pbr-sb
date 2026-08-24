@@ -196,7 +196,7 @@ NfqwsBoundedOpkgTestResult run_nfqws_bounded_opkg_for_testing(
     const ScriptedInstallPaths& scripted = {},
     // The service stop the production upgrade hands in, run between the
     // package's preinst and the unpack.
-    std::function<bool(std::string&)> stop_service = {});
+    ScriptedServiceStop stop_service = {});
 
 struct NfqwsInstallTestResult {
     std::string output;

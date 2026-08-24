@@ -1043,10 +1043,10 @@ TEST_CASE("the upgrade's service stop runs in the old prerm's slot") {
             return execution;
         }),
         "1.2.4", fixture.store_root(), fixture.feed_list(),
-        fixture.scripted_paths(), [&](std::string& notes) {
+        fixture.scripted_paths(), [&](const ScriptedNoteSink& note) {
             ++stop_calls;
             commands_at_stop = fixture.commands.size();
-            notes += "service stopped for the upgrade\n";
+            note("service stopped for the upgrade");
             return true;
         });
 
@@ -1061,6 +1061,36 @@ TEST_CASE("the upgrade's service stop runs in the old prerm's slot") {
           std::string::npos);
 }
 
+TEST_CASE("the transaction's own steps are logged where they happened") {
+    // The operator log is read as a sequence. Collecting the transaction's
+    // notes and appending them after every command the package manager
+    // printed showed the stop below the unpack it ran before, which is the
+    // one thing this log is supposed to make unambiguous.
+    NfqwsPackageFixture fixture;
+    fixture.retain_current("1.2.4", "bytes of 1.2.4");
+    fixture.serve("1.2.5", "bytes of 1.2.5");
+    fixture.lay_init_script();
+    const auto result = run_nfqws_bounded_opkg_for_testing(
+        fixture.executor([] {
+            ExecCaptureResult execution;
+            execution.exit_code = 0;
+            execution.stdout_output = "UNPACK-MARKER\n";
+            return execution;
+        }),
+        "1.2.4", fixture.store_root(), fixture.feed_list(),
+        fixture.scripted_paths(), [](const ScriptedNoteSink& note) {
+            note("STOP-MARKER");
+            return true;
+        });
+
+    CHECK(result.scripted_ok);
+    const auto stop_at = result.output.find("STOP-MARKER");
+    const auto unpack_at = result.output.find("UNPACK-MARKER");
+    REQUIRE(stop_at != std::string::npos);
+    REQUIRE(unpack_at != std::string::npos);
+    CHECK(stop_at < unpack_at);
+}
+
 TEST_CASE("a stop that fails refuses the unpack") {
     NfqwsPackageFixture fixture;
     fixture.retain_current("1.2.4", "bytes of 1.2.4");
@@ -1073,7 +1103,7 @@ TEST_CASE("a stop that fails refuses the unpack") {
         }),
         "1.2.4", fixture.store_root(), fixture.feed_list(),
         fixture.scripted_paths(),
-        [&](std::string&) { return false; });
+        [&](const ScriptedNoteSink&) { return false; });
 
     CHECK(result.status != 0);
     CHECK(result.scripted);

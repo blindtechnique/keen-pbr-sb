@@ -855,11 +855,11 @@ TEST_CASE("the caller's service stop runs between preinst and the unpack") {
     std::size_t scripts_at_stop = 0;
     int stop_calls = 0;
     txn.scripted_install_candidate(
-        /*upgrade=*/true, report, [&](std::string& notes) {
+        /*upgrade=*/true, report, [&](const ScriptedNoteSink& note) {
             ++stop_calls;
             commands_at_stop = world.commands.size();
             scripts_at_stop = world.script_runs.size();
-            notes += "service stopped\n";
+            note("service stopped");
             return true;
         });
 
@@ -883,7 +883,7 @@ TEST_CASE("a service that cannot be stopped keeps its files") {
     ScriptedInstallReport report;
     txn.scripted_install_candidate(
         /*upgrade=*/true, report,
-        [&](std::string&) { return false; });
+        [&](const ScriptedNoteSink&) { return false; });
 
     CHECK(report.service_stop_ran);
     CHECK_FALSE(report.service_stop_ok);

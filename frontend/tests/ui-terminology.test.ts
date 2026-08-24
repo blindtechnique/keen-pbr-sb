@@ -89,12 +89,17 @@ describe("nfqws updater truthfulness", () => {
 
     expect(russian).not.toContain("официального репозитория")
     expect(english.toLowerCase()).not.toContain("official repository")
+    // What installs comes from the configured sources, which need not be the
+    // GitHub release the panel displays as "latest".
     expect(russian).toContain("настроенн")
     expect(english).toContain("configured Entware")
-    expect(russian).toContain("криптографически не проверяет")
-    expect(english).toContain(
-      "does not pin or independently cryptographically verify"
-    )
+    // The panel does now pin and check the package - against that same
+    // repository's index, which is self-referential. The disclosure that
+    // survives is about the repository's own authenticity, not about the
+    // absence of any verification, which is why the older "does not pin"
+    // wording was retired rather than kept.
+    expect(russian).toContain("подлинность")
+    expect(english).toContain("does not independently confirm")
   })
 
   test("does not promise a stale one-click rollback after the request", () => {

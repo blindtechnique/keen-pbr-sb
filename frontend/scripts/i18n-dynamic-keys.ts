@@ -176,6 +176,13 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
       "progressStepKeys covers exactly the steps the handler publishes, asserted in src/api/component-transaction-events.test.ts.",
   },
   {
+    file: "src/pages/nfqws-page.tsx",
+    argument: "`nfqws.upgradeMissing.${*}`",
+    keys: ["nfqws.upgradeMissing.*"],
+    reason:
+      "One key per upgrade guarantee the backend can report missing; the union is NfqwsUpgradeGuarantee and every member is asserted in tests/nfqws-upgrade-guarantees.test.ts.",
+  },
+  {
     file: "src/components/settings/maintenance-cards.tsx",
     argument: "`pages.settings.softwareUpdate.${*}`",
     keys: ["pages.settings.softwareUpdate.rollbackReason*"],

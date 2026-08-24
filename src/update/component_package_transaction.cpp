@@ -335,7 +335,7 @@ void ComponentPackageTransaction::promote_installed_candidate() {
 
 void ComponentPackageTransaction::scripted_install_candidate(
     bool upgrade, ScriptedInstallReport& report,
-    const ScriptedServiceStop& stop_service) {
+    const ScriptedServiceStop& stop_service, const ScriptedNoteSink& note) {
     const auto candidate = store_.inspect(IpkSlot::candidate);
     if (candidate.state != IpkSlotState::usable) {
         throw ComponentPackageRefused(
@@ -343,12 +343,12 @@ void ComponentPackageTransaction::scripted_install_candidate(
                         "(candidate slot is ") +
             ipk_slot_state_name(candidate.state) + ")");
     }
-    scripted_install(IpkSlot::candidate, {}, upgrade, report, stop_service);
+    scripted_install(IpkSlot::candidate, {}, upgrade, report, stop_service, note);
 }
 
 void ComponentPackageTransaction::scripted_reinstall_current(
     const std::string& expected_version, ScriptedInstallReport& report,
-    const ScriptedServiceStop& stop_service) {
+    const ScriptedServiceStop& stop_service, const ScriptedNoteSink& note) {
     const auto current = store_.inspect(IpkSlot::current);
     if (current.state != IpkSlotState::usable) {
         throw ComponentPackageRefused(
@@ -365,7 +365,7 @@ void ComponentPackageTransaction::scripted_reinstall_current(
     // scripts still see it as an upgrade of an installed package.
     scripted_install(IpkSlot::current,
                      {"--force-downgrade", "--force-reinstall"},
-                     /*upgrade=*/true, report, stop_service);
+                     /*upgrade=*/true, report, stop_service, note);
 }
 
 namespace {
@@ -386,8 +386,24 @@ struct StagingCleanup {
 void ComponentPackageTransaction::scripted_install(
     IpkSlot slot, const std::vector<std::string>& extra_install_flags,
     bool upgrade, ScriptedInstallReport& report,
-    const ScriptedServiceStop& stop_service) {
+    const ScriptedServiceStop& stop_service,
+    const ScriptedNoteSink& note) {
     const auto ipk = store_.ipk_path(slot);
+    // Every step note lands in the report AND, when the caller is
+    // interleaving them with command output, in that stream at the moment
+    // it is written. `emit` is itself a ScriptedNoteSink, so the caller's
+    // stop hook writes through the same path and lands in the same place.
+    const ScriptedNoteSink emit = [&report, &note](const std::string& line) {
+        append_line(report.notes, line);
+        // A log sink must never change control flow. One that throws here
+        // would unwind past the init-script restore below and leave the
+        // component's boot script renamed aside over a line of text.
+        if (!note) return;
+        try {
+            note(line);
+        } catch (...) {
+        }
+    };
     const auto command_ok = [](const ExecCaptureResult& result) {
         return result.exit_code == 0 && !result.timed_out &&
                !result.termination_uncertain;
@@ -401,7 +417,7 @@ void ComponentPackageTransaction::scripted_install(
     try {
         stage = store_.staging_directory();
     } catch (const std::exception& failure) {
-        append_line(report.notes,
+        emit(
                     std::string("The staging directory for the package "
                                 "scripts is unavailable: ") +
                         failure.what());
@@ -412,7 +428,7 @@ void ComponentPackageTransaction::scripted_install(
     if (!command_ok(run_({options_.scripted.tar, "-xzf", ipk.string(), "-C",
                           stage.string()},
                          options_.timeouts, {}))) {
-        append_line(report.notes,
+        emit(
                     "The package archive could not be unpacked for its "
                     "maintainer scripts; nothing was mutated.");
         return;
@@ -420,7 +436,7 @@ void ComponentPackageTransaction::scripted_install(
     std::error_code fs_error;
     fs::path control_archive = stage / "control.tar.gz";
     if (!fs::is_regular_file(control_archive, fs_error)) {
-        append_line(report.notes,
+        emit(
                     "The package archive holds no control.tar.gz; nothing "
                     "was mutated.");
         return;
@@ -431,7 +447,7 @@ void ComponentPackageTransaction::scripted_install(
                           control_archive.string(), "-C",
                           scripts_dir.string()},
                          options_.timeouts, {}))) {
-        append_line(report.notes,
+        emit(
                     "The package's control archive could not be unpacked; "
                     "nothing was mutated.");
         return;
@@ -449,7 +465,7 @@ void ComponentPackageTransaction::scripted_install(
                   upgrade ? "upgrade" : "install"},
                  options_.timeouts, {}));
         if (!report.preinst_ok) {
-            append_line(report.notes,
+            emit(
                         "The package's preinst script failed; the package "
                         "manager was not run.");
             return;
@@ -463,9 +479,9 @@ void ComponentPackageTransaction::scripted_install(
     // files: the unpack is refused.
     if (stop_service) {
         report.service_stop_ran = true;
-        report.service_stop_ok = stop_service(report.notes);
+        report.service_stop_ok = stop_service(emit);
         if (!report.service_stop_ok) {
-            append_line(report.notes,
+            emit(
                         "The running service could not be proven stopped; "
                         "the package manager was not run.");
             return;
@@ -486,7 +502,7 @@ void ComponentPackageTransaction::scripted_install(
     report.unpack_ok =
         command_ok(run_(install_argv, options_.timeouts, {}));
     if (!report.unpack_ok) {
-        append_line(report.notes,
+        emit(
                     "opkg could not unpack the package; the maintainer "
                     "scripts were not run.");
         return;
@@ -501,7 +517,7 @@ void ComponentPackageTransaction::scripted_install(
     // interrupted earlier run is replaced by the rename.
     const auto postinst = scripts_dir / "postinst";
     if (!fs::is_regular_file(postinst, fs_error)) {
-        append_line(report.notes,
+        emit(
                     "The package has no postinst script; nothing had to be "
                     "suppressed.");
         return;
@@ -516,7 +532,7 @@ void ComponentPackageTransaction::scripted_install(
         // let its real stop and start escape the transaction, so this
         // fails closed instead.
         report.postinst_ok = false;
-        append_line(report.notes,
+        emit(
                     "The init script could not be inspected (" +
                         fs_error.message() +
                         "); postinst was not run and the package's real "
@@ -531,7 +547,7 @@ void ComponentPackageTransaction::scripted_install(
             // the smaller harm. The binary has not been switched, which the
             // caller's verification is built to catch.
             report.postinst_ok = false;
-            append_line(report.notes,
+            emit(
                         "The init script could not be held aside (" +
                             fs_error.message() +
                             "); postinst was not run and the package's real "
@@ -547,7 +563,7 @@ void ComponentPackageTransaction::scripted_install(
         std::error_code restore_error;
         fs::rename(held, init, restore_error);
         if (restore_error) {
-            append_line(report.notes,
+            emit(
                         "The init script could not be restored from " +
                             held.string() + " (" + restore_error.message() +
                             "); boot recovery restores it by that name.");
@@ -565,7 +581,7 @@ void ComponentPackageTransaction::scripted_install(
         throw;
     }
     if (!report.postinst_ok) {
-        append_line(report.notes, "The package's postinst script failed.");
+        emit( "The package's postinst script failed.");
     }
     restore_init();
 }
