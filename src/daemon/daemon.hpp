@@ -1330,7 +1330,6 @@ private:
     // Declared after every field captured by its worker callbacks so reverse
     // member destruction stops the coordinator before those dependencies.
     ResolverStreamCoordinator resolver_stream_coordinator_;
-    bool routing_runtime_active_{true};
 };
 
 } // namespace keen_pbr3

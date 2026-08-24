@@ -182,6 +182,7 @@ add_executable(keen-pbr-tests
   test_lifecycle_operation.cpp
   test_list_refresh_task.cpp
   test_runtime_state_machine.cpp
+  test_runtime_state_store.cpp
   test_urltest_manager.cpp
   test_port_spec_util.cpp
   test_policy_rule.cpp

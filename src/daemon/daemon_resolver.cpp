@@ -162,7 +162,9 @@ RuntimeStateSnapshot Daemon::build_runtime_state_snapshot() const {
     snapshot.resolver_live_status = resolver_snapshot.live_status;
     snapshot.resolver_last_probe_ts = resolver_snapshot.last_probe_ts;
     snapshot.apply_started_ts = resolver_snapshot.apply_started_ts;
-    snapshot.routing_runtime_active = routing_runtime_active_;
+    // routing_runtime_active is deliberately absent: the store owns it and
+    // carries it across publishes, so this builder cannot answer for it and
+    // cannot forget to.
     snapshot.runtime_state = runtime_state_machine_.state();
     snapshot.runtime_state_reason = runtime_state_machine_.reason();
 
@@ -211,7 +213,7 @@ void Daemon::publish_runtime_state() {
     Logger::instance().trace(
         "runtime_state_publish",
         "routing_runtime_active={} runtime_state={} reason={}",
-        routing_runtime_active_ ? "true" : "false",
+        routing_runtime_active() ? "true" : "false",
         runtime_state_name(runtime_state_machine_.state()),
         runtime_state_machine_.reason());
     runtime_state_store_.publish(build_runtime_state_snapshot());
@@ -257,7 +259,7 @@ void Daemon::schedule_keenetic_dns_refresh() {
         std::chrono::minutes{5},
         [this]() {
             post_control_task([this]() {
-                if (!routing_runtime_active_ ||
+                if (!routing_runtime_active() ||
                     !config_uses_keenetic_dns(config_.dns)) {
                     return;
                 }
@@ -272,7 +274,7 @@ bool Daemon::commit_keenetic_dns_refresh_result(
     std::uint64_t generation,
     const KeeneticDnsRefreshResult& result) {
     if (generation != runtime_generation_.load(std::memory_order_acquire) ||
-        !routing_runtime_active_ ||
+        !routing_runtime_active() ||
         !config_uses_keenetic_dns(config_.dns)) {
         return false;
     }
@@ -761,15 +763,15 @@ void Daemon::commit_resolver_hash_probe_result(
 
 void Daemon::refresh_resolver_config_hash_actual_async() {
     const auto dns_cfg_opt = config_.dns;
-    if (!routing_runtime_active_ ||
+    if (!routing_runtime_active() ||
         !dns_cfg_opt.has_value() ||
         !dns_cfg_opt->system_resolver.has_value()) {
         periodic_task_metrics_.record_skipped(
             "resolver-hash-refresh",
-            !routing_runtime_active_
+            !routing_runtime_active()
                 ? "routing runtime is inactive"
                 : "system resolver is not configured");
-        if (!routing_runtime_active_) {
+        if (!routing_runtime_active()) {
             resolver_sync_.runtime_stopped();
         } else {
             reset_resolver_actual_state();

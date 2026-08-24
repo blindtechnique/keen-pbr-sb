@@ -588,8 +588,12 @@ bool Daemon::wait_for_resolver_stream_epoch(
                std::memory_order_acquire) == expected_epoch;
 }
 
+
 bool Daemon::routing_runtime_active() const {
-    return runtime_state_store_.snapshot().routing_runtime_active;
+    // The store owns this outright now: reading the whole snapshot to get one
+    // bool copied the route and rule vectors and the urltest map on every
+    // event that asks.
+    return runtime_state_store_.routing_runtime_active();
 }
 
 void Daemon::warn_conntrack_unavailable_once() {
@@ -916,7 +920,7 @@ void Daemon::run_owned_conntrack_cleanup_retry() {
     auto retry = std::move(*pending_owned_conntrack_cleanup_retry_);
     pending_owned_conntrack_cleanup_retry_.reset();
     if (!owned_conntrack_cleanup_retry_is_current(
-            routing_runtime_active_,
+            routing_runtime_active(),
             retry,
             runtime_generation_.load(std::memory_order_acquire))) {
         return;
@@ -1093,7 +1097,7 @@ void Daemon::complete_owned_conntrack_cleanup_operation(
     operation->cancel();
 
     const bool current = owned_conntrack_cleanup_retry_is_current(
-        routing_runtime_active_,
+        routing_runtime_active(),
         retry,
         runtime_generation_.load(std::memory_order_acquire));
     // Keep mutation ownership until the control loop has either committed the
@@ -1306,7 +1310,7 @@ void Daemon::stop_routing_runtime() {
     urltest_after_firewall_gate_.reset();
     cancel_resolver_reload_retry();
     cancel_internal_vpn_catalog_refresh_retry();
-    if (!routing_runtime_active_) {
+    if (!routing_runtime_active()) {
         if (runtime_state_machine_.state() != RuntimeState::stopped) {
             transition_runtime_or_throw(RuntimeState::stopped, "inactive runtime stopped");
             publish_runtime_state();
@@ -1342,7 +1346,7 @@ void Daemon::stop_routing_runtime() {
     // Routing and firewall teardown has already happened. Publish the real
     // state even when dnsmasq fallback activation fails; reporting "running"
     // here would leave restart callers and the UI with a false liveness state.
-    routing_runtime_active_ = false;
+    runtime_state_store_.set_routing_runtime_active(false);
     transition_runtime_or_throw(RuntimeState::stopped, "runtime stopped");
     refresh_resolver_config_hash_actual_async();
     publish_runtime_state();
@@ -1355,7 +1359,7 @@ void Daemon::stop_routing_runtime() {
 
 void Daemon::start_routing_runtime() {
     auto& log = Logger::instance();
-    if (routing_runtime_active_) {
+    if (routing_runtime_active()) {
         schedule_owned_snat_health_check();
         reset_idle_stall_observer(/*schedule_if_eligible=*/true);
         return;
@@ -1447,7 +1451,7 @@ void Daemon::start_routing_runtime() {
             internal_vpn_resolution);
         update_internal_vpn_service_verified_includes_lkg(
             internal_vpn_service_resolution);
-        routing_runtime_active_ = true;
+        runtime_state_store_.set_routing_runtime_active(true);
         reset_idle_stall_observer(/*schedule_if_eligible=*/true);
         schedule_owned_snat_health_check();
         schedule_internal_vpn_catalog_refresh_if_needed(
@@ -1506,7 +1510,7 @@ void Daemon::start_routing_runtime() {
         if (!run_system_resolver_hook("deactivate")) {
             log.warn("System resolver fallback recovery failed");
         }
-        routing_runtime_active_ = false;
+        runtime_state_store_.set_routing_runtime_active(false);
         cancel_idle_stall_observer();
         cancel_owned_snat_health_check();
         cancel_owned_conntrack_cleanup_retry();
@@ -1522,7 +1526,7 @@ void Daemon::start_routing_runtime() {
 }
 
 void Daemon::restart_routing_runtime() {
-    if (!routing_runtime_active_) {
+    if (!routing_runtime_active()) {
         throw DaemonError("Routing runtime is stopped");
     }
 
@@ -1632,7 +1636,7 @@ void Daemon::restart_routing_runtime() {
                 }
             });
 
-        routing_runtime_active_ = true;
+        runtime_state_store_.set_routing_runtime_active(true);
         reset_idle_stall_observer(/*schedule_if_eligible=*/true);
         schedule_internal_vpn_catalog_refresh_if_needed(
             internal_vpn_resolution.state,
@@ -1667,7 +1671,7 @@ void Daemon::restart_routing_runtime() {
                 previous_apply_started, std::memory_order_release);
             resolver_sync_.restore(previous_resolver_sync);
         }
-        routing_runtime_active_ = true;
+        runtime_state_store_.set_routing_runtime_active(true);
         reset_idle_stall_observer(/*schedule_if_eligible=*/true);
         if (!kernel_generation_committed &&
             config_has_native_vpn_catalog_policy(config_)) {
@@ -3614,7 +3618,7 @@ void Daemon::start_interface_probe_round_impl(
                             }
                         } else {
                             std::string reconciliation_error;
-                            if (routing_runtime_active_) {
+                            if (routing_runtime_active()) {
                                 // Keenetic may recreate a tunnel route without
                                 // changing administrative UP. Reconcile once,
                                 // after all per-target observations have been
@@ -3832,7 +3836,7 @@ void Daemon::schedule_startup_firewall_retry(
          list_cache_snapshot = std::move(list_cache_snapshot)]() {
             auto& log = Logger::instance();
             if (!runtime_recovery_is_current(
-                    routing_runtime_active_,
+                    routing_runtime_active(),
                     generation,
                     runtime_generation_.load(std::memory_order_acquire))) {
                 log.verbose(
@@ -3988,7 +3992,7 @@ void Daemon::commit_remote_list_refresh_task_result(
             const auto reconcile_committed_cache = [this, reload, &source](
                 RemoteListsRefreshResult& committed,
                 bool& reloaded) -> std::optional<std::string> {
-                if (!reload || !routing_runtime_active_ ||
+                if (!reload || !routing_runtime_active() ||
                     !committed.any_changed()) {
                     return std::nullopt;
                 }
@@ -4282,7 +4286,7 @@ RemoteListRefreshTaskStartResult Daemon::start_remote_list_refresh_task(
     const std::string task_id = started.task.id;
     const ListRefreshCancellationToken cancellation = started.cancellation;
     const OutboundMarkMap marks_snapshot = outbound_marks_;
-    const bool runtime_active_snapshot = routing_runtime_active_;
+    const bool runtime_active_snapshot = routing_runtime_active();
     const auto relevant_lists = collect_relevant_list_names(config_snapshot);
     const auto dns_relevant_lists = collect_dns_relevant_list_names(config_snapshot);
     const auto generation = runtime_generation_.load(std::memory_order_acquire);
@@ -4848,13 +4852,13 @@ void Daemon::schedule_internal_vpn_catalog_refresh() {
                         internal_vpn_catalog_refresh_gate_.complete();
                     const bool rerun_is_valid =
                         rerun_requested &&
-                        routing_runtime_active_ &&
+                        routing_runtime_active() &&
                         config_has_native_vpn_catalog_policy(config_);
                     if (rerun_is_valid) {
                         schedule_internal_vpn_catalog_refresh();
                     }
 
-                    if (!routing_runtime_active_ ||
+                    if (!routing_runtime_active() ||
                         !config_has_native_vpn_catalog_policy(config_)) {
                         return;
                     }
@@ -4953,7 +4957,7 @@ void Daemon::schedule_internal_vpn_catalog_refresh() {
             "Skipping native VPN NDMS refresh because the blocking executor "
             "is unavailable");
         if (rerun_requested &&
-            routing_runtime_active_ &&
+            routing_runtime_active() &&
             config_has_native_vpn_catalog_policy(config_)) {
             schedule_internal_vpn_catalog_refresh();
             return;
@@ -4976,7 +4980,7 @@ void Daemon::schedule_internal_vpn_catalog_refresh_if_needed(
     const bool service_needs_refresh =
         config_requires_internal_vpn_service_inventory(config_) &&
         service_state != InternalVpnRuntimeResolutionState::verified;
-    if (!routing_runtime_active_ ||
+    if (!routing_runtime_active() ||
         (!interface_needs_refresh && !service_needs_refresh)) {
         return;
     }
@@ -4988,7 +4992,7 @@ void Daemon::schedule_internal_vpn_catalog_refresh_retry(
     if (!scheduler_ ||
         internal_vpn_catalog_refresh_retry_task_id_ >= 0 ||
         !runtime_recovery_is_current(
-            routing_runtime_active_,
+            routing_runtime_active(),
             runtime_generation,
             runtime_generation_.load(std::memory_order_acquire))) {
         return;
@@ -5017,7 +5021,7 @@ void Daemon::schedule_internal_vpn_catalog_refresh_retry(
             [this, runtime_generation]() {
                 internal_vpn_catalog_refresh_retry_task_id_ = -1;
                 if (!runtime_recovery_is_current(
-                        routing_runtime_active_,
+                        routing_runtime_active(),
                         runtime_generation,
                         runtime_generation_.load(
                             std::memory_order_acquire))) {
@@ -5066,7 +5070,7 @@ void Daemon::schedule_resolver_reload_retry(
     const auto decline = classify_resolver_reload_schedule(
         scheduler_ != nullptr,
         resolver_reload_retry_task_id_ >= 0,
-        routing_runtime_active_,
+        routing_runtime_active(),
         runtime_generation,
         runtime_generation_.load(std::memory_order_acquire));
     if (decline != ResolverReloadScheduleDecline::scheduled) {
@@ -5109,7 +5113,7 @@ void Daemon::schedule_resolver_reload_retry(
                 resolver_reload_retry_pending_attempt_ = 0U;
                 resolver_reload_retry_pending_generation_ = 0U;
                 if (!runtime_recovery_is_current(
-                        routing_runtime_active_,
+                        routing_runtime_active(),
                         runtime_generation,
                         runtime_generation_.load(
                             std::memory_order_acquire))) {
@@ -5171,7 +5175,7 @@ void Daemon::start_resolver_reload_retry_attempt(
     std::uint64_t runtime_generation) {
     const bool maintenance_attempt =
         attempt >= RESOLVER_RELOAD_RETRY_DELAYS.size();
-    if (!routing_runtime_active_ ||
+    if (!routing_runtime_active() ||
         runtime_generation !=
             runtime_generation_.load(std::memory_order_acquire)) {
         Logger::instance().verbose(
@@ -5320,7 +5324,7 @@ void Daemon::complete_resolver_reload_retry_attempt(
         const auto current_generation =
             runtime_generation_.load(std::memory_order_acquire);
         if (operation.runtime_generation != current_generation ||
-            !routing_runtime_active_) {
+            !routing_runtime_active()) {
             Logger::instance().verbose(
                 "Discarding stale resolver reload recovery completion.");
             keenetic_dns_refresh_deferred_by_resolver_stream_ = false;
@@ -5354,7 +5358,7 @@ void Daemon::complete_resolver_reload_retry_attempt(
             }
         }
         const auto outcome = evaluate_resolver_reload_retry(
-            routing_runtime_active_,
+            routing_runtime_active(),
             operation.runtime_generation,
             current_generation,
             operation.retry_attempt,
@@ -5446,7 +5450,7 @@ bool Daemon::acknowledge_verified_resolver_reload(
     std::uint64_t runtime_generation) {
     const auto current_generation =
         runtime_generation_.load(std::memory_order_acquire);
-    if (!routing_runtime_active_ || runtime_generation != current_generation) {
+    if (!routing_runtime_active() || runtime_generation != current_generation) {
         return false;
     }
 
@@ -5454,7 +5458,7 @@ bool Daemon::acknowledge_verified_resolver_reload(
         "resolver-reload:" + std::to_string(runtime_generation));
 
     const auto runtime_recovery_action = plan_resolver_runtime_recovery(
-        routing_runtime_active_,
+        routing_runtime_active(),
         runtime_state_machine_.state(),
         runtime_state_machine_.reason(),
         resolver_reload_latched_);
@@ -5507,7 +5511,7 @@ void Daemon::resume_deferred_keenetic_dns_refresh() noexcept {
                     keenetic_dns_refresh_deferred_by_resolver_stream_ = true;
                     return;
                 }
-                if (!routing_runtime_active_ || !config_.dns.has_value() ||
+                if (!routing_runtime_active() || !config_.dns.has_value() ||
                     !dns_config_uses_keenetic_server(*config_.dns)) {
                     return;
                 }
@@ -5515,7 +5519,7 @@ void Daemon::resume_deferred_keenetic_dns_refresh() noexcept {
                     runtime_generation_.load(std::memory_order_acquire));
             },
             "keenetic-dns-refresh-after-resolver-recovery");
-        if (!queued && routing_runtime_active_) {
+        if (!queued && routing_runtime_active()) {
             keenetic_dns_refresh_deferred_by_resolver_stream_ = true;
         }
     } catch (const std::exception& error) {
@@ -5556,7 +5560,7 @@ void Daemon::schedule_idle_stall_observer_after(
         if (!scheduler_ ||
             !idle_stall_observer_enabled_.load(
                 std::memory_order_acquire) ||
-            !routing_runtime_active_) {
+            !routing_runtime_active()) {
             return;
         }
         if (idle_stall_observer_task_id_ >= 0) {
@@ -5609,7 +5613,7 @@ bool Daemon::schedule_exact_tcp_reset_cleanup(
     std::size_t attempt) noexcept {
     if (!scheduler_ || expected_runtime_generation == 0U ||
         !running_.load(std::memory_order_acquire) ||
-        !routing_runtime_active_ ||
+        !routing_runtime_active() ||
         runtime_generation_.load(std::memory_order_acquire) !=
             expected_runtime_generation ||
         attempt >
@@ -5817,7 +5821,7 @@ void Daemon::run_exact_tcp_reset_cleanup(
     // with the serial lookup above, this prevents an old callback from
     // deleting a newly armed identical rule.
     if (!running_.load(std::memory_order_acquire) ||
-        !routing_runtime_active_ ||
+        !routing_runtime_active() ||
         runtime_generation_.load(std::memory_order_acquire) !=
             expected_runtime_generation) {
         pending_exact_tcp_reset_cleanups_.erase(pending);
@@ -5855,7 +5859,7 @@ void Daemon::run_exact_tcp_reset_cleanup(
 void Daemon::reset_idle_stall_observer(
     bool schedule_if_eligible) noexcept {
     cancel_idle_stall_observer();
-    if (!schedule_if_eligible || !routing_runtime_active_ ||
+    if (!schedule_if_eligible || !routing_runtime_active() ||
         !idle_stall_observer_requested(config_)) {
         return;
     }
@@ -5867,7 +5871,7 @@ void Daemon::reset_idle_stall_observer(
 
 void Daemon::run_idle_stall_observer() noexcept {
     try {
-        if (!routing_runtime_active_ ||
+        if (!routing_runtime_active() ||
             !idle_stall_observer_enabled_.load(
                 std::memory_order_acquire) ||
             !idle_stall_observer_requested(config_)) {
@@ -6254,7 +6258,7 @@ void Daemon::dispatch_udp_call_affinity_mutations(
                                         expected_runtime_generation,
                                         expected_coverage_generation]() {
         return running_.load(std::memory_order_acquire) &&
-               routing_runtime_active_ &&
+               routing_runtime_active() &&
                idle_stall_observer_enabled_.load(
                    std::memory_order_acquire) &&
                runtime_generation_.load(std::memory_order_acquire) ==
@@ -6308,7 +6312,7 @@ void Daemon::dispatch_udp_call_affinity_mutations(
                                                  expected_runtime_generation,
                                                  expected_coverage_generation]() {
                 // Worker code may consult only atomics. The control-owned
-                // routing_runtime_active_ flag is checked before dispatch and
+                // routing_runtime_active() flag is checked before dispatch and
                 // again by the posted control-loop completion.
                 return running_.load(std::memory_order_acquire) &&
                        idle_stall_observer_enabled_.load(
@@ -6653,7 +6657,7 @@ void Daemon::dispatch_udp_call_affinity_mutations(
                         false, std::memory_order_release);
                     const bool generation_is_current =
                         running_.load(std::memory_order_acquire) &&
-                        routing_runtime_active_ &&
+                        routing_runtime_active() &&
                         idle_stall_observer_enabled_.load(
                             std::memory_order_acquire) &&
                         runtime_generation_.load(
@@ -6790,7 +6794,7 @@ void Daemon::commit_idle_stall_observation(
     const auto generation_is_current = [this,
                                         expected_runtime_generation,
                                         expected_coverage_generation]() {
-        return routing_runtime_active_ &&
+        return routing_runtime_active() &&
                idle_stall_observer_enabled_.load(
                    std::memory_order_acquire) &&
                runtime_generation_.load(std::memory_order_acquire) ==
@@ -7228,7 +7232,7 @@ void Daemon::commit_idle_stall_observation(
                                                         expected_runtime_generation,
                                                         expected_coverage_generation]() {
                         return running_.load(std::memory_order_acquire) &&
-                               routing_runtime_active_ &&
+                               routing_runtime_active() &&
                                idle_stall_observer_enabled_.load(
                                    std::memory_order_acquire) &&
                                runtime_generation_.load(
@@ -7401,7 +7405,7 @@ void Daemon::commit_idle_stall_observation(
                     }
 
                     if (!running_.load(std::memory_order_acquire) ||
-                        !routing_runtime_active_ ||
+                        !routing_runtime_active() ||
                         !idle_stall_observer_enabled_.load(
                             std::memory_order_acquire) ||
                         runtime_generation_.load(
@@ -7520,7 +7524,7 @@ void Daemon::execute_committed_stale_flow_reconnect(
             RuntimeReconnectCommitState::committed,
             request,
             [this]() noexcept {
-                return routing_runtime_active_;
+                return routing_runtime_active();
             },
             [this]() noexcept {
                 return runtime_generation_.load(std::memory_order_acquire);
@@ -7717,7 +7721,7 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
             });
         return has_explicit_inbound_scope || has_native_vpn_bypass;
     };
-    const bool previous_runtime_active = routing_runtime_active_;
+    const bool previous_runtime_active = routing_runtime_active();
     const bool reconnect_unmarked_flows_on_routing_change =
         reconnect_unmarked_flows_on_routing_change_enabled(prepared.config);
     const auto previous_owned_reconnect_list_names =
@@ -7880,7 +7884,7 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
 #ifdef WITH_API
     refresh_interface_traffic_config_targets(config_);
 #endif
-    routing_runtime_active_ = true;
+    runtime_state_store_.set_routing_runtime_active(true);
     schedule_internal_vpn_catalog_refresh_if_needed(
         internal_vpn_lkg_update.state,
         internal_vpn_service_lkg_update.state);
@@ -7994,7 +7998,7 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
         owned_destination_coverage);
     reset_idle_stall_observer(/*schedule_if_eligible=*/true);
     } catch (...) {
-        routing_runtime_active_ = false;
+        runtime_state_store_.set_routing_runtime_active(false);
         cancel_idle_stall_observer();
         cancel_meta_udp443_activation_cleanup();
         try {

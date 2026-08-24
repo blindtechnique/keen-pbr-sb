@@ -1166,7 +1166,7 @@ void Daemon::handle_ipc_control_socket() {
                 const bool resolver_generation_available =
                     resolver_lkg_stream_available(
                         runtime_state,
-                        routing_runtime_active_,
+                        routing_runtime_active(),
                         committed_snapshot_available,
                         exact_activation_stream_authorized);
                 if (!resolver_generation_available) {
@@ -2244,7 +2244,7 @@ void Daemon::check_owned_snat_health() {
         runtime_generation_.load(std::memory_order_acquire);
     const bool urltest_recovery_without_timer =
         should_run_periodic_urltest_firewall_recovery(
-            routing_runtime_active_,
+            routing_runtime_active(),
             urltest_after_firewall_gate_.waiting_for(
                 current_runtime_generation),
             runtime_retry_pending,
@@ -2285,7 +2285,7 @@ void Daemon::check_owned_snat_health() {
     }
     const bool resolver_recovery_without_timer =
         should_run_periodic_resolver_reload_recovery(
-            routing_runtime_active_,
+            routing_runtime_active(),
             resolver_reload_retry_task_id_ >= 0,
             resolver_reload_retry_pending_,
             resolver_after_firewall_gate_.waiting_for(
@@ -2305,12 +2305,12 @@ void Daemon::check_owned_snat_health() {
     const bool recovery_pending =
         runtime_retry_pending ||
         runtime_firewall_retry_.owned_snat_recovery_pending();
-    if (!routing_runtime_active_ ||
+    if (!routing_runtime_active() ||
         recovery_pending ||
         netfilter_refresh_pending) {
         periodic_task_metrics_.record_skipped(
             "owned-snat-health",
-            !routing_runtime_active_
+            !routing_runtime_active()
                 ? "routing runtime is inactive"
                 : "netfilter recovery is already pending");
         return;
@@ -2342,7 +2342,7 @@ void Daemon::check_owned_snat_health() {
         ppe_desired_drift = configured_ppe_auto;
     }
     if (should_schedule_periodic_ppe_full_refresh(
-            routing_runtime_active_,
+            routing_runtime_active(),
             recovery_pending,
             netfilter_refresh_pending,
             ppe_liveness_owned,
@@ -2358,7 +2358,7 @@ void Daemon::check_owned_snat_health() {
     const auto ppe_observation =
         firewall_->refresh_ppe_deoffload_observation();
     if (should_schedule_periodic_ppe_full_refresh(
-            routing_runtime_active_,
+            routing_runtime_active(),
             recovery_pending,
             netfilter_refresh_pending,
             ppe_liveness_owned,
@@ -2397,13 +2397,13 @@ void Daemon::check_owned_snat_health() {
     const bool fastnat_disabled =
         !messages_first_active || fastnat_is_disabled_or_unavailable();
     const bool repair_snat = should_run_periodic_snat_repair(
-            routing_runtime_active_,
+            routing_runtime_active(),
             recovery_pending,
             netfilter_refresh_pending,
             state);
     const bool repair_meta =
         should_run_periodic_forward_udp_reject_repair(
-            routing_runtime_active_,
+            routing_runtime_active(),
             recovery_pending,
             netfilter_refresh_pending,
             messages_first_active,
@@ -3370,7 +3370,7 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
     bool schedule_catalog_refresh,
     OwnedSnatRecovery snat_recovery) {
     auto& log = Logger::instance();
-    if (!routing_runtime_active_) {
+    if (!routing_runtime_active()) {
         log.verbose(
             "Skipping runtime routing/firewall refresh because routing is stopped.");
         return false;
@@ -3833,7 +3833,7 @@ void Daemon::schedule_runtime_firewall_retry(
         },
         [this](std::uint64_t expected_generation) {
             const bool current = runtime_recovery_is_current(
-                routing_runtime_active_,
+                routing_runtime_active(),
                 expected_generation,
                 runtime_generation_.load(std::memory_order_acquire));
             if (!current) {
@@ -3883,7 +3883,7 @@ void Daemon::handle_interface_event(const InterfaceMonitor::Event& event) {
     request_remote_access_reconcile_from_control("interface event");
 #endif
     if (!interface_event_requires_runtime_observation(event) ||
-        !routing_runtime_active_) {
+        !routing_runtime_active()) {
         return;
     }
     if (event.observation_gap) {
@@ -3979,7 +3979,7 @@ void Daemon::handle_interface_event(const InterfaceMonitor::Event& event) {
 }
 
 void Daemon::recover_internal_vpn_catalog_after_observation_gap() {
-    if (!routing_runtime_active_ ||
+    if (!routing_runtime_active() ||
         !config_has_native_vpn_catalog_policy(config_)) {
         return;
     }
@@ -4508,7 +4508,7 @@ void Daemon::run() {
         internal_vpn_generation.reset();
         internal_vpn_service_generation.reset();
     }
-    routing_runtime_active_ = true;
+    runtime_state_store_.set_routing_runtime_active(true);
     reset_idle_stall_observer(/*schedule_if_eligible=*/true);
     schedule_owned_snat_health_check();
     schedule_keenetic_dns_refresh();
@@ -4665,7 +4665,7 @@ void Daemon::run() {
             log.error("Startup rollback: resolver fallback activation failed: {}",
                       cleanup_error.what());
         }
-        routing_runtime_active_ = false;
+        runtime_state_store_.set_routing_runtime_active(false);
         resolver_sync_.runtime_stopped();
         try {
             transition_runtime_or_throw(
@@ -4770,7 +4770,7 @@ void Daemon::run() {
     firewall_->cleanup();
     committed_meta_udp443_fwmark_.reset();
     committed_meta_udp443_owned_mask_ = 0U;
-    routing_runtime_active_ = false;
+    runtime_state_store_.set_routing_runtime_active(false);
     transition_runtime_or_throw(RuntimeState::stopped, "daemon shutdown complete");
     remove_pid_file();
 }
