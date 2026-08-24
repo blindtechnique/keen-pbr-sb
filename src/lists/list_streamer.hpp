@@ -4,6 +4,7 @@
 #include "../config/config.hpp"
 #include "list_entry_visitor.hpp"
 
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <string>
@@ -20,6 +21,11 @@ public:
     // captured as missing remains missing without a live fallback.
     ListStreamer(
         const CacheManager& cache,
+        std::shared_ptr<const ListCacheGenerationSnapshot> cache_snapshot);
+    // Worker-owned operations can read an already pinned generation without
+    // retaining a reference to the mutable CacheManager owned by ListService.
+    ListStreamer(
+        std::size_t max_file_size_bytes,
         std::shared_ptr<const ListCacheGenerationSnapshot> cache_snapshot);
 
     // Stream all sources for a named list (cache file, local file, inline entries)
@@ -58,7 +64,7 @@ private:
         const std::string& name,
         const std::shared_ptr<const ListCacheGenerationSnapshot>& snapshot);
 
-    const CacheManager& cache_;
+    const CacheManager* cache_{nullptr};
     std::size_t max_file_size_bytes_;
     std::shared_ptr<const ListCacheGenerationSnapshot> cache_snapshot_;
 };

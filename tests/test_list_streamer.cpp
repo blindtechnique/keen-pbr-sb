@@ -164,6 +164,30 @@ TEST_CASE("ListStreamer snapshot remains on one cache generation") {
     CHECK(live_visitor.entries.front() == "newest.example");
 }
 
+TEST_CASE("ListStreamer pinned snapshot does not retain CacheManager") {
+    ListTempDirectory temp;
+    auto transport = std::make_shared<ListSequenceHttpTransport>();
+    std::shared_ptr<const ListCacheGenerationSnapshot> snapshot;
+    {
+        CacheManager cache(temp.path() / "cache", 1024, transport);
+        cache.ensure_dir();
+        transport->enqueue("pinned.example\n");
+        REQUIRE(cache.download(
+                    "remote", "https://example.test/list.txt")
+                    .updated());
+        snapshot = cache.capture_generation({"remote"});
+    }
+
+    ListStreamer streamer(1024, snapshot);
+    ListConfig config;
+    config.url = "https://example.test/list.txt";
+    CollectingListVisitor visitor;
+    streamer.stream_list("remote", config, visitor);
+
+    REQUIRE(visitor.entries.size() == 1U);
+    CHECK(visitor.entries.front() == "pinned.example");
+}
+
 TEST_CASE("shared routing snapshot keeps multiple lists on one cache view") {
     ListTempDirectory temp;
     auto transport = std::make_shared<ListSequenceHttpTransport>();

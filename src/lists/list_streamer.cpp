@@ -12,14 +12,18 @@
 namespace keen_pbr3 {
 
 ListStreamer::ListStreamer(const CacheManager& cache)
-    : cache_(cache)
+    : cache_(&cache)
     , max_file_size_bytes_(cache.max_file_size()) {}
 
 ListStreamer::ListStreamer(
     const CacheManager& cache,
     std::shared_ptr<const ListCacheGenerationSnapshot> cache_snapshot)
-    : cache_(cache)
-    , max_file_size_bytes_(cache.max_file_size())
+    : ListStreamer(cache.max_file_size(), std::move(cache_snapshot)) {}
+
+ListStreamer::ListStreamer(
+    std::size_t max_file_size_bytes,
+    std::shared_ptr<const ListCacheGenerationSnapshot> cache_snapshot)
+    : max_file_size_bytes_(max_file_size_bytes)
     , cache_snapshot_(std::move(cache_snapshot)) {
     if (!cache_snapshot_) {
         throw std::invalid_argument("cache snapshot must not be null");
@@ -100,7 +104,11 @@ ListStreamer::operation_cache_snapshot(const std::string& name) const {
         }
         return cache_snapshot_;
     }
-    return cache_.capture_generation({name});
+    if (cache_ == nullptr) {
+        throw std::logic_error(
+            "live cache access is unavailable without a pinned snapshot");
+    }
+    return cache_->capture_generation({name});
 }
 
 std::optional<std::filesystem::path> ListStreamer::cache_source_path(
