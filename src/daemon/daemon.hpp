@@ -25,6 +25,7 @@
 #include "../dns/dns_txt_client.hpp"
 #include "config_store.hpp"
 #include "config_reload_coordinator.hpp"
+#include "internal_vpn_runtime_resolution.hpp"
 #include "keenetic_dns_refresh_coordinator.hpp"
 #include "../health/interface_probe.hpp"
 #include "pid_file.hpp"
@@ -253,32 +254,9 @@ struct RemoteListRefreshTaskStartResult {
     bool force_reconcile{false};
 };
 
-enum class InternalVpnRuntimeResolutionState : std::uint8_t {
-    verified,
-    retained_verified_includes,
-    degraded,
-    authoritative_negative,
-};
-
 enum class NetfilterRefreshReason : std::uint8_t {
     full = 1U << 0U,
     nat_only = 1U << 1U,
-};
-
-struct InternalVpnRuntimeResolution {
-    std::vector<InternalVpnServer> effective_servers;
-    InternalVpnRuntimeResolutionState state{
-        InternalVpnRuntimeResolutionState::degraded};
-    std::vector<InternalVpnServer> verified_includes_for_lkg;
-    std::vector<std::string> retain_verified_include_ndms_ids;
-};
-
-struct InternalVpnServiceRuntimeResolution {
-    std::vector<InternalVpnRuntimeTarget> effective_targets;
-    InternalVpnRuntimeResolutionState state{
-        InternalVpnRuntimeResolutionState::degraded};
-    std::vector<InternalVpnRuntimeTarget> verified_includes_for_lkg;
-    std::vector<std::string> retain_verified_include_service_ids;
 };
 
 struct PreparedRuntimeInputs {

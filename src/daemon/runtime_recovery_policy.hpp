@@ -7,11 +7,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -23,6 +25,7 @@
 #include "../runtime/runtime_state_machine.hpp"
 #include "../runtime/whatsapp_catalog_identity.hpp"
 #include "../util/ipv6_support.hpp"
+#include "internal_vpn_runtime_resolution.hpp"
 
 namespace keen_pbr3 {
 
@@ -637,6 +640,12 @@ struct RuntimeFirewallRetryAdmission {
     bool coalesced{false};
     OwnedSnatRecovery snat_recovery;
     std::uint64_t recovery_revision{0U};
+    // Exact catalogue which the synchronous caller must pass to the typed
+    // operation scheduler. A retained coalesced operation owns an accepted
+    // payload and leaves this field empty. Noncoalesced retries, lower stale
+    // generations, and non-retained compatibility timers keep it here for an
+    // explicit caller decision instead of implying ownership transfer.
+    PreparedNativeVpnCatalogPtr prepared_now;
 };
 
 // Build exact cleanup authority from one immutable runtime view. Callers can
@@ -767,6 +776,9 @@ struct RuntimeFirewallOperationCompletion {
     bool owned{false};
     bool rerun_requested{false};
     OwnedSnatRecovery snat_recovery;
+    // Latest exact catalogue which has not been consumed by the completed
+    // worker. Ownership transfers once with the authenticated completion.
+    PreparedNativeVpnCatalogPtr next_prepared_catalog;
 
     explicit operator bool() const noexcept { return owned; }
 };
@@ -783,7 +795,27 @@ public:
     RuntimeFirewallRetryAdmission begin_attempt(
         std::size_t retry_attempt,
         OwnedSnatRecovery snat_recovery) {
+        return begin_attempt_with_prepared_catalog(
+            retry_attempt,
+            std::move(snat_recovery),
+            {});
+    }
+
+    // Typed native-VPN catalogue admission. The complete immutable bundle is
+    // allocated by the caller before this method acquires the coordinator
+    // mutex. A timer which has not captured worker input may consume the
+    // latest same-generation bundle directly. Later observations occupy one
+    // generation-monotonic, same-generation-latest trailing slot; a generic
+    // event never clears that exact payload.
+    RuntimeFirewallRetryAdmission begin_attempt_with_prepared_catalog(
+        std::size_t retry_attempt,
+        OwnedSnatRecovery snat_recovery,
+        const PreparedNativeVpnCatalogPtr& prepared_catalog) {
+        auto admitted_catalog = prepared_catalog;
         std::lock_guard<std::mutex> lock(operation_mutex_);
+        const bool exact_catalog_observed =
+            static_cast<bool>(admitted_catalog);
+        bool exact_catalog_accepted = false;
         const bool temporal_recovery_observation =
             snat_recovery.requested;
         const auto recovery_revision_before =
@@ -791,12 +823,51 @@ public:
         auto retained = retain_recovery_locked(std::move(snat_recovery));
         const bool coalesced = runtime_recovery_request_should_coalesce(
             retry_attempt, active_schedule_serial_ != 0U);
+        if (admitted_catalog && coalesced &&
+            active_schedule_serial_ != 0U) {
+            if (active_operation_retains_claim_ &&
+                active_operation_accepts_prepared_catalog_) {
+                if (active_operation_phase_ ==
+                        RuntimeFirewallOperationPhase::timer_pending &&
+                    admitted_catalog->runtime_generation ==
+                        active_operation_generation_) {
+                    active_prepared_catalog_ =
+                        std::move(admitted_catalog);
+                    exact_catalog_accepted = true;
+                } else {
+                    // Generation order is authoritative; arrival order is
+                    // only a latest-wins tiebreaker within one generation.
+                    // A late older observation remains with prepared_now and
+                    // cannot overwrite either the active generation or a
+                    // newer trailing payload.
+                    const auto retained_generation =
+                        trailing_prepared_catalog_
+                        ? trailing_prepared_catalog_->runtime_generation
+                        : active_operation_generation_;
+                    if (admitted_catalog->runtime_generation >=
+                        retained_generation) {
+                        trailing_prepared_catalog_ =
+                            std::move(admitted_catalog);
+                        trailing_attempt_requested_ = true;
+                        exact_catalog_accepted = true;
+                    }
+                }
+            }
+        }
+        // Compatibility operations never opted into exact-catalogue
+        // ownership, regardless of whether they retain a phase claim or have
+        // a generic terminal callback. A noncoalesced retry likewise cannot
+        // lend its payload to the already-active claim. In every such case the
+        // pointer remains in admission.prepared_now for explicit typed
+        // scheduling by the caller.
         // A timer-pending operation has not captured its immutable worker
         // input yet and consumes the newest recovery revision when it fires.
         // Once ownership crossed that boundary, remember one fresh trailing
         // observation instead of losing the event.
         if (coalesced && active_operation_phase_ !=
-                             RuntimeFirewallOperationPhase::timer_pending) {
+                             RuntimeFirewallOperationPhase::timer_pending &&
+            (!exact_catalog_observed || exact_catalog_accepted ||
+             temporal_recovery_observation)) {
             trailing_attempt_requested_ = true;
             // Even an identical SNAT observation is a new temporal event
             // after immutable worker capture. Its revision prevents the older
@@ -810,7 +881,8 @@ public:
         return RuntimeFirewallRetryAdmission{
             coalesced,
             std::move(retained),
-            pending_recovery_revision_};
+            pending_recovery_revision_,
+            std::move(admitted_catalog)};
     }
 
     OwnedSnatRecovery retain_recovery(
@@ -879,6 +951,8 @@ public:
             runtime_generation,
             bounded_retry_count,
             std::move(snat_recovery),
+            PreparedNativeVpnCatalogPtr{},
+            /*accept_prepared_catalog=*/false,
             std::forward<Schedule>(schedule),
             std::forward<IsCurrent>(is_current),
             std::forward<RunAttempt>(run_attempt),
@@ -904,14 +978,24 @@ public:
         IsCurrent&& is_current,
         QueueOperation&& queue_operation,
         bool persistent_recovery_requested = false) {
+        auto compatibility_queue =
+            [queue_operation =
+                 std::forward<QueueOperation>(queue_operation)](
+                RuntimeFirewallOperationClaim claim,
+                OwnedSnatRecovery recovery,
+                PreparedNativeVpnCatalogPtr) mutable {
+                queue_operation(claim, std::move(recovery));
+            };
         return schedule_impl</*RetainOperationClaim=*/true>(
             attempt,
             runtime_generation,
             bounded_retry_count,
             std::move(snat_recovery),
+            PreparedNativeVpnCatalogPtr{},
+            /*accept_prepared_catalog=*/false,
             std::forward<Schedule>(schedule),
             std::forward<IsCurrent>(is_current),
-            std::forward<QueueOperation>(queue_operation),
+            std::move(compatibility_queue),
             [](RuntimeFirewallOperationCompletion) {},
             persistent_recovery_requested);
     }
@@ -934,11 +1018,66 @@ public:
         QueueOperation&& queue_operation,
         OnTerminal&& on_terminal,
         bool persistent_recovery_requested = false) {
+        auto compatibility_queue =
+            [queue_operation =
+                 std::forward<QueueOperation>(queue_operation)](
+                RuntimeFirewallOperationClaim claim,
+                OwnedSnatRecovery recovery,
+                PreparedNativeVpnCatalogPtr) mutable {
+                queue_operation(claim, std::move(recovery));
+            };
         return schedule_impl</*RetainOperationClaim=*/true>(
             attempt,
             runtime_generation,
             bounded_retry_count,
             std::move(snat_recovery),
+            PreparedNativeVpnCatalogPtr{},
+            /*accept_prepared_catalog=*/false,
+            std::forward<Schedule>(schedule),
+            std::forward<IsCurrent>(is_current),
+            std::move(compatibility_queue),
+            std::forward<OnTerminal>(on_terminal),
+            persistent_recovery_requested);
+    }
+
+    // Exact-catalogue form. The queue callback always receives three typed
+    // values and every accepted operation has an explicit terminal owner;
+    // compatibility callers use schedule_operation() above instead of
+    // callback-signature detection. The pointer is copied from const& so an
+    // early generation/no-plan/contention rejection cannot consume the
+    // caller's only immutable snapshot.
+    template <typename Schedule,
+              typename IsCurrent,
+              typename QueueOperation,
+              typename OnTerminal>
+    RuntimeFirewallRetryPlan
+    schedule_operation_with_prepared_catalog_and_terminal(
+        std::size_t attempt,
+        std::uint64_t runtime_generation,
+        std::size_t bounded_retry_count,
+        OwnedSnatRecovery snat_recovery,
+        const PreparedNativeVpnCatalogPtr& prepared_catalog,
+        Schedule&& schedule,
+        IsCurrent&& is_current,
+        QueueOperation&& queue_operation,
+        OnTerminal&& on_terminal,
+        bool persistent_recovery_requested = false) {
+        static_assert(
+            std::is_nothrow_invocable_v<
+                std::decay_t<OnTerminal>&,
+                RuntimeFirewallOperationCompletion>,
+            "exact catalogue terminal callback must be noexcept");
+        // After the coordinator releases its claim this callback is the sole
+        // durable outcome sink. Production callbacks therefore only move the
+        // completion into durable operation context and signal control work;
+        // they must not perform throwing publication here.
+        return schedule_impl</*RetainOperationClaim=*/true>(
+            attempt,
+            runtime_generation,
+            bounded_retry_count,
+            std::move(snat_recovery),
+            prepared_catalog,
+            /*accept_prepared_catalog=*/true,
             std::forward<Schedule>(schedule),
             std::forward<IsCurrent>(is_current),
             std::forward<QueueOperation>(queue_operation),
@@ -964,6 +1103,8 @@ public:
             attempt,
             runtime_generation,
             std::move(snat_recovery),
+            PreparedNativeVpnCatalogPtr{},
+            /*accept_prepared_catalog=*/false,
             std::forward<Schedule>(schedule),
             std::forward<IsCurrent>(is_current),
             std::forward<RunAttempt>(run_attempt),
@@ -982,13 +1123,23 @@ public:
         Schedule&& schedule,
         IsCurrent&& is_current,
         QueueOperation&& queue_operation) {
+        auto compatibility_queue =
+            [queue_operation =
+                 std::forward<QueueOperation>(queue_operation)](
+                RuntimeFirewallOperationClaim claim,
+                OwnedSnatRecovery recovery,
+                PreparedNativeVpnCatalogPtr) mutable {
+                queue_operation(claim, std::move(recovery));
+            };
         return defer_same_attempt_impl</*RetainOperationClaim=*/true>(
             attempt,
             runtime_generation,
             std::move(snat_recovery),
+            PreparedNativeVpnCatalogPtr{},
+            /*accept_prepared_catalog=*/false,
             std::forward<Schedule>(schedule),
             std::forward<IsCurrent>(is_current),
-            std::forward<QueueOperation>(queue_operation),
+            std::move(compatibility_queue),
             [](RuntimeFirewallOperationCompletion) {});
     }
 
@@ -1004,10 +1155,50 @@ public:
         IsCurrent&& is_current,
         QueueOperation&& queue_operation,
         OnTerminal&& on_terminal) {
+        auto compatibility_queue =
+            [queue_operation =
+                 std::forward<QueueOperation>(queue_operation)](
+                RuntimeFirewallOperationClaim claim,
+                OwnedSnatRecovery recovery,
+                PreparedNativeVpnCatalogPtr) mutable {
+                queue_operation(claim, std::move(recovery));
+            };
         return defer_same_attempt_impl</*RetainOperationClaim=*/true>(
             attempt,
             runtime_generation,
             std::move(snat_recovery),
+            PreparedNativeVpnCatalogPtr{},
+            /*accept_prepared_catalog=*/false,
+            std::forward<Schedule>(schedule),
+            std::forward<IsCurrent>(is_current),
+            std::move(compatibility_queue),
+            std::forward<OnTerminal>(on_terminal));
+    }
+
+    template <typename Schedule,
+              typename IsCurrent,
+              typename QueueOperation,
+              typename OnTerminal>
+    bool defer_same_attempt_operation_with_prepared_catalog_and_terminal(
+        std::size_t attempt,
+        std::uint64_t runtime_generation,
+        OwnedSnatRecovery snat_recovery,
+        const PreparedNativeVpnCatalogPtr& prepared_catalog,
+        Schedule&& schedule,
+        IsCurrent&& is_current,
+        QueueOperation&& queue_operation,
+        OnTerminal&& on_terminal) {
+        static_assert(
+            std::is_nothrow_invocable_v<
+                std::decay_t<OnTerminal>&,
+                RuntimeFirewallOperationCompletion>,
+            "exact catalogue terminal callback must be noexcept");
+        return defer_same_attempt_impl</*RetainOperationClaim=*/true>(
+            attempt,
+            runtime_generation,
+            std::move(snat_recovery),
+            prepared_catalog,
+            /*accept_prepared_catalog=*/true,
             std::forward<Schedule>(schedule),
             std::forward<IsCurrent>(is_current),
             std::forward<QueueOperation>(queue_operation),
@@ -1045,8 +1236,10 @@ public:
         if (!operation_matches_locked(claim)) return {};
         RuntimeFirewallOperationCompletion completion{
             /*owned=*/true,
-            trailing_attempt_requested_,
-            pending_owned_snat_recovery_};
+            trailing_attempt_requested_ ||
+                static_cast<bool>(trailing_prepared_catalog_),
+            pending_owned_snat_recovery_,
+            std::move(trailing_prepared_catalog_)};
         release_retry_slot_locked();
         return completion;
     }
@@ -1073,8 +1266,10 @@ public:
         }
         RuntimeFirewallOperationCompletion completion{
             /*owned=*/true,
-            trailing_attempt_requested_,
-            completed_recovery};
+            trailing_attempt_requested_ ||
+                static_cast<bool>(trailing_prepared_catalog_),
+            completed_recovery,
+            std::move(trailing_prepared_catalog_)};
         // All allocating copies are complete. Publish the terminal recovery
         // state and release ownership only after the result is ready.
         pending_owned_snat_recovery_ =
@@ -1088,6 +1283,9 @@ public:
 
     // Allocation-free pre-worker terminal transfer. Recovery authority remains
     // latched in the coordinator; the receiver must take a fresh snapshot.
+    // A queue-side rejection also transfers the latest exact catalogue, while
+    // a stale-generation path discards its obsolete active catalogue and may
+    // transfer only a newer trailing generation.
     RuntimeFirewallOperationCompletion
     terminate_operation_for_resnapshot(
         RuntimeFirewallOperationClaim claim,
@@ -1098,17 +1296,31 @@ public:
         }
         std::lock_guard<std::mutex> lock(operation_mutex_);
         if (!operation_matches_locked(claim)) return {};
+        auto next_prepared_catalog =
+            std::move(trailing_prepared_catalog_);
+        if (!next_prepared_catalog && force_rerun) {
+            // Queue/snapshot rejection occurred before a worker could own the
+            // captured bundle. Transfer it to the terminal owner. A stale
+            // generation path calls this with force_rerun=false and therefore
+            // discards the obsolete active bundle while still transferring a
+            // newer trailing generation.
+            next_prepared_catalog =
+                std::move(active_prepared_catalog_);
+        }
         RuntimeFirewallOperationCompletion completion{
             /*owned=*/true,
             force_rerun || trailing_attempt_requested_ ||
-                pending_owned_snat_recovery_.requested,
-            {}};
+                pending_owned_snat_recovery_.requested ||
+                static_cast<bool>(next_prepared_catalog),
+            {},
+            std::move(next_prepared_catalog)};
         release_retry_slot_locked();
         return completion;
     }
 
     // Only timer and executor-proven-not-started queue authority can be
-    // abandoned. Running/control claims may already represent a changed kernel
+    // abandoned. Cancellation explicitly discards every catalogue owned by
+    // that slot. Running/control claims may already represent a changed kernel
     // generation and must reach begin_control()+complete_operation().
     bool cancel_operation(
         RuntimeFirewallOperationClaim claim) noexcept {
@@ -1165,11 +1377,17 @@ private:
         std::uint64_t runtime_generation,
         std::size_t bounded_retry_count,
         OwnedSnatRecovery snat_recovery,
+        PreparedNativeVpnCatalogPtr prepared_catalog,
+        bool accept_prepared_catalog,
         Schedule&& schedule,
         IsCurrent&& is_current,
         RunAttempt&& run_attempt,
         OnTerminal&& on_terminal,
         bool persistent_recovery_requested) {
+        if (prepared_catalog &&
+            prepared_catalog->runtime_generation != runtime_generation) {
+            return {};
+        }
         // The coordinator owns the recovery latch, so callers cannot
         // accidentally downgrade an exhausted owned-SNAT recovery to a
         // finished generic retry by passing an empty or stale payload.
@@ -1187,8 +1405,15 @@ private:
             return retry_plan;
         }
 
+        auto terminal_callback =
+            std::make_shared<std::decay_t<OnTerminal>>(
+                std::forward<OnTerminal>(on_terminal));
         const auto operation_claim = reserve_retry_slot(
-            runtime_generation, retry_plan.next_attempt);
+            runtime_generation,
+            retry_plan.next_attempt,
+            std::move(prepared_catalog),
+            accept_prepared_catalog,
+            RetainOperationClaim);
         if (!operation_claim) {
             return {};
         }
@@ -1201,9 +1426,8 @@ private:
                  snat_recovery = std::move(scheduled_recovery),
                  is_current = std::forward<IsCurrent>(is_current),
                  run_attempt = std::forward<RunAttempt>(run_attempt),
-                 on_terminal = std::forward<OnTerminal>(on_terminal)]()
+                 on_terminal = terminal_callback]()
                     mutable {
-                    (void)on_terminal;
                     if constexpr (RetainOperationClaim) {
                         (void)snat_recovery;
                         std::optional<OperationRecoverySnapshot>
@@ -1225,7 +1449,7 @@ private:
                                     operation_claim,
                                     /*force_rerun=*/true);
                             if (terminal.owned) {
-                                on_terminal(std::move(terminal));
+                                (*on_terminal)(std::move(terminal));
                             }
                             throw;
                         }
@@ -1240,7 +1464,7 @@ private:
                                     operation_input->claim,
                                     /*force_rerun=*/true);
                             if (terminal.owned) {
-                                on_terminal(std::move(terminal));
+                                (*on_terminal)(std::move(terminal));
                             }
                             throw;
                         }
@@ -1249,14 +1473,15 @@ private:
                                 terminate_operation_for_resnapshot(
                                     operation_input->claim);
                             if (terminal.owned) {
-                                on_terminal(std::move(terminal));
+                                (*on_terminal)(std::move(terminal));
                             }
                             return;
                         }
                         try {
                             run_attempt(
                                 operation_input->claim,
-                                operation_input->snat_recovery);
+                                operation_input->snat_recovery,
+                                operation_input->prepared_catalog);
                         } catch (...) {
                             // If the adapter threw before begin_worker(),
                             // transfer the exact queued outcome. If it already
@@ -1267,7 +1492,7 @@ private:
                                     operation_input->claim,
                                     /*force_rerun=*/true);
                             if (terminal.owned) {
-                                on_terminal(std::move(terminal));
+                                (*on_terminal)(std::move(terminal));
                             }
                             throw;
                         }
@@ -1295,17 +1520,39 @@ private:
                 const auto registration = register_timer_task_if_current(
                     operation_claim, task_id);
                 if (registration == TimerTaskRegistration::rejected) {
+                    auto terminal =
+                        terminate_operation_for_resnapshot(
+                            operation_claim,
+                            /*force_rerun=*/true);
+                    if (terminal.owned) {
+                        (*terminal_callback)(std::move(terminal));
+                    }
                     return {};
                 }
             } else {
-                (void)register_timer_task_if_current(
-                    operation_claim, task_id);
+                const auto registration =
+                    register_timer_task_if_current(
+                        operation_claim, task_id);
+                if (registration == TimerTaskRegistration::rejected) {
+                    (void)release_retry_slot_if_current(
+                        operation_claim);
+                }
             }
         } catch (...) {
             // The scheduler may invoke a ready callback inline and only then
             // report a registration failure. Cancel only the original timer
             // phase; ownership already handed to a worker must survive.
-            (void)cancel_operation(operation_claim);
+            if constexpr (RetainOperationClaim) {
+                auto terminal =
+                    terminate_operation_for_resnapshot(
+                        operation_claim,
+                        /*force_rerun=*/true);
+                if (terminal.owned) {
+                    (*terminal_callback)(std::move(terminal));
+                }
+            } else {
+                (void)cancel_operation(operation_claim);
+            }
             throw;
         }
         return retry_plan;
@@ -1320,17 +1567,30 @@ private:
         std::size_t attempt,
         std::uint64_t runtime_generation,
         OwnedSnatRecovery snat_recovery,
+        PreparedNativeVpnCatalogPtr prepared_catalog,
+        bool accept_prepared_catalog,
         Schedule&& schedule,
         IsCurrent&& is_current,
         RunAttempt&& run_attempt,
         OnTerminal&& on_terminal) {
+        if (prepared_catalog &&
+            prepared_catalog->runtime_generation != runtime_generation) {
+            return false;
+        }
         snat_recovery = retain_recovery(std::move(snat_recovery));
         if (retry_pending()) {
             return false;
         }
 
+        auto terminal_callback =
+            std::make_shared<std::decay_t<OnTerminal>>(
+                std::forward<OnTerminal>(on_terminal));
         const auto operation_claim = reserve_retry_slot(
-            runtime_generation, attempt);
+            runtime_generation,
+            attempt,
+            std::move(prepared_catalog),
+            accept_prepared_catalog,
+            RetainOperationClaim);
         if (!operation_claim) {
             return false;
         }
@@ -1343,9 +1603,8 @@ private:
                  snat_recovery = std::move(scheduled_recovery),
                  is_current = std::forward<IsCurrent>(is_current),
                  run_attempt = std::forward<RunAttempt>(run_attempt),
-                 on_terminal = std::forward<OnTerminal>(on_terminal)]()
+                 on_terminal = terminal_callback]()
                     mutable {
-                    (void)on_terminal;
                     if constexpr (RetainOperationClaim) {
                         (void)snat_recovery;
                         std::optional<OperationRecoverySnapshot>
@@ -1362,7 +1621,7 @@ private:
                                     operation_claim,
                                     /*force_rerun=*/true);
                             if (terminal.owned) {
-                                on_terminal(std::move(terminal));
+                                (*on_terminal)(std::move(terminal));
                             }
                             throw;
                         }
@@ -1377,7 +1636,7 @@ private:
                                     operation_input->claim,
                                     /*force_rerun=*/true);
                             if (terminal.owned) {
-                                on_terminal(std::move(terminal));
+                                (*on_terminal)(std::move(terminal));
                             }
                             throw;
                         }
@@ -1386,21 +1645,22 @@ private:
                                 terminate_operation_for_resnapshot(
                                     operation_input->claim);
                             if (terminal.owned) {
-                                on_terminal(std::move(terminal));
+                                (*on_terminal)(std::move(terminal));
                             }
                             return;
                         }
                         try {
                             run_attempt(
                                 operation_input->claim,
-                                operation_input->snat_recovery);
+                                operation_input->snat_recovery,
+                                operation_input->prepared_catalog);
                         } catch (...) {
                             auto terminal =
                                 terminate_operation_for_resnapshot(
                                     operation_input->claim,
                                     /*force_rerun=*/true);
                             if (terminal.owned) {
-                                on_terminal(std::move(terminal));
+                                (*on_terminal)(std::move(terminal));
                             }
                             throw;
                         }
@@ -1421,12 +1681,34 @@ private:
             const auto registration = register_timer_task_if_current(
                 operation_claim, task_id);
             if (registration == TimerTaskRegistration::rejected) {
+                if constexpr (RetainOperationClaim) {
+                    auto terminal =
+                        terminate_operation_for_resnapshot(
+                            operation_claim,
+                            /*force_rerun=*/true);
+                    if (terminal.owned) {
+                        (*terminal_callback)(std::move(terminal));
+                    }
+                } else {
+                    (void)release_retry_slot_if_current(
+                        operation_claim);
+                }
                 accepted = false;
             }
         } catch (...) {
             // As above, do not invalidate a claim which an inline callback
             // already handed to the worker before the scheduler threw.
-            (void)cancel_operation(operation_claim);
+            if constexpr (RetainOperationClaim) {
+                auto terminal =
+                    terminate_operation_for_resnapshot(
+                        operation_claim,
+                        /*force_rerun=*/true);
+                if (terminal.owned) {
+                    (*terminal_callback)(std::move(terminal));
+                }
+            } else {
+                (void)cancel_operation(operation_claim);
+            }
             throw;
         }
         return accepted;
@@ -1434,7 +1716,10 @@ private:
 
     RuntimeFirewallOperationClaim reserve_retry_slot(
         std::uint64_t runtime_generation,
-        std::size_t attempt) noexcept {
+        std::size_t attempt,
+        PreparedNativeVpnCatalogPtr prepared_catalog,
+        bool accept_prepared_catalog,
+        bool retain_operation_claim) noexcept {
         std::lock_guard<std::mutex> lock(operation_mutex_);
         if (active_schedule_serial_ != 0U) {
             return {};
@@ -1446,6 +1731,10 @@ private:
             RuntimeFirewallOperationPhase::timer_pending;
         active_operation_recovery_revision_ =
             pending_recovery_revision_;
+        active_prepared_catalog_ = std::move(prepared_catalog);
+        active_operation_accepts_prepared_catalog_ =
+            accept_prepared_catalog;
+        active_operation_retains_claim_ = retain_operation_claim;
         retry_task_id_ = -1;
         return RuntimeFirewallOperationClaim{
             active_schedule_serial_,
@@ -1465,6 +1754,11 @@ private:
             return std::nullopt;
         }
         active_operation_phase_ = next;
+        if (next == RuntimeFirewallOperationPhase::worker_running) {
+            // The typed worker callback now owns the immutable input. Keep no
+            // hidden copy after backend execution may begin.
+            active_prepared_catalog_.reset();
+        }
         retry_task_id_ = -1;
         claim.phase = next;
         return claim;
@@ -1473,11 +1767,15 @@ private:
     struct OperationRecoverySnapshot {
         RuntimeFirewallOperationClaim claim;
         OwnedSnatRecovery snat_recovery;
+        PreparedNativeVpnCatalogPtr prepared_catalog;
 
         OperationRecoverySnapshot(
             RuntimeFirewallOperationClaim operation_claim,
-            const OwnedSnatRecovery& recovery)
-            : claim(operation_claim), snat_recovery(recovery) {}
+            const OwnedSnatRecovery& recovery,
+            PreparedNativeVpnCatalogPtr catalog)
+            : claim(operation_claim),
+              snat_recovery(recovery),
+              prepared_catalog(std::move(catalog)) {}
     };
 
     bool begin_queued_operation(
@@ -1493,7 +1791,10 @@ private:
         // exact and the callback's phase-specific catch can release it.
         claim.phase = RuntimeFirewallOperationPhase::worker_queued;
         claim.recovery_revision = pending_recovery_revision_;
-        result.emplace(claim, pending_owned_snat_recovery_);
+        result.emplace(
+            claim,
+            pending_owned_snat_recovery_,
+            active_prepared_catalog_);
         active_operation_phase_ =
             RuntimeFirewallOperationPhase::worker_queued;
         active_operation_recovery_revision_ =
@@ -1510,7 +1811,6 @@ private:
             return TimerTaskRegistration::consumed;
         }
         if (task_id < 0) {
-            release_retry_slot_locked();
             return TimerTaskRegistration::rejected;
         }
         retry_task_id_ = task_id;
@@ -1571,6 +1871,10 @@ private:
         active_operation_recovery_revision_ = 0U;
         retry_task_id_ = -1;
         trailing_attempt_requested_ = false;
+        active_operation_accepts_prepared_catalog_ = false;
+        active_operation_retains_claim_ = false;
+        active_prepared_catalog_.reset();
+        trailing_prepared_catalog_.reset();
     }
 
     mutable std::mutex operation_mutex_;
@@ -1585,6 +1889,10 @@ private:
     OwnedSnatRecovery pending_owned_snat_recovery_;
     std::uint64_t pending_recovery_revision_{0U};
     bool trailing_attempt_requested_{false};
+    bool active_operation_accepts_prepared_catalog_{false};
+    bool active_operation_retains_claim_{false};
+    PreparedNativeVpnCatalogPtr active_prepared_catalog_;
+    PreparedNativeVpnCatalogPtr trailing_prepared_catalog_;
 };
 
 // A transient URLTEST publication failure leaves the last committed cursor

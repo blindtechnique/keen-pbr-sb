@@ -7,6 +7,7 @@
 #include <functional>
 #include <optional>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 using namespace keen_pbr3;
@@ -25,6 +26,38 @@ struct FakeRuntimeFirewallRetryScheduler {
     std::vector<std::function<void()>> callbacks;
     int next_task_id{1};
 };
+
+PreparedNativeVpnCatalogPtr make_prepared_native_vpn_catalog_for_test(
+    std::uint64_t runtime_generation,
+    bool schedule_catalog_refresh = true) {
+    InternalVpnRuntimeResolution interface_resolution;
+    interface_resolution.state =
+        InternalVpnRuntimeResolutionState::verified;
+    InternalVpnServiceRuntimeResolution service_resolution;
+    service_resolution.state =
+        InternalVpnRuntimeResolutionState::verified;
+    return std::make_shared<const PreparedNativeVpnCatalog>(
+        PreparedNativeVpnCatalog{
+            runtime_generation,
+            std::move(interface_resolution),
+            std::move(service_resolution),
+            schedule_catalog_refresh});
+}
+
+struct NoexceptExactCatalogTerminalForTest {
+    void operator()(RuntimeFirewallOperationCompletion) const noexcept {}
+};
+
+struct ThrowingExactCatalogTerminalForTest {
+    void operator()(RuntimeFirewallOperationCompletion) const {}
+};
+
+static_assert(std::is_nothrow_invocable_v<
+              NoexceptExactCatalogTerminalForTest&,
+              RuntimeFirewallOperationCompletion>);
+static_assert(!std::is_nothrow_invocable_v<
+              ThrowingExactCatalogTerminalForTest&,
+              RuntimeFirewallOperationCompletion>);
 
 } // namespace
 
@@ -953,6 +986,832 @@ TEST_CASE(
     CHECK(coordinator.complete_operation(*control_claim).owned);
     CHECK_FALSE(coordinator.retry_pending());
     CHECK_FALSE(coordinator.operation_is_current(*control_claim));
+}
+
+TEST_CASE(
+    "native VPN catalogue admission returns one complete noncoalesced bundle") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    const auto prepared =
+        make_prepared_native_vpn_catalog_for_test(17U);
+
+    const auto admission =
+        coordinator.begin_attempt_with_prepared_catalog(
+            0,
+            {},
+            prepared);
+
+    CHECK_FALSE(admission.coalesced);
+    CHECK(admission.prepared_now == prepared);
+    REQUIRE(admission.prepared_now);
+    CHECK(admission.prepared_now->runtime_generation == 17U);
+    CHECK(admission.prepared_now->interface_resolution.state ==
+          InternalVpnRuntimeResolutionState::verified);
+    CHECK(admission.prepared_now->service_resolution.state ==
+          InternalVpnRuntimeResolutionState::verified);
+}
+
+TEST_CASE(
+    "non-retained compatibility timer leaves exact native VPN catalogue with admission") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    FakeRuntimeFirewallRetryScheduler scheduler;
+    std::size_t attempt_calls = 0U;
+    REQUIRE(coordinator.schedule(
+        0,
+        /*runtime_generation=*/17,
+        /*bounded_retry_count=*/6,
+        {},
+        [&scheduler](const RuntimeFirewallRetryPlan& retry_plan,
+                     auto callback) {
+            return scheduler.schedule(retry_plan, std::move(callback));
+        },
+        [](std::uint64_t) { return true; },
+        [&](std::size_t, OwnedSnatRecovery) { ++attempt_calls; })
+                .schedule);
+
+    auto prepared =
+        make_prepared_native_vpn_catalog_for_test(17U);
+    const std::weak_ptr<const PreparedNativeVpnCatalog> lifetime = prepared;
+    auto admission = coordinator.begin_attempt_with_prepared_catalog(
+        0,
+        {},
+        prepared);
+    prepared.reset();
+
+    CHECK(admission.coalesced);
+    REQUIRE(admission.prepared_now);
+    CHECK(admission.prepared_now->runtime_generation == 17U);
+
+    SUBCASE("timer completion never claims or destroys the payload") {
+        scheduler.callbacks.front()();
+        CHECK(attempt_calls == 1U);
+        CHECK_FALSE(coordinator.retry_pending());
+        CHECK_FALSE(lifetime.expired());
+    }
+
+    SUBCASE("timer cancellation never claims or destroys the payload") {
+        std::size_t cancel_calls = 0U;
+        coordinator.cancel([&](int) { ++cancel_calls; });
+        CHECK(cancel_calls == 1U);
+        CHECK_FALSE(coordinator.retry_pending());
+        CHECK_FALSE(lifetime.expired());
+
+        scheduler.callbacks.front()();
+        CHECK(attempt_calls == 0U);
+    }
+
+    admission.prepared_now.reset();
+    CHECK(lifetime.expired());
+}
+
+TEST_CASE(
+    "retained compatibility operation never claims exact native VPN catalogue") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    FakeRuntimeFirewallRetryScheduler scheduler;
+    bool current = true;
+    bool reject_queue = false;
+
+    SUBCASE("stale generation") { current = false; }
+    SUBCASE("queue rejection") { reject_queue = true; }
+
+    std::size_t queued = 0U;
+    std::size_t terminal_calls = 0U;
+    std::optional<RuntimeFirewallOperationCompletion> terminal;
+    REQUIRE(coordinator.schedule_operation_with_terminal(
+        0,
+        /*runtime_generation=*/17,
+        /*bounded_retry_count=*/6,
+        {},
+        [&scheduler](const RuntimeFirewallRetryPlan& retry_plan,
+                     auto callback) {
+            return scheduler.schedule(retry_plan, std::move(callback));
+        },
+        [&](std::uint64_t) { return current; },
+        [&](RuntimeFirewallOperationClaim, OwnedSnatRecovery) {
+            if (reject_queue) {
+                throw std::runtime_error("generic queue rejected");
+            }
+            ++queued;
+        },
+        [&](RuntimeFirewallOperationCompletion completion) {
+            ++terminal_calls;
+            terminal = std::move(completion);
+        }).schedule);
+
+    auto prepared =
+        make_prepared_native_vpn_catalog_for_test(17U);
+    const std::weak_ptr<const PreparedNativeVpnCatalog> lifetime = prepared;
+    auto admission = coordinator.begin_attempt_with_prepared_catalog(
+        0,
+        {},
+        prepared);
+    prepared.reset();
+    CHECK(admission.coalesced);
+    REQUIRE(admission.prepared_now);
+    CHECK_FALSE(lifetime.expired());
+
+    if (reject_queue) {
+        CHECK_THROWS_AS(
+            scheduler.callbacks.front()(),
+            std::runtime_error);
+    } else {
+        scheduler.callbacks.front()();
+    }
+
+    CHECK(queued == 0U);
+    CHECK(terminal_calls == 1U);
+    REQUIRE(terminal);
+    CHECK(terminal->owned);
+    CHECK(terminal->rerun_requested == reject_queue);
+    CHECK_FALSE(terminal->next_prepared_catalog);
+    CHECK(admission.prepared_now->runtime_generation == 17U);
+    CHECK_FALSE(coordinator.retry_pending());
+
+    admission.prepared_now.reset();
+    CHECK(lifetime.expired());
+}
+
+TEST_CASE(
+    "timer-pending native VPN catalogue consumes same-generation latest without rerun") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    FakeRuntimeFirewallRetryScheduler scheduler;
+    const auto first =
+        make_prepared_native_vpn_catalog_for_test(17U, true);
+    const auto latest =
+        make_prepared_native_vpn_catalog_for_test(17U, false);
+    auto admission = coordinator.begin_attempt_with_prepared_catalog(
+        0,
+        {},
+        first);
+    REQUIRE(admission.prepared_now == first);
+
+    std::optional<RuntimeFirewallOperationClaim> queued_claim;
+    PreparedNativeVpnCatalogPtr worker_catalog;
+    std::size_t terminal_calls = 0U;
+    REQUIRE(coordinator
+                .schedule_operation_with_prepared_catalog_and_terminal(
+        0,
+        /*runtime_generation=*/17,
+        /*bounded_retry_count=*/6,
+        {},
+        admission.prepared_now,
+        [&scheduler](const RuntimeFirewallRetryPlan& retry_plan,
+                     auto callback) {
+            return scheduler.schedule(retry_plan, std::move(callback));
+        },
+        [](std::uint64_t) { return true; },
+        [&](RuntimeFirewallOperationClaim claim,
+            OwnedSnatRecovery,
+            PreparedNativeVpnCatalogPtr prepared_catalog) {
+            queued_claim = claim;
+            worker_catalog = std::move(prepared_catalog);
+        },
+        [&](RuntimeFirewallOperationCompletion) noexcept {
+            ++terminal_calls;
+        }).schedule);
+    admission.prepared_now.reset();
+
+    const auto coalesced =
+        coordinator.begin_attempt_with_prepared_catalog(
+            0,
+            {},
+            latest);
+    CHECK(coalesced.coalesced);
+    CHECK_FALSE(coalesced.prepared_now);
+    REQUIRE(scheduler.callbacks.size() == 1U);
+    scheduler.callbacks.front()();
+    CHECK(terminal_calls == 0U);
+
+    REQUIRE(queued_claim);
+    CHECK(worker_catalog == latest);
+    CHECK_FALSE(worker_catalog->schedule_catalog_refresh);
+    const auto running_claim = coordinator.begin_worker(*queued_claim);
+    REQUIRE(running_claim);
+    const auto control_claim = coordinator.begin_control(*running_claim);
+    REQUIRE(control_claim);
+    const auto completion =
+        coordinator.complete_operation(*control_claim);
+    CHECK(completion.owned);
+    CHECK_FALSE(completion.rerun_requested);
+    CHECK_FALSE(completion.next_prepared_catalog);
+}
+
+TEST_CASE(
+    "noncoalesced retry attempt keeps native VPN catalogue with admission") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    FakeRuntimeFirewallRetryScheduler scheduler;
+    const auto active_catalog =
+        make_prepared_native_vpn_catalog_for_test(17U, true);
+    const auto retry_catalog =
+        make_prepared_native_vpn_catalog_for_test(17U, false);
+    auto initial = coordinator.begin_attempt_with_prepared_catalog(
+        0,
+        {},
+        active_catalog);
+    std::optional<RuntimeFirewallOperationClaim> queued_claim;
+    PreparedNativeVpnCatalogPtr worker_catalog;
+    std::size_t terminal_calls = 0U;
+
+    REQUIRE(coordinator
+                .schedule_operation_with_prepared_catalog_and_terminal(
+                    0,
+                    /*runtime_generation=*/17,
+                    /*bounded_retry_count=*/6,
+                    {},
+                    initial.prepared_now,
+                    [&scheduler](
+                        const RuntimeFirewallRetryPlan& retry_plan,
+                        auto callback) {
+                        return scheduler.schedule(
+                            retry_plan,
+                            std::move(callback));
+                    },
+                    [](std::uint64_t) { return true; },
+                    [&](RuntimeFirewallOperationClaim claim,
+                        OwnedSnatRecovery,
+                        PreparedNativeVpnCatalogPtr prepared_catalog) {
+                        queued_claim = claim;
+                        worker_catalog = std::move(prepared_catalog);
+                    },
+                    [&](RuntimeFirewallOperationCompletion) noexcept {
+                        ++terminal_calls;
+                    })
+                .schedule);
+    initial.prepared_now.reset();
+
+    auto retry = coordinator.begin_attempt_with_prepared_catalog(
+        /*retry_attempt=*/1,
+        {},
+        retry_catalog);
+    CHECK_FALSE(retry.coalesced);
+    CHECK(retry.prepared_now == retry_catalog);
+
+    scheduler.callbacks.front()();
+    CHECK(terminal_calls == 0U);
+    REQUIRE(queued_claim);
+    CHECK(worker_catalog == active_catalog);
+    const auto running_claim = coordinator.begin_worker(*queued_claim);
+    REQUIRE(running_claim);
+    const auto control_claim = coordinator.begin_control(*running_claim);
+    REQUIRE(control_claim);
+    const auto completion =
+        coordinator.complete_operation(*control_claim);
+    CHECK(completion.owned);
+    CHECK_FALSE(completion.rerun_requested);
+    CHECK_FALSE(completion.next_prepared_catalog);
+    CHECK(retry.prepared_now == retry_catalog);
+}
+
+TEST_CASE(
+    "post-capture generic event preserves latest trailing native VPN catalogue") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    FakeRuntimeFirewallRetryScheduler scheduler;
+    const auto first =
+        make_prepared_native_vpn_catalog_for_test(17U, true);
+    const auto trailing =
+        make_prepared_native_vpn_catalog_for_test(17U, false);
+    auto admission = coordinator.begin_attempt_with_prepared_catalog(
+        0,
+        {},
+        first);
+    std::optional<RuntimeFirewallOperationClaim> queued_claim;
+    PreparedNativeVpnCatalogPtr worker_catalog;
+    std::size_t terminal_calls = 0U;
+
+    REQUIRE(coordinator
+                .schedule_operation_with_prepared_catalog_and_terminal(
+        0,
+        /*runtime_generation=*/17,
+        /*bounded_retry_count=*/6,
+        {},
+        admission.prepared_now,
+        [&scheduler](const RuntimeFirewallRetryPlan& retry_plan,
+                     auto callback) {
+            return scheduler.schedule(retry_plan, std::move(callback));
+        },
+        [](std::uint64_t) { return true; },
+        [&](RuntimeFirewallOperationClaim claim,
+            OwnedSnatRecovery,
+            PreparedNativeVpnCatalogPtr prepared_catalog) {
+            queued_claim = claim;
+            worker_catalog = std::move(prepared_catalog);
+        },
+        [&](RuntimeFirewallOperationCompletion) noexcept {
+            ++terminal_calls;
+        }).schedule);
+    admission.prepared_now.reset();
+    scheduler.callbacks.front()();
+    CHECK(terminal_calls == 0U);
+    REQUIRE(queued_claim);
+    CHECK(worker_catalog == first);
+    const auto running_claim = coordinator.begin_worker(*queued_claim);
+    REQUIRE(running_claim);
+
+    // A was captured, then a generic event and exact B arrived. A later
+    // generic event must not erase B from the one trailing slot.
+    CHECK(coordinator.begin_attempt(0, {}).coalesced);
+    CHECK(coordinator.begin_attempt_with_prepared_catalog(
+              0,
+              {},
+              trailing)
+              .coalesced);
+    CHECK(coordinator.begin_attempt(0, {}).coalesced);
+
+    const auto control_claim = coordinator.begin_control(*running_claim);
+    REQUIRE(control_claim);
+    const auto completion =
+        coordinator.complete_operation(*control_claim);
+    CHECK(completion.owned);
+    CHECK(completion.rerun_requested);
+    CHECK(completion.next_prepared_catalog == trailing);
+
+    const auto repeated =
+        coordinator.complete_operation(*control_claim);
+    CHECK_FALSE(repeated.owned);
+    CHECK_FALSE(repeated.rerun_requested);
+    CHECK_FALSE(repeated.next_prepared_catalog);
+}
+
+TEST_CASE(
+    "post-capture native VPN trailing catalogue is generation-monotonic and latest-wins") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    FakeRuntimeFirewallRetryScheduler scheduler;
+    const auto first =
+        make_prepared_native_vpn_catalog_for_test(17U, true);
+    const auto second =
+        make_prepared_native_vpn_catalog_for_test(17U, false);
+    const auto latest =
+        make_prepared_native_vpn_catalog_for_test(18U, true);
+    const auto newest_same_generation =
+        make_prepared_native_vpn_catalog_for_test(18U, false);
+    const auto late_older =
+        make_prepared_native_vpn_catalog_for_test(17U, true);
+    auto admission = coordinator.begin_attempt_with_prepared_catalog(
+        0,
+        {},
+        first);
+    std::optional<RuntimeFirewallOperationClaim> queued_claim;
+    std::size_t terminal_calls = 0U;
+
+    REQUIRE(coordinator
+                .schedule_operation_with_prepared_catalog_and_terminal(
+        0,
+        /*runtime_generation=*/17,
+        /*bounded_retry_count=*/6,
+        {},
+        admission.prepared_now,
+        [&scheduler](const RuntimeFirewallRetryPlan& retry_plan,
+                     auto callback) {
+            return scheduler.schedule(retry_plan, std::move(callback));
+        },
+        [](std::uint64_t) { return true; },
+        [&](RuntimeFirewallOperationClaim claim,
+            OwnedSnatRecovery,
+            PreparedNativeVpnCatalogPtr) { queued_claim = claim; },
+        [&](RuntimeFirewallOperationCompletion) noexcept {
+            ++terminal_calls;
+        })
+                .schedule);
+    admission.prepared_now.reset();
+    scheduler.callbacks.front()();
+    CHECK(terminal_calls == 0U);
+    REQUIRE(queued_claim);
+    const auto running_claim = coordinator.begin_worker(*queued_claim);
+    REQUIRE(running_claim);
+
+    CHECK(coordinator.begin_attempt_with_prepared_catalog(
+              0,
+              {},
+              second)
+              .coalesced);
+    CHECK(coordinator.begin_attempt_with_prepared_catalog(
+              0,
+              {},
+              latest)
+              .coalesced);
+    CHECK(coordinator.begin_attempt_with_prepared_catalog(
+              0,
+              {},
+              newest_same_generation)
+              .coalesced);
+    const auto ignored_older =
+        coordinator.begin_attempt_with_prepared_catalog(
+            0,
+            {},
+            late_older);
+    CHECK(ignored_older.coalesced);
+    CHECK(ignored_older.prepared_now == late_older);
+
+    const auto control_claim = coordinator.begin_control(*running_claim);
+    REQUIRE(control_claim);
+    const auto completion =
+        coordinator.complete_operation(*control_claim);
+    CHECK(completion.next_prepared_catalog == newest_same_generation);
+    CHECK(completion.next_prepared_catalog != latest);
+    CHECK(completion.next_prepared_catalog != second);
+}
+
+TEST_CASE(
+    "stale native VPN generation discards old input and transfers newer generation once") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    FakeRuntimeFirewallRetryScheduler scheduler;
+    auto old_catalog =
+        make_prepared_native_vpn_catalog_for_test(17U);
+    const std::weak_ptr<const PreparedNativeVpnCatalog> old_lifetime =
+        old_catalog;
+    const auto fresh_catalog =
+        make_prepared_native_vpn_catalog_for_test(18U);
+    auto admission = coordinator.begin_attempt_with_prepared_catalog(
+        0,
+        {},
+        old_catalog);
+    old_catalog.reset();
+    std::size_t queued = 0U;
+    std::size_t terminal_calls = 0U;
+    std::optional<RuntimeFirewallOperationCompletion> terminal;
+
+    REQUIRE(coordinator
+                .schedule_operation_with_prepared_catalog_and_terminal(
+                    0,
+                    /*runtime_generation=*/17,
+                    /*bounded_retry_count=*/6,
+                    {},
+                    admission.prepared_now,
+                    [&scheduler](
+                        const RuntimeFirewallRetryPlan& retry_plan,
+                        auto callback) {
+                        return scheduler.schedule(
+                            retry_plan,
+                            std::move(callback));
+                    },
+                    [](std::uint64_t) { return false; },
+                    [&](RuntimeFirewallOperationClaim,
+                        OwnedSnatRecovery,
+                        PreparedNativeVpnCatalogPtr) { ++queued; },
+                    [&](RuntimeFirewallOperationCompletion completion) noexcept {
+                        ++terminal_calls;
+                        terminal = std::move(completion);
+                    })
+                .schedule);
+    admission.prepared_now.reset();
+    CHECK(coordinator.begin_attempt_with_prepared_catalog(
+              0,
+              {},
+              fresh_catalog)
+              .coalesced);
+
+    scheduler.callbacks.front()();
+    CHECK(queued == 0U);
+    CHECK(terminal_calls == 1U);
+    REQUIRE(terminal);
+    CHECK(terminal->owned);
+    CHECK(terminal->rerun_requested);
+    CHECK(terminal->next_prepared_catalog == fresh_catalog);
+    CHECK(old_lifetime.expired());
+    CHECK_FALSE(coordinator.retry_pending());
+}
+
+TEST_CASE(
+    "native VPN typed rejection leaves exact catalogue with caller") {
+    const auto prepared =
+        make_prepared_native_vpn_catalog_for_test(18U);
+
+    SUBCASE("generation mismatch") {
+        RuntimeFirewallRetryCoordinator coordinator;
+        std::size_t schedule_calls = 0U;
+        std::size_t terminal_calls = 0U;
+        const auto plan = coordinator
+            .schedule_operation_with_prepared_catalog_and_terminal(
+                0,
+                /*runtime_generation=*/17,
+                /*bounded_retry_count=*/6,
+                {},
+                prepared,
+                [&](const RuntimeFirewallRetryPlan&, auto) {
+                    ++schedule_calls;
+                    return 1;
+                },
+                [](std::uint64_t) { return true; },
+                [](RuntimeFirewallOperationClaim,
+                   OwnedSnatRecovery,
+                   PreparedNativeVpnCatalogPtr) {},
+                [&](RuntimeFirewallOperationCompletion) noexcept {
+                    ++terminal_calls;
+                });
+        CHECK_FALSE(plan.schedule);
+        CHECK(schedule_calls == 0U);
+        CHECK(terminal_calls == 0U);
+        CHECK(prepared->runtime_generation == 18U);
+    }
+
+    SUBCASE("bounded plan exhausted") {
+        RuntimeFirewallRetryCoordinator coordinator;
+        std::size_t schedule_calls = 0U;
+        const auto plan = coordinator
+            .schedule_operation_with_prepared_catalog_and_terminal(
+                /*attempt=*/6,
+                /*runtime_generation=*/18,
+                /*bounded_retry_count=*/6,
+                {},
+                prepared,
+                [&](const RuntimeFirewallRetryPlan&, auto) {
+                    ++schedule_calls;
+                    return 1;
+                },
+                [](std::uint64_t) { return true; },
+                [](RuntimeFirewallOperationClaim,
+                   OwnedSnatRecovery,
+                   PreparedNativeVpnCatalogPtr) {},
+                [](RuntimeFirewallOperationCompletion) noexcept {});
+        CHECK_FALSE(plan.schedule);
+        CHECK(schedule_calls == 0U);
+        CHECK(prepared->runtime_generation == 18U);
+    }
+
+    SUBCASE("another timer owns the slot") {
+        RuntimeFirewallRetryCoordinator coordinator;
+        FakeRuntimeFirewallRetryScheduler scheduler;
+        REQUIRE(coordinator.schedule_operation(
+            0,
+            /*runtime_generation=*/18,
+            /*bounded_retry_count=*/6,
+            {},
+            [&scheduler](const RuntimeFirewallRetryPlan& retry_plan,
+                         auto callback) {
+                return scheduler.schedule(
+                    retry_plan,
+                    std::move(callback));
+            },
+            [](std::uint64_t) { return true; },
+            [](RuntimeFirewallOperationClaim, OwnedSnatRecovery) {})
+                    .schedule);
+
+        const auto rejected = coordinator
+            .schedule_operation_with_prepared_catalog_and_terminal(
+                0,
+                /*runtime_generation=*/18,
+                /*bounded_retry_count=*/6,
+                {},
+                prepared,
+                [](const RuntimeFirewallRetryPlan&, auto) { return 2; },
+                [](std::uint64_t) { return true; },
+                [](RuntimeFirewallOperationClaim,
+                   OwnedSnatRecovery,
+                   PreparedNativeVpnCatalogPtr) {},
+                [](RuntimeFirewallOperationCompletion) noexcept {});
+        CHECK_FALSE(rejected.schedule);
+        CHECK(prepared->runtime_generation == 18U);
+        coordinator.cancel([](int) {});
+    }
+}
+
+TEST_CASE(
+    "native VPN scheduler rejection transfers exact catalogue to terminal owner") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    const auto prepared =
+        make_prepared_native_vpn_catalog_for_test(17U);
+    std::size_t terminal_calls = 0U;
+    std::optional<RuntimeFirewallOperationCompletion> terminal;
+
+    const auto plan = coordinator
+        .schedule_operation_with_prepared_catalog_and_terminal(
+            0,
+            /*runtime_generation=*/17,
+            /*bounded_retry_count=*/6,
+            {},
+            prepared,
+            [](const RuntimeFirewallRetryPlan&, auto) { return -1; },
+            [](std::uint64_t) { return true; },
+            [](RuntimeFirewallOperationClaim,
+               OwnedSnatRecovery,
+               PreparedNativeVpnCatalogPtr) {},
+            [&](RuntimeFirewallOperationCompletion completion) noexcept {
+                ++terminal_calls;
+                terminal = std::move(completion);
+            });
+
+    CHECK_FALSE(plan.schedule);
+    CHECK(terminal_calls == 1U);
+    REQUIRE(terminal);
+    CHECK(terminal->owned);
+    CHECK(terminal->rerun_requested);
+    CHECK(terminal->next_prepared_catalog == prepared);
+    CHECK_FALSE(coordinator.retry_pending());
+}
+
+TEST_CASE(
+    "native VPN queue rejection transfers exact catalogue to terminal owner") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    FakeRuntimeFirewallRetryScheduler scheduler;
+    const auto prepared =
+        make_prepared_native_vpn_catalog_for_test(17U);
+    std::size_t terminal_calls = 0U;
+    std::optional<RuntimeFirewallOperationCompletion> terminal;
+
+    REQUIRE(coordinator
+                .schedule_operation_with_prepared_catalog_and_terminal(
+                    0,
+                    /*runtime_generation=*/17,
+                    /*bounded_retry_count=*/6,
+                    {},
+                    prepared,
+                    [&scheduler](
+                        const RuntimeFirewallRetryPlan& retry_plan,
+                        auto callback) {
+                        return scheduler.schedule(
+                            retry_plan,
+                            std::move(callback));
+                    },
+                    [](std::uint64_t) { return true; },
+                    [](RuntimeFirewallOperationClaim,
+                       OwnedSnatRecovery,
+                       PreparedNativeVpnCatalogPtr) {
+                        throw std::runtime_error("executor rejected");
+                    },
+                    [&](RuntimeFirewallOperationCompletion completion) noexcept {
+                        ++terminal_calls;
+                        terminal = std::move(completion);
+                    })
+                .schedule);
+
+    CHECK_THROWS_AS(scheduler.callbacks.front()(), std::runtime_error);
+    CHECK(terminal_calls == 1U);
+    REQUIRE(terminal);
+    CHECK(terminal->owned);
+    CHECK(terminal->next_prepared_catalog == prepared);
+    CHECK_FALSE(coordinator.retry_pending());
+}
+
+TEST_CASE(
+    "deferred native VPN scheduler rejection transfers exact catalogue") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    const auto prepared =
+        make_prepared_native_vpn_catalog_for_test(17U);
+    std::size_t terminal_calls = 0U;
+    std::optional<RuntimeFirewallOperationCompletion> terminal;
+
+    CHECK_FALSE(coordinator
+        .defer_same_attempt_operation_with_prepared_catalog_and_terminal(
+            3,
+            /*runtime_generation=*/17,
+            {},
+            prepared,
+            [](auto) { return -1; },
+            [](std::uint64_t) { return true; },
+            [](RuntimeFirewallOperationClaim,
+               OwnedSnatRecovery,
+               PreparedNativeVpnCatalogPtr) {},
+            [&](RuntimeFirewallOperationCompletion completion) noexcept {
+                ++terminal_calls;
+                terminal = std::move(completion);
+            }));
+    CHECK(terminal_calls == 1U);
+    REQUIRE(terminal);
+    CHECK(terminal->owned);
+    CHECK(terminal->next_prepared_catalog == prepared);
+    CHECK_FALSE(coordinator.retry_pending());
+}
+
+TEST_CASE("native VPN catalogue cancellation explicitly discards payload") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    FakeRuntimeFirewallRetryScheduler scheduler;
+    auto prepared =
+        make_prepared_native_vpn_catalog_for_test(17U);
+    const std::weak_ptr<const PreparedNativeVpnCatalog> lifetime = prepared;
+    std::size_t terminal_calls = 0U;
+
+    REQUIRE(coordinator
+                .schedule_operation_with_prepared_catalog_and_terminal(
+        0,
+        /*runtime_generation=*/17,
+        /*bounded_retry_count=*/6,
+        {},
+        prepared,
+        [&scheduler](const RuntimeFirewallRetryPlan& retry_plan,
+                     auto callback) {
+            return scheduler.schedule(retry_plan, std::move(callback));
+        },
+        [](std::uint64_t) { return true; },
+        [](RuntimeFirewallOperationClaim,
+           OwnedSnatRecovery,
+           PreparedNativeVpnCatalogPtr) {},
+        [&](RuntimeFirewallOperationCompletion) noexcept {
+            ++terminal_calls;
+        })
+                .schedule);
+    prepared.reset();
+    CHECK_FALSE(lifetime.expired());
+
+    std::size_t cancel_calls = 0U;
+    coordinator.cancel([&](int task_id) {
+        CHECK(task_id == 1);
+        ++cancel_calls;
+    });
+    CHECK(cancel_calls == 1U);
+    CHECK(terminal_calls == 0U);
+    CHECK_FALSE(coordinator.retry_pending());
+    CHECK(lifetime.expired());
+
+    // The stale timer closure cannot recover or transfer the discarded
+    // catalogue after shutdown cancellation.
+    scheduler.callbacks.front()();
+    CHECK(lifetime.expired());
+}
+
+TEST_CASE(
+    "executor-proven queued cancellation discards native VPN catalogue") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    FakeRuntimeFirewallRetryScheduler scheduler;
+    auto prepared =
+        make_prepared_native_vpn_catalog_for_test(17U);
+    const std::weak_ptr<const PreparedNativeVpnCatalog> lifetime = prepared;
+    std::optional<RuntimeFirewallOperationClaim> queued_claim;
+    std::size_t terminal_calls = 0U;
+
+    REQUIRE(coordinator
+                .schedule_operation_with_prepared_catalog_and_terminal(
+        0,
+        /*runtime_generation=*/17,
+        /*bounded_retry_count=*/6,
+        {},
+        prepared,
+        [&scheduler](const RuntimeFirewallRetryPlan& retry_plan,
+                     auto callback) {
+            return scheduler.schedule(retry_plan, std::move(callback));
+        },
+        [](std::uint64_t) { return true; },
+        [&](RuntimeFirewallOperationClaim claim,
+            OwnedSnatRecovery,
+            PreparedNativeVpnCatalogPtr) { queued_claim = claim; },
+        [&](RuntimeFirewallOperationCompletion) noexcept {
+            ++terminal_calls;
+        })
+                .schedule);
+    prepared.reset();
+    scheduler.callbacks.front()();
+    REQUIRE(queued_claim);
+    CHECK_FALSE(lifetime.expired());
+
+    CHECK(coordinator.cancel_operation(*queued_claim));
+    CHECK(terminal_calls == 0U);
+    CHECK(lifetime.expired());
+    CHECK_FALSE(coordinator.cancel_operation(*queued_claim));
+}
+
+TEST_CASE(
+    "native VPN completion owns catalogue lifetime exactly until terminal release") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    FakeRuntimeFirewallRetryScheduler scheduler;
+    auto first =
+        make_prepared_native_vpn_catalog_for_test(17U);
+    auto trailing =
+        make_prepared_native_vpn_catalog_for_test(17U, false);
+    const std::weak_ptr<const PreparedNativeVpnCatalog> trailing_lifetime =
+        trailing;
+    std::optional<RuntimeFirewallOperationClaim> queued_claim;
+    std::size_t terminal_calls = 0U;
+
+    REQUIRE(coordinator
+                .schedule_operation_with_prepared_catalog_and_terminal(
+        0,
+        /*runtime_generation=*/17,
+        /*bounded_retry_count=*/6,
+        {},
+        first,
+        [&scheduler](const RuntimeFirewallRetryPlan& retry_plan,
+                     auto callback) {
+            return scheduler.schedule(retry_plan, std::move(callback));
+        },
+        [](std::uint64_t) { return true; },
+        [&](RuntimeFirewallOperationClaim claim,
+            OwnedSnatRecovery,
+            PreparedNativeVpnCatalogPtr) { queued_claim = claim; },
+        [&](RuntimeFirewallOperationCompletion) noexcept {
+            ++terminal_calls;
+        })
+                .schedule);
+    first.reset();
+    scheduler.callbacks.front()();
+    CHECK(terminal_calls == 0U);
+    REQUIRE(queued_claim);
+    const auto running_claim = coordinator.begin_worker(*queued_claim);
+    REQUIRE(running_claim);
+    CHECK(coordinator.begin_attempt_with_prepared_catalog(
+              0,
+              {},
+              trailing)
+              .coalesced);
+    trailing.reset();
+    CHECK_FALSE(trailing_lifetime.expired());
+
+    const auto control_claim = coordinator.begin_control(*running_claim);
+    REQUIRE(control_claim);
+    auto completion = coordinator.complete_operation(*control_claim);
+    REQUIRE(completion.next_prepared_catalog);
+    CHECK_FALSE(trailing_lifetime.expired());
+    CHECK_FALSE(coordinator.complete_operation(*control_claim).owned);
+
+    completion.next_prepared_catalog.reset();
+    CHECK(trailing_lifetime.expired());
 }
 
 TEST_CASE(
