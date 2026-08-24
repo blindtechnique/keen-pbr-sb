@@ -564,6 +564,14 @@ inline bool runtime_recovery_is_current(
     return runtime_active && expected_generation == current_generation;
 }
 
+inline bool deferred_runtime_mutation_intent_is_current(
+    bool accepting_control_tasks,
+    std::uint64_t expected_generation,
+    std::uint64_t current_generation) noexcept {
+    return accepting_control_tasks &&
+           expected_generation == current_generation;
+}
+
 inline bool runtime_recovery_request_should_coalesce(
     std::size_t retry_attempt,
     bool retry_pending) noexcept {
@@ -837,6 +845,64 @@ public:
             throw;
         }
         return retry_plan;
+    }
+
+    // Admission contention is not a failed firewall attempt. Keep the exact
+    // attempt number and retained recovery payload in the coordinator's one
+    // timer slot, then retry only after the generation fence still matches.
+    // This is deliberately separate from schedule(): it must not advance the
+    // bounded retry budget or manufacture an incident merely because another
+    // admitted runtime writer was active.
+    template <typename Schedule, typename IsCurrent, typename RunAttempt>
+    bool defer_same_attempt(
+        std::size_t attempt,
+        std::uint64_t runtime_generation,
+        OwnedSnatRecovery snat_recovery,
+        Schedule&& schedule,
+        IsCurrent&& is_current,
+        RunAttempt&& run_attempt) {
+        snat_recovery = retain_recovery(std::move(snat_recovery));
+        if (retry_pending()) {
+            return false;
+        }
+
+        const auto schedule_serial = next_schedule_serial();
+        active_schedule_serial_ = schedule_serial;
+        retry_task_id_ = -1;
+        auto scheduled_recovery = std::move(snat_recovery);
+        bool accepted = true;
+        try {
+            const int task_id = std::forward<Schedule>(schedule)(
+                [this,
+                 schedule_serial,
+                 attempt,
+                 runtime_generation,
+                 snat_recovery = std::move(scheduled_recovery),
+                 is_current = std::forward<IsCurrent>(is_current),
+                 run_attempt = std::forward<RunAttempt>(run_attempt)]()
+                    mutable {
+                    if (!release_retry_slot_if_current(schedule_serial)) {
+                        return;
+                    }
+                    if (!is_current(runtime_generation)) {
+                        return;
+                    }
+                    run_attempt(attempt, std::move(snat_recovery));
+                });
+            // Test schedulers may consume the callback inline. Preserve a
+            // reentrant successor instead of reviving this completed slot.
+            if (active_schedule_serial_ == schedule_serial) {
+                retry_task_id_ = task_id;
+                if (retry_task_id_ < 0) {
+                    (void)release_retry_slot_if_current(schedule_serial);
+                    accepted = false;
+                }
+            }
+        } catch (...) {
+            (void)release_retry_slot_if_current(schedule_serial);
+            throw;
+        }
+        return accepted;
     }
 
     template <typename Cancel>

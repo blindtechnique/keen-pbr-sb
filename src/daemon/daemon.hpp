@@ -249,6 +249,7 @@ struct RemoteListRefreshTaskStartResult {
     bool accepted{false};
     ListRefreshTaskSnapshot task;
     std::string error;
+    bool force_reconcile{false};
 };
 
 enum class InternalVpnRuntimeResolutionState : std::uint8_t {
@@ -605,6 +606,15 @@ private:
     void schedule_runtime_firewall_retry(std::size_t attempt,
                                          std::uint64_t runtime_generation,
                                          OwnedSnatRecovery snat_recovery);
+    void defer_runtime_firewall_retry(
+        std::size_t attempt,
+        std::uint64_t runtime_generation,
+        std::optional<InternalVpnRuntimeResolution>
+            prepared_internal_vpn_resolution,
+        std::optional<InternalVpnServiceRuntimeResolution>
+            prepared_internal_vpn_service_resolution,
+        bool schedule_catalog_refresh,
+        OwnedSnatRecovery snat_recovery);
     void cancel_runtime_firewall_retry();
     void schedule_resolver_reload_retry(std::size_t attempt,
                                         std::uint64_t runtime_generation);
@@ -848,10 +858,16 @@ private:
     bool start_targeted_interface_probe(const std::string& tag) noexcept;
     CacheCommitCallback make_guarded_cache_commit_callback();
     void refresh_lists_and_maybe_reload_async(
-        std::string source = "autoupdate");
+        std::string source = "autoupdate",
+        bool force_reconcile = false);
+    void schedule_deferred_list_refresh(
+        std::string source,
+        std::uint64_t runtime_generation,
+        bool force_reconcile);
     RemoteListRefreshTaskStartResult start_remote_list_refresh_task(
         bool reload,
-        std::string source);
+        std::string source,
+        bool force_reconcile = false);
     void commit_remote_list_refresh_task_result(
         std::string task_id,
         ListRefreshCancellationToken cancellation,
@@ -872,6 +888,9 @@ private:
     void refresh_resolver_config_hash_actual_async();
     void maybe_schedule_resolver_config_hash_actual_refresh();
     void schedule_keenetic_dns_refresh();
+    void request_keenetic_dns_refresh();
+    void schedule_deferred_keenetic_dns_refresh(
+        std::uint64_t runtime_generation);
     bool commit_keenetic_dns_refresh_result(
         std::uint64_t generation,
         const KeeneticDnsRefreshResult& result);
@@ -969,8 +988,15 @@ private:
 
     // Lists autoupdate state
     int lists_autoupdate_task_id_{-1};
+    // One generation-fenced trailing async refresh while the runtime writer
+    // is busy. This is independent of the steady cron timer above.
+    int lists_runtime_mutation_retry_task_id_{-1};
+    bool lists_runtime_mutation_retry_force_reconcile_{false};
     // Periodic refresh task for cached Keenetic DNS server values.
     int keenetic_dns_refresh_task_id_{-1};
+    // One admission-contention retry. It retains only the exact generation
+    // intent; no RCI payload has been fetched before this timer is armed.
+    int keenetic_dns_refresh_admission_retry_task_id_{-1};
     // Single timer for either the steady resolver poll or convergence retry.
     int resolver_config_hash_actual_task_id_{-1};
     // Exponential retry step for resolver convergence probes.

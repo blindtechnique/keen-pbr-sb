@@ -2,11 +2,145 @@
 
 #include "runtime/list_refresh_task.hpp"
 
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 using namespace keen_pbr3;
+
+TEST_CASE("list refresh task retains mutation lifetime through terminal publication") {
+    ListRefreshTaskCoordinator coordinator;
+    auto exact_payload = std::make_shared<int>(73);
+    std::weak_ptr<int> observed = exact_payload;
+    bool terminal_publication_observed_lifetime = false;
+    coordinator.set_publish_callback([&](const auto& snapshot) {
+        if (list_refresh_task_status_is_terminal(snapshot.status)) {
+            terminal_publication_observed_lifetime = !observed.expired();
+        }
+    });
+    const auto started = coordinator.begin(1, exact_payload);
+    REQUIRE(started.accepted);
+    exact_payload.reset();
+
+    REQUIRE_FALSE(observed.expired());
+    REQUIRE(coordinator.mark_running(started.task.id, "meta"));
+    REQUIRE(coordinator.mark_applying(started.task.id));
+    REQUIRE(observed.lock());
+    CHECK(*observed.lock() == 73);
+
+    REQUIRE(coordinator.succeed(started.task.id, {}, true));
+    CHECK(terminal_publication_observed_lifetime);
+    CHECK(observed.expired());
+}
+
+TEST_CASE("read-only list refresh atomically upgrades to one forced reconcile") {
+    ListRefreshTaskCoordinator coordinator;
+    auto mutation_lifetime = std::make_shared<int>(118);
+    std::weak_ptr<int> observed = mutation_lifetime;
+    bool terminal_publication_observed_lifetime = false;
+    coordinator.set_publish_callback([&](const auto& snapshot) {
+        if (list_refresh_task_status_is_terminal(snapshot.status)) {
+            terminal_publication_observed_lifetime = !observed.expired();
+        }
+    });
+
+    const auto read_only = coordinator.begin(1);
+    REQUIRE(read_only.accepted);
+    REQUIRE_FALSE(read_only.coalesced);
+    REQUIRE(coordinator.mark_running(read_only.task.id, "meta"));
+
+    const auto upgraded = coordinator.begin(
+        1, mutation_lifetime, /*upgrade_active=*/true);
+    REQUIRE(upgraded.accepted);
+    REQUIRE(upgraded.coalesced);
+    CHECK(upgraded.task.id == read_only.task.id);
+    REQUIRE(upgraded.cancellation.valid());
+    CHECK(upgraded.cancellation.shared_flag() ==
+          read_only.cancellation.shared_flag());
+    CHECK(coordinator.force_reconcile_requested(read_only.task.id));
+    mutation_lifetime.reset();
+    CHECK_FALSE(observed.expired());
+
+    // An upgraded reload must apply the live/current configuration even when
+    // the worker reports HTTP 304 / no changed cache entry.
+    CHECK(should_reconcile_committed_list_cache(
+        /*reload_requested=*/false,
+        /*force_reconcile=*/true,
+        /*runtime_active=*/true,
+        /*cache_changed=*/false));
+    CHECK_FALSE(should_reconcile_committed_list_cache(
+        /*reload_requested=*/false,
+        /*force_reconcile=*/true,
+        /*runtime_active=*/false,
+        /*cache_changed=*/false));
+
+    REQUIRE(coordinator.mark_applying(read_only.task.id));
+    REQUIRE(coordinator.succeed(read_only.task.id, {}, true));
+    CHECK(terminal_publication_observed_lifetime);
+    CHECK(observed.expired());
+}
+
+TEST_CASE("deferred reload keeps force after the read-only task terminalizes") {
+    ListRefreshTaskCoordinator coordinator;
+    const auto read_only = coordinator.begin(1);
+    REQUIRE(read_only.accepted);
+    REQUIRE(coordinator.mark_running(read_only.task.id, "meta"));
+
+    // Global admission was busy, so begin()/upgrade could not run. Preserve
+    // the fact that a read-only task existed in the one deferred intent.
+    bool deferred_force = merge_list_refresh_force_reconcile(
+        /*retained=*/false,
+        /*incoming=*/coordinator.active().has_value());
+    REQUIRE(deferred_force);
+    deferred_force = merge_list_refresh_force_reconcile(
+        deferred_force,
+        /*incoming later busy request=*/false);
+    REQUIRE(deferred_force);
+
+    REQUIRE(coordinator.succeed(read_only.task.id, {}, false));
+    CHECK_FALSE(coordinator.active().has_value());
+
+    auto mutation_lifetime = std::make_shared<int>(304);
+    std::weak_ptr<int> observed = mutation_lifetime;
+    const auto trailing = coordinator.begin(
+        1,
+        mutation_lifetime,
+        /*upgrade_active=*/true,
+        /*force_new=*/deferred_force);
+    REQUIRE(trailing.accepted);
+    CHECK_FALSE(trailing.coalesced);
+    CHECK(coordinator.force_reconcile_requested(trailing.task.id));
+    mutation_lifetime.reset();
+    CHECK_FALSE(observed.expired());
+
+    REQUIRE(coordinator.mark_running(trailing.task.id, "meta"));
+    CHECK(should_reconcile_committed_list_cache(
+        /*reload_requested=*/true,
+        /*force_reconcile=*/
+            coordinator.force_reconcile_requested(trailing.task.id),
+        /*runtime_active=*/true,
+        /*cache_changed=*/false));
+    REQUIRE(coordinator.mark_applying(trailing.task.id));
+    REQUIRE(coordinator.succeed(trailing.task.id, {}, true));
+    CHECK(observed.expired());
+}
+
+TEST_CASE("list refresh shutdown terminalization releases mutation lifetime") {
+    ListRefreshTaskCoordinator coordinator;
+    auto exact_payload = std::make_shared<int>(91);
+    std::weak_ptr<int> observed = exact_payload;
+    const auto started = coordinator.begin(1, exact_payload);
+    REQUIRE(started.accepted);
+    exact_payload.reset();
+    REQUIRE(coordinator.mark_running(started.task.id, "meta"));
+
+    RemoteListsRefreshResult committed;
+    committed.changed_lists = {"meta"};
+    REQUIRE(finish_list_refresh_if_shutting_down(
+        false, coordinator, started.task.id, committed));
+    CHECK(observed.expired());
+}
 
 TEST_CASE("list refresh task tracks progress and structured success result") {
     std::int64_t now = 100;
@@ -120,10 +254,21 @@ TEST_CASE("list refresh task exposes cooperative cancellation") {
 
 TEST_CASE("queued list refresh cancellation frees the single-flight slot immediately") {
     ListRefreshTaskCoordinator coordinator;
-    const auto started = coordinator.begin(1);
+    auto exact_payload = std::make_shared<int>(44);
+    std::weak_ptr<int> observed = exact_payload;
+    bool terminal_publication_observed_lifetime = false;
+    coordinator.set_publish_callback([&](const auto& snapshot) {
+        if (list_refresh_task_status_is_terminal(snapshot.status)) {
+            terminal_publication_observed_lifetime = !observed.expired();
+        }
+    });
+    const auto started = coordinator.begin(1, exact_payload);
     REQUIRE(started.accepted);
+    exact_payload.reset();
 
     REQUIRE(coordinator.request_cancel(started.task.id));
+    CHECK(terminal_publication_observed_lifetime);
+    CHECK(observed.expired());
     CHECK(started.cancellation.cancellation_requested());
     CHECK_FALSE(coordinator.active().has_value());
     CHECK_FALSE(coordinator.mark_running(started.task.id));

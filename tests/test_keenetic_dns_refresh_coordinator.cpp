@@ -146,6 +146,44 @@ TEST_CASE("Keenetic DNS refresh runs off-thread and commits on control queue") {
     executor.shutdown();
 }
 
+TEST_CASE("Keenetic DNS refresh retains mutation lifetime through control commit") {
+    BlockingExecutor executor(1, 4);
+    PeriodicTaskMetricsRegistry metrics(
+        {KeeneticDnsRefreshCoordinator::metric_label()});
+    ManualControlQueue control;
+    auto exact_payload = std::make_shared<int>(53);
+    std::weak_ptr<int> observed = exact_payload;
+    bool commit_observed_lifetime = false;
+
+    KeeneticDnsRefreshCoordinator coordinator(
+        executor,
+        metrics,
+        []() { return updated_result(); },
+        [&](std::function<void()> task) {
+            return control.post(std::move(task));
+        },
+        [&](std::uint64_t generation,
+            const KeeneticDnsRefreshResult&) {
+            CHECK(generation == 23);
+            const auto payload = observed.lock();
+            REQUIRE(payload);
+            CHECK(*payload == 53);
+            commit_observed_lifetime = true;
+            return true;
+        });
+
+    REQUIRE(coordinator.request(23, exact_payload) ==
+            KeeneticDnsRefreshCoordinator::RequestResult::started);
+    exact_payload.reset();
+    REQUIRE(control.wait_for_size(1));
+    CHECK_FALSE(observed.expired());
+    control.run_one();
+
+    CHECK(commit_observed_lifetime);
+    CHECK(observed.expired());
+    executor.shutdown();
+}
+
 TEST_CASE("Keenetic DNS refresh coalesces requests into one latest-generation rerun") {
     BlockingExecutor executor(1, 4);
     PeriodicTaskMetricsRegistry metrics(

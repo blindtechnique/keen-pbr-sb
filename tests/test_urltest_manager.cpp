@@ -1086,6 +1086,75 @@ TEST_CASE("resolved cursor mismatch launches one durable convergence probe") {
     CHECK(commits.size() == 0);
 }
 
+TEST_CASE("selection admission busy queues one trailing probe without recursion") {
+    auto transport = std::make_shared<UrltestTransport>();
+    URLTester tester(transport);
+    const auto marks = make_marks();
+    FakeRepeatingScheduler scheduler;
+    BlockingExecutor executor(2, 8);
+    CommitQueue commits;
+    UrltestManager* manager_ptr = nullptr;
+    int callback_depth = 0;
+    int maximum_callback_depth = 0;
+    int transition_count = 0;
+
+    UrltestManager manager(
+        tester,
+        marks,
+        scheduler,
+        executor,
+        [&](const UrltestSelectionChange& change) {
+            REQUIRE(manager_ptr != nullptr);
+            ++callback_depth;
+            maximum_callback_depth =
+                std::max(maximum_callback_depth, callback_depth);
+            ++transition_count;
+            if (transition_count == 1) {
+                // This is the daemon's admission-busy path. The request is
+                // made from inside the selection callback while the exact
+                // probe generation is still inflight.
+                manager_ptr->trigger_external_health_test(
+                    change.urltest_tag);
+                --callback_depth;
+                return false;
+            }
+            --callback_depth;
+            return true;
+        },
+        [&commits](const std::string& tag,
+                   std::uint64_t generation,
+                   std::map<std::string, URLTestResult> results,
+                   TraceId) {
+            commits.push(tag, generation, std::move(results));
+            return true;
+        });
+    manager_ptr = &manager;
+
+    manager.register_urltest(make_priority_urltest_outbound());
+    auto initial = commits.pop();
+    CHECK_FALSE(manager.commit_probe_results(
+        initial.tag, initial.generation, std::move(initial.results)));
+    CHECK(maximum_callback_depth == 1);
+    CHECK(transition_count == 1);
+
+    auto trailing = commits.pop();
+    CHECK(manager.commit_probe_results(
+        trailing.tag, trailing.generation, std::move(trailing.results)));
+    CHECK(maximum_callback_depth == 1);
+    CHECK(transition_count == 2);
+    CHECK(manager.get_selected("automatic") == "primary");
+
+    constexpr const char* retry_label =
+        "urltest-external-health-retry:automatic";
+    const auto state = manager.get_state("automatic");
+    REQUIRE(state.has_value());
+    CHECK(state->external_health_completed_serial ==
+          state->external_health_request_serial);
+    CHECK_FALSE(state->probe_inflight);
+    CHECK(scheduler.count_label(retry_label) == 0);
+    CHECK(commits.size() == 0);
+}
+
 TEST_CASE("external health retries a transient commit admission failure") {
     bool throw_on_first_failure = false;
     bool fail_first_retry_schedule = false;

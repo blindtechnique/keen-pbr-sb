@@ -54,6 +54,12 @@ TEST_CASE("runtime recovery runs only for the active configuration generation") 
     CHECK_FALSE(runtime_recovery_is_current(true, 7, 8));
 }
 
+TEST_CASE("deferred runtime mutation intent drops on shutdown or generation change") {
+    CHECK(deferred_runtime_mutation_intent_is_current(true, 7, 7));
+    CHECK_FALSE(deferred_runtime_mutation_intent_is_current(false, 7, 7));
+    CHECK_FALSE(deferred_runtime_mutation_intent_is_current(true, 7, 8));
+}
+
 TEST_CASE("new runtime refresh coalesces with a pending recovery chain") {
     CHECK(runtime_recovery_request_should_coalesce(0, true));
     CHECK_FALSE(runtime_recovery_request_should_coalesce(0, false));
@@ -682,6 +688,108 @@ TEST_CASE("runtime firewall retry merges owned recovery before coalescing") {
     CHECK(coalesced.snat_recovery.requested);
     CHECK(coalesced.snat_recovery.missing_observed);
     CHECK(coordinator.owned_snat_recovery_pending());
+}
+
+TEST_CASE("runtime firewall admission deferral keeps attempt and one trailing slot") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    std::vector<std::function<void()>> callbacks;
+    std::size_t observed_attempt = 99;
+    OwnedSnatRecovery observed_recovery;
+
+    REQUIRE(coordinator.defer_same_attempt(
+        3,
+        /*runtime_generation=*/17,
+        OwnedSnatRecovery{/*requested=*/true,
+                          /*missing_observed=*/false},
+        [&](auto callback) {
+            callbacks.emplace_back(std::move(callback));
+            return 41;
+        },
+        [](std::uint64_t generation) { return generation == 17; },
+        [&](std::size_t attempt, OwnedSnatRecovery recovery) {
+            // Match the production callback: begin_attempt() merges any SNAT
+            // observation which arrived while this exact timer was pending.
+            const auto admission = coordinator.begin_attempt(
+                attempt, std::move(recovery));
+            observed_attempt = attempt;
+            observed_recovery = admission.snat_recovery;
+        }));
+    REQUIRE(coordinator.retry_pending());
+    REQUIRE(callbacks.size() == 1);
+
+    CHECK_FALSE(coordinator.defer_same_attempt(
+        3,
+        /*runtime_generation=*/17,
+        OwnedSnatRecovery{/*requested=*/true,
+                          /*missing_observed=*/true},
+        [&](auto callback) {
+            callbacks.emplace_back(std::move(callback));
+            return 42;
+        },
+        [](std::uint64_t) { return true; },
+        [](std::size_t, OwnedSnatRecovery) {}));
+    CHECK(callbacks.size() == 1);
+
+    callbacks.front()();
+    CHECK_FALSE(coordinator.retry_pending());
+    CHECK(observed_attempt == 3);
+    CHECK(observed_recovery.requested);
+    CHECK(observed_recovery.missing_observed);
+}
+
+TEST_CASE("runtime firewall admission deferral reports scheduler rejection") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    CHECK_FALSE(coordinator.defer_same_attempt(
+        2,
+        /*runtime_generation=*/9,
+        {},
+        [](auto) { return -1; },
+        [](std::uint64_t) { return true; },
+        [](std::size_t, OwnedSnatRecovery) {}));
+    CHECK_FALSE(coordinator.retry_pending());
+}
+
+TEST_CASE("new prepared firewall intent replaces the exact deferred payload") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    std::vector<std::function<void()>> callbacks;
+    int applied_payload = 0;
+
+    REQUIRE(coordinator.defer_same_attempt(
+        0,
+        /*runtime_generation=*/17,
+        {},
+        [&](auto callback) {
+            callbacks.emplace_back(std::move(callback));
+            return 10;
+        },
+        [](std::uint64_t) { return true; },
+        [payload = 1, &applied_payload](std::size_t,
+                                        OwnedSnatRecovery) {
+            applied_payload = payload;
+        }));
+    REQUIRE(callbacks.size() == 1);
+    const auto stale_callback = callbacks.front();
+
+    coordinator.cancel([](int) {});
+    REQUIRE(coordinator.defer_same_attempt(
+        0,
+        /*runtime_generation=*/17,
+        {},
+        [&](auto callback) {
+            callbacks.emplace_back(std::move(callback));
+            return 11;
+        },
+        [](std::uint64_t) { return true; },
+        [payload = 2, &applied_payload](std::size_t,
+                                        OwnedSnatRecovery) {
+            applied_payload = payload;
+        }));
+    REQUIRE(callbacks.size() == 2);
+
+    stale_callback();
+    CHECK(applied_payload == 0);
+    callbacks.back()();
+    CHECK(applied_payload == 2);
 }
 
 TEST_CASE("stale runtime firewall retry releases its slot and skips the attempt") {

@@ -1310,6 +1310,11 @@ void Daemon::stop_routing_runtime() {
     urltest_after_firewall_gate_.reset();
     cancel_resolver_reload_retry();
     cancel_internal_vpn_catalog_refresh_retry();
+    if (lists_runtime_mutation_retry_task_id_ >= 0) {
+        scheduler_->cancel(lists_runtime_mutation_retry_task_id_);
+        lists_runtime_mutation_retry_task_id_ = -1;
+    }
+    lists_runtime_mutation_retry_force_reconcile_ = false;
     if (!routing_runtime_active()) {
         if (runtime_state_machine_.state() != RuntimeState::stopped) {
             transition_runtime_or_throw(RuntimeState::stopped, "inactive runtime stopped");
@@ -1338,6 +1343,10 @@ void Daemon::stop_routing_runtime() {
     if (keenetic_dns_refresh_task_id_ >= 0) {
         scheduler_->cancel(keenetic_dns_refresh_task_id_);
         keenetic_dns_refresh_task_id_ = -1;
+    }
+    if (keenetic_dns_refresh_admission_retry_task_id_ >= 0) {
+        scheduler_->cancel(keenetic_dns_refresh_admission_retry_task_id_);
+        keenetic_dns_refresh_admission_retry_task_id_ = -1;
     }
 
     const bool resolver_deactivated =
@@ -2961,6 +2970,26 @@ bool Daemon::handle_urltest_selection_change(
             }
         }
 
+        auto runtime_mutation = runtime_mutation_admission_.try_acquire(
+            "urltest-selection-change");
+        if (!runtime_mutation.has_value()) {
+            // The manager's external-health latch is the existing exact
+            // single-flight owner for this selector. Returning false restores
+            // its previous cursor; this request supplies one trailing probe
+            // after the current inflight generation retires.
+            urltest_manager_->trigger_external_health_test(
+                change.urltest_tag);
+            const auto active = runtime_mutation_admission_.active();
+            log.verbose(
+                "Urltest '{}' transition deferred behind runtime mutation "
+                "'{}'.",
+                change.urltest_tag,
+                active.has_value()
+                    ? active->label
+                    : std::string{"unknown"});
+            return false;
+        }
+
         const auto list_cache_snapshot =
             capture_relevant_list_cache_generation(config_);
         firewall_state_.swap_urltest_selections(candidate_selections);
@@ -3830,7 +3859,7 @@ void Daemon::schedule_startup_firewall_retry(
             capture_relevant_list_cache_generation(config_);
     }
 
-    scheduler_->schedule_oneshot(
+    const int task_id = scheduler_->schedule_oneshot(
         delay,
         [this, attempt, generation,
          list_cache_snapshot = std::move(list_cache_snapshot)]() {
@@ -3841,6 +3870,22 @@ void Daemon::schedule_startup_firewall_retry(
                     runtime_generation_.load(std::memory_order_acquire))) {
                 log.verbose(
                     "Discarding stale startup firewall recovery retry.");
+                return;
+            }
+            auto runtime_mutation =
+                runtime_mutation_admission_.try_acquire(
+                    "startup-firewall-retry");
+            if (!runtime_mutation.has_value()) {
+                const auto active = runtime_mutation_admission_.active();
+                log.verbose(
+                    "Startup firewall retry {} deferred behind runtime "
+                    "mutation '{}' without consuming retry budget.",
+                    attempt,
+                    active.has_value()
+                        ? active->label
+                        : std::string{"unknown"});
+                schedule_startup_firewall_retry(
+                    attempt, generation, list_cache_snapshot);
                 return;
             }
             try {
@@ -3903,6 +3948,13 @@ void Daemon::schedule_startup_firewall_retry(
         },
         "startup-firewall-retry");
 
+    if (task_id < 0) {
+        Logger::instance().error(
+            "Startup firewall retry {} was rejected; no retry budget or "
+            "runtime cursor was changed.",
+            attempt);
+        return;
+    }
     Logger::instance().info("Firewall apply retry {} scheduled in {}s.",
                             attempt, delay.count());
 }
@@ -3924,6 +3976,7 @@ void Daemon::schedule_lists_autoupdate() {
     lists_autoupdate_task_id_ = scheduler_->schedule_oneshot(
         delay,
         [this]() {
+            lists_autoupdate_task_id_ = -1;
             refresh_lists_and_maybe_reload_async();
         },
         "lists-autoupdate");
@@ -3971,6 +4024,8 @@ void Daemon::commit_remote_list_refresh_task_result(
          reschedule]() mutable {
             ScopedTraceContext trace_scope_inner(trace_id);
             auto& refresh_result = *completion_result;
+            const bool force_reconcile =
+                list_refresh_tasks_.force_reconcile_requested(task_id);
 
             const auto schedule_next = [this, reschedule]() {
                 if (reschedule) schedule_lists_autoupdate();
@@ -3989,11 +4044,15 @@ void Daemon::commit_remote_list_refresh_task_result(
                     refresh_result.value_or(RemoteListsRefreshResult{}));
                 schedule_next();
             };
-            const auto reconcile_committed_cache = [this, reload, &source](
-                RemoteListsRefreshResult& committed,
-                bool& reloaded) -> std::optional<std::string> {
-                if (!reload || !routing_runtime_active() ||
-                    !committed.any_changed()) {
+            const auto reconcile_committed_cache =
+                [this, reload, force_reconcile, &source](
+                    RemoteListsRefreshResult& committed,
+                    bool& reloaded) -> std::optional<std::string> {
+                if (!should_reconcile_committed_list_cache(
+                        reload,
+                        force_reconcile,
+                        routing_runtime_active(),
+                        committed.any_changed())) {
                     return std::nullopt;
                 }
                 try {
@@ -4037,7 +4096,8 @@ void Daemon::commit_remote_list_refresh_task_result(
                                          "source={} generation={} reason=stale_runtime",
                                          source,
                                          generation);
-                if (!refresh_result || !refresh_result->any_changed()) {
+                if (!refresh_result ||
+                    (!refresh_result->any_changed() && !force_reconcile)) {
                     if (cancellation.cancellation_requested()) {
                         finish_cancelled();
                     } else {
@@ -4083,7 +4143,8 @@ void Daemon::commit_remote_list_refresh_task_result(
             }
 
             if (cancellation.cancellation_requested() &&
-                (!refresh_result || !refresh_result->any_changed())) {
+                (!refresh_result ||
+                 (!refresh_result->any_changed() && !force_reconcile))) {
                 finish_cancelled();
                 return;
             }
@@ -4150,9 +4211,58 @@ void Daemon::commit_remote_list_refresh_task_result(
                     source);
             }
 
-            if (reload && should_reload_runtime_after_list_refresh(
-                              runtime_active_snapshot,
-                              result.refresh_result)) {
+            if (force_reconcile &&
+                should_reconcile_committed_list_cache(
+                    reload,
+                    force_reconcile,
+                    routing_runtime_active(),
+                    result.refresh_result.any_changed())) {
+                Logger::instance().info(
+                    "Lists refresh ({}): applying an upgraded reload request "
+                    "against the current runtime generation",
+                    source);
+                if (!list_refresh_tasks_.mark_applying(task_id)) {
+                    if (cancellation.cancellation_requested()) {
+                        if (const auto reconcile_error =
+                                reconcile_committed_cache(
+                                    result.refresh_result,
+                                    result.reloaded)) {
+                            (void)list_refresh_tasks_.fail(
+                                task_id,
+                                *reconcile_error,
+                                std::move(result.refresh_result),
+                                result.reloaded);
+                        } else {
+                            (void)list_refresh_tasks_.finish_cancelled(
+                                task_id,
+                                "list refresh cancelled after committing completed lists",
+                                std::move(result.refresh_result),
+                                result.reloaded);
+                        }
+                    } else {
+                        (void)list_refresh_tasks_.fail(
+                            task_id,
+                            "list refresh task left the running state before apply",
+                            std::move(result.refresh_result),
+                            result.reloaded);
+                    }
+                    schedule_next();
+                    return;
+                }
+                if (const auto reconcile_error =
+                        reconcile_committed_cache(
+                            result.refresh_result, result.reloaded)) {
+                    (void)list_refresh_tasks_.fail(
+                        task_id,
+                        *reconcile_error,
+                        std::move(result.refresh_result),
+                        result.reloaded);
+                    schedule_next();
+                    return;
+                }
+            } else if (reload && should_reload_runtime_after_list_refresh(
+                                     runtime_active_snapshot,
+                                     result.refresh_result)) {
                 Logger::instance().info(
                     "Lists refresh ({}): relevant list(s) changed ({}), reloading runtime",
                     source,
@@ -4203,7 +4313,7 @@ void Daemon::commit_remote_list_refresh_task_result(
                 }
             } else if (result.refresh_result.any_relevant_changed()) {
                 Logger::instance().info(
-                    reload
+                    (reload || force_reconcile)
                         ? "Lists refresh: relevant list(s) changed ({}), but runtime is stopped"
                         : "Lists refresh: relevant list(s) changed ({}); runtime reload was not requested",
                     format_list_names(result.refresh_result.relevant_changed_lists));
@@ -4260,11 +4370,27 @@ void Daemon::commit_remote_list_refresh_task_result(
 
 RemoteListRefreshTaskStartResult Daemon::start_remote_list_refresh_task(
     bool reload,
-    std::string source) {
+    std::string source,
+    bool force_reconcile) {
     auto& log = Logger::instance();
 
     if (!accept_posted_control_tasks_.load(std::memory_order_acquire)) {
         return {false, {}, "daemon is shutting down"};
+    }
+
+    std::shared_ptr<RuntimeMutationAdmission::Lease> mutation_lease;
+    if (reload) {
+        auto admitted = runtime_mutation_admission_.try_acquire(
+            "lists-refresh-" + source);
+        if (!admitted.has_value()) {
+            const bool retain_force = merge_list_refresh_force_reconcile(
+                force_reconcile,
+                list_refresh_tasks_.active().has_value());
+            return {false, {}, "busy", retain_force};
+        }
+        mutation_lease =
+            std::make_shared<RuntimeMutationAdmission::Lease>(
+                std::move(*admitted));
     }
 
     const Config config_snapshot = config_;
@@ -4274,12 +4400,35 @@ RemoteListRefreshTaskStartResult Daemon::start_remote_list_refresh_task(
         return {false, {}, "failed to select remote lists"};
     }
 
-    auto started = list_refresh_tasks_.begin(target_selection.list_names.size());
+    auto started = list_refresh_tasks_.begin(
+        target_selection.list_names.size(),
+        mutation_lease,
+        /*upgrade_active=*/reload,
+        /*force_new=*/force_reconcile);
+    if (started.coalesced) {
+        Logger::instance().trace(
+            "lists_refresh_upgrade",
+            "source={} task_id={} reconcile=current",
+            source,
+            started.task.id);
+        if (source == "autoupdate" || source == "post-apply") {
+            // The active task keeps its original source, so preserve this
+            // caller's cron ownership now instead of waiting for its terminal
+            // callback to schedule a cadence it does not know about.
+            schedule_lists_autoupdate();
+        }
+        return {true, std::move(started.task), {}};
+    }
     if (!started.accepted) {
         Logger::instance().trace("lists_refresh_skip",
                                  "source={} reason=inflight",
                                  source);
-        return {false, std::move(started.task), "busy"};
+        return {
+            false,
+            std::move(started.task),
+            "busy",
+            merge_list_refresh_force_reconcile(
+                force_reconcile, /*incoming=*/true)};
     }
 
     log.info("Lists refresh ({}): checking for updates", source);
@@ -4376,12 +4525,86 @@ RemoteListRefreshTaskStartResult Daemon::start_remote_list_refresh_task(
     return {true, std::move(started.task), {}};
 }
 
-void Daemon::refresh_lists_and_maybe_reload_async(std::string source) {
+void Daemon::refresh_lists_and_maybe_reload_async(
+    std::string source,
+    bool force_reconcile) {
     const bool reschedule = source == "autoupdate" || source == "post-apply";
-    const auto start = start_remote_list_refresh_task(true, source);
+    const auto start = start_remote_list_refresh_task(
+        true, source, force_reconcile);
     if (!start.accepted && reschedule) {
-        schedule_lists_autoupdate();
+        if (start.error == "busy") {
+            schedule_deferred_list_refresh(
+                std::move(source),
+                runtime_generation_.load(std::memory_order_acquire),
+                start.force_reconcile);
+        } else {
+            schedule_lists_autoupdate();
+        }
     }
+}
+
+void Daemon::schedule_deferred_list_refresh(
+    std::string source,
+    std::uint64_t runtime_generation,
+    bool force_reconcile) {
+    lists_runtime_mutation_retry_force_reconcile_ =
+        merge_list_refresh_force_reconcile(
+            lists_runtime_mutation_retry_force_reconcile_,
+            force_reconcile);
+    if (lists_runtime_mutation_retry_task_id_ >= 0) {
+        const int stale_task_id =
+            lists_runtime_mutation_retry_task_id_;
+        lists_runtime_mutation_retry_task_id_ = -1;
+        try {
+            scheduler_->cancel(stale_task_id);
+        } catch (const std::exception& error) {
+            // Scheduler invalidates the entry before fd cleanup can throw.
+            // Keep the OR-merged force bit and install the replacement intent.
+            try {
+                Logger::instance().verbose(
+                    "Lists refresh retry cleanup reported '{}'; replacing "
+                    "the intent without dropping forced reconciliation.",
+                    error.what());
+            } catch (...) {
+            }
+        } catch (...) {
+        }
+    }
+
+    constexpr auto kAdmissionRetryDelay = std::chrono::seconds{1};
+    const int task_id = scheduler_->schedule_oneshot(
+        kAdmissionRetryDelay,
+        [this,
+         source = std::move(source),
+         runtime_generation]() mutable {
+            lists_runtime_mutation_retry_task_id_ = -1;
+            const bool deferred_force_reconcile =
+                lists_runtime_mutation_retry_force_reconcile_;
+            lists_runtime_mutation_retry_force_reconcile_ = false;
+            if (!deferred_runtime_mutation_intent_is_current(
+                    accept_posted_control_tasks_.load(
+                        std::memory_order_acquire),
+                    runtime_generation,
+                    runtime_generation_.load(
+                        std::memory_order_acquire))) {
+                return;
+            }
+            refresh_lists_and_maybe_reload_async(
+                std::move(source), deferred_force_reconcile);
+        },
+        "lists-refresh-admission-retry");
+    if (task_id < 0) {
+        lists_runtime_mutation_retry_force_reconcile_ = false;
+        Logger::instance().error(
+            "Lists refresh admission retry was rejected; no runtime cursor "
+            "was changed.");
+        return;
+    }
+    lists_runtime_mutation_retry_task_id_ = task_id;
+    const auto active = runtime_mutation_admission_.active();
+    Logger::instance().verbose(
+        "Lists refresh deferred behind runtime mutation '{}'.",
+        active.has_value() ? active->label : std::string{"unknown"});
 }
 
 PreparedRuntimeInputs Daemon::prepare_runtime_inputs(const Config& config,
@@ -5515,8 +5738,7 @@ void Daemon::resume_deferred_keenetic_dns_refresh() noexcept {
                     !dns_config_uses_keenetic_server(*config_.dns)) {
                     return;
                 }
-                (void)keenetic_dns_refresh_coordinator_.request(
-                    runtime_generation_.load(std::memory_order_acquire));
+                request_keenetic_dns_refresh();
             },
             "keenetic-dns-refresh-after-resolver-recovery");
         if (!queued && routing_runtime_active()) {
@@ -7785,9 +8007,18 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
         scheduler_->cancel(lists_autoupdate_task_id_);
         lists_autoupdate_task_id_ = -1;
     }
+    if (lists_runtime_mutation_retry_task_id_ >= 0) {
+        scheduler_->cancel(lists_runtime_mutation_retry_task_id_);
+        lists_runtime_mutation_retry_task_id_ = -1;
+    }
+    lists_runtime_mutation_retry_force_reconcile_ = false;
     if (keenetic_dns_refresh_task_id_ >= 0) {
         scheduler_->cancel(keenetic_dns_refresh_task_id_);
         keenetic_dns_refresh_task_id_ = -1;
+    }
+    if (keenetic_dns_refresh_admission_retry_task_id_ >= 0) {
+        scheduler_->cancel(keenetic_dns_refresh_admission_retry_task_id_);
+        keenetic_dns_refresh_admission_retry_task_id_ = -1;
     }
     if (resolver_config_hash_actual_task_id_ >= 0) {
         scheduler_->cancel(resolver_config_hash_actual_task_id_);

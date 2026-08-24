@@ -246,6 +246,10 @@ void Daemon::schedule_resolver_config_hash_actual_after(
 }
 
 void Daemon::schedule_keenetic_dns_refresh() {
+    if (keenetic_dns_refresh_admission_retry_task_id_ >= 0) {
+        scheduler_->cancel(keenetic_dns_refresh_admission_retry_task_id_);
+        keenetic_dns_refresh_admission_retry_task_id_ = -1;
+    }
     if (keenetic_dns_refresh_task_id_ >= 0) {
         scheduler_->cancel(keenetic_dns_refresh_task_id_);
         keenetic_dns_refresh_task_id_ = -1;
@@ -263,11 +267,73 @@ void Daemon::schedule_keenetic_dns_refresh() {
                     !config_uses_keenetic_dns(config_.dns)) {
                     return;
                 }
-                (void)keenetic_dns_refresh_coordinator_.request(
-                    runtime_generation_.load(std::memory_order_acquire));
+                request_keenetic_dns_refresh();
             }, "keenetic-dns-refresh");
         },
         "keenetic-dns-refresh");
+}
+
+void Daemon::request_keenetic_dns_refresh() {
+    if (!routing_runtime_active() ||
+        !config_uses_keenetic_dns(config_.dns)) {
+        return;
+    }
+
+    const auto generation =
+        runtime_generation_.load(std::memory_order_acquire);
+    auto admitted = runtime_mutation_admission_.try_acquire(
+        "keenetic-dns-refresh");
+    if (!admitted.has_value()) {
+        schedule_deferred_keenetic_dns_refresh(generation);
+        return;
+    }
+
+    auto mutation_lease =
+        std::make_shared<RuntimeMutationAdmission::Lease>(
+            std::move(*admitted));
+    const auto request = keenetic_dns_refresh_coordinator_.request(
+        generation, mutation_lease);
+    if (request == KeeneticDnsRefreshCoordinator::RequestResult::rejected) {
+        mutation_lease.reset();
+        Logger::instance().verbose(
+            "Keenetic DNS refresh worker rejected generation {}.",
+            generation);
+        schedule_deferred_keenetic_dns_refresh(generation);
+    }
+}
+
+void Daemon::schedule_deferred_keenetic_dns_refresh(
+    std::uint64_t runtime_generation) {
+    if (keenetic_dns_refresh_admission_retry_task_id_ >= 0) {
+        return;
+    }
+
+    constexpr auto kAdmissionRetryDelay = std::chrono::seconds{1};
+    const int task_id = scheduler_->schedule_oneshot(
+        kAdmissionRetryDelay,
+        [this, runtime_generation]() {
+            keenetic_dns_refresh_admission_retry_task_id_ = -1;
+            if (!runtime_recovery_is_current(
+                    routing_runtime_active(),
+                    runtime_generation,
+                    runtime_generation_.load(std::memory_order_acquire)) ||
+                !config_uses_keenetic_dns(config_.dns)) {
+                return;
+            }
+            request_keenetic_dns_refresh();
+        },
+        "keenetic-dns-refresh-admission-retry");
+    if (task_id < 0) {
+        Logger::instance().error(
+            "Keenetic DNS admission retry was rejected; no runtime cursor "
+            "was changed.");
+        return;
+    }
+    keenetic_dns_refresh_admission_retry_task_id_ = task_id;
+    const auto active = runtime_mutation_admission_.active();
+    Logger::instance().verbose(
+        "Keenetic DNS refresh deferred behind runtime mutation '{}'.",
+        active.has_value() ? active->label : std::string{"unknown"});
 }
 
 bool Daemon::commit_keenetic_dns_refresh_result(

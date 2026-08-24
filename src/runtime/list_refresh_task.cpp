@@ -93,13 +93,34 @@ void ListRefreshTaskCoordinator::publish_noexcept(
     }
 }
 
-ListRefreshTaskBeginResult ListRefreshTaskCoordinator::begin(std::size_t total) {
+ListRefreshTaskBeginResult ListRefreshTaskCoordinator::begin(
+    std::size_t total,
+    std::shared_ptr<void> operation_lifetime,
+    bool upgrade_active,
+    bool force_new) {
     ListRefreshTaskBeginResult result;
     PublishCallback callback;
     {
         KPBR_LOCK_GUARD(mutex_);
         if (active_) {
             result.task = active_->snapshot;
+            if (upgrade_active && operation_lifetime &&
+                !active_->operation_lifetime &&
+                !active_->snapshot.cancel_requested &&
+                (active_->snapshot.status == ListRefreshTaskStatus::Queued ||
+                 active_->snapshot.status == ListRefreshTaskStatus::Running)) {
+                // Upgrade the exact in-flight read-only task atomically. The
+                // worker may already have committed cache data, so the lease
+                // and force-reconcile bit must become visible together before
+                // terminalization can observe either one.
+                active_->operation_lifetime =
+                    std::move(operation_lifetime);
+                active_->force_reconcile = true;
+                result.accepted = true;
+                result.coalesced = true;
+                result.cancellation = ListRefreshCancellationToken(
+                    active_->cancellation_flag);
+            }
             return result;
         }
 
@@ -114,7 +135,11 @@ ListRefreshTaskBeginResult ListRefreshTaskCoordinator::begin(std::size_t total) 
         snapshot.total = total;
         snapshot.revision = 1;
 
-        active_ = ActiveTask{snapshot, cancellation_flag};
+        active_ = ActiveTask{
+            snapshot,
+            cancellation_flag,
+            std::move(operation_lifetime),
+            force_new};
         callback = publish_callback_;
         result.accepted = true;
         result.task = std::move(snapshot);
@@ -186,6 +211,7 @@ bool ListRefreshTaskCoordinator::mark_applying(const std::string& id) {
 bool ListRefreshTaskCoordinator::request_cancel(const std::string& id) {
     ListRefreshTaskSnapshot published;
     PublishCallback callback;
+    std::shared_ptr<void> operation_lifetime;
     {
         KPBR_LOCK_GUARD(mutex_);
         if (!active_ || active_->snapshot.id != id ||
@@ -218,10 +244,13 @@ bool ListRefreshTaskCoordinator::request_cancel(const std::string& id) {
             while (terminal_history_.size() > terminal_history_limit_) {
                 terminal_history_.pop_back();
             }
+            operation_lifetime =
+                std::move(active_->operation_lifetime);
             active_.reset();
         }
     }
     publish_noexcept(callback, published);
+    (void)operation_lifetime;
     return true;
 }
 
@@ -242,6 +271,7 @@ bool ListRefreshTaskCoordinator::finish(
 
     ListRefreshTaskSnapshot published;
     PublishCallback callback;
+    std::shared_ptr<void> operation_lifetime;
     {
         KPBR_LOCK_GUARD(mutex_);
         if (!active_ || active_->snapshot.id != id) return false;
@@ -279,9 +309,11 @@ bool ListRefreshTaskCoordinator::finish(
         while (terminal_history_.size() > terminal_history_limit_) {
             terminal_history_.pop_back();
         }
+        operation_lifetime = std::move(active_->operation_lifetime);
         active_.reset();
     }
     publish_noexcept(callback, published);
+    (void)operation_lifetime;
     return true;
 }
 
@@ -318,6 +350,13 @@ std::optional<ListRefreshTaskSnapshot> ListRefreshTaskCoordinator::active() cons
     KPBR_LOCK_GUARD(mutex_);
     if (!active_) return std::nullopt;
     return active_->snapshot;
+}
+
+bool ListRefreshTaskCoordinator::force_reconcile_requested(
+    const std::string& id) const {
+    KPBR_LOCK_GUARD(mutex_);
+    return active_ && active_->snapshot.id == id &&
+           active_->force_reconcile;
 }
 
 std::optional<ListRefreshTaskSnapshot> ListRefreshTaskCoordinator::find(

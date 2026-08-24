@@ -3379,9 +3379,48 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
         retry_attempt, std::move(snat_recovery));
     snat_recovery = admission.snat_recovery;
     if (admission.coalesced) {
-        log.verbose(
-            "Coalescing runtime routing/firewall refresh with the pending "
-            "recovery retry.");
+        if (prepared_internal_vpn_resolution.has_value() ||
+            prepared_internal_vpn_service_resolution.has_value()) {
+            // A catalog completion is an exact authoritative observation, not
+            // another generic wakeup. Replace the older timer now; otherwise
+            // an admission-deferred closure could later publish its older
+            // prepared snapshot after the shared catalog had advanced.
+            try {
+                cancel_runtime_firewall_retry();
+            } catch (const std::exception& error) {
+                // The coordinator invalidates its serial before delegating to
+                // Scheduler::cancel(). Even if fd cleanup throws, the old
+                // callback is fenced and the newer exact payload must still
+                // be admitted below.
+                try {
+                    log.verbose(
+                        "Runtime firewall retry cleanup reported '{}' while "
+                        "replacing it with a newer catalog observation.",
+                        error.what());
+                } catch (...) {
+                }
+            } catch (...) {
+            }
+            log.verbose(
+                "Replacing pending runtime firewall recovery with the latest "
+                "prepared native VPN catalog observation.");
+        } else {
+            log.verbose(
+                "Coalescing runtime routing/firewall refresh with the pending "
+                "recovery retry.");
+            return false;
+        }
+    }
+    auto runtime_mutation = runtime_mutation_admission_.try_acquire(
+        "runtime-firewall-recovery");
+    if (!runtime_mutation.has_value()) {
+        defer_runtime_firewall_retry(
+            retry_attempt,
+            runtime_generation_.load(std::memory_order_acquire),
+            std::move(prepared_internal_vpn_resolution),
+            std::move(prepared_internal_vpn_service_resolution),
+            schedule_catalog_refresh,
+            std::move(snat_recovery));
         return false;
     }
     try {
@@ -3867,6 +3906,75 @@ void Daemon::schedule_runtime_firewall_retry(
             "Runtime firewall recovery retry {} scheduled in {}s.",
             retry_plan.next_attempt,
             delay.count());
+    }
+}
+
+void Daemon::defer_runtime_firewall_retry(
+    std::size_t attempt,
+    std::uint64_t runtime_generation,
+    std::optional<InternalVpnRuntimeResolution>
+        prepared_internal_vpn_resolution,
+    std::optional<InternalVpnServiceRuntimeResolution>
+        prepared_internal_vpn_service_resolution,
+    bool schedule_catalog_refresh,
+    OwnedSnatRecovery snat_recovery) {
+    try {
+        const bool scheduled = runtime_firewall_retry_.defer_same_attempt(
+            attempt,
+            runtime_generation,
+            std::move(snat_recovery),
+            [this](auto callback) {
+                return scheduler_->schedule_oneshot(
+                    std::chrono::seconds{1},
+                    std::move(callback),
+                    "runtime-firewall-admission-retry");
+            },
+            [this](std::uint64_t expected_generation) {
+                return runtime_recovery_is_current(
+                    routing_runtime_active(),
+                    expected_generation,
+                    runtime_generation_.load(std::memory_order_acquire));
+            },
+            [this,
+             prepared_internal_vpn_resolution =
+                 std::move(prepared_internal_vpn_resolution),
+             prepared_internal_vpn_service_resolution =
+                 std::move(prepared_internal_vpn_service_resolution),
+             schedule_catalog_refresh](
+                std::size_t deferred_attempt,
+                OwnedSnatRecovery deferred_snat_recovery) mutable {
+                (void)refresh_iproute_and_firewall_runtime(
+                    deferred_attempt,
+                    std::move(prepared_internal_vpn_resolution),
+                    std::move(prepared_internal_vpn_service_resolution),
+                    schedule_catalog_refresh,
+                    std::move(deferred_snat_recovery));
+            });
+        if (scheduled) {
+            const auto active = runtime_mutation_admission_.active();
+            Logger::instance().verbose(
+                "Runtime firewall reconciliation deferred behind runtime "
+                "mutation '{}' without consuming retry budget.",
+                active.has_value()
+                    ? active->label
+                    : std::string{"unknown"});
+        } else if (!runtime_firewall_retry_.retry_pending()) {
+            Logger::instance().error(
+                "Runtime firewall admission retry was rejected; the periodic "
+                "health owner retains the recovery intent.");
+        }
+    } catch (const std::exception& error) {
+        // Admission contention is not a firewall failure. Do not increment an
+        // incident or retry cursor when even the trailing timer cannot be
+        // armed; the periodic health owner can request a fresh observation.
+        try {
+            Logger::instance().error(
+                "Could not defer runtime firewall reconciliation behind "
+                "another writer: {}",
+                error.what());
+        } catch (...) {
+        }
+    } catch (...) {
     }
 }
 

@@ -49,7 +49,12 @@ public:
     KeeneticDnsRefreshCoordinator& operator=(
         const KeeneticDnsRefreshCoordinator&) = delete;
 
-    RequestResult request(std::uint64_t runtime_generation) noexcept;
+    // `operation_lifetime` is retained from worker admission through the
+    // terminal control-loop commit. Production uses it for the single runtime
+    // mutation lease; tests and read-only callers may leave it empty.
+    RequestResult request(
+        std::uint64_t runtime_generation,
+        std::shared_ptr<void> operation_lifetime = {}) noexcept;
 
     // Prevents new work, waits for callbacks already using the owner, and
     // suppresses queued worker/control callbacks that have not started yet.

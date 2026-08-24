@@ -65,7 +65,8 @@ struct KeeneticDnsRefreshCoordinator::State final
           post_control(std::move(post_control_value)),
           commit(std::move(commit_value)) {}
 
-    RequestResult request(std::uint64_t runtime_generation) noexcept {
+    RequestResult request(std::uint64_t runtime_generation,
+                          std::shared_ptr<void> operation_lifetime) noexcept {
         std::lock_guard<std::mutex> lock(state_mutex);
         if (stopping) {
             return RequestResult::rejected;
@@ -76,13 +77,19 @@ struct KeeneticDnsRefreshCoordinator::State final
 
         if (in_flight) {
             pending = true;
+            if (operation_lifetime) {
+                latest_operation_lifetime =
+                    std::move(operation_lifetime);
+            }
             return RequestResult::coalesced;
         }
 
         in_flight = true;
+        active_operation_lifetime = std::move(operation_lifetime);
         active_claim_id = next_claim_id_locked();
         claim_phase = ClaimPhase::worker;
         if (!enqueue_claimed_locked(latest_generation, active_claim_id)) {
+            active_operation_lifetime.reset();
             in_flight = false;
             active_claim_id = 0;
             claim_phase = ClaimPhase::idle;
@@ -99,6 +106,8 @@ struct KeeneticDnsRefreshCoordinator::State final
         callbacks_finished.wait(lock, [this]() {
             return active_callbacks == 0;
         });
+        latest_operation_lifetime.reset();
+        active_operation_lifetime.reset();
     }
 
 private:
@@ -326,6 +335,8 @@ private:
         }
         if (stopping) {
             pending = false;
+            latest_operation_lifetime.reset();
+            active_operation_lifetime.reset();
             in_flight = false;
             active_claim_id = 0;
             claim_phase = ClaimPhase::idle;
@@ -334,6 +345,7 @@ private:
         }
 
         if (!pending) {
+            active_operation_lifetime.reset();
             in_flight = false;
             active_claim_id = 0;
             claim_phase = ClaimPhase::idle;
@@ -342,9 +354,12 @@ private:
         }
 
         pending = false;
+        active_operation_lifetime =
+            std::move(latest_operation_lifetime);
         active_claim_id = next_claim_id_locked();
         claim_phase = ClaimPhase::worker;
         if (!enqueue_claimed_locked(latest_generation, active_claim_id)) {
+            active_operation_lifetime.reset();
             in_flight = false;
             active_claim_id = 0;
             claim_phase = ClaimPhase::idle;
@@ -377,6 +392,8 @@ private:
     bool in_flight{false};
     bool pending{false};
     bool stopping{false};
+    std::shared_ptr<void> active_operation_lifetime;
+    std::shared_ptr<void> latest_operation_lifetime;
 };
 
 KeeneticDnsRefreshCoordinator::KeeneticDnsRefreshCoordinator(
@@ -397,11 +414,13 @@ KeeneticDnsRefreshCoordinator::~KeeneticDnsRefreshCoordinator() {
 
 KeeneticDnsRefreshCoordinator::RequestResult
 KeeneticDnsRefreshCoordinator::request(
-    std::uint64_t runtime_generation) noexcept {
+    std::uint64_t runtime_generation,
+    std::shared_ptr<void> operation_lifetime) noexcept {
     if (!state_) {
         return RequestResult::rejected;
     }
-    return state_->request(runtime_generation);
+    return state_->request(
+        runtime_generation, std::move(operation_lifetime));
 }
 
 void KeeneticDnsRefreshCoordinator::stop() noexcept {

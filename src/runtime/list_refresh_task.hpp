@@ -63,6 +63,7 @@ private:
 
 struct ListRefreshTaskBeginResult {
     bool accepted{false};
+    bool coalesced{false};
     ListRefreshTaskSnapshot task;
     ListRefreshCancellationToken cancellation;
 };
@@ -75,7 +76,18 @@ public:
     explicit ListRefreshTaskCoordinator(std::size_t terminal_history_limit = 8,
                                         Clock clock = {});
 
-    ListRefreshTaskBeginResult begin(std::size_t total);
+    // Retains the admitted operation lifetime until terminal publication (or
+    // queued cancellation). The daemon uses this to keep its exact runtime
+    // mutation lease across worker refresh, control-loop apply/rollback and
+    // final task publication without a second ownership mechanism. A
+    // `upgrade_active` can atomically attach a reload to an active read-only
+    // task. `force_new` carries the same durable reconcile obligation when a
+    // deferred retry starts only after that original task has terminalized.
+    ListRefreshTaskBeginResult begin(
+        std::size_t total,
+        std::shared_ptr<void> operation_lifetime = {},
+        bool upgrade_active = false,
+        bool force_new = false);
     bool mark_running(const std::string& id,
                       std::optional<std::string> current = std::nullopt);
     bool update_progress(const std::string& id,
@@ -98,6 +110,7 @@ public:
                           bool reloaded = false);
 
     std::optional<ListRefreshTaskSnapshot> active() const;
+    bool force_reconcile_requested(const std::string& id) const;
     std::optional<ListRefreshTaskSnapshot> find(const std::string& id) const;
     std::vector<ListRefreshTaskSnapshot> terminal_history() const;
     void set_publish_callback(PublishCallback callback);
@@ -106,6 +119,8 @@ private:
     struct ActiveTask {
         ListRefreshTaskSnapshot snapshot;
         std::shared_ptr<std::atomic<bool>> cancellation_flag;
+        std::shared_ptr<void> operation_lifetime;
+        bool force_reconcile{false};
     };
 
     bool mutate_active(
@@ -129,6 +144,21 @@ private:
 
 bool list_refresh_task_status_is_terminal(ListRefreshTaskStatus status);
 const char* list_refresh_task_status_name(ListRefreshTaskStatus status);
+
+inline bool should_reconcile_committed_list_cache(
+    bool reload_requested,
+    bool force_reconcile,
+    bool runtime_active,
+    bool cache_changed) noexcept {
+    return runtime_active &&
+           (force_reconcile || (reload_requested && cache_changed));
+}
+
+inline bool merge_list_refresh_force_reconcile(
+    bool retained,
+    bool incoming) noexcept {
+    return retained || incoming;
+}
 
 // Returns true when shutdown owns terminalization and the caller must not
 // mutate DNS/firewall/runtime state. A refresh may already have committed
