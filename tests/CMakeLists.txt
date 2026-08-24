@@ -2,6 +2,7 @@ add_executable(keen-pbr-tests
   test_main.cpp
   test_firewall_verifier.cpp
   test_firewall_runtime.cpp
+  test_meta_udp_443_activation_contract.cpp
   test_runtime_firewall_backend_transaction.cpp
   test_ppe_deoffload.cpp
   test_system_auth_capability.cpp
@@ -362,6 +363,7 @@ add_executable(keen-pbr-tests
   ../src/util/traced_mutex.cpp
   ../src/runtime/lifecycle_operation.cpp
   ../src/runtime/list_refresh_task.cpp
+  ../src/runtime/meta_udp_443_activation_contract.cpp
   ../src/runtime/runtime_state_machine.cpp
   ../src/routing/policy_rule.cpp
   ../src/routing/route_table.cpp

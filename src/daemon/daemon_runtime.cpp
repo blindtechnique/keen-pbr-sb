@@ -1650,103 +1650,34 @@ Daemon::prepare_meta_udp443_activation_or_throw(
     const std::vector<RuleState>& candidate_rules,
     const AppliedListContentState& candidate_list_content_state,
     bool forwarded_scope_allows_unmarked_cleanup) {
+    // Preserve the historical inactive fast path: it performed no large
+    // policy snapshot allocation and no backend observation. Active delayed
+    // work receives the owned copy below; the free contract deliberately
+    // validates selection again at its trust boundary.
     const auto owned_mask = fwmark_mask_value(
         config_.fwmark.value_or(FwmarkConfig{}));
-    const auto selection = resolve_meta_udp_443_policy_selection(
-        config_, candidate_rules, owned_mask);
-    if (!selection.active()) {
+    if (!resolve_meta_udp_443_policy_selection(
+             config_, candidate_rules, owned_mask).active()) {
         return std::nullopt;
     }
-    if (!fastnat_is_disabled_or_unavailable()) {
-        throw DaemonError(
-            "daemon.meta_udp443_policy=messages_first requires verified "
-            "FastNAT-off packet traversal");
-    }
 
-    std::set<std::uint32_t> cleanup_owned_marks{selection.fwmark};
-    if (committed_meta_udp443_fwmark_.has_value()) {
-        if (committed_meta_udp443_owned_mask_ != owned_mask) {
-            throw DaemonError(
-                "Meta UDP/443 messages-first cannot change the fwmark mask "
-                "while the policy is active; switch to balanced first");
-        }
-        if (*committed_meta_udp443_fwmark_ == 0U ||
-            (*committed_meta_udp443_fwmark_ & ~owned_mask) != 0U) {
-            throw DaemonError(
-                "Meta UDP/443 messages-first cannot prove the previously "
-                "committed route mark for exact activation cleanup");
-        }
-        cleanup_owned_marks.insert(*committed_meta_udp443_fwmark_);
+    MetaUdp443ActivationInput input;
+    input.config = config_;
+    input.candidate_rules = candidate_rules;
+    input.candidate_list_content_state = candidate_list_content_state;
+    input.forwarded_scope_allows_unmarked_cleanup =
+        forwarded_scope_allows_unmarked_cleanup;
+    input.committed_fwmark = committed_meta_udp443_fwmark_;
+    input.committed_owned_mask = committed_meta_udp443_owned_mask_;
+    try {
+        return keen_pbr3::prepare_meta_udp443_activation_or_throw(
+            input, conntrack_manager_, netlink_);
+    } catch (const MetaUdp443ActivationError& error) {
+        // Preserve the member function's existing exception contract for all
+        // current synchronous callers while the worker-safe free contract
+        // remains independent of DaemonError.
+        throw DaemonError(error.what());
     }
-    const bool ipv6_enabled = resolve_ipv6_support(config_).enabled;
-    const auto capability =
-        conntrack_manager_.probe_exact_cleanup_capability(ipv6_enabled);
-    if (capability == ConntrackCleanupResult::CommandUnavailable) {
-        throw DaemonError(
-            "daemon.meta_udp443_policy=messages_first requires the "
-            "conntrack utility for exact activation cleanup");
-    }
-    if (capability != ConntrackCleanupResult::Succeeded) {
-        throw DaemonError(
-            "daemon.meta_udp443_policy=messages_first could not verify "
-            "the exact conntrack cleanup capability");
-    }
-
-    const std::set<std::string> list_names(
-        selection.list_names.begin(), selection.list_names.end());
-    auto coverage = collect_conntrack_destination_retirement_coverage(
-        destination_retirement_plan_for_lists(list_names),
-        candidate_list_content_state);
-    std::sort(
-        coverage.destination_selectors.begin(),
-        coverage.destination_selectors.end());
-    coverage.destination_selectors.erase(
-        std::unique(
-            coverage.destination_selectors.begin(),
-            coverage.destination_selectors.end()),
-        coverage.destination_selectors.end());
-    if (coverage.partial() || coverage.destination_selectors.empty() ||
-        runtime_recovery_detail::contains_global_destination_selector(
-            coverage)) {
-        throw DaemonError(
-            "Meta UDP/443 messages-first policy requires complete "
-            "authoritative activation cleanup coverage before publication");
-    }
-
-    const auto local_addresses = local_interface_addresses_from(
-        netlink_.dump_interfaces());
-    const auto observation_options =
-        meta_udp443_observation_options(ipv6_enabled);
-    const auto observation =
-        conntrack_manager_.observe_forwarded_destination_flows(
-            coverage.destination_selectors,
-            local_addresses,
-            owned_mask,
-            observation_options,
-            {},
-            coverage.destination_selectors,
-            {});
-    const auto candidates = select_meta_udp_443_cleanup_candidates(
-        observation,
-        cleanup_owned_marks,
-        owned_mask,
-        selection.allow_unmarked_cleanup &&
-            forwarded_scope_allows_unmarked_cleanup);
-    if (!candidates.complete) {
-        throw DaemonError(
-            "Meta UDP/443 messages-first policy requires a complete exact "
-            "conntrack activation snapshot before publication");
-    }
-
-    return MetaUdp443ActivationPlan{
-        selection.fwmark,
-        owned_mask,
-        std::move(cleanup_owned_marks),
-        std::move(coverage.destination_selectors),
-        ipv6_enabled,
-        selection.allow_unmarked_cleanup &&
-            forwarded_scope_allows_unmarked_cleanup,
-        std::move(candidates.flows)};
 }
 
 void Daemon::report_meta_udp443_degraded(
@@ -2005,7 +1936,7 @@ void Daemon::dispatch_meta_udp443_activation_cleanup(
                             plan.destination_selectors,
                             post_publication_local_addresses,
                             plan.owned_mask,
-                            meta_udp443_observation_options(
+                            meta_udp443_activation_observation_options(
                                 plan.ipv6_enabled),
                             {},
                             plan.destination_selectors,
