@@ -194,4 +194,16 @@ execute_runtime_firewall_backend_transaction(
     return result;
 }
 
+RuntimeFirewallBackendTransactionResult
+execute_runtime_firewall_backend_transaction(
+    const RuntimeFirewallBackendTransactionInput& input,
+    Firewall& firewall,
+    ConntrackManager& conntrack_manager,
+    NetlinkManager& netlink) {
+    SystemMetaUdp443ActivationBackendServices meta_services{
+        conntrack_manager, netlink};
+    return execute_runtime_firewall_backend_transaction(
+        input, firewall, meta_services);
+}
+
 } // namespace keen_pbr3

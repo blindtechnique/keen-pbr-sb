@@ -40,52 +40,48 @@ std::vector<std::string> local_interface_addresses_from(
     return addresses;
 }
 
-class ProductionMetaUdp443ActivationBackendServices final
-    : public MetaUdp443ActivationBackendServices {
-public:
-    ProductionMetaUdp443ActivationBackendServices(
-        ConntrackManager& conntrack_manager,
-        NetlinkManager& netlink)
-        : conntrack_manager_(conntrack_manager), netlink_(netlink) {}
+} // namespace
 
-    bool fastnat_is_disabled_or_unavailable() override {
-        return system_fastnat_is_disabled_or_unavailable();
-    }
+SystemMetaUdp443ActivationBackendServices::
+SystemMetaUdp443ActivationBackendServices(
+    ConntrackManager& conntrack_manager,
+    NetlinkManager& netlink)
+    : conntrack_manager_(conntrack_manager), netlink_(netlink) {}
 
-    ConntrackCleanupResult probe_exact_cleanup_capability(
-        bool ipv6_enabled) override {
-        return conntrack_manager_.probe_exact_cleanup_capability(
-            ipv6_enabled);
-    }
+bool SystemMetaUdp443ActivationBackendServices::
+    fastnat_is_disabled_or_unavailable() {
+    return system_fastnat_is_disabled_or_unavailable();
+}
 
-    std::vector<DumpedInterface> dump_interfaces() override {
-        return netlink_.dump_interfaces();
-    }
+ConntrackCleanupResult SystemMetaUdp443ActivationBackendServices::
+    probe_exact_cleanup_capability(bool ipv6_enabled) {
+    return conntrack_manager_.probe_exact_cleanup_capability(
+        ipv6_enabled);
+}
 
-    ConntrackFlowObservation observe_forwarded_destination_flows(
+std::vector<DumpedInterface>
+SystemMetaUdp443ActivationBackendServices::dump_interfaces() {
+    return netlink_.dump_interfaces();
+}
+
+ConntrackFlowObservation SystemMetaUdp443ActivationBackendServices::
+    observe_forwarded_destination_flows(
         const std::vector<std::string>& destination_cidrs,
         const std::vector<std::string>& local_interface_addresses,
         std::uint32_t owned_mask,
         const ConntrackFlowObservationOptions& options,
         const std::vector<std::string>& media_guard_source_addresses,
         const std::vector<std::string>& media_seed_destination_cidrs,
-        const std::set<std::uint32_t>& media_seed_owned_marks) override {
-        return conntrack_manager_.observe_forwarded_destination_flows(
-            destination_cidrs,
-            local_interface_addresses,
-            owned_mask,
-            options,
-            media_guard_source_addresses,
-            media_seed_destination_cidrs,
-            media_seed_owned_marks);
-    }
-
-private:
-    ConntrackManager& conntrack_manager_;
-    NetlinkManager& netlink_;
-};
-
-} // namespace
+        const std::set<std::uint32_t>& media_seed_owned_marks) {
+    return conntrack_manager_.observe_forwarded_destination_flows(
+        destination_cidrs,
+        local_interface_addresses,
+        owned_mask,
+        options,
+        media_guard_source_addresses,
+        media_seed_destination_cidrs,
+        media_seed_owned_marks);
+}
 
 ConntrackFlowObservationOptions
 meta_udp443_activation_observation_options(bool ipv6_enabled) {
@@ -237,7 +233,7 @@ prepare_meta_udp443_activation_or_throw(
     const MetaUdp443ActivationInput& input,
     ConntrackManager& conntrack_manager,
     NetlinkManager& netlink) {
-    ProductionMetaUdp443ActivationBackendServices services{
+    SystemMetaUdp443ActivationBackendServices services{
         conntrack_manager, netlink};
     return prepare_meta_udp443_activation_or_throw(input, services);
 }

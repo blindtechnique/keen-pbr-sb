@@ -128,4 +128,13 @@ execute_runtime_firewall_backend_transaction(
     Firewall& firewall,
     MetaUdp443ActivationBackendServices& meta_services);
 
+// Production convenience overload. The explicit service references keep the
+// worker boundary visible while constructing the narrow Meta adapter locally.
+RuntimeFirewallBackendTransactionResult
+execute_runtime_firewall_backend_transaction(
+    const RuntimeFirewallBackendTransactionInput& input,
+    Firewall& firewall,
+    ConntrackManager& conntrack_manager,
+    NetlinkManager& netlink);
+
 } // namespace keen_pbr3
