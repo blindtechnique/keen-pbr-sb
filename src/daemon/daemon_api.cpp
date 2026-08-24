@@ -595,7 +595,8 @@ ConfigApplyResult Daemon::apply_validated_config_via_control_task(
     auto prepared = std::make_shared<PreparedRuntimeInputs>();
     auto rollback_prepared = std::make_shared<PreparedRuntimeInputs>();
 
-    const Config active_config = config_store_.active_config();
+    const auto active_snapshot = config_store_.pin_active_snapshot();
+    const Config& active_config = active_snapshot->config;
     const bool refresh_remote_lists_after_apply =
         remote_list_sources_changed(active_config, config);
 
@@ -667,10 +668,9 @@ ListRefreshOperationResult Daemon::refresh_lists_via_api(std::optional<std::stri
         throw ApiError("List refresh is unavailable while a draft config is staged", 409);
     }
 
-    const Config config_snapshot = config_store_.active_config();
-    const auto marks_snapshot = allocate_outbound_marks(
-        config_snapshot.fwmark.value_or(FwmarkConfig{}),
-        config_snapshot.outbounds.value_or(std::vector<Outbound>{}));
+    const auto active_snapshot = config_store_.pin_active_snapshot();
+    const Config& config_snapshot = active_snapshot->config;
+    const OutboundMarkMap& marks_snapshot = active_snapshot->outbound_marks;
     const bool runtime_active_snapshot = runtime_state_store_.snapshot().routing_runtime_active;
     const auto target_selection = select_remote_list_targets(config_snapshot, requested_name);
     if (!target_selection.ok()) {
@@ -718,7 +718,7 @@ ListRefreshOperationResult Daemon::refresh_lists_via_api(std::optional<std::stri
             [this,
              &reloaded,
              &stale_runtime,
-             config_snapshot,
+             active_snapshot,
              generation,
              runtime_active_snapshot,
              refresh_result]() mutable {
@@ -734,7 +734,7 @@ ListRefreshOperationResult Daemon::refresh_lists_via_api(std::optional<std::stri
                                                             refresh_result)) {
                     bool rolled_back = false;
                     apply_config_with_rollback(
-                        config_snapshot, rolled_back, false);
+                        active_snapshot->config, rolled_back, false);
                     reloaded = true;
                 }
             },
