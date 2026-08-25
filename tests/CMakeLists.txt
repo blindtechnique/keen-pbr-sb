@@ -4,6 +4,7 @@ add_executable(keen-pbr-tests
   test_firewall_runtime.cpp
   test_meta_udp_443_activation_contract.cpp
   test_runtime_firewall_backend_transaction.cpp
+  test_runtime_firewall_worker_operation.cpp
   test_ppe_deoffload.cpp
   test_system_auth_capability.cpp
   test_step_up.cpp
