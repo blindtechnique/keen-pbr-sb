@@ -1274,7 +1274,8 @@ TEST_CASE("lost writer or guard drift never reaches backend perform") {
         fixture.install_owned_target();
         fixture.backend.before_guard = [&](const auto, const bool deleting) {
             if (deleting) {
-                fixture.gateway.drift_kind_on_call = 3U;
+                fixture.gateway.kind =
+                    NdmsNativeTunnelImportKind::amnezia_wireguard;
             }
         };
 
