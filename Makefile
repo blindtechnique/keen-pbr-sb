@@ -133,6 +133,7 @@ sanitize: ## Build and run the unit suite under AddressSanitizer + UndefinedBeha
 NARROW_TEST_TARGETS := \
 	keen-pbr-cache-generation-tests \
 	keen-pbr-native-tunnel-import-tests \
+	keen-pbr-native-direct-observation-tests \
 	keen-pbr-runtime-mutation-admission-tests \
 	keen-pbr-rescue-tests \
 	keen-pbr-keenetic-dns-refresh-tests \
