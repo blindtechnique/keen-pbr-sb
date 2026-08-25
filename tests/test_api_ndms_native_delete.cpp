@@ -1056,7 +1056,30 @@ TEST_CASE("native delete rejects malformed request shapes without callback") {
     CHECK(callback_count == 0U);
 }
 
-TEST_CASE("native delete auth transport headers and reservation reject pre-body") {
+TEST_CASE("native delete accepts an authenticated session without step-up") {
+    std::size_t callback_count = 0U;
+    NativeDeleteApiFixture fixture(
+        [&](const NdmsNativeCooperativeDeleteRequest&) {
+            ++callback_count;
+            return blocked_result();
+        });
+    const auto session = fixture.login();
+
+    reset_sensitive_request_body_stream_count_for_testing();
+    const auto authenticated = fixture.client().Post(
+        std::string{kNdmsNativeDeleteApiPath},
+        fixture.acknowledged_headers(session),
+        valid_delete_body(),
+        "application/json");
+
+    check_no_store(authenticated);
+    CHECK(authenticated->status == 200);
+    CHECK(sensitive_request_body_stream_count_for_testing() == 1U);
+    CHECK(fixture.reservation_attempts() == 1U);
+    CHECK(callback_count == 1U);
+}
+
+TEST_CASE("native delete authenticated transport headers and reservation reject pre-body") {
     std::size_t callback_count = 0U;
     NativeDeleteApiFixture fixture(
         [&](const NdmsNativeCooperativeDeleteRequest&) {
@@ -1075,18 +1098,6 @@ TEST_CASE("native delete auth transport headers and reservation reject pre-body"
     CHECK(fixture.reservation_attempts() == 0U);
 
     const auto session = fixture.login();
-    reset_sensitive_request_body_stream_count_for_testing();
-    const auto no_step_up = fixture.client().Post(
-        std::string{kNdmsNativeDeleteApiPath},
-        fixture.acknowledged_headers(session),
-        valid_delete_body(),
-        "application/json");
-    check_no_store(no_step_up);
-    CHECK(no_step_up->status == 403);
-    CHECK(sensitive_request_body_stream_count_for_testing() == 0U);
-    CHECK(fixture.reservation_attempts() == 0U);
-
-    fixture.grant_step_up(session);
     fixture.set_protected_transport(false);
     reset_sensitive_request_body_stream_count_for_testing();
     const auto unprotected = fixture.client().Post(

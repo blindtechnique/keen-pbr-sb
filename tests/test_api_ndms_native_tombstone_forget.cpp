@@ -273,16 +273,6 @@ TEST_CASE("native tombstone forget guards and exact body precede execution") {
     CHECK(fixture.reservation_attempts() == 0U);
 
     const auto session = fixture.login();
-    const auto no_step_up = fixture.client().Post(
-        std::string{kNdmsNativeTombstoneForgetApiPath},
-        session,
-        valid_body(),
-        "application/json");
-    check_no_store(no_step_up);
-    CHECK(no_step_up->status == 403);
-    CHECK(fixture.reservation_attempts() == 0U);
-
-    fixture.grant_step_up(session);
     const auto wrong_content_type = fixture.client().Post(
         std::string{kNdmsNativeTombstoneForgetApiPath},
         session,

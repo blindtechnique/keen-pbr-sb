@@ -2903,6 +2903,7 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
             return httplib::Server::HandlerResponse::Unhandled;
         }
         res.status = 401;
+        res.set_header("Cache-Control", "no-store");
         res.set_content(R"({"error":"authentication required"})", "application/json");
         return httplib::Server::HandlerResponse::Handled;
     });
