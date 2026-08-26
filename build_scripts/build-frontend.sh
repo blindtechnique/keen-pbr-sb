@@ -6,7 +6,25 @@ WORKSPACE="${1:?Usage: $0 <workspace-dir> [output-dir]}"
 OUTPUT_DIR="${2:-$WORKSPACE/frontend/dist}"
 SOURCE_ID_SCRIPT="$WORKSPACE/build_scripts/frontend-source-id.sh"
 MARKER_NAME=".keen-pbr-source-id"
+VERSION_MARKER_NAME=".keen-pbr-version"
 BUN_BIN=
+
+PACKAGE_VERSION="$(
+    sed -n 's/^KEEN_PBR_VERSION=//p' "$WORKSPACE/version.mk" | head -n 1
+)"
+if [ -z "$PACKAGE_VERSION" ]; then
+    echo "ERROR: version.mk does not declare KEEN_PBR_VERSION." >&2
+    exit 1
+fi
+APP_VERSION="v$PACKAGE_VERSION"
+if [ -n "${KEEN_PBR_RELEASE_OVERRIDE:-}" ]; then
+    if ! printf '%s\n' "$KEEN_PBR_RELEASE_OVERRIDE" |
+        grep -Eq '^[0-9]{14}$'; then
+        echo "ERROR: KEEN_PBR_RELEASE_OVERRIDE must be a 14-digit build timestamp." >&2
+        exit 1
+    fi
+    APP_VERSION="$APP_VERSION-$KEEN_PBR_RELEASE_OVERRIDE"
+fi
 
 ensure_bun() {
     if command -v bun >/dev/null 2>&1; then
@@ -61,6 +79,7 @@ if [ "$SOURCE_ID_AFTER" != "$SOURCE_ID_BEFORE" ]; then
     exit 1
 fi
 printf '%s\n' "$SOURCE_ID_AFTER" > "$TMP_BUILD_DIR/$MARKER_NAME"
+printf '%s\n' "$APP_VERSION" > "$TMP_BUILD_DIR/$VERSION_MARKER_NAME"
 
 rm -rf "$OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR"

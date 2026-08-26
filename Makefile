@@ -52,7 +52,8 @@ build: ## Compile the project
 	cmake --build $(GCC_BUILD_DIR)
 
 frontend-build: ## Build frontend assets with bun
-	bash build_scripts/build-frontend.sh "$(abspath .)" "$(abspath frontend/dist)"
+	KEEN_PBR_RELEASE_OVERRIDE="$(KEEN_PBR_RELEASE)" \
+	  bash build_scripts/build-frontend.sh "$(abspath .)" "$(abspath frontend/dist)"
 
 frontend-api-generate: ## Regenerate frontend API client using the Orval version pinned in frontend/package.json
 	cd frontend && bunx --bun orval@$(ORVAL_VERSION) --config ./orval.config.ts

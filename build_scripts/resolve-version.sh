@@ -18,7 +18,9 @@ resolve_release() {
         return
     fi
 
-    printf '%s' "$KEEN_PBR_RELEASE"
+    # Exported source trees have no commit timestamp. Generate a real build
+    # identity instead of reviving the historical numeric release counter.
+    TZ=UTC date '+%Y%m%d%H%M%S'
 }
 
 validate_commit() {
@@ -62,7 +64,7 @@ resolve_commit() {
         if [ -n "$commit" ]; then
             # Failure to inspect the worktree must never be reported as a
             # verified clean commit. Conservatively mark it dirty instead.
-            if dirty="$(git -C "$WORKSPACE" status --porcelain --untracked-files=no 2>/dev/null)"; then
+            if dirty="$(git -C "$WORKSPACE" status --porcelain --untracked-files=normal 2>/dev/null)"; then
                 if [ -n "$dirty" ]; then
                     commit="$commit-dirty"
                 fi

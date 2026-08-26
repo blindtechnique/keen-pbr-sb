@@ -43,6 +43,8 @@ jobs:
       - name: Build frontend
         run: |
           git diff --check
+          KEEN_PBR_RELEASE_OVERRIDE="$(bash build_scripts/resolve-version.sh release "$PWD")"
+          export KEEN_PBR_RELEASE_OVERRIDE
           cd frontend
           bun install --frozen-lockfile
           make -C .. generate-check
@@ -271,7 +273,7 @@ jobs:
         env:
           KEENETIC_CONFIG: ${{ matrix.config }}
         run: |
-          KEEN_PBR_RELEASE_OVERRIDE="$(sed -n 's/^KEEN_PBR_RELEASE=//p' version.mk)"
+          KEEN_PBR_RELEASE_OVERRIDE="$(bash build_scripts/resolve-version.sh release "$PWD")"
           export KEEN_PBR_RELEASE_OVERRIDE
           echo "Building release $KEEN_PBR_RELEASE_OVERRIDE for $KEENETIC_CONFIG"
           make keenetic-packages \

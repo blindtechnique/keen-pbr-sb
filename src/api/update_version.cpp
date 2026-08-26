@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <limits>
 #include <optional>
 #include <vector>
@@ -11,15 +12,24 @@ namespace {
 
 struct ForkVersion {
     std::vector<unsigned int> upstream;
-    unsigned int release{0};
+    std::uint64_t release{0};
 };
 
 std::optional<ForkVersion> parse_fork_version(std::string value) {
     if (!value.empty() && value.front() == 'v') value.erase(value.begin());
-    const auto marker = value.find("-sb");
+    auto marker = value.find("-sb");
+    std::size_t release_begin = std::string::npos;
+    if (marker != std::string::npos) {
+        release_begin = marker + 3;
+        if (release_begin < value.size() && value[release_begin] == '.') {
+            ++release_begin;
+        }
+    } else {
+        marker = value.rfind('-');
+        if (marker != std::string::npos) release_begin = marker + 1;
+    }
     if (marker == std::string::npos) return std::nullopt;
-    auto release = value.substr(marker + 3);
-    if (!release.empty() && release.front() == '.') release.erase(release.begin());
+    const auto release = value.substr(release_begin);
     if (release.empty() ||
         !std::all_of(release.begin(), release.end(), [](unsigned char ch) { return std::isdigit(ch); }))
         return std::nullopt;
@@ -45,9 +55,8 @@ std::optional<ForkVersion> parse_fork_version(std::string value) {
         begin = end + 1;
     }
     try {
-        const auto number = std::stoul(release);
-        if (number > std::numeric_limits<unsigned int>::max()) return std::nullopt;
-        result.release = static_cast<unsigned int>(number);
+        const auto number = std::stoull(release);
+        result.release = static_cast<std::uint64_t>(number);
     } catch (const std::exception&) {
         return std::nullopt;
     }
@@ -55,6 +64,11 @@ std::optional<ForkVersion> parse_fork_version(std::string value) {
 }
 
 } // namespace
+
+std::string format_fork_version(const std::string& version,
+                                const std::string& release) {
+    return "v" + version + "-" + release;
+}
 
 bool is_newer_fork_version(const std::string& candidate, const std::string& current) {
     const auto lhs = parse_fork_version(candidate);

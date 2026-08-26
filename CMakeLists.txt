@@ -63,7 +63,7 @@ if(KEEN_PBR_COMMIT STREQUAL "")
       set(KEEN_PBR_COMMIT "")
     elseif(NOT KEEN_PBR_COMMIT STREQUAL "")
       execute_process(
-        COMMAND "${GIT_EXECUTABLE}" status --porcelain --untracked-files=no
+        COMMAND "${GIT_EXECUTABLE}" status --porcelain --untracked-files=normal
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         OUTPUT_VARIABLE KEEN_PBR_GIT_DIRTY
         OUTPUT_STRIP_TRAILING_WHITESPACE

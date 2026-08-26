@@ -4478,7 +4478,7 @@ components:
           properties:
             current:
               type: string
-              description: Version this daemon reports, as `v<version>-sb.<release>`.
+              description: Version this daemon reports, as `v<version>-<build timestamp>`.
             latest:
               type: string
               description: Latest release tag, or empty when none is known.

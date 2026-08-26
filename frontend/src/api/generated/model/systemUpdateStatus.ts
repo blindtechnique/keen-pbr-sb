@@ -12,7 +12,7 @@ import type { SystemUpdateLocalStatus } from './systemUpdateLocalStatus';
 
  */
 export type SystemUpdateStatus = SystemUpdateLocalStatus & {
-  /** Version this daemon reports, as `v<version>-sb.<release>`. */
+  /** Version this daemon reports, as `v<version>-<build timestamp>`. */
   current: string;
   /** Latest release tag, or empty when none is known. */
   latest: string;

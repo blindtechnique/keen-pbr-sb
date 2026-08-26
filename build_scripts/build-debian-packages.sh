@@ -29,7 +29,9 @@ prepare_tree() {
 }
 
 mkdir -p "$RELEASE_DIR"
-bash "$WORKSPACE/build_scripts/ensure-frontend-dist.sh" "$WORKSPACE" "$FRONTEND_DIST"
+KEEN_PBR_RELEASE_OVERRIDE="$KEEN_PBR_RELEASE" \
+    bash "$WORKSPACE/build_scripts/ensure-frontend-dist.sh" \
+        "$WORKSPACE" "$FRONTEND_DIST"
 
 BUILD_ROOT="$(mktemp -d /tmp/keen-pbr-debian.XXXXXX)"
 FULL_SRC="$BUILD_ROOT/full"

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import io
 import json
 import re
@@ -41,6 +42,8 @@ REQUIRED_FILES = REQUIRED_EXECUTABLES | {
     "opt/etc/keen-pbr/transports.json",
     "opt/usr/share/keen-pbr/catalog.json",
     "opt/usr/share/keen-pbr/frontend/index.html",
+    "opt/usr/share/keen-pbr/frontend/index.html.gz",
+    "opt/usr/share/keen-pbr/frontend/.keen-pbr-version",
     "opt/usr/share/keen-pbr/nfqws-blobs/SHA256SUMS",
     "opt/usr/share/keen-pbr/nfqws-blobs/ORIGIN_SHA256SUMS",
     "opt/usr/share/keen-pbr/nfqws-blobs/quic_initial_steamcommunity_com.bin",
@@ -351,6 +354,8 @@ def validate(path: Path, arch: str, expected_commit: str | None = None) -> None:
     if members.get("debian-binary") != b"2.0\n":
         raise ValidationError("missing or unsupported debian-binary member")
 
+    frontend_version = ""
+    keen_pbr_binary_content = b""
     with open_tar(find_archive(members, "data.tar")) as data_tar:
         entries = indexed_tar_members(data_tar, "data archive")
         missing = sorted(REQUIRED_FILES - entries.keys())
@@ -366,6 +371,8 @@ def validate(path: Path, arch: str, expected_commit: str | None = None) -> None:
                 raise ValidationError(f"cannot read {binary}")
             binary_content = stream.read()
             validate_elf(entries[binary], binary_content[:64], arch)
+            if binary == "opt/usr/bin/keen-pbr":
+                keen_pbr_binary_content = binary_content
             if (
                 expected_commit is not None
                 and binary == "opt/usr/bin/keen-pbr"
@@ -390,6 +397,74 @@ def validate(path: Path, arch: str, expected_commit: str | None = None) -> None:
         if catalog_stream is None:
             raise ValidationError("cannot read bundled catalog.json")
         validate_bundled_catalog(json.load(catalog_stream))
+
+        frontend_version_stream = data_tar.extractfile(
+            entries["opt/usr/share/keen-pbr/frontend/.keen-pbr-version"]
+        )
+        if frontend_version_stream is None:
+            raise ValidationError("cannot read frontend version identity")
+        frontend_version = frontend_version_stream.read().decode().strip()
+        if not frontend_version or "-sb." in frontend_version:
+            raise ValidationError("frontend version identity is missing or uses legacy sb.N")
+        if re.fullmatch(r"v.+-[0-9]{14}", frontend_version) is None:
+            raise ValidationError(
+                "frontend version identity must end with an exact 14-digit build timestamp"
+            )
+        index_stream = data_tar.extractfile(
+            entries["opt/usr/share/keen-pbr/frontend/index.html"]
+        )
+        if index_stream is None:
+            raise ValidationError("cannot read frontend index.html")
+        index_content = index_stream.read()
+        compressed_index_stream = data_tar.extractfile(
+            entries["opt/usr/share/keen-pbr/frontend/index.html.gz"]
+        )
+        if compressed_index_stream is None:
+            raise ValidationError("cannot read frontend index.html gzip twin")
+        try:
+            compressed_index_content = gzip.decompress(
+                compressed_index_stream.read()
+            )
+        except OSError as error:
+            raise ValidationError(
+                "frontend index.html gzip twin is invalid"
+            ) from error
+        if compressed_index_content != index_content:
+            raise ValidationError("frontend index.html gzip twin is stale")
+        active_match = re.search(
+            rb'<script\b[^>]*\bsrc=["\']/([^"\']+\.js)["\']',
+            index_content,
+        )
+        if active_match is None:
+            raise ValidationError("frontend index.html does not declare an active JavaScript entry")
+        active_relative = active_match.group(1).decode("utf-8")
+        active_path = "opt/usr/share/keen-pbr/frontend/" + active_relative
+        if not active_relative.startswith("assets/") or active_path not in entries:
+            raise ValidationError("frontend active JavaScript entry is missing or unsafe")
+        active_stream = data_tar.extractfile(entries[active_path])
+        if active_stream is None:
+            raise ValidationError("cannot read frontend active JavaScript entry")
+        active_content = active_stream.read()
+        if frontend_version.encode() not in active_content:
+            raise ValidationError(
+                "frontend active JavaScript does not contain its declared version identity"
+            )
+        if re.search(rb"v[0-9]+(?:\.[0-9]+)+-sb\.[0-9]+", active_content):
+            raise ValidationError("frontend active JavaScript contains a legacy sb.N identity")
+        compressed_path = active_path + ".gz"
+        if compressed_path not in entries:
+            raise ValidationError("frontend active JavaScript gzip twin is missing")
+        compressed_stream = data_tar.extractfile(entries[compressed_path])
+        if compressed_stream is None:
+            raise ValidationError("cannot read frontend active JavaScript gzip twin")
+        try:
+            compressed_content = gzip.decompress(compressed_stream.read())
+        except OSError as error:
+            raise ValidationError(
+                "frontend active JavaScript gzip twin is invalid"
+            ) from error
+        if compressed_content != active_content:
+            raise ValidationError("frontend active JavaScript gzip twin is stale")
 
     with open_tar(find_archive(members, "control.tar")) as control_tar:
         entries = indexed_tar_members(control_tar, "control archive")
@@ -416,6 +491,23 @@ def validate(path: Path, arch: str, expected_commit: str | None = None) -> None:
         ):
             raise ValidationError("cannot read package control files")
         control = control_stream.read().decode()
+        version_match = re.search(r"^Version:\s*(\S+)\s*$", control, re.MULTILINE)
+        if version_match is None:
+            raise ValidationError("package control does not declare Version")
+        expected_frontend_version = f"v{version_match.group(1)}"
+        if frontend_version != expected_frontend_version:
+            raise ValidationError(
+                "frontend version identity does not match package Version "
+                f"({frontend_version!r} != {expected_frontend_version!r})"
+            )
+        package_version, build_timestamp = version_match.group(1).rsplit("-", 1)
+        expected_binary_identity = (
+            f"{package_version} (build {build_timestamp}, commit "
+        ).encode("ascii")
+        if expected_binary_identity not in keen_pbr_binary_content:
+            raise ValidationError(
+                "keen-pbr binary build identity does not match package Version"
+            )
         if expected_commit is not None and (
             f"Built from source commit {expected_commit}." not in control
         ):

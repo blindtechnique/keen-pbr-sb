@@ -2,6 +2,7 @@
 
 #include "api/update_version.hpp"
 
+using keen_pbr3::format_fork_version;
 using keen_pbr3::is_newer_fork_version;
 using keen_pbr3::safe_github_tag;
 
@@ -18,9 +19,23 @@ TEST_CASE("fork release comparison supports historical and future tags") {
     CHECK_FALSE(is_newer_fork_version("not-a-version", "v3.0.7-sb.4"));
 }
 
+TEST_CASE("fork release comparison supports timestamp identities") {
+    CHECK(format_fork_version("3.3.0", "20260827010101") ==
+          "v3.3.0-20260827010101");
+    CHECK(is_newer_fork_version("v3.3.0-20260827020202",
+                                "v3.3.0-20260827010101"));
+    CHECK_FALSE(is_newer_fork_version("v3.3.0-20260827010101",
+                                      "v3.3.0-20260827020202"));
+    CHECK(is_newer_fork_version("v3.3.0-20260827010101",
+                                "v3.3.0-sb.12"));
+    CHECK(is_newer_fork_version("v3.3.1-sb.1",
+                                "v3.3.0-20260827010101"));
+}
+
 TEST_CASE("only path-safe GitHub tags are accepted for changelog links") {
     CHECK(safe_github_tag("v3.0.7-sb.4"));
     CHECK(safe_github_tag("3.0.7-sb1"));
+    CHECK(safe_github_tag("v3.3.0-20260827010101"));
     CHECK_FALSE(safe_github_tag("v3.0.7/../../main"));
     CHECK_FALSE(safe_github_tag(""));
 }

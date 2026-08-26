@@ -6,15 +6,35 @@ WORKSPACE="${1:?Usage: $0 <workspace-dir> [dist-dir]}"
 DIST_DIR="${2:-$WORKSPACE/frontend/dist}"
 MODE="${KEEN_PBR_FRONTEND_DIST_MODE:-source}"
 MARKER="$DIST_DIR/.keen-pbr-source-id"
+VERSION_MARKER="$DIST_DIR/.keen-pbr-version"
+PACKAGE_VERSION="$(
+    sed -n 's/^KEEN_PBR_VERSION=//p' "$WORKSPACE/version.mk" | head -n 1
+)"
+[ -n "$PACKAGE_VERSION" ] || {
+    echo "ERROR: version.mk does not declare KEEN_PBR_VERSION." >&2
+    exit 1
+}
+EXPECTED_APP_VERSION="v$PACKAGE_VERSION"
+if [ -n "${KEEN_PBR_RELEASE_OVERRIDE:-}" ]; then
+    if ! printf '%s\n' "$KEEN_PBR_RELEASE_OVERRIDE" |
+        grep -Eq '^[0-9]{14}$'; then
+        echo "ERROR: KEEN_PBR_RELEASE_OVERRIDE must be a 14-digit build timestamp." >&2
+        exit 1
+    fi
+    EXPECTED_APP_VERSION="$EXPECTED_APP_VERSION-$KEEN_PBR_RELEASE_OVERRIDE"
+fi
 
 case "$MODE" in
     source)
         EXPECTED_ID="$(
             sh "$WORKSPACE/build_scripts/frontend-source-id.sh" "$WORKSPACE"
         )"
-        if [ -s "$DIST_DIR/index.html" ] && [ -f "$MARKER" ]; then
+        if [ -s "$DIST_DIR/index.html" ] && [ -f "$MARKER" ] &&
+           [ -f "$VERSION_MARKER" ]; then
             ACTUAL_ID="$(cat "$MARKER")"
-            if [ "$ACTUAL_ID" = "$EXPECTED_ID" ]; then
+            ACTUAL_APP_VERSION="$(cat "$VERSION_MARKER")"
+            if [ "$ACTUAL_ID" = "$EXPECTED_ID" ] &&
+               [ "$ACTUAL_APP_VERSION" = "$EXPECTED_APP_VERSION" ]; then
                 exit 0
             fi
         fi
@@ -23,6 +43,11 @@ case "$MODE" in
     prebuilt)
         if [ ! -s "$DIST_DIR/index.html" ]; then
             echo "ERROR: trusted prebuilt frontend is missing index.html: $DIST_DIR" >&2
+            exit 1
+        fi
+        if [ ! -f "$VERSION_MARKER" ] ||
+           [ "$(cat "$VERSION_MARKER")" != "$EXPECTED_APP_VERSION" ]; then
+            echo "ERROR: trusted prebuilt frontend identity does not match $EXPECTED_APP_VERSION." >&2
             exit 1
         fi
         exit 0
@@ -36,7 +61,9 @@ esac
 sh "$WORKSPACE/build_scripts/build-frontend.sh" "$WORKSPACE" "$DIST_DIR"
 
 ACTUAL_ID="$(cat "$MARKER" 2>/dev/null || true)"
-if [ ! -s "$DIST_DIR/index.html" ] || [ "$ACTUAL_ID" != "$EXPECTED_ID" ]; then
+ACTUAL_APP_VERSION="$(cat "$VERSION_MARKER" 2>/dev/null || true)"
+if [ ! -s "$DIST_DIR/index.html" ] || [ "$ACTUAL_ID" != "$EXPECTED_ID" ] ||
+   [ "$ACTUAL_APP_VERSION" != "$EXPECTED_APP_VERSION" ]; then
     echo "ERROR: frontend build did not produce a verified bundle: $DIST_DIR" >&2
     exit 1
 fi

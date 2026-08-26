@@ -16,25 +16,32 @@ const textAssetPattern =
  * purpose would be to print a number that is fixed at build time anyway.
  */
 function packageVersion() {
+  let raw = ""
   try {
-    const raw = fs.readFileSync(path.resolve(__dirname, "../version.mk"), "utf8")
-    const version = raw.match(/KEEN_PBR_VERSION\s*=\s*(.+)/)?.[1].trim()
-    if (!version) return ""
-    // The build stamp the package build assigns, which is what the daemon
-    // reports and what the installed package is named. Showing the same string
-    // in the header means an operator comparing "what is running" with "what I
-    // installed" is comparing the same thing - the release counter they saw
-    // before was a number that changed for reasons they never see.
-    const stamp = process.env.KEEN_PBR_RELEASE_OVERRIDE?.trim()
-    if (stamp) return `v${version}-sb.${stamp}`
-    // Built outside the package build. The counter is all there is, and saying
-    // so with the same shape keeps the two readable side by side.
-    const release = raw.match(/KEEN_PBR_RELEASE\s*=\s*(.+)/)?.[1].trim()
-    if (release) return `v${version}-sb.${release}`
+    raw = fs.readFileSync(path.resolve(__dirname, "../version.mk"), "utf8")
   } catch {
     // Building the frontend on its own is allowed; the header just says nothing.
+    return ""
   }
-  return ""
+
+  const version = raw.match(/KEEN_PBR_VERSION\s*=\s*(.+)/)?.[1].trim()
+  if (!version) return ""
+
+  // The package build assigns the same 14-digit timestamp to the daemon, IPK
+  // and frontend. Rejecting any other override prevents a legacy counter such
+  // as `12` from silently returning as a plausible build identity.
+  const stamp = process.env.KEEN_PBR_RELEASE_OVERRIDE?.trim()
+  if (stamp && !/^\d{14}$/.test(stamp)) {
+    throw new Error(
+      "KEEN_PBR_RELEASE_OVERRIDE must be a 14-digit build timestamp"
+    )
+  }
+  if (stamp) return `v${version}-${stamp}`
+
+  // A standalone preview has no package identity to claim. Show only the
+  // semantic version; the historical release counter (for example sb.12) is
+  // not a build timestamp and must never reappear in the header.
+  return `v${version}`
 }
 
 // https://vite.dev/config/

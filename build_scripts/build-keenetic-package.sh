@@ -27,7 +27,9 @@ case "$KEEN_PBR_JOBS" in
         ;;
 esac
 
-sh "$WORKSPACE/build_scripts/ensure-frontend-dist.sh" "$WORKSPACE" "$FRONTEND_DIST"
+KEEN_PBR_RELEASE_OVERRIDE="$KEEN_PBR_RELEASE" \
+    sh "$WORKSPACE/build_scripts/ensure-frontend-dist.sh" \
+        "$WORKSPACE" "$FRONTEND_DIST"
 
 cd "$ENTWARE_DIR"
 # Reusable builder images may already contain our local feed from a previous

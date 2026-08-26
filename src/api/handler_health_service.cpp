@@ -310,9 +310,8 @@ std::string release_string(const nlohmann::json& release,
 
 nlohmann::json software_update_status(bool force_remote_check) {
     auto response = local_update_status();
-    const std::string current = std::string("v") +
-                                KEEN_PBR3_VERSION_STRING + "-sb." +
-                                KEEN_PBR3_VERSION_RELEASE_STRING;
+    const std::string current = format_fork_version(
+        KEEN_PBR3_VERSION_STRING, KEEN_PBR3_VERSION_RELEASE_STRING);
     const auto now = unix_time_now();
     const auto cache = read_release_cache();
     nlohmann::json release = nlohmann::json::object();

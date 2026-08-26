@@ -60,6 +60,7 @@ def pipeline_environment(fake_bin: Path, trace: Path, commit: str) -> dict[str, 
     environment["PATH"] = f"{fake_bin}{os.pathsep}{environment.get('PATH', '')}"
     environment["IDENTITY_TRACE"] = str(trace)
     environment["KEEN_PBR_COMMIT_OVERRIDE"] = commit
+    environment["KEEN_PBR_RELEASE_OVERRIDE"] = "20260827010101"
     # These identity-only fixtures intentionally supply a detached synthetic
     # bundle. Production source builds use the fingerprinted default mode.
     environment["KEEN_PBR_FRONTEND_DIST_MODE"] = "prebuilt"
@@ -110,6 +111,13 @@ class BuildIdentityTest(unittest.TestCase):
             self.assertEqual(clean.returncode, 0, clean.stderr)
             self.assertEqual(clean.stdout, expected)
 
+            untracked_path = workspace / "untracked.cpp"
+            untracked_path.write_text("uncommitted source\n", encoding="utf-8")
+            untracked = self.resolve(workspace)
+            self.assertEqual(untracked.returncode, 0, untracked.stderr)
+            self.assertEqual(untracked.stdout, f"{expected}-dirty")
+            untracked_path.unlink()
+
             (workspace / "tracked.txt").write_text("dirty\n", encoding="utf-8")
             dirty = self.resolve(workspace)
             self.assertEqual(dirty.returncode, 0, dirty.stderr)
@@ -126,6 +134,13 @@ class BuildIdentityTest(unittest.TestCase):
             self.assertEqual(unknown.returncode, 0, unknown.stderr)
             self.assertEqual(unknown.stdout, "unknown")
 
+            exported_release = run(
+                ["bash", str(RESOLVER), "release", str(exported)]
+            )
+            self.assertEqual(exported_release.returncode, 0, exported_release.stderr)
+            self.assertRegex(exported_release.stdout, r"^[0-9]{14}\n?$")
+            self.assertNotEqual(exported_release.stdout.strip(), "12")
+
     def test_git_status_failure_is_never_reported_as_clean(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "workspace"
@@ -139,7 +154,7 @@ class BuildIdentityTest(unittest.TestCase):
                 "case \" $* \" in\n"
                 "  *\" rev-parse --is-inside-work-tree \"*) echo true ;;\n"
                 "  *\" rev-parse --short=12 HEAD \"*) echo 0123456789ab ;;\n"
-                "  *\" status --porcelain --untracked-files=no \"*) exit 2 ;;\n"
+                "  *\" status --porcelain --untracked-files=normal \"*) exit 2 ;;\n"
                 "  *) exit 2 ;;\n"
                 "esac\n",
                 encoding="utf-8",
@@ -275,6 +290,9 @@ class BuildIdentityTest(unittest.TestCase):
             keenetic_dist = keenetic_workspace / "frontend/dist"
             keenetic_dist.mkdir(parents=True)
             (keenetic_dist / "index.html").write_text("ok", encoding="utf-8")
+            (keenetic_dist / ".keen-pbr-version").write_text(
+                "v3.1.1-20260827010101\n", encoding="utf-8"
+            )
             transport = root / "transport-manager"
             transport.write_bytes(b"fixture")
             entware = root / "entware"
@@ -320,6 +338,9 @@ class BuildIdentityTest(unittest.TestCase):
             openwrt_dist = openwrt_workspace / "frontend/dist"
             openwrt_dist.mkdir(parents=True)
             (openwrt_dist / "index.html").write_text("ok", encoding="utf-8")
+            (openwrt_dist / ".keen-pbr-version").write_text(
+                "v3.1.1-20260827010101\n", encoding="utf-8"
+            )
             sdk = root / "openwrt-sdk"
             (sdk / "scripts").mkdir(parents=True)
             (sdk / "staging_dir").mkdir()
@@ -368,6 +389,9 @@ class BuildIdentityTest(unittest.TestCase):
             debian_dist = debian_workspace / "frontend/dist"
             debian_dist.mkdir(parents=True)
             (debian_dist / "index.html").write_text("ok", encoding="utf-8")
+            (debian_dist / ".keen-pbr-version").write_text(
+                "v3.1.1-20260827010101\n", encoding="utf-8"
+            )
             write_executable(
                 debian_workspace / "build_scripts/collect-debian.sh",
                 "#!/bin/sh\nexit 0\n",
@@ -446,6 +470,15 @@ class BuildIdentityTest(unittest.TestCase):
         main = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
         self.assertEqual(main.count("KEEN_PBR3_VERSION_IDENTITY_STRING"), 3)
 
+        for relative_path in (
+            "build_scripts/resolve-version.sh",
+            "CMakeLists.txt",
+        ):
+            content = (ROOT / relative_path).read_text(encoding="utf-8")
+            with self.subTest(path=relative_path, identity_scope="untracked"):
+                self.assertIn("--untracked-files=normal", content)
+                self.assertNotRegex(content, r"--untracked-files=no(?:\s|$)")
+
 
 class FrontendDistFreshnessTest(unittest.TestCase):
     def test_nonempty_stale_bundle_is_rebuilt_and_fresh_bundle_is_reused(self) -> None:
@@ -506,6 +539,10 @@ class FrontendDistFreshnessTest(unittest.TestCase):
                 "current-v1\n",
             )
             self.assertTrue((dist / ".keen-pbr-source-id").is_file())
+            self.assertEqual(
+                (dist / ".keen-pbr-version").read_text(encoding="utf-8"),
+                "v3.1.1\n",
+            )
             self.assertEqual(len(trace.read_text(encoding="utf-8").splitlines()), 2)
 
             reused = run(
@@ -514,6 +551,21 @@ class FrontendDistFreshnessTest(unittest.TestCase):
             )
             self.assertEqual(reused.returncode, 0, reused.stderr)
             self.assertEqual(len(trace.read_text(encoding="utf-8").splitlines()), 2)
+
+            versioned_environment = environment.copy()
+            versioned_environment["KEEN_PBR_RELEASE_OVERRIDE"] = "20260827010101"
+            rebuilt_for_release = run(
+                ["sh", str(ensure), str(workspace), str(dist)],
+                env=versioned_environment,
+            )
+            self.assertEqual(
+                rebuilt_for_release.returncode, 0, rebuilt_for_release.stderr
+            )
+            self.assertEqual(
+                (dist / ".keen-pbr-version").read_text(encoding="utf-8"),
+                "v3.1.1-20260827010101\n",
+            )
+            self.assertEqual(len(trace.read_text(encoding="utf-8").splitlines()), 4)
 
             source.write_text("current-v2\n", encoding="utf-8")
             rebuilt_again = run(
@@ -525,7 +577,7 @@ class FrontendDistFreshnessTest(unittest.TestCase):
                 (dist / "index.html").read_text(encoding="utf-8"),
                 "current-v2\n",
             )
-            self.assertEqual(len(trace.read_text(encoding="utf-8").splitlines()), 4)
+            self.assertEqual(len(trace.read_text(encoding="utf-8").splitlines()), 6)
 
     def test_prebuilt_mode_is_explicit_and_frontend_builder_never_bootstraps_tools(self) -> None:
         ensure = (ROOT / "build_scripts/ensure-frontend-dist.sh").read_text(

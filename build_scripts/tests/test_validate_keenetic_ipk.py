@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import gzip
 import io
 import json
 import tarfile
@@ -155,6 +156,12 @@ def make_ipk(
     catalog: bytes | None = None,
     binary_commit: str | None = None,
     control_commit: str | None = None,
+    package_version: str = "1-20260827010101",
+    frontend_version: str | None = None,
+    binary_version: str | None = None,
+    active_frontend_version: str | None = None,
+    compressed_frontend_version: str | None = None,
+    compressed_index_content: bytes | None = None,
 ) -> None:
     executable = 0o755
     config = json.dumps(
@@ -168,14 +175,30 @@ def make_ipk(
         name: (b"#!/bin/sh\n", executable)
         for name in VALIDATOR.REQUIRED_EXECUTABLES
     }
+    if binary_version is None:
+        binary_version = package_version
+    binary_package_version, binary_build = binary_version.rsplit("-", 1)
     files["opt/usr/bin/keen-pbr"] = (
-        elf() + (binary_commit.encode("ascii") if binary_commit else b""),
+        elf()
+        + f"{binary_package_version} (build {binary_build}, commit ".encode()
+        + (binary_commit.encode("ascii") if binary_commit else b""),
         executable,
     )
     files["opt/usr/bin/transport-manager"] = (
         transport_binary if transport_binary is not None else elf(),
         executable,
     )
+    if frontend_version is None:
+        frontend_version = f"v{package_version}"
+    if active_frontend_version is None:
+        active_frontend_version = frontend_version
+    if compressed_frontend_version is None:
+        compressed_frontend_version = active_frontend_version
+    index_content = b'<script type="module" src="/assets/index.js"></script>'
+    if compressed_index_content is None:
+        compressed_index_content = index_content
+    active_content = f'const version="{active_frontend_version}";'.encode()
+    compressed_content = f'const version="{compressed_frontend_version}";'.encode()
     files.update(
         {
             "opt/etc/keen-pbr/config.json": (b"{}", 0o600),
@@ -184,7 +207,30 @@ def make_ipk(
                 bundled_catalog() if catalog is None else catalog,
                 0o644,
             ),
-            "opt/usr/share/keen-pbr/frontend/index.html": (b"<!doctype html>", 0o644),
+            "opt/usr/share/keen-pbr/frontend/index.html": (
+                index_content,
+                0o644,
+            ),
+            "opt/usr/share/keen-pbr/frontend/index.html.gz": (
+                gzip.compress(compressed_index_content, mtime=0),
+                0o644,
+            ),
+            "opt/usr/share/keen-pbr/frontend/.keen-pbr-version": (
+                f"{frontend_version}\n".encode(),
+                0o644,
+            ),
+            "opt/usr/share/keen-pbr/frontend/assets/index.js": (
+                active_content,
+                0o644,
+            ),
+            "opt/usr/share/keen-pbr/frontend/assets/index.js.gz": (
+                gzip.compress(compressed_content, mtime=0),
+                0o644,
+            ),
+            "opt/usr/share/keen-pbr/frontend/assets/lazy.js": (
+                f'const version="{frontend_version}";'.encode(),
+                0o644,
+            ),
             "opt/usr/share/keen-pbr/nfqws-blobs/SHA256SUMS": (b"", 0o644),
             "opt/usr/share/keen-pbr/nfqws-blobs/ORIGIN_SHA256SUMS": (
                 b"",
@@ -255,7 +301,7 @@ def make_ipk(
             "control": (
                 (
                     "Package: keen-pbr\n"
-                    "Version: 1\n"
+                    f"Version: {package_version}\n"
                     f"Depends: {control_depends}\n"
                     + (
                         "Description: Policy-based routing daemon\n"
@@ -310,6 +356,100 @@ class ValidateKeeneticIpkTest(unittest.TestCase):
                 control_commit=commit,
             )
             VALIDATOR.validate(package, "aarch64", commit)
+
+    def test_rejects_legacy_frontend_version(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "keen-pbr.ipk"
+            make_ipk(
+                package,
+                package_version="3.3.0-sb.12",
+                frontend_version="v3.3.0-sb.12",
+            )
+            with self.assertRaisesRegex(
+                VALIDATOR.ValidationError, "legacy sb.N"
+            ):
+                VALIDATOR.validate(package, "aarch64")
+
+    def test_rejects_frontend_version_that_does_not_match_package(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "keen-pbr.ipk"
+            make_ipk(
+                package,
+                package_version="3.3.0-20260827010101",
+                frontend_version="v3.3.0-20260827020202",
+            )
+            with self.assertRaisesRegex(
+                VALIDATOR.ValidationError, "does not match package Version"
+            ):
+                VALIDATOR.validate(package, "aarch64")
+
+    def test_rejects_consistent_non_timestamp_version(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "keen-pbr.ipk"
+            make_ipk(
+                package,
+                package_version="3.3.0-12",
+                frontend_version="v3.3.0-12",
+            )
+            with self.assertRaisesRegex(
+                VALIDATOR.ValidationError, "14-digit build timestamp"
+            ):
+                VALIDATOR.validate(package, "aarch64")
+
+    def test_rejects_binary_build_identity_that_does_not_match_package(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "keen-pbr.ipk"
+            make_ipk(
+                package,
+                package_version="3.3.0-20260827020202",
+                binary_version="3.3.0-20260827010101",
+            )
+            with self.assertRaisesRegex(
+                VALIDATOR.ValidationError,
+                "binary build identity does not match package Version",
+            ):
+                VALIDATOR.validate(package, "aarch64")
+
+    def test_rejects_version_present_only_in_an_inactive_chunk(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "keen-pbr.ipk"
+            make_ipk(
+                package,
+                active_frontend_version="v3.3.0-sb.12",
+            )
+            with self.assertRaisesRegex(
+                VALIDATOR.ValidationError,
+                "active JavaScript does not contain its declared version",
+            ):
+                VALIDATOR.validate(package, "aarch64")
+
+    def test_rejects_stale_active_javascript_gzip_twin(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "keen-pbr.ipk"
+            make_ipk(
+                package,
+                compressed_frontend_version="v3.3.0-sb.12",
+            )
+            with self.assertRaisesRegex(
+                VALIDATOR.ValidationError,
+                "gzip twin is stale",
+            ):
+                VALIDATOR.validate(package, "aarch64")
+
+    def test_rejects_stale_index_html_gzip_twin(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "keen-pbr.ipk"
+            make_ipk(
+                package,
+                compressed_index_content=(
+                    b'<script type="module" src="/assets/stale.js"></script>'
+                ),
+            )
+            with self.assertRaisesRegex(
+                VALIDATOR.ValidationError,
+                "index.html gzip twin is stale",
+            ):
+                VALIDATOR.validate(package, "aarch64")
 
     def test_rejects_missing_binary_build_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

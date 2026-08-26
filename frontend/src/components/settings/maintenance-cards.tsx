@@ -164,7 +164,7 @@ export function SoftwareUpdateCard() {
             return { ...previous, check_error: detail || message }
           }
           return {
-            current: __APP_VERSION__ ? `v${__APP_VERSION__}` : "",
+            current: __APP_VERSION__,
             latest: "",
             available: false,
             current_ahead: false,
@@ -534,7 +534,7 @@ function UpdateVersionSummary({
           {t("pages.settings.softwareUpdate.current")}:{" "}
         </span>
         <code>
-          {status?.current || (__APP_VERSION__ ? `v${__APP_VERSION__}` : "—")}
+          {status?.current || __APP_VERSION__ || "—"}
         </code>
       </div>
       <div>
