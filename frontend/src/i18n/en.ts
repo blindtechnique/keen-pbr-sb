@@ -155,6 +155,7 @@ export const enTranslation = {
     strategyEditorDescription:
       "Each line is a set of nfqws arguments for one kind of traffic. Save writes the strategy to disk; Apply also restarts the service with it.",
     strategyBreakdownTitle: "Strategy: {{name}}",
+    strategyBreakdownTitleInactive: "Strategy: {{name}} - not applied",
     strategyBreakdownDescription:
       "Read-only explanation of the saved text. Open Text to make changes.",
     editorView: {

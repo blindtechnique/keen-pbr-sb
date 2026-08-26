@@ -294,6 +294,41 @@ bool builtin_strategy(const std::string& name) {
     return fs::is_regular_file(fs::path(kBuiltinStrategies) / name / "nfqws2.conf", ec);
 }
 
+
+// Deleting a strategy means one of two different things, and the panel says
+// so: for a built-in that the operator has overridden it is "restore the
+// built-in", and for anything else it is "delete".
+//
+// The tombstone in `.deleted` exists for exactly one job - hiding a built-in
+// that nothing else can hide, since a packaged strategy cannot be removed
+// from disk. Writing it while restoring a built-in hid the strategy that was
+// being restored: the override went away, the built-in should have surfaced,
+// and its own tombstone buried it. That is how "restore the balanced
+// built-in" made the balanced strategy disappear from the panel.
+//
+// So the tombstone is written only when a built-in survives this call and no
+// override was taken away by it.
+NfqwsStrategyDeleteOutcome delete_nfqws_strategy(
+    const std::string& name,
+    const fs::path& builtin_root,
+    const fs::path& user_root) {
+    NfqwsStrategyDeleteOutcome outcome;
+    std::error_code error;
+    outcome.override_removed =
+        fs::remove(user_root / (name + ".conf"), error);
+    const bool builtin_exists =
+        fs::is_regular_file(builtin_root / name / "nfqws2.conf", error);
+    if (!builtin_exists || outcome.override_removed) {
+        outcome.durable = true;
+        return outcome;
+    }
+    const auto saved =
+        save_nfqws_file(user_root / ".deleted" / name, "deleted\n");
+    outcome.tombstone_written = true;
+    outcome.durable = saved.durable;
+    return outcome;
+}
+
 bool generated_default_strategy(const std::string& name) {
     return name.rfind("default (", 0) == 0;
 }
@@ -4485,12 +4520,9 @@ void register_nfqws_handler_impl(
             const auto name = request.value("name", std::string{});
             if (!valid_name(name, true)) throw ApiError("invalid strategy name", 400);
             const std::lock_guard lock(nfqws_operation_mutex());
-            std::error_code ec2;
-            fs::remove(fs::path(kUserStrategies) / (name + ".conf"), ec2);
-            const auto saved = save_nfqws_file(
-                fs::path(kUserStrategies) / ".deleted" / name,
-                "deleted\n");
-            return successful_write_response(saved.durable).dump();
+            const auto outcome = delete_nfqws_strategy(
+                name, kBuiltinStrategies, kUserStrategies);
+            return successful_write_response(outcome.durable).dump();
         }
         if (action == "import_lists") {
             if (!request.contains("files") || !request["files"].is_object()) throw ApiError("nfqws list bundle is invalid", 400);
@@ -4593,6 +4625,13 @@ void register_nfqws_handler(ApiServer& server, ApiContext& ctx) {
 NfqwsBootRecoveryResult run_nfqws_boot_recovery_for_testing(
     const NfqwsBootRecoveryHooks& hooks) {
     return run_nfqws_boot_recovery_with(hooks);
+}
+
+NfqwsStrategyDeleteOutcome delete_nfqws_strategy_for_testing(
+    const std::string& name,
+    const std::string& builtin_root,
+    const std::string& user_root) {
+    return delete_nfqws_strategy(name, builtin_root, user_root);
 }
 
 NfqwsRetentionBackfillResult run_nfqws_retention_backfill_for_testing(

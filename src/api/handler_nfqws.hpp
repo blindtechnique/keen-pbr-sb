@@ -134,6 +134,17 @@ struct NfqwsRetentionBackfillResult {
 NfqwsRetentionBackfillResult run_nfqws_retention_backfill(
     ApiContext& ctx) noexcept;
 
+
+// What deleting a strategy did. `tombstone_written` is the part that has to
+// stay honest: the tombstone hides a built-in, so writing it while restoring
+// one is what made a built-in strategy vanish from the panel instead of
+// coming back.
+struct NfqwsStrategyDeleteOutcome {
+    bool override_removed{false};
+    bool tombstone_written{false};
+    bool durable{false};
+};
+
 // The boot recovery as orchestration over its inputs and effects, so the
 // decision-to-action mapping, the lease handling and the recorded outcome can
 // be driven without a router. Production wires every hook to the real helper.
@@ -209,6 +220,14 @@ struct NfqwsRetentionBackfillHooks {
 };
 
 #ifdef KEEN_PBR3_TESTING
+// Runs the production delete against directories the test owns, so the rule
+// that decides whether a tombstone is written is exercised rather than
+// restated.
+NfqwsStrategyDeleteOutcome delete_nfqws_strategy_for_testing(
+    const std::string& name,
+    const std::string& builtin_root,
+    const std::string& user_root);
+
 NfqwsRetentionBackfillResult run_nfqws_retention_backfill_for_testing(
     const NfqwsRetentionBackfillHooks& hooks);
 #endif

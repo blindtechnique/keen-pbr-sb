@@ -2081,9 +2081,12 @@ function StrategiesEditor({
               size="compact"
               title={
                 editorView === "breakdown"
-                  ? t("nfqws.strategyBreakdownTitle", {
-                      name: displayStrategyName(effectiveSelected),
-                    })
+                  ? t(
+                      effectiveSelected === status.active_strategy
+                        ? "nfqws.strategyBreakdownTitle"
+                        : "nfqws.strategyBreakdownTitleInactive",
+                      { name: displayStrategyName(effectiveSelected) }
+                    )
                   : t("nfqws.strategyEditorTitle", {
                       name: displayStrategyName(effectiveSelected),
                     })

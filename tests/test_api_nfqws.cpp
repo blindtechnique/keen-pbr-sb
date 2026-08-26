@@ -2018,6 +2018,139 @@ TEST_CASE("every retention outcome has a distinct stable name") {
     }
     CHECK(names.size() == outcomes.size());
 }
+
+namespace {
+
+// A built-in strategy directory and an overrides directory, laid out the way
+// the package and the panel lay them out.
+struct StrategyWorld {
+    std::filesystem::path root;
+
+    StrategyWorld() {
+        std::string pattern = "/tmp/keen-pbr-strategies-XXXXXX";
+        REQUIRE(::mkdtemp(&pattern[0]) != nullptr);
+        root = pattern;
+        std::filesystem::create_directories(builtin_root());
+        std::filesystem::create_directories(user_root());
+    }
+    ~StrategyWorld() {
+        std::error_code error;
+        std::filesystem::remove_all(root, error);
+    }
+
+    std::filesystem::path builtin_root() const { return root / "packaged"; }
+    std::filesystem::path user_root() const { return root / "user"; }
+
+    void lay_builtin(const std::string& name, const std::string& body) const {
+        std::filesystem::create_directories(builtin_root() / name);
+        std::ofstream file(builtin_root() / name / "nfqws2.conf",
+                           std::ios::trunc);
+        file << body;
+    }
+    void lay_override(const std::string& name, const std::string& body) const {
+        std::ofstream file(user_root() / (name + ".conf"), std::ios::trunc);
+        file << body;
+    }
+    bool builtin_present(const std::string& name) const {
+        std::error_code error;
+        return std::filesystem::is_regular_file(
+            builtin_root() / name / "nfqws2.conf", error);
+    }
+    bool override_present(const std::string& name) const {
+        std::error_code error;
+        return std::filesystem::is_regular_file(user_root() / (name + ".conf"),
+                                                error);
+    }
+    bool tombstoned(const std::string& name) const {
+        std::error_code error;
+        return std::filesystem::is_regular_file(user_root() / ".deleted" / name,
+                                                error);
+    }
+
+    NfqwsStrategyDeleteOutcome remove(const std::string& name) const {
+        return delete_nfqws_strategy_for_testing(
+            name, builtin_root().string(), user_root().string());
+    }
+};
+
+} // namespace
+
+TEST_CASE("restoring a built-in strategy does not bury it") {
+    // The panel calls the action "restore the built-in" when an override
+    // exists, and the owner pressed it on the balanced strategy: the
+    // override went away, the built-in should have surfaced - and the
+    // tombstone written by the same call hid it, so the strategy vanished
+    // from the list entirely.
+    StrategyWorld world;
+    world.lay_builtin("02 balanced", "NFQWS_ARGS=\"--packaged\"\n");
+    world.lay_override("02 balanced", "NFQWS_ARGS=\"--tuned retrans=3\"\n");
+
+    const auto outcome = world.remove("02 balanced");
+
+    CHECK(outcome.override_removed);
+    CHECK_FALSE(outcome.tombstone_written);
+    CHECK_FALSE(world.tombstoned("02 balanced"));
+    CHECK_FALSE(world.override_present("02 balanced"));
+    // The point of the whole action: the packaged strategy is available
+    // again, and nothing hides it.
+    CHECK(world.builtin_present("02 balanced"));
+}
+
+TEST_CASE("deleting a built-in without an override hides it") {
+    // The tombstone's one job: a packaged strategy cannot be removed from
+    // disk, so hiding it is the only way to honour a delete.
+    StrategyWorld world;
+    world.lay_builtin("03 max", "NFQWS_ARGS=\"--packaged\"\n");
+
+    const auto outcome = world.remove("03 max");
+
+    CHECK_FALSE(outcome.override_removed);
+    CHECK(outcome.tombstone_written);
+    CHECK(world.tombstoned("03 max"));
+}
+
+TEST_CASE("a built-in can still be hidden, in two presses") {
+    // Restore first, then delete: the labels the panel shows in each state
+    // are exactly these two steps, and both have to work in sequence.
+    StrategyWorld world;
+    world.lay_builtin("02 balanced", "NFQWS_ARGS=\"--packaged\"\n");
+    world.lay_override("02 balanced", "NFQWS_ARGS=\"--tuned\"\n");
+
+    const auto restored = world.remove("02 balanced");
+    CHECK(restored.override_removed);
+    CHECK_FALSE(world.tombstoned("02 balanced"));
+
+    const auto hidden = world.remove("02 balanced");
+    CHECK_FALSE(hidden.override_removed);
+    CHECK(hidden.tombstone_written);
+    CHECK(world.tombstoned("02 balanced"));
+}
+
+TEST_CASE("deleting a strategy of the operator's own leaves no tombstone") {
+    // Nothing to hide: the file is gone, and a tombstone would only wait to
+    // hide a future strategy that happens to reuse the name.
+    StrategyWorld world;
+    world.lay_override("my tuning", "NFQWS_ARGS=\"--mine\"\n");
+
+    const auto outcome = world.remove("my tuning");
+
+    CHECK(outcome.override_removed);
+    CHECK_FALSE(outcome.tombstone_written);
+    CHECK_FALSE(world.tombstoned("my tuning"));
+    CHECK_FALSE(world.override_present("my tuning"));
+}
+
+TEST_CASE("deleting what is already gone writes nothing") {
+    StrategyWorld world;
+
+    const auto outcome = world.remove("never existed");
+
+    CHECK_FALSE(outcome.override_removed);
+    CHECK_FALSE(outcome.tombstone_written);
+    CHECK_FALSE(world.tombstoned("never existed"));
+    CHECK(outcome.durable);
+}
+
 } // namespace keen_pbr3
 
 #endif // WITH_API
