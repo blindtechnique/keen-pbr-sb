@@ -1300,7 +1300,7 @@ int run_firewall_integration(int argc, char* argv[]) {
 
     const RoutingHealthReport report = build_routing_health_report(
         firewall->backend(),
-        firewall->uses_raw_prerouting(),
+        firewall->raw_prerouting_mode(),
         firewall_state,
         route_table.get_routes(),
         policy_rules.get_rules(),
