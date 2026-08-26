@@ -122,6 +122,7 @@ import {
 } from "@/lib/nfqws-upgrade-capability"
 import {
   canonicalNfqwsProfileTier,
+  nfqwsBreakdownSubject,
   nfqwsProfileMatchesPackage,
   NFQWS_PROFILE_ORDER,
   nfqwsBuiltinStrategyDisplayKey,
@@ -1620,9 +1621,7 @@ function StrategiesEditor({
 }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const preferredStrategy =
-    status.active_strategy || status.strategies[0]?.name || ""
-  const [selected, setSelected] = useState(preferredStrategy)
+  const [selected, setSelected] = useState(status.active_strategy)
   const [draftContent, setDraftContent] = useState<Record<string, string>>({})
   const dirty = Object.entries(draftContent).some(([name, content]) => {
     const persisted = status.strategies.find((item) => item.name === name)
@@ -1637,11 +1636,12 @@ function StrategiesEditor({
     },
     [onDirtyChange]
   )
-  const effectiveSelected =
-    status.strategies.some((item) => item.name === selected) ||
-    Object.hasOwn(draftContent, selected)
-      ? selected
-      : preferredStrategy
+  const effectiveSelected = nfqwsBreakdownSubject({
+    activeStrategy: status.active_strategy,
+    draftNames: Object.keys(draftContent),
+    selected,
+    strategyNames: status.strategies.map((item) => item.name),
+  })
   const strategy = status.strategies.find(
     (item) => item.name === effectiveSelected
   )

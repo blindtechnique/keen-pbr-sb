@@ -703,3 +703,26 @@ export function nfqwsProtocolLabel(protocol: string): string {
   }
   return labels[protocol.toLowerCase()] ?? protocol
 }
+
+// Предмет разбора — то, что применено, или то, что оператор открыл сам.
+// Пустое имя здесь законный ответ: разбирать нечего, и раздела нет.
+//
+// Раньше на этом месте стояло `|| strategies[0]?.name`. При пустом
+// active_strategy панель назначала предметом первую строку списка, а порядок
+// задаёт бэкенд (natural_less по имени) — то есть порядок каталога
+// превращался в утверждение о системе: оператор видел «Разбор: 01 safe» у
+// стратегии, которую не выбирал и которая не применена, и на неё же были
+// нацелены кнопки «Сохранить» и «Применить». Пустой active_strategy — это
+// утверждение бэкенда о том, что работающий nfqws2.conf не совпал ни с одной
+// стратегией, а не приглашение выбрать вместо него.
+export function nfqwsBreakdownSubject(params: {
+  activeStrategy: string
+  draftNames: readonly string[]
+  selected: string
+  strategyNames: readonly string[]
+}): string {
+  const { activeStrategy, draftNames, selected, strategyNames } = params
+  const stillExists =
+    strategyNames.includes(selected) || draftNames.includes(selected)
+  return stillExists ? selected : activeStrategy
+}
