@@ -1027,7 +1027,9 @@ export function TransportsPage({
             transport,
           })
           if (response.status !== 200) {
-            throw new Error("native import tracker creation failed")
+            throw new Error(
+              t("transports.nativeImport.panelLinkCreationFailed")
+            )
           }
         }
         persistRecoveredImportCountry(

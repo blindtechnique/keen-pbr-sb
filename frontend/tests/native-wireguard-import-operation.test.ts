@@ -5,6 +5,8 @@ import {
   nativeWireGuardImportOperationSurvivesContextChange,
   nativeWireGuardImportShouldContinueInBackground,
 } from "@/lib/native-wireguard-import-operation"
+import { enTranslation } from "../src/i18n/en"
+import { ruTranslation } from "../src/i18n/ru"
 
 test("in-flight and ambiguous native imports cannot be reset by new intake", () => {
   for (const status of [
@@ -111,6 +113,25 @@ test("background handoff paints progress and bypasses the discard-draft close", 
   )
   expect(pageSource).toContain("() => ({ close, complete })")
   expect(contextSource).toContain("useContext(UpsertCloseContext).complete")
+})
+
+test("failed panel linking after import is localized and warns against a duplicate import", async () => {
+  const transportsSource = await Bun.file(
+    new URL("../src/pages/transports-page.tsx", import.meta.url)
+  ).text()
+
+  expect(transportsSource).toContain(
+    't("transports.nativeImport.panelLinkCreationFailed")'
+  )
+  expect(transportsSource).not.toContain(
+    'throw new Error("native import tracker creation failed")'
+  )
+  expect(
+    ruTranslation.transports.nativeImport.panelLinkCreationFailed
+  ).toContain("Не импортируйте его повторно")
+  expect(
+    enTranslation.transports.nativeImport.panelLinkCreationFailed
+  ).toContain("Do not import it again")
 })
 
 test("native import owns focus and blocks competing create UI until completion", async () => {

@@ -1203,6 +1203,8 @@ export const ruTranslation = {
       title: "Импорт WireGuard / AmneziaWG",
       importingToast: "VPN импортируется",
       importedToast: "VPN добавлен, маршрут подключён",
+      panelLinkCreationFailed:
+        "VPN создан в KeeneticOS, но панели не удалось сохранить его привязку. Не импортируйте его повторно: обновите список и подключите обнаруженный интерфейс.",
       displayNameRequired:
         "Сначала укажите название туннеля выше. Оно будет использовано в KeeneticOS и для автоматически созданного маршрута.",
       description:

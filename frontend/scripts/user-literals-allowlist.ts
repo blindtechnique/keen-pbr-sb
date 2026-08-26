@@ -48,6 +48,17 @@ export const allowedLiterals: readonly string[] = [
   "useTheme must be used within a ThemeProvider",
   "useSidebar must be used within a SidebarProvider.",
   "useLanguage must be used within a LanguageProvider",
+  // Внутренние диагностические причины подготовки и компенсации native-delete.
+  // NativeInterfaceDeleteDialog перехватывает их на обеих границах и показывает
+  // только локализованные deleteFailed/finishing; `error.message` в UI не уходит.
+  "native delete configuration is unavailable",
+  "native delete route configuration is unavailable",
+  "native delete route restore staging failed",
+  "native delete route restore apply failed",
+  "native delete tracker restore failed",
+  "native delete route staging failed",
+  "native delete route apply failed",
+  "native delete tracker removal failed",
   // Команды оболочки, которые пользователь копирует как есть. Перевод сломал бы
   // их: это не текст, а ввод для терминала.
   'sh -c "$(curl -fsSL https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/main/install.sh)"',

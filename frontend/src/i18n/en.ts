@@ -1199,6 +1199,8 @@ export const enTranslation = {
       title: "Import WireGuard / AmneziaWG",
       importingToast: "Importing VPN",
       importedToast: "VPN added and route connected",
+      panelLinkCreationFailed:
+        "The VPN was created in KeeneticOS, but the panel could not save its link. Do not import it again; refresh the list and connect the detected interface.",
       displayNameRequired:
         "Enter the tunnel name above first. It will be used in KeeneticOS and for the automatically created route.",
       description:
