@@ -14,6 +14,7 @@ import {
   formatPpePorts,
   getPpeDeoffloadPresentation,
 } from "@/components/overview/ppe-deoffload-status-model"
+import { localizeRoutingHealthDetail } from "@/components/overview/routing-health-detail-model"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
 
@@ -117,7 +118,7 @@ export function RoutingHealthCard({
                     t
                   )}
                   {renderInlineDetail(
-                    getDiagnosticDetail(rule.status, rule.detail)
+                    localizeRoutingHealthDetail(rule.detail, t)
                   )}
                 </>
               }
@@ -199,7 +200,7 @@ export function RoutingHealthCard({
                     noLabel={t("overview.routing.no")}
                   />
                   {renderInlineDetail(
-                    getDiagnosticDetail(policy.status, policy.detail)
+                    localizeRoutingHealthDetail(policy.detail, t)
                   )}
                 </>
               }
@@ -250,7 +251,10 @@ function PpeDeoffloadStatus({ health }: { health: PpeDeoffloadHealth }) {
   const quicApplied = formatPpePorts(health.quic.applied_ports) ?? noPorts
   const lastReconcile = formatPpeTimestamp(health.last_reconcile_ts)
   const observedAt = formatPpeTimestamp(health.observed_at)
-  const diagnosticDetail = health.detail ?? health.reason
+  const diagnosticDetail = localizeRoutingHealthDetail(
+    health.detail ?? health.reason,
+    t
+  )
 
   return (
     <section className="space-y-2">
@@ -570,15 +574,7 @@ function getRouteMismatchDetail(
     return issues.join(", ")
   }
 
-  return getDiagnosticDetail(table.status, table.detail)
-}
-
-function getDiagnosticDetail(status: string, detail?: string | null) {
-  if (!detail || detail === "ok") {
-    return status === "ok" ? null : null
-  }
-
-  return detail
+  return localizeRoutingHealthDetail(table.detail, t)
 }
 
 function mapCheckTone(status: string): StatusTone {

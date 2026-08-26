@@ -1937,6 +1937,9 @@ export const ruTranslation = {
         routes: "Маршруты",
         policies: "Политики",
       },
+      details: {
+        disabledByConfiguration: "Отключено в настройках",
+      },
       ppe: {
         title: "Видимость трафика при аппаратном ускорении",
         states: {

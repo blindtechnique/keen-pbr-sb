@@ -1925,6 +1925,9 @@ export const enTranslation = {
         routes: "Routes",
         policies: "Policies",
       },
+      details: {
+        disabledByConfiguration: "Disabled by configuration",
+      },
       ppe: {
         title: "Hardware acceleration visibility",
         states: {
