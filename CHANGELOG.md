@@ -2,7 +2,7 @@
 
 Здесь перечислены изменения именно форка `keen-pbr-sb`. История оригинального keen-pbr остаётся в upstream-репозитории [maksimkurb/keen-pbr](https://github.com/maksimkurb/keen-pbr).
 
-Формат основан на Keep a Changelog. Часть версии до `-sb` соответствует базовой версии keen-pbr, число после `sb` — выпуску форка.
+Формат основан на Keep a Changelog. Установленные сборки обозначаются как `3.3.0-ГГГГММДДччммсс`: первая часть — базовая версия keen-pbr, последние 14 цифр — время сборки форка в UTC.
 
 ## [3.3.0] — в разработке
 
@@ -70,20 +70,270 @@
   одним неизменяемым generation-fenced снимком интерфейсов и сервисов; только
   типизированная операция может принять его, а отмена, stale generation и
   отказ scheduler/queue имеют однозначного владельца результата.
-- Для будущего off-loop apply добавлен долговечный worker-envelope без второй
+- Для off-loop apply добавлен долговечный worker-envelope без второй
   state machine. Неподделываемый running claim, один mutation lease и
   caller-owned terminal mailbox переживают копирование или отмену задачи,
   отказ очереди, исключение worker и уничтожение операции до постановки в
   очередь. Результат либо точное требование переснять входы публикуется один
   раз до best-effort уведомления control loop.
-- Этот B1-контур пока является подготовленным локальным контрактом, а не
-  завершённым выносом: production `Daemon` ещё не вызывает новую
-  backend-транзакцию из worker, поэтому блокирующий apply/recovery остаётся в
-  control loop. Совмещённая локальная production-сборка и `make test` выполнены
-  25 августа: основной бинарник прошёл 3168/3168 test cases и 34 457/34 457
-  assertions, все обязательные narrow-бинарники также завершились без ошибок.
-  Отдельные B1-фильтры подтвердили worker-envelope 12/12, native-VPN catalog
-  latch 16/16 и backend transaction 11/11. IPK из этого среза не собирался.
+- Локальный B1-контур добавляет долговечного control-владельца
+  terminal outcome. Владелец сам выполняет и без второго fallible-шва сохраняет
+  переходы `worker_running -> control_pending -> complete`, удерживает result,
+  mutation lease и одноразовый noexcept-checkpoint публикации, а exact
+  coordinator completion имеет приоритет над пришедшим раньше lease-free
+  `lost_claim`. Тесты контракта покрывают обе очередности этой гонки, повтор
+  после исключения и явный drain уже работающего terminal при shutdown.
+- Отдельный worker-attempt выполняет одной попыткой SNAT-observation,
+  stage/Meta-preflight/commit и post-COMMIT проверки Meta/FastNAT, сохраняя
+  неоднозначный commit без автоматического повтора. Точный authority-снимок
+  owned conntrack marks теперь захватывается до COMMIT и переносится в result:
+  finalizer не должен строить ему замену после изменения firewall generation.
+  Production-сигнатура native VPN уже передаёт интерфейсное и сервисное
+  наблюдения одним immutable generation-fenced объектом; exact TCP cleanup
+  остаётся dormant, пока retry-coordinator владеет firewall backend.
+- Первый production-срез B1 локально подключает отложенные firewall
+  `schedule/defer` к типизированному exact catalog/claim/terminal API и отдельной
+  ограниченной очереди `1x1`. Один Daemon-owned active context удерживает
+  immutable worker input, точную SNAT-recovery authority, mutation lease и
+  одноразовый terminal owner; scheduler/queue rejection, отмена, stale claim и
+  worker outcome завершаются через тот же durable drain. Best-effort wake
+  подкреплён watchdog, а shutdown закрывает admission, отменяет timer/queued
+  work, прокачивает terminal до и во время quiesce, затем останавливает worker и
+  выполняет финальный drain. Control publication использует безаллокаторные
+  swap-checkpoints и освобождает lease только после coordinator completion.
+  Неоднозначный entered COMMIT не получает автоматического replay даже при уже
+  накопленном trailing intent: продолжение возможно только через новый полный
+  backend resnapshot. Exact native-direct source cleanup выполняется worker-side
+  лишь после доказанного commit и не повторяется в control tail.
+- Асинхронный transport/ownership-контур этого B1-среза вынесен из `Daemon` в
+  отдельный `RuntimeFirewallOperationOwner` без обратного указателя на `Daemon`.
+  Он единолично удерживает active context, typed schedule/defer, очередь `1x1`,
+  terminal wake/drain, повторяющийся watchdog, shutdown fence и долговечный
+  pending successor. Точный SNAT recovery и самый новый совместимый prepared
+  catalog сохраняются до доказанного приёма successor новым context/coordinator;
+  более новое catalog-less поколение не наследует устаревший catalog. Отказ
+  control-post, регистрации watchdog, выделения нового context либо timer arm
+  не теряет terminal outcome и не оставляет mutation lease без владельца.
+- Это извлечение ownership, а не завершение firewall P1 и не полное разделение
+  `Daemon`: построение worker input, static-route reconciliation, публикация
+  rules/LKG/resolver/Meta/conntrack и политика ambiguous COMMIT пока остаются в
+  daemon-specific domain state и control-tail callback. Актуальный production
+  target слинкован полностью (253/253); отдельная owner/terminal/worker цель
+  прошла 26/26 сценариев и 509/509 assertions, итоговое независимое review не
+  нашло P0/P1-блокеров.
+- Следующий локальный срез **B1-immediate** убирает старый синхронный первичный
+  runtime refresh: attempt 0 без фиктивного таймера сразу передаётся тому же
+  `RuntimeFirewallOperationOwner` и `RuntimeFirewallRetryCoordinator`.
+  Move-only completion intent завершает periodic URLTEST, owned-SNAT repair и
+  FULL netfilter probe только после точного terminal outcome; queue/scheduler
+  rejection, stale claim и shutdown не оставляют operation без владельца.
+  Backend failure attempt 0 переходит к attempt 1 через одну секунду, а
+  исчерпавшийся SNAT pre-worker retry уходит в тихое обслуживание через 60
+  секунд без same-attempt loop. Старый compatibility-путь удалён, число прямых
+  production-вызовов `apply_firewall()` уменьшено с 12 до 11. Узкий suite
+  прошёл 43/43 сценария и 666/666 assertions; blockers-only review дал
+  P0/P1 = 0.
+- Для следующего route-среза построение желаемого поколения выделено в чистые
+  `PlannedRoutingState`/`plan_routing_state()`: planner принимает immutable
+  reachability snapshot, не выполняет Netlink I/O и не изменяет входные данные.
+  Совместимый `populate_routing_state()` сохраняет прежние callback caching и
+  порядок route/rule mutation, cleanup и adoption. Routing suite прошёл 66/66
+  сценариев и 261/261 assertions, включая parity, deterministic replay,
+  nested URLTEST и IPv6-off; независимое review дало GO без P0/P1.
+- Вторая половина R0 переносит блокирующее IPv6-наблюдение, снимки main routes
+  и интерфейсов и построение желаемого route/rule generation первичной runtime
+  attempt в тот же owned worker. Immutable `RuntimeRouteHealthPlan` несёт
+  serial, runtime generation и route epoch; одноразовый typed checkpoint
+  допускает firewall backend только после подтверждённой публикации того же
+  поколения. Stale, route-unavailable, mutation failure и shutdown не запускают firewall.
+  Watchdog повторно поднимает отпущенный control claim, shutdown будит worker,
+  а main-table `RTM_NEWROUTE`/`RTM_DELROUTE` инвалидируют план и сохраняют один
+  coalesced refresh даже после уже выданного ack. Ожидание checkpoint не держит
+  affinity/backend lock. Kernel route/rule mutation пока остаётся короткой
+  control-loop фазой до R1. Focused gates: route preparation 3/3 (32
+  assertions), route health 5/5 (65), InterfaceMonitor 4/4 (31), отдельный
+  owner suite 45/45 (675); blockers-only review дал GO без P0/P1.
+- Первый prerequisite-срез R1 выделяет постоянного
+  `RuntimeRoutingOperationOwner`, который единолично хранит mutable-ledger
+  `RouteTable` и `PolicyRuleManager`. Запрос связан точным tuple operation,
+  runtime generation, intent, inventory revision и route epoch; stale/replay
+  отклоняются до Netlink. Читатели получают только неизменяемую копию с
+  монотонной ревизией, а частичная ошибка сохраняет lifetime-owned typed
+  journal и рабочий снимок для следующего exact resnapshot. Результат намеренно
+  называется `compatibility_converged`, а не commit. Production/test targets собраны; узкий набор прошёл
+  6/6 сценариев и 65/65 assertions, независимый blockers-only review дал GO,
+  P0/P1 = 0.
+- Второй prerequisite-срез R1b добавляет одну совмещённую route/rule
+  транзакцию с заранее опубликованным lifetime-owned журналом, точными
+  per-object receipts, immutable fence и commit-before-cleanup. Нормальная
+  очистка policy rules использует только явный owner-ledger; kernel-shape
+  heuristic разрешён лишь отдельному recovery-проходу. Foreign/unrepresentable
+  route/rule, wildcard rule identity, неоднозначный kernel slot, неканонический
+  default-route запрос и racer во время rollback/cleanup дают отказ или
+  `cleanup_pending`, но не широкое удаление. Production backend намеренно
+  fail-closed: до появления единого exclusive-writer lease, полного raw
+  inventory и честных conditional replace/delete capability-preflight
+  останавливает операцию до первого Netlink-вызова, поэтому R1b ещё не включён
+  в `Daemon` и не объявлен production commit-authority. Оба target слинкованы;
+  focused suite прошёл 40/40 сценариев и 340/340 assertions, полный gate —
+  3266/3266 и 35 748/35 748; независимый blockers-only review дал GO без P0/P1.
+- Следующий wiring-срез подключает `RuntimeRoutingOperationOwner` к `Daemon`:
+  отдельные mutable `route_table_` и `policy_rules_` удалены, initial setup,
+  reconcile, lifecycle/rollback cleanup, interface wake и runtime-снимки идут
+  через одного владельца. Вложенные manager-деструкторы для него разоружены,
+  поэтому teardown выполняется один раз под тем же owner; обычные standalone и
+  dry-run manager сохраняют прежний cleanup. Завершённый inventory публикуется
+  атомарным immutable `shared_ptr`, поэтому status/SSE не ждут worker-held
+  routing mutex. Interface wake при занятом owner сохраняется в
+  дедуплицирующем pending-наборе и также не блокирует control loop.
+- В основном runtime refresh совместимый route/rule reconcile теперь
+  выполняется в worker до firewall backend. Fence поколения и route epoch
+  повторяется уже после захвата combined owner. Успешный immutable snapshot
+  строится из фактических manager-ledger после reconcile, поэтому неудавшееся
+  удаление obsolete route/rule больше не скрывается желаемым планом. До первого
+  Netlink write заранее выделяется консервативная публикация с явным
+  `inventory_complete=false`: даже если точную post-operation копию нельзя
+  выделить, уже применённое kernel-поколение не превращается в ложный mutation
+  failure, а снимок не выдаётся за полный. Неизвестный эффект удаления rule
+  теперь оставляет logical/owned ledger и защищает route-anchor той же таблицы;
+  shutdown/rollback соблюдают тот же порядок. Отдельный
+  `compatibility_cleanup_pending` не называется convergence. Признаки точности
+  ledger и известности kernel-эффектов проходят в runtime-state: health отвечает
+  unknown вместо ложного mismatch, а worker выдаёт `stale` и не допускает
+  firewall до свежего авторитетного reconcile. Покрыты статические тестовые
+  сценарии отказа до/после delete-effect, allocation-fallback, pre-mutation
+  dump/fence failure и разных route/rule backend-объектов. Дополнительное
+  fail-closed усиление сохраняет route-anchor при tracked-unowned, foreign и
+  restart-orphan policy rule, отличает нормальное desired rule той же таблицы
+  от чужой зависимости и не принимает ошибку orphan dump за пустой inventory.
+  Неоднозначный rollback одной dual-stack family и неудавшееся восстановление
+  replaced route заранее получают консервативную запись owner-ledger. Повторный
+  startup использует live-aware repair. Exact identity публикует consumed
+  high-water marks даже при ошибке до первой записи, но journal и fallback
+  выделяются до consume, поэтому ранняя allocation failure оставляет identity
+  повторяемым.
+- Единый `RuntimeRoutingInventoryAuthority` теперь используется worker и всеми
+  синхронными firewall apply. Incomplete/unknown routing и известный
+  live-missing desired route не допускают backend COMMIT; health/API сразу
+  получают false-маркеры при сохранённом firewall LKG. Interface-probe больше
+  не открывает параллельный routing writer, а ставит coalesced central refresh.
+  Route-preparation после выполненной route mutation переносится allocation-free
+  через placement-new move-конструкцию, поэтому старый ABI GCC 8.4 не зависит
+  от небезопасного предположения о `noexcept std::string::swap`, а ошибка строки
+  не превращается в ложный ambiguous firewall COMMIT.
+  После освобождения owner control loop только повторно сверяет
+  exact context, публикует metadata и выдаёт ack;
+  netlink mutation там больше нет. Это всё ещё compatibility
+  offload, а не включение exact R1b: изменение epoch/внешний writer во время
+  legacy netlink-фазы остаётся причиной немедленного coalesced retry, пока raw
+  inventory/owned-preimage backend не завершён. Прежний production gate на
+  Entware/Keenetic GCC 8.4 прошёл 281/281 build-шагов. Замороженный production-
+  снимок прошёл host gate: preflight 18/18, monolithic 3295/3295 и 36 063
+  assertions, 12 narrow-целей 756/756 и 14 374 assertions, crash smoke и
+  production link/version; суммарно 4051 doctest-сценарий и 50 437 assertions
+  без ошибок. Текущий post-snapshot batch 26 августа отдельно прошёл общий
+  compile-only target-gate реальным GCC 8.4 с `BUILD_TESTS=ON`: завершён граф
+  из 739 compile/link шагов и слинкованы ARM64 `keen-pbr`, monolithic
+  `keen-pbr-tests`, `keen-pbr-runtime-firewall-owner-tests` и
+  `keen-pbr-runtime-firewall-lifecycle-completion-tests`. Все четыре ELF имеют
+  interpreter `/opt/lib/ld-linux-aarch64.so.1`; без QEMU они не исполнялись.
+  IPK и роутер не менялись.
+- Эти новые локальные срезы ещё **не закрывают firewall P0-1/P1/B1**: первичный
+  backend apply, блокирующие route/link observation/planning и совместимый
+  kernel route/rule reconcile первичной runtime attempt уже вынесены из
+  control loop, но exact raw backend, daemon-specific publication tail,
+  прямые cleanup/backend writers и синхронные apply-группы остаются. Все sync apply теперь
+  fail-closed проверяют authoritative routing, но сами ещё выполняются в
+  control loop. После проверенного safety-снимка отдельный startup-срез передал
+  его legacy recursive firewall retry тому же
+  `RuntimeFirewallOperationOwner` и уменьшил прямые вызовы с 11 до 10.
+  Следующий локальный P0-1 restart-срез подключил эти prerequisites к
+  production API: request guard передаёт точный уже выданный mutation lease
+  без release/reacquire, HTTP worker ждёт exact-once
+  `RuntimeFirewallLifecycleTerminal`, а control loop только принимает операцию
+  в owner и не блокируется ожиданием worker. Один retained lease и тот же
+  lifecycle source проходят queue/pre-worker failure, bounded successor и
+  shutdown drain; rejection возвращает исходный lease, final terminal
+  различает verified success, shutdown, not-verified и ambiguous COMMIT.
+  Restart использует `RouteReconcileMode::Strict`, сохраняющий действующее
+  поколение `FirewallApplyMode::PreserveSets` и обязательную проверку resolver
+  reload/stream. Уже совершённый firewall COMMIT без подтверждённого resolver
+  не считается успешным restart и не вызывает replay исходной мутации. Старый
+  прямой синхронный `restart_routing_runtime()` удалён, поэтому число прямых
+  production-вызовов `apply_firewall()` уменьшилось с 10 до 9.
+  Следующий локальный START-срез передаёт уже выданный lease тому же owner и
+  удаляет прямой синхронный `start_routing_runtime()`. Cache-only DNS остаётся
+  до первой мутации; routes/firewall/owned conntrack выполняются worker-side,
+  resolver `activate` — отдельным stream-worker с exact attempt-id/epoch.
+  Кандидат не публикуется до подтверждения resolver; bounded transient retries
+  равны 100/200/400 мс. Любой окончательный отказ, потерянный resolver control
+  handoff либо ошибка обязательной runtime-публикации удерживает тот же
+  terminal/lease до off-loop rollback routes, firewall и resolver. Поэтому
+  прямых `apply_firewall()` осталось восемь в пяти функциональных группах:
+  cold startup, Keenetic DNS candidate/rollback, pre-apply SNAT repair,
+  URLTEST candidate/rollback и config transaction.
+  В том же несобранном batch устранены terminal/liveness-разрывы: firmware
+  netfilter refresh не отменяет foreground lifecycle timer; trailing source
+  после verified START/restart отделяется в background successor; последняя
+  route-epoch fence не позволяет объявить START успешным по устаревшему route
+  plan: позднее изменение топологии расходует конечный START-бюджет
+  100/200/400 мс и после него запускает rollback вместо бесконечного
+  same-attempt defer. Четыре последовательных scheduler/executor rejection до
+  `begin_worker()` завершаются не внутри transport-owner, а типизированным
+  terminal Daemon; START выполняет обычный off-loop rollback, после чего lease
+  освобождается до `not_verified`. Coordinator и queue mailbox получили
+  небросающие ownership-locks, поэтому pre-worker transfer не зависит от
+  ошибки platform mutex, а stale claim не создаёт второго владельца. Поздний
+  SNAT/catalog delta после сохранения completion переносится в successor; при
+  исчерпании transport-бюджета restart exact payload отделяется в один
+  background resnapshot, а foreground lease освобождается перед
+  `not_verified`. START имеет отдельный конечный бюджет из четырёх отказов
+  передачи rollback worker и после его исчерпания завершает fail-closed
+  finalizer вместо зависания в `starting`. Сбой сохранения необязательного
+  background tail не меняет уже подтверждённый foreground result. Promoted
+  watchdog делает не более одного launch за tick. Shutdown переводит
+  foreground timer в typed terminal, а timer-id observation failure идёт через
+  exact rejection terminal вместо ложного `consumed`.
+  Обязательные resolver `activate` для START и `reload` для foreground restart
+  теперь используют общий асинхронный `ResolverStreamCoordinator`: hook и
+  15-секундное ожидание exact dnsmasq stream не блокируют control loop, terminal
+  паркуется до fenced completion, а потерянный control wake подбирается
+  watchdog. Restart без необходимости DNS refresh больше не получает ложный
+  resolver failure; неуспешный reload передаётся существующему background retry
+  без повторного firewall apply. Production hook не может зависнуть навсегда:
+  общий KeeneticOS `safe_exec` ограничивает его 30 секундами, завершает process
+  group с 2-секундным grace и затем `SIGKILL`; после успешного hook отдельно
+  действует 15-секундный stream timeout.
+  START resolver generation также строится по точному подготовленному
+  native-VPN DNS access policy этой же lifecycle-операции, а не по ещё старому
+  глобальному inventory до публикации кандидата. Тот же список участвует в
+  вычислении expected hash и затем передаётся dnsmasq; отдельная регрессия
+  закрепляет приоритет подготовленного кандидата над stale fallback.
+  Финальный объединённый gate обоих lifecycle wiring-срезов прошёл: monolithic
+  `3341/3341` и `36 767/36 767`, owner `75/75` и `1251/1251`, lifecycle
+  completion `4/4` и `28/28`, все обязательные native/rescue/DNS/router-info/
+  resolver/journal/lock narrow-цели и crash smoke. Реальный Entware/Keenetic
+  GCC 8.4 собрал 285 target-объектов; IPK прошёл identity validator и
+  изолированный install/reinstall/remove/recovery lifecycle. P0-1 остаётся
+  открытым для пяти sync apply-групп, exact raw routing backend и дальнейшего
+  извлечения daemon-specific publication tail. Следующий pre-generation SNAT
+  barrier нельзя делегировать простым ранним исключением: API и SIGHUP приняли
+  бы его за изменившийся runtime и запустили ложный rollback. Для этого среза
+  требуется typed pre-apply-deferred continuation с тем же exact mutation
+  lease, без ручного пользовательского повтора.
+  Установленный Keenetic IPK `3.3.0-20260826231313`
+  (`05997c8f81ff-dirty`, SHA-256
+  `b56f111d2447a0db28a1da176776b446f9fb101e841127f2462478b4a581bb1f`)
+  прошёл router acceptance. Первая candidate-попытка была корректно откатана:
+  `status` через 6 секунд увидел штатное незавершённое initial URLTest
+  поколение. Исправленный установочный gate дождался строгого `Overall: OK`
+  под PENDING/update-lock, выдержал ещё 30 секунд и завершился `DEPLOY-OK`.
+  Независимый postflight подтвердил точную binary identity, живые S79/S80,
+  routing `Overall: OK`, свободную update-lock, неизменные SHA конфигурации и
+  rescue `ready=true`, `rollback_available=true`, `pending=false`,
+  `unknown=false`; прежний IPK `3.3.0-20260825071624` сохранён как rollback
+  previous с SHA-256
+  `e95b8085586f7c72724e429cb2c80fb7ad041e7dafd898edfbc1a6b54f4b95b4`.
 - Router-info обновляется single-flight без RCI I/O под cache mutex. Принятый
   снимок живёт 30 секунд, конкурентные читатели получают stale LKG, а полный
   RCI failure повторяется не чаще раза в 30 секунд и не затирает LKG.
@@ -92,6 +342,54 @@
 
 ### Исправлено
 
+- Панель стратегий nfqws больше не назначает первую стратегию каталога, когда
+  backend честно сообщает, что активный `nfqws2.conf` не совпал ни с одной из
+  них. Разбор показывается только для применённой или явно открытой стратегии,
+  заголовок называет просматриваемый разбор, а не состояние системы. Кнопка
+  «Сохранить» не создаёт byte-identical override встроенного профиля и не
+  замораживает автоматическую подстановку WAN; «Применить» недоступна для ещё
+  не сохранённого нового черновика. Четыре фронтенд-коммита Claude интегрированы
+  с сохранением исходной истории.
+- Английская backend-причина `disabled by configuration` в русской карточке
+  диагностики теперь отображается как «Отключено в настройках»; неизвестные
+  диагностические подробности сохраняются без подмены. Ошибка сохранения
+  привязки уже созданного native VPN также локализована и явно запрещает
+  повторный импорт; восемь внутренних delete-диагностик, которые никогда не
+  выводятся пользователю, документированы в allowlist.
+- Версия установленной сборки теперь имеет единый вид
+  `v3.3.0-ГГГГММДДччммсс` в daemon API, шапке, package control и frontend
+  marker. Строгий IPK-validator сверяет timestamp, binary identity, активный
+  JavaScript и реально отдаваемые gzip-копии `index.html`/JS; старый `sb.12`,
+  stale entrypoint и несовпадающие package/frontend данные отклоняются. Source
+  identity учитывает untracked-файлы, которые упаковщик копирует в build tree,
+  поэтому пакет больше не может выглядеть собранным из clean commit при наличии
+  неопубликованного исходника.
+- Текущий предсборочный gate после этих изменений прошёл: frontend `904/904`
+  (2633 assertions), identity/IPK-validator `29/29`, monolithic C++
+  `3342/3342` (36 773 assertions), а также все обязательные native, rescue,
+  DNS, resolver, lock и runtime-firewall standalone-наборы. Новый IPK после
+  этого объединённого checkpoint на момент записи ещё не собирался.
+- Восстановление встроенной стратегии nfqws больше не записывает tombstone,
+  который сразу снова скрывал её после reload. Для неактивной стратегии
+  заголовок разбора берётся из builtin-каталога. Изменение перенесено из
+  Claude-коммита `4a7212e3` локальным интеграционным коммитом `05997c8f`;
+  добавлены пять backend-регрессий, frontend и transport-manager gates прошли.
+- Завершение `RuntimeFirewallOperationOwner` больше не оставляет mutation lease
+  во внешне удержанном context и не вызывает внешний terminal callback после
+  разрушения owner. После остановки worker/timer очищаются lease, operation,
+  terminal owner и callbacks, а lifecycle source переводится в однозначный
+  `not_verified`; owner-suite закрепляет отсутствие callback re-entry и
+  исправляет точную START/restart failure injection.
+- В новом lifecycle completion удалено повторное неверное предположение о
+  `noexcept std::string::swap` на Entware GCC 8.4. Заранее подготовленный
+  terminal теперь публикуется placement-new move-конструкцией; после входа в
+  `settle()` нет строкового allocation/swap-шва.
+- Для GCC 8.4 со старым ABI libstdc++ устранено неверное предположение, что
+  move-assignment результата со `std::string` всегда `noexcept`. Точный
+  worker-result теперь конструируется через заранее выделенный holder и
+  `optional::emplace`, а потенциально бросающее сохранение terminal detail
+  выполняется до checkpoint `prepared`; после entered COMMIT не добавлен новый
+  fallible publication seam и неоднозначная операция не переигрывается.
 - Ранний отказ неавторизованного native/API-запроса теперь всегда получает
   `Cache-Control: no-store` ещё до чтения тела. Удаление native VPN и очистка
   tombstone явно проверяются с обычной действующей сессией без повторного ввода
@@ -100,6 +398,12 @@
   `keen-pbr-native-direct-observation-tests`. Инъекция смены типа интерфейса в
   cooperative-delete тесте теперь действует в обеих областях точного guard и
   не зависит от исторического номера чтения каталога.
+- Обязательный gate теперь включает отдельные
+  `keen-pbr-runtime-firewall-owner-tests` и
+  `keen-pbr-runtime-firewall-lifecycle-completion-tests`; статическая сверка
+  Makefile/CMake прошла 4/4. Assertions над `shared_ptr` в owner-тесте явно
+  приводятся к `bool`, поэтому doctest 2.5.1 больше не пытается форматировать
+  сам указатель и не останавливает host-компиляцию.
 - После удаления native WG/AWG вместе с интерфейсом и маршрутом удаляется его
   локальная карточка псевдонима/страны. Осиротевшие карточки больше не создают
   отдельную вкладку KeeneticOS с уже отсутствующими `WireguardN`.
