@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test"
 import {
   canonicalNfqwsProfileTier,
   nfqwsProfileMatchesPackage,
+  nfqwsBreakdownSubject,
   nfqwsBuiltinStrategyDisplayKey,
   parseNfqwsProfileMarker,
   parseNfqwsStrategy,
@@ -406,5 +407,71 @@ describe("nfqws legacy strategy display names", () => {
     expect(
       nfqwsBuiltinStrategyDisplayKey({ name: "ver4", builtin: true })
     ).toBeUndefined()
+  })
+})
+
+describe("nfqwsBreakdownSubject", () => {
+  // Список приходит отсортированным бэкендом (natural_less по имени), поэтому
+  // «01 safe» всегда нулевой. Ни один случай ниже не смеет его вернуть.
+  const LIST = ["01 safe", "02 balanced", "03 max"]
+  const subject = (over: {
+    activeStrategy?: string
+    draftNames?: string[]
+    selected?: string
+    strategyNames?: string[]
+  }) =>
+    nfqwsBreakdownSubject({
+      activeStrategy: "",
+      draftNames: [],
+      selected: "",
+      strategyNames: LIST,
+      ...over,
+    })
+
+  test("nothing applied and nothing chosen has no subject", () => {
+    // Роутер владельца: nfqws2.conf правлен руками, бэкенд отвечает пустым
+    // active_strategy. Панель показывала «Разбор: 01 safe» - стратегию, которую
+    // он не выбирал и которая не применена. Ответ - пусто, раздела нет.
+    expect(subject({})).toBe("")
+  })
+
+  test("the applied strategy is the subject until the operator picks another", () => {
+    expect(subject({ activeStrategy: "02 balanced" })).toBe("02 balanced")
+  })
+
+  test("what the operator opened wins over what is applied", () => {
+    expect(subject({ activeStrategy: "02 balanced", selected: "03 max" })).toBe(
+      "03 max"
+    )
+  })
+
+  test("a name that left the list falls back to the applied one, never to the first", () => {
+    // Сразу после удаления список ещё содержит остальные, и раздел не должен
+    // молча переименоваться в «01 safe» вместе со своими кнопками.
+    expect(
+      subject({
+        activeStrategy: "03 max",
+        selected: "02 balanced",
+        strategyNames: ["01 safe", "03 max"],
+      })
+    ).toBe("03 max")
+  })
+
+  test("a name that left the list with nothing applied leaves no subject", () => {
+    expect(
+      subject({ selected: "02 balanced", strategyNames: ["01 safe", "03 max"] })
+    ).toBe("")
+  })
+
+  test("an unsaved draft stays the subject", () => {
+    // Черновика нет в strategies[] - без этой ветки он исчезал бы из-под
+    // редактора при первом же обновлении статуса.
+    expect(
+      subject({ draftNames: ["my-strategy"], selected: "my-strategy" })
+    ).toBe("my-strategy")
+  })
+
+  test("an empty catalogue has no subject to offer", () => {
+    expect(subject({ selected: "01 safe", strategyNames: [] })).toBe("")
   })
 })
