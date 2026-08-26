@@ -20,7 +20,8 @@ RoutingHealthReport build_routing_health_report(
     const FirewallState& firewall_state,
     const std::vector<RouteSpec>& tracked_routes,
     const std::vector<RuleSpec>& tracked_policy_rules,
-    NetlinkManager& netlink);
+    NetlinkManager& netlink,
+    bool routing_inventory_authoritative = true);
 
 // Orchestrates firewall and routing verification to produce a RoutingHealthReport.
 // Combines results from FirewallVerifier and RoutingVerifier.

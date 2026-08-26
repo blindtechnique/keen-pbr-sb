@@ -1,4 +1,5 @@
 #include "netlink.hpp"
+#include "route_table.hpp"
 
 #include "../log/logger.hpp"
 #include "../util/format_compat.hpp"
@@ -131,6 +132,51 @@ struct RouteDeleter {
 };
 using RoutePtr = std::unique_ptr<struct rtnl_route, RouteDeleter>;
 
+DumpedRoute dumped_route_from_nl(struct rtnl_route* route) {
+    DumpedRoute dumped;
+    dumped.table = rtnl_route_get_table(route);
+    dumped.family = rtnl_route_get_family(route);
+    dumped.metric = static_cast<uint32_t>(rtnl_route_get_priority(route));
+    dumped.protocol = rtnl_route_get_protocol(route);
+    const int route_type = rtnl_route_get_type(route);
+    dumped.blackhole = route_type == RTN_BLACKHOLE;
+    dumped.unreachable = route_type == RTN_UNREACHABLE;
+    const int nexthop_count = rtnl_route_get_nnexthops(route);
+    dumped.exact_identity_representable =
+        (dumped.blackhole || dumped.unreachable)
+            ? nexthop_count == 0
+            : route_type == RTN_UNICAST && nexthop_count == 1;
+
+    if (struct nl_addr* destination = rtnl_route_get_dst(route)) {
+        if (nl_addr_get_prefixlen(destination) == 0U) {
+            dumped.destination = "default";
+        } else {
+            char buffer[128];
+            nl_addr2str(destination, buffer, sizeof(buffer));
+            dumped.destination = buffer;
+        }
+    }
+
+    if (!dumped.blackhole && !dumped.unreachable &&
+        nexthop_count > 0) {
+        if (struct rtnl_nexthop* nexthop =
+                rtnl_route_nexthop_n(route, 0)) {
+            const int ifindex = rtnl_route_nh_get_ifindex(nexthop);
+            if (ifindex > 0) {
+                char ifname[IF_NAMESIZE];
+                if (if_indextoname(static_cast<unsigned>(ifindex), ifname)) {
+                    dumped.interface = ifname;
+                }
+            }
+            struct nl_addr* gateway = rtnl_route_nh_get_gateway(nexthop);
+            if (gateway && nl_addr_get_len(gateway) > 0) {
+                dumped.gateway = nl_addr_to_ip_str(gateway);
+            }
+        }
+    }
+    return dumped;
+}
+
 // RAII wrapper for rtnl_nexthop
 struct NexthopDeleter {
     void operator()(struct rtnl_nexthop* nh) const {
@@ -194,6 +240,10 @@ RoutePtr build_route(const RouteSpec& spec,
         rtnl_route_set_type(route.get(), RTN_UNREACHABLE);
         return route;
     }
+
+    // Route type is part of exact delete identity.  Leaving it unset makes an
+    // RTM_DELROUTE request a wildcard over foreign same-slot route types.
+    rtnl_route_set_type(route.get(), RTN_UNICAST);
 
     NexthopPtr nh(rtnl_route_nh_alloc());
     if (!nh) {
@@ -329,6 +379,28 @@ void NetlinkManager::delete_route(const RouteSpec& spec) {
     }
 }
 
+RouteExactDeleteResult NetlinkManager::delete_route_if_exact(
+    const RouteSpec&) {
+    // Linux RTM_DELROUTE has no compare-and-delete predicate. In particular,
+    // metric 0 is a wildcard in the kernel lookup, and a cache proof followed
+    // by delete can remove a foreign racer. Keep the exact API fail-closed
+    // until an exclusive route-writer capability is available.
+    return RouteExactDeleteResult::PreconditionMismatch;
+}
+
+RouteExactReplaceResult NetlinkManager::replace_route_if_exact(
+    const RouteSpec& expected,
+    const RouteSpec& replacement) {
+    (void)expected;
+    (void)replacement;
+    // Linux RTM_NEWROUTE/NLM_F_REPLACE has no compare-and-swap predicate. A
+    // cache check followed by replace can overwrite a firmware/external racer.
+    // Keep the exact transaction fail-closed until one exclusive route writer
+    // owns both observation and replacement. Compatibility callers continue
+    // to use replace_route() explicitly and receive no exactness claim.
+    return RouteExactReplaceResult::PreconditionMismatch;
+}
+
 void NetlinkManager::flush_routes_in_table(uint32_t table_id, int family) {
     KPBR_LOCK_GUARD(mutex_);
 
@@ -430,6 +502,18 @@ void NetlinkManager::delete_rule_for_family(const RuleSpec& spec, int family) {
     }
 }
 
+RuleExactDeleteResult NetlinkManager::delete_rule_if_exact(
+    const RuleSpec&,
+    int) {
+    // Linux RTM_DELRULE does not provide compare-and-delete semantics. A
+    // pre-dump followed by the partial RuleSpec delete is racy and may delete
+    // a foreign rule which acquired the same visible key. Until this backend
+    // has an exclusive-writer proof or a complete atomic primitive, exact
+    // transactions must fail closed. The compatibility deletion API above is
+    // intentionally unchanged for its existing callers.
+    return RuleExactDeleteResult::PreconditionMismatch;
+}
+
 std::vector<DumpedRoute> NetlinkManager::dump_routes(int family) {
     KPBR_LOCK_GUARD(mutex_);
 
@@ -450,53 +534,7 @@ std::vector<DumpedRoute> NetlinkManager::dump_routes(int family) {
         auto* ctx = static_cast<DumpRoutesCtx*>(arg);
         auto* route = reinterpret_cast<struct rtnl_route*>(obj);
 
-        DumpedRoute dr;
-        dr.table = rtnl_route_get_table(route);
-        dr.family = rtnl_route_get_family(route);
-        dr.metric = static_cast<uint32_t>(rtnl_route_get_priority(route));
-        dr.protocol = rtnl_route_get_protocol(route);
-
-        // Determine route type
-        int rt_type = rtnl_route_get_type(route);
-        dr.blackhole = (rt_type == RTN_BLACKHOLE);
-        dr.unreachable = (rt_type == RTN_UNREACHABLE);
-
-        // Destination
-        struct nl_addr* dst = rtnl_route_get_dst(route);
-        if (dst) {
-            const unsigned int prefix_length = nl_addr_get_prefixlen(dst);
-            if (prefix_length == 0U) {
-                dr.destination = "default";
-            } else {
-                char buf[128];
-                nl_addr2str(dst, buf, sizeof(buf));
-                dr.destination = buf;
-            }
-        }
-
-        // Nexthop info (interface and gateway)
-        if (!dr.blackhole && !dr.unreachable) {
-            int nh_count = rtnl_route_get_nnexthops(route);
-            if (nh_count > 0) {
-                struct rtnl_nexthop* nh = rtnl_route_nexthop_n(route, 0);
-                if (nh) {
-                    int ifindex = rtnl_route_nh_get_ifindex(nh);
-                    if (ifindex > 0) {
-                        char ifname[IF_NAMESIZE];
-                        if (if_indextoname(static_cast<unsigned>(ifindex),
-                                           ifname)) {
-                            dr.interface = ifname;
-                        }
-                    }
-                    struct nl_addr* gw = rtnl_route_nh_get_gateway(nh);
-                    if (gw && nl_addr_get_len(gw) > 0) {
-                        dr.gateway = nl_addr_to_ip_str(gw);
-                    }
-                }
-            }
-        }
-
-        ctx->result->push_back(std::move(dr));
+        ctx->result->push_back(dumped_route_from_nl(route));
     }, &ctx);
 
     return result;
@@ -537,6 +575,13 @@ std::vector<DumpedRule> NetlinkManager::dump_policy_rules(int family) {
         dr.fwmask   = rtnl_rule_get_mask(rule);
         dr.table    = rtnl_rule_get_table(rule);
         dr.family   = rtnl_rule_get_family(rule);
+        // libnl's high-level rule cache discards several kernel attributes
+        // (for example FRA_TUN_ID, FRA_UID_RANGE and suppression selectors).
+        // This partial projection therefore cannot prove a complete identity.
+        // Compatibility consumers may still inspect the visible tuple, while
+        // exact transactions fail closed until a raw RTM_GETRULE parser is
+        // supplied.
+        dr.exact_identity_representable = false;
 
         out->push_back(dr);
     }, &result);

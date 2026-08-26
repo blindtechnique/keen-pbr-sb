@@ -446,27 +446,26 @@ std::vector<std::string> find_affected_urltests(
     return result;
 }
 
-void populate_routing_state(const Config& cfg,
-                            const OutboundMarkMap& marks,
-                            RouteTable& routes,
-                            PolicyRuleManager& rules,
-                            OutboundReachabilityFn reachability_check,
-                            const std::map<std::string, std::string>* urltest_selections,
-                            bool ipv6_enabled) {
+namespace {
+
+template <typename ReachabilityCheck>
+PlannedRoutingState build_planned_routing_state(
+    const Config& cfg,
+    const OutboundMarkMap& marks,
+    ReachabilityCheck&& reachability_check,
+    const std::map<std::string, std::string>* urltest_selections,
+    bool ipv6_enabled) {
     const auto& outbounds = cfg.outbounds.value_or(std::vector<Outbound>{});
     const uint32_t table_start = static_cast<uint32_t>(
         cfg.iproute.value_or(IprouteConfig{}).table_start.value_or(150));
     const uint32_t fwmark_mask = fwmark_mask_value(cfg.fwmark.value_or(FwmarkConfig{}));
-    std::vector<RouteSpec> planned_routes;
-    std::vector<RuleSpec> planned_rules;
-    const auto prior_generated_route_tables =
-        routes.live_generated_route_tables();
+    PlannedRoutingState plan;
 
     auto add_route_if_enabled = [&](const RouteSpec& route) {
         if (!ipv6_enabled && route.family == AF_INET6) {
             return false;
         }
-        planned_routes.push_back(route);
+        plan.routes.push_back(route);
         return true;
     };
 
@@ -477,7 +476,7 @@ void populate_routing_state(const Config& cfg,
     auto is_reachable = [&](const Outbound& outbound) {
         const auto [it, inserted] =
             reachability_snapshot.try_emplace(outbound.tag, true);
-        if (inserted && reachability_check) {
+        if (inserted) {
             it->second = reachability_check(outbound);
         }
         return it->second;
@@ -516,7 +515,7 @@ void populate_routing_state(const Config& cfg,
             if (!ipv6_enabled) {
                 ip_rule.family = AF_INET;
             }
-            planned_rules.push_back(ip_rule);
+            plan.rules.push_back(ip_rule);
         } else if (ob.type == OutboundType::TABLE) {
             auto mark_it = marks.find(ob.tag);
             if (mark_it == marks.end()) continue;
@@ -530,7 +529,7 @@ void populate_routing_state(const Config& cfg,
                 ip_rule.family = AF_INET;
             }
             ++table_offset;
-            planned_rules.push_back(ip_rule);
+            plan.rules.push_back(ip_rule);
         } else if (ob.type == OutboundType::URLTEST) {
             auto mark_it = marks.find(ob.tag);
             if (mark_it == marks.end()) continue;
@@ -616,25 +615,71 @@ void populate_routing_state(const Config& cfg,
             if (!ipv6_enabled) {
                 ip_rule.family = AF_INET;
             }
-            planned_rules.push_back(ip_rule);
+            plan.rules.push_back(ip_rule);
         }
         // BLACKHOLE: no routing table, no ip rule
         // IGNORE: no routing needed
     }
 
+    return plan;
+}
+
+} // anonymous namespace
+
+PlannedRoutingState plan_routing_state(
+    const Config& cfg,
+    const OutboundMarkMap& marks,
+    const OutboundReachabilitySnapshot& reachability_snapshot,
+    const std::map<std::string, std::string>* urltest_selections,
+    bool ipv6_enabled) {
+    return build_planned_routing_state(
+        cfg,
+        marks,
+        [&reachability_snapshot](const Outbound& outbound) {
+            const auto it = reachability_snapshot.find(outbound.tag);
+            return it == reachability_snapshot.end() || it->second;
+        },
+        urltest_selections,
+        ipv6_enabled);
+}
+
+void populate_routing_state(const Config& cfg,
+                            const OutboundMarkMap& marks,
+                            RouteTable& routes,
+                            PolicyRuleManager& rules,
+                            OutboundReachabilityFn reachability_check,
+                            const std::map<std::string, std::string>* urltest_selections,
+                            bool ipv6_enabled) {
+    const auto prior_generated_route_tables =
+        routes.live_generated_route_tables();
+    auto plan = build_planned_routing_state(
+        cfg,
+        marks,
+        [&reachability_check](const Outbound& outbound) {
+            return !reachability_check || reachability_check(outbound);
+        },
+        urltest_selections,
+        ipv6_enabled);
+
     // Do not expose a policy rule until every route it can select exists.
     // If either phase fails, remove newly created routes and restore any
     // protocol-186 route that was atomically replaced during this transaction.
     try {
-        for (const auto& route : planned_routes) {
+        for (const auto& route : plan.routes) {
             routes.add(route);
         }
-        for (const auto& rule : planned_rules) {
+        for (const auto& rule : plan.rules) {
             rules.add(rule);
         }
     } catch (...) {
-        rules.clear();
-        routes.clear();
+        auto protected_tables = rules.clear();
+        const auto live_dependency_tables =
+            rules.protect_route_tables_with_live_rules(
+                routes.get_routes());
+        protected_tables.insert(
+            live_dependency_tables.begin(),
+            live_dependency_tables.end());
+        (void)routes.clear(protected_tables);
         throw;
     }
 
@@ -643,12 +688,22 @@ void populate_routing_state(const Config& cfg,
     // forwarding. Exact protocol-marked state is adopted only at this commit
     // boundary, never by generic clear().
     routes.finalize_pending_replacements();
-    rules.remove_orphaned_generated(
-        planned_rules, prior_generated_route_tables);
-    routes.remove_obsolete(planned_routes);
+    auto protected_tables = rules.remove_orphaned_generated(
+        plan.rules, prior_generated_route_tables);
+    const auto retained_rule_tables = rules.remove_obsolete(plan.rules);
+    protected_tables.insert(
+        retained_rule_tables.begin(), retained_rule_tables.end());
+    const auto live_dependency_tables =
+        rules.protect_route_tables_with_live_rules(
+            routes.get_routes(),
+            prior_generated_route_tables,
+            plan.rules);
+    protected_tables.insert(
+        live_dependency_tables.begin(), live_dependency_tables.end());
+    (void)routes.remove_obsolete(plan.routes, protected_tables);
 
     adopt_committed_generated_state(
-        routes, rules, planned_routes, planned_rules);
+        routes, rules, plan.routes, plan.rules);
 }
 
 void reconcile_kernel_routing_state(
@@ -671,10 +726,19 @@ void reconcile_kernel_routing_state(
         throw;
     }
     routes.finalize_pending_replacements();
-    rules.remove_orphaned_generated(
+    auto protected_tables = rules.remove_orphaned_generated(
         desired_rules, prior_generated_route_tables);
-    rules.remove_obsolete(desired_rules);
-    routes.remove_obsolete(desired_routes);
+    const auto retained_rule_tables = rules.remove_obsolete(desired_rules);
+    protected_tables.insert(
+        retained_rule_tables.begin(), retained_rule_tables.end());
+    const auto live_dependency_tables =
+        rules.protect_route_tables_with_live_rules(
+            routes.get_routes(),
+            prior_generated_route_tables,
+            desired_rules);
+    protected_tables.insert(
+        live_dependency_tables.begin(), live_dependency_tables.end());
+    (void)routes.remove_obsolete(desired_routes, protected_tables);
 
     adopt_committed_generated_state(
         routes, rules, desired_routes, desired_rules);

@@ -152,6 +152,48 @@ TEST_CASE("resolver stream coordinator supports a synchronous control handoff") 
     CHECK(coordinator.wait_for_idle_for(100ms));
 }
 
+TEST_CASE(
+    "per-operation resolver completion replaces the global commit for only that request") {
+    CoordinatorHarness harness;
+    const std::string lifecycle_token =
+        "66666666666666666666666666666666";
+    std::size_t lifecycle_completions = 0U;
+
+    auto lifecycle = operation(lifecycle_token, 61U);
+    lifecycle.completion =
+        [&](const ResolverStreamOperation& completed_operation,
+            const ResolverStreamResult& result) {
+            ++lifecycle_completions;
+            CHECK(completed_operation.attempt_id == lifecycle_token);
+            CHECK(completed_operation.stream_epoch == 61U);
+            CHECK(result.completed);
+        };
+
+    REQUIRE(harness.coordinator.request(std::move(lifecycle)) ==
+            ResolverStreamCoordinator::RequestResult::started);
+    harness.coordinator.notify_stream_completed(lifecycle_token, 61U);
+    REQUIRE(wait_until([&] { return harness.queued() == 1U; }));
+    harness.run_one();
+
+    CHECK(lifecycle_completions == 1U);
+    CHECK(harness.results.empty());
+    REQUIRE(harness.coordinator.wait_for_idle_for(100ms));
+
+    const std::string background_token =
+        "77777777777777777777777777777777";
+    REQUIRE(harness.coordinator.request(
+                operation(background_token, 62U)) ==
+            ResolverStreamCoordinator::RequestResult::started);
+    harness.coordinator.notify_stream_completed(background_token, 62U);
+    REQUIRE(wait_until([&] { return harness.queued() == 1U; }));
+    harness.run_one();
+
+    CHECK(lifecycle_completions == 1U);
+    REQUIRE(harness.results.size() == 1U);
+    CHECK(harness.results.front().completed);
+    CHECK(harness.coordinator.wait_for_idle_for(100ms));
+}
+
 TEST_CASE("resolver stream coordinator releases a rejected control handoff once") {
     BlockingExecutor executor{1, 8};
     std::atomic<int> releases{0};

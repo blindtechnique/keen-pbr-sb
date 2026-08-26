@@ -3,6 +3,7 @@
 #include "../config/config.hpp"
 #include "../keenetic/internal_vpn_runtime_target.hpp"
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -26,5 +27,13 @@ bool is_safe_dnsmasq_interface_selector(
 std::vector<std::string> build_dnsmasq_trusted_interfaces(
     const std::vector<InternalVpnServer>& interface_servers,
     const std::vector<InternalVpnRuntimeTarget>& service_targets);
+
+// A foreground lifecycle operation may prepare a native-VPN inventory before
+// publishing it globally. Prefer its exact, already validated access policy so
+// the resolver generation and its hash cannot be built from stale globals.
+std::vector<std::string> select_dnsmasq_trusted_interfaces(
+    std::optional<std::vector<std::string>> prepared_override,
+    const std::vector<InternalVpnServer>& fallback_interface_servers,
+    const std::vector<InternalVpnRuntimeTarget>& fallback_service_targets);
 
 } // namespace keen_pbr3

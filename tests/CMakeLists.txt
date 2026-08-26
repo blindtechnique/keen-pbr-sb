@@ -5,6 +5,12 @@ add_executable(keen-pbr-tests
   test_meta_udp_443_activation_contract.cpp
   test_runtime_firewall_backend_transaction.cpp
   test_runtime_firewall_worker_operation.cpp
+  test_runtime_firewall_terminal_owner.cpp
+  test_runtime_firewall_operation_owner.cpp
+  test_runtime_firewall_worker_attempt.cpp
+  test_runtime_route_health_plan.cpp
+  test_runtime_firewall_immediate_completion.cpp
+  test_runtime_firewall_lifecycle_completion.cpp
   test_ppe_deoffload.cpp
   test_system_auth_capability.cpp
   test_step_up.cpp
@@ -122,6 +128,8 @@ add_executable(keen-pbr-tests
   test_dependency_analysis.cpp
   test_list_delete_planner.cpp
   test_routing_state.cpp
+  test_runtime_routing_operation_owner.cpp
+  test_runtime_routing_transaction.cpp
   test_runtime_interface_inventory.cpp
   test_api_ndms_names.cpp
   test_api_ndms_native_delete.cpp
@@ -202,6 +210,11 @@ add_executable(keen-pbr-tests
   ../src/daemon/keenetic_dns_refresh_coordinator.cpp
   ../src/daemon/resolver_stream_coordinator.cpp
   ../src/daemon/runtime_firewall_backend_transaction.cpp
+  ../src/daemon/runtime_firewall_immediate_completion.cpp
+  ../src/daemon/runtime_firewall_lifecycle_completion.cpp
+  ../src/daemon/runtime_firewall_operation_owner.cpp
+  ../src/daemon/runtime_firewall_worker_attempt.cpp
+  ../src/daemon/runtime_route_health_plan.cpp
   ../src/daemon/daemon_api.cpp
   ../src/daemon/daemon_dns_probe.cpp
   ../src/setup/catalog_setup_planner.cpp
@@ -368,6 +381,8 @@ add_executable(keen-pbr-tests
   ../src/runtime/runtime_state_machine.cpp
   ../src/routing/policy_rule.cpp
   ../src/routing/route_table.cpp
+  ../src/routing/runtime_routing_operation_owner.cpp
+  ../src/routing/runtime_routing_transaction.cpp
   ../src/routing/routing_verifier.cpp
   ../src/routing/target.cpp
 )
@@ -786,6 +801,76 @@ keen_pbr_apply_project_options(keen-pbr-resolver-stream-tests)
 add_test(
   NAME keen-pbr-resolver-stream-tests
   COMMAND keen-pbr-resolver-stream-tests
+)
+
+# Keep the lifecycle completion bridge independently buildable. It is the
+# allocation-safe hand-off between asynchronous firewall publication and a
+# non-control lifecycle caller; no daemon integration belongs in this target.
+add_executable(keen-pbr-runtime-firewall-lifecycle-completion-tests
+  test_main.cpp
+  test_runtime_firewall_lifecycle_completion.cpp
+  ../src/daemon/runtime_firewall_lifecycle_completion.cpp
+)
+set_target_properties(
+  keen-pbr-runtime-firewall-lifecycle-completion-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_include_directories(
+  keen-pbr-runtime-firewall-lifecycle-completion-tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+)
+target_link_libraries(
+  keen-pbr-runtime-firewall-lifecycle-completion-tests PRIVATE
+  Threads::Threads
+)
+keen_pbr_apply_project_options(
+  keen-pbr-runtime-firewall-lifecycle-completion-tests)
+add_test(
+  NAME keen-pbr-runtime-firewall-lifecycle-completion-tests
+  COMMAND keen-pbr-runtime-firewall-lifecycle-completion-tests
+)
+
+# Keep the delayed runtime-firewall transport owner independently buildable.
+# Domain publication remains covered by the daemon suite; this target fixes
+# the owner-specific scheduler, watchdog, coalescing and shutdown seams.
+add_executable(keen-pbr-runtime-firewall-owner-tests
+  test_main.cpp
+  test_runtime_firewall_immediate_completion.cpp
+  test_runtime_firewall_operation_owner.cpp
+  test_runtime_firewall_terminal_owner.cpp
+  test_runtime_firewall_worker_operation.cpp
+  ../src/daemon/runtime_firewall_operation_owner.cpp
+  ../src/daemon/runtime_firewall_immediate_completion.cpp
+  ../src/daemon/runtime_firewall_lifecycle_completion.cpp
+  ../src/runtime/periodic_task_metrics.cpp
+  ../src/util/blocking_executor.cpp
+  ../src/util/traced_mutex.cpp
+  ../src/log/logger.cpp
+  ../src/log/trace.cpp
+)
+set_target_properties(keen-pbr-runtime-firewall-owner-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_include_directories(keen-pbr-runtime-firewall-owner-tests PRIVATE
+  ${KEEN_PBR_GENERATED_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+)
+target_link_libraries(keen-pbr-runtime-firewall-owner-tests PRIVATE
+  nlohmann_json::nlohmann_json
+  fmt::fmt-header-only
+  Threads::Threads
+)
+keen_pbr_apply_project_options(keen-pbr-runtime-firewall-owner-tests)
+add_test(
+  NAME keen-pbr-runtime-firewall-owner-tests
+  COMMAND keen-pbr-runtime-firewall-owner-tests
 )
 
 add_test(

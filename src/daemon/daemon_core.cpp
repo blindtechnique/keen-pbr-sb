@@ -13,7 +13,9 @@
 #include <fstream>
 #include <future>
 #include <grp.h>
+#include <limits>
 #include <map>
+#include <new>
 #include <nlohmann/json.hpp>
 #include <ostream>
 #include <poll.h>
@@ -30,6 +32,7 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <thread>
+#include <type_traits>
 #include <unistd.h>
 
 #include <keen-pbr/version.hpp>
@@ -59,6 +62,8 @@
 #include "../util/ipv6_support.hpp"
 #include "../util/time_utils.hpp"
 #include "../dns/dns_probe_server.hpp" // IWYU pragma: keep
+#include "runtime_firewall_operation_owner.hpp"
+#include "runtime_route_health_plan.hpp"
 #include "scheduler.hpp"
 
 #ifdef WITH_API
@@ -96,7 +101,6 @@ constexpr std::array<std::chrono::seconds, 6>
         std::chrono::seconds{16},
         std::chrono::seconds{32},
     };
-
 #ifndef KEEN_PBR_CONTROL_SOCKET
 #define KEEN_PBR_CONTROL_SOCKET "/run/keen-pbr/control.sock"
 #endif
@@ -292,6 +296,125 @@ nlohmann::json list_refresh_task_json(
 
 } // namespace
 
+struct RuntimeFirewallStartRollbackResult;
+
+struct DaemonRuntimeFirewallOperationState final
+    : RuntimeFirewallOperationDomainState {
+    enum class PreworkerFailureKind : std::uint8_t {
+        none,
+        admission_contention,
+        route_unavailable,
+        preparation_failure,
+        transport_rejected,
+    };
+
+    struct CorePublication final {
+        bool prepared{false};
+        bool committed{false};
+        std::vector<RuleState> rules;
+        AppliedListContentState list_content_state;
+        std::map<std::string, ListSetUsage> list_usage;
+        std::map<std::string, std::string> list_fingerprints;
+        std::vector<InternalVpnServer> internal_vpn_servers;
+        std::vector<InternalVpnRuntimeTarget> internal_vpn_service_targets;
+        std::vector<FirewallSourceEgressSnatSelector>
+            native_vpn_direct_egress_snat_selectors;
+        std::optional<std::uint32_t> committed_meta_fwmark;
+        std::uint32_t committed_meta_owned_mask{0U};
+    };
+
+    enum class LifecycleTailPhase : std::uint8_t {
+        not_started,
+        in_flight,
+        completed,
+    };
+
+    InternalVpnRuntimeResolution internal_vpn_resolution;
+    InternalVpnServiceRuntimeResolution internal_vpn_service_resolution;
+    std::vector<std::string> lifecycle_trusted_dns_interfaces;
+    std::shared_ptr<const ListCacheGenerationSnapshot> list_cache_snapshot;
+    bool resolver_refresh_required{false};
+    // A foreground lifecycle operation is complete only after the committed
+    // firewall generation and its resolver stream have both been verified.
+    // Ordinary background refreshes retain their best-effort resolver tail.
+    bool lifecycle_resolver_verified{false};
+    std::string lifecycle_failure_detail;
+    LifecycleTailPhase lifecycle_resolver_phase{
+        LifecycleTailPhase::not_started};
+    std::string lifecycle_resolver_attempt_id;
+    std::uint64_t lifecycle_resolver_stream_epoch{0U};
+    LifecycleTailPhase lifecycle_start_rollback_phase{
+        LifecycleTailPhase::not_started};
+    std::shared_ptr<RuntimeFirewallStartRollbackResult>
+        lifecycle_start_rollback_result;
+    std::size_t lifecycle_start_rollback_handoff_rejections{0U};
+    bool lifecycle_start_candidate_published{false};
+    bool lifecycle_start_finalized{false};
+    bool lifecycle_start_post_success_finished{false};
+    bool lifecycle_start_failure_detail_prepared{false};
+    std::string lifecycle_start_rollback_detail;
+    bool preworker_side_effects_armed{false};
+    std::optional<PendingMetaUdp443ActivationCleanup>
+        previous_meta_cleanup;
+    std::uint64_t meta_cleanup_epoch{0U};
+
+    CorePublication core_publication;
+    std::optional<MetaUdp443ActivationPlan>
+        candidate_meta_activation_plan;
+    std::optional<OwnedSnatRecovery> processed_snat_recovery;
+    OwnedSnatState inspected_snat_after{OwnedSnatState::unknown};
+    bool worker_result_valid{false};
+    bool worker_failure_transient{false};
+    std::string worker_failure_detail;
+    bool core_published{false};
+    bool internal_vpn_lkg_published{false};
+    bool resolver_generation_published{false};
+    bool resolver_tail_finished{false};
+    bool meta_tail_finished{false};
+    bool conntrack_tail_finished{false};
+    bool runtime_tail_finished{false};
+    RuntimeFirewallImmediateCompletionIntent immediate_completion_intent;
+    PreworkerFailureKind preworker_failure_kind{
+        PreworkerFailureKind::none};
+    std::string preworker_failure_detail;
+    bool preworker_failure_policy_finished{false};
+    bool suppress_coordinator_rerun{false};
+    bool preworker_urltest_permanent_started{false};
+    std::vector<std::string> preworker_failed_urltest_tags;
+    std::shared_ptr<RuntimeRouteMutationCheckpoint>
+        route_mutation_checkpoint;
+};
+
+struct RuntimeFirewallStartRollbackResult final {
+    std::atomic<bool> ready{false};
+    bool routing_cleared{false};
+    bool firewall_cleared{false};
+    bool resolver_deactivated{false};
+    std::string detail;
+};
+
+static_assert(
+    std::is_nothrow_move_assignable_v<
+        DaemonRuntimeFirewallOperationState::CorePublication>,
+    "the runtime firewall core checkpoint must commit without throwing");
+static_assert(
+    std::is_nothrow_move_assignable_v<
+        std::optional<MetaUdp443ActivationPlan>>,
+    "the runtime firewall Meta checkpoint must commit without throwing");
+static_assert(
+    std::is_nothrow_move_assignable_v<std::optional<OwnedSnatRecovery>>,
+    "the runtime firewall SNAT checkpoint must commit without throwing");
+
+DaemonRuntimeFirewallOperationState& runtime_firewall_domain_state(
+    const std::shared_ptr<RuntimeFirewallOperationContext>& context) {
+    if (!context || !context->domain_state) {
+        throw std::logic_error(
+            "runtime firewall operation has no domain state");
+    }
+    return static_cast<DaemonRuntimeFirewallOperationState&>(
+        *context->domain_state);
+}
+
 std::string get_outbound_tag(const Outbound& ob) {
     return ob.tag;
 }
@@ -336,8 +459,7 @@ Daemon::Daemon(Config config,
               handle_interface_event(event);
           }))
     , netlink_()
-    , route_table_(netlink_)
-    , policy_rules_(netlink_)
+    , routing_operation_owner_(netlink_, netlink_)
     , firewall_state_()
     , url_tester_()
     , outbound_marks_(allocate_outbound_marks(config_.fwmark.value_or(FwmarkConfig{}),
@@ -390,6 +512,75 @@ Daemon::Daemon(Config config,
     firewall_state_.set_fwmark_mask(fwmark_mask_value(config_.fwmark.value_or(FwmarkConfig{})));
     list_service_.ensure_dir();
     scheduler_ = std::make_unique<Scheduler>(*this);
+
+    RuntimeFirewallOperationOwner::Callbacks firewall_owner_callbacks;
+    firewall_owner_callbacks.create_domain_state = [] {
+        return std::make_shared<DaemonRuntimeFirewallOperationState>();
+    };
+    firewall_owner_callbacks.post_control =
+        [this](std::function<void()> task, std::string label) {
+            return post_control_task(std::move(task), std::move(label));
+        };
+    firewall_owner_callbacks.schedule_oneshot =
+        [this](std::chrono::milliseconds delay,
+               std::function<void()> task,
+               std::string label) {
+            return scheduler_->schedule_oneshot(
+                delay, std::move(task), std::move(label));
+        };
+    firewall_owner_callbacks.schedule_repeating =
+        [this](std::chrono::milliseconds interval,
+               std::function<void()> task,
+               std::string label) {
+            return scheduler_->schedule_repeating(
+                interval, std::move(task), std::move(label));
+        };
+    firewall_owner_callbacks.cancel_scheduled =
+        [this](int task_id) { scheduler_->cancel(task_id); };
+    firewall_owner_callbacks.runtime_is_current =
+        [this](std::uint64_t expected_generation,
+               RuntimeFirewallLifecycleKind lifecycle_kind) {
+            const bool current =
+                runtime_firewall_lifecycle_generation_is_current(
+                    lifecycle_kind, expected_generation);
+            if (!current) {
+                Logger::instance().verbose(
+                    "Discarding stale runtime firewall recovery retry.");
+            }
+            return current;
+        };
+    firewall_owner_callbacks.urltest_waiting =
+        [this](std::uint64_t generation) {
+            return urltest_after_firewall_gate_.waiting_for(generation);
+        };
+    firewall_owner_callbacks.dispatch_attempt =
+        [this](std::shared_ptr<RuntimeFirewallOperationContext> context,
+               RuntimeFirewallOperationClaim claim,
+               OwnedSnatRecovery recovery,
+               PreparedNativeVpnCatalogPtr catalog,
+               bool schedule_catalog_refresh) {
+            dispatch_runtime_firewall_worker_attempt(
+                context,
+                claim,
+                std::move(recovery),
+                std::move(catalog),
+                schedule_catalog_refresh);
+        };
+    firewall_owner_callbacks.drain_terminal =
+        [this](std::shared_ptr<RuntimeFirewallOperationContext> context,
+               bool shutdown) {
+            drain_runtime_firewall_terminal(context, shutdown);
+        };
+    firewall_owner_callbacks.active_mutation_label = [this] {
+        const auto active = runtime_mutation_admission_.active();
+        return active.has_value()
+            ? active->label
+            : std::string{"unknown"};
+    };
+    runtime_firewall_owner_ =
+        std::make_shared<RuntimeFirewallOperationOwner>(
+            runtime_firewall_retry_,
+            std::move(firewall_owner_callbacks));
 
 #ifdef WITH_API
     // DNS diagnostics are interactive and should have only one live probe.
@@ -453,8 +644,15 @@ Daemon::~Daemon() {
         reset_remote_access_retry_bridge();
     });
 #endif
+    cleanup_step("fence runtime firewall shutdown", [this] {
+        runtime_firewall_owner_->request_shutdown();
+    });
     cleanup_step("close runtime mutation admission", [this] {
         runtime_mutation_admission_.shutdown();
+    });
+    cleanup_step("cancel runtime firewall retry", [this] {
+        runtime_firewall_owner_->cancel_completion_watchdog();
+        runtime_firewall_owner_->cancel_retry();
     });
     cleanup_step("close routing test admission", [this] {
         routing_test_admission_.shutdown();
@@ -484,6 +682,8 @@ Daemon::~Daemon() {
         scheduler_->cancel_all();
     });
     cleanup_step("discard queued blocking work", [this] {
+        runtime_firewall_owner_->cancel_pending_work();
+        runtime_firewall_owner_->pump_terminal_for_shutdown();
         blocking_executor_.cancel_pending();
     });
     cleanup_step("drain resolver stream recovery", [this] {
@@ -491,6 +691,16 @@ Daemon::~Daemon() {
     });
     cleanup_step("drain runtime mutations", [this] {
         quiesce_runtime_mutations();
+    });
+    cleanup_step("stop runtime firewall executor", [this] {
+        runtime_firewall_owner_->shutdown_executor();
+        runtime_firewall_owner_->pump_terminal_for_shutdown();
+    });
+    cleanup_step("retire runtime firewall owner", [this] {
+        runtime_firewall_owner_->cancel_completion_watchdog();
+        runtime_firewall_owner_->cancel_retry();
+        scheduler_->cancel_all();
+        runtime_firewall_owner_->reset_active();
     });
     // Stop ingress while the eventfd wake target is still alive. Otherwise an
     // acceptor finishing a frame during teardown could write to a descriptor
@@ -1596,7 +1806,9 @@ void Daemon::handle_ipc_control_socket() {
                         snapshot.firewall_state,
                         snapshot.route_specs,
                         snapshot.policy_rule_specs,
-                        netlink_);
+                        netlink_,
+                        snapshot.routing_inventory_complete &&
+                            snapshot.routing_kernel_state_known);
                 }
                 // Filled from the live backend rather than recomputed here:
                 // the state is what the last apply actually observed, and
@@ -1682,11 +1894,13 @@ bool Daemon::cancel_control_task_if_still_queued(
 }
 
 void Daemon::quiesce_runtime_mutations() noexcept {
+    runtime_firewall_owner_->pump_terminal_for_shutdown();
     auto next_warning = std::chrono::steady_clock::now() +
         std::chrono::seconds{5};
     while (!runtime_mutation_admission_.wait_for_idle_for(
         std::chrono::milliseconds{10})) {
         try {
+            runtime_firewall_owner_->pump_terminal_for_shutdown();
             // An admitted resolver hook may still be waiting for dnsmasq's
             // config-script IPC request, while an API/SIGHUP writer may be
             // waiting for its terminal control callback. Keep both channels
@@ -1698,6 +1912,7 @@ void Daemon::quiesce_runtime_mutations() noexcept {
             if (control_fd_ >= 0) {
                 handle_control_commands();
             }
+            runtime_firewall_owner_->pump_terminal_for_shutdown();
         } catch (const std::exception& error) {
             try {
                 Logger::instance().error(
@@ -1727,6 +1942,7 @@ void Daemon::quiesce_runtime_mutations() noexcept {
             next_warning = now + std::chrono::seconds{5};
         }
     }
+    runtime_firewall_owner_->pump_terminal_for_shutdown();
 }
 
 void Daemon::quiesce_resolver_stream_recovery() noexcept {
@@ -2162,7 +2378,10 @@ void Daemon::handle_signal() {
         // Close writer admission at the terminal signal boundary, not later
         // in the shutdown tail. Events already returned in this epoll batch
         // must not begin a new config or routing-test operation.
+        runtime_firewall_owner_->request_shutdown();
         runtime_mutation_admission_.shutdown();
+        runtime_firewall_owner_->cancel_completion_watchdog();
+        runtime_firewall_owner_->cancel_retry();
         routing_test_admission_.shutdown();
         running_.store(false, std::memory_order_release);
         return;
@@ -2256,31 +2475,35 @@ void Daemon::check_owned_snat_health() {
         // another external netfilter event.
         auto task_metrics =
             periodic_task_metrics_.begin("owned-snat-health");
-        try {
-            const bool recovered =
-                refresh_iproute_and_firewall_runtime(
-                    0,
-                    std::nullopt,
-                    std::nullopt,
-                    /*schedule_catalog_refresh=*/false,
-                    runtime_firewall_retry_
-                        .pending_owned_snat_recovery());
-            if (recovered) {
-                task_metrics.success();
-            } else {
-                task_metrics.failure(
-                    "URLTEST firewall recovery did not converge");
-            }
-        } catch (const std::exception& error) {
-            task_metrics.failure(error.what());
-            Logger::instance().info(
-                "Periodic URLTEST firewall recovery could not install its "
-                "next retry owner: {}",
-                error.what());
-        } catch (...) {
-            task_metrics.failure(
-                "URLTEST firewall recovery failed with an unknown error");
-        }
+        (void)refresh_iproute_and_firewall_runtime(
+            0,
+            {},
+            /*schedule_catalog_refresh=*/false,
+            runtime_firewall_retry_
+                .pending_owned_snat_recovery(),
+            RuntimeFirewallImmediateCompletionIntent::
+                periodic_urltest(std::move(task_metrics)));
+        return;
+    }
+    const bool owned_snat_recovery_without_timer =
+        should_run_periodic_owned_snat_firewall_recovery(
+            routing_runtime_active(),
+            runtime_firewall_retry_.owned_snat_recovery_pending(),
+            runtime_retry_pending,
+            netfilter_refresh_pending);
+    if (owned_snat_recovery_without_timer) {
+        // A pre-claim transport rejection can leave the exact SNAT recovery
+        // latched without a one-shot timer. This existing periodic owner is
+        // the maintenance cadence after the bounded immediate chain ends.
+        auto task_metrics =
+            periodic_task_metrics_.begin("owned-snat-health");
+        (void)refresh_iproute_and_firewall_runtime(
+            0,
+            {},
+            /*schedule_catalog_refresh=*/false,
+            runtime_firewall_retry_.pending_owned_snat_recovery(),
+            RuntimeFirewallImmediateCompletionIntent::
+                periodic_owned_firewall(std::move(task_metrics)));
         return;
     }
     const bool resolver_recovery_without_timer =
@@ -2464,19 +2687,15 @@ void Daemon::check_owned_snat_health() {
         repair_meta
             ? (repair_snat ? " and Meta UDP/443" : "Meta UDP/443")
             : "");
-    const bool repaired = refresh_iproute_and_firewall_runtime(
+    (void)refresh_iproute_and_firewall_runtime(
         0,
-        std::nullopt,
-        std::nullopt,
+        {},
         /*schedule_catalog_refresh=*/false,
         OwnedSnatRecovery{
             /*requested=*/repair_snat,
-            /*missing_observed=*/false});
-    if (repaired) {
-        task_metrics.success();
-    } else {
-        task_metrics.failure("owned SNAT repair did not converge");
-    }
+            /*missing_observed=*/false},
+        RuntimeFirewallImmediateCompletionIntent::
+            periodic_owned_firewall(std::move(task_metrics)));
 }
 
 void Daemon::reconcile_pending_netfilter_runtime_refresh() noexcept {
@@ -2504,45 +2723,81 @@ void Daemon::reconcile_pending_netfilter_runtime_refresh() noexcept {
         Logger::instance().info(
             "Netfilter event: applying {} runtime refresh...",
             reason_label);
-        if (nat_refresh && runtime_firewall_retry_.retry_pending()) {
-            // Do not coalesce away a confirmed firmware NAT rebuild behind an
-            // older generic recovery. Replace that retry with an immediate
-            // attempt whose bounded chain verifies SNAT health.
-            cancel_runtime_firewall_retry();
-        }
-        const bool targeted_urltest_recovery_pending =
-            urltest_after_firewall_gate_.waiting_for(
-                runtime_generation_.load(std::memory_order_acquire));
-        const bool runtime_refreshed =
-            refresh_iproute_and_firewall_runtime(
-                0,
-                std::nullopt,
-                std::nullopt,
+        if (runtime_firewall_owner_->foreground_lifecycle_pending()) {
+            // START/restart already owns the one exact writer lease. Retain
+            // this firmware event behind that chain instead of cancelling its
+            // timer or dropping the source merely because routing has not yet
+            // reached active state.
+            runtime_firewall_owner_->defer(
+                /*attempt=*/0U,
+                runtime_generation_.load(std::memory_order_acquire),
+                {},
                 /*schedule_catalog_refresh=*/true,
                 OwnedSnatRecovery{
                     /*requested=*/snat_health_check,
                     /*missing_observed=*/false});
-
-        // A nat-only repair must not turn one firmware table rebuild into a
-        // burst of remote health probes. Full/mangle refreshes preserve the
-        // historical SIGUSR1 behaviour, but only after reconciliation.
-        if (should_trigger_broad_urltest_probe_after_netfilter_refresh(
-                runtime_refreshed,
-                full_refresh,
-                targeted_urltest_recovery_pending) &&
-            urltest_manager_) {
             Logger::instance().info(
-                "Netfilter event: probing urltest endpoints...");
-            for (const auto& ob :
-                 config_.outbounds.value_or(std::vector<Outbound>{})) {
-                if (ob.type == OutboundType::URLTEST) {
-                    urltest_manager_->trigger_immediate_test(ob.tag);
-                }
-            }
+                "Netfilter event: {} runtime refresh was retained behind "
+                "the active lifecycle operation.",
+                reason_label);
+            return;
         }
-        if (runtime_refreshed) {
+        if (nat_refresh && runtime_firewall_retry_.retry_pending()) {
+            // Do not coalesce away a confirmed firmware NAT rebuild behind an
+            // older generic recovery. Replace that retry with an immediate
+            // attempt whose bounded chain verifies SNAT health.
+            runtime_firewall_owner_->cancel_retry();
+        }
+        const bool targeted_urltest_recovery_pending =
+            urltest_after_firewall_gate_.waiting_for(
+                runtime_generation_.load(std::memory_order_acquire));
+        const auto runtime_refresh_disposition =
+            refresh_iproute_and_firewall_runtime(
+                0,
+                {},
+                /*schedule_catalog_refresh=*/true,
+                OwnedSnatRecovery{
+                    /*requested=*/snat_health_check,
+                    /*missing_observed=*/false},
+                RuntimeFirewallImmediateCompletionIntent::netfilter(
+                    full_refresh,
+                    targeted_urltest_recovery_pending));
+
+        if (runtime_refresh_disposition ==
+            RuntimeFirewallImmediateDisposition::rejected) {
+            const bool runtime_active = routing_runtime_active();
+            const bool owner_shutdown =
+                runtime_firewall_owner_->shutdown_requested();
+            pending_netfilter_refresh_reasons_ =
+                retain_netfilter_refresh_reasons_after_immediate_disposition(
+                    pending_netfilter_refresh_reasons_,
+                    reasons,
+                    runtime_refresh_disposition,
+                    runtime_active,
+                    owner_shutdown);
+            if (runtime_active && !owner_shutdown) {
+                // Re-arm the existing bounded debounce owner. This does not
+                // re-send configuration inline and preserves both FULL and
+                // NAT source bits from the same firmware burst.
+                schedule_netfilter_runtime_refresh(
+                    full_refresh ? NetfilterRefreshReason::full
+                                 : NetfilterRefreshReason::nat_only);
+                Logger::instance().info(
+                    "Netfilter event: {} runtime refresh was not accepted; "
+                    "the exact source event remains scheduled.",
+                    reason_label);
+            } else {
+                Logger::instance().verbose(
+                    "Netfilter event: {} runtime refresh was ignored because "
+                    "routing is stopped or the firewall owner is shutting "
+                    "down.",
+                    reason_label);
+            }
+        } else if (runtime_refresh_disposition ==
+                   RuntimeFirewallImmediateDisposition::handed_off) {
             Logger::instance().info(
-                "Netfilter event: {} runtime refresh complete.",
+                "Netfilter event: {} runtime refresh handed to the firewall "
+                "worker.",
                 reason_label);
         } else {
             Logger::instance().info(
@@ -3362,624 +3617,3100 @@ void Daemon::complete_sighup_reload(
     }
 }
 
-bool Daemon::refresh_iproute_and_firewall_runtime(
+RuntimeFirewallImmediateDisposition
+Daemon::refresh_iproute_and_firewall_runtime(
     std::size_t retry_attempt,
-    std::optional<InternalVpnRuntimeResolution>
-        prepared_internal_vpn_resolution,
-    std::optional<InternalVpnServiceRuntimeResolution>
-        prepared_internal_vpn_service_resolution,
+    PreparedNativeVpnCatalogPtr prepared_native_vpn_catalog,
     bool schedule_catalog_refresh,
-    OwnedSnatRecovery snat_recovery) {
-    auto& log = Logger::instance();
+    OwnedSnatRecovery snat_recovery,
+    RuntimeFirewallImmediateCompletionIntent completion_intent) {
+    std::shared_ptr<DaemonRuntimeFirewallOperationState> state;
+    try {
+        state = std::make_shared<DaemonRuntimeFirewallOperationState>();
+    } catch (...) {
+        (void)completion_intent.settle(
+            RuntimeFirewallImmediateTerminalOutcome::not_verified);
+        return RuntimeFirewallImmediateDisposition::rejected;
+    }
+    state->immediate_completion_intent = std::move(completion_intent);
     if (!routing_runtime_active()) {
-        log.verbose(
-            "Skipping runtime routing/firewall refresh because routing is stopped.");
+        (void)state->immediate_completion_intent.settle(
+            RuntimeFirewallImmediateTerminalOutcome::not_verified);
+        return RuntimeFirewallImmediateDisposition::rejected;
+    }
+
+    const auto current_generation =
+        runtime_generation_.load(std::memory_order_acquire);
+    RuntimeFirewallImmediateDisposition disposition{
+        RuntimeFirewallImmediateDisposition::rejected};
+    try {
+        disposition = runtime_firewall_owner_->start_immediate(
+            retry_attempt,
+            current_generation,
+            std::move(snat_recovery),
+            std::move(prepared_native_vpn_catalog),
+            schedule_catalog_refresh,
+            state);
+    } catch (...) {
+        (void)state->immediate_completion_intent.settle(
+            RuntimeFirewallImmediateTerminalOutcome::not_verified);
+        return RuntimeFirewallImmediateDisposition::rejected;
+    }
+    if (disposition !=
+        RuntimeFirewallImmediateDisposition::handed_off) {
+        // No operation context accepted this invocation. Preserve the former
+        // synchronous false outcome locally; the intent must never attach to
+        // the active/trailing operation or one of its successors.
+        (void)state->immediate_completion_intent.settle(
+            RuntimeFirewallImmediateTerminalOutcome::not_verified);
+    }
+    return disposition;
+}
+
+bool Daemon::runtime_firewall_lifecycle_generation_is_current(
+    RuntimeFirewallLifecycleKind lifecycle_kind,
+    std::uint64_t expected_generation) const noexcept {
+    bool active = false;
+    try {
+        active = routing_runtime_active();
+    } catch (...) {
+        // This predicate is called from coordinator/watchdog noexcept
+        // boundaries. A failed state-store lock is never evidence that a
+        // generation is current.
         return false;
     }
-    const auto admission = runtime_firewall_retry_.begin_attempt(
-        retry_attempt, std::move(snat_recovery));
-    snat_recovery = admission.snat_recovery;
-    if (admission.coalesced) {
-        if (prepared_internal_vpn_resolution.has_value() ||
-            prepared_internal_vpn_service_resolution.has_value()) {
-            // A catalog completion is an exact authoritative observation, not
-            // another generic wakeup. Replace the older timer now; otherwise
-            // an admission-deferred closure could later publish its older
-            // prepared snapshot after the shared catalog had advanced.
+    const bool exact_start_in_progress =
+        runtime_firewall_lifecycle_is_start(lifecycle_kind) &&
+        !active &&
+        runtime_state_machine_.state() == RuntimeState::starting;
+    return (active || exact_start_in_progress) &&
+           expected_generation ==
+               runtime_generation_.load(std::memory_order_acquire);
+}
+
+#ifdef WITH_API
+void Daemon::begin_preowned_runtime_firewall_start(
+    std::unique_ptr<RuntimeMutationAdmission::Lease> mutation_lease,
+    RuntimeFirewallLifecycleCompletion::Source completion) {
+    auto rejection_source = completion;
+    const auto settle_rejection = [&rejection_source](
+        std::string_view detail) noexcept {
+        RuntimeFirewallLifecycleTerminal terminal;
+        terminal.outcome = RuntimeFirewallLifecycleOutcome::not_verified;
+        terminal.committed = false;
+        terminal.commit_ambiguous = false;
+        try {
+            terminal.detail.assign(detail.data(), detail.size());
+        } catch (...) {
+        }
+        (void)rejection_source.settle(std::move(terminal));
+    };
+
+    if (!mutation_lease || !static_cast<bool>(*mutation_lease) ||
+        !runtime_mutation_admission_.owns(*mutation_lease)) {
+        mutation_lease.reset();
+        settle_rejection(
+            "runtime start did not receive its exact mutation lease");
+        throw DaemonError(
+            "Runtime start lost its mutation admission before owner handoff");
+    }
+    if (routing_runtime_active()) {
+        mutation_lease.reset();
+        settle_rejection("routing runtime is already active");
+        throw DaemonError("Routing runtime is already started");
+    }
+
+    // This is the only Keenetic DNS preflight for START. It is deliberately
+    // cache-only and happens before state publication or any kernel mutation.
+    KeeneticDnsCacheView prepared_keenetic_dns;
+    try {
+        prepared_keenetic_dns = prepare_keenetic_dns_view(
+            config_, /*allow_refresh=*/false);
+    } catch (const std::exception& error) {
+        mutation_lease.reset();
+        settle_rejection(error.what());
+        throw;
+    } catch (...) {
+        mutation_lease.reset();
+        settle_rejection("cache-only Keenetic DNS preparation failed");
+        throw;
+    }
+
+    auto previous_keenetic_dns = active_keenetic_dns_;
+    auto previous_urltest_selections =
+        firewall_state_.get_urltest_selections();
+    auto state = std::make_shared<DaemonRuntimeFirewallOperationState>();
+    bool start_state_published = false;
+    bool start_inputs_installed = false;
+
+    const auto fail_before_handoff = [
+        this,
+        &previous_keenetic_dns,
+        &previous_urltest_selections,
+        &start_state_published,
+        &start_inputs_installed,
+        &mutation_lease,
+        &settle_rejection](std::string_view detail) noexcept {
+        if (start_inputs_installed) {
             try {
-                cancel_runtime_firewall_retry();
-            } catch (const std::exception& error) {
-                // The coordinator invalidates its serial before delegating to
-                // Scheduler::cancel(). Even if fd cleanup throws, the old
-                // callback is fenced and the newer exact payload must still
-                // be admitted below.
+                using std::swap;
+                swap(active_keenetic_dns_, previous_keenetic_dns);
+            } catch (...) {
+            }
+            try {
+                firewall_state_.swap_urltest_selections(
+                    previous_urltest_selections);
+            } catch (...) {
+            }
+            if (urltest_manager_) {
                 try {
-                    log.verbose(
-                        "Runtime firewall retry cleanup reported '{}' while "
-                        "replacing it with a newer catalog observation.",
+                    urltest_manager_->clear();
+                } catch (...) {
+                }
+            }
+        }
+        try {
+            cancel_idle_stall_observer();
+        } catch (...) {
+        }
+        try {
+            cancel_owned_snat_health_check();
+        } catch (...) {
+        }
+        try {
+            runtime_state_store_.set_routing_runtime_active(false);
+        } catch (...) {
+        }
+        if (start_state_published) {
+            try {
+                transition_runtime_or_throw(
+                    RuntimeState::broken,
+                    "runtime start owner handoff failed");
+                publish_runtime_state();
+            } catch (...) {
+            }
+        }
+        // Release exact mutation admission before waking the API waiter. All
+        // operations above are catch-all guarded, so settlement cannot be
+        // skipped by an ancillary cleanup failure.
+        mutation_lease.reset();
+        settle_rejection(detail);
+    };
+
+    RuntimeFirewallOperationOwner::PreownedImmediateStartResult result;
+    try {
+        cancel_idle_stall_observer();
+        cancel_meta_udp443_activation_cleanup();
+        cancel_owned_snat_health_check();
+        cancel_owned_conntrack_cleanup_retry();
+        cancel_resolver_reload_retry();
+        urltest_after_firewall_gate_.reset();
+        runtime_firewall_owner_->cancel_retry();
+        runtime_firewall_retry_.clear_owned_snat_recovery();
+
+        transition_runtime_or_throw(
+            RuntimeState::starting, "runtime start requested");
+        // The state machine has already changed even when publication throws;
+        // the pre-handoff failure path must therefore move it to broken.
+        start_state_published = true;
+        publish_runtime_state();
+
+        const auto generation =
+            runtime_generation_.fetch_add(
+                1U, std::memory_order_acq_rel) + 1U;
+        active_keenetic_dns_ = std::move(prepared_keenetic_dns);
+        start_inputs_installed = true;
+        normalize_urltest_selections();
+        register_urltest_outbounds();
+
+        result = runtime_firewall_owner_->start_immediate_preowned(
+            0U,
+            generation,
+            {},
+            {},
+            /*schedule_catalog_refresh=*/false,
+            state,
+            runtime_mutation_admission_,
+            std::move(mutation_lease),
+            std::move(completion),
+            RuntimeFirewallLifecycleKind::start_from_stopped);
+    } catch (const std::exception& error) {
+        fail_before_handoff(error.what());
+        throw;
+    } catch (...) {
+        fail_before_handoff(
+            "runtime firewall owner rejected start during handoff");
+        throw;
+    }
+
+    if (result.disposition !=
+        RuntimeFirewallImmediateDisposition::handed_off) {
+        fail_before_handoff(
+            "runtime firewall owner already has an exact operation");
+        throw DaemonError(
+            "Runtime start was not admitted by the firewall owner");
+    }
+
+    rejection_source = {};
+    try {
+        Logger::instance().info(
+            "Runtime start handed to the asynchronous firewall owner.");
+    } catch (...) {
+    }
+}
+
+void Daemon::begin_preowned_runtime_firewall_restart(
+    std::unique_ptr<RuntimeMutationAdmission::Lease> mutation_lease,
+    RuntimeFirewallLifecycleCompletion::Source completion) {
+    auto rejection_source = completion;
+    const auto settle_rejection = [&rejection_source](
+        std::string_view detail) noexcept {
+        RuntimeFirewallLifecycleTerminal terminal;
+        terminal.outcome = RuntimeFirewallLifecycleOutcome::not_verified;
+        terminal.committed = false;
+        terminal.commit_ambiguous = false;
+        try {
+            terminal.detail.assign(detail.data(), detail.size());
+        } catch (...) {
+        }
+        (void)rejection_source.settle(std::move(terminal));
+    };
+
+    if (!mutation_lease || !static_cast<bool>(*mutation_lease) ||
+        !runtime_mutation_admission_.owns(*mutation_lease)) {
+        mutation_lease.reset();
+        settle_rejection(
+            "runtime restart did not receive its exact mutation lease");
+        throw DaemonError(
+            "Runtime restart lost its mutation admission before owner handoff");
+    }
+    if (!routing_runtime_active()) {
+        mutation_lease.reset();
+        settle_rejection("routing runtime is stopped");
+        throw DaemonError("Routing runtime is stopped");
+    }
+
+    // A timer-only background retry owns no mutation lease. Retire that timer
+    // before the foreground operation is admitted, while preserving the
+    // coordinator's exact pending SNAT recovery payload for this attempt.
+    OwnedSnatRecovery pending_snat_recovery;
+    std::shared_ptr<DaemonRuntimeFirewallOperationState> state;
+    try {
+        pending_snat_recovery =
+            runtime_firewall_retry_.pending_owned_snat_recovery();
+        runtime_firewall_owner_->cancel_retry();
+        state =
+            std::make_shared<DaemonRuntimeFirewallOperationState>();
+    } catch (const std::exception& error) {
+        mutation_lease.reset();
+        settle_rejection(error.what());
+        throw;
+    } catch (...) {
+        mutation_lease.reset();
+        settle_rejection(
+            "runtime restart preparation failed before owner handoff");
+        throw;
+    }
+
+    RuntimeFirewallOperationOwner::PreownedImmediateStartResult result;
+    try {
+        result = runtime_firewall_owner_->start_immediate_preowned(
+            0U,
+            runtime_generation_.load(std::memory_order_acquire),
+            pending_snat_recovery,
+            {},
+            /*schedule_catalog_refresh=*/true,
+            state,
+            runtime_mutation_admission_,
+            std::move(mutation_lease),
+            std::move(completion),
+            RuntimeFirewallLifecycleKind::restart_active);
+    } catch (...) {
+        result.unaccepted_lease.reset();
+        mutation_lease.reset();
+        RuntimeFirewallLifecycleTerminal terminal;
+        terminal.outcome = RuntimeFirewallLifecycleOutcome::not_verified;
+        terminal.committed = false;
+        terminal.commit_ambiguous = false;
+        try {
+            terminal.detail =
+                "runtime firewall owner rejected restart during handoff";
+        } catch (...) {
+        }
+        (void)rejection_source.settle(std::move(terminal));
+        throw;
+    }
+
+    if (result.disposition !=
+        RuntimeFirewallImmediateDisposition::handed_off) {
+        // Destroying the exact returned lease below releases admission. The
+        // copied source publishes a precise terminal instead of relying on
+        // the conservative source-abandonment fallback.
+        result.unaccepted_lease.reset();
+        mutation_lease.reset();
+        RuntimeFirewallLifecycleTerminal terminal;
+        terminal.outcome = RuntimeFirewallLifecycleOutcome::not_verified;
+        terminal.committed = false;
+        terminal.commit_ambiguous = false;
+        try {
+            terminal.detail =
+                "runtime firewall owner already has an exact operation";
+        } catch (...) {
+        }
+        (void)rejection_source.settle(std::move(terminal));
+        throw DaemonError(
+            "Runtime restart was not admitted by the firewall owner");
+    }
+
+    // The owner now carries both the physical lease and completion source.
+    // Release this extra producer and leave the control loop immediately.
+    rejection_source = {};
+    try {
+        cancel_resolver_reload_retry();
+    } catch (...) {
+        // The accepted owner remains authoritative. Its resolver tail will
+        // observe any still-running stream and schedule a fresh retry.
+    }
+    try {
+        Logger::instance().info(
+            "Runtime restart handed to the asynchronous firewall owner.");
+    } catch (...) {
+    }
+}
+#endif
+
+void Daemon::dispatch_runtime_firewall_worker_attempt(
+    const std::shared_ptr<RuntimeFirewallOperationContext>& context,
+    RuntimeFirewallOperationClaim queued_claim,
+    OwnedSnatRecovery snat_recovery_input,
+    PreparedNativeVpnCatalogPtr prepared_native_vpn_catalog,
+    bool schedule_catalog_refresh) {
+    if (!context || !runtime_firewall_owner_->is_active(context)) {
+        runtime_firewall_owner_->terminate_before_worker(
+            context,
+            queued_claim,
+            RuntimeFirewallOperationContext::SuccessorMode::
+                defer_same_attempt,
+            /*force_rerun=*/true);
+        return;
+    }
+    auto& state = runtime_firewall_domain_state(context);
+
+    context->queued_claim = queued_claim;
+    context->submitted_snat_recovery = std::move(snat_recovery_input);
+    auto& snat_recovery = context->submitted_snat_recovery;
+    context->prepared_native_vpn_catalog =
+        prepared_native_vpn_catalog;
+    context->schedule_catalog_refresh = schedule_catalog_refresh;
+    context->successor_attempt = queued_claim.attempt;
+    context->successor_runtime_generation =
+        queued_claim.runtime_generation;
+    context->successor_schedule_catalog_refresh =
+        schedule_catalog_refresh;
+    // Until the worker publishes and control proves success, every
+    // pre-worker loss keeps the exact attempt. This also covers executor
+    // rejection, whose queue envelope owns the sole terminalization.
+    context->successor_mode =
+        RuntimeFirewallOperationContext::SuccessorMode::
+            defer_same_attempt;
+    // Arm before any fallible preparation. Admission contention, input
+    // allocation and executor rejection all publish a durable pre-worker
+    // terminal and need the same independent drain fallback.
+    if (!runtime_firewall_owner_->arm_completion_watchdog(context)) {
+        runtime_firewall_owner_->terminate_before_worker(
+            context,
+            queued_claim,
+            RuntimeFirewallOperationContext::SuccessorMode::
+                defer_same_attempt,
+            /*force_rerun=*/true);
+        // No asynchronous fallback exists when watchdog registration fails.
+        // We are still on the control loop and no worker has been queued, so
+        // consume the exact coordinator terminal synchronously.
+        drain_runtime_firewall_terminal(context, /*shutdown=*/false);
+        return;
+    }
+
+    const auto terminalize_before_worker = [this, &context, queued_claim](
+        RuntimeFirewallOperationContext::SuccessorMode successor_mode,
+        bool force_rerun) {
+        runtime_firewall_owner_->terminate_before_worker(
+            context, queued_claim, successor_mode, force_rerun);
+    };
+
+    if (!runtime_firewall_lifecycle_generation_is_current(
+            context->lifecycle_kind,
+            queued_claim.runtime_generation)) {
+        terminalize_before_worker(
+            RuntimeFirewallOperationContext::SuccessorMode::none,
+            /*force_rerun=*/false);
+        return;
+    }
+
+    std::optional<RuntimeMutationAdmission::Lease> mutation_lease;
+    if (!context->retained_mutation_lease) {
+        try {
+            mutation_lease = runtime_mutation_admission_.try_acquire(
+                "runtime-firewall-worker");
+        } catch (const std::exception& error) {
+        state.preworker_failure_kind =
+            DaemonRuntimeFirewallOperationState::PreworkerFailureKind::
+                preparation_failure;
+        try {
+            state.preworker_failure_detail = error.what();
+        } catch (...) {
+            state.preworker_failure_detail =
+                "runtime mutation admission failed";
+        }
+        const bool retry_required =
+            runtime_firewall_preworker_retry_required(
+                snat_recovery.requested,
+                config_has_native_vpn_catalog_policy(config_),
+                urltest_after_firewall_gate_.waiting_for(
+                    queued_claim.runtime_generation),
+                queued_claim.attempt,
+                RUNTIME_FIREWALL_RETRY_DELAYS.size());
+        state.suppress_coordinator_rerun = !retry_required;
+        terminalize_before_worker(
+            retry_required
+                ? RuntimeFirewallOperationContext::SuccessorMode::
+                      reschedule_retry
+                : RuntimeFirewallOperationContext::SuccessorMode::none,
+            /*force_rerun=*/retry_required);
+            return;
+        } catch (...) {
+        state.preworker_failure_kind =
+            DaemonRuntimeFirewallOperationState::PreworkerFailureKind::
+                preparation_failure;
+        try {
+            state.preworker_failure_detail =
+                "runtime mutation admission failed with an unknown error";
+        } catch (...) {
+        }
+        const bool retry_required =
+            runtime_firewall_preworker_retry_required(
+                snat_recovery.requested,
+                config_has_native_vpn_catalog_policy(config_),
+                urltest_after_firewall_gate_.waiting_for(
+                    queued_claim.runtime_generation),
+                queued_claim.attempt,
+                RUNTIME_FIREWALL_RETRY_DELAYS.size());
+        state.suppress_coordinator_rerun = !retry_required;
+        terminalize_before_worker(
+            retry_required
+                ? RuntimeFirewallOperationContext::SuccessorMode::
+                      reschedule_retry
+                : RuntimeFirewallOperationContext::SuccessorMode::none,
+            /*force_rerun=*/retry_required);
+            return;
+        }
+        if (!mutation_lease.has_value()) {
+            state.preworker_failure_kind =
+                DaemonRuntimeFirewallOperationState::PreworkerFailureKind::
+                    admission_contention;
+            state.preworker_failure_detail =
+                "runtime mutation admission is busy";
+            terminalize_before_worker(
+                RuntimeFirewallOperationContext::SuccessorMode::
+                    defer_same_attempt,
+                /*force_rerun=*/true);
+            return;
+        }
+    }
+
+    try {
+        const bool lifecycle_start =
+            runtime_firewall_lifecycle_is_start(
+                context->lifecycle_kind);
+        state.internal_vpn_resolution =
+            prepared_native_vpn_catalog
+            ? prepared_native_vpn_catalog->interface_resolution
+            : prepare_internal_vpn_server_resolution_from_cache();
+        state.internal_vpn_service_resolution =
+            prepared_native_vpn_catalog
+            ? prepared_native_vpn_catalog->service_resolution
+            : prepare_internal_vpn_service_resolution_from_cache();
+        if (prepared_native_vpn_catalog) {
+            context->schedule_catalog_refresh =
+                prepared_native_vpn_catalog->schedule_catalog_refresh;
+            context->successor_schedule_catalog_refresh =
+                context->schedule_catalog_refresh;
+        }
+        if (context->schedule_catalog_refresh) {
+            schedule_internal_vpn_catalog_refresh_if_needed(
+                state.internal_vpn_resolution.state,
+                state.internal_vpn_service_resolution.state);
+        }
+
+        state.lifecycle_trusted_dns_interfaces =
+            build_dnsmasq_trusted_interfaces(
+                state.internal_vpn_resolution.effective_servers,
+                state.internal_vpn_service_resolution.effective_targets);
+        const auto& next_resolver_access_policy =
+            state.lifecycle_trusted_dns_interfaces;
+        const auto current_resolver_access_policy =
+            resolver_generation_snapshot_
+            ? resolver_generation_snapshot_->trusted_dns_interfaces
+            : build_dnsmasq_trusted_interfaces(
+                  resolved_internal_vpn_servers_,
+                  resolved_internal_vpn_service_targets_);
+        state.resolver_refresh_required =
+            runtime_firewall_lifecycle_is_foreground(
+                context->lifecycle_kind) ||
+            current_resolver_access_policy != next_resolver_access_policy ||
+            !resolver_generation_snapshot_ ||
+            !resolver_generation_snapshot_->list_cache_snapshot;
+        if (lifecycle_start) {
+            // START activates the already-pinned resolver/list generation.
+            // Requiring activation is not authority to advance remote bodies.
+            state.list_cache_snapshot =
+                resolver_generation_snapshot_ &&
+                        resolver_generation_snapshot_->list_cache_snapshot
+                    ? resolver_generation_snapshot_->list_cache_snapshot
+                    : capture_relevant_list_cache_generation(config_);
+        } else {
+            state.list_cache_snapshot = state.resolver_refresh_required
+                ? capture_relevant_list_cache_generation(config_)
+                : resolver_generation_snapshot_->list_cache_snapshot;
+        }
+
+        RuntimeFirewallWorkerAttemptInput worker_input;
+        auto& transaction = worker_input.transaction;
+        transaction.operation_serial = queued_claim.serial;
+        transaction.runtime_generation = queued_claim.runtime_generation;
+        transaction.config = config_;
+        transaction.outbound_marks = outbound_marks_;
+        transaction.urltest_selections =
+            firewall_state_.get_urltest_selections();
+        transaction.effective_internal_vpn_servers =
+            state.internal_vpn_resolution.effective_servers;
+        transaction.effective_internal_vpn_targets =
+            internal_vpn_interface_runtime_targets(
+                transaction.effective_internal_vpn_servers);
+        transaction.effective_internal_vpn_targets.insert(
+            transaction.effective_internal_vpn_targets.end(),
+            state.internal_vpn_service_resolution.effective_targets.begin(),
+            state.internal_vpn_service_resolution.effective_targets.end());
+        transaction.candidate_native_vpn_direct_egress_snat_selectors =
+            select_native_vpn_direct_egress_snat_selectors(
+                transaction.effective_internal_vpn_targets);
+        transaction.committed_meta_udp443_fwmark =
+            committed_meta_udp443_fwmark_;
+        transaction.committed_meta_udp443_owned_mask =
+            committed_meta_udp443_owned_mask_;
+        transaction.list_max_file_size_bytes =
+            max_file_size_bytes(config_);
+        transaction.list_cache_snapshot = state.list_cache_snapshot;
+        transaction.requested_list_fingerprints =
+            state.list_cache_snapshot
+            ? state.list_cache_snapshot->fingerprints()
+            : std::map<std::string, std::string>{};
+        transaction.requested_mode =
+            runtime_firewall_lifecycle_is_foreground(
+                context->lifecycle_kind)
+            ? FirewallApplyMode::PreserveSets
+            : runtime_refresh_firewall_mode();
+        transaction.udp_call_affinity_ipset_available =
+            opts_.udp_call_affinity_ipset_available;
+        transaction.keenetic_dns_snapshot = active_keenetic_dns_.snapshot;
+        transaction.previous_rules = firewall_state_.get_rules();
+        transaction.previous_list_usage = applied_list_usage_;
+        transaction.previous_list_content_state =
+            applied_list_content_state_;
+        transaction.previous_list_fingerprints =
+            applied_list_fingerprints_;
+        transaction.previous_native_vpn_direct_egress_snat_selectors =
+            applied_native_vpn_direct_egress_snat_selectors_;
+
+        worker_input.route_health_request.operation_serial =
+            queued_claim.serial;
+        worker_input.route_health_request.runtime_generation =
+            queued_claim.runtime_generation;
+        worker_input.route_health_request.route_epoch =
+            routing_observation_epoch_.load(std::memory_order_acquire);
+        worker_input.route_health_request.config = transaction.config;
+        worker_input.route_health_request.outbound_marks =
+            transaction.outbound_marks;
+        worker_input.route_health_request.urltest_selections =
+            transaction.urltest_selections;
+        worker_input.route_reconcile_mode =
+            runtime_firewall_lifecycle_is_foreground(
+                context->lifecycle_kind)
+            ? RouteReconcileMode::Strict
+            : RouteReconcileMode::DeferredRepair;
+        worker_input.route_mutation_checkpoint =
+            std::make_shared<RuntimeRouteMutationCheckpoint>();
+        state.route_mutation_checkpoint =
+            worker_input.route_mutation_checkpoint;
+
+        std::weak_ptr<RuntimeFirewallOperationContext> weak_context{
+            context};
+        context->pump_worker_checkpoint = [this, weak_context]() noexcept {
+            const auto retained = weak_context.lock();
+            if (!retained) return;
+            pump_runtime_route_health_checkpoint(retained);
+        };
+        const auto route_mutation_checkpoint =
+            worker_input.route_mutation_checkpoint;
+        context->cancel_worker_checkpoint =
+            [route_mutation_checkpoint]() noexcept {
+                (void)route_mutation_checkpoint->cancel();
+            };
+
+        const auto route_config = config_.route.value_or(RouteConfig{});
+        const bool has_explicit_inbound_scope =
+            route_config.inbound_interfaces.has_value() &&
+            !route_config.inbound_interfaces->empty();
+        const bool has_native_vpn_bypass = std::any_of(
+            transaction.effective_internal_vpn_servers.begin(),
+            transaction.effective_internal_vpn_servers.end(),
+            [](const InternalVpnServer& server) {
+                return !server.process_clients;
+            }) || std::any_of(
+            transaction.effective_internal_vpn_targets.begin(),
+            transaction.effective_internal_vpn_targets.end(),
+            [](const InternalVpnRuntimeTarget& target) {
+                return !target.process_clients;
+            });
+        transaction.forwarded_scope_allows_unmarked_cleanup =
+            !has_explicit_inbound_scope && !has_native_vpn_bypass;
+
+        worker_input.inspect_owned_snat = snat_recovery.requested;
+        if (worker_input.inspect_owned_snat) {
+            worker_input.pre_mutation_owned_conntrack_cleanup_snapshot =
+                snapshot_owned_conntrack_marks();
+        }
+        worker_input.cleanup_owned_conntrack_after_commit =
+            lifecycle_start;
+
+        if (!lifecycle_start) {
+            state.previous_meta_cleanup = pending_meta_udp443_cleanup_;
+        }
+        cancel_idle_stall_observer();
+        cancel_meta_udp443_activation_cleanup();
+        if (!lifecycle_start) {
+            state.preworker_side_effects_armed = true;
+        }
+        state.meta_cleanup_epoch = meta_udp443_cleanup_epoch_.load(
+            std::memory_order_acquire);
+
+        auto worker_input_snapshot =
+            std::make_shared<const RuntimeFirewallWorkerAttemptInput>(
+                std::move(worker_input));
+        std::unique_ptr<RuntimeMutationAdmission::Lease> lease_owner;
+        if (mutation_lease.has_value()) {
+            lease_owner =
+                std::make_unique<RuntimeMutationAdmission::Lease>(
+                    std::move(*mutation_lease));
+        }
+        state.preworker_failure_kind =
+            DaemonRuntimeFirewallOperationState::PreworkerFailureKind::
+                transport_rejected;
+        state.preworker_failure_detail =
+            "runtime firewall worker queue rejected the exact attempt";
+        RuntimeFirewallOperationOwner::WorkerRunner worker_runner{
+            [this](
+                const RuntimeFirewallWorkerAttemptInput& input,
+                const RuntimeFirewallDelayedWorker::RunningClaim&)
+                -> RuntimeFirewallWorkerAttemptResultPtr {
+                SystemRuntimeRouteHealthServices route_health_services{
+                    netlink_};
+                return
+                    execute_runtime_firewall_worker_attempt_durable_with_route_preparation(
+                    input,
+                    route_health_services,
+                    [this, &input](const RuntimeRouteHealthPlan& plan,
+                                   RouteReconcileMode reconcile_mode) {
+                        RuntimeRouteWorkerMutationResult result;
+                        const auto exact_worker_input =
+                            plan.operation_serial ==
+                                input.route_health_request.operation_serial &&
+                            plan.runtime_generation ==
+                                input.route_health_request.runtime_generation &&
+                            plan.route_epoch ==
+                                input.route_health_request.route_epoch &&
+                            plan.operation_serial ==
+                                input.transaction.operation_serial &&
+                            plan.runtime_generation ==
+                                input.transaction.runtime_generation;
+                        const auto current_generation =
+                            runtime_generation_.load(
+                                std::memory_order_acquire);
+                        const auto current_route_epoch =
+                            routing_observation_epoch_.load(
+                                std::memory_order_acquire);
+                        if (runtime_firewall_owner_->shutdown_requested()) {
+                            result.ack = RuntimeRouteMutationAck::shutdown;
+                            return result;
+                        }
+                        if (!exact_worker_input ||
+                            current_generation != plan.runtime_generation ||
+                            current_route_epoch != plan.route_epoch) {
+                            result.ack = RuntimeRouteMutationAck::stale;
+                            return result;
+                        }
+
+                        try {
+                            // This is the production off-loop routing write.
+                            // The combined owner serializes both manager
+                            // ledgers; no Daemon RouteTable/PolicyRuleManager
+                            // escape remains.
+                            const auto inventory =
+                                routing_operation_owner_.
+                                    reconcile_compatibility_generation(
+                                    plan.routing.routes,
+                                    plan.routing.rules,
+                                    reconcile_mode,
+                                    [this, &plan]() {
+                                        return !runtime_firewall_owner_
+                                                    ->shutdown_requested() &&
+                                            runtime_generation_.load(
+                                                std::memory_order_acquire) ==
+                                                plan.runtime_generation &&
+                                            routing_observation_epoch_.load(
+                                                std::memory_order_acquire) ==
+                                                plan.route_epoch;
+                                    });
+                            if (!inventory) {
+                                result.ack = runtime_firewall_owner_
+                                                     ->shutdown_requested()
+                                    ? RuntimeRouteMutationAck::shutdown
+                                    : RuntimeRouteMutationAck::stale;
+                                return result;
+                            }
+                            if (classify_runtime_routing_inventory(inventory) !=
+                                RuntimeRoutingInventoryAuthority::
+                                    authoritative) {
+                                // A conservative preimage or an unknown
+                                // delete effect is not sufficient admission
+                                // evidence for the firewall generation. The
+                                // typed stale result keeps one coalesced retry
+                                // and never replays the route body itself.
+                                result.ack = RuntimeRouteMutationAck::stale;
+                                try {
+                                    result.failure_detail =
+                                        "runtime routing inventory requires "
+                                        "a fresh authoritative "
+                                        "reconciliation";
+                                } catch (...) {
+                                }
+                                return result;
+                            }
+                            if (runtime_firewall_owner_
+                                    ->shutdown_requested()) {
+                                result.ack =
+                                    RuntimeRouteMutationAck::shutdown;
+                            } else if (
+                                runtime_generation_.load(
+                                    std::memory_order_acquire) !=
+                                    plan.runtime_generation ||
+                                routing_observation_epoch_.load(
+                                    std::memory_order_acquire) !=
+                                    plan.route_epoch) {
+                                result.ack =
+                                    RuntimeRouteMutationAck::stale;
+                            } else {
+                                result.ack =
+                                    RuntimeRouteMutationAck::applied;
+                            }
+                        } catch (const std::bad_alloc&) {
+                            result.ack = RuntimeRouteMutationAck::stale;
+                            try {
+                                result.failure_detail =
+                                    "runtime route mutation could not "
+                                    "allocate its terminal evidence";
+                            } catch (...) {
+                            }
+                        } catch (const RouteInterfaceUnavailableError& error) {
+                            result.ack =
+                                RuntimeRouteMutationAck::route_unavailable;
+                            try {
+                                result.failure_detail = error.what();
+                            } catch (...) {
+                            }
+                        } catch (const std::exception& error) {
+                            result.ack =
+                                classify_runtime_routing_inventory(
+                                    routing_operation_owner_.snapshot()) ==
+                                        RuntimeRoutingInventoryAuthority::
+                                            authoritative
+                                ? RuntimeRouteMutationAck::mutation_failed
+                                : RuntimeRouteMutationAck::stale;
+                            try {
+                                result.failure_detail = error.what();
+                            } catch (...) {
+                            }
+                        } catch (...) {
+                            result.ack =
+                                classify_runtime_routing_inventory(
+                                    routing_operation_owner_.snapshot()) ==
+                                        RuntimeRoutingInventoryAuthority::
+                                            authoritative
+                                ? RuntimeRouteMutationAck::mutation_failed
+                                : RuntimeRouteMutationAck::stale;
+                            try {
+                                result.failure_detail =
+                                    "runtime route mutation failed with an "
+                                    "unknown error";
+                            } catch (...) {
+                            }
+                        }
+                        return result;
+                    },
+                    [this, &input]() {
+                        // Route observation, mutation and the control-only
+                        // publication rendezvous have already completed.
+                        // Hold this lock only for firewall/conntrack.
+                        KPBR_UNIQUE_LOCK(
+                            affinity_mutation_lock,
+                            udp_call_affinity_mutation_mutex_);
+                        return execute_runtime_firewall_worker_attempt(
+                            input,
+                            *firewall_,
+                            conntrack_manager_,
+                            netlink_);
+                    });
+            }};
+        const bool enqueued = context->retained_mutation_lease
+            ? runtime_firewall_owner_->enqueue_worker_with_retained_lease(
+                  context,
+                  queued_claim,
+                  std::move(worker_input_snapshot),
+                  std::move(worker_runner))
+            : runtime_firewall_owner_->enqueue_worker(
+                  context,
+                  queued_claim,
+                  std::move(worker_input_snapshot),
+                  std::move(lease_owner),
+                  std::move(worker_runner));
+        if (enqueued) {
+            state.preworker_failure_kind =
+                DaemonRuntimeFirewallOperationState::PreworkerFailureKind::
+                    none;
+            state.preworker_failure_detail.clear();
+        }
+        // On rejection the destroyed queue envelope publishes the exact
+        // queued_abandoned terminal and returns the mutation lease. Do not
+        // manufacture a second terminal here.
+    } catch (const RouteInterfaceUnavailableError& error) {
+        state.preworker_failure_kind =
+            DaemonRuntimeFirewallOperationState::PreworkerFailureKind::
+                route_unavailable;
+        try {
+            state.preworker_failure_detail = error.what();
+        } catch (...) {
+            state.preworker_failure_detail =
+                "runtime route interface is unavailable";
+        }
+        const bool retry_required =
+            snat_recovery.requested ||
+            urltest_after_firewall_gate_.waiting_for(
+                queued_claim.runtime_generation);
+        terminalize_before_worker(
+            retry_required
+                ? RuntimeFirewallOperationContext::SuccessorMode::
+                      reschedule_retry
+                : RuntimeFirewallOperationContext::SuccessorMode::none,
+            /*force_rerun=*/retry_required);
+    } catch (const std::exception& error) {
+        const bool transport_rejected =
+            state.preworker_failure_kind ==
+            DaemonRuntimeFirewallOperationState::PreworkerFailureKind::
+                transport_rejected;
+        if (!transport_rejected) {
+            state.preworker_failure_kind =
+                DaemonRuntimeFirewallOperationState::PreworkerFailureKind::
+                    preparation_failure;
+        }
+        try {
+            state.preworker_failure_detail = error.what();
+        } catch (...) {
+            state.preworker_failure_detail =
+                "runtime firewall input preparation failed";
+        }
+        if (context->worker_operation) {
+            context->worker_operation.reset();
+        } else {
+            const bool retry_required = transport_rejected ||
+                (!runtime_firewall_lifecycle_is_start(
+                     context->lifecycle_kind) &&
+                 runtime_firewall_preworker_retry_required(
+                    snat_recovery.requested,
+                    config_has_native_vpn_catalog_policy(config_),
+                    urltest_after_firewall_gate_.waiting_for(
+                        queued_claim.runtime_generation),
+                    queued_claim.attempt,
+                    RUNTIME_FIREWALL_RETRY_DELAYS.size()));
+            if (!transport_rejected) {
+                state.suppress_coordinator_rerun = !retry_required;
+            }
+            terminalize_before_worker(
+                transport_rejected
+                    ? RuntimeFirewallOperationContext::SuccessorMode::
+                          defer_same_attempt
+                    : (retry_required
+                           ? RuntimeFirewallOperationContext::SuccessorMode::
+                                 reschedule_retry
+                           : RuntimeFirewallOperationContext::SuccessorMode::
+                                 none),
+                /*force_rerun=*/retry_required);
+        }
+    } catch (...) {
+        const bool transport_rejected =
+            state.preworker_failure_kind ==
+            DaemonRuntimeFirewallOperationState::PreworkerFailureKind::
+                transport_rejected;
+        if (!transport_rejected) {
+            state.preworker_failure_kind =
+                DaemonRuntimeFirewallOperationState::PreworkerFailureKind::
+                    preparation_failure;
+            try {
+                state.preworker_failure_detail =
+                    "runtime firewall input preparation failed with an "
+                    "unknown error";
+            } catch (...) {
+            }
+        }
+        if (context->worker_operation) {
+            // If no queue envelope was made, Operation destruction performs
+            // the only exact queued-claim terminalization. If an envelope was
+            // already made, its shared state owns the same one-shot action.
+            context->worker_operation.reset();
+        } else {
+            const bool retry_required = transport_rejected ||
+                (!runtime_firewall_lifecycle_is_start(
+                     context->lifecycle_kind) &&
+                 runtime_firewall_preworker_retry_required(
+                    snat_recovery.requested,
+                    config_has_native_vpn_catalog_policy(config_),
+                    urltest_after_firewall_gate_.waiting_for(
+                        queued_claim.runtime_generation),
+                    queued_claim.attempt,
+                    RUNTIME_FIREWALL_RETRY_DELAYS.size()));
+            if (!transport_rejected) {
+                state.suppress_coordinator_rerun = !retry_required;
+            }
+            terminalize_before_worker(
+                transport_rejected
+                    ? RuntimeFirewallOperationContext::SuccessorMode::
+                          defer_same_attempt
+                    : (retry_required
+                           ? RuntimeFirewallOperationContext::SuccessorMode::
+                                 reschedule_retry
+                           : RuntimeFirewallOperationContext::SuccessorMode::
+                                 none),
+                /*force_rerun=*/retry_required);
+        }
+        try {
+            Logger::instance().error(
+                "Runtime firewall worker input could not be queued; the "
+                "exact attempt will be deferred without consuming retry "
+                "budget.");
+        } catch (...) {
+        }
+    }
+}
+
+void Daemon::pump_runtime_route_health_checkpoint(
+    const std::shared_ptr<RuntimeFirewallOperationContext>& context)
+    noexcept {
+    if (!context || !runtime_firewall_owner_->is_active(context)) return;
+    // The pump is a watchdog/shutdown seam and is declared noexcept. Avoid
+    // the throwing domain-state accessor even though every production
+    // context is created with this exact state type.
+    if (!context->domain_state) return;
+    auto& state = static_cast<DaemonRuntimeFirewallOperationState&>(
+        *context->domain_state);
+    const auto checkpoint = state.route_mutation_checkpoint;
+    if (!checkpoint ||
+        checkpoint->state() !=
+            RuntimeRouteMutationCheckpointState::plan_ready) {
+        return;
+    }
+
+    auto claim = checkpoint->try_claim_control();
+    if (!claim.has_value()) return;
+    const auto plan = claim->plan();
+    if (!plan) {
+        (void)claim->acknowledge(
+            RuntimeRouteMutationAck::mutation_failed);
+        return;
+    }
+
+    const bool shutting_down =
+        runtime_firewall_owner_->shutdown_requested() ||
+        !runtime_firewall_lifecycle_generation_is_current(
+            context->lifecycle_kind,
+            plan->runtime_generation);
+    if (shutting_down) {
+        (void)claim->acknowledge(RuntimeRouteMutationAck::shutdown);
+        return;
+    }
+
+    const bool exact_context =
+        context->queued_claim.serial == plan->operation_serial &&
+        context->queued_claim.runtime_generation ==
+            plan->runtime_generation &&
+        plan->runtime_generation ==
+            runtime_generation_.load(std::memory_order_acquire) &&
+        plan->route_epoch ==
+            routing_observation_epoch_.load(std::memory_order_acquire) &&
+        context->worker_input &&
+        context->worker_input->route_health_request.operation_serial ==
+            plan->operation_serial &&
+        context->worker_input->route_health_request.runtime_generation ==
+            plan->runtime_generation &&
+        context->worker_input->route_health_request.route_epoch ==
+            plan->route_epoch;
+    if (!exact_context) {
+        (void)claim->acknowledge(RuntimeRouteMutationAck::stale);
+        return;
+    }
+
+    // The route/rule mutation already completed in the worker and released
+    // the combined owner. This control boundary only revalidates the exact
+    // context, publishes its observation metadata and lets firewall proceed.
+    try {
+        log_ipv6_support_decision_once(plan->ipv6_decision);
+    } catch (...) {
+    }
+    (void)claim->acknowledge(RuntimeRouteMutationAck::applied);
+}
+
+void Daemon::trigger_broad_urltest_probe_noexcept() noexcept {
+    if (!urltest_manager_) return;
+    try {
+        Logger::instance().info(
+            "Netfilter event: probing urltest endpoints after verified "
+            "firewall publication...");
+    } catch (...) {
+    }
+    if (!config_.outbounds.has_value()) return;
+    for (const auto& outbound : *config_.outbounds) {
+        if (outbound.type != OutboundType::URLTEST) continue;
+        try {
+            urltest_manager_->trigger_immediate_test(outbound.tag);
+        } catch (const std::exception& error) {
+            try {
+                Logger::instance().info(
+                    "Netfilter event: urltest '{}' probe could not be "
+                    "started: {}",
+                    outbound.tag,
+                    error.what());
+            } catch (...) {
+            }
+        } catch (...) {
+        }
+    }
+}
+
+bool Daemon::begin_runtime_firewall_lifecycle_resolver(
+    const std::shared_ptr<RuntimeFirewallOperationContext>& context)
+    noexcept {
+    const bool lifecycle_start = context &&
+        runtime_firewall_lifecycle_is_start(context->lifecycle_kind);
+    const bool lifecycle_restart = context &&
+        runtime_firewall_lifecycle_is_restart(context->lifecycle_kind);
+    if (!context || !runtime_firewall_owner_->is_active(context) ||
+        (!lifecycle_start && !lifecycle_restart) ||
+        !context->domain_state) {
+        return false;
+    }
+    auto& state = static_cast<DaemonRuntimeFirewallOperationState&>(
+        *context->domain_state);
+    using Phase = DaemonRuntimeFirewallOperationState::
+        LifecycleTailPhase;
+    if (lifecycle_restart && !state.resolver_refresh_required) {
+        state.lifecycle_resolver_verified = true;
+        state.lifecycle_resolver_phase = Phase::completed;
+        return false;
+    }
+    if (state.lifecycle_resolver_phase == Phase::in_flight) {
+        const bool coordinator_in_flight =
+            resolver_stream_coordinator_.in_flight();
+        bool exact_stream_in_flight = false;
+        if (coordinator_in_flight) {
+            KPBR_LOCK_GUARD(resolver_stream_attempt_mutex_);
+            exact_stream_in_flight =
+                active_resolver_stream_attempt_id_ ==
+                    state.lifecycle_resolver_attempt_id &&
+                active_resolver_stream_generation_ &&
+                active_resolver_stream_generation_->stream_epoch ==
+                    state.lifecycle_resolver_stream_epoch;
+        }
+        if (exact_stream_in_flight) {
+            return true;
+        }
+        // A rejected control handoff retires the coordinator claim without
+        // invoking its control-only completion. The terminal watchdog is the
+        // durable fallback: once the exact stream is no longer in flight it
+        // converts that lost handoff into a failed lifecycle resolver tail.
+        state.lifecycle_resolver_verified = false;
+        state.lifecycle_resolver_phase = Phase::completed;
+        try {
+            state.lifecycle_failure_detail = lifecycle_start
+                ? "resolver activation completion was not published"
+                : "resolver reload completion was not published";
+        } catch (...) {
+        }
+        return false;
+    }
+    if (state.lifecycle_resolver_phase == Phase::completed) {
+        return false;
+    }
+
+    const auto fail = [&state](std::string_view detail) noexcept {
+        state.lifecycle_resolver_verified = false;
+        state.lifecycle_resolver_phase = Phase::completed;
+        try {
+            state.lifecycle_failure_detail.assign(
+                detail.data(), detail.size());
+        } catch (...) {
+        }
+    };
+
+    // The active attempt id/generation are the IPC stream authority. Never
+    // overwrite another coordinator claim before request() can reject us as
+    // busy; the coordinator releases its lifetime before reporting idle.
+    if (resolver_stream_coordinator_.in_flight()) {
+        fail(lifecycle_start
+                 ? "resolver activation coordinator is busy"
+                 : "resolver reload coordinator is busy");
+        return false;
+    }
+
+    try {
+        if (!state.list_cache_snapshot) {
+            fail(lifecycle_start
+                     ? "runtime start resolver list generation is unavailable"
+                     : "runtime restart resolver list generation is unavailable");
+            return false;
+        }
+        if (!state.resolver_generation_published) {
+            apply_started_ts_.store(
+                unix_timestamp_now_seconds(),
+                std::memory_order_release);
+            commit_resolver_generation_snapshot(
+                make_resolver_generation_snapshot(
+                    state.list_cache_snapshot,
+                    state.lifecycle_trusted_dns_interfaces));
+            state.resolver_generation_published = true;
+        }
+        if (!resolver_generation_snapshot_) {
+            fail("lifecycle resolver generation was not published");
+            return false;
+        }
+
+        auto generation = std::make_shared<ResolverGenerationSnapshot>(
+            *resolver_generation_snapshot_);
+        generation->stream_epoch =
+            resolver_stream_epoch_.fetch_add(
+                1U, std::memory_order_acq_rel) + 1U;
+        const std::string attempt_id = generate_resolver_attempt_id();
+        state.lifecycle_resolver_attempt_id = attempt_id;
+        state.lifecycle_resolver_stream_epoch =
+            generation->stream_epoch;
+        const auto args = build_system_resolver_hook_args(
+            generation->config,
+            lifecycle_start
+                ? runtime_start_resolver_action()
+                : std::string_view{"reload"},
+            attempt_id);
+        if (args.empty()) {
+            state.lifecycle_resolver_verified = true;
+            state.lifecycle_resolver_phase = Phase::completed;
+            return false;
+        }
+
+        auto lifetime = std::make_shared<ResolverStreamAttemptLifetime>(
+            ipc_resolver_hook_inflight_,
+            nullptr,
+            generation,
+            [this, attempt_id, lifecycle_start]() noexcept {
+                KPBR_LOCK_GUARD(resolver_stream_attempt_mutex_);
+                if (active_resolver_stream_attempt_id_ == attempt_id) {
+                    active_resolver_stream_attempt_id_.clear();
+                    active_resolver_stream_generation_.reset();
+                    if (lifecycle_start) {
+                        inactive_resolver_activation_generation_.reset();
+                    }
+                }
+            });
+        resolver_generation_snapshot_ = generation;
+        {
+            KPBR_LOCK_GUARD(resolver_stream_attempt_mutex_);
+            active_resolver_stream_attempt_id_ = attempt_id;
+            active_resolver_stream_generation_ = generation;
+            if (lifecycle_start) {
+                inactive_resolver_activation_generation_ = generation;
+            }
+        }
+
+        std::weak_ptr<RuntimeFirewallOperationContext> weak_context{
+            context};
+        ResolverStreamOperation operation;
+        operation.runtime_generation =
+            context->queued_claim.runtime_generation;
+        operation.retry_attempt = context->queued_claim.attempt;
+        operation.stream_epoch = generation->stream_epoch;
+        operation.attempt_id = attempt_id;
+        operation.timeout = std::chrono::seconds{15};
+        operation.lifetime = std::move(lifetime);
+        operation.invoke_hook = [this, args]() {
+            KPBR_LOCK_GUARD(system_resolver_hook_mutex_);
+            return hook_command_executor_(args);
+        };
+        operation.completion =
+            [this, weak_context](
+                const ResolverStreamOperation& completed_operation,
+                const ResolverStreamResult& result) noexcept {
+                const auto retained = weak_context.lock();
+                if (!retained ||
+                    !runtime_firewall_owner_->is_active(retained) ||
+                    !retained->domain_state) {
+                    return;
+                }
+                auto& completed_state =
+                    static_cast<DaemonRuntimeFirewallOperationState&>(
+                        *retained->domain_state);
+                using CompletedPhase =
+                    DaemonRuntimeFirewallOperationState::
+                        LifecycleTailPhase;
+                if (completed_state.lifecycle_resolver_phase !=
+                    CompletedPhase::in_flight) {
+                    return;
+                }
+                const bool exact =
+                    runtime_firewall_lifecycle_generation_is_current(
+                        retained->lifecycle_kind,
+                        completed_operation.runtime_generation) &&
+                    completed_operation.attempt_id ==
+                        completed_state
+                            .lifecycle_resolver_attempt_id &&
+                    completed_operation.stream_epoch ==
+                        completed_state
+                            .lifecycle_resolver_stream_epoch &&
+                    resolver_generation_snapshot_ &&
+                    resolver_generation_snapshot_->stream_epoch ==
+                        completed_operation.stream_epoch;
+                completed_state.lifecycle_resolver_verified =
+                    exact && result.completed &&
+                    result.hook_exit_code == 0;
+                if (!completed_state.lifecycle_resolver_verified) {
+                    try {
+                        completed_state.lifecycle_failure_detail =
+                            result.error.empty()
+                                ? (runtime_firewall_lifecycle_is_start(
+                                       retained->lifecycle_kind)
+                                       ? "resolver activation did not publish "
+                                         "the expected configuration stream"
+                                       : "resolver reload did not publish the "
+                                         "expected configuration stream")
+                                : result.error;
+                    } catch (...) {
+                    }
+                }
+                completed_state.lifecycle_resolver_phase =
+                    CompletedPhase::completed;
+                runtime_firewall_owner_->request_terminal_drain(
+                    retained);
+            };
+
+        const auto requested =
+            resolver_stream_coordinator_.request(std::move(operation));
+        if (requested ==
+            ResolverStreamCoordinator::RequestResult::started) {
+            state.lifecycle_resolver_phase = Phase::in_flight;
+            return true;
+        }
+        if (requested ==
+            ResolverStreamCoordinator::RequestResult::busy) {
+            fail(lifecycle_start
+                     ? "resolver activation coordinator is busy"
+                     : "resolver reload coordinator is busy");
+        } else {
+            fail(lifecycle_start
+                     ? "resolver activation worker rejected the operation"
+                     : "resolver reload worker rejected the operation");
+        }
+    } catch (const std::exception& error) {
+        fail(error.what());
+    } catch (...) {
+        fail(lifecycle_start
+                 ? "resolver activation failed with an unknown error"
+                 : "resolver reload failed with an unknown error");
+    }
+    return false;
+}
+
+bool Daemon::begin_runtime_firewall_start_rollback(
+    const std::shared_ptr<RuntimeFirewallOperationContext>& context)
+    noexcept {
+    if (!context || !runtime_firewall_owner_->is_active(context) ||
+        !runtime_firewall_lifecycle_is_start(context->lifecycle_kind) ||
+        !context->domain_state) {
+        return false;
+    }
+    auto& state = static_cast<DaemonRuntimeFirewallOperationState&>(
+        *context->domain_state);
+    using Phase = DaemonRuntimeFirewallOperationState::
+        LifecycleTailPhase;
+    if (state.lifecycle_start_rollback_phase == Phase::completed) {
+        return false;
+    }
+    if (state.lifecycle_start_rollback_phase == Phase::in_flight) {
+        const auto result = state.lifecycle_start_rollback_result;
+        if (!result ||
+            !result->ready.load(std::memory_order_acquire)) {
+            return true;
+        }
+        try {
+            state.lifecycle_start_rollback_detail = result->detail;
+        } catch (...) {
+        }
+        state.lifecycle_start_rollback_phase = Phase::completed;
+        return false;
+    }
+
+    const auto reject_handoff = [&state](std::string_view detail) noexcept {
+        state.lifecycle_start_rollback_result.reset();
+        state.lifecycle_start_rollback_phase = Phase::not_started;
+        if (state.lifecycle_start_rollback_handoff_rejections <
+            kRuntimeFirewallStartRollbackHandoffRetryLimit) {
+            ++state.lifecycle_start_rollback_handoff_rejections;
+        }
+        const bool retry =
+            runtime_firewall_start_rollback_handoff_retry_available(
+                state.lifecycle_start_rollback_handoff_rejections);
+        try {
+            state.lifecycle_start_rollback_detail.assign(
+                detail.data(), detail.size());
+            if (!retry) {
+                if (!state.lifecycle_start_rollback_detail.empty()) {
+                    state.lifecycle_start_rollback_detail += "; ";
+                }
+                state.lifecycle_start_rollback_detail +=
+                    "rollback worker transport retry limit exhausted; "
+                    "kernel cleanup was not verified";
+            }
+        } catch (...) {
+        }
+        if (!retry) {
+            // The exact START terminal now proceeds through the ordinary
+            // inactive+broken publication. Never report cleanup success when
+            // the dedicated rollback executor did not accept the task.
+            state.lifecycle_start_rollback_phase = Phase::completed;
+        }
+        return retry;
+    };
+
+    try {
+        auto result =
+            std::make_shared<RuntimeFirewallStartRollbackResult>();
+        const auto deactivate_args = build_system_resolver_hook_args(
+            config_, "deactivate");
+        std::weak_ptr<RuntimeFirewallOperationContext> weak_context{
+            context};
+        state.lifecycle_start_rollback_result = result;
+        state.lifecycle_start_rollback_phase = Phase::in_flight;
+
+        const bool queued = runtime_firewall_owner_->enqueue_auxiliary(
+            context,
+            "runtime-start-rollback",
+            [this, result, deactivate_args, weak_context]() mutable {
+                const auto append_failure = [result](
+                    const char* stage,
+                    std::string_view detail) noexcept {
+                    try {
+                        if (!result->detail.empty()) {
+                            result->detail += "; ";
+                        }
+                        result->detail += stage;
+                        if (!detail.empty()) {
+                            result->detail += ": ";
+                            result->detail.append(
+                                detail.data(), detail.size());
+                        }
+                    } catch (...) {
+                    }
+                };
+
+                try {
+                    const auto inventory =
+                        routing_operation_owner_.clear();
+                    result->routing_cleared =
+                        classify_runtime_routing_inventory(inventory) ==
+                            RuntimeRoutingInventoryAuthority::authoritative &&
+                        inventory->routes.empty() &&
+                        inventory->rules.empty() &&
+                        inventory->outcome ==
+                            RuntimeRoutingOperationOutcome::cleared;
+                    if (!result->routing_cleared) {
+                        append_failure(
+                            "routing cleanup",
+                            "kernel removal was not authoritatively verified");
+                    }
+                } catch (const std::exception& error) {
+                    append_failure("routing cleanup", error.what());
+                } catch (...) {
+                    append_failure(
+                        "routing cleanup", "unknown error");
+                }
+
+                try {
+                    KPBR_LOCK_GUARD(
+                        udp_call_affinity_mutation_mutex_);
+                    firewall_->cleanup();
+                    result->firewall_cleared = true;
+                } catch (const std::exception& error) {
+                    append_failure("firewall cleanup", error.what());
+                } catch (...) {
+                    append_failure(
+                        "firewall cleanup", "unknown error");
+                }
+
+                try {
+                    if (deactivate_args.empty()) {
+                        result->resolver_deactivated = true;
+                    } else {
+                        KPBR_LOCK_GUARD(system_resolver_hook_mutex_);
+                        result->resolver_deactivated =
+                            hook_command_executor_(deactivate_args) == 0;
+                        if (!result->resolver_deactivated) {
+                            append_failure(
+                                "resolver deactivate",
+                                "hook returned a non-zero status");
+                        }
+                    }
+                } catch (const std::exception& error) {
+                    append_failure(
+                        "resolver deactivate", error.what());
+                } catch (...) {
+                    append_failure(
+                        "resolver deactivate", "unknown error");
+                }
+
+                result->ready.store(true, std::memory_order_release);
+                (void)post_control_task(
+                    [this, weak_context]() noexcept {
+                        const auto retained = weak_context.lock();
+                        if (retained) {
+                            runtime_firewall_owner_
+                                ->request_terminal_drain(retained);
+                        }
+                    },
+                    "runtime-start-rollback-complete");
+            });
+        if (queued) return true;
+
+        // Keep the exact terminal and lease parked. The bounded terminal
+        // watchdog will retry the auxiliary handoff; finalizing without
+        // clearing routes/firewall/resolver would falsely report a rollback.
+        return reject_handoff(
+            "runtime start rollback worker rejected the operation");
+    } catch (const std::exception& error) {
+        return reject_handoff(error.what());
+    } catch (...) {
+        return reject_handoff(
+            "runtime start rollback could not be queued");
+    }
+}
+
+void Daemon::drain_runtime_firewall_terminal(
+    const std::shared_ptr<RuntimeFirewallOperationContext>& context,
+    bool shutdown) {
+    if (!context || !context->terminal_owner ||
+        !runtime_firewall_owner_->is_active(context)) {
+        return;
+    }
+    auto& state = runtime_firewall_domain_state(context);
+
+    auto drain = context->terminal_owner->try_begin_drain();
+    if (!drain.has_value()) return;
+
+    const auto capture_completion = [this, &context](
+        const RuntimeFirewallOperationCompletion& source) {
+        if (context->completion_captured) {
+            if (context->worker_commit_ambiguous) return;
+
+            // Netfilter/NAT events can arrive while this exact terminal is
+            // parked on resolver activation or START rollback. Fold their
+            // recovery payload into the already durable completion instead
+            // of merely setting force_successor and losing SNAT inspection.
+            (void)absorb_trailing_runtime_firewall_completion(
+                context->completion,
+                context->trailing_snat_recovery,
+                context->trailing_prepared_native_vpn_catalog,
+                context->force_successor);
+            return;
+        }
+        auto captured = source;
+        // Pre-worker terminal transfer deliberately leaves the recovery in
+        // the coordinator. Snapshot it before closing the one-shot owner so
+        // a rejected queue cannot drop an owned-SNAT repair request.
+        if (!captured.snat_recovery.requested) {
+            captured.snat_recovery =
+                runtime_firewall_retry_.pending_owned_snat_recovery();
+        }
+        // Once COMMIT was entered without a proven result, neither an older
+        // prepared candidate nor an event that arrived before the ambiguity
+        // may replay it. The full netfilter resnapshot owner is armed below
+        // and will create a fresh operation only after observing the backend.
+        if (!context->worker_commit_ambiguous) {
+            (void)absorb_trailing_runtime_firewall_completion(
+                captured,
+                context->trailing_snat_recovery,
+                context->trailing_prepared_native_vpn_catalog,
+                context->force_successor);
+        }
+        context->completion = std::move(captured);
+        context->completion_captured = true;
+        context->trailing_snat_recovery = {};
+        context->trailing_prepared_native_vpn_catalog.reset();
+    };
+
+    const auto restore_preworker_control_state =
+        [this, &state, shutdown]() {
+            if (!state.preworker_side_effects_armed) return;
+            if (!shutdown) {
+                reset_idle_stall_observer(
+                    /*schedule_if_eligible=*/true);
+                const auto current_generation =
+                    runtime_generation_.load(std::memory_order_acquire);
+                if (state.previous_meta_cleanup.has_value() &&
+                    state.previous_meta_cleanup->runtime_generation ==
+                        current_generation) {
+                    schedule_meta_udp443_activation_cleanup_retry(
+                        state.previous_meta_cleanup->plan,
+                        current_generation,
+                        meta_udp443_cleanup_epoch_.load(
+                            std::memory_order_acquire),
+                        state.previous_meta_cleanup->attempt);
+                }
+            }
+            state.preworker_side_effects_armed = false;
+        };
+
+    const auto settle_immediate_completion =
+        [this, &state](
+            RuntimeFirewallImmediateTerminalOutcome outcome) noexcept {
+            const auto settlement =
+                state.immediate_completion_intent.settle(outcome);
+            if (settlement.status ==
+                RuntimeFirewallImmediateCompletionIntent::SettleStatus::
+                    retry) {
+                return false;
+            }
+            if (settlement.broad_urltest_probe_claimed) {
+                trigger_broad_urltest_probe_noexcept();
+            }
+            return true;
+        };
+
+    const auto absorb_retained_mutation_lease =
+        [&context, &drain]() noexcept {
+            // A retry after a fallible settlement may already have returned
+            // the exact token to this context. Never ask the terminal owner
+            // for it twice and never replace one physical authority.
+            if (context->retained_mutation_lease) return true;
+            auto returned = drain->take_retained_mutation_lease();
+            if (returned) {
+                context->retained_mutation_lease = std::move(returned);
+            }
+            return true;
+        };
+
+    const auto settle_lifecycle_completion =
+        [&context, &state](
+            RuntimeFirewallLifecycleOutcome outcome) noexcept {
+            if (!context->lifecycle_completion) return;
+            RuntimeFirewallLifecycleTerminal terminal;
+            terminal.outcome = outcome;
+            terminal.committed = state.core_publication.committed;
+            terminal.commit_ambiguous =
+                context->worker_commit_ambiguous;
+            terminal.transient = state.worker_failure_transient ||
+                (runtime_firewall_lifecycle_is_foreground(
+                     context->lifecycle_kind) &&
+                 state.core_publication.committed &&
+                 !state.lifecycle_resolver_verified);
+            try {
+                terminal.detail = state.lifecycle_failure_detail.empty()
+                    ? state.worker_failure_detail
+                    : state.lifecycle_failure_detail;
+            } catch (...) {
+                // Outcome and commit authority are sufficient for the caller;
+                // diagnostic allocation must not strand the completion.
+            }
+            (void)context->lifecycle_completion.settle(
+                std::move(terminal));
+        };
+
+    const auto finalize_start_broken =
+        [this, &context, &state](std::string_view detail) noexcept {
+            if (!runtime_firewall_lifecycle_is_start(
+                    context->lifecycle_kind) ||
+                state.lifecycle_start_finalized) {
+                return state.lifecycle_start_finalized;
+            }
+            if (!state.lifecycle_start_failure_detail_prepared) {
+                try {
+                    auto prepared = state.lifecycle_failure_detail.empty()
+                        ? std::string{detail}
+                        : state.lifecycle_failure_detail;
+                    if (!state.lifecycle_start_rollback_detail.empty()) {
+                        if (!prepared.empty()) {
+                            prepared += "; ";
+                        }
+                        prepared += "rollback: ";
+                        prepared += state.lifecycle_start_rollback_detail;
+                    }
+                    state.lifecycle_failure_detail.swap(prepared);
+                    state.lifecycle_start_failure_detail_prepared = true;
+                } catch (...) {
+                }
+            }
+            // These are ancillary cleanup signals. None may turn a handled
+            // START failure into std::terminate or prevent the mandatory
+            // inactive+broken publication below from being retried.
+            try {
+                cancel_idle_stall_observer();
+            } catch (...) {
+            }
+            try {
+                cancel_meta_udp443_activation_cleanup();
+            } catch (...) {
+            }
+            try {
+                cancel_owned_snat_health_check();
+            } catch (...) {
+            }
+            try {
+                cancel_owned_conntrack_cleanup_retry();
+            } catch (...) {
+            }
+            try {
+                cancel_resolver_reload_retry();
+            } catch (...) {
+            }
+            try {
+                cancel_internal_vpn_catalog_refresh_retry();
+            } catch (...) {
+            }
+            try {
+                urltest_after_firewall_gate_.reset();
+            } catch (...) {
+            }
+            try {
+                resolver_after_firewall_gate_.reset();
+            } catch (...) {
+            }
+            if (urltest_manager_) {
+                try {
+                    urltest_manager_->clear();
+                } catch (...) {
+                }
+            }
+            try {
+                clear_exact_tcp_reset_cleanup_ownership();
+            } catch (...) {
+            }
+            committed_meta_udp443_fwmark_.reset();
+            committed_meta_udp443_owned_mask_ = 0U;
+            try {
+                refresh_resolver_config_hash_actual_async();
+            } catch (...) {
+            }
+
+            bool inactive_published = false;
+            try {
+                runtime_state_store_.set_routing_runtime_active(false);
+                inactive_published = true;
+            } catch (const std::exception& error) {
+                try {
+                    Logger::instance().error(
+                        "Failed to publish inactive runtime start state: {}",
                         error.what());
                 } catch (...) {
                 }
             } catch (...) {
             }
-            log.verbose(
-                "Replacing pending runtime firewall recovery with the latest "
-                "prepared native VPN catalog observation.");
-        } else {
-            log.verbose(
-                "Coalescing runtime routing/firewall refresh with the pending "
-                "recovery retry.");
-            return false;
-        }
-    }
-    auto runtime_mutation = runtime_mutation_admission_.try_acquire(
-        "runtime-firewall-recovery");
-    if (!runtime_mutation.has_value()) {
-        defer_runtime_firewall_retry(
-            retry_attempt,
-            runtime_generation_.load(std::memory_order_acquire),
-            std::move(prepared_internal_vpn_resolution),
-            std::move(prepared_internal_vpn_service_resolution),
-            schedule_catalog_refresh,
-            std::move(snat_recovery));
-        return false;
-    }
-    try {
-        // Interface notifications are handled on the control loop. Re-resolve
-        // against live netlink names using only the shared cache snapshot;
-        // never perform an NDMS HTTP request here.
-        const auto internal_vpn_resolution =
-            prepared_internal_vpn_resolution.has_value()
-                ? std::move(*prepared_internal_vpn_resolution)
-                : prepare_internal_vpn_server_resolution_from_cache();
-        const auto internal_vpn_service_resolution =
-            prepared_internal_vpn_service_resolution.has_value()
-                ? std::move(*prepared_internal_vpn_service_resolution)
-                : prepare_internal_vpn_service_resolution_from_cache();
-        // This can be an ordinary managed-WAN event after the catalog TTL,
-        // not only a native-VPN event. Cache-only reconciliation remains
-        // immediate; the central lifecycle invariant puts the authoritative
-        // RCI observation on the blocking executor.
-        if (schedule_catalog_refresh) {
-            schedule_internal_vpn_catalog_refresh_if_needed(
-                internal_vpn_resolution.state,
-                internal_vpn_service_resolution.state);
-        }
-        const auto next_resolver_access_policy =
-            build_dnsmasq_trusted_interfaces(
-                internal_vpn_resolution.effective_servers,
-                internal_vpn_service_resolution.effective_targets);
-        const auto current_resolver_access_policy =
-            resolver_generation_snapshot_
-                ? resolver_generation_snapshot_->trusted_dns_interfaces
-                : build_dnsmasq_trusted_interfaces(
-                    resolved_internal_vpn_servers_,
-                    resolved_internal_vpn_service_targets_);
-        const bool resolver_access_policy_changed =
-            current_resolver_access_policy !=
-            next_resolver_access_policy;
-        // A firewall-only repair must stay on the list generation already
-        // committed to dnsmasq. If no committed generation exists, promote
-        // this pass to a paired firewall/resolver transaction on one newly
-        // captured generation.
-        const bool resolver_generation_missing =
-            !resolver_generation_snapshot_ ||
-            !resolver_generation_snapshot_->list_cache_snapshot;
-        const bool resolver_refresh_required =
-            resolver_access_policy_changed || resolver_generation_missing;
-        const auto list_cache_snapshot =
-            resolver_refresh_required
-                ? capture_relevant_list_cache_generation(config_)
-                : resolver_generation_snapshot_->list_cache_snapshot;
-        InternalVpnRuntimeGenerationTransaction
-            internal_vpn_generation(
-                resolved_internal_vpn_servers_,
-                internal_vpn_resolution.effective_servers);
-        InternalVpnRuntimeTargetGenerationTransaction
-            internal_vpn_service_generation(
-                resolved_internal_vpn_service_targets_,
-                internal_vpn_service_resolution.effective_targets);
-        const OwnedSnatState snat_before =
-            snat_recovery.requested
-                ? firewall_->inspect_owned_snat_state()
-                : OwnedSnatState::unknown;
-        snat_recovery =
-            observe_owned_snat_state(
-                std::move(snat_recovery),
-                snat_before,
-                snat_before == OwnedSnatState::missing
-                    ? std::optional<OwnedConntrackCleanupSnapshot>{
-                          snapshot_owned_conntrack_marks()}
-                    : std::nullopt);
-        snat_recovery =
-            runtime_firewall_retry_.retain_recovery(
-                std::move(snat_recovery));
-        reconcile_static_routing(RouteReconcileMode::DeferredRepair);
-        apply_firewall(
-            runtime_refresh_firewall_mode(),
-            list_cache_snapshot);
-        const OwnedSnatState inspected_snat_after =
-            snat_recovery.requested
-                ? firewall_->inspect_owned_snat_state()
-                : OwnedSnatState::unknown;
-        snat_recovery =
-            observe_owned_snat_state(
-                std::move(snat_recovery),
-                inspected_snat_after,
-                inspected_snat_after == OwnedSnatState::missing
-                    ? std::optional<OwnedConntrackCleanupSnapshot>{
-                          snapshot_owned_conntrack_marks()}
-                    : std::nullopt);
-        snat_recovery =
-            runtime_firewall_retry_.retain_recovery(
-                std::move(snat_recovery));
-        const OwnedSnatState snat_after = inspected_snat_after;
-        if (snat_recovery.requested &&
-            snat_after != OwnedSnatState::healthy) {
-            throw TransientFirewallError(
-                snat_after == OwnedSnatState::missing
-                    ? "tunnel SNAT scaffold is missing after runtime repair"
-                    : (snat_after == OwnedSnatState::stale
-                           ? "tunnel SNAT scaffold is stale after runtime "
-                             "repair"
-                           : "tunnel SNAT scaffold could not be inspected "
-                             "after runtime repair"));
-        }
-        internal_vpn_generation.commit();
-        internal_vpn_service_generation.commit();
-        update_internal_vpn_verified_includes_lkg(
-            internal_vpn_resolution);
-        update_internal_vpn_service_verified_includes_lkg(
-            internal_vpn_service_resolution);
-        const auto current_runtime_generation =
-            runtime_generation_.load(std::memory_order_acquire);
-        const bool resolver_waits_for_firewall =
-            resolver_after_firewall_gate_.waiting_for(
-                current_runtime_generation);
-        if (resolver_refresh_required) {
-            // Firewall B is now authoritative. Publish the matching prepared
-            // resolver generation even while the recovery gate is closed;
-            // the gate delays only the external dnsmasq stream. Its eventual
-            // release will therefore retry B rather than the previous A.
-            apply_started_ts_.store(
-                unix_timestamp_now_seconds(), std::memory_order_release);
-            commit_resolver_generation_snapshot(
-                make_resolver_generation_snapshot(
-                    list_cache_snapshot));
-        }
-        if (resolver_refresh_required && !resolver_waits_for_firewall) {
-            // A live NDMS catalog refresh can add, remove or rename a dynamic
-            // SSTP/IKE/L2TP/OpenConnect ingress without changing config.json.
-            // Firewall and the in-memory inventory have already committed, so
-            // publish the matching dnsmasq interface ACL as the same runtime
-            // generation. A resolver failure must not roll back working
-            // forwarding; the bounded resolver reconciler will converge it.
-            cancel_resolver_reload_retry();
-            if (resolver_stream_coordinator_.in_flight()) {
-                log.verbose(
-                    "Native VPN DNS access policy committed while a resolver "
-                    "recovery stream was active; scheduling one trailing "
-                    "resolver convergence pass");
-                schedule_resolver_reload_retry(
-                    0, current_runtime_generation);
-            } else {
+
+            bool broken_transitioned = false;
+            try {
+                transition_runtime_or_throw(
+                    RuntimeState::broken, "runtime start failed");
+                broken_transitioned =
+                    runtime_state_machine_.state() == RuntimeState::broken;
+            } catch (const std::exception& error) {
                 try {
-                    if (run_system_resolver_hook_stream_prepared(
-                            "reload", /*rebuild_snapshot=*/false)) {
-                        if (acknowledge_verified_resolver_reload(
-                                current_runtime_generation)) {
-                            // The resolver proof is complete independently of
-                            // later conntrack/remote-access tail work. Publish
-                            // the exact resolver-owned recovery now so a tail
-                            // exception cannot leave a stale broken reason.
-                            publish_runtime_state();
-                        }
-                        refresh_resolver_config_hash_actual_async();
-                    } else {
-                        log.info(
-                            "Native VPN DNS access policy did not converge "
-                            "during runtime refresh; scheduling a bounded "
-                            "resolver retry.");
-                        schedule_resolver_reload_retry(
-                            0,
-                            runtime_generation_.load(
-                                std::memory_order_acquire));
-                    }
-                } catch (const std::exception& error) {
-                    log.info(
-                        "Native VPN DNS access policy refresh was deferred: "
-                        "{}",
+                    Logger::instance().error(
+                        "Failed to enter broken runtime start state: {}",
                         error.what());
-                    schedule_resolver_reload_retry(
-                        0,
-                        runtime_generation_.load(
-                            std::memory_order_acquire));
+                } catch (...) {
+                }
+            } catch (...) {
+            }
+
+            bool snapshot_published = false;
+            if (inactive_published && broken_transitioned) {
+                try {
+                    publish_runtime_state();
+                    snapshot_published = true;
+                } catch (const std::exception& error) {
+                    try {
+                        Logger::instance().error(
+                            "Failed to publish broken runtime start state: {}",
+                            error.what());
+                    } catch (...) {
+                    }
+                } catch (...) {
                 }
             }
-        }
-        if (should_cleanup_conntrack_after_snat_repair(
-                snat_recovery, snat_after)) {
-            if (snat_recovery.cleanup_snapshot.has_value()) {
-                // This event is rare and serialized on the control loop. A
-                // bounded synchronous cleanup is intentional: it is the
-                // generation barrier that prevents an old numerical mark
-                // from being deleted after a concurrent config save reuses
-                // it for a different outbound.
-                cleanup_owned_conntrack_snapshot(
-                    *snat_recovery.cleanup_snapshot,
-                    "after verified tunnel SNAT recovery");
-                log.info(
-                    "Tunnel SNAT was restored after a firmware firewall "
-                    "rebuild; retired the affected "
-                    "keen-pbr-marked flows.");
+            state.lifecycle_start_finalized =
+                inactive_published && broken_transitioned &&
+                snapshot_published;
+            return state.lifecycle_start_finalized;
+        };
+
+    const auto finish_preworker_failure_policy =
+        [this, &context, &state, shutdown]() {
+            if (state.preworker_failure_policy_finished) return;
+            if (shutdown) {
+                state.preworker_failure_policy_finished = true;
+                return;
             }
-        }
-        runtime_firewall_retry_.complete_attempt(
-            /*succeeded=*/true, snat_recovery);
-        release_urltest_firewall_recovery(
-            current_runtime_generation);
-        if (resolver_after_firewall_gate_.release(
-                current_runtime_generation)) {
-            schedule_resolver_reload_retry(
-                0, current_runtime_generation);
-        }
-        runtime_firewall_incidents_.clear();
-#ifdef WITH_API
-        request_remote_access_reconcile_from_control(
-            "verified firewall refresh");
-#endif
-        publish_runtime_state();
-        log.info("Runtime iproute and firewall refresh complete.");
-        return true;
-    } catch (const RouteInterfaceUnavailableError& e) {
-        // A TUN/WireGuard link may disappear between the desired-state
-        // snapshot and RTM_NEWROUTE. This is transient runtime churn, not a
-        // broken configuration and not a user-facing permanent incident. Do
-        // not create a second retry timer: a kernel UP event resets per-route
-        // backoff and the existing interface probe is the observation-gap
-        // fallback. If this pass also owns a pending SNAT repair, keep that
-        // request on the existing coalescing runtime-retry coordinator so a
-        // missed UP event cannot leave SNAT recovery latched forever.
-        log.verbose(
-            "Runtime route reconciliation is waiting for an interface: {}",
-            e.what());
-        runtime_firewall_retry_.complete_attempt(
-            /*succeeded=*/false, snat_recovery);
-        const auto current_runtime_generation =
-            runtime_generation_.load(std::memory_order_acquire);
-        const bool urltest_recovery_pending =
-            urltest_after_firewall_gate_.waiting_for(
-                current_runtime_generation);
-        if (urltest_recovery_pending &&
-            retry_attempt >= RUNTIME_FIREWALL_RETRY_DELAYS.size()) {
-            for (const auto& tag :
-                 urltest_after_firewall_gate_.pending_tags(
-                     current_runtime_generation)) {
-                const auto incident =
-                    urltest_apply_incidents_.record_failure(
-                        tag, /*notify_immediately=*/true);
-                if (incident.notify) {
-                    log.error(
-                        "Urltest '{}' firewall recovery is still waiting for "
-                        "a route after {} bounded retries: {}. The previous "
-                        "cursor remains active and quiet maintenance will "
-                        "continue in the background.",
-                        tag,
-                        retry_attempt,
-                        e.what());
+
+            const auto kind = context->foreground_transport_exhausted
+                ? DaemonRuntimeFirewallOperationState::
+                      PreworkerFailureKind::transport_rejected
+                : state.preworker_failure_kind;
+            if (kind == DaemonRuntimeFirewallOperationState::
+                            PreworkerFailureKind::transport_rejected &&
+                !runtime_firewall_owner_->
+                    note_foreground_transport_rejection(context)) {
+                const bool preserve_active_restart_recovery =
+                    runtime_firewall_lifecycle_is_restart(
+                        context->lifecycle_kind);
+                context->successor_mode = preserve_active_restart_recovery
+                    ? RuntimeFirewallOperationContext::SuccessorMode::
+                          defer_same_attempt
+                    : RuntimeFirewallOperationContext::SuccessorMode::none;
+                context->force_successor =
+                    preserve_active_restart_recovery;
+                state.suppress_coordinator_rerun =
+                    !preserve_active_restart_recovery;
+                try {
+                    state.lifecycle_failure_detail =
+                        "runtime firewall worker transport retry limit "
+                        "was exhausted";
+                } catch (...) {
                 }
             }
-        }
-        if (runtime_firewall_retry_.route_unavailable_retry_required() ||
-            urltest_recovery_pending) {
-            schedule_runtime_firewall_retry(
-                retry_attempt,
-                current_runtime_generation,
-                snat_recovery);
-        }
-        return false;
-    } catch (const TransientFirewallError& e) {
-        runtime_firewall_retry_.complete_attempt(
-            /*succeeded=*/false, snat_recovery);
-        if (retry_attempt >= RUNTIME_FIREWALL_RETRY_DELAYS.size()) {
-            const auto current_runtime_generation =
-                runtime_generation_.load(std::memory_order_acquire);
-            const bool urltest_recovery_pending =
-                urltest_after_firewall_gate_.waiting_for(
-                    current_runtime_generation);
-            if (snat_recovery.requested || urltest_recovery_pending) {
-                if (urltest_recovery_pending) {
-                    // This bounded-chain boundary is the sole owner of the
-                    // URLTEST bell.  Initial deferral must not advance or
-                    // consume the per-selector notification latch.
+            if (runtime_firewall_lifecycle_is_start(
+                    context->lifecycle_kind)) {
+                try {
+                    if (state.lifecycle_failure_detail.empty()) {
+                        state.lifecycle_failure_detail =
+                            context->foreground_transport_exhausted
+                            ? "runtime start worker transport retry limit "
+                              "was exhausted"
+                            : (state.preworker_failure_detail.empty()
+                                   ? "runtime start failed before worker "
+                                     "handoff"
+                                   : state.preworker_failure_detail);
+                    }
+                } catch (...) {
+                }
+                state.preworker_failure_policy_finished = true;
+                return;
+            }
+
+            const auto generation = context->queued_claim.runtime_generation;
+            const auto attempt = context->queued_claim.attempt;
+            const bool urltest_pending =
+                urltest_after_firewall_gate_.waiting_for(generation);
+            if (kind == DaemonRuntimeFirewallOperationState::
+                            PreworkerFailureKind::route_unavailable) {
+                Logger::instance().verbose(
+                    "Runtime route reconciliation is waiting for an "
+                    "interface: {}",
+                    state.preworker_failure_detail);
+                if (urltest_pending &&
+                    attempt >= RUNTIME_FIREWALL_RETRY_DELAYS.size()) {
                     for (const auto& tag :
                          urltest_after_firewall_gate_.pending_tags(
-                             current_runtime_generation)) {
+                             generation)) {
                         const auto incident =
                             urltest_apply_incidents_.record_failure(
                                 tag, /*notify_immediately=*/true);
                         if (incident.notify) {
-                            log.error(
-                                "Urltest '{}' firewall recovery failed after "
-                                "{} bounded retries: {}. The previous cursor "
-                                "remains active and quiet maintenance will "
-                                "continue in the background.",
+                            Logger::instance().error(
+                                "Urltest '{}' firewall recovery is still "
+                                "waiting for a route after {} bounded "
+                                "retries: {}. The previous cursor remains "
+                                "active.",
                                 tag,
-                                retry_attempt,
-                                e.what());
+                                attempt,
+                                state.preworker_failure_detail);
                         }
                     }
                 }
-                // Keep one quiet, capped maintenance retry alive while the
-                // desired SNAT contract or a restored URLTEST cursor is still
-                // awaiting proof. Netfilter hooks can be lost during firmware
-                // service restarts; recovery must not depend on another event.
-                log.info(
-                    "Runtime firewall recovery remains pending after {} "
-                    "bounded retries: {}. A maintenance retry will continue "
-                    "in the background.",
-                    retry_attempt,
-                    e.what());
-                schedule_runtime_firewall_retry(
-                    retry_attempt,
-                    current_runtime_generation,
-                    snat_recovery);
-            } else {
-                const auto incident =
-                    runtime_firewall_incidents_.record_failure(
-                        "runtime-firewall-reconciliation",
-                        /*notify_immediately=*/true);
-                if (incident.notify) {
-                    log.error(
-                        "Runtime routing/firewall reconciliation failed after "
-                        "{} retries: {}. The last committed runtime generation "
-                        "remains active; inspect firewall diagnostics before "
-                        "retrying Apply.",
-                        retry_attempt,
-                        e.what());
+            } else if (
+                kind == DaemonRuntimeFirewallOperationState::
+                            PreworkerFailureKind::preparation_failure) {
+                if (urltest_pending ||
+                    state.preworker_urltest_permanent_started) {
+                    if (!state.preworker_urltest_permanent_started) {
+                        auto failed_tags =
+                            urltest_after_firewall_gate_.pending_tags(
+                                generation);
+                        state.preworker_failed_urltest_tags.assign(
+                            failed_tags.begin(), failed_tags.end());
+                        urltest_after_firewall_gate_.reset();
+                        state.preworker_urltest_permanent_started = true;
+                    }
+                    try {
+                        transition_runtime_or_throw(
+                            RuntimeState::broken,
+                            "urltest firewall recovery failed permanently");
+                        publish_runtime_state();
+                    } catch (...) {
+                    }
+                    for (const auto& tag :
+                         state.preworker_failed_urltest_tags) {
+                        const auto incident =
+                            urltest_apply_incidents_.record_failure(
+                                tag, /*notify_immediately=*/true);
+                        if (incident.notify) {
+                            Logger::instance().error(
+                                "Urltest '{}' firewall recovery failed "
+                                "permanently before worker handoff: {}. "
+                                "Runtime state is broken while the last "
+                                "verified kernel generation remains active.",
+                                tag,
+                                state.preworker_failure_detail);
+                        }
+                    }
                 } else {
-                    log.info(
-                        "Runtime routing/firewall reconciliation is still "
-                        "unavailable after {} retries: {}. The existing "
-                        "notification remains active.",
-                        retry_attempt,
-                        e.what());
+                    const bool retry =
+                        context->successor_mode ==
+                        RuntimeFirewallOperationContext::SuccessorMode::
+                            reschedule_retry;
+                    const auto incident =
+                        runtime_firewall_incidents_.record_failure(
+                            "runtime-firewall-reconciliation",
+                            /*notify_immediately=*/true);
+                    if (incident.notify) {
+                        Logger::instance().error(
+                            retry
+                                ? "Runtime routing/firewall preparation "
+                                  "failed: {}. A bounded retry will verify "
+                                  "whether the failure clears."
+                                : "Runtime routing/firewall preparation "
+                                  "failed permanently: {}. The last "
+                                  "committed runtime generation remains "
+                                  "active.",
+                            state.preworker_failure_detail);
+                    }
                 }
+            } else if (
+                kind == DaemonRuntimeFirewallOperationState::
+                            PreworkerFailureKind::transport_rejected) {
+                Logger::instance().info(
+                    "Runtime firewall worker handoff was rejected; the exact "
+                    "attempt remains deferred without consuming retry "
+                    "budget.");
+            } else if (
+                kind == DaemonRuntimeFirewallOperationState::
+                            PreworkerFailureKind::admission_contention) {
+                Logger::instance().verbose(
+                    "Runtime firewall worker is waiting behind another "
+                    "runtime mutation.");
             }
-            return false;
+            state.preworker_failure_policy_finished = true;
+        };
+
+    const auto finish_context =
+        [this,
+         &context,
+         &state,
+         &settle_lifecycle_completion,
+         shutdown]() {
+        if (!context->completion_captured) return;
+
+        // Terminal shutdown never creates a successor. Retire the one-shot
+        // owner before touching any potentially allocating recovery payload;
+        // admission is already closed and the dedicated executor is being
+        // drained by the lifecycle owner.
+        if (shutdown) {
+            runtime_firewall_owner_->cancel_completion_watchdog();
+            runtime_firewall_owner_->reset_if_active(context);
+            context->retained_mutation_lease.reset();
+            settle_lifecycle_completion(
+                RuntimeFirewallLifecycleOutcome::shutdown);
+            return;
         }
-        log.info(
-            "Runtime iproute and firewall refresh deferred: {}", e.what());
-        schedule_runtime_firewall_retry(
-            retry_attempt,
-            runtime_generation_.load(std::memory_order_acquire),
-            snat_recovery);
-        return false;
-    } catch (const std::exception& e) {
-        runtime_firewall_retry_.complete_attempt(
-            /*succeeded=*/false, snat_recovery);
-        // A permanent rule/configuration failure is actionable and must remain
-        // visible to the user. Stable-ID changes also retain a bounded retry:
-        // the generation guard has restored the previous in-memory map, so
-        // kernel and memory still describe the same previous generation.
-        const bool retry =
-            config_has_native_vpn_catalog_policy(config_) &&
-            retry_attempt < RUNTIME_FIREWALL_RETRY_DELAYS.size();
-        const auto current_runtime_generation =
-            runtime_generation_.load(std::memory_order_acquire);
-        const bool urltest_recovery_failed_permanently =
-            urltest_after_firewall_gate_.waiting_for(
-                current_runtime_generation);
-        const auto failed_urltest_tags =
-            urltest_after_firewall_gate_.pending_tags(
-                current_runtime_generation);
-        if (urltest_recovery_failed_permanently) {
-            // A typed transient keeps the last committed runtime serving
-            // while recovery is pending. A non-transient failure during that
-            // proof is different: keep the permanent broken reason visible,
-            // while the actually active last committed routing/LKG remains
-            // available until an explicit stop performs full cleanup.
-            urltest_after_firewall_gate_.reset();
+
+        auto successor_mode = context->successor_mode;
+        auto successor_attempt = context->successor_attempt;
+        auto successor_generation =
+            context->successor_runtime_generation != 0U
+            ? context->successor_runtime_generation
+            : context->queued_claim.runtime_generation;
+        auto successor_recovery =
+            std::move(context->completion.snat_recovery);
+        auto successor_catalog =
+            context->completion.next_prepared_catalog;
+        if (!successor_catalog && !context->worker_succeeded &&
+            !context->worker_commit_ambiguous) {
+            successor_catalog = context->prepared_native_vpn_catalog;
+        }
+        bool schedule_catalog_refresh =
+            context->successor_schedule_catalog_refresh;
+        if (successor_catalog) {
+            if (successor_generation != 0U &&
+                successor_catalog->runtime_generation <
+                    successor_generation) {
+                // A catalog-less observation can already represent a newer
+                // runtime generation. Never let an older prepared candidate
+                // downgrade that retained intent; the successor must build a
+                // fresh cache-only snapshot for the newer generation.
+                successor_catalog.reset();
+            } else {
+                schedule_catalog_refresh =
+                    successor_catalog->schedule_catalog_refresh;
+            }
+            if (successor_catalog &&
+                successor_catalog->runtime_generation >
+                    successor_generation) {
+                successor_generation =
+                    successor_catalog->runtime_generation;
+                successor_attempt = 0U;
+            }
+        }
+
+        // An ambiguous COMMIT has exactly one legal continuation: a fresh
+        // backend resnapshot. Do not let a pre-existing trailing intent turn
+        // it back into same-attempt replay in this finalizer.
+        if (context->worker_commit_ambiguous) {
+            successor_mode =
+                RuntimeFirewallOperationContext::SuccessorMode::none;
+            successor_catalog.reset();
+            successor_recovery = {};
+        }
+        const bool completion_requests_rerun =
+            runtime_firewall_terminal_requests_successor(
+                context->worker_commit_ambiguous,
+                context->completion.rerun_requested,
+                context->force_successor,
+                state.suppress_coordinator_rerun);
+        if (successor_mode ==
+                RuntimeFirewallOperationContext::SuccessorMode::none &&
+            completion_requests_rerun) {
+            successor_mode =
+                RuntimeFirewallOperationContext::SuccessorMode::
+                    defer_same_attempt;
+        }
+
+        const bool lifecycle_verified_success =
+            context->worker_succeeded &&
+            (!runtime_firewall_lifecycle_is_foreground(
+                 context->lifecycle_kind) ||
+             state.lifecycle_resolver_verified);
+        // A source event which arrived during a successful foreground
+        // lifecycle must survive after START changes state to running. Settle
+        // and release the foreground request, then launch that trailing work
+        // as an ordinary background successor.
+        const bool detach_verified_foreground =
+            runtime_firewall_lifecycle_is_foreground(
+                context->lifecycle_kind) &&
+            lifecycle_verified_success &&
+            successor_mode !=
+                RuntimeFirewallOperationContext::SuccessorMode::none;
+        const bool detach_failed_restart_recovery =
+            context->foreground_transport_exhausted &&
+            runtime_firewall_lifecycle_is_restart(
+                context->lifecycle_kind) &&
+            successor_mode !=
+                RuntimeFirewallOperationContext::SuccessorMode::none;
+        const bool detach_foreground =
+            detach_verified_foreground ||
+            detach_failed_restart_recovery;
+        const auto successor_lifecycle_kind =
+            detach_foreground
+            ? RuntimeFirewallLifecycleKind::background
+            : context->lifecycle_kind;
+        if (!runtime_firewall_lifecycle_generation_is_current(
+                successor_lifecycle_kind,
+                successor_generation) ||
+            successor_mode ==
+                RuntimeFirewallOperationContext::SuccessorMode::none) {
+            runtime_firewall_owner_->cancel_completion_watchdog();
+            runtime_firewall_owner_->reset_if_active(context);
+            context->retained_mutation_lease.reset();
+            settle_lifecycle_completion(
+                lifecycle_verified_success
+                    ? RuntimeFirewallLifecycleOutcome::verified_success
+                    : RuntimeFirewallLifecycleOutcome::not_verified);
+            return;
+        }
+
+        if (successor_generation == 0U) {
+            successor_generation =
+                runtime_generation_.load(std::memory_order_acquire);
+        }
+        if (!runtime_firewall_lifecycle_generation_is_current(
+                successor_lifecycle_kind,
+                successor_generation)) {
+            runtime_firewall_owner_->cancel_completion_watchdog();
+            runtime_firewall_owner_->reset_if_active(context);
+            context->retained_mutation_lease.reset();
+            settle_lifecycle_completion(
+                RuntimeFirewallLifecycleOutcome::not_verified);
+            return;
+        }
+
+        // Retain the exact successor before closing the one-shot terminal
+        // context. Its SNAT snapshot/catalog then survive allocation or timer
+        // registration failure while a fresh owner is being created.
+        const bool retained =
+            runtime_firewall_owner_->retain_pending_successor(
+                context,
+                successor_mode,
+                successor_attempt,
+                successor_generation,
+                std::move(successor_recovery),
+                std::move(successor_catalog),
+                schedule_catalog_refresh,
+                detach_foreground);
+        runtime_firewall_owner_->cancel_completion_watchdog();
+        runtime_firewall_owner_->reset_if_active(context);
+        if (!retained) {
+            context->retained_mutation_lease.reset();
+            settle_lifecycle_completion(
+                lifecycle_verified_success
+                    ? RuntimeFirewallLifecycleOutcome::verified_success
+                    : RuntimeFirewallLifecycleOutcome::not_verified);
+            Logger::instance().error(
+                "Could not retain the exact runtime firewall successor; a "
+                "fresh netfilter resnapshot was requested.");
+            schedule_netfilter_runtime_refresh_noexcept(
+                NetfilterRefreshReason::full,
+                "runtime firewall successor ownership collision");
+            return;
+        }
+
+        if (detach_foreground) {
+            context->retained_mutation_lease.reset();
+            settle_lifecycle_completion(
+                lifecycle_verified_success
+                    ? RuntimeFirewallLifecycleOutcome::verified_success
+                    : RuntimeFirewallLifecycleOutcome::not_verified);
+        }
+        try {
+            (void)runtime_firewall_owner_->launch_pending_successor();
+        } catch (const std::exception& error) {
             try {
-                transition_runtime_or_throw(
-                    RuntimeState::broken,
-                    "urltest firewall recovery failed permanently");
-                publish_runtime_state();
+                Logger::instance().error(
+                    "Could not arm the retained runtime firewall successor: "
+                    "{}",
+                    error.what());
             } catch (...) {
             }
-            // Use the same per-selector latch that owns bounded transient
-            // exhaustion.  Escalating a maintenance attempt to permanent
-            // state updates health, but cannot mint a second bell for the
-            // same gated incident.
-            for (const auto& tag : failed_urltest_tags) {
-                const auto incident =
-                    urltest_apply_incidents_.record_failure(
-                        tag, /*notify_immediately=*/true);
-                if (incident.notify) {
-                    log.error(
-                        "Urltest '{}' firewall recovery failed permanently: "
-                        "{}. Runtime state is broken because the restored "
-                        "kernel generation could not be verified.",
-                        tag,
-                        e.what());
+        } catch (...) {
+        }
+    };
+
+    if (drain->kind() ==
+        RuntimeFirewallDelayedTerminalOwner::DrainKind::coordinator) {
+        const auto* terminal = drain->coordinator_terminal();
+        if (!terminal || !terminal->owned) return;
+        capture_completion(*terminal);
+        restore_preworker_control_state();
+        finish_preworker_failure_policy();
+        if (!shutdown && runtime_firewall_lifecycle_is_start(
+                context->lifecycle_kind) &&
+            context->successor_mode ==
+                RuntimeFirewallOperationContext::SuccessorMode::none) {
+            if (begin_runtime_firewall_start_rollback(context)) {
+                drain->park_until_wake();
+                return;
+            }
+            if (!finalize_start_broken(
+                    "runtime start ended before worker handoff")) {
+                drain->park_until_wake();
+                return;
+            }
+        }
+        if (!absorb_retained_mutation_lease()) return;
+        if (!settle_immediate_completion(
+                shutdown
+                    ? RuntimeFirewallImmediateTerminalOutcome::shutdown
+                    : RuntimeFirewallImmediateTerminalOutcome::
+                          not_verified)) {
+            return;
+        }
+        if (!drain->finish_coordinator_terminal()) return;
+        finish_context();
+        return;
+    }
+
+    const auto* terminal = drain->worker_terminal();
+    if (!terminal) return;
+    if (terminal->status ==
+        RuntimeFirewallDelayedWorker::TerminalStatus::queued_abandoned) {
+        if (!terminal->coordinator_completion.has_value() ||
+            !terminal->coordinator_completion->owned) {
+            return;
+        }
+        capture_completion(*terminal->coordinator_completion);
+        restore_preworker_control_state();
+        finish_preworker_failure_policy();
+        if (!shutdown && runtime_firewall_lifecycle_is_start(
+                context->lifecycle_kind) &&
+            context->successor_mode ==
+                RuntimeFirewallOperationContext::SuccessorMode::none) {
+            if (begin_runtime_firewall_start_rollback(context)) {
+                drain->park_until_wake();
+                return;
+            }
+            if (!finalize_start_broken(
+                    "runtime start worker queue was abandoned")) {
+                drain->park_until_wake();
+                return;
+            }
+        }
+        if (!absorb_retained_mutation_lease()) return;
+        if (!settle_immediate_completion(
+                shutdown
+                    ? RuntimeFirewallImmediateTerminalOutcome::shutdown
+                    : RuntimeFirewallImmediateTerminalOutcome::
+                          not_verified)) {
+            return;
+        }
+        if (!drain->finish_worker_terminal()) return;
+        finish_context();
+        return;
+    }
+
+    if (!terminal->running_claim.has_value() ||
+        !terminal->mutation_lease) {
+        // A bare pre-worker lost_claim waits for the coordinator terminal;
+        // try_begin_drain() normally filters it before reaching this branch.
+        return;
+    }
+
+    // begin_worker() was crossed, so a later application/backend retry starts
+    // with a fresh transport budget. Only consecutive pre-worker rejections
+    // are bounded by the foreground handoff limit.
+    context->foreground_transport_rejections = 0U;
+    const RuntimeFirewallWorkerAttemptResult* worker_result =
+        terminal->result.get();
+    const bool retained_worker_lease =
+        terminal->mutation_lease.return_policy ==
+        RuntimeFirewallDelayedWorker::MutationLeaseReturnPolicy::
+            return_to_operation_owner;
+    if (!state.core_publication.prepared) {
+        DaemonRuntimeFirewallOperationState::CorePublication publication;
+        std::optional<MetaUdp443ActivationPlan> candidate_meta_plan;
+        OwnedSnatRecovery processed_recovery =
+            context->submitted_snat_recovery;
+        OwnedSnatState inspected_snat_after = OwnedSnatState::unknown;
+        bool result_valid =
+            terminal->status ==
+                RuntimeFirewallDelayedWorker::TerminalStatus::result &&
+            worker_result != nullptr &&
+            worker_result->transaction.operation_serial ==
+                context->queued_claim.serial &&
+            worker_result->transaction.runtime_generation ==
+                context->queued_claim.runtime_generation &&
+            context->worker_input &&
+            context->worker_input->transaction.operation_serial ==
+                context->queued_claim.serial &&
+            context->worker_input->transaction.runtime_generation ==
+                context->queued_claim.runtime_generation;
+        const bool current_generation =
+            runtime_firewall_lifecycle_generation_is_current(
+                context->lifecycle_kind,
+                context->queued_claim.runtime_generation);
+
+        bool commit_ambiguous =
+            terminal->status !=
+                RuntimeFirewallDelayedWorker::TerminalStatus::result ||
+            worker_result == nullptr;
+        bool transient_failure = !result_valid;
+        std::string failure_detail;
+        if (terminal->status ==
+                RuntimeFirewallDelayedWorker::TerminalStatus::exception &&
+            terminal->exception) {
+            try {
+                std::rethrow_exception(terminal->exception);
+            } catch (const std::exception& error) {
+                failure_detail = error.what();
+            } catch (...) {
+                failure_detail =
+                    "runtime firewall worker threw a non-standard exception";
+            }
+        } else if (terminal->status ==
+                   RuntimeFirewallDelayedWorker::TerminalStatus::
+                       missing_result) {
+            failure_detail =
+                "runtime firewall worker returned no terminal result";
+        } else if (terminal->status ==
+                   RuntimeFirewallDelayedWorker::TerminalStatus::lost_claim) {
+            failure_detail =
+                "runtime firewall worker lost its exact operation claim";
+        } else if (!result_valid) {
+            failure_detail =
+                "runtime firewall worker returned mismatched operation "
+                "identity";
+        }
+
+        if (result_valid) {
+            commit_ambiguous =
+                worker_result->transaction.commit_entered &&
+                !worker_result->transaction.committed();
+            const auto& route_preparation =
+                worker_result->route_preparation;
+            if (route_preparation.required &&
+                (!route_preparation.observation_succeeded ||
+                 !route_preparation.worker_mutation_ack.has_value() ||
+                 *route_preparation.worker_mutation_ack !=
+                     RuntimeRouteMutationAck::applied ||
+                 !route_preparation.checkpoint_published ||
+                 !route_preparation.mutation_ack.has_value() ||
+                 *route_preparation.mutation_ack !=
+                     RuntimeRouteMutationAck::applied)) {
+                // Route observation/mutation is a pre-COMMIT admission
+                // boundary. It is never ambiguous and must not permit the
+                // firewall transaction to run against an unacknowledged
+                // desired route generation.
+                commit_ambiguous = false;
+                if (!route_preparation.observation_succeeded) {
+                    transient_failure = true;
+                    failure_detail =
+                        route_preparation.observation_failure.detail;
+                    if (failure_detail.empty()) {
+                        failure_detail =
+                            "runtime route observation did not complete";
+                    }
+                } else if (
+                    !route_preparation.worker_mutation_ack.has_value()) {
+                    transient_failure = true;
+                    failure_detail =
+                        "runtime route plan did not enter its combined "
+                        "worker owner";
+                } else if (
+                    *route_preparation.worker_mutation_ack !=
+                        RuntimeRouteMutationAck::applied) {
+                    failure_detail =
+                        route_preparation.worker_mutation_failure_detail;
+                    switch (*route_preparation.worker_mutation_ack) {
+                    case RuntimeRouteMutationAck::applied:
+                        break;
+                    case RuntimeRouteMutationAck::stale:
+                        transient_failure = true;
+                        if (failure_detail.empty()) {
+                            failure_detail =
+                                "runtime route observation became stale "
+                                "before worker mutation";
+                        }
+                        break;
+                    case RuntimeRouteMutationAck::route_unavailable:
+                        transient_failure = false;
+                        if (failure_detail.empty()) {
+                            failure_detail =
+                                "runtime route interface is unavailable";
+                        }
+                        break;
+                    case RuntimeRouteMutationAck::mutation_failed:
+                        transient_failure = false;
+                        if (failure_detail.empty()) {
+                            failure_detail =
+                                "runtime route worker mutation failed";
+                        }
+                        break;
+                    case RuntimeRouteMutationAck::shutdown:
+                        transient_failure = false;
+                        if (failure_detail.empty()) {
+                            failure_detail =
+                                "runtime route mutation stopped during "
+                                "shutdown";
+                        }
+                        break;
+                    }
+                } else if (!route_preparation.checkpoint_published) {
+                    transient_failure = true;
+                    failure_detail =
+                        "runtime route result could not enter its control "
+                        "publication checkpoint";
+                } else if (!route_preparation.mutation_ack.has_value()) {
+                    transient_failure = true;
+                    failure_detail =
+                        "runtime route checkpoint returned no acknowledgement";
                 } else {
-                    log.info(
-                        "Urltest '{}' firewall recovery became permanent: "
-                        "{}. Its existing notification remains active.",
-                        tag,
-                        e.what());
+                    switch (*route_preparation.mutation_ack) {
+                    case RuntimeRouteMutationAck::applied:
+                        break;
+                    case RuntimeRouteMutationAck::stale:
+                        transient_failure = true;
+                        failure_detail =
+                            "runtime route observation became stale before "
+                            "publication";
+                        break;
+                    case RuntimeRouteMutationAck::route_unavailable:
+                        transient_failure = false;
+                        failure_detail =
+                            "runtime route publication reported an "
+                            "unexpected interface failure";
+                        break;
+                    case RuntimeRouteMutationAck::mutation_failed:
+                        transient_failure = false;
+                        failure_detail =
+                            "runtime route publication failed";
+                        break;
+                    case RuntimeRouteMutationAck::shutdown:
+                        transient_failure = false;
+                        failure_detail =
+                            "runtime route publication stopped during "
+                            "shutdown";
+                        break;
+                    }
+                }
+            } else if (worker_result->transaction.failure.has_value()) {
+                failure_detail =
+                    worker_result->transaction.failure->message;
+                transient_failure =
+                    worker_result->transaction.failure->kind ==
+                    RuntimeFirewallBackendFailureKind::transient_firewall;
+            } else if (!worker_result->transaction_executed) {
+                transient_failure = true;
+                if (worker_result->owned_snat_before.failure.failed()) {
+                    failure_detail =
+                        worker_result->owned_snat_before.failure.message;
+                } else {
+                    failure_detail =
+                        "runtime firewall backend transaction was not "
+                        "admitted after its required observation";
                 }
             }
+        }
+
+        const bool committed_candidate =
+            result_valid && current_generation && !shutdown &&
+            worker_result->transaction.committed();
+        if (committed_candidate) {
+            const auto& committed =
+                *worker_result->transaction.committed_firewall;
+            publication.rules = committed.rule_states;
+            publication.list_content_state =
+                committed.list_content_state;
+            publication.list_usage = committed.list_usage;
+            publication.list_fingerprints =
+                context->worker_input->transaction
+                    .requested_list_fingerprints;
+            publication.internal_vpn_servers =
+                state.internal_vpn_resolution.effective_servers;
+            publication.internal_vpn_service_targets =
+                state.internal_vpn_service_resolution.effective_targets;
+            publication.native_vpn_direct_egress_snat_selectors =
+                context->worker_input->transaction
+                    .candidate_native_vpn_direct_egress_snat_selectors;
+            candidate_meta_plan =
+                worker_result->transaction.meta_activation_plan;
+            if (candidate_meta_plan.has_value()) {
+                publication.committed_meta_fwmark =
+                    candidate_meta_plan->expected_fwmark;
+                publication.committed_meta_owned_mask =
+                    candidate_meta_plan->owned_mask;
+            }
+            publication.committed = true;
+        }
+
+        bool snat_healthy = true;
+        if (processed_recovery.requested) {
+            OwnedSnatState before = OwnedSnatState::unknown;
+            if (result_valid &&
+                worker_result->owned_snat_before.state.has_value() &&
+                !worker_result->owned_snat_before.failure.failed()) {
+                before = *worker_result->owned_snat_before.state;
+            }
+            std::optional<OwnedConntrackCleanupSnapshot> exact_snapshot;
+            if (before == OwnedSnatState::missing && result_valid &&
+                worker_result
+                    ->pre_mutation_owned_conntrack_cleanup_snapshot
+                    .has_value() &&
+                worker_result
+                    ->pre_mutation_owned_conntrack_cleanup_snapshot
+                    ->valid() &&
+                worker_result
+                    ->pre_mutation_owned_conntrack_cleanup_snapshot
+                    ->runtime_generation ==
+                    context->queued_claim.runtime_generation) {
+                exact_snapshot = worker_result
+                    ->pre_mutation_owned_conntrack_cleanup_snapshot;
+            }
+            processed_recovery = observe_owned_snat_state(
+                std::move(processed_recovery),
+                before,
+                std::move(exact_snapshot));
+
+            if (result_valid &&
+                worker_result->owned_snat_after.state.has_value() &&
+                !worker_result->owned_snat_after.failure.failed()) {
+                inspected_snat_after =
+                    *worker_result->owned_snat_after.state;
+            }
+            processed_recovery = observe_owned_snat_state(
+                std::move(processed_recovery),
+                inspected_snat_after);
+            snat_healthy =
+                inspected_snat_after == OwnedSnatState::healthy;
+            if (!snat_healthy) {
+                transient_failure = true;
+                if (failure_detail.empty()) {
+                    failure_detail =
+                        "tunnel SNAT scaffold was not healthy after the "
+                        "runtime firewall transaction";
+                }
+            }
+        }
+
+        const bool worker_succeeded =
+            publication.committed && snat_healthy;
+        if (!worker_succeeded && failure_detail.empty()) {
+            failure_detail = commit_ambiguous
+                ? "runtime firewall COMMIT outcome is ambiguous"
+                : "runtime firewall transaction did not commit";
+        }
+
+        const bool lifecycle_start =
+            runtime_firewall_lifecycle_is_start(
+                context->lifecycle_kind);
+        const bool retryable_failure = lifecycle_start
+            ? transient_failure
+            : (transient_failure ||
+               processed_recovery.requested ||
+               (context->worker_input &&
+                config_has_native_vpn_catalog_policy(
+                    context->worker_input->transaction.config)) ||
+               urltest_after_firewall_gate_.waiting_for(
+                   context->queued_claim.runtime_generation));
+        const bool bounded_retry_required =
+            !worker_succeeded &&
+            !commit_ambiguous &&
+            retryable_failure &&
+            (!lifecycle_start ||
+             runtime_firewall_start_retry_available(
+                 context->queued_claim.attempt));
+
+        // The target GCC 8 old-string ABI does not promise nothrow move
+        // assignment. Commit that sole fallible context field while the
+        // checkpoint is still visibly unprepared. If it throws, the drain
+        // guard re-arms and the complete local preparation is recomputed.
+        state.worker_failure_detail = std::move(failure_detail);
+
+        // Every context write below is covered by the static nothrow contract
+        // above or is scalar. Publish prepared=true only inside this tail so a
+        // retry can never observe a partially committed core checkpoint.
+        publication.prepared = true;
+        state.core_publication = std::move(publication);
+        state.candidate_meta_activation_plan =
+            std::move(candidate_meta_plan);
+        state.processed_snat_recovery =
+            std::move(processed_recovery);
+        state.inspected_snat_after = inspected_snat_after;
+        context->worker_succeeded = worker_succeeded;
+        state.worker_result_valid = result_valid;
+        context->worker_commit_ambiguous = commit_ambiguous;
+        state.worker_failure_transient = transient_failure;
+        context->successor_mode = bounded_retry_required
+            ? RuntimeFirewallOperationContext::SuccessorMode::
+                  reschedule_retry
+            : RuntimeFirewallOperationContext::SuccessorMode::none;
+    }
+
+    if (!drain->begin_worker_control(runtime_firewall_retry_)) return;
+
+    const bool lifecycle_start =
+        runtime_firewall_lifecycle_is_start(context->lifecycle_kind);
+    const auto publish_core_candidate = [this, &state]() noexcept {
+        if (state.core_published) return true;
+        auto& publication = state.core_publication;
+        if (!publication.committed) return true;
+
+        firewall_state_.swap_rules(publication.rules);
+        applied_list_content_state_.static_destinations.swap(
+            publication.list_content_state.static_destinations);
+        applied_list_content_state_.domain_entry_lists.swap(
+            publication.list_content_state.domain_entry_lists);
+        applied_list_content_state_.truncated_static_destination_lists.swap(
+            publication.list_content_state
+                .truncated_static_destination_lists);
+        applied_list_usage_.swap(publication.list_usage);
+        applied_list_fingerprints_.swap(
+            publication.list_fingerprints);
+        resolved_internal_vpn_servers_.swap(
+            publication.internal_vpn_servers);
+        resolved_internal_vpn_service_targets_.swap(
+            publication.internal_vpn_service_targets);
+        applied_native_vpn_direct_egress_snat_selectors_.swap(
+            publication.native_vpn_direct_egress_snat_selectors);
+        committed_meta_udp443_fwmark_ =
+            publication.committed_meta_fwmark;
+        committed_meta_udp443_owned_mask_ =
+            publication.committed_meta_owned_mask;
+        state.core_published = true;
+        return true;
+    };
+
+    if (!drain->publish_worker_control([
+            lifecycle_start,
+            &publish_core_candidate]() noexcept {
+            return lifecycle_start
+                ? true
+                : publish_core_candidate();
+        })) {
+        return;
+    }
+
+    if (!shutdown && state.core_published &&
+        !state.internal_vpn_lkg_published) {
+        update_internal_vpn_verified_includes_lkg(
+            state.internal_vpn_resolution);
+        update_internal_vpn_service_verified_includes_lkg(
+            state.internal_vpn_service_resolution);
+        state.internal_vpn_lkg_published = true;
+    }
+
+    if (!shutdown && lifecycle_start &&
+        !state.lifecycle_start_candidate_published) {
+        // START keeps its candidate private until resolver activate publishes
+        // the exact expected stream. Meta/idle work is likewise deferred.
+    } else if (!shutdown && state.core_published &&
+        !state.meta_tail_finished) {
+        reset_idle_stall_observer(/*schedule_if_eligible=*/true);
+        const auto current_generation =
+            runtime_generation_.load(std::memory_order_acquire);
+        const auto cleanup_epoch =
+            meta_udp443_cleanup_epoch_.load(std::memory_order_acquire);
+        const bool filter_healthy =
+            worker_result != nullptr &&
+            worker_result->forward_udp_reject_after_commit.state ==
+                std::optional<OwnedForwardUdpRejectState>{
+                    OwnedForwardUdpRejectState::healthy} &&
+            !worker_result->forward_udp_reject_after_commit.failure.failed();
+        const bool fastnat_healthy =
+            !state.candidate_meta_activation_plan.has_value() ||
+            (worker_result != nullptr &&
+             worker_result->fastnat_after_commit
+                     .disabled_or_unavailable ==
+                 std::optional<bool>{true} &&
+             !worker_result->fastnat_after_commit.failure.failed());
+
+        if (state.candidate_meta_activation_plan.has_value() &&
+            fastnat_healthy && filter_healthy) {
+            meta_udp443_incidents_.reset("meta-udp443-activation");
+            schedule_meta_udp443_activation_cleanup_retry(
+                *state.candidate_meta_activation_plan,
+                current_generation,
+                cleanup_epoch,
+                /*attempt=*/0U);
+        } else if (
+            state.candidate_meta_activation_plan.has_value()) {
+            report_meta_udp443_degraded(
+                !fastnat_healthy
+                    ? "FastNAT was re-enabled during delayed firewall "
+                      "publication"
+                    : "the exact owned first FORWARD hook could not be "
+                      "reverified after delayed publication");
+            schedule_meta_udp443_activation_cleanup_retry(
+                *state.candidate_meta_activation_plan,
+                current_generation,
+                cleanup_epoch,
+                /*attempt=*/1U);
+            if (fastnat_healthy) {
+                schedule_netfilter_runtime_refresh_noexcept(
+                    NetfilterRefreshReason::full,
+                    "could not repair delayed Meta UDP/443 publication");
+            }
+        } else if (filter_healthy) {
+            meta_udp443_incidents_.reset("meta-udp443-activation");
         } else {
+            report_meta_udp443_degraded(
+                "balanced mode could not verify absence of owned UDP/443 "
+                "artifacts after delayed publication");
+            schedule_netfilter_runtime_refresh_noexcept(
+                NetfilterRefreshReason::full,
+                "could not clean stale balanced-mode Meta UDP/443 "
+                "artifacts");
+        }
+        state.meta_tail_finished = true;
+        state.preworker_side_effects_armed = false;
+    } else if (!shutdown && !state.core_published &&
+               !state.meta_tail_finished) {
+        reset_idle_stall_observer(/*schedule_if_eligible=*/true);
+        const auto current_generation =
+            runtime_generation_.load(std::memory_order_acquire);
+        const bool publication_may_have_changed =
+            context->worker_commit_ambiguous ||
+            (worker_result != nullptr &&
+             meta_udp443_publication_may_have_changed(
+                 worker_result->meta_publication_epoch_before,
+                 worker_result->meta_publication_epoch_after));
+        if (should_restore_pending_meta_udp443_cleanup_after_apply_failure(
+                state.previous_meta_cleanup.has_value(),
+                state.previous_meta_cleanup.has_value()
+                    ? state.previous_meta_cleanup->runtime_generation
+                    : 0U,
+                current_generation,
+                publication_may_have_changed)) {
+            schedule_meta_udp443_activation_cleanup_retry(
+                state.previous_meta_cleanup->plan,
+                current_generation,
+                meta_udp443_cleanup_epoch_.load(
+                    std::memory_order_acquire),
+                state.previous_meta_cleanup->attempt);
+        } else if (publication_may_have_changed) {
+            report_meta_udp443_degraded(
+                "delayed firewall COMMIT outcome is ambiguous; exact Meta "
+                "cleanup authority was discarded");
+            schedule_netfilter_runtime_refresh_noexcept(
+                NetfilterRefreshReason::full,
+                "could not resnapshot Meta UDP/443 after an ambiguous "
+                "delayed COMMIT");
+        }
+        state.meta_tail_finished = true;
+        state.preworker_side_effects_armed = false;
+    }
+
+    if (!shutdown && lifecycle_start &&
+        !state.resolver_tail_finished) {
+        if (!context->worker_succeeded) {
+            state.lifecycle_resolver_verified = false;
+            state.resolver_tail_finished = true;
+        } else {
+            if (begin_runtime_firewall_lifecycle_resolver(context)) {
+                drain->park_until_wake();
+                return;
+            }
+            state.resolver_tail_finished = true;
+            if (state.lifecycle_resolver_verified) {
+                if (!publish_core_candidate()) return;
+                state.lifecycle_start_candidate_published = true;
+                // Re-enter once so the ordinary internal-VPN and Meta tails
+                // observe only the now-verified published candidate.
+                return;
+            }
+        }
+    } else if (!shutdown && !lifecycle_start &&
+               state.core_published &&
+               !state.resolver_tail_finished) {
+        const auto current_generation =
+            runtime_generation_.load(std::memory_order_acquire);
+        const bool resolver_waits_for_firewall =
+            resolver_after_firewall_gate_.waiting_for(
+                current_generation);
+        const bool foreground_lifecycle =
+            runtime_firewall_lifecycle_is_foreground(
+                context->lifecycle_kind);
+        bool lifecycle_resolver_verified =
+            runtime_firewall_restart_resolver_initially_verified(
+                context->lifecycle_kind,
+                state.resolver_refresh_required,
+                resolver_waits_for_firewall);
+        if (state.resolver_refresh_required &&
+            !state.resolver_generation_published) {
+            apply_started_ts_.store(
+                unix_timestamp_now_seconds(),
+                std::memory_order_release);
+            commit_resolver_generation_snapshot(
+                make_resolver_generation_snapshot(
+                    state.list_cache_snapshot));
+            state.resolver_generation_published = true;
+        }
+        if (state.resolver_refresh_required &&
+            !resolver_waits_for_firewall) {
+            cancel_resolver_reload_retry();
+            if (foreground_lifecycle) {
+                if (begin_runtime_firewall_lifecycle_resolver(context)) {
+                    drain->park_until_wake();
+                    return;
+                }
+                lifecycle_resolver_verified =
+                    state.lifecycle_resolver_verified;
+                if (lifecycle_resolver_verified) {
+                    if (acknowledge_verified_resolver_reload(
+                            current_generation)) {
+                        publish_runtime_state();
+                    }
+                    refresh_resolver_config_hash_actual_async();
+                } else {
+                    schedule_resolver_reload_retry(
+                        0, current_generation);
+                }
+            } else if (resolver_stream_coordinator_.in_flight()) {
+                schedule_resolver_reload_retry(
+                    0, current_generation);
+            } else {
+                try {
+                    if (run_system_resolver_hook_stream_prepared(
+                            "reload", /*rebuild_snapshot=*/false)) {
+                        lifecycle_resolver_verified = true;
+                        if (acknowledge_verified_resolver_reload(
+                                current_generation)) {
+                            publish_runtime_state();
+                        }
+                        refresh_resolver_config_hash_actual_async();
+                    } else {
+                        schedule_resolver_reload_retry(
+                            0, current_generation);
+                    }
+                } catch (const std::exception& error) {
+                    lifecycle_resolver_verified = false;
+                    Logger::instance().info(
+                        "Native VPN DNS access policy refresh was deferred: "
+                        "{}",
+                        error.what());
+                    schedule_resolver_reload_retry(
+                        0, current_generation);
+                } catch (...) {
+                    lifecycle_resolver_verified = false;
+                    schedule_resolver_reload_retry(
+                        0, current_generation);
+                }
+            }
+        } else if (foreground_lifecycle &&
+                   resolver_waits_for_firewall) {
+            state.lifecycle_failure_detail =
+                "resolver reload remains gated behind firewall recovery";
+        }
+        if (foreground_lifecycle) {
+            state.lifecycle_resolver_verified =
+                lifecycle_resolver_verified;
+        }
+        state.resolver_tail_finished = true;
+    }
+
+    if (!shutdown && !state.conntrack_tail_finished) {
+        if (state.worker_result_valid && worker_result != nullptr &&
+            worker_result->native_direct_egress_source_cleanup
+                .failure.failed()) {
+            Logger::instance().info(
+                "Delayed native VPN source-flow cleanup was incomplete: {}",
+                worker_result->native_direct_egress_source_cleanup
+                    .failure.message);
+        }
+        if (context->worker_succeeded &&
+            state.processed_snat_recovery.has_value() &&
+            should_cleanup_conntrack_after_snat_repair(
+                *state.processed_snat_recovery,
+                state.inspected_snat_after) &&
+            state.processed_snat_recovery->cleanup_snapshot
+                .has_value() &&
+            state.processed_snat_recovery->cleanup_snapshot
+                    ->runtime_generation ==
+                runtime_generation_.load(std::memory_order_acquire)) {
+            const auto& snapshot =
+                *state.processed_snat_recovery->cleanup_snapshot;
+            schedule_owned_conntrack_cleanup_retry(
+                snapshot,
+                ordered_owned_conntrack_marks(snapshot));
+        }
+        state.conntrack_tail_finished = true;
+    }
+
+    if (!shutdown && !state.runtime_tail_finished) {
+        const auto current_generation =
+            runtime_generation_.load(std::memory_order_acquire);
+        if (lifecycle_start) {
+            bool successor_pending =
+                context->successor_mode !=
+                RuntimeFirewallOperationContext::SuccessorMode::none;
+            const bool route_epoch_current =
+                context->worker_input &&
+                context->worker_input->route_health_request.route_epoch !=
+                    0U &&
+                context->worker_input->route_health_request.route_epoch ==
+                    routing_observation_epoch_.load(
+                        std::memory_order_acquire);
+            if (context->worker_succeeded && !route_epoch_current) {
+                // Interface events are serialized on this control loop, so
+                // this is the last exact fence before publishing running.
+                // A changed topology after the worker route checkpoint is a
+                // non-ambiguous fresh-snapshot request, not a verified START.
+                context->worker_succeeded = false;
+                const bool retry_available =
+                    runtime_firewall_start_retry_available(
+                        context->queued_claim.attempt);
+                context->successor_mode = retry_available
+                    ? RuntimeFirewallOperationContext::SuccessorMode::
+                          reschedule_retry
+                    : RuntimeFirewallOperationContext::SuccessorMode::none;
+                context->force_successor = retry_available;
+                successor_pending = retry_available;
+                state.worker_failure_transient = retry_available;
+                state.worker_failure_detail =
+                    "runtime route observation changed before START "
+                    "publication";
+            }
+            const bool verified_start =
+                context->worker_succeeded &&
+                state.lifecycle_resolver_verified &&
+                state.lifecycle_start_candidate_published &&
+                state.core_published;
+            if (verified_start) {
+                bool publication_failed = false;
+                if (!state.lifecycle_start_finalized) {
+                    try {
+                        runtime_state_store_.set_routing_runtime_active(true);
+                        if (runtime_state_machine_.state() !=
+                            RuntimeState::running) {
+                            transition_runtime_or_throw(
+                                RuntimeState::running,
+                                "runtime start complete");
+                        }
+                        publish_runtime_state();
+                        state.lifecycle_start_finalized = true;
+                    } catch (const std::exception& error) {
+                        publication_failed = true;
+                        try {
+                            state.lifecycle_failure_detail =
+                                std::string{
+                                    "runtime start state publication failed: "} +
+                                error.what();
+                        } catch (...) {
+                        }
+                    } catch (...) {
+                        publication_failed = true;
+                        try {
+                            state.lifecycle_failure_detail =
+                                "runtime start state publication failed";
+                        } catch (...) {
+                        }
+                    }
+                }
+
+                if (publication_failed) {
+                    context->worker_succeeded = false;
+                    if (begin_runtime_firewall_start_rollback(context)) {
+                        drain->park_until_wake();
+                        return;
+                    }
+                    if (!finalize_start_broken(
+                            state.lifecycle_failure_detail)) {
+                        drain->park_until_wake();
+                        return;
+                    }
+                } else if (!state.lifecycle_start_post_success_finished) {
+                    // All remaining work is ancillary. A scheduler, notifier
+                    // or logger failure must not replay the already-published
+                    // START transition or strand its exact completion.
+                    try {
+                        reset_idle_stall_observer(
+                            /*schedule_if_eligible=*/true);
+                    } catch (...) {
+                    }
+                    try {
+                        schedule_owned_snat_health_check();
+                    } catch (...) {
+                    }
+                    try {
+                        schedule_internal_vpn_catalog_refresh_if_needed(
+                            state.internal_vpn_resolution.state,
+                            state.internal_vpn_service_resolution.state);
+                    } catch (...) {
+                    }
+                    try {
+                        runtime_firewall_incidents_.clear();
+                    } catch (...) {
+                    }
+#ifdef WITH_API
+                    try {
+                        request_remote_access_reconcile_from_control(
+                            "runtime start");
+                    } catch (...) {
+                    }
+#endif
+                    try {
+                        schedule_keenetic_dns_refresh();
+                    } catch (...) {
+                    }
+                    try {
+                        refresh_resolver_config_hash_actual_async();
+                    } catch (...) {
+                    }
+                    try {
+                        Logger::instance().info(
+                            "Routing runtime started.");
+                    } catch (...) {
+                    }
+                    try {
+                        if (worker_result != nullptr) {
+                            const auto& cleanup =
+                                worker_result
+                                    ->post_commit_owned_conntrack_cleanup;
+                            if (cleanup.attempted &&
+                                cleanup.snapshot.has_value()) {
+                                if (cleanup.summary.command_unavailable) {
+                                    warn_conntrack_unavailable_once();
+                                }
+                                auto remaining =
+                                    cleanup.summary.remaining_marks;
+                                if (cleanup.failure.failed() &&
+                                    remaining.empty()) {
+                                    remaining =
+                                        ordered_owned_conntrack_marks(
+                                            *cleanup.snapshot);
+                                }
+                                if (!cleanup.summary.command_unavailable &&
+                                    !remaining.empty()) {
+                                    schedule_owned_conntrack_cleanup_retry(
+                                        *cleanup.snapshot,
+                                        std::move(remaining));
+                                }
+                            }
+                        }
+                    } catch (...) {
+                    }
+                    state.lifecycle_start_post_success_finished = true;
+                }
+            } else if (successor_pending &&
+                       !context->worker_commit_ambiguous) {
+                try {
+                    Logger::instance().info(
+                        "Runtime start firewall attempt remains pending: {}",
+                        state.worker_failure_detail);
+                } catch (...) {
+                }
+            } else {
+                if (begin_runtime_firewall_start_rollback(context)) {
+                    drain->park_until_wake();
+                    return;
+                }
+                if (!finalize_start_broken(
+                        state.lifecycle_failure_detail.empty()
+                            ? std::string_view{state.worker_failure_detail}
+                            : std::string_view{
+                                  state.lifecycle_failure_detail})) {
+                    drain->park_until_wake();
+                    return;
+                }
+            }
+        } else if (context->worker_succeeded) {
+            release_urltest_firewall_recovery(current_generation);
+            if (resolver_after_firewall_gate_.release(
+                    current_generation)) {
+                schedule_resolver_reload_retry(
+                    0, current_generation);
+            }
+            runtime_firewall_incidents_.clear();
+#ifdef WITH_API
+            request_remote_access_reconcile_from_control(
+                "verified delayed firewall refresh");
+#endif
+            publish_runtime_state();
+            Logger::instance().info(
+                "Delayed runtime firewall refresh complete.");
+        } else {
+            // Firewall remains on its verified LKG, but route preparation may
+            // already have committed either an authoritative new generation
+            // or a conservative recovery ledger. Publish that exact pairing
+            // on every failed terminal; otherwise health/API can keep the
+            // previous route snapshot merely because the new one is complete.
+            try {
+                publish_runtime_state();
+            } catch (const std::exception& error) {
+                try {
+                    Logger::instance().warn(
+                        "Could not publish runtime state after failed "
+                        "routing/firewall reconciliation: {}",
+                        error.what());
+                } catch (...) {
+                }
+            } catch (...) {
+            }
             const auto incident =
                 runtime_firewall_incidents_.record_failure(
                     "runtime-firewall-reconciliation",
-                    /*notify_immediately=*/true);
-            if (incident.notify) {
-                if (retry) {
-                    log.error(
-                        "Runtime routing/firewall reconciliation failed: {}. A "
-                        "bounded retry will verify whether the failure clears. "
-                        "The last committed runtime generation remains active.",
-                        e.what());
-                } else {
-                    log.error(
-                        "Runtime routing/firewall reconciliation failed "
-                        "permanently: {}. The last committed runtime generation "
-                        "remains active; inspect firewall diagnostics before "
-                        "retrying Apply.",
-                        e.what());
-                }
-            } else {
-                log.info(
-                    "Runtime routing/firewall reconciliation remains failed: "
-                    "{}. The existing notification remains active.",
-                    e.what());
+                    /*notify_immediately=*/
+                        !state.worker_failure_transient);
+            if (state.worker_failure_transient) {
+                Logger::instance().info(
+                    "Delayed runtime firewall refresh remains pending: {}",
+                    state.worker_failure_detail);
+            } else if (incident.notify) {
+                Logger::instance().error(
+                    "Delayed runtime firewall refresh failed: {}. The last "
+                    "verified daemon snapshot remains active while a bounded "
+                    "retry resnapshots the backend.",
+                    state.worker_failure_detail);
+            }
+            if (context->worker_commit_ambiguous) {
+                schedule_netfilter_runtime_refresh_noexcept(
+                    NetfilterRefreshReason::full,
+                    "ambiguous delayed runtime firewall COMMIT");
             }
         }
-        if (retry && !urltest_recovery_failed_permanently) {
-            schedule_runtime_firewall_retry(
-                retry_attempt,
-                runtime_generation_.load(std::memory_order_acquire),
-                snat_recovery);
-        }
-        return false;
+        state.runtime_tail_finished = true;
     }
-}
 
-void Daemon::cancel_runtime_firewall_retry() {
-    runtime_firewall_retry_.cancel(
-        [this](int task_id) { scheduler_->cancel(task_id); });
-}
-
-void Daemon::schedule_runtime_firewall_retry(
-    std::size_t attempt,
-    std::uint64_t runtime_generation,
-    OwnedSnatRecovery snat_recovery) {
-    const auto retry_plan = runtime_firewall_retry_.schedule(
-        attempt,
-        runtime_generation,
-        RUNTIME_FIREWALL_RETRY_DELAYS.size(),
-        std::move(snat_recovery),
-        [this, attempt](const RuntimeFirewallRetryPlan& plan,
-                        auto callback) {
-            const auto delay = plan.maintenance
-                ? std::chrono::seconds{60}
-                : RUNTIME_FIREWALL_RETRY_DELAYS[attempt];
-            return scheduler_->schedule_oneshot(
-                delay,
-                std::move(callback),
-                "runtime-firewall-retry");
-        },
-        [this](std::uint64_t expected_generation) {
-            const bool current = runtime_recovery_is_current(
-                routing_runtime_active(),
-                expected_generation,
-                runtime_generation_.load(std::memory_order_acquire));
-            if (!current) {
-                Logger::instance().verbose(
-                    "Discarding stale runtime firewall recovery retry.");
-            }
-            return current;
-        },
-        [this](std::size_t next_attempt,
-               OwnedSnatRecovery scheduled_snat_recovery) {
-            refresh_iproute_and_firewall_runtime(
-                next_attempt,
-                std::nullopt,
-                std::nullopt,
-                /*schedule_catalog_refresh=*/true,
-                std::move(scheduled_snat_recovery));
-        },
-        urltest_after_firewall_gate_.waiting_for(runtime_generation));
-    if (!retry_plan.schedule) {
+    if (!state.processed_snat_recovery.has_value()) {
+        state.processed_snat_recovery =
+            context->submitted_snat_recovery;
+    }
+    const bool lifecycle_verified =
+        !lifecycle_start ||
+        (state.lifecycle_start_finalized &&
+         state.lifecycle_resolver_verified &&
+         routing_runtime_active());
+    if (!drain->complete_worker_control(
+            runtime_firewall_retry_,
+            !shutdown && context->worker_succeeded &&
+                lifecycle_verified,
+            *state.processed_snat_recovery)) {
         return;
     }
-    const auto delay = retry_plan.maintenance
-        ? std::chrono::seconds{60}
-        : RUNTIME_FIREWALL_RETRY_DELAYS[attempt];
-    if (retry_plan.maintenance) {
-        Logger::instance().verbose(
-            "Persistent firewall maintenance recovery scheduled in {}s.",
-            delay.count());
-    } else {
-        Logger::instance().info(
-            "Runtime firewall recovery retry {} scheduled in {}s.",
-            retry_plan.next_attempt,
-            delay.count());
+    const auto* completion = drain->worker_control_completion();
+    if (!completion || !completion->owned) return;
+    capture_completion(*completion);
+    if (retained_worker_lease) {
+        if (!absorb_retained_mutation_lease()) return;
+    } else if (!drain->release_worker_lease()) {
+        return;
     }
-}
-
-void Daemon::defer_runtime_firewall_retry(
-    std::size_t attempt,
-    std::uint64_t runtime_generation,
-    std::optional<InternalVpnRuntimeResolution>
-        prepared_internal_vpn_resolution,
-    std::optional<InternalVpnServiceRuntimeResolution>
-        prepared_internal_vpn_service_resolution,
-    bool schedule_catalog_refresh,
-    OwnedSnatRecovery snat_recovery) {
-    try {
-        const bool scheduled = runtime_firewall_retry_.defer_same_attempt(
-            attempt,
-            runtime_generation,
-            std::move(snat_recovery),
-            [this](auto callback) {
-                return scheduler_->schedule_oneshot(
-                    std::chrono::seconds{1},
-                    std::move(callback),
-                    "runtime-firewall-admission-retry");
-            },
-            [this](std::uint64_t expected_generation) {
-                return runtime_recovery_is_current(
-                    routing_runtime_active(),
-                    expected_generation,
-                    runtime_generation_.load(std::memory_order_acquire));
-            },
-            [this,
-             prepared_internal_vpn_resolution =
-                 std::move(prepared_internal_vpn_resolution),
-             prepared_internal_vpn_service_resolution =
-                 std::move(prepared_internal_vpn_service_resolution),
-             schedule_catalog_refresh](
-                std::size_t deferred_attempt,
-                OwnedSnatRecovery deferred_snat_recovery) mutable {
-                (void)refresh_iproute_and_firewall_runtime(
-                    deferred_attempt,
-                    std::move(prepared_internal_vpn_resolution),
-                    std::move(prepared_internal_vpn_service_resolution),
-                    schedule_catalog_refresh,
-                    std::move(deferred_snat_recovery));
-            });
-        if (scheduled) {
-            const auto active = runtime_mutation_admission_.active();
-            Logger::instance().verbose(
-                "Runtime firewall reconciliation deferred behind runtime "
-                "mutation '{}' without consuming retry budget.",
-                active.has_value()
-                    ? active->label
-                    : std::string{"unknown"});
-        } else if (!runtime_firewall_retry_.retry_pending()) {
-            Logger::instance().error(
-                "Runtime firewall admission retry was rejected; the periodic "
-                "health owner retains the recovery intent.");
-        }
-    } catch (const std::exception& error) {
-        // Admission contention is not a firewall failure. Do not increment an
-        // incident or retry cursor when even the trailing timer cannot be
-        // armed; the periodic health owner can request a fresh observation.
-        try {
-            Logger::instance().error(
-                "Could not defer runtime firewall reconciliation behind "
-                "another writer: {}",
-                error.what());
-        } catch (...) {
-        }
-    } catch (...) {
+    if (!settle_immediate_completion(
+            shutdown
+                ? RuntimeFirewallImmediateTerminalOutcome::shutdown
+                : (context->worker_succeeded && lifecycle_verified
+                       ? RuntimeFirewallImmediateTerminalOutcome::
+                             verified_success
+                       : RuntimeFirewallImmediateTerminalOutcome::
+                             not_verified))) {
+        return;
     }
+    if (!drain->finish_worker_terminal()) return;
+    finish_context();
 }
 
 void Daemon::handle_interface_event(const InterfaceMonitor::Event& event) {
+    if (event.route_changed) {
+        // The route-health worker consumes main-table reachability. A route
+        // event invalidates that immutable plan and also retains one generic
+        // successor. If the current worker already crossed its route ack,
+        // the owner coalesces this refresh behind the terminal instead of
+        // losing the event. It must not masquerade as link/topology churn or
+        // trigger native-catalog work.
+        routing_observation_epoch_.fetch_add(
+            1U, std::memory_order_acq_rel);
+        if (routing_runtime_active()) {
+            (void)refresh_iproute_and_firewall_runtime(
+                0U,
+                {},
+                /*schedule_catalog_refresh=*/false);
+        }
+        return;
+    }
     auto& log = Logger::instance();
 #ifdef WITH_API
     teardown_conntrack_events();
@@ -3991,10 +6722,11 @@ void Daemon::handle_interface_event(const InterfaceMonitor::Event& event) {
     // to keen-pbr routing rules.
     request_remote_access_reconcile_from_control("interface event");
 #endif
-    if (!interface_event_requires_runtime_observation(event) ||
-        !routing_runtime_active()) {
+    if (!interface_event_requires_runtime_observation(event)) {
         return;
     }
+    routing_observation_epoch_.fetch_add(1U, std::memory_order_acq_rel);
+    if (!routing_runtime_active()) return;
     if (event.observation_gap) {
         recover_internal_vpn_catalog_after_observation_gap();
         return;
@@ -4004,7 +6736,8 @@ void Daemon::handle_interface_event(const InterfaceMonitor::Event& event) {
         // The kernel just made this link usable. Let only its deferred route
         // repairs bypass their remaining backoff before the event-driven
         // reconciliation below; unrelated/flapping links stay isolated.
-        route_table_.notify_interface_up(event.interface_name);
+        routing_operation_owner_.notify_interface_up(
+            event.interface_name);
     }
     const bool reconcile_immediately =
         interface_event_affects_managed_runtime(
@@ -4106,7 +6839,7 @@ void Daemon::recover_internal_vpn_catalog_after_observation_gap() {
         },
         // A previously scheduled retry may describe the pre-gap generation
         // and must not suppress this safety-critical reconciliation.
-        [this]() { cancel_runtime_firewall_retry(); },
+        [this]() { runtime_firewall_owner_->cancel_retry(); },
         // Reconcile from the invalidated cache immediately so an unverified
         // process_clients=false bypass cannot remain active. Suppress the
         // implicit catalog request here: the explicit final stage below gives
@@ -4114,8 +6847,7 @@ void Daemon::recover_internal_vpn_catalog_after_observation_gap() {
         [this]() {
             refresh_iproute_and_firewall_runtime(
                 0,
-                std::nullopt,
-                std::nullopt,
+                {},
                 /*schedule_catalog_refresh=*/false);
         },
         // The single-flight gate coalesces this request with any refresh that
@@ -4520,6 +7252,7 @@ void Daemon::run() {
     // coming up without rules and retrying beats leaving the router with no
     // service at all, because a running daemon can still be reached and fixed.
     bool startup_firewall_generation_committed = false;
+    bool startup_firewall_recovery_needed = false;
     try {
         retry_hot_apply_firewall(
             [this, &startup_list_cache_snapshot]() {
@@ -4554,12 +7287,11 @@ void Daemon::run() {
         internal_vpn_generation.reset();
         internal_vpn_service_generation.reset();
         // This is expected while NDMS is still publishing its firewall after
-        // boot. schedule_startup_firewall_retry() emits one actionable error
-        // only if bounded recovery is exhausted.
+        // boot. The shared runtime owner retains the one bounded recovery
+        // operation until it reaches an exact terminal outcome.
         log.info("Firewall rules are not ready at startup: {}. "
                  "The service continues and will retry shortly.", e.what());
-        schedule_startup_firewall_retry(
-            1, std::nullopt, startup_list_cache_snapshot);
+        startup_firewall_recovery_needed = true;
     } catch (const std::exception& e) {
         internal_vpn_generation.reset();
         internal_vpn_service_generation.reset();
@@ -4570,8 +7302,36 @@ void Daemon::run() {
         // bounded recovery rather than stranding the candidate indefinitely.
         log.error("Firewall apply failed permanently at startup: {}", e.what());
         if (config_has_native_vpn_catalog_policy(config_)) {
-            schedule_startup_firewall_retry(
-                1, std::nullopt, startup_list_cache_snapshot);
+            startup_firewall_recovery_needed = true;
+        }
+    }
+
+    if (startup_firewall_recovery_needed) {
+        try {
+            runtime_firewall_owner_->schedule(
+                /*attempt=*/0U,
+                runtime_generation_.load(std::memory_order_acquire),
+                /*snat_recovery=*/{},
+                /*prepared_catalog=*/{});
+        } catch (const std::exception& error) {
+            // Startup must remain available even if timer registration or an
+            // owner-side allocation fails. Periodic health reconciliation can
+            // still observe and repair the missing firewall generation.
+            try {
+                log.error(
+                    "Could not hand off startup firewall recovery: {}. "
+                    "The service continues without the delayed attempt.",
+                    error.what());
+            } catch (...) {
+            }
+        } catch (...) {
+            try {
+                log.error(
+                    "Could not hand off startup firewall recovery: unknown "
+                    "error. The service continues without the delayed "
+                    "attempt.");
+            } catch (...) {
+            }
         }
     }
 
@@ -4677,7 +7437,10 @@ void Daemon::run() {
         cancel_remote_access_recovery_watchdog();
         reset_remote_access_retry_bridge();
 #endif
+        runtime_firewall_owner_->request_shutdown();
         runtime_mutation_admission_.shutdown();
+        runtime_firewall_owner_->cancel_completion_watchdog();
+        runtime_firewall_owner_->cancel_retry();
         routing_test_admission_.shutdown();
         sighup_reload_coordinator_.stop();
         cancel_resolver_reload_retry();
@@ -4700,9 +7463,17 @@ void Daemon::run() {
         // A queued SIGHUP preparation already owns its mutation lease. Drop
         // queued callbacks before waiting for that lease, while active workers
         // can still publish their ordinary completion through the control loop.
+        runtime_firewall_owner_->cancel_pending_work();
+        runtime_firewall_owner_->pump_terminal_for_shutdown();
         blocking_executor_.cancel_pending();
         quiesce_resolver_stream_recovery();
         quiesce_runtime_mutations();
+        runtime_firewall_owner_->shutdown_executor();
+        runtime_firewall_owner_->pump_terminal_for_shutdown();
+        runtime_firewall_owner_->cancel_completion_watchdog();
+        runtime_firewall_owner_->cancel_retry();
+        scheduler_->cancel_all();
+        runtime_firewall_owner_->reset_active();
         {
             KPBR_LOCK_GUARD(control_tasks_mutex_);
             accept_posted_control_tasks_.store(
@@ -4745,15 +7516,9 @@ void Daemon::run() {
                       cleanup_error.what());
         }
         try {
-            policy_rules_.clear();
+            (void)routing_operation_owner_.clear();
         } catch (const std::exception& cleanup_error) {
-            log.error("Startup rollback: policy-rule cleanup failed: {}",
-                      cleanup_error.what());
-        }
-        try {
-            route_table_.clear();
-        } catch (const std::exception& cleanup_error) {
-            log.error("Startup rollback: route cleanup failed: {}",
+            log.error("Startup rollback: routing cleanup failed: {}",
                       cleanup_error.what());
         }
         try {
@@ -4815,7 +7580,10 @@ void Daemon::run() {
     // late exact delete from racing normal shutdown.
     cancel_idle_stall_observer();
     cancel_meta_udp443_activation_cleanup();
+    runtime_firewall_owner_->request_shutdown();
     runtime_mutation_admission_.shutdown();
+    runtime_firewall_owner_->cancel_completion_watchdog();
+    runtime_firewall_owner_->cancel_retry();
     routing_test_admission_.shutdown();
     sighup_reload_coordinator_.stop();
     cancel_resolver_reload_retry();
@@ -4830,12 +7598,20 @@ void Daemon::run() {
     }
     cancel_owned_conntrack_cleanup_retry();
     scheduler_->cancel_all();
+    runtime_firewall_owner_->cancel_pending_work();
+    runtime_firewall_owner_->pump_terminal_for_shutdown();
     blocking_executor_.cancel_pending();
     // Admission is closed before quiescence, so new HTTP/SIGHUP writers are
     // rejected. Existing owners keep their token and may finish through the
     // control queue while this thread still owns the event-loop state.
     quiesce_resolver_stream_recovery();
     quiesce_runtime_mutations();
+    runtime_firewall_owner_->shutdown_executor();
+    runtime_firewall_owner_->pump_terminal_for_shutdown();
+    runtime_firewall_owner_->cancel_completion_watchdog();
+    runtime_firewall_owner_->cancel_retry();
+    scheduler_->cancel_all();
+    runtime_firewall_owner_->reset_active();
     {
         KPBR_LOCK_GUARD(control_tasks_mutex_);
         accept_posted_control_tasks_.store(
@@ -4874,8 +7650,7 @@ void Daemon::run() {
 
     teardown_dns_probe();
 
-    policy_rules_.clear();
-    route_table_.clear();
+    (void)routing_operation_owner_.clear();
     firewall_->cleanup();
     committed_meta_udp443_fwmark_.reset();
     committed_meta_udp443_owned_mask_ = 0U;
@@ -4886,6 +7661,7 @@ void Daemon::run() {
 
 void Daemon::stop() {
     list_refresh_tasks_.request_cancel_active();
+    runtime_firewall_owner_->request_shutdown();
     runtime_mutation_admission_.shutdown();
     routing_test_admission_.shutdown();
     sighup_reload_coordinator_.stop();

@@ -78,6 +78,20 @@ enum class RouteAddResult {
     AlreadyPresent,
 };
 
+// Receipt for an exact RTM_DELROUTE request.  PreconditionMismatch means the
+// backend cannot prove that the object occupying the kernel slot is the exact
+// expected image, so no destructive request was sent.
+enum class RouteExactDeleteResult {
+    Deleted,
+    AlreadyAbsent,
+    PreconditionMismatch,
+};
+
+enum class RouteExactReplaceResult {
+    Replaced,
+    PreconditionMismatch,
+};
+
 struct DumpedRoute;
 
 // Small testable surface used by RouteTable.  Returning whether the kernel
@@ -86,12 +100,32 @@ struct DumpedRoute;
 class RouteNetlinkOperations {
 public:
     virtual ~RouteNetlinkOperations() = default;
+    // A combined exact transaction may perform rollback after any forward
+    // write. Returning true is a strong lease assertion: this same most-
+    // derived backend exclusively serializes the complete route + policy-rule
+    // dependency namespace for the full execute call and implements every
+    // conditional primitive below. A mere per-socket mutex is insufficient.
+    virtual bool supports_exact_route_transaction() const noexcept {
+        return false;
+    }
     virtual RouteAddResult add_route(const RouteSpec& spec) = 0;
     // Atomically replace the route occupying the same kernel slot. Callers
     // must first prove that the conflicting object is keen-pbr-owned (route
     // protocol 186); NetlinkManager deliberately does not infer ownership.
     virtual void replace_route(const RouteSpec& spec) = 0;
     virtual void delete_route(const RouteSpec& spec) = 0;
+    // Transactional callers must use this surface.  The safe default refuses
+    // deletion; concrete backends which can submit the full route identity
+    // atomically may override it and return a typed receipt.
+    virtual RouteExactDeleteResult delete_route_if_exact(
+        const RouteSpec&) {
+        return RouteExactDeleteResult::PreconditionMismatch;
+    }
+    virtual RouteExactReplaceResult replace_route_if_exact(
+        const RouteSpec&,
+        const RouteSpec&) {
+        return RouteExactReplaceResult::PreconditionMismatch;
+    }
     virtual std::vector<DumpedRoute> dump_routes(int family = 0) = 0;
 };
 
@@ -109,6 +143,12 @@ enum class RuleAddResult {
     AlreadyPresent,
 };
 
+enum class RuleExactDeleteResult {
+    Deleted,
+    AlreadyAbsent,
+    PreconditionMismatch,
+};
+
 struct DumpedRule;
 
 // PolicyRuleManager expands family=0 into two concrete operations so it can
@@ -116,8 +156,21 @@ struct DumpedRule;
 class RuleNetlinkOperations {
 public:
     virtual ~RuleNetlinkOperations() = default;
+    // Same combined exclusive-writer lease contract as the route capability;
+    // execute rejects distinct most-derived route/rule backend objects.
+    virtual bool supports_exact_rule_transaction() const noexcept {
+        return false;
+    }
     virtual RuleAddResult add_rule_for_family(const RuleSpec& spec, int family) = 0;
     virtual void delete_rule_for_family(const RuleSpec& spec, int family) = 0;
+    // Exact transactions must never fall back to the broad policy-rule delete
+    // key. Backends which cannot prove and conditionally delete one complete
+    // rule identity fail closed by default.
+    virtual RuleExactDeleteResult delete_rule_if_exact(
+        const RuleSpec&,
+        int) {
+        return RuleExactDeleteResult::PreconditionMismatch;
+    }
     virtual std::vector<DumpedRule> dump_policy_rules(int family = 0) = 0;
 };
 
@@ -132,6 +185,10 @@ struct DumpedRoute {
     int family{0};                      // AF_INET or AF_INET6
     uint32_t metric{0};                 // Route metric/priority
     uint8_t protocol{0};                // Kernel rtm_protocol
+    // False when the kernel object has a route type or multipath shape which
+    // RouteSpec cannot express exactly. Such an object may occupy a slot but
+    // can never satisfy an exact ownership/commit proof.
+    bool exact_identity_representable{true};
 };
 
 // A policy rule dumped from the kernel (read-only snapshot)
@@ -141,6 +198,10 @@ struct DumpedRule {
     uint32_t fwmask{0};
     uint32_t table{0};
     int family{0};              // AF_INET or AF_INET6
+    // False when the kernel rule contains selectors or metadata which
+    // RuleSpec cannot encode. Such a rule may occupy the same visible key,
+    // but cannot satisfy an exact ownership/commit proof.
+    bool exact_identity_representable{true};
 };
 
 // A network interface dumped from the kernel (read-only snapshot)
@@ -180,11 +241,19 @@ public:
     RouteAddResult add_route(const RouteSpec& spec) override;
     void replace_route(const RouteSpec& spec) override;
     void delete_route(const RouteSpec& spec) override;
+    RouteExactDeleteResult delete_route_if_exact(
+        const RouteSpec& spec) override;
+    RouteExactReplaceResult replace_route_if_exact(
+        const RouteSpec& expected,
+        const RouteSpec& replacement) override;
     void flush_routes_in_table(uint32_t table_id, int family = 0);
 
     // Policy rule operations
     RuleAddResult add_rule_for_family(const RuleSpec& spec, int family) override;
     void delete_rule_for_family(const RuleSpec& spec, int family) override;
+    RuleExactDeleteResult delete_rule_if_exact(
+        const RuleSpec& spec,
+        int family) override;
 
     // Dump all routes in a specific routing table from the kernel.
     // family: 0 (AF_UNSPEC) to get both IPv4 and IPv6 routes.

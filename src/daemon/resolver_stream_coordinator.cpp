@@ -263,7 +263,12 @@ private:
             return;
         }
         try {
-            commit(context->operation, result);
+            if (context->operation.completion) {
+                context->operation.completion(
+                    context->operation, result);
+            } else {
+                commit(context->operation, result);
+            }
         } catch (...) {
             // Completion ownership must always be released. The daemon commit
             // callback owns detailed logging because it has the operation's

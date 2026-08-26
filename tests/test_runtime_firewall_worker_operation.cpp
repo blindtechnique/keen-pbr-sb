@@ -32,6 +32,10 @@ using TestTerminal = TestWorkerOperation::TerminalEnvelope;
 using TestTerminalStatus = TestWorkerOperation::TerminalStatus;
 using TestTerminalMailboxPtr =
     TestWorkerOperation::TerminalMailboxPtr;
+using TestMutationLeaseBinding =
+    TestWorkerOperation::MutationLeaseBinding;
+using TestMutationLeaseReturnPolicy =
+    TestWorkerOperation::MutationLeaseReturnPolicy;
 
 static_assert(
     !std::is_default_constructible_v<
@@ -40,6 +44,9 @@ static_assert(
     !std::is_constructible_v<
         TestWorkerOperation::RunningClaim,
         RuntimeFirewallOperationClaim>);
+static_assert(!std::is_copy_constructible_v<TestMutationLeaseBinding>);
+static_assert(
+    std::is_nothrow_move_constructible_v<TestMutationLeaseBinding>);
 
 RuntimeFirewallOperationClaim acquire_queued_claim(
     RuntimeFirewallRetryCoordinator& coordinator,
@@ -148,12 +155,14 @@ void complete_running_terminal(
     RuntimeFirewallRetryCoordinator& coordinator,
     TestTerminal& terminal) {
     REQUIRE(terminal.running_claim.has_value());
-    REQUIRE(terminal.mutation_lease);
+    REQUIRE(terminal.mutation_lease.lease);
+    CHECK(terminal.mutation_lease.return_policy ==
+          TestMutationLeaseReturnPolicy::release_after_attempt);
     const auto control_claim = coordinator.begin_control(
         terminal.running_claim->raw_claim());
     REQUIRE(control_claim.has_value());
     CHECK(coordinator.complete_operation(*control_claim).owned);
-    terminal.mutation_lease.reset();
+    terminal.mutation_lease.lease.reset();
 }
 
 TestWorkerOperation::Worker successful_worker(
@@ -346,12 +355,17 @@ TEST_CASE(
         RuntimeMutationAdmission admission;
         const auto queued_claim = acquire_queued_claim(coordinator);
         std::size_t wake_calls = 0U;
+        bool admission_free_before_wake = false;
         auto operation = make_operation(
             coordinator,
             admission,
             queued_claim,
             /*value=*/7,
-            [&]() { ++wake_calls; });
+            [&]() {
+                ++wake_calls;
+                admission_free_before_wake = admission.try_acquire(
+                    "ordinary-rejection-watchdog").has_value();
+            });
         auto callback = operation->make_queued_closure(
             successful_worker(/*result_value=*/19));
 
@@ -362,11 +376,14 @@ TEST_CASE(
         callback = {};
 
         CHECK(wake_calls == 1U);
+        CHECK(admission_free_before_wake);
         auto terminal = operation->take_terminal();
         REQUIRE(terminal.has_value());
         CHECK(terminal->status ==
               TestTerminalStatus::queued_abandoned);
         CHECK_FALSE(terminal->mutation_lease);
+        CHECK(terminal->mutation_lease.return_policy ==
+              TestMutationLeaseReturnPolicy::release_after_attempt);
     }
 
     SUBCASE("throw before ownership destroys the adapter argument") {
@@ -396,6 +413,99 @@ TEST_CASE(
         REQUIRE(operation->take_terminal().has_value());
         CHECK_FALSE(coordinator.retry_pending());
     }
+}
+
+TEST_CASE(
+    "runtime firewall retained queue rejection returns the exact lease") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    RuntimeMutationAdmission admission;
+    const auto queued_claim = acquire_queued_claim(coordinator);
+    std::size_t wake_calls = 0U;
+    bool admission_held_before_wake = false;
+    bool pending_cleared_before_wake = false;
+    TestTerminalMailboxPtr mailbox;
+    mailbox = TestWorkerOperation::create_terminal_mailbox([&]() {
+        ++wake_calls;
+        admission_held_before_wake = !admission.try_acquire(
+            "retained-rejection-watchdog").has_value();
+        pending_cleared_before_wake =
+            !mailbox->retained_mutation_lease_pending();
+    });
+
+    auto mutation_lease = acquire_mutation_lease(admission);
+    const auto* const exact_lease = mutation_lease.get();
+    auto operation = TestWorkerOperation::create(
+        coordinator,
+        queued_claim,
+        std::make_shared<const TestWorkerInput>(TestWorkerInput{53}),
+        TestMutationLeaseBinding::retained_lease(
+            std::move(mutation_lease)),
+        mailbox);
+    CHECK(mailbox->retained_mutation_lease_pending());
+
+    auto callback = operation->make_queued_closure(
+        successful_worker(/*result_value=*/59));
+    BlockingExecutor executor(/*worker_count=*/0, /*max_queue_size=*/0);
+    CHECK_FALSE(executor.try_post(
+        "runtime-firewall", std::move(callback)));
+    callback = {};
+
+    CHECK(wake_calls == 1U);
+    CHECK(admission_held_before_wake);
+    CHECK(pending_cleared_before_wake);
+    auto terminal = operation->take_terminal();
+    REQUIRE(terminal.has_value());
+    CHECK(terminal->status == TestTerminalStatus::queued_abandoned);
+    CHECK_FALSE(terminal->running_claim.has_value());
+    REQUIRE(terminal->coordinator_completion.has_value());
+    REQUIRE(terminal->mutation_lease.lease);
+    CHECK(terminal->mutation_lease.lease.get() == exact_lease);
+    CHECK(terminal->mutation_lease.return_policy ==
+          TestMutationLeaseReturnPolicy::return_to_operation_owner);
+    CHECK_FALSE(mailbox->retained_mutation_lease_pending());
+    CHECK_FALSE(admission.try_acquire("before-retained-return").has_value());
+
+    terminal->mutation_lease.lease.reset();
+    CHECK(admission.try_acquire("after-retained-return").has_value());
+}
+
+TEST_CASE(
+    "runtime firewall retained prequeue failure returns the exact lease") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    RuntimeMutationAdmission admission;
+    const auto queued_claim = acquire_queued_claim(coordinator);
+    std::size_t wake_calls = 0U;
+    const auto mailbox = TestWorkerOperation::create_terminal_mailbox(
+        [&]() { ++wake_calls; });
+    auto mutation_lease = acquire_mutation_lease(admission);
+    const auto* const exact_lease = mutation_lease.get();
+    auto operation = TestWorkerOperation::create(
+        coordinator,
+        queued_claim,
+        std::make_shared<const TestWorkerInput>(TestWorkerInput{61}),
+        TestMutationLeaseBinding::retained_lease(
+            std::move(mutation_lease)),
+        mailbox);
+
+    CHECK_THROWS_AS(
+        operation->make_queued_closure({}),
+        std::invalid_argument);
+    CHECK(mailbox->retained_mutation_lease_pending());
+    CHECK_NOTHROW(operation.reset());
+
+    CHECK(wake_calls == 1U);
+    CHECK_FALSE(mailbox->retained_mutation_lease_pending());
+    auto terminal = mailbox->take_terminal();
+    REQUIRE(terminal.has_value());
+    CHECK(terminal->status == TestTerminalStatus::queued_abandoned);
+    REQUIRE(terminal->coordinator_completion.has_value());
+    REQUIRE(terminal->mutation_lease.lease);
+    CHECK(terminal->mutation_lease.lease.get() == exact_lease);
+    CHECK(terminal->mutation_lease.return_policy ==
+          TestMutationLeaseReturnPolicy::return_to_operation_owner);
+
+    terminal->mutation_lease.lease.reset();
+    CHECK(admission.try_acquire("after-prequeue-return").has_value());
 }
 
 TEST_CASE(
@@ -700,4 +810,55 @@ TEST_CASE(
     CHECK_FALSE(terminal->coordinator_completion.has_value());
     CHECK_FALSE(terminal->mutation_lease);
     CHECK_FALSE(operation->take_terminal().has_value());
+}
+
+TEST_CASE(
+    "runtime firewall begin-worker loss returns a retained exact lease") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    RuntimeMutationAdmission admission;
+    const auto queued_claim = acquire_queued_claim(coordinator);
+    std::size_t worker_calls = 0U;
+    std::size_t wake_calls = 0U;
+    bool admission_held_before_wake = false;
+    bool pending_cleared_before_wake = false;
+    TestTerminalMailboxPtr mailbox;
+    mailbox = TestWorkerOperation::create_terminal_mailbox([&]() {
+        ++wake_calls;
+        admission_held_before_wake = !admission.try_acquire(
+            "retained-lost-claim-watchdog").has_value();
+        pending_cleared_before_wake =
+            !mailbox->retained_mutation_lease_pending();
+    });
+    auto mutation_lease = acquire_mutation_lease(admission);
+    const auto* const exact_lease = mutation_lease.get();
+    auto operation = TestWorkerOperation::create(
+        coordinator,
+        queued_claim,
+        std::make_shared<const TestWorkerInput>(TestWorkerInput{67}),
+        TestMutationLeaseBinding::retained_lease(
+            std::move(mutation_lease)),
+        mailbox);
+    auto callback = operation->make_queued_closure(
+        successful_worker(/*result_value=*/71, &worker_calls));
+
+    REQUIRE(coordinator.cancel_operation(queued_claim));
+    callback();
+    callback = {};
+
+    CHECK(worker_calls == 0U);
+    CHECK(wake_calls == 1U);
+    CHECK(admission_held_before_wake);
+    CHECK(pending_cleared_before_wake);
+    auto terminal = operation->take_terminal();
+    REQUIRE(terminal.has_value());
+    CHECK(terminal->status == TestTerminalStatus::lost_claim);
+    CHECK_FALSE(terminal->running_claim.has_value());
+    CHECK_FALSE(terminal->coordinator_completion.has_value());
+    REQUIRE(terminal->mutation_lease.lease);
+    CHECK(terminal->mutation_lease.lease.get() == exact_lease);
+    CHECK(terminal->mutation_lease.return_policy ==
+          TestMutationLeaseReturnPolicy::return_to_operation_owner);
+
+    terminal->mutation_lease.lease.reset();
+    CHECK(admission.try_acquire("after-retained-lost-claim").has_value());
 }

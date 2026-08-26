@@ -58,6 +58,29 @@ struct InterfaceMonitor::Impl {
             return;
         }
 
+        if (hdr->nlmsg_type == RTM_NEWROUTE ||
+            hdr->nlmsg_type == RTM_DELROUTE) {
+            auto* route = static_cast<rtmsg*>(nlmsg_data(hdr));
+            if (!route) return;
+
+            std::uint32_t table = route->rtm_table;
+            struct nlattr* attrs[RTA_MAX + 1] = {};
+            if (nlmsg_parse(
+                    hdr,
+                    sizeof(*route),
+                    attrs,
+                    RTA_MAX,
+                    nullptr) >= 0 &&
+                attrs[RTA_TABLE] != nullptr) {
+                table = nla_get_u32(attrs[RTA_TABLE]);
+            }
+            const auto event =
+                InterfaceMonitor::describe_route_transition(
+                    table, route->rtm_family);
+            if (event.has_value()) callback(*event);
+            return;
+        }
+
         if (hdr->nlmsg_type == RTM_NEWADDR || hdr->nlmsg_type == RTM_DELADDR) {
             auto* addr = static_cast<ifaddrmsg*>(nlmsg_data(hdr));
             if (!addr ||
@@ -159,6 +182,8 @@ struct InterfaceMonitor::Impl {
                                         RTNLGRP_LINK,
                                         RTNLGRP_IPV4_IFADDR,
                                         RTNLGRP_IPV6_IFADDR,
+                                        RTNLGRP_IPV4_ROUTE,
+                                        RTNLGRP_IPV6_ROUTE,
                                         0);
         if (err < 0) {
             close_socket();
@@ -259,6 +284,19 @@ InterfaceMonitor::Event InterfaceMonitor::describe_indexed_link_transition(
         false,
         topology_changed,
     };
+}
+
+std::optional<InterfaceMonitor::Event>
+InterfaceMonitor::describe_route_transition(
+    std::uint32_t table,
+    int address_family) {
+    if (table != RT_TABLE_MAIN ||
+        (address_family != AF_INET && address_family != AF_INET6)) {
+        return std::nullopt;
+    }
+    Event event;
+    event.route_changed = true;
+    return event;
 }
 
 int InterfaceMonitor::fd() const {

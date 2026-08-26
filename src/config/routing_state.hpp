@@ -29,6 +29,23 @@ inline bool is_reserved_table(uint32_t id) {
 }
 
 using OutboundReachabilityFn = std::function<bool(const Outbound&)>;
+using OutboundReachabilitySnapshot = std::map<std::string, bool>;
+
+// Fully in-memory desired routing generation. Building this value performs no
+// netlink reads and does not mutate RouteTable or PolicyRuleManager. A missing
+// reachability entry preserves the historical no-observer behaviour and is
+// therefore treated as reachable.
+struct PlannedRoutingState {
+    std::vector<RouteSpec> routes;
+    std::vector<RuleSpec> rules;
+};
+
+PlannedRoutingState plan_routing_state(
+    const Config& cfg,
+    const OutboundMarkMap& marks,
+    const OutboundReachabilitySnapshot& reachability_snapshot = {},
+    const std::map<std::string, std::string>* urltest_selections = nullptr,
+    bool ipv6_enabled = true);
 
 // Return URLTEST outbounds that directly or transitively contain one of the
 // changed child outbounds. Results preserve configuration order and contain

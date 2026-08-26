@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <set>
 #include <string_view>
+#include <utility>
 
 namespace keen_pbr3 {
 namespace {
@@ -75,6 +76,17 @@ std::vector<std::string> build_dnsmasq_trusted_interfaces(
     }
 
     return {result.begin(), result.end()};
+}
+
+std::vector<std::string> select_dnsmasq_trusted_interfaces(
+    std::optional<std::vector<std::string>> prepared_override,
+    const std::vector<InternalVpnServer>& fallback_interface_servers,
+    const std::vector<InternalVpnRuntimeTarget>& fallback_service_targets) {
+    if (prepared_override.has_value()) {
+        return std::move(*prepared_override);
+    }
+    return build_dnsmasq_trusted_interfaces(
+        fallback_interface_servers, fallback_service_targets);
 }
 
 } // namespace keen_pbr3

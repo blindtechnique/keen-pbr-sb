@@ -509,6 +509,8 @@ set(SOURCES
   src/routing/interface_monitor.cpp
   src/routing/route_table.cpp
   src/routing/policy_rule.cpp
+  src/routing/runtime_routing_operation_owner.cpp
+  src/routing/runtime_routing_transaction.cpp
   src/routing/routing_verifier.cpp
   src/health/circuit_breaker.cpp
   src/health/url_tester.cpp
@@ -546,6 +548,11 @@ set(SOURCES
   src/daemon/keenetic_dns_refresh_coordinator.cpp
   src/daemon/resolver_stream_coordinator.cpp
   src/daemon/runtime_firewall_backend_transaction.cpp
+  src/daemon/runtime_firewall_immediate_completion.cpp
+  src/daemon/runtime_firewall_lifecycle_completion.cpp
+  src/daemon/runtime_firewall_operation_owner.cpp
+  src/daemon/runtime_firewall_worker_attempt.cpp
+  src/daemon/runtime_route_health_plan.cpp
   src/daemon/daemon_api.cpp
   src/daemon/daemon_dns_probe.cpp
   src/daemon/list_service.cpp

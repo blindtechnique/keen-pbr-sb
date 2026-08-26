@@ -3,6 +3,9 @@
 
 #include <doctest/doctest.h>
 
+#include <linux/rtnetlink.h>
+#include <sys/socket.h>
+
 namespace keen_pbr3 {
 
 TEST_CASE("InterfaceMonitor reconnect rebuilds usable netlink socket") {
@@ -67,6 +70,24 @@ TEST_CASE("InterfaceMonitor observation gaps require runtime resynchronization")
     InterfaceMonitor::Event gap{};
     gap.observation_gap = true;
     CHECK(interface_event_requires_runtime_observation(gap));
+}
+
+TEST_CASE("InterfaceMonitor fences only main-table IPv4 and IPv6 route changes") {
+    const auto ipv4 = InterfaceMonitor::describe_route_transition(
+        RT_TABLE_MAIN, AF_INET);
+    REQUIRE(ipv4.has_value());
+    CHECK(ipv4->route_changed);
+    CHECK(interface_event_requires_runtime_observation(*ipv4));
+
+    const auto ipv6 = InterfaceMonitor::describe_route_transition(
+        RT_TABLE_MAIN, AF_INET6);
+    REQUIRE(ipv6.has_value());
+    CHECK(ipv6->route_changed);
+
+    CHECK_FALSE(InterfaceMonitor::describe_route_transition(
+        100U, AF_INET).has_value());
+    CHECK_FALSE(InterfaceMonitor::describe_route_transition(
+        RT_TABLE_MAIN, AF_UNSPEC).has_value());
 }
 
 } // namespace keen_pbr3

@@ -19,7 +19,8 @@ std::string run_lifecycle(ApiContext& ctx,
                           LifecycleOperationType type,
                           std::vector<LifecycleOperationStage> stages,
                           const std::string& stage_id,
-                          const std::function<void()>& action,
+                          const std::function<void(ApiRuntimeMutationGuard&)>&
+                              action,
                           const std::string& message,
                           const std::string& mutation_label,
                           bool require_runtime_running,
@@ -34,7 +35,7 @@ std::string run_lifecycle(ApiContext& ctx,
         require_runtime_stopped);
 
     if (!ctx.lifecycle_operations) {
-        action();
+        action(mutation);
         return success_response(message);
     }
 
@@ -48,7 +49,7 @@ std::string run_lifecycle(ApiContext& ctx,
 
     try {
         ctx.lifecycle_operations->start_stage(operation.id, stage_id);
-        action();
+        action(mutation);
         ctx.lifecycle_operations->succeed_stage(operation.id, stage_id);
         ctx.lifecycle_operations->finish(operation.id);
         return success_response(message);
@@ -71,7 +72,14 @@ void register_reload_handler(ApiServer& server, ApiContext& ctx) {
         return run_lifecycle(
             ctx, LifecycleOperationType::Start,
             {{"start_routing", "Start routing and firewall"}},
-            "start_routing", [&ctx] { ctx.start_runtime(); },
+            "start_routing",
+            [&ctx](ApiRuntimeMutationGuard& mutation) {
+                if (ctx.can_start_runtime_with_lease()) {
+                    ctx.start_runtime_with_lease(mutation.take_lease());
+                    return;
+                }
+                ctx.start_runtime();
+            },
             "Routing runtime started", "start-runtime", false, true);
     });
 
@@ -79,7 +87,8 @@ void register_reload_handler(ApiServer& server, ApiContext& ctx) {
         return run_lifecycle(
             ctx, LifecycleOperationType::Stop,
             {{"stop_routing", "Stop routing and firewall"}},
-            "stop_routing", [&ctx] { ctx.stop_runtime(); },
+            "stop_routing",
+            [&ctx](ApiRuntimeMutationGuard&) { ctx.stop_runtime(); },
             "Routing runtime stopped", "stop-runtime", true, false);
     });
 
@@ -87,7 +96,14 @@ void register_reload_handler(ApiServer& server, ApiContext& ctx) {
         return run_lifecycle(
             ctx, LifecycleOperationType::Restart,
             {{"restart_routing", "Restart routing and firewall"}},
-            "restart_routing", [&ctx] { ctx.restart_runtime(); },
+            "restart_routing",
+            [&ctx](ApiRuntimeMutationGuard& mutation) {
+                if (ctx.can_restart_runtime_with_lease()) {
+                    ctx.restart_runtime_with_lease(mutation.take_lease());
+                    return;
+                }
+                ctx.restart_runtime();
+            },
             "Routing runtime restarted", "restart-runtime", true, false);
     });
 }

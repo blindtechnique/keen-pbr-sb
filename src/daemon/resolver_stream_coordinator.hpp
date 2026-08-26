@@ -11,6 +11,7 @@
 namespace keen_pbr3 {
 
 class BlockingExecutor;
+struct ResolverStreamResult;
 
 struct ResolverStreamOperation {
     std::uint64_t runtime_generation{0};
@@ -23,6 +24,12 @@ struct ResolverStreamOperation {
     // the single terminal completion.
     std::shared_ptr<void> lifetime;
     std::function<int()> invoke_hook;
+    // A lifecycle operation may own its completion instead of entering the
+    // background reload policy callback. It still runs on the control loop
+    // under the coordinator's exact claim.
+    std::function<void(
+        const ResolverStreamOperation&,
+        const ResolverStreamResult&)> completion;
 };
 
 struct ResolverStreamResult {

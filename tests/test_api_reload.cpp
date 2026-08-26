@@ -11,6 +11,7 @@
 #include "runtime/runtime_mutation_admission.hpp"
 
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -179,6 +180,152 @@ TEST_CASE("runtime mutation admission rejects before lifecycle projection") {
     const auto lifecycle = fixture.store.snapshot();
     REQUIRE(lifecycle.has_value());
     CHECK(lifecycle->result == LifecycleOperationResult::Succeeded);
+}
+
+TEST_CASE("API mutation guard hands off its production lease without releasing admission") {
+    RuntimeMutationAdmission admission;
+    SseBroadcaster broadcaster;
+    auto context = test_support::make_minimal_api_context(
+        broadcaster, "/tmp/keen-pbr-reload-lease-handoff-test.json");
+    context.acquire_runtime_mutation_fn =
+        [&admission](std::string label, bool, bool) {
+            auto lease = admission.try_acquire(std::move(label));
+            if (!lease.has_value()) {
+                throw ApiError("runtime mutation busy", 409);
+            }
+            return std::move(*lease);
+        };
+
+    std::optional<RuntimeMutationAdmission::Lease> transferred;
+    {
+        ApiRuntimeMutationGuard mutation(
+            context, "restart-runtime", true, false);
+        const auto active = admission.active();
+        REQUIRE(active.has_value());
+        CHECK(active->label == "restart-runtime");
+        transferred.emplace(mutation.take_lease());
+    }
+
+    REQUIRE(transferred.has_value());
+    CHECK(static_cast<bool>(*transferred));
+    CHECK(admission.active().has_value());
+    transferred->release();
+    CHECK_FALSE(admission.active().has_value());
+}
+
+TEST_CASE("restart endpoint hands the exact production lease to its tail callback") {
+    RuntimeMutationAdmission admission;
+    ReloadApiFixture fixture(test_support::isolated_api_port(5));
+    fixture.context.acquire_runtime_mutation_fn =
+        [&admission](std::string label, bool, bool) {
+            auto lease = admission.try_acquire(std::move(label));
+            if (!lease.has_value()) {
+                throw ApiError("runtime mutation busy", 409);
+            }
+            return std::move(*lease);
+        };
+
+    std::optional<RuntimeMutationAdmission::Lease> transferred;
+    std::size_t legacy_restart_calls = 0U;
+    fixture.context.restart_runtime_fn = [&] {
+        ++legacy_restart_calls;
+    };
+    fixture.context.restart_runtime_with_lease_fn =
+        [&](RuntimeMutationAdmission::Lease lease) {
+            transferred.emplace(std::move(lease));
+        };
+
+    const auto response = fixture.client->Post(
+        "/api/service/restart", "", "application/json");
+    REQUIRE(response != nullptr);
+    CHECK(response->status == 200);
+    CHECK(legacy_restart_calls == 0U);
+    REQUIRE(transferred.has_value());
+    CHECK(static_cast<bool>(*transferred));
+    const auto active = admission.active();
+    REQUIRE(active.has_value());
+    CHECK(active->label == "restart-runtime");
+    CHECK(transferred->token() == active->token);
+
+    transferred->release();
+    CHECK_FALSE(admission.active().has_value());
+}
+
+TEST_CASE("start endpoint hands the exact production lease to its tail callback") {
+    RuntimeMutationAdmission admission;
+    ReloadApiFixture fixture(test_support::isolated_api_port(6));
+    bool require_running = true;
+    bool require_stopped = false;
+    fixture.context.acquire_runtime_mutation_fn =
+        [&admission, &require_running, &require_stopped](
+            std::string label,
+            bool requested_running,
+            bool requested_stopped) {
+            require_running = requested_running;
+            require_stopped = requested_stopped;
+            auto lease = admission.try_acquire(std::move(label));
+            if (!lease.has_value()) {
+                throw ApiError("runtime mutation busy", 409);
+            }
+            return std::move(*lease);
+        };
+
+    std::optional<RuntimeMutationAdmission::Lease> transferred;
+    std::size_t legacy_start_calls = 0U;
+    fixture.context.start_runtime_fn = [&] {
+        ++legacy_start_calls;
+    };
+    fixture.context.start_runtime_with_lease_fn =
+        [&](RuntimeMutationAdmission::Lease lease) {
+            transferred.emplace(std::move(lease));
+        };
+
+    const auto response = fixture.client->Post(
+        "/api/service/start", "", "application/json");
+    REQUIRE(response != nullptr);
+    CHECK(response->status == 200);
+    CHECK(legacy_start_calls == 0U);
+    CHECK_FALSE(require_running);
+    CHECK(require_stopped);
+    REQUIRE(transferred.has_value());
+    CHECK(static_cast<bool>(*transferred));
+    const auto active = admission.active();
+    REQUIRE(active.has_value());
+    CHECK(active->label == "start-runtime");
+    CHECK(transferred->token() == active->token);
+
+    transferred->release();
+    CHECK_FALSE(admission.active().has_value());
+}
+
+TEST_CASE("start endpoint releases its exact lease when tail handoff throws") {
+    RuntimeMutationAdmission admission;
+    ReloadApiFixture fixture(test_support::isolated_api_port(7));
+    fixture.context.acquire_runtime_mutation_fn =
+        [&admission](std::string label, bool, bool) {
+            auto lease = admission.try_acquire(std::move(label));
+            if (!lease.has_value()) {
+                throw ApiError("runtime mutation busy", 409);
+            }
+            return std::move(*lease);
+        };
+    fixture.context.start_runtime_with_lease_fn =
+        [](RuntimeMutationAdmission::Lease lease) {
+            CHECK(static_cast<bool>(lease));
+            throw std::runtime_error("typed start handoff failed");
+        };
+
+    const auto response = fixture.client->Post(
+        "/api/service/start", "", "application/json");
+    REQUIRE(response != nullptr);
+    CHECK(response->status == 500);
+    CHECK(response->body.find("typed start handoff failed") !=
+          std::string::npos);
+    CHECK_FALSE(admission.active().has_value());
+    const auto lifecycle = fixture.store.snapshot();
+    REQUIRE(lifecycle.has_value());
+    CHECK(lifecycle->result == LifecycleOperationResult::Failed);
+    CHECK(lifecycle->error == "typed start handoff failed");
 }
 
 } // namespace keen_pbr3

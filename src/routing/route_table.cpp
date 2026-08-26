@@ -8,11 +8,16 @@
 #include <iterator>
 #include <set>
 #include <sys/socket.h>
+#include <type_traits>
 #include <utility>
 
 namespace keen_pbr3 {
 
 namespace {
+
+static_assert(
+    std::is_nothrow_move_constructible_v<RouteSpec>,
+    "preallocated route receipts must enter their ledgers without throwing");
 
 bool routes_equal(const RouteSpec& a, const RouteSpec& b) {
     return a.destination == b.destination &&
@@ -62,6 +67,9 @@ bool route_metric_matches_live(const RouteSpec& expected,
 }
 
 bool route_matches_live(const RouteSpec& expected, const DumpedRoute& actual) {
+    // Compatibility matcher for the existing RouteTable. Exact transactions
+    // additionally require DumpedRoute representability before treating this
+    // projected tuple as an owned kernel identity.
     return expected.destination == actual.destination &&
            expected.table == actual.table &&
            expected.interface == actual.interface &&
@@ -164,9 +172,11 @@ RouteTable::RouteTable(
     RouteNetlinkOperations& netlink,
     bool dry_run,
     InterfaceReadinessProbe interface_readiness_probe,
-    NowFunction now)
+    NowFunction now,
+    bool cleanup_on_destruction)
     : netlink_(netlink),
       dry_run_(dry_run),
+      cleanup_on_destruction_(cleanup_on_destruction),
       interface_readiness_probe_(
           interface_readiness_probe
               ? std::move(interface_readiness_probe)
@@ -176,6 +186,7 @@ RouteTable::RouteTable(
                : NowFunction{[]() { return Clock::now(); }}) {}
 
 RouteTable::~RouteTable() {
+    if (!cleanup_on_destruction_) return;
     // Best-effort cleanup on destruction
     try {
         clear();
@@ -400,23 +411,48 @@ void RouteTable::add(const RouteSpec& spec) {
     if (is_tracked(spec)) {
         return;
     }
-    bool owned = dry_run_;
     if (!dry_run_) {
-        const auto outcome = add_route_checked(spec);
-        owned = outcome == RouteInstallOutcome::Created ||
-                outcome == RouteInstallOutcome::ReplacedManaged;
+        // Reserve the conservative ledger before any route write. If a
+        // replacement succeeds but verification/rollback becomes ambiguous,
+        // the pending receipt must remain reachable by clear() so policy-rule
+        // dependencies keep the table anchored.
+        RouteSpec tracked_copy = spec;
+        RouteSpec owned_copy = spec;
+        routes_.reserve(routes_.size() + 1U);
+        owned_routes_.reserve(owned_routes_.size() + 1U);
+        bool owned = false;
+        try {
+            const auto outcome = add_route_checked(spec);
+            owned = outcome == RouteInstallOutcome::Created ||
+                    outcome == RouteInstallOutcome::ReplacedManaged;
+        } catch (...) {
+            const bool pending_replacement = std::any_of(
+                pending_replacements_.begin(),
+                pending_replacements_.end(),
+                [&](const PendingReplacement& pending) {
+                    return routes_equal(pending.installed, spec);
+                });
+            if (pending_replacement) {
+                routes_.push_back(std::move(tracked_copy));
+                owned_routes_.push_back(std::move(owned_copy));
+            }
+            throw;
+        }
+        routes_.push_back(std::move(tracked_copy));
+        if (owned) {
+            owned_routes_.push_back(std::move(owned_copy));
+        }
+        return;
     }
     routes_.push_back(spec);
-    if (owned) {
-        owned_routes_.push_back(spec);
-    }
+    owned_routes_.push_back(spec);
 }
 
-void RouteTable::remove(const RouteSpec& spec) {
+bool RouteTable::remove(const RouteSpec& spec) {
     auto it = std::find_if(routes_.begin(), routes_.end(),
                            [&](const RouteSpec& r) { return routes_equal(r, spec); });
     if (it == routes_.end()) {
-        return;
+        return true;
     }
     auto owned_it = std::find_if(
         owned_routes_.begin(), owned_routes_.end(),
@@ -430,7 +466,7 @@ void RouteTable::remove(const RouteSpec& spec) {
             });
         if (has_pending_replacement) {
             if (!restore_pending_replacement(spec)) {
-                return;
+                return false;
             }
         } else {
             try {
@@ -446,7 +482,7 @@ void RouteTable::remove(const RouteSpec& spec) {
                     spec.blackhole,
                     spec.unreachable,
                     e.what());
-                return;
+                return false;
             }
         }
     }
@@ -455,6 +491,7 @@ void RouteTable::remove(const RouteSpec& spec) {
     }
     forget_repair_record(spec);
     routes_.erase(it);
+    return true;
 }
 
 void RouteTable::reconcile(const std::vector<RouteSpec>& desired,
@@ -465,8 +502,9 @@ void RouteTable::reconcile(const std::vector<RouteSpec>& desired,
     adopt_live_generated_desired(desired);
 }
 
-void RouteTable::add_missing(const std::vector<RouteSpec>& desired,
+bool RouteTable::add_missing(const std::vector<RouteSpec>& desired,
                              RouteReconcileMode mode) {
+    bool desired_live_complete = true;
     // Deferred state can exist for a route that never reached routes_. Prune
     // obsolete records before any installation attempt, because a different
     // new route may throw transactionally and postpone remove_obsolete().
@@ -521,9 +559,15 @@ void RouteTable::add_missing(const std::vector<RouteSpec>& desired,
 
             if (mode == RouteReconcileMode::DeferredRepair &&
                 !repair_retry_due(route)) {
+                desired_live_complete = false;
                 continue;
             }
 
+            // Preallocate the ownership receipt before the repair write. Any
+            // later logging/backoff allocation may fail, but clear() must
+            // still see and safely retire the recreated kernel route.
+            RouteSpec owned_copy = route;
+            owned_routes_.reserve(owned_routes_.size() + 1U);
             RouteInstallOutcome result;
             try {
                 result = add_route_checked(route);
@@ -535,11 +579,21 @@ void RouteTable::add_missing(const std::vector<RouteSpec>& desired,
                 // desired ownership record, but wait for the per-route
                 // deadline or an explicit UP event instead of spinning.
                 defer_repair(route);
+                desired_live_complete = false;
                 continue;
             }
 
             if (result == RouteInstallOutcome::Created ||
                 result == RouteInstallOutcome::ReplacedManaged) {
+                const bool already_owned = std::any_of(
+                    owned_routes_.begin(), owned_routes_.end(),
+                    [&](const RouteSpec& candidate) {
+                        return routes_equal(candidate, route);
+                    });
+                if (!already_owned) {
+                    owned_routes_.push_back(std::move(owned_copy));
+                }
+
                 const auto log_decision = record_repair(route);
                 if (log_decision ==
                     route_table_detail::RouteRepairLogDecision::Info) {
@@ -562,17 +616,6 @@ void RouteTable::add_missing(const std::vector<RouteSpec>& desired,
                         route.gateway.value_or("(none)"),
                         route.metric,
                         static_cast<unsigned>(route.protocol));
-                }
-            }
-            if (result == RouteInstallOutcome::Created ||
-                result == RouteInstallOutcome::ReplacedManaged) {
-                const bool already_owned = std::any_of(
-                    owned_routes_.begin(), owned_routes_.end(),
-                    [&](const RouteSpec& candidate) {
-                        return routes_equal(candidate, route);
-                    });
-                if (!already_owned) {
-                    owned_routes_.push_back(route);
                 }
             }
             if (mode == RouteReconcileMode::DeferredRepair) {
@@ -613,6 +656,7 @@ void RouteTable::add_missing(const std::vector<RouteSpec>& desired,
             throw;
         }
     }
+    return desired_live_complete;
 }
 
 bool RouteTable::restore_pending_replacement(
@@ -724,15 +768,11 @@ void RouteTable::adopt_generated_orphans(
         // A daemon restart loses in-memory ownership, but protocol 186 remains
         // in the kernel. Adopt only unexpected protocol-marked objects and let
         // the existing exact-delete path retire them. Never flush a table.
-        std::vector<DumpedRoute> live;
-        try {
-            live = netlink_.dump_routes();
-        } catch (const std::exception& error) {
-            Logger::instance().warn(
-                "Could not inspect protocol-186 routes for orphan cleanup: {}",
-                error.what());
-            return;
-        }
+        // This observation is part of the destructive-cleanup proof. A
+        // failed dump must propagate so the combined owner publishes an
+        // unknown generation and retries; silently treating it as an empty
+        // orphan set could delete or hide a restart-owned route.
+        const auto live = netlink_.dump_routes();
         for (const auto& actual : live) {
             if (!route_table_detail::is_generated_route_candidate(actual)) {
                 continue;
@@ -764,7 +804,10 @@ void RouteTable::adopt_generated_orphans(
     }
 }
 
-void RouteTable::remove_obsolete(const std::vector<RouteSpec>& desired) {
+std::set<uint32_t> RouteTable::remove_obsolete(
+    const std::vector<RouteSpec>& desired,
+    const std::set<uint32_t>& protected_tables) {
+    std::set<uint32_t> uncertain_tables;
     adopt_generated_orphans(desired);
 
     const std::vector<RouteSpec> current = routes_;
@@ -774,9 +817,16 @@ void RouteTable::remove_obsolete(const std::vector<RouteSpec>& desired) {
                                                    return routes_equal(route, candidate);
                                                });
         if (!still_desired) {
-            remove(route);
+            if (protected_tables.count(route.table) != 0U) {
+                uncertain_tables.insert(route.table);
+                continue;
+            }
+            if (!remove(route)) {
+                uncertain_tables.insert(route.table);
+            }
         }
     }
+    return uncertain_tables;
 }
 
 std::set<uint32_t> RouteTable::live_generated_route_tables() const {
@@ -811,16 +861,25 @@ void RouteTable::notify_interface_up(const std::string& interface_name) {
     }
 }
 
-void RouteTable::clear() {
+std::set<uint32_t> RouteTable::clear(
+    const std::set<uint32_t>& protected_tables) {
+    std::set<uint32_t> uncertain_tables;
     // clear() is also the rollback path. Never adopt arbitrary live
     // protocol-186 objects here: a failed generation must preserve the
     // previously committed generation. Recovered state is adopted explicitly
     // only after the complete route+rule transaction succeeds.
     const std::vector<RouteSpec> tracked = routes_;
     for (auto it = tracked.rbegin(); it != tracked.rend(); ++it) {
-        remove(*it);
+        if (protected_tables.count(it->table) != 0U) {
+            uncertain_tables.insert(it->table);
+            continue;
+        }
+        if (!remove(*it)) {
+            uncertain_tables.insert(it->table);
+        }
     }
     repair_records_.clear();
+    return uncertain_tables;
 }
 
 } // namespace keen_pbr3

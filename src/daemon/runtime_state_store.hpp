@@ -19,6 +19,8 @@ struct RuntimeStateSnapshot {
     FirewallState firewall_state;
     std::vector<RouteSpec> route_specs;
     std::vector<RuleSpec> policy_rule_specs;
+    bool routing_inventory_complete{true};
+    bool routing_kernel_state_known{true};
     std::map<std::string, UrltestState> urltest_states;
     std::string resolver_config_hash;
     std::string resolver_config_hash_actual;

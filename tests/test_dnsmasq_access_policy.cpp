@@ -11,6 +11,24 @@ TEST_CASE("dnsmasq access policy stays implicit without verified VPN servers") {
     CHECK(build_dnsmasq_trusted_interfaces({}, {}).empty());
 }
 
+TEST_CASE("prepared lifecycle DNS policy wins over stale global inventory") {
+    InternalVpnServer stale{};
+    stale.interface = "nwg-old";
+    const std::vector<std::string> prepared{
+        "br*", "nwg-new"};
+
+    CHECK(
+        select_dnsmasq_trusted_interfaces(
+            prepared, {stale}, {}) == prepared);
+    CHECK(
+        select_dnsmasq_trusted_interfaces(
+            std::vector<std::string>{}, {stale}, {}).empty());
+    CHECK(
+        select_dnsmasq_trusted_interfaces(
+            std::nullopt, {stale}, {}) ==
+        std::vector<std::string>{"br*", "nwg-old"});
+}
+
 TEST_CASE("dnsmasq access policy covers verified native and pooled VPN ingress") {
     InternalVpnServer wireguard{};
     wireguard.interface = "nwg0";

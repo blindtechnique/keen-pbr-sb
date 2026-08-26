@@ -228,6 +228,15 @@ struct ApiContext {
         std::string,
         NdmsNativeInterfaceLifecycleAction)>
         run_ndms_native_interface_lifecycle_fn;
+    // Production lifecycle mutations transfer the request's exact mutation
+    // lease into the asynchronous firewall owner and wait for its typed
+    // terminal. Keep these at the aggregate tail so existing tests and
+    // embedders retain their positional initialization contract; when absent,
+    // the corresponding legacy callback is the compatibility path.
+    std::function<void(RuntimeMutationAdmission::Lease)>
+        restart_runtime_with_lease_fn;
+    std::function<void(RuntimeMutationAdmission::Lease)>
+        start_runtime_with_lease_fn;
 
     Config get_visible_config() const {
         return get_visible_config_fn();
@@ -359,6 +368,19 @@ struct ApiContext {
         start_runtime_fn();
     }
 
+    bool can_start_runtime_with_lease() const noexcept {
+        return static_cast<bool>(start_runtime_with_lease_fn);
+    }
+
+    void start_runtime_with_lease(
+        RuntimeMutationAdmission::Lease lease) const {
+        if (!start_runtime_with_lease_fn) {
+            throw std::logic_error(
+                "Runtime start lease handoff is unavailable");
+        }
+        start_runtime_with_lease_fn(std::move(lease));
+    }
+
     void stop_runtime() const {
         stop_runtime_fn();
     }
@@ -376,6 +398,19 @@ struct ApiContext {
 
     void restart_runtime() const {
         restart_runtime_fn();
+    }
+
+    bool can_restart_runtime_with_lease() const noexcept {
+        return static_cast<bool>(restart_runtime_with_lease_fn);
+    }
+
+    void restart_runtime_with_lease(
+        RuntimeMutationAdmission::Lease lease) const {
+        if (!restart_runtime_with_lease_fn) {
+            throw std::logic_error(
+                "Runtime restart lease handoff is unavailable");
+        }
+        restart_runtime_with_lease_fn(std::move(lease));
     }
 
     ListRefreshOperationResult refresh_lists(
@@ -480,6 +515,16 @@ public:
             context_.finish_config_operation();
             legacy_active_ = false;
         }
+    }
+
+    RuntimeMutationAdmission::Lease take_lease() {
+        if (!lease_.has_value() || legacy_active_) {
+            throw std::logic_error(
+                "Runtime mutation lease handoff requires production admission");
+        }
+        auto lease = std::move(*lease_);
+        lease_.reset();
+        return lease;
     }
 
 private:

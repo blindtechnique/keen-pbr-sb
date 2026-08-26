@@ -4,6 +4,7 @@
 #include "../src/config/config.hpp"
 #include "../src/dns/keenetic_dns.hpp"
 #include "../src/lists/list_entry_visitor.hpp"
+#include "../src/routing/firewall_state.hpp"
 #include "../src/runtime/meta_udp_443_policy.hpp"
 
 #include <algorithm>
@@ -20,6 +21,7 @@
 #include <sys/stat.h>
 #include <type_traits>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 using namespace keen_pbr3;
@@ -154,6 +156,49 @@ private:
 };
 
 Config staged_transaction_config();
+
+static_assert(
+    std::is_nothrow_swappable_v<std::vector<RuleState>>,
+    "the published rule container must support allocation-free swap");
+static_assert(
+    noexcept(std::declval<FirewallState&>().swap_rules(
+        std::declval<std::vector<RuleState>&>())),
+    "rule publication must remain noexcept");
+
+TEST_CASE(
+    "FirewallState swaps the complete rule snapshot without moving storage") {
+    const auto make_rule = [](std::size_t index,
+                              std::string outbound,
+                              std::uint32_t fwmark) {
+        RuleState rule{};
+        rule.rule_index = index;
+        rule.outbound_tag = std::move(outbound);
+        rule.action_type = RuleActionType::Mark;
+        rule.fwmark = fwmark;
+        return rule;
+    };
+
+    FirewallState state;
+    state.set_rules({make_rule(1U, "old", 0x00010000U)});
+    const auto* old_storage = state.get_rules().data();
+
+    std::vector<RuleState> candidate{
+        make_rule(2U, "new-primary", 0x00020000U),
+        make_rule(3U, "new-fallback", 0x00030000U),
+    };
+    const auto* candidate_storage = candidate.data();
+
+    state.swap_rules(candidate);
+
+    REQUIRE(state.get_rules().size() == 2U);
+    CHECK(state.get_rules().data() == candidate_storage);
+    CHECK(state.get_rules()[0].outbound_tag == "new-primary");
+    CHECK(state.get_rules()[1].outbound_tag == "new-fallback");
+
+    REQUIRE(candidate.size() == 1U);
+    CHECK(candidate.data() == old_storage);
+    CHECK(candidate.front().outbound_tag == "old");
+}
 
 TEST_CASE("PPE remains fail-safe off during ordinary firewall staging") {
     const auto config = staged_transaction_config();

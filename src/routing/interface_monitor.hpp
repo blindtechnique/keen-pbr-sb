@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -30,6 +31,9 @@ public:
         // NDMS observation instead of assuming a later outbound probe repairs
         // the internal-VPN mapping.
         bool observation_gap{false};
+        // A main-table IPv4/IPv6 route changed. This is a revision fence for
+        // off-loop reachability plans; it is not an interface/catalog event.
+        bool route_changed{false};
     };
     using InterfaceStateCallback = std::function<void(const Event&)>;
 
@@ -59,6 +63,9 @@ public:
         std::optional<std::string> previous_interface_name,
         std::optional<bool> previous_is_up,
         bool is_up);
+    static std::optional<Event> describe_route_transition(
+        std::uint32_t table,
+        int address_family);
 
 private:
     struct Impl;

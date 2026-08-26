@@ -2042,26 +2042,39 @@ TEST_CASE(
     CHECK(later.coalesced);
     CHECK(later.recovery_revision > running_claim->recovery_revision);
 
-    const auto control_claim = coordinator.begin_control(*running_claim);
-    REQUIRE(control_claim.has_value());
-    auto forged_claim = *control_claim;
+    RuntimeFirewallOperationClaim retained_control;
+    auto forged_running = *running_claim;
+    ++forged_running.recovery_revision;
+    CHECK_FALSE(coordinator.begin_control_into(
+        forged_running, retained_control));
+    CHECK_FALSE(static_cast<bool>(retained_control));
+    CHECK(coordinator.operation_is_current(*running_claim));
+
+    REQUIRE(coordinator.begin_control_into(
+        *running_claim, retained_control));
+    CHECK(retained_control.phase ==
+          RuntimeFirewallOperationPhase::control_pending);
+    auto forged_claim = retained_control;
     ++forged_claim.recovery_revision;
-    const auto forged_completion = coordinator.complete_operation(
+    RuntimeFirewallOperationCompletion retained_completion;
+    CHECK_FALSE(coordinator.complete_operation_into(
         forged_claim,
         /*succeeded=*/true,
-        worker_recovery);
-    CHECK_FALSE(forged_completion.owned);
-    CHECK(coordinator.operation_is_current(*control_claim));
+        worker_recovery,
+        retained_completion));
+    CHECK_FALSE(retained_completion.owned);
+    CHECK(coordinator.operation_is_current(retained_control));
     CHECK(coordinator.owned_snat_recovery_pending());
 
-    const auto completion = coordinator.complete_operation(
-        *control_claim,
+    REQUIRE(coordinator.complete_operation_into(
+        retained_control,
         /*succeeded=*/true,
-        worker_recovery);
-    CHECK(completion.owned);
-    CHECK(completion.rerun_requested);
-    CHECK(completion.snat_recovery.requested);
-    CHECK(completion.snat_recovery.missing_observed);
+        worker_recovery,
+        retained_completion));
+    CHECK(retained_completion.owned);
+    CHECK(retained_completion.rerun_requested);
+    CHECK(retained_completion.snat_recovery.requested);
+    CHECK(retained_completion.snat_recovery.missing_observed);
     CHECK(coordinator.owned_snat_recovery_pending());
 }
 

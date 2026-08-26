@@ -50,9 +50,17 @@ RoutingHealthReport build_routing_health_report(
     const FirewallState& firewall_state,
     const std::vector<RouteSpec>& tracked_routes,
     const std::vector<RuleSpec>& tracked_policy_rules,
-    NetlinkManager& netlink) {
+    NetlinkManager& netlink,
+    bool routing_inventory_authoritative) {
     RoutingHealthReport report;
     report.firewall_backend = firewall_backend;
+
+    if (!routing_inventory_authoritative) {
+        report.error =
+            "runtime routing inventory is not authoritative; "
+            "waiting for reconciliation";
+        return report;
+    }
 
     try {
         // 1. Create firewall verifier

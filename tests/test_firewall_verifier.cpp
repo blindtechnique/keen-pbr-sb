@@ -2,6 +2,7 @@
 
 #include "../src/firewall/iptables_verifier.hpp"
 #include "../src/firewall/nftables_verifier.hpp"
+#include "../src/health/routing_health_checker.hpp"
 #include "../src/util/safe_exec.hpp"
 
 using namespace keen_pbr3;
@@ -31,6 +32,26 @@ bool matches_args(const std::vector<std::string>& actual,
 }
 
 } // namespace
+
+TEST_CASE("routing health never treats incomplete owner inventory as authoritative") {
+    NetlinkManager netlink;
+    const FirewallState firewall_state;
+    const auto report = build_routing_health_report(
+        FirewallBackend::iptables,
+        RawPreroutingMode{},
+        firewall_state,
+        {},
+        {},
+        netlink,
+        /*routing_inventory_authoritative=*/false);
+
+    CHECK_FALSE(report.overall_ok);
+    CHECK(report.route_tables.empty());
+    CHECK(report.policy_rules.empty());
+    CHECK(report.error ==
+          "runtime routing inventory is not authoritative; "
+          "waiting for reconciliation");
+}
 
 // =============================================================================
 // parse_iptables_s tests

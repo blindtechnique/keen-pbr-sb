@@ -38,6 +38,11 @@ public:
     // Replace the current rule state
     void set_rules(std::vector<RuleState> rules);
 
+    // Exchange the complete applied-rule snapshot without allocation. The
+    // control owner receives the previously published rules in the caller's
+    // vector, so publication and rollback do not need a throwing assignment.
+    void swap_rules(std::vector<RuleState>& rules) noexcept;
+
     // Update the urltest selection for a given urltest tag
     void set_urltest_selection(const std::string& urltest_tag,
                                const std::string& child_tag);

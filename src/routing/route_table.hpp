@@ -81,7 +81,8 @@ public:
         RouteNetlinkOperations& netlink,
         bool dry_run = false,
         InterfaceReadinessProbe interface_readiness_probe = {},
-        NowFunction now = {});
+        NowFunction now = {},
+        bool cleanup_on_destruction = true);
     ~RouteTable();
 
     // Non-copyable
@@ -92,7 +93,9 @@ public:
     void add(const RouteSpec& spec);
 
     // Remove a specific route. If not tracked, this is a no-op.
-    void remove(const RouteSpec& spec);
+    // False means a destructive request failed or its replacement rollback
+    // could not prove the final effect; the ledger remains conservative.
+    bool remove(const RouteSpec& spec);
 
     // Install missing routes before removing obsolete routes tracked by this
     // process. Live kernel state is reconciled as well: firmware interface
@@ -102,10 +105,16 @@ public:
     void reconcile(
         const std::vector<RouteSpec>& desired,
         RouteReconcileMode mode = RouteReconcileMode::Strict);
-    void add_missing(
+    // False means at least one tracked desired route is known live-missing
+    // and its DeferredRepair attempt was postponed/unavailable.
+    bool add_missing(
         const std::vector<RouteSpec>& desired,
         RouteReconcileMode mode = RouteReconcileMode::Strict);
-    void remove_obsolete(const std::vector<RouteSpec>& desired);
+    // A table protected by an unresolved policy-rule dependency is never
+    // removed in this pass. Returned tables need a later exact reconciliation.
+    std::set<uint32_t> remove_obsolete(
+        const std::vector<RouteSpec>& desired,
+        const std::set<uint32_t>& protected_tables = {});
 
     // The route phase can atomically replace a protocol-186 object before the
     // policy-rule phase succeeds. Until the caller commits the generation,
@@ -135,7 +144,8 @@ public:
     void notify_interface_up(const std::string& interface_name);
 
     // Remove all installed routes (shutdown cleanup).
-    void clear();
+    std::set<uint32_t> clear(
+        const std::set<uint32_t>& protected_tables = {});
 
     // Number of currently tracked routes.
     size_t size() const { return routes_.size(); }
@@ -164,6 +174,7 @@ private:
 
     RouteNetlinkOperations& netlink_;
     bool dry_run_{false};
+    bool cleanup_on_destruction_{true};
     InterfaceReadinessProbe interface_readiness_probe_;
     NowFunction now_;
     std::vector<RouteSpec> routes_;

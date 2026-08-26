@@ -1,4 +1,5 @@
 #include "daemon.hpp"
+#include "runtime_firewall_operation_owner.hpp"
 #include "keenetic_dns_refresh_transaction.hpp"
 
 #include "../dns/dns_router.hpp"
@@ -78,7 +79,9 @@ Daemon::capture_relevant_list_cache_generation(const Config& config) const {
 
 ResolverGenerationSnapshot Daemon::make_resolver_generation_snapshot(
     std::shared_ptr<const ListCacheGenerationSnapshot>
-        list_cache_snapshot) {
+        list_cache_snapshot,
+    std::optional<std::vector<std::string>>
+        trusted_dns_interfaces_override) {
     ResolverGenerationSnapshot snapshot;
     snapshot.config = config_;
     snapshot.keenetic_dns = active_keenetic_dns_;
@@ -97,7 +100,8 @@ ResolverGenerationSnapshot Daemon::make_resolver_generation_snapshot(
     log_ipv6_support_decision_once(ipv6_decision);
     snapshot.ipv6_policy = resolver_ipv6_policy(ipv6_decision);
     snapshot.trusted_dns_interfaces =
-        build_dnsmasq_trusted_interfaces(
+        select_dnsmasq_trusted_interfaces(
+            std::move(trusted_dns_interfaces_override),
             resolved_internal_vpn_servers_,
             resolved_internal_vpn_service_targets_);
     snapshot.generation =
@@ -151,8 +155,18 @@ void Daemon::commit_resolver_generation_snapshot(
 RuntimeStateSnapshot Daemon::build_runtime_state_snapshot() const {
     RuntimeStateSnapshot snapshot;
     snapshot.firewall_state = firewall_state_;
-    snapshot.route_specs = route_table_.get_routes();
-    snapshot.policy_rule_specs = policy_rules_.get_rules();
+    const auto routing_inventory = routing_operation_owner_.snapshot();
+    if (routing_inventory) {
+        snapshot.route_specs = routing_inventory->routes;
+        snapshot.policy_rule_specs = routing_inventory->rules;
+        snapshot.routing_inventory_complete =
+            routing_inventory->inventory_complete;
+        snapshot.routing_kernel_state_known =
+            routing_inventory->kernel_state_known;
+    } else {
+        snapshot.routing_inventory_complete = false;
+        snapshot.routing_kernel_state_known = false;
+    }
     const auto resolver_snapshot = resolver_sync_.snapshot(unix_timestamp_now_seconds());
     snapshot.resolver_config_hash = resolver_snapshot.expected_hash;
     snapshot.resolver_config_hash_actual = resolver_snapshot.actual_hash;
@@ -619,7 +633,7 @@ bool Daemon::commit_keenetic_dns_refresh_result(
                     current_generation);
             },
             [this, current_generation]() {
-                schedule_runtime_firewall_retry(
+                runtime_firewall_owner_->schedule(
                     0, current_generation, OwnedSnatRecovery{});
             },
             [this, current_generation]() {

@@ -11,9 +11,39 @@
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 
 namespace keen_pbr3 {
+
+namespace detail {
+
+// Mailbox and queue-envelope critical sections only move fixed ownership
+// records. A tiny non-throwing lock prevents a platform std::mutex error from
+// escaping a noexcept destructor/publication path and stranding the exact
+// coordinator claim or mutation lease.
+class RuntimeFirewallWorkerMailboxMutex final {
+public:
+    RuntimeFirewallWorkerMailboxMutex() noexcept = default;
+    RuntimeFirewallWorkerMailboxMutex(
+        const RuntimeFirewallWorkerMailboxMutex&) = delete;
+    RuntimeFirewallWorkerMailboxMutex& operator=(
+        const RuntimeFirewallWorkerMailboxMutex&) = delete;
+
+    void lock() noexcept {
+        while (locked_.test_and_set(std::memory_order_acquire)) {
+        }
+    }
+
+    void unlock() noexcept {
+        locked_.clear(std::memory_order_release);
+    }
+
+private:
+    std::atomic_flag locked_ = ATOMIC_FLAG_INIT;
+};
+
+} // namespace detail
 
 // Shared cross-thread storage for one admitted runtime-firewall worker. The
 // retry coordinator remains the sole operation phase state machine. This
@@ -35,6 +65,60 @@ public:
     using ResultPtr = std::shared_ptr<const Result>;
     using MutationLeasePtr =
         std::unique_ptr<RuntimeMutationAdmission::Lease>;
+
+    enum class MutationLeaseReturnPolicy : std::uint8_t {
+        release_after_attempt,
+        return_to_operation_owner,
+    };
+
+    // Typed ownership for the one mutation-admission token transported by an
+    // operation. An attempt lease keeps the historical contract: a failure
+    // before begin_worker() releases admission before publishing its terminal.
+    // A retained lease was acquired by an outer operation owner and must be
+    // returned to that owner even when the queued worker never starts.
+    struct MutationLeaseBinding {
+        MutationLeasePtr lease;
+        MutationLeaseReturnPolicy return_policy{
+            MutationLeaseReturnPolicy::release_after_attempt};
+
+        MutationLeaseBinding() noexcept = default;
+        MutationLeaseBinding(const MutationLeaseBinding&) = delete;
+        MutationLeaseBinding& operator=(
+            const MutationLeaseBinding&) = delete;
+        MutationLeaseBinding(MutationLeaseBinding&&) noexcept = default;
+        MutationLeaseBinding& operator=(
+            MutationLeaseBinding&&) noexcept = default;
+
+        static MutationLeaseBinding attempt_lease(
+            MutationLeasePtr lease) noexcept {
+            return MutationLeaseBinding{
+                std::move(lease),
+                MutationLeaseReturnPolicy::release_after_attempt};
+        }
+
+        static MutationLeaseBinding retained_lease(
+            MutationLeasePtr lease) noexcept {
+            return MutationLeaseBinding{
+                std::move(lease),
+                MutationLeaseReturnPolicy::return_to_operation_owner};
+        }
+
+        explicit operator bool() const noexcept {
+            return static_cast<bool>(lease);
+        }
+
+        void reset() noexcept { lease.reset(); }
+
+    private:
+        MutationLeaseBinding(
+            MutationLeasePtr lease,
+            MutationLeaseReturnPolicy return_policy) noexcept
+            : lease(std::move(lease)), return_policy(return_policy) {}
+    };
+
+    static_assert(
+        std::is_nothrow_move_constructible_v<MutationLeaseBinding>,
+        "mutation lease binding must cross terminal ownership without a gap");
 
     // An unforgeable proof that this exact queue envelope successfully crossed
     // RuntimeFirewallRetryCoordinator::begin_worker(). Callers can copy the
@@ -72,10 +156,12 @@ public:
     // One move-only terminal outcome. Running outcomes carry the exact
     // capability and transfer the sole mutation lease to the control owner,
     // which must call begin_control(), publish daemon state, complete the
-    // coordinator operation, and finally release the lease. Outcomes without
-    // a running capability contain no lease: it was released before this
-    // envelope became observable. A lost claim detected after begin_worker()
-    // retains both capability and lease but deliberately drops stale result.
+    // coordinator operation, and finally release the lease. An ordinary
+    // outcome without a running capability contains no lease: it was released
+    // before this envelope became observable. A pre-owned retained lease is
+    // instead returned in that pre-worker envelope. A lost claim detected
+    // after begin_worker() retains both capability and lease but deliberately
+    // drops stale result.
     struct TerminalEnvelope {
         TerminalStatus status{TerminalStatus::lost_claim};
         std::optional<RunningClaim> running_claim;
@@ -83,7 +169,7 @@ public:
         std::exception_ptr exception;
         std::optional<RuntimeFirewallOperationCompletion>
             coordinator_completion;
-        MutationLeasePtr mutation_lease;
+        MutationLeaseBinding mutation_lease;
     };
 
     using OnTerminalReady = std::function<void()>;
@@ -98,8 +184,9 @@ public:
         TerminalMailbox(const TerminalMailbox&) = delete;
         TerminalMailbox& operator=(const TerminalMailbox&) = delete;
 
-        std::optional<TerminalEnvelope> take_terminal() {
-            std::lock_guard<std::mutex> lock(mutex_);
+        std::optional<TerminalEnvelope> take_terminal() noexcept {
+            std::lock_guard<detail::RuntimeFirewallWorkerMailboxMutex> lock(
+                mutex_);
             if (!terminal_.has_value() || terminal_taken_) {
                 return std::nullopt;
             }
@@ -109,6 +196,14 @@ public:
             return terminal;
         }
 
+        // A coordinator terminal may win the race with a retained pre-worker
+        // loss. The control owner must keep its mailbox alive until this flag
+        // clears, then absorb the terminal carrying the exact retained token.
+        bool retained_mutation_lease_pending() const noexcept {
+            return retained_mutation_lease_pending_.load(
+                std::memory_order_acquire);
+        }
+
     private:
         friend class RuntimeFirewallWorkerOperation<Input, Result>;
 
@@ -116,13 +211,20 @@ public:
             OnTerminalReady on_terminal_ready) noexcept
             : on_terminal_ready_(std::move(on_terminal_ready)) {}
 
-        bool bind_mutation_lease(MutationLeasePtr mutation_lease) {
-            std::lock_guard<std::mutex> lock(mutex_);
+        bool bind_mutation_lease(
+            MutationLeaseBinding mutation_lease) noexcept {
+            std::lock_guard<detail::RuntimeFirewallWorkerMailboxMutex> lock(
+                mutex_);
             if (operation_bound_ || terminal_.has_value() ||
                 terminal_taken_) {
                 return false;
             }
             operation_bound_ = true;
+            if (mutation_lease.return_policy ==
+                MutationLeaseReturnPolicy::return_to_operation_owner) {
+                retained_mutation_lease_pending_.store(
+                    true, std::memory_order_release);
+            }
             mutation_lease_ = std::move(mutation_lease);
             return true;
         }
@@ -131,11 +233,12 @@ public:
             TerminalStatus status,
             RunningClaim running_claim,
             ResultPtr result,
-            std::exception_ptr exception) {
+            std::exception_ptr exception) noexcept {
             {
-                std::lock_guard<std::mutex> lock(mutex_);
+                std::lock_guard<
+                    detail::RuntimeFirewallWorkerMailboxMutex> lock(mutex_);
                 if (!operation_bound_ || terminal_.has_value() ||
-                    terminal_taken_ || !mutation_lease_) {
+                    terminal_taken_ || !mutation_lease_.lease) {
                     return false;
                 }
 
@@ -148,6 +251,8 @@ public:
                     std::move(exception),
                     std::nullopt,
                     std::move(mutation_lease_)});
+                retained_mutation_lease_pending_.store(
+                    false, std::memory_order_release);
             }
             notify_terminal_ready();
             return true;
@@ -155,25 +260,33 @@ public:
 
         bool publish_preworker_terminal(
             TerminalStatus status,
-            std::optional<RuntimeFirewallOperationCompletion> completion) {
+            std::optional<RuntimeFirewallOperationCompletion>
+                completion) noexcept {
             {
-                std::lock_guard<std::mutex> lock(mutex_);
+                std::lock_guard<
+                    detail::RuntimeFirewallWorkerMailboxMutex> lock(mutex_);
                 if (!operation_bound_ || terminal_.has_value() ||
                     terminal_taken_) {
                     return false;
                 }
 
-                // Releasing admission is part of publication. The mailbox
-                // cannot become observable and no wake can run while the
-                // pre-worker lease remains owned.
-                mutation_lease_.reset();
+                // An ordinary attempt releases admission as part of
+                // publication. A retained pre-owned token instead moves into
+                // the envelope while the mailbox lock is held. The pending
+                // bit clears only after that exact token has a new owner.
+                if (mutation_lease_.return_policy ==
+                    MutationLeaseReturnPolicy::release_after_attempt) {
+                    mutation_lease_.lease.reset();
+                }
                 terminal_.emplace(TerminalEnvelope{
                     status,
                     std::nullopt,
                     {},
                     {},
                     std::move(completion),
-                    {}});
+                    std::move(mutation_lease_)});
+                retained_mutation_lease_pending_.store(
+                    false, std::memory_order_release);
             }
             notify_terminal_ready();
             return true;
@@ -189,12 +302,13 @@ public:
             }
         }
 
-        std::mutex mutex_;
+        detail::RuntimeFirewallWorkerMailboxMutex mutex_;
         OnTerminalReady on_terminal_ready_;
         bool operation_bound_{false};
-        MutationLeasePtr mutation_lease_;
+        MutationLeaseBinding mutation_lease_;
         std::optional<TerminalEnvelope> terminal_;
         bool terminal_taken_{false};
+        std::atomic<bool> retained_mutation_lease_pending_{false};
     };
 
     using TerminalMailboxPtr = std::shared_ptr<TerminalMailbox>;
@@ -217,6 +331,21 @@ public:
         InputPtr input,
         MutationLeasePtr mutation_lease,
         const TerminalMailboxPtr& terminal_mailbox) {
+        return create(
+            coordinator,
+            queued_claim,
+            std::move(input),
+            MutationLeaseBinding::attempt_lease(
+                std::move(mutation_lease)),
+            terminal_mailbox);
+    }
+
+    static OperationPtr create(
+        RuntimeFirewallRetryCoordinator& coordinator,
+        RuntimeFirewallOperationClaim queued_claim,
+        InputPtr input,
+        MutationLeaseBinding mutation_lease,
+        const TerminalMailboxPtr& terminal_mailbox) {
         if (!queued_claim ||
             queued_claim.phase !=
                 RuntimeFirewallOperationPhase::worker_queued ||
@@ -228,7 +357,7 @@ public:
             throw std::invalid_argument(
                 "runtime firewall worker requires immutable input");
         }
-        if (!mutation_lease || !*mutation_lease) {
+        if (!mutation_lease.lease || !*mutation_lease.lease) {
             throw std::invalid_argument(
                 "runtime firewall worker requires an exclusive mutation lease");
         }
@@ -257,16 +386,13 @@ public:
 
     ~RuntimeFirewallWorkerOperation() noexcept {
         bool queue_was_never_armed = false;
-        try {
-            std::lock_guard<std::mutex> lock(envelope_mutex_);
+        {
+            std::lock_guard<detail::RuntimeFirewallWorkerMailboxMutex> lock(
+                envelope_mutex_);
             if (!queue_envelope_created_) {
                 queue_envelope_created_ = true;
                 queue_was_never_armed = true;
             }
-        } catch (...) {
-            // std::mutex failures are unrecoverable for the mailbox protocol,
-            // but a destructor must not terminate daemon shutdown.
-            return;
         }
         if (queue_was_never_armed) {
             terminate_queued_claim(
@@ -298,7 +424,8 @@ public:
 
         std::shared_ptr<QueuedClosureState> state;
         {
-            std::lock_guard<std::mutex> lock(envelope_mutex_);
+            std::lock_guard<detail::RuntimeFirewallWorkerMailboxMutex> lock(
+                envelope_mutex_);
             if (queue_envelope_created_) {
                 throw std::logic_error(
                     "runtime firewall worker already has a queue envelope");
@@ -371,7 +498,8 @@ private:
                     ClosureState::terminalized,
                     std::memory_order_release);
                 operation_->publish_preworker_terminal(
-                    TerminalStatus::lost_claim, std::nullopt);
+                    TerminalStatus::lost_claim,
+                    std::nullopt);
                 return;
             }
 
@@ -445,29 +573,20 @@ private:
         if (!terminal_mailbox) return;
 
         std::optional<RuntimeFirewallOperationCompletion> completion;
-        try {
-            auto transferred =
-                coordinator.terminate_operation_for_resnapshot(
-                    queued_claim,
-                    /*force_rerun=*/true);
-            if (transferred.owned) {
-                completion.emplace(std::move(transferred));
-            }
-        } catch (...) {
-            // A lost-claim terminal is still published below. Queue teardown
-            // and operation destruction must never terminate shutdown.
+        auto transferred =
+            coordinator.terminate_operation_for_resnapshot(
+                queued_claim,
+                /*force_rerun=*/true);
+        if (transferred.owned) {
+            completion.emplace(std::move(transferred));
         }
 
         const auto status = completion.has_value()
             ? TerminalStatus::queued_abandoned
             : TerminalStatus::lost_claim;
-        try {
-            terminal_mailbox->publish_preworker_terminal(
-                status, std::move(completion));
-        } catch (...) {
-            // Standard mailbox moves are allocation-free. Retain noexcept
-            // destruction even if the platform mutex reports a fatal error.
-        }
+        terminal_mailbox->publish_preworker_terminal(
+            status,
+            std::move(completion));
     }
 
     bool publish_running_terminal(
@@ -503,14 +622,16 @@ private:
 
     bool publish_preworker_terminal(
         TerminalStatus status,
-        std::optional<RuntimeFirewallOperationCompletion> completion) {
+        std::optional<RuntimeFirewallOperationCompletion>
+            completion) noexcept {
         if (status != TerminalStatus::queued_abandoned &&
             status != TerminalStatus::lost_claim) {
             return false;
         }
 
         return terminal_mailbox_->publish_preworker_terminal(
-            status, std::move(completion));
+            status,
+            std::move(completion));
     }
 
     RuntimeFirewallRetryCoordinator& coordinator_;
@@ -518,7 +639,7 @@ private:
     const InputPtr input_;
     const TerminalMailboxPtr terminal_mailbox_;
 
-    std::mutex envelope_mutex_;
+    detail::RuntimeFirewallWorkerMailboxMutex envelope_mutex_;
     bool queue_envelope_created_{false};
 };
 

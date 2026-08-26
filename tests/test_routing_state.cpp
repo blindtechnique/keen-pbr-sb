@@ -84,6 +84,40 @@ size_t count_routes_by_family(const std::vector<RouteSpec>& routes, int family) 
                                              }));
 }
 
+bool route_specs_equal(const RouteSpec& left, const RouteSpec& right) {
+    return left.destination == right.destination &&
+           left.table == right.table &&
+           left.interface == right.interface &&
+           left.gateway == right.gateway &&
+           left.blackhole == right.blackhole &&
+           left.unreachable == right.unreachable &&
+           left.family == right.family &&
+           left.metric == right.metric &&
+           left.protocol == right.protocol;
+}
+
+bool rule_specs_equal(const RuleSpec& left, const RuleSpec& right) {
+    return left.fwmark == right.fwmark &&
+           left.fwmask == right.fwmask &&
+           left.table == right.table &&
+           left.priority == right.priority &&
+           left.family == right.family;
+}
+
+bool routing_plans_equal(const PlannedRoutingState& left,
+                         const PlannedRoutingState& right) {
+    return left.routes.size() == right.routes.size() &&
+           std::equal(left.routes.begin(),
+                      left.routes.end(),
+                      right.routes.begin(),
+                      route_specs_equal) &&
+           left.rules.size() == right.rules.size() &&
+           std::equal(left.rules.begin(),
+                      left.rules.end(),
+                      right.rules.begin(),
+                      rule_specs_equal);
+}
+
 } // namespace
 
 TEST_CASE("build_fw_rule_states: ignore outbound becomes pass-through firewall rule") {
@@ -741,6 +775,97 @@ TEST_CASE("populate_routing_state: strict enforcement installs unreachable defau
     REQUIRE(routes.get_routes().size() == 2);
     CHECK(find_route(routes.get_routes(), 100, false, true, kUnreachableRouteMetric) != nullptr);
     CHECK(find_route(routes.get_routes(), 100, true, false) == nullptr);
+}
+
+TEST_CASE("plan_routing_state: pure plan matches the compatibility wrapper") {
+    auto cfg = parse_minimal_config(R"({
+        "iproute":{"table_start":100},
+        "daemon":{"strict_enforcement":false},
+        "outbounds":[
+            {"tag":"vpn_a","type":"interface","interface":"wg0","gateway":"10.0.0.1"},
+            {"tag":"vpn_b","type":"interface","interface":"wg1","gateway6":"2001:db8::1"},
+            {"tag":"fixed","type":"table","table":220},
+            {"tag":"inner","type":"urltest","url":"https://example.org",
+             "outbound_groups":[{"outbounds":["vpn_a","vpn_b"]}]},
+            {"tag":"outer","type":"urltest","url":"https://example.org",
+             "outbound_groups":[{"outbounds":["inner"]}]}
+        ]
+    })");
+    const auto marks = allocate_outbound_marks(
+        cfg.fwmark.value_or(FwmarkConfig{}),
+        cfg.outbounds.value_or(std::vector<Outbound>{}));
+    const std::map<std::string, std::string> selections{
+        {"inner", "vpn_b"},
+        {"outer", "inner"},
+    };
+    const OutboundReachabilitySnapshot reachability{
+        {"vpn_a", true},
+        {"vpn_b", false},
+    };
+
+    const auto plan = plan_routing_state(
+        cfg, marks, reachability, &selections, /*ipv6_enabled=*/false);
+
+    NetlinkManager netlink;
+    RouteTable routes(netlink, true);
+    PolicyRuleManager rules(netlink, true);
+    populate_routing_state(
+        cfg,
+        marks,
+        routes,
+        rules,
+        [&reachability](const Outbound& outbound) {
+            const auto it = reachability.find(outbound.tag);
+            return it == reachability.end() || it->second;
+        },
+        &selections,
+        /*ipv6_enabled=*/false);
+
+    PlannedRoutingState wrapper_plan;
+    wrapper_plan.routes = routes.get_routes();
+    wrapper_plan.rules = rules.get_rules();
+    CHECK(routing_plans_equal(plan, wrapper_plan));
+}
+
+TEST_CASE("plan_routing_state: snapshot input is deterministic and remains unchanged") {
+    auto cfg = parse_minimal_config(R"({
+        "iproute":{"table_start":100},
+        "daemon":{"strict_enforcement":false},
+        "outbounds":[
+            {"tag":"unavailable","type":"interface","interface":"wg0"},
+            {"tag":"snapshot_default","type":"interface","interface":"wg1"},
+            {"tag":"auto","type":"urltest","url":"https://example.org",
+             "outbound_groups":[{"outbounds":["unavailable","snapshot_default"]}]}
+        ]
+    })");
+    const auto marks = allocate_outbound_marks(
+        cfg.fwmark.value_or(FwmarkConfig{}),
+        cfg.outbounds.value_or(std::vector<Outbound>{}));
+    const std::map<std::string, std::string> selections{
+        {"auto", "snapshot_default"},
+    };
+    OutboundReachabilitySnapshot reachability{{"unavailable", false}};
+    const auto original_reachability = reachability;
+
+    const auto first = plan_routing_state(
+        cfg, marks, reachability, &selections, /*ipv6_enabled=*/true);
+    const auto second = plan_routing_state(
+        cfg, marks, reachability, &selections, /*ipv6_enabled=*/true);
+
+    CHECK(reachability == original_reachability);
+    CHECK(routing_plans_equal(first, second));
+    CHECK(find_route(first.routes,
+                     101,
+                     false,
+                     false,
+                     0,
+                     std::optional<std::string>{"wg1"}) != nullptr);
+    CHECK(find_route(first.routes,
+                     100,
+                     false,
+                     false,
+                     0,
+                     std::optional<std::string>{"wg0"}) == nullptr);
 }
 
 TEST_CASE("populate_routing_state: strict enforcement installs real default when up") {
@@ -2198,7 +2323,7 @@ TEST_CASE("kernel routing reconciliation refuses a foreign route collision") {
     CHECK(netlink.live_rules.front().table == foreign_rule.table);
 }
 
-TEST_CASE("kernel routing reconciliation removes only corroborated stale policy generation") {
+TEST_CASE("kernel routing reconciliation preserves a stale route anchor while a foreign rule depends on its table") {
     RecordingRoutingNetlink netlink;
     RouteTable routes(netlink);
     PolicyRuleManager rules(netlink);
@@ -2247,6 +2372,24 @@ TEST_CASE("kernel routing reconciliation removes only corroborated stale policy 
         "route:add:159",
         "rule:add:159",
         "rule:delete:154",
-        "route:delete:154",
     }));
+    CHECK(netlink.contains_live_route(stale_generated_route));
+
+    netlink.live_rules.erase(
+        std::remove_if(
+            netlink.live_rules.begin(),
+            netlink.live_rules.end(),
+            [&](const DumpedRule& actual) {
+                return policy_rule_detail::rule_matches_live(
+                    unrelated_foreign_rule, actual);
+            }),
+        netlink.live_rules.end());
+    netlink.events.clear();
+
+    reconcile_kernel_routing_state(
+        routes, rules, {desired_route}, {desired_rule});
+
+    CHECK(netlink.events ==
+          std::vector<std::string>({"route:delete:154"}));
+    CHECK_FALSE(netlink.contains_live_route(stale_generated_route));
 }

@@ -26,7 +26,10 @@ std::vector<RuleSpec> find_orphaned_generated_rules(
 class PolicyRuleManager {
 public:
     // If dry_run is true, add()/clear() only track specs and skip netlink ops.
-    explicit PolicyRuleManager(RuleNetlinkOperations& netlink, bool dry_run = false);
+    explicit PolicyRuleManager(
+        RuleNetlinkOperations& netlink,
+        bool dry_run = false,
+        bool cleanup_on_destruction = true);
     ~PolicyRuleManager();
 
     // Non-copyable
@@ -37,7 +40,9 @@ public:
     void add(const RuleSpec& spec);
 
     // Remove a specific policy rule. If not tracked, this is a no-op.
-    void remove(const RuleSpec& spec);
+    // False means the exact kernel effect is unknown and the logical/owned
+    // ledger was retained conservatively.
+    bool remove(const RuleSpec& spec);
 
     // Install missing rules before removing obsolete rules tracked by this
     // process. Live kernel state is reconciled as well: firmware can discard
@@ -45,10 +50,21 @@ public:
     // Existing foreign rules are observed, not claimed.
     void reconcile(const std::vector<RuleSpec>& desired);
     void add_missing(const std::vector<RuleSpec>& desired);
-    void remove_obsolete(const std::vector<RuleSpec>& desired);
-    void remove_orphaned_generated(
+    // Tables returned here may still have a live policy-rule dependency. A
+    // caller must not remove their route anchors in the same cleanup pass.
+    std::set<uint32_t> remove_obsolete(
+        const std::vector<RuleSpec>& desired);
+    std::set<uint32_t> remove_orphaned_generated(
         const std::vector<RuleSpec>& desired,
         const std::set<uint32_t>& corroborated_route_tables);
+
+    // Return every candidate route table which still has any live policy-rule
+    // dependency, regardless of ownership. If the live rule dump fails, all
+    // candidate tables are returned so route-anchor cleanup fails closed.
+    std::set<uint32_t> protect_route_tables_with_live_rules(
+        const std::vector<RouteSpec>& candidate_routes,
+        const std::set<uint32_t>& additional_candidate_tables = {},
+        const std::vector<RuleSpec>& accounted_rules = {});
 
     // Exact desired rules can safely be adopted only after the complete
     // route+rule generation commits and protocol-186 route evidence exists.
@@ -61,7 +77,9 @@ public:
     void adopt_desired(const std::vector<RuleSpec>& desired);
 
     // Remove all installed policy rules (shutdown cleanup).
-    void clear();
+    // Retains failed owned/logical rules and returns every table whose exact
+    // rule absence was not proven.
+    std::set<uint32_t> clear();
 
     // Number of currently tracked rules.
     size_t size() const { return rules_.size(); }
@@ -72,6 +90,7 @@ public:
 private:
     RuleNetlinkOperations& netlink_;
     bool dry_run_{false};
+    bool cleanup_on_destruction_{true};
     std::vector<RuleSpec> rules_;
     // Concrete-family rules created by this process and safe to delete.
     std::vector<RuleSpec> owned_rules_;

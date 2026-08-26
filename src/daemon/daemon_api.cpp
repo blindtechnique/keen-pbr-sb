@@ -588,6 +588,104 @@ void Daemon::run_runtime_control_operation_or_throw(const std::string& label,
         label);
 }
 
+void Daemon::start_routing_runtime_with_lease(
+    RuntimeMutationAdmission::Lease lease) {
+    if (is_event_loop_thread()) {
+        throw DaemonError(
+            "Runtime start completion cannot wait on the control loop");
+    }
+
+    auto completion = RuntimeFirewallLifecycleCompletion::create();
+    auto lease_owner =
+        std::make_unique<RuntimeMutationAdmission::Lease>(std::move(lease));
+    auto completion_source = std::move(completion.source);
+
+    // Only the short owner handoff is synchronous. The HTTP worker, never the
+    // control loop, waits for route/firewall/resolver verification below.
+    enqueue_control_task(
+        [this, &lease_owner, &completion_source]() mutable {
+            begin_preowned_runtime_firewall_start(
+                std::move(lease_owner),
+                std::move(completion_source));
+        },
+        true,
+        "api-start-runtime-owner",
+        true);
+
+    const auto terminal = completion.wait.wait();
+    if (terminal.outcome ==
+        RuntimeFirewallLifecycleOutcome::verified_success) {
+        return;
+    }
+
+    std::string message;
+    if (terminal.outcome == RuntimeFirewallLifecycleOutcome::shutdown) {
+        message = "Runtime start was interrupted by daemon shutdown";
+    } else if (terminal.commit_ambiguous) {
+        message =
+            "Runtime start result is ambiguous; firewall commit could not "
+            "be verified";
+    } else {
+        message = "Runtime start did not reach a verified running state";
+    }
+    if (!terminal.detail.empty()) {
+        message += ": " + terminal.detail;
+    }
+    throw DaemonError(std::move(message));
+}
+
+void Daemon::restart_routing_runtime_with_lease(
+    RuntimeMutationAdmission::Lease lease) {
+    if (is_event_loop_thread()) {
+        throw DaemonError(
+            "Runtime restart completion cannot wait on the control loop");
+    }
+
+    auto completion = RuntimeFirewallLifecycleCompletion::create();
+    auto lease_owner =
+        std::make_unique<RuntimeMutationAdmission::Lease>(std::move(lease));
+    auto completion_source = std::move(completion.source);
+
+    // This wait covers only admission into the asynchronous owner. The
+    // control task must not wait for firewall/resolver completion: the HTTP
+    // worker performs that wait below while the event loop remains free to
+    // drain worker terminals and successor attempts.
+    enqueue_control_task(
+        [this, &lease_owner, &completion_source]() mutable {
+            begin_preowned_runtime_firewall_restart(
+                std::move(lease_owner),
+                std::move(completion_source));
+        },
+        true,
+        "api-restart-runtime-owner",
+        true);
+
+    const auto terminal = completion.wait.wait();
+    if (terminal.outcome ==
+        RuntimeFirewallLifecycleOutcome::verified_success) {
+        return;
+    }
+
+    std::string message;
+    if (terminal.outcome == RuntimeFirewallLifecycleOutcome::shutdown) {
+        message = "Runtime restart was interrupted by daemon shutdown";
+    } else if (terminal.committed && !terminal.commit_ambiguous) {
+        message =
+            "Runtime firewall restart committed, but post-commit verification "
+            "did not complete";
+    } else if (terminal.commit_ambiguous) {
+        message =
+            "Runtime restart result is ambiguous; firewall commit could not "
+            "be verified";
+    } else {
+        message = "Runtime restart did not reach a verified result";
+    }
+    if (!terminal.detail.empty()) {
+        message += ": " + terminal.detail;
+    }
+    throw DaemonError(std::move(message));
+}
+
 ConfigApplyResult Daemon::apply_validated_config_via_control_task(
     Config config,
     std::string saved_config_json) {
@@ -992,7 +1090,9 @@ void Daemon::setup_api() {
                     runtime_snapshot.firewall_state,
                     runtime_snapshot.route_specs,
                     runtime_snapshot.policy_rule_specs,
-                    netlink_);
+                    netlink_,
+                    runtime_snapshot.routing_inventory_complete &&
+                        runtime_snapshot.routing_kernel_state_known);
                 // From the live backend: this is what the last apply observed.
                 // Re-inspecting the firmware chain on a health request would
                 // both duplicate the writer and answer a different question.
@@ -1079,20 +1179,18 @@ void Daemon::setup_api() {
             return apply_validated_config_via_control_task(std::move(config),
                                                            std::move(saved_config_json));
         },
-        [this]() {
-            run_runtime_control_operation_or_throw("api-start-runtime",
-                                                   "Start routing runtime",
-                                                   [this]() { start_routing_runtime(); });
+        []() {
+            throw std::logic_error(
+                "Production runtime start requires exact lease handoff");
         },
         [this]() {
             run_runtime_control_operation_or_throw("api-stop-runtime",
                                                    "Stop routing runtime",
                                                    [this]() { stop_routing_runtime(); });
         },
-        [this]() {
-            run_runtime_control_operation_or_throw("api-restart-runtime",
-                                                   "Restart routing runtime",
-                                                   [this]() { restart_routing_runtime(); });
+        []() {
+            throw std::logic_error(
+                "Production runtime restart requires exact lease handoff");
         },
         [this](std::optional<std::string> requested_name) {
             return refresh_lists_via_api(requested_name);
@@ -1111,6 +1209,14 @@ void Daemon::setup_api() {
                 std::move(label),
                 require_runtime_running,
                 require_runtime_stopped);
+        };
+    api_ctx_->start_runtime_with_lease_fn =
+        [this](RuntimeMutationAdmission::Lease lease) {
+            start_routing_runtime_with_lease(std::move(lease));
+        };
+    api_ctx_->restart_runtime_with_lease_fn =
+        [this](RuntimeMutationAdmission::Lease lease) {
+            restart_routing_runtime_with_lease(std::move(lease));
         };
     status_stream_ = std::make_unique<StatusStream>([this]() {
         return build_runtime_inventory(*api_ctx_);

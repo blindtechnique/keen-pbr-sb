@@ -100,6 +100,31 @@ inline bool idle_stall_observer_requested(const Config& config) {
 
 namespace runtime_recovery_detail {
 
+// The retry slot is an ownership state machine, including noexcept queue and
+// timer terminal paths. Its critical sections never wait for I/O or execute
+// callbacks, so a small non-throwing lock avoids turning a platform mutex
+// failure into a permanently stranded claim.
+class RuntimeFirewallCoordinatorMutex final {
+public:
+    RuntimeFirewallCoordinatorMutex() noexcept = default;
+    RuntimeFirewallCoordinatorMutex(
+        const RuntimeFirewallCoordinatorMutex&) = delete;
+    RuntimeFirewallCoordinatorMutex& operator=(
+        const RuntimeFirewallCoordinatorMutex&) = delete;
+
+    void lock() noexcept {
+        while (locked_.test_and_set(std::memory_order_acquire)) {
+        }
+    }
+
+    void unlock() noexcept {
+        locked_.clear(std::memory_order_release);
+    }
+
+private:
+    std::atomic_flag locked_ = ATOMIC_FLAG_INIT;
+};
+
 inline bool firewall_criteria_equal(
     const FirewallRuleCriteria& left,
     const FirewallRuleCriteria& right) noexcept {
@@ -504,6 +529,28 @@ inline RuntimeFirewallRetryPlan plan_runtime_firewall_retry(
     return {};
 }
 
+inline bool runtime_firewall_preworker_retry_required(
+    bool snat_recovery_requested,
+    bool native_vpn_catalog_policy,
+    bool urltest_recovery_waiting,
+    std::size_t attempt,
+    std::size_t bounded_retry_count) noexcept {
+    return snat_recovery_requested ||
+           (!urltest_recovery_waiting && native_vpn_catalog_policy &&
+            attempt < bounded_retry_count);
+}
+
+inline bool runtime_firewall_terminal_requests_successor(
+    bool commit_ambiguous,
+    bool coordinator_rerun_requested,
+    bool independent_trailing_intent,
+    bool suppress_coordinator_rerun) noexcept {
+    return !commit_ambiguous &&
+           (independent_trailing_intent ||
+            (coordinator_rerun_requested &&
+             !suppress_coordinator_rerun));
+}
+
 struct OwnedConntrackCleanupSnapshot {
     std::uint64_t runtime_generation{0};
     std::uint32_t owned_mask{0};
@@ -783,6 +830,73 @@ struct RuntimeFirewallOperationCompletion {
     explicit operator bool() const noexcept { return owned; }
 };
 
+// A source event may arrive after the coordinator completion was already
+// copied into the durable terminal context, while a resolver/rollback tail is
+// still parked. Merge the complete late intent with a strong exception
+// guarantee: both durable inputs remain untouched until the allocating SNAT
+// set merge has completed, then the newest catalogue and rerun bit publish
+// before either delta is cleared.
+inline bool absorb_trailing_runtime_firewall_completion(
+    RuntimeFirewallOperationCompletion& completion,
+    OwnedSnatRecovery& trailing_snat,
+    PreparedNativeVpnCatalogPtr& trailing_catalog,
+    bool force_successor = false) {
+    const bool has_snat = trailing_snat.requested ||
+        trailing_snat.missing_observed ||
+        trailing_snat.cleanup_snapshot.has_value();
+    const bool has_catalog = static_cast<bool>(trailing_catalog);
+    if (!has_snat && !has_catalog && !force_successor) {
+        return false;
+    }
+
+    auto merged_snat = completion.snat_recovery;
+    if (has_snat) {
+        merged_snat = merge_owned_snat_recovery(
+            std::move(merged_snat), trailing_snat);
+    }
+    auto newest_catalog = completion.next_prepared_catalog;
+    if (trailing_catalog &&
+        (!newest_catalog ||
+         trailing_catalog->runtime_generation >=
+             newest_catalog->runtime_generation)) {
+        newest_catalog = trailing_catalog;
+    }
+
+    completion.snat_recovery = std::move(merged_snat);
+    completion.next_prepared_catalog = std::move(newest_catalog);
+    completion.rerun_requested = true;
+    trailing_snat = {};
+    trailing_catalog.reset();
+    return true;
+}
+
+// Immediate admission is ownership, never proof that the backend transaction
+// committed. `handed_off` also covers an inline stale/rejected terminal: the
+// exact terminal owner, rather than the initiating caller, must settle it.
+enum class RuntimeFirewallImmediateDisposition : std::uint8_t {
+    handed_off,
+    coalesced,
+    rejected,
+};
+
+static_assert(
+    std::is_nothrow_copy_assignable_v<RuntimeFirewallOperationClaim>,
+    "phase claim must enter durable storage before coordinator publication");
+static_assert(
+    std::is_nothrow_move_constructible_v<RuntimeFirewallOperationClaim>,
+    "compatibility claim return must not open a post-transition gap");
+static_assert(
+    std::is_nothrow_move_assignable_v<OwnedSnatRecovery>,
+    "prepared recovery must publish without a post-completion failure gap");
+static_assert(
+    std::is_nothrow_move_assignable_v<
+        RuntimeFirewallOperationCompletion>,
+    "completion must enter durable storage before slot release");
+static_assert(
+    std::is_nothrow_move_constructible_v<
+        RuntimeFirewallOperationCompletion>,
+    "compatibility completion return must remain allocation-free");
+
 // Control-loop-owned retry policy plus a mutex-protected cross-boundary claim
 // for runtime routing/firewall reconciliation. The coordinator deliberately
 // does not perform reconciliation itself: it only owns the single operation
@@ -792,6 +906,9 @@ struct RuntimeFirewallOperationCompletion {
 // keep their original synchronous behavior.
 class RuntimeFirewallRetryCoordinator {
 public:
+    using OperationLock = std::lock_guard<
+        runtime_recovery_detail::RuntimeFirewallCoordinatorMutex>;
+
     RuntimeFirewallRetryAdmission begin_attempt(
         std::size_t retry_attempt,
         OwnedSnatRecovery snat_recovery) {
@@ -812,7 +929,7 @@ public:
         OwnedSnatRecovery snat_recovery,
         const PreparedNativeVpnCatalogPtr& prepared_catalog) {
         auto admitted_catalog = prepared_catalog;
-        std::lock_guard<std::mutex> lock(operation_mutex_);
+        OperationLock lock(operation_mutex_);
         const bool exact_catalog_observed =
             static_cast<bool>(admitted_catalog);
         bool exact_catalog_accepted = false;
@@ -887,7 +1004,7 @@ public:
 
     OwnedSnatRecovery retain_recovery(
         OwnedSnatRecovery snat_recovery) {
-        std::lock_guard<std::mutex> lock(operation_mutex_);
+        OperationLock lock(operation_mutex_);
         return retain_recovery_locked(std::move(snat_recovery));
     }
 
@@ -896,7 +1013,7 @@ public:
                           std::uint64_t processed_recovery_revision = 0U) {
         const bool owned_recovery_completed =
             succeeded && snat_recovery.requested;
-        std::lock_guard<std::mutex> lock(operation_mutex_);
+        OperationLock lock(operation_mutex_);
         (void)retain_recovery_locked(std::move(snat_recovery));
         if (owned_recovery_completed &&
             (processed_recovery_revision == 0U ||
@@ -908,13 +1025,22 @@ public:
     }
 
     bool retry_pending() const noexcept {
-        std::lock_guard<std::mutex> lock(operation_mutex_);
-        return active_schedule_serial_ != 0U;
+        try {
+            OperationLock lock(operation_mutex_);
+            return active_schedule_serial_ != 0U;
+        } catch (...) {
+            // A failed observation must not admit a duplicate writer.
+            return true;
+        }
     }
 
     bool owned_snat_recovery_pending() const noexcept {
-        std::lock_guard<std::mutex> lock(operation_mutex_);
-        return pending_owned_snat_recovery_.requested;
+        try {
+            OperationLock lock(operation_mutex_);
+            return pending_owned_snat_recovery_.requested;
+        } catch (...) {
+            return true;
+        }
     }
 
     bool route_unavailable_retry_required() const noexcept {
@@ -922,18 +1048,148 @@ public:
     }
 
     OwnedSnatRecovery pending_owned_snat_recovery() const {
-        std::lock_guard<std::mutex> lock(operation_mutex_);
+        OperationLock lock(operation_mutex_);
         return pending_owned_snat_recovery_;
     }
 
     void clear_owned_snat_recovery() noexcept {
-        std::lock_guard<std::mutex> lock(operation_mutex_);
-        if (owned_snat_recovery_equal(
-                pending_owned_snat_recovery_, OwnedSnatRecovery{})) {
-            return;
+        try {
+            OperationLock lock(operation_mutex_);
+            if (owned_snat_recovery_equal(
+                    pending_owned_snat_recovery_, OwnedSnatRecovery{})) {
+                return;
+            }
+            pending_owned_snat_recovery_ = {};
+            advance_recovery_revision_locked();
+        } catch (...) {
+            // Preserve the recovery latch when it cannot be safely observed.
         }
-        pending_owned_snat_recovery_ = {};
-        advance_recovery_revision_locked();
+    }
+
+    // Admit attempt N directly into the existing timer_pending ->
+    // worker_queued ownership transition. No scheduler callback or synthetic
+    // zero-delay task exists on this path: the caller has already decided to
+    // run now and the exact terminal sink remains the sole outcome owner.
+    template <typename IsCurrent,
+              typename QueueOperation,
+              typename OnTerminal>
+    RuntimeFirewallImmediateDisposition
+    start_immediate_operation_with_prepared_catalog_and_terminal(
+        std::size_t attempt,
+        std::uint64_t runtime_generation,
+        OwnedSnatRecovery snat_recovery,
+        const PreparedNativeVpnCatalogPtr& prepared_catalog,
+        IsCurrent&& is_current,
+        QueueOperation&& queue_operation,
+        OnTerminal&& on_terminal) {
+        static_assert(
+            std::is_nothrow_invocable_v<
+                std::decay_t<OnTerminal>&,
+                RuntimeFirewallOperationCompletion>,
+            "immediate terminal callback must be noexcept");
+        if (prepared_catalog &&
+            prepared_catalog->runtime_generation != runtime_generation) {
+            return RuntimeFirewallImmediateDisposition::rejected;
+        }
+
+        // Allocate the terminal callable before retaining recovery or
+        // reserving a phase claim. Failure here leaves the caller as the sole
+        // owner and is therefore a normal rejected disposition.
+        std::shared_ptr<std::decay_t<OnTerminal>> terminal_callback;
+        try {
+            terminal_callback =
+                std::make_shared<std::decay_t<OnTerminal>>(
+                    std::forward<OnTerminal>(on_terminal));
+        } catch (...) {
+            return RuntimeFirewallImmediateDisposition::rejected;
+        }
+
+        RuntimeFirewallRetryAdmission admission;
+        try {
+            admission = begin_attempt_with_prepared_catalog(
+                attempt,
+                std::move(snat_recovery),
+                prepared_catalog);
+        } catch (...) {
+            return RuntimeFirewallImmediateDisposition::rejected;
+        }
+        if (admission.coalesced) {
+            return RuntimeFirewallImmediateDisposition::coalesced;
+        }
+
+        const auto operation_claim = reserve_retry_slot(
+            runtime_generation,
+            attempt,
+            std::move(admission.prepared_now),
+            /*accept_prepared_catalog=*/true,
+            /*retain_operation_claim=*/true);
+        if (!operation_claim) {
+            // A worker/control completion can race between the admission
+            // snapshot and reservation. Give a winner one final opportunity
+            // to retain this exact catalogue; recovery is already latched.
+            try {
+                const auto collision =
+                    begin_attempt_with_prepared_catalog(
+                        attempt, {}, prepared_catalog);
+                return collision.coalesced
+                    ? RuntimeFirewallImmediateDisposition::coalesced
+                    : RuntimeFirewallImmediateDisposition::rejected;
+            } catch (...) {
+                return RuntimeFirewallImmediateDisposition::rejected;
+            }
+        }
+
+        const auto publish_terminal =
+            [&terminal_callback](
+                RuntimeFirewallOperationCompletion terminal) noexcept {
+                if (terminal.owned) {
+                    (*terminal_callback)(std::move(terminal));
+                }
+            };
+        std::optional<OperationRecoverySnapshot> operation_input;
+        try {
+            if (!begin_queued_operation(
+                    operation_claim, operation_input)) {
+                return RuntimeFirewallImmediateDisposition::rejected;
+            }
+        } catch (...) {
+            publish_terminal(terminate_operation_for_resnapshot(
+                operation_claim,
+                /*force_rerun=*/true));
+            return RuntimeFirewallImmediateDisposition::handed_off;
+        }
+
+        bool current = false;
+        try {
+            current = is_current(
+                operation_input->claim.runtime_generation);
+        } catch (...) {
+            publish_terminal(terminate_operation_for_resnapshot(
+                operation_input->claim,
+                /*force_rerun=*/true));
+            return RuntimeFirewallImmediateDisposition::handed_off;
+        }
+        if (!current) {
+            publish_terminal(terminate_operation_for_resnapshot(
+                operation_input->claim));
+            return RuntimeFirewallImmediateDisposition::handed_off;
+        }
+
+        try {
+            queue_operation(
+                operation_input->claim,
+                std::move(operation_input->snat_recovery),
+                std::move(operation_input->prepared_catalog));
+        } catch (...) {
+            // If queue_operation already crossed begin_worker(), this exact
+            // queued claim is stale and termination is a no-op; the running
+            // operation still owns its terminal. Otherwise publish the sole
+            // pre-worker terminal now.
+            publish_terminal(terminate_operation_for_resnapshot(
+                operation_input->claim,
+                /*force_rerun=*/true));
+        }
+        return RuntimeFirewallImmediateDisposition::handed_off;
     }
 
     template <typename Schedule, typename IsCurrent, typename RunAttempt>
@@ -1215,44 +1471,104 @@ public:
 
     std::optional<RuntimeFirewallOperationClaim> begin_control(
         RuntimeFirewallOperationClaim claim) noexcept {
-        return transition_operation(
-            claim,
-            RuntimeFirewallOperationPhase::worker_running,
-            RuntimeFirewallOperationPhase::control_pending);
+        RuntimeFirewallOperationClaim retained;
+        if (!begin_control_into(claim, retained)) {
+            return std::nullopt;
+        }
+        return retained;
+    }
+
+    // Store the exact control claim before publishing the one-way phase
+    // transition. The destination is caller-owned durable storage and must be
+    // empty; invalid input never changes either side.
+    bool begin_control_into(
+        RuntimeFirewallOperationClaim claim,
+        RuntimeFirewallOperationClaim& retained_control) noexcept {
+        if (claim.phase !=
+                RuntimeFirewallOperationPhase::worker_running ||
+            retained_control) {
+            return false;
+        }
+        try {
+            OperationLock lock(operation_mutex_);
+            if (!operation_matches_locked(claim)) return false;
+
+            auto control_claim = claim;
+            control_claim.phase =
+                RuntimeFirewallOperationPhase::control_pending;
+            retained_control = control_claim;
+            active_operation_phase_ = control_claim.phase;
+            return true;
+        } catch (...) {
+            return false;
+        }
     }
 
     bool operation_is_current(
         RuntimeFirewallOperationClaim claim) const noexcept {
-        std::lock_guard<std::mutex> lock(operation_mutex_);
-        return operation_matches_locked(claim);
+        try {
+            OperationLock lock(operation_mutex_);
+            return operation_matches_locked(claim);
+        } catch (...) {
+            return false;
+        }
     }
 
     RuntimeFirewallOperationCompletion complete_operation(
         RuntimeFirewallOperationClaim claim) {
-        if (claim.phase != RuntimeFirewallOperationPhase::control_pending) {
-            return {};
+        RuntimeFirewallOperationCompletion retained;
+        (void)complete_operation_into(claim, retained);
+        return retained;
+    }
+
+    bool complete_operation_into(
+        RuntimeFirewallOperationClaim claim,
+        RuntimeFirewallOperationCompletion& retained_completion) {
+        if (claim.phase !=
+                RuntimeFirewallOperationPhase::control_pending ||
+            retained_completion.owned) {
+            return false;
         }
-        std::lock_guard<std::mutex> lock(operation_mutex_);
-        if (!operation_matches_locked(claim)) return {};
+        OperationLock lock(operation_mutex_);
+        if (!operation_matches_locked(claim)) return false;
+
         RuntimeFirewallOperationCompletion completion{
             /*owned=*/true,
             trailing_attempt_requested_ ||
                 static_cast<bool>(trailing_prepared_catalog_),
             pending_owned_snat_recovery_,
-            std::move(trailing_prepared_catalog_)};
+            trailing_prepared_catalog_};
+        // The caller owns completion before the coordinator publishes release.
+        retained_completion = std::move(completion);
         release_retry_slot_locked();
-        return completion;
+        return true;
     }
 
     RuntimeFirewallOperationCompletion complete_operation(
         RuntimeFirewallOperationClaim claim,
         bool succeeded,
         OwnedSnatRecovery processed_recovery) {
-        if (claim.phase != RuntimeFirewallOperationPhase::control_pending) {
-            return {};
+        RuntimeFirewallOperationCompletion retained;
+        (void)complete_operation_into(
+            claim,
+            succeeded,
+            std::move(processed_recovery),
+            retained);
+        return retained;
+    }
+
+    bool complete_operation_into(
+        RuntimeFirewallOperationClaim claim,
+        bool succeeded,
+        OwnedSnatRecovery processed_recovery,
+        RuntimeFirewallOperationCompletion& retained_completion) {
+        if (claim.phase !=
+                RuntimeFirewallOperationPhase::control_pending ||
+            retained_completion.owned) {
+            return false;
         }
-        std::lock_guard<std::mutex> lock(operation_mutex_);
-        if (!operation_matches_locked(claim)) return {};
+        OperationLock lock(operation_mutex_);
+        if (!operation_matches_locked(claim)) return false;
 
         const bool newer_observation_pending =
             pending_recovery_revision_ > claim.recovery_revision;
@@ -1269,16 +1585,18 @@ public:
             trailing_attempt_requested_ ||
                 static_cast<bool>(trailing_prepared_catalog_),
             completed_recovery,
-            std::move(trailing_prepared_catalog_)};
+            trailing_prepared_catalog_};
         // All allocating copies are complete. Publish the terminal recovery
-        // state and release ownership only after the result is ready.
+        // state and release ownership only after the durable caller slot owns
+        // the exact result.
+        retained_completion = std::move(completion);
         pending_owned_snat_recovery_ =
             std::move(completed_recovery);
         if (clear_completed_recovery) {
             advance_recovery_revision_locked();
         }
         release_retry_slot_locked();
-        return completion;
+        return true;
     }
 
     // Allocation-free pre-worker terminal transfer. Recovery authority remains
@@ -1289,12 +1607,12 @@ public:
     RuntimeFirewallOperationCompletion
     terminate_operation_for_resnapshot(
         RuntimeFirewallOperationClaim claim,
-        bool force_rerun = false) {
+        bool force_rerun = false) noexcept {
         if (claim.phase != RuntimeFirewallOperationPhase::timer_pending &&
             claim.phase != RuntimeFirewallOperationPhase::worker_queued) {
             return {};
         }
-        std::lock_guard<std::mutex> lock(operation_mutex_);
+        OperationLock lock(operation_mutex_);
         if (!operation_matches_locked(claim)) return {};
         auto next_prepared_catalog =
             std::move(trailing_prepared_catalog_);
@@ -1335,7 +1653,7 @@ public:
     void cancel(Cancel&& cancel) {
         int task_id = -1;
         {
-            std::lock_guard<std::mutex> lock(operation_mutex_);
+            OperationLock lock(operation_mutex_);
             if (active_schedule_serial_ == 0U) {
                 return;
             }
@@ -1358,6 +1676,38 @@ public:
         if (task_id >= 0) {
             std::forward<Cancel>(cancel)(task_id);
         }
+    }
+
+    // Shutdown-only transfer for an exact timer which has not entered its
+    // callback. Coordinator authority is released only after the typed
+    // completion exists in caller-owned storage. Scheduler cancellation is
+    // best-effort after that one-way transfer and cannot erase the terminal.
+    template <typename Cancel>
+    RuntimeFirewallOperationCompletion cancel_timer_for_terminal(
+        Cancel&& cancel) noexcept {
+        int task_id = -1;
+        RuntimeFirewallOperationCompletion completion;
+        try {
+            OperationLock lock(operation_mutex_);
+            if (active_schedule_serial_ == 0U ||
+                active_operation_phase_ !=
+                    RuntimeFirewallOperationPhase::timer_pending) {
+                return {};
+            }
+            task_id = retry_task_id_;
+            completion.owned = true;
+            release_retry_slot_locked();
+            (void)next_schedule_serial_locked();
+        } catch (...) {
+            return {};
+        }
+        if (task_id >= 0) {
+            try {
+                std::forward<Cancel>(cancel)(task_id);
+            } catch (...) {
+            }
+        }
+        return completion;
     }
 
 private:
@@ -1720,48 +2070,56 @@ private:
         PreparedNativeVpnCatalogPtr prepared_catalog,
         bool accept_prepared_catalog,
         bool retain_operation_claim) noexcept {
-        std::lock_guard<std::mutex> lock(operation_mutex_);
-        if (active_schedule_serial_ != 0U) {
+        try {
+            OperationLock lock(operation_mutex_);
+            if (active_schedule_serial_ != 0U) {
+                return {};
+            }
+            active_schedule_serial_ = next_schedule_serial_locked();
+            active_operation_generation_ = runtime_generation;
+            active_operation_attempt_ = attempt;
+            active_operation_phase_ =
+                RuntimeFirewallOperationPhase::timer_pending;
+            active_operation_recovery_revision_ =
+                pending_recovery_revision_;
+            active_prepared_catalog_ = std::move(prepared_catalog);
+            active_operation_accepts_prepared_catalog_ =
+                accept_prepared_catalog;
+            active_operation_retains_claim_ = retain_operation_claim;
+            retry_task_id_ = -1;
+            return RuntimeFirewallOperationClaim{
+                active_schedule_serial_,
+                runtime_generation,
+                attempt,
+                RuntimeFirewallOperationPhase::timer_pending,
+                pending_recovery_revision_};
+        } catch (...) {
             return {};
         }
-        active_schedule_serial_ = next_schedule_serial_locked();
-        active_operation_generation_ = runtime_generation;
-        active_operation_attempt_ = attempt;
-        active_operation_phase_ =
-            RuntimeFirewallOperationPhase::timer_pending;
-        active_operation_recovery_revision_ =
-            pending_recovery_revision_;
-        active_prepared_catalog_ = std::move(prepared_catalog);
-        active_operation_accepts_prepared_catalog_ =
-            accept_prepared_catalog;
-        active_operation_retains_claim_ = retain_operation_claim;
-        retry_task_id_ = -1;
-        return RuntimeFirewallOperationClaim{
-            active_schedule_serial_,
-            runtime_generation,
-            attempt,
-            RuntimeFirewallOperationPhase::timer_pending,
-            pending_recovery_revision_};
     }
 
     std::optional<RuntimeFirewallOperationClaim> transition_operation(
         RuntimeFirewallOperationClaim claim,
         RuntimeFirewallOperationPhase expected,
         RuntimeFirewallOperationPhase next) noexcept {
-        std::lock_guard<std::mutex> lock(operation_mutex_);
-        if (claim.phase != expected ||
-            !operation_matches_locked(claim)) {
+        try {
+            OperationLock lock(operation_mutex_);
+            if (claim.phase != expected ||
+                !operation_matches_locked(claim)) {
+                return std::nullopt;
+            }
+            active_operation_phase_ = next;
+            if (next == RuntimeFirewallOperationPhase::worker_running) {
+                // The typed worker callback now owns the immutable input. Keep no
+                // hidden copy after backend execution may begin.
+                active_prepared_catalog_.reset();
+            }
+            retry_task_id_ = -1;
+            claim.phase = next;
+            return claim;
+        } catch (...) {
             return std::nullopt;
         }
-        active_operation_phase_ = next;
-        if (next == RuntimeFirewallOperationPhase::worker_running) {
-            // The typed worker callback now owns the immutable input. Keep no
-            // hidden copy after backend execution may begin.
-            active_prepared_catalog_.reset();
-        }
-        retry_task_id_ = -1;
-        claim.phase = next;
-        return claim;
     }
 
     struct OperationRecoverySnapshot {
@@ -1781,7 +2139,7 @@ private:
     bool begin_queued_operation(
         RuntimeFirewallOperationClaim claim,
         std::optional<OperationRecoverySnapshot>& result) {
-        std::lock_guard<std::mutex> lock(operation_mutex_);
+        OperationLock lock(operation_mutex_);
         if (claim.phase != RuntimeFirewallOperationPhase::timer_pending ||
             !operation_matches_locked(claim)) {
             return false;
@@ -1806,15 +2164,23 @@ private:
     TimerTaskRegistration register_timer_task_if_current(
         RuntimeFirewallOperationClaim claim,
         int task_id) noexcept {
-        std::lock_guard<std::mutex> lock(operation_mutex_);
-        if (!operation_matches_locked(claim)) {
-            return TimerTaskRegistration::consumed;
-        }
-        if (task_id < 0) {
+        try {
+            OperationLock lock(operation_mutex_);
+            if (!operation_matches_locked(claim)) {
+                return TimerTaskRegistration::consumed;
+            }
+            if (task_id < 0) {
+                return TimerTaskRegistration::rejected;
+            }
+            retry_task_id_ = task_id;
+            return TimerTaskRegistration::installed;
+        } catch (...) {
+            // Failure to observe/install the id is not proof that an inline
+            // callback consumed the claim. Force the caller through its exact
+            // terminalization path; a late scheduler callback is serial
+            // fenced after that claim is released.
             return TimerTaskRegistration::rejected;
         }
-        retry_task_id_ = task_id;
-        return TimerTaskRegistration::installed;
     }
 
     std::uint64_t next_schedule_serial_locked() noexcept {
@@ -1845,10 +2211,14 @@ private:
 
     bool release_retry_slot_if_current(
         RuntimeFirewallOperationClaim claim) noexcept {
-        std::lock_guard<std::mutex> lock(operation_mutex_);
-        if (!operation_matches_locked(claim)) return false;
-        release_retry_slot_locked();
-        return true;
+        try {
+            OperationLock lock(operation_mutex_);
+            if (!operation_matches_locked(claim)) return false;
+            release_retry_slot_locked();
+            return true;
+        } catch (...) {
+            return false;
+        }
     }
 
     bool operation_matches_locked(
@@ -1877,7 +2247,8 @@ private:
         trailing_prepared_catalog_.reset();
     }
 
-    mutable std::mutex operation_mutex_;
+    mutable runtime_recovery_detail::RuntimeFirewallCoordinatorMutex
+        operation_mutex_;
     int retry_task_id_{-1};
     std::uint64_t schedule_serial_{0};
     std::uint64_t active_schedule_serial_{0};
@@ -2040,6 +2411,15 @@ inline bool should_run_periodic_urltest_firewall_recovery(
            !netfilter_refresh_pending;
 }
 
+inline bool should_run_periodic_owned_snat_firewall_recovery(
+    bool routing_runtime_active,
+    bool owned_snat_recovery_pending,
+    bool runtime_retry_pending,
+    bool netfilter_refresh_pending) noexcept {
+    return routing_runtime_active && owned_snat_recovery_pending &&
+           !runtime_retry_pending && !netfilter_refresh_pending;
+}
+
 inline bool should_run_periodic_netfilter_refresh(
     bool retry_timer_armed,
     bool refresh_reason_pending) noexcept {
@@ -2186,6 +2566,23 @@ inline bool should_trigger_broad_urltest_probe_after_netfilter_refresh(
     bool targeted_recovery_pending_before_refresh) noexcept {
     return runtime_refreshed && full_refresh &&
            !targeted_recovery_pending_before_refresh;
+}
+
+inline std::uint8_t
+retain_netfilter_refresh_reasons_after_immediate_disposition(
+    std::uint8_t pending_reasons,
+    std::uint8_t submitted_reasons,
+    RuntimeFirewallImmediateDisposition disposition,
+    bool routing_runtime_active,
+    bool shutdown_requested) noexcept {
+    // Coalescing means that the active transport accepted the exact trailing
+    // recovery intent. A stopped runtime deliberately absorbs the signal;
+    // rearming it would otherwise create an unbounded FULL/NAT timer loop.
+    return disposition == RuntimeFirewallImmediateDisposition::rejected &&
+                   routing_runtime_active && !shutdown_requested
+               ? static_cast<std::uint8_t>(pending_reasons |
+                                           submitted_reasons)
+               : pending_reasons;
 }
 
 struct NetfilterRefreshSchedule {

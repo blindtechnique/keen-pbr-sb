@@ -42,8 +42,7 @@
 #include "../routing/interface_monitor.hpp"
 #include "../routing/firewall_state.hpp"
 #include "../routing/netlink.hpp"
-#include "../routing/policy_rule.hpp"
-#include "../routing/route_table.hpp"
+#include "../routing/runtime_routing_operation_owner.hpp"
 #include "../runtime/lifecycle_operation.hpp"
 #include "../runtime/list_refresh_task.hpp"
 #include "../runtime/meta_udp_443_activation_plan.hpp"
@@ -62,6 +61,8 @@
 #include "../util/ipv6_support.hpp"
 #include "../util/traced_mutex.hpp"
 #include "list_service.hpp"
+#include "runtime_firewall_immediate_completion.hpp"
+#include "runtime_firewall_lifecycle_completion.hpp"
 #include "runtime_recovery_policy.hpp"
 #include "targeted_probe_admission.hpp"
 #include "runtime_state_store.hpp"
@@ -79,6 +80,10 @@ class DnsProbeServer;
 struct DnsProbeEvent;
 class ConntrackEventMonitor;
 class OwnedConntrackCleanupOperation;
+class RuntimeFirewallOperationOwner;
+struct RuntimeFirewallOperationContext;
+enum class RuntimeFirewallLifecycleKind : std::uint8_t;
+struct PlannedRoutingState;
 struct NdmsCatalogSnapshot;
 struct NdmsVpnServerServiceSnapshot;
 enum class ResolverType;
@@ -297,6 +302,7 @@ enum class RemoteListPreparationMode {
 inline bool interface_event_requires_runtime_observation(
     const InterfaceMonitor::Event& event) {
     return event.observation_gap ||
+           event.route_changed ||
            event.administrative_state_changed ||
            event.address_changed ||
            event.topology_changed;
@@ -445,6 +451,60 @@ struct ResolverGenerationSnapshot {
     std::uint64_t stream_epoch{0};
 };
 
+// Shared by background resolver recovery and foreground lifecycle activation.
+// The lifetime owns the single IPC gate and the exact streamed generation
+// until ResolverStreamCoordinator retires its claim.
+class ResolverIpcGate {
+public:
+    explicit ResolverIpcGate(std::atomic<bool>& flag) : flag_(flag) {
+        if (flag_.exchange(true, std::memory_order_acq_rel)) {
+            throw DaemonError(
+                "system resolver operation is already in progress");
+        }
+    }
+
+    ~ResolverIpcGate() {
+        flag_.store(false, std::memory_order_release);
+    }
+
+    ResolverIpcGate(const ResolverIpcGate&) = delete;
+    ResolverIpcGate& operator=(const ResolverIpcGate&) = delete;
+
+private:
+    std::atomic<bool>& flag_;
+};
+
+class ResolverStreamAttemptLifetime {
+public:
+    ResolverStreamAttemptLifetime(
+        std::atomic<bool>& ipc_gate,
+        std::shared_ptr<RuntimeMutationAdmission::Lease> mutation_lease,
+        std::shared_ptr<const ResolverGenerationSnapshot> generation,
+        std::function<void()> clear_active)
+        : ipc_gate_(ipc_gate),
+          mutation_lease_(std::move(mutation_lease)),
+          generation_(std::move(generation)),
+          clear_active_(std::move(clear_active)) {}
+
+    ~ResolverStreamAttemptLifetime() noexcept {
+        try {
+            if (clear_active_) clear_active_();
+        } catch (...) {
+        }
+    }
+
+    ResolverStreamAttemptLifetime(
+        const ResolverStreamAttemptLifetime&) = delete;
+    ResolverStreamAttemptLifetime& operator=(
+        const ResolverStreamAttemptLifetime&) = delete;
+
+private:
+    ResolverIpcGate ipc_gate_;
+    std::shared_ptr<RuntimeMutationAdmission::Lease> mutation_lease_;
+    std::shared_ptr<const ResolverGenerationSnapshot> generation_;
+    std::function<void()> clear_active_;
+};
+
 // Helper to get tag from any outbound variant
 std::string get_outbound_tag(const Outbound& ob);
 
@@ -561,27 +621,35 @@ private:
     void schedule_interface_monitor_reconnect_retry();
     void recover_internal_vpn_catalog_after_observation_gap();
     void handle_interface_event(const InterfaceMonitor::Event& event);
-    bool refresh_iproute_and_firewall_runtime(
+    RuntimeFirewallImmediateDisposition
+    refresh_iproute_and_firewall_runtime(
         std::size_t retry_attempt = 0,
-        std::optional<InternalVpnRuntimeResolution>
-            prepared_internal_vpn_resolution = std::nullopt,
-        std::optional<InternalVpnServiceRuntimeResolution>
-            prepared_internal_vpn_service_resolution = std::nullopt,
+        PreparedNativeVpnCatalogPtr prepared_native_vpn_catalog = {},
         bool schedule_catalog_refresh = true,
-        OwnedSnatRecovery snat_recovery = {});
-    void schedule_runtime_firewall_retry(std::size_t attempt,
-                                         std::uint64_t runtime_generation,
-                                         OwnedSnatRecovery snat_recovery);
-    void defer_runtime_firewall_retry(
-        std::size_t attempt,
-        std::uint64_t runtime_generation,
-        std::optional<InternalVpnRuntimeResolution>
-            prepared_internal_vpn_resolution,
-        std::optional<InternalVpnServiceRuntimeResolution>
-            prepared_internal_vpn_service_resolution,
-        bool schedule_catalog_refresh,
-        OwnedSnatRecovery snat_recovery);
-    void cancel_runtime_firewall_retry();
+        OwnedSnatRecovery snat_recovery = {},
+        RuntimeFirewallImmediateCompletionIntent completion_intent = {});
+    void dispatch_runtime_firewall_worker_attempt(
+        const std::shared_ptr<RuntimeFirewallOperationContext>& context,
+        RuntimeFirewallOperationClaim queued_claim,
+        OwnedSnatRecovery snat_recovery,
+        PreparedNativeVpnCatalogPtr prepared_native_vpn_catalog,
+        bool schedule_catalog_refresh);
+    bool runtime_firewall_lifecycle_generation_is_current(
+        RuntimeFirewallLifecycleKind lifecycle_kind,
+        std::uint64_t expected_generation) const noexcept;
+    void pump_runtime_route_health_checkpoint(
+        const std::shared_ptr<RuntimeFirewallOperationContext>& context)
+        noexcept;
+    bool begin_runtime_firewall_lifecycle_resolver(
+        const std::shared_ptr<RuntimeFirewallOperationContext>& context)
+        noexcept;
+    bool begin_runtime_firewall_start_rollback(
+        const std::shared_ptr<RuntimeFirewallOperationContext>& context)
+        noexcept;
+    void drain_runtime_firewall_terminal(
+        const std::shared_ptr<RuntimeFirewallOperationContext>& context,
+        bool shutdown);
+    void trigger_broad_urltest_probe_noexcept() noexcept;
     void schedule_resolver_reload_retry(std::size_t attempt,
                                         std::uint64_t runtime_generation);
     void start_resolver_reload_retry_attempt(
@@ -601,6 +669,9 @@ private:
     // lifecycle and runtime apply
     void setup_static_routing();
     void reconcile_static_routing(RouteReconcileMode mode);
+    void reconcile_static_routing(
+        const PlannedRoutingState& plan,
+        RouteReconcileMode mode);
     // Runtime callers must deliberately choose preserving or destructive
     // semantics; an omitted mode is a compile-time error.
     void apply_firewall(
@@ -750,9 +821,7 @@ private:
     void apply_config_with_rollback(const Config& next_config,
                                     bool& rolled_back,
                                     bool refresh_remote_lists = true);
-    void start_routing_runtime();
     void stop_routing_runtime();
-    void restart_routing_runtime();
     bool routing_runtime_active() const;
     OwnedConntrackCleanupSnapshot
     snapshot_owned_conntrack_marks() const;
@@ -793,12 +862,6 @@ private:
     bool wait_for_resolver_stream_epoch(std::uint64_t expected_epoch,
                                         std::chrono::milliseconds timeout);
     void schedule_lists_autoupdate();
-    // Re-applies rules after a failed startup attempt, backing off each time.
-    void schedule_startup_firewall_retry(
-        int attempt = 1,
-        std::optional<std::uint64_t> runtime_generation = std::nullopt,
-        std::shared_ptr<const ListCacheGenerationSnapshot>
-            list_cache_snapshot = nullptr);
     // Periodic HTTP probe of every interface outbound.
     void schedule_interface_probe();
     // Weekly refresh of the ready-made list catalogue.
@@ -884,6 +947,16 @@ private:
     void run_runtime_control_operation_or_throw(const std::string& label,
                                                 const char* operation_name,
                                                 std::function<void()> task);
+    void start_routing_runtime_with_lease(
+        RuntimeMutationAdmission::Lease lease);
+    void begin_preowned_runtime_firewall_start(
+        std::unique_ptr<RuntimeMutationAdmission::Lease> lease,
+        RuntimeFirewallLifecycleCompletion::Source completion);
+    void restart_routing_runtime_with_lease(
+        RuntimeMutationAdmission::Lease lease);
+    void begin_preowned_runtime_firewall_restart(
+        std::unique_ptr<RuntimeMutationAdmission::Lease> lease,
+        RuntimeFirewallLifecycleCompletion::Source completion);
     ListRefreshOperationResult refresh_lists_via_api(std::optional<std::string> requested_name);
     void setup_conntrack_events();
     void handle_conntrack_events(uint32_t events);
@@ -942,7 +1015,9 @@ private:
     capture_relevant_list_cache_generation(const Config& config) const;
     ResolverGenerationSnapshot make_resolver_generation_snapshot(
         std::shared_ptr<const ListCacheGenerationSnapshot>
-            list_cache_snapshot = nullptr);
+            list_cache_snapshot = nullptr,
+        std::optional<std::vector<std::string>>
+            trusted_dns_interfaces_override = std::nullopt);
     // Schedule (or reschedule) the periodic refresh of resolver_config_hash_actual_.
     void schedule_resolver_config_hash_actual_refresh();
     void schedule_resolver_config_hash_actual_after(
@@ -1143,8 +1218,7 @@ private:
     std::unique_ptr<InterfaceMonitor> interface_monitor_;
     std::optional<int> interface_monitor_fd_;
     NetlinkManager netlink_;
-    RouteTable route_table_;
-    PolicyRuleManager policy_rules_;
+    RuntimeRoutingOperationOwner routing_operation_owner_;
     FirewallState firewall_state_;
     // Effective content analyzed immediately before the current firewall
     // generation was populated. This follows normalized list entries rather
@@ -1159,6 +1233,10 @@ private:
     std::map<std::string, std::string> applied_list_fingerprints_;
     ConntrackManager conntrack_manager_;
     bool conntrack_unavailable_warning_emitted_{false};
+    // Relevant link/address observations advance independently of the runtime
+    // configuration generation. An off-loop route plan must match both values
+    // before control is allowed to mutate route/rule state from it.
+    std::atomic<std::uint64_t> routing_observation_epoch_{1U};
     std::atomic<std::uint64_t> meta_udp443_cleanup_epoch_{1U};
     // Schedule serial whose worker could not hand completion back to the
     // control loop. A scalar token (not a bool) prevents an old worker from
@@ -1216,6 +1294,11 @@ private:
     RuntimeIncidentLatch meta_udp443_incidents_{1};
     RuntimeIncidentLatch internal_vpn_catalog_incidents_{5};
     RuntimeIncidentLatch resolver_reload_incidents_{1};
+    // This admission authority must outlive the delayed-firewall operation
+    // owner, including its retained terminal context and dedicated executor.
+    RuntimeMutationAdmission runtime_mutation_admission_;
+    std::shared_ptr<RuntimeFirewallOperationOwner>
+        runtime_firewall_owner_;
     BlockingExecutor blocking_executor_{2, 64};
     // Resolver hooks can synchronously request a generated configuration.
     // Keep command execution, streaming and TXT probes on independent queues.
@@ -1248,7 +1331,6 @@ private:
     // One authority admits every externally requested runtime mutation. API
     // requests own move-only leases; asynchronous SIGHUP shares one lease
     // until the reload coordinator chooses its single completion owner.
-    RuntimeMutationAdmission runtime_mutation_admission_;
     ConfigReloadCoordinator sighup_reload_coordinator_;
     CoalescedSingleFlightGate internal_vpn_catalog_refresh_gate_;
     int internal_vpn_catalog_refresh_retry_task_id_{-1};
