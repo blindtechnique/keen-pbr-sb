@@ -385,6 +385,7 @@ export const enTranslation = {
     strategyName: "New strategy name",
     applyStrategy: "Apply",
     saveStrategy: "Save",
+    strategyNoChanges: "No changes to save",
     confirmDelete: "Delete the selected file or strategy?",
     fileName: "New filename without extension",
     newFile: "New file",

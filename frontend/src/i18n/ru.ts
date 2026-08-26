@@ -386,6 +386,7 @@ export const ruTranslation = {
     strategyName: "Название новой стратегии",
     applyStrategy: "Применить",
     saveStrategy: "Сохранить",
+    strategyNoChanges: "Изменений нет — сохранять нечего",
     confirmDelete: "Удалить выбранный файл или стратегию?",
     fileName: "Имя нового файла без расширения",
     newFile: "Новый файл",

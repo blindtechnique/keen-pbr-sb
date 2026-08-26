@@ -2126,7 +2126,13 @@ function StrategiesEditor({
           )}
           <div className="flex flex-wrap justify-end gap-2">
             <Button
+              disabled={!selectedHasEdits}
               onClick={() => void run("save_strategy", effectiveSelected)}
+              title={
+                selectedHasEdits
+                  ? t("nfqws.saveStrategy")
+                  : t("nfqws.strategyNoChanges")
+              }
               variant="outline"
             >
               <SaveIcon />
