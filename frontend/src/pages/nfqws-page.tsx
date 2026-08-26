@@ -2139,12 +2139,14 @@ function StrategiesEditor({
               {t("nfqws.saveStrategy")}
             </Button>
             <Button
-              disabled={selectedIsApplied}
+              disabled={selectedIsApplied || strategy === undefined}
               onClick={() => setApplying(effectiveSelected)}
               title={
-                selectedIsApplied
-                  ? t("nfqws.strategyAlreadyApplied")
-                  : t("nfqws.applyStrategy")
+                strategy === undefined
+                  ? t("nfqws.strategySaveBeforeApply")
+                  : selectedIsApplied
+                    ? t("nfqws.strategyAlreadyApplied")
+                    : t("nfqws.applyStrategy")
               }
             >
               <PlayIcon />
