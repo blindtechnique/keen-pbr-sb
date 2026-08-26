@@ -156,6 +156,7 @@ export const ruTranslation = {
     strategyEditorDescription:
       "Каждая строка — аргументы nfqws для своей группы трафика. «Сохранить» записывает стратегию на диск, «Применить» ещё и перезапускает службу с ней.",
     strategyBreakdownTitle: "Стратегия: {{name}}",
+    strategyBreakdownTitleInactive: "Стратегия: {{name}} — не применена",
     strategyBreakdownDescription:
       "Разбор сохранённого текста без возможности изменения. Для правки откройте «Текст».",
     editorView: {
