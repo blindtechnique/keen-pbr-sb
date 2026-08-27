@@ -579,6 +579,7 @@ target_include_directories(keen-pbr-native-tunnel-import-tests PRIVATE
 )
 target_link_libraries(keen-pbr-native-tunnel-import-tests PRIVATE
   nlohmann_json::nlohmann_json
+  fmt::fmt-header-only
   ${KEEN_PBR_CURL_TARGET}
   PkgConfig::ZLIB
 )
@@ -625,6 +626,7 @@ target_include_directories(keen-pbr-native-direct-observation-tests PRIVATE
 )
 target_link_libraries(keen-pbr-native-direct-observation-tests PRIVATE
   nlohmann_json::nlohmann_json
+  fmt::fmt-header-only
   ${KEEN_PBR_CURL_TARGET}
   PkgConfig::ZLIB
 )
