@@ -1,4 +1,7 @@
-import type { ConfigStateResponseListRefreshState } from "@/api/generated/model"
+import type {
+  ConfigStateResponseListRefreshState,
+  HealthResponse,
+} from "@/api/generated/model"
 import type { NfqwsUpdateStatus } from "@/api/nfqws"
 
 export type SoftwareUpdateResponse = {
@@ -14,6 +17,12 @@ export type Notice = {
 }
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
+
+export type NotificationCurrentState = {
+  service?: Pick<HealthResponse, "build" | "commit" | "runtime_state">
+}
+
+type RuntimeIncidentFamily = "meta-udp443" | "ppe-deoffload"
 
 const MAX_NOTICES = 20
 
@@ -40,6 +49,62 @@ const LEGACY_KEENETIC_REMOTE_ACCESS_INCOMPATIBILITY =
 
 const SAFE_SRS_CONVERSION =
   /^List '[^'\r\n]+': SRS import is lossy: (?:mapped [1-9]\d* exact domain\(s\) to keen-pbr root-and-subdomain semantics|skipped [1-9]\d* unsupported condition\(s\))(?:; (?:mapped [1-9]\d* exact domain\(s\) to keen-pbr root-and-subdomain semantics|skipped [1-9]\d* unsupported condition\(s\)))*$/
+
+const SERVICE_START =
+  /^(\S+ \S+)\s+keen-pbr\s+\S+\s+\(build\s+([^,)]+)(?:,\s+commit\s+([^)]+))?\)\s+starting(?:,|$)/
+
+function runtimeIncidentFamily(text: string): RuntimeIncidentFamily | null {
+  if (
+    text.startsWith("Meta/WhatsApp UDP/443 policy state is degraded:") ||
+    text.startsWith("Meta/WhatsApp messages-first recovery remains degraded:")
+  ) {
+    return "meta-udp443"
+  }
+  if (text.startsWith("PPE de-offload reconciliation degraded:")) {
+    return "ppe-deoffload"
+  }
+  return null
+}
+
+// A restart creates a new incident-latch generation. Match the start marker to
+// the machine-readable build/commit currently served over SSE before treating
+// an older Meta/PPE line as history; a marker from some previous binary is not
+// recovery evidence. Current-process incidents remain visible.
+function currentProcessStartIndex(
+  lines: readonly string[],
+  state: NotificationCurrentState | undefined
+): number | undefined {
+  const service = state?.service
+  if (!service || service.runtime_state !== "running") return undefined
+
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const match = lines[index]?.match(SERVICE_START)
+    if (!match) continue
+    const [, , build, commit] = match
+    if (build.trim() !== service.build.trim()) continue
+
+    const currentCommit = service.commit?.trim()
+    if (
+      currentCommit &&
+      currentCommit !== "unknown" &&
+      commit?.trim() !== currentCommit
+    ) {
+      continue
+    }
+    return index
+  }
+  return undefined
+}
+
+function runtimeIncidentIsResolved(
+  lineIndex: number,
+  currentProcessStart: number | undefined
+): boolean {
+  // Both positions belong to the same ordered tail returned by the router.
+  // Comparing indices remains correct across browser/router time zones and
+  // across a router clock correction between the incident and restart.
+  return currentProcessStart !== undefined && lineIndex < currentProcessStart
+}
 
 function isDiagnosticOnlyMessage(text: string): boolean {
   // Current builds normalize this old incompatible desired state to durable
@@ -149,9 +214,12 @@ export function collectNotices(
   listRefreshState: ConfigStateResponseListRefreshState | undefined,
   dismissedUntil: number,
   dismissedIds: ReadonlySet<string>,
-  t: Translate
+  t: Translate,
+  currentState?: NotificationCurrentState
 ): Notice[] {
   const notices: Notice[] = []
+  const seenRuntimeIncidents = new Set<RuntimeIncidentFamily>()
+  const currentProcessStart = currentProcessStartIndex(lines, currentState)
 
   addSyntheticNotice(
     notices,
@@ -200,6 +268,21 @@ export function collectNotices(
     // current, actionable notifications after an upgrade.
     if (isDiagnosticOnlyMessage(text)) {
       continue
+    }
+    // Meta/PPE reconcilers already latch one operational incident, but a log
+    // tail spans restarts and therefore may contain many copies. Keep only the
+    // newest current copy per subsystem. Neither current API state is strong
+    // enough to clear a same-process line: Meta has no public owned-graph
+    // health, while PPE timestamps cannot be safely correlated with local log
+    // text across router/browser time zones. A matching later daemon start is
+    // the only current-process boundary proven by the same journal clock.
+    const incidentFamily = runtimeIncidentFamily(text)
+    if (incidentFamily) {
+      if (seenRuntimeIncidents.has(incidentFamily)) continue
+      seenRuntimeIncidents.add(incidentFamily)
+      if (runtimeIncidentIsResolved(index, currentProcessStart)) {
+        continue
+      }
     }
     // Already fixed: the daemon's current per-list state outranks what the log
     // remembers about a night when it was broken.

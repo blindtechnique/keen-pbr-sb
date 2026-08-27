@@ -4,7 +4,7 @@ import { BellIcon, CheckCheckIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
 import { nfqwsUpdateQueryOptions } from "@/api/nfqws"
-import { useGetConfig } from "@/api/queries"
+import { useGetConfig, useGetHealthService } from "@/api/queries"
 import { selectListRefreshState } from "@/api/selectors"
 import { Button } from "@/components/ui/button"
 import { TOP_BAR_CONTROL_CLASS } from "@/components/layout/top-bar-control-styles"
@@ -78,6 +78,7 @@ export function NotificationsBell() {
   })
 
   const nfqwsUpdateQuery = useQuery(nfqwsUpdateQueryOptions())
+  const serviceHealthQuery = useGetHealthService()
   // Тот же источник, что у страницы списков. Она молчала про списки, которые
   // давно обновились, а колокольчик про них кричал — потому что читал журнал,
   // а не состояние.
@@ -97,7 +98,13 @@ export function NotificationsBell() {
         listRefreshState,
         dismissedUntil,
         dismissedIds,
-        t
+        t,
+        {
+          service:
+            serviceHealthQuery.data?.status === 200
+              ? serviceHealthQuery.data.data
+              : undefined,
+        }
       ),
     [
       logsQuery.data,
@@ -106,6 +113,7 @@ export function NotificationsBell() {
       listRefreshState,
       dismissedUntil,
       dismissedIds,
+      serviceHealthQuery.data,
       t,
     ]
   )

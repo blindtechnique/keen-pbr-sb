@@ -208,6 +208,127 @@ describe("notification collector", () => {
     expect(hidden).toEqual([])
     expect(newer[0]?.id).toBe("nfqws-update-v1.2.0")
   })
+
+  test("coalesces repeated current Meta incidents without declaring recovery", () => {
+    const notices = collectNotices(
+      [
+        "2026-08-27 21:06:07.355 [E] Meta/WhatsApp UDP/443 policy state is degraded: delayed firewall COMMIT outcome is ambiguous; exact Meta cleanup authority was discarded. The service will perform a bounded recovery without broadening the affected traffic scope.",
+        "2026-08-27 21:53:45.503 [E] Meta/WhatsApp UDP/443 policy state is degraded: balanced mode could not verify absence of owned UDP/443 artifacts after delayed publication. The service will perform a bounded recovery without broadening the affected traffic scope.",
+      ],
+      undefined,
+      undefined,
+      undefined,
+      0,
+      new Set(),
+      t
+    )
+
+    expect(notices).toHaveLength(1)
+    expect(notices[0]?.timestamp).toBe("2026-08-27 21:53:45.503")
+    expect(notices[0]?.text).toContain("balanced mode")
+  })
+
+  test("coalesces repeated current PPE incidents without inferring recovery", () => {
+    const notices = collectNotices(
+      [
+        "2026-08-27 16:21:16.717 [W] PPE de-offload reconciliation degraded: could not inspect the IPv4 PPE de-offload graph",
+        "2026-08-27 21:53:47.825 [W] PPE de-offload reconciliation degraded: could not inspect the IPv4 PPE de-offload graph",
+      ],
+      undefined,
+      undefined,
+      undefined,
+      0,
+      new Set(),
+      t
+    )
+
+    expect(notices).toHaveLength(1)
+    expect(notices[0]?.timestamp).toBe("2026-08-27 21:53:47.825")
+  })
+
+  test("does not compare router log time with browser-local health time", () => {
+    const line =
+      "2026-08-27 21:53:47.825 [W] PPE de-offload reconciliation degraded: could not inspect the IPv4 PPE de-offload graph"
+    const notices = collectNotices(
+      [line],
+      undefined,
+      undefined,
+      undefined,
+      0,
+      new Set(),
+      t
+    )
+
+    expect(notices).toHaveLength(1)
+    expect(notices[0]?.timestamp).toBe("2026-08-27 21:53:47.825")
+  })
+
+  test("drops prior-process incidents only for the matching running build", () => {
+    const lines = [
+      "2026-08-27 11:10:54.565 [E] Meta/WhatsApp UDP/443 policy state is degraded: delayed firewall COMMIT outcome is ambiguous; exact Meta cleanup authority was discarded. The service will perform a bounded recovery without broadening the affected traffic scope.",
+      "2026-08-27 12:19:21.298 keen-pbr 3.3.0 (build 20260827080953, commit 89118c8653b9) starting, log file: /opt/var/log/keen-pbr.log",
+    ]
+    const matching = collectNotices(
+      lines,
+      undefined,
+      undefined,
+      undefined,
+      0,
+      new Set(),
+      t,
+      {
+        service: {
+          build: "20260827080953",
+          commit: "89118c8653b9",
+          runtime_state: "running",
+        },
+      }
+    )
+    const wrongCommit = collectNotices(
+      lines,
+      undefined,
+      undefined,
+      undefined,
+      0,
+      new Set(),
+      t,
+      {
+        service: {
+          build: "20260827080953",
+          commit: "different0000",
+          runtime_state: "running",
+        },
+      }
+    )
+
+    expect(matching).toHaveLength(0)
+    expect(wrongCommit).toHaveLength(1)
+  })
+
+  test("does not hide a current Meta incident after the matching restart", () => {
+    const notices = collectNotices(
+      [
+        "2026-08-27 12:19:21.298 keen-pbr 3.3.0 (build 20260827080953, commit 89118c8653b9) starting, log file: /opt/var/log/keen-pbr.log",
+        "2026-08-27 21:53:45.503 [E] Meta/WhatsApp UDP/443 policy state is degraded: balanced mode could not verify absence of owned UDP/443 artifacts after delayed publication. The service will perform a bounded recovery without broadening the affected traffic scope.",
+      ],
+      undefined,
+      undefined,
+      undefined,
+      0,
+      new Set(),
+      t,
+      {
+        service: {
+          build: "20260827080953",
+          commit: "89118c8653b9",
+          runtime_state: "running",
+        },
+      }
+    )
+
+    expect(notices).toHaveLength(1)
+    expect(notices[0]?.timestamp).toBe("2026-08-27 21:53:45.503")
+  })
 })
 
 describe("list refresh notices follow the daemon, not the journal", () => {
@@ -235,7 +356,10 @@ describe("list refresh notices follow the daemon, not the journal", () => {
       failedNight,
       undefined,
       undefined,
-      { ads: {}, porn: { last_error: "Could not resolve host: example.invalid" } },
+      {
+        ads: {},
+        porn: { last_error: "Could not resolve host: example.invalid" },
+      },
       0,
       new Set(),
       t
@@ -246,7 +370,9 @@ describe("list refresh notices follow the daemon, not the journal", () => {
 
   test("one still-broken list keeps the summary that names it", () => {
     const notices = collectNotices(
-      ["2026-08-16 04:00:41.147 [W] Lists refresh: failed to refresh list(s): ads, porn"],
+      [
+        "2026-08-16 04:00:41.147 [W] Lists refresh: failed to refresh list(s): ads, porn",
+      ],
       undefined,
       undefined,
       { ads: {}, porn: { last_error: "boom" } },
@@ -260,7 +386,9 @@ describe("list refresh notices follow the daemon, not the journal", () => {
 
   test("a list the daemon does not report is not assumed to have recovered", () => {
     const notices = collectNotices(
-      ["2026-08-16 04:00:39.746 [W] List 'gone': failed to refresh https://example.invalid/x: boom"],
+      [
+        "2026-08-16 04:00:39.746 [W] List 'gone': failed to refresh https://example.invalid/x: boom",
+      ],
       undefined,
       undefined,
       {},
