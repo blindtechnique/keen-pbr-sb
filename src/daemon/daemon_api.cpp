@@ -759,6 +759,26 @@ ConfigApplyResult Daemon::apply_validated_config_via_control_task(
     return *result;
 }
 
+ConfigApplyResult
+Daemon::apply_validated_config_via_control_task_with_lease_return(
+    Config config,
+    std::string saved_config_json,
+    RuntimeMutationAdmission::Lease& lease) {
+    struct ExactLeaseReturn final {
+        RuntimeMutationAdmission::Lease& destination;
+        RuntimeMutationAdmission::Lease& owner;
+
+        ~ExactLeaseReturn() noexcept {
+            destination = std::move(owner);
+        }
+    };
+
+    RuntimeMutationAdmission::Lease owner{std::move(lease)};
+    const ExactLeaseReturn return_exact{lease, owner};
+    return apply_validated_config_via_control_task(
+        std::move(config), std::move(saved_config_json));
+}
+
 ListRefreshOperationResult Daemon::refresh_lists_via_api(std::optional<std::string> requested_name) {
     auto mutation = acquire_runtime_mutation_or_throw(
         "refresh-lists", false, false);
@@ -1213,6 +1233,20 @@ void Daemon::setup_api() {
     api_ctx_->validate_runtime_mutation_lease_fn =
         [this](const RuntimeMutationAdmission::Lease& lease) noexcept {
             return runtime_mutation_admission_.owns(lease);
+        };
+    api_ctx_->try_acquire_runtime_mutation_handoff_gate_fn =
+        [this](const RuntimeMutationAdmission::Lease& lease) noexcept {
+            return runtime_mutation_admission_
+                .try_acquire_handoff_gate(lease);
+        };
+    api_ctx_->enqueue_apply_validated_config_with_lease_return_fn =
+        [this](Config config,
+               std::string saved_config_json,
+               RuntimeMutationAdmission::Lease& lease) {
+            return apply_validated_config_via_control_task_with_lease_return(
+                std::move(config),
+                std::move(saved_config_json),
+                lease);
         };
     api_ctx_->start_runtime_with_lease_fn =
         [this](RuntimeMutationAdmission::Lease lease) {

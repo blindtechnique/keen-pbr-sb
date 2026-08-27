@@ -944,6 +944,10 @@ private:
     ConfigApplyResult apply_validated_config_via_control_task(
         Config config,
         std::string saved_config_json);
+    ConfigApplyResult apply_validated_config_via_control_task_with_lease_return(
+        Config config,
+        std::string saved_config_json,
+        RuntimeMutationAdmission::Lease& lease);
     void run_runtime_control_operation_or_throw(const std::string& label,
                                                 const char* operation_name,
                                                 std::function<void()> task);

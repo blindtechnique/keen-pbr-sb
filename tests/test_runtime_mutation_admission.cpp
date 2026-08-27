@@ -62,6 +62,91 @@ TEST_CASE("runtime mutation admission releases ownership on destruction") {
     CHECK(admission.owns(*replacement));
 }
 
+TEST_CASE("runtime mutation admission handoff gate closes only its scope") {
+    RuntimeMutationAdmission admission;
+    auto active = admission.try_acquire("config-apply");
+    REQUIRE(active.has_value());
+
+    auto handoff =
+        admission.try_acquire_handoff_gate(*active);
+    REQUIRE(handoff.has_value());
+    REQUIRE(static_cast<bool>(*handoff));
+    auto second =
+        admission.try_acquire_handoff_gate(*active);
+    REQUIRE(second.has_value());
+    RuntimeMutationAdmission::HandoffGate moved{
+        std::move(*second)};
+    CHECK_FALSE(static_cast<bool>(*second));
+    CHECK(admission.owns(*active));
+    active->release();
+    CHECK_FALSE(admission.active().has_value());
+    CHECK_FALSE(
+        admission.try_acquire("during-handoff").has_value());
+    CHECK_FALSE(
+        admission.wait_for_idle_for(std::chrono::milliseconds{0}));
+
+    std::atomic<bool> waiter_finished{false};
+    std::atomic<bool> waiter_ready{false};
+    std::thread waiter([&] {
+        waiter_ready.store(true, std::memory_order_release);
+        waiter_finished.store(
+            admission.wait_until_idle(),
+            std::memory_order_release);
+    });
+    while (!waiter_ready.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+    CHECK_FALSE(waiter_finished.load(std::memory_order_acquire));
+
+    handoff->release();
+    handoff->release();
+    CHECK_FALSE(
+        admission.wait_for_idle_for(std::chrono::milliseconds{0}));
+    CHECK_FALSE(waiter_finished.load(std::memory_order_acquire));
+    moved.release();
+    waiter.join();
+    CHECK(waiter_finished.load(std::memory_order_acquire));
+    auto resumed = admission.try_acquire("after-handoff");
+    REQUIRE(resumed.has_value());
+    CHECK(admission.owns(*resumed));
+}
+
+TEST_CASE("runtime mutation handoff gate drains bounded shutdown") {
+    RuntimeMutationAdmission admission;
+    auto active = admission.try_acquire("config-apply");
+    REQUIRE(active.has_value());
+    auto handoff =
+        admission.try_acquire_handoff_gate(*active);
+    REQUIRE(handoff.has_value());
+
+    active->release();
+    admission.shutdown();
+    CHECK_FALSE(
+        admission.wait_for_idle_for(std::chrono::milliseconds{0}));
+    CHECK_FALSE(admission.wait_until_idle());
+
+    handoff->release();
+    CHECK(
+        admission.wait_for_idle_for(std::chrono::milliseconds{10}));
+    CHECK_FALSE(admission.try_acquire("after-shutdown").has_value());
+}
+
+TEST_CASE("runtime mutation handoff gate may outlive admission") {
+    std::optional<RuntimeMutationAdmission::HandoffGate> retained;
+    {
+        auto admission =
+            std::make_unique<RuntimeMutationAdmission>();
+        auto active = admission->try_acquire("config-apply");
+        REQUIRE(active.has_value());
+        retained =
+            admission->try_acquire_handoff_gate(*active);
+        REQUIRE(retained.has_value());
+        active->release();
+    }
+    REQUIRE(static_cast<bool>(*retained));
+    retained.reset();
+}
+
 TEST_CASE("runtime mutation admission shutdown is terminal") {
     RuntimeMutationAdmission admission;
     auto lease = admission.try_acquire("shutdown-race");
@@ -142,4 +227,11 @@ TEST_CASE("runtime mutation admission rejects foreign and empty leases") {
     CHECK_FALSE(first.owns(empty));
     CHECK_FALSE(second.owns(*lease));
     CHECK(first.owns(*lease));
+    CHECK_FALSE(
+        first.try_acquire_handoff_gate(empty).has_value());
+    CHECK_FALSE(
+        second.try_acquire_handoff_gate(*lease).has_value());
+    auto gate = first.try_acquire_handoff_gate(*lease);
+    REQUIRE(gate.has_value());
+    gate->release();
 }

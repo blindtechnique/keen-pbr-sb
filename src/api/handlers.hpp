@@ -463,6 +463,24 @@ struct ApiContext {
     // validator makes lease return unavailable rather than trusting a token.
     std::function<bool(const RuntimeMutationAdmission::Lease&)>
         validate_runtime_mutation_lease_fn;
+    // Literal aggregate tail used by config-save. The callback transfers the
+    // supplied lease into the daemon apply boundary and writes that exact
+    // physical lease back before returning or throwing. The current production
+    // adapter preserves the synchronous control-task apply; a later off-loop
+    // owner can reuse the same boundary. The request must reclaim the lease
+    // before it interprets apply failure, restores snapshots, or commits WAL.
+    std::function<ConfigApplyResult(
+        Config,
+        std::string,
+        RuntimeMutationAdmission::Lease&)>
+        enqueue_apply_validated_config_with_lease_return_fn;
+    // Bound to the same admission as acquire_runtime_mutation_fn. The gate is
+    // acquired against the exact live lease before durable config mutation,
+    // blocks another writer during the handoff, and is released only after
+    // exact lease reclaim or request unwind.
+    std::function<std::optional<RuntimeMutationAdmission::HandoffGate>(
+        const RuntimeMutationAdmission::Lease&)>
+        try_acquire_runtime_mutation_handoff_gate_fn;
 };
 
 // Request-scoped compatibility wrapper.  Production owns an unforgeable
@@ -490,6 +508,7 @@ public:
             }
             production_lease_token_ = lease_->token();
             production_state_ = ProductionState::production_owned;
+            production_admission_ = true;
             return;
         }
 
@@ -516,6 +535,35 @@ public:
     ApiRuntimeMutationGuard(const ApiRuntimeMutationGuard&) = delete;
     ApiRuntimeMutationGuard& operator=(const ApiRuntimeMutationGuard&) = delete;
 
+    bool uses_production_admission() const noexcept {
+        return production_admission_;
+    }
+
+    bool arm_handoff_gate() noexcept {
+        if (production_state_ != ProductionState::production_owned ||
+            production_handoff_taken_ ||
+            handoff_gate_.has_value() ||
+            !lease_.has_value() ||
+            !static_cast<bool>(*lease_) ||
+            !context_.try_acquire_runtime_mutation_handoff_gate_fn ||
+            legacy_active_) {
+            return false;
+        }
+        try {
+            auto gate =
+                context_.try_acquire_runtime_mutation_handoff_gate_fn(
+                    *lease_);
+            if (!gate.has_value() ||
+                !static_cast<bool>(*gate)) {
+                return false;
+            }
+            handoff_gate_.emplace(std::move(*gate));
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
     void finish() {
         if (production_state_ == ProductionState::production_owned) {
             if (lease_.has_value()) {
@@ -538,6 +586,8 @@ public:
     RuntimeMutationAdmission::Lease take_lease() {
         if (production_state_ != ProductionState::production_owned ||
             production_handoff_taken_ ||
+            !handoff_gate_.has_value() ||
+            !static_cast<bool>(*handoff_gate_) ||
             !lease_.has_value() ||
             !static_cast<bool>(*lease_) ||
             legacy_active_) {
@@ -574,6 +624,7 @@ public:
         }
         lease_.emplace(std::move(returned_lease));
         production_state_ = ProductionState::production_owned;
+        handoff_gate_.reset();
         return true;
     }
 
@@ -591,11 +642,14 @@ private:
 
     ApiContext& context_;
     std::optional<RuntimeMutationAdmission::Lease> lease_;
+    std::optional<RuntimeMutationAdmission::HandoffGate>
+        handoff_gate_;
     std::function<bool(const RuntimeMutationAdmission::Lease&)>
         validate_returned_lease_fn_;
     std::uint64_t production_lease_token_{0U};
     ProductionState production_state_{ProductionState::finished};
     bool production_handoff_taken_{false};
+    bool production_admission_{false};
     bool legacy_active_{false};
 };
 

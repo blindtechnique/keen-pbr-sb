@@ -24,6 +24,7 @@ private:
         std::uint64_t next_token{0};
         std::uint64_t active_token{0};
         std::string active_label;
+        std::uint64_t handoff_count{0};
         bool accepting{true};
         std::condition_variable idle_cv;
     };
@@ -90,6 +91,56 @@ public:
         std::uint64_t token_{0};
     };
 
+    class HandoffGate {
+    public:
+        HandoffGate() noexcept = default;
+
+        ~HandoffGate() noexcept {
+            release();
+        }
+
+        HandoffGate(const HandoffGate&) = delete;
+        HandoffGate& operator=(const HandoffGate&) = delete;
+
+        HandoffGate(HandoffGate&& other) noexcept
+            : state_(std::move(other.state_)) {}
+
+        HandoffGate& operator=(HandoffGate&& other) noexcept {
+            if (this == &other) {
+                return *this;
+            }
+            release();
+            state_ = std::move(other.state_);
+            return *this;
+        }
+
+        explicit operator bool() const noexcept {
+            return static_cast<bool>(state_);
+        }
+
+        void release() noexcept {
+            auto state = std::move(state_);
+            if (!state) {
+                return;
+            }
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                if (state->handoff_count != 0) {
+                    --state->handoff_count;
+                }
+            }
+            state->idle_cv.notify_all();
+        }
+
+    private:
+        friend class RuntimeMutationAdmission;
+
+        explicit HandoffGate(std::shared_ptr<State> state) noexcept
+            : state_(std::move(state)) {}
+
+        std::shared_ptr<State> state_;
+    };
+
     RuntimeMutationAdmission() : state_(std::make_shared<State>()) {}
 
     ~RuntimeMutationAdmission() noexcept {
@@ -109,7 +160,8 @@ public:
 
     std::optional<Lease> try_acquire(std::string label) {
         std::lock_guard<std::mutex> lock(state_->mutex);
-        if (!state_->accepting || state_->active_token != 0) {
+        if (!state_->accepting || state_->active_token != 0 ||
+            state_->handoff_count != 0) {
             return std::nullopt;
         }
 
@@ -122,15 +174,30 @@ public:
         return Lease{state_, state_->active_token};
     }
 
+    std::optional<HandoffGate> try_acquire_handoff_gate(
+        const Lease& lease) noexcept {
+        const auto state = state_;
+        std::lock_guard<std::mutex> lock(state->mutex);
+        if (!lease.state_ || lease.state_.get() != state.get() ||
+            lease.token_ == 0 || state->active_token != lease.token_) {
+            return std::nullopt;
+        }
+        ++state->handoff_count;
+        return HandoffGate{state};
+    }
+
     // Used by deferred external writers such as SIGHUP. Returns true once the
     // current owner is gone, or false when shutdown closes admission first.
     bool wait_until_idle() const noexcept {
         const auto state = state_;
         std::unique_lock<std::mutex> lock(state->mutex);
         state->idle_cv.wait(lock, [state] {
-            return !state->accepting || state->active_token == 0;
+            return !state->accepting ||
+                   (state->active_token == 0 &&
+                    state->handoff_count == 0);
         });
-        return state->accepting && state->active_token == 0;
+        return state->accepting && state->active_token == 0 &&
+               state->handoff_count == 0;
     }
 
     // Shutdown uses a bounded wait while pumping the control queue. Unlike
@@ -142,7 +209,8 @@ public:
         const auto state = state_;
         std::unique_lock<std::mutex> lock(state->mutex);
         return state->idle_cv.wait_for(lock, timeout, [state] {
-            return state->active_token == 0;
+            return state->active_token == 0 &&
+                   state->handoff_count == 0;
         });
     }
 

@@ -383,6 +383,24 @@ std::string commit_prepared_config_impl(
                 std::move(maintenance_operation));
         ApiRuntimeMutationGuard config_operation(
             ctx, "save-config");
+        if (config_operation.uses_production_admission() &&
+            (!ctx.enqueue_apply_validated_config_with_lease_return_fn ||
+             !ctx.validate_runtime_mutation_lease_fn ||
+             !ctx.try_acquire_runtime_mutation_handoff_gate_fn ||
+             !config_operation.arm_handoff_gate())) {
+            throw ApiError(
+                "Runtime configuration owner is unavailable",
+                503,
+                nlohmann::json{
+                    {"error",
+                     "Runtime configuration owner is unavailable"},
+                    {"saved", false},
+                    {"applied", false},
+                    {"rolled_back", false},
+                    {"recovery_required", false},
+                }
+                    .dump());
+        }
         auto prepared = prepare();
 
         LifecycleOperationSnapshot lifecycle;
@@ -774,52 +792,103 @@ std::string commit_prepared_config_impl(
         }
 
         ConfigApplyResult apply_result;
-        try {
-            apply_result =
-                ctx.enqueue_apply_validated_config(
-                    prepared.config,
-                    prepared.serialized);
-            inject_config_save_fault(
-                runtime_options,
-                ConfigSaveCheckpoint::apply_returned);
-        } catch (const ApiError&) {
-            fail_lifecycle_best_effort(
-                ctx,
-                lifecycle,
-                "Configuration runtime apply was "
-                "interrupted");
-            throw_recovery_required(
-                ctx,
-                "Configuration runtime apply was "
-                "interrupted; runtime state is unknown",
-                false,
-                false);
-        } catch (const std::exception& error) {
-            fail_lifecycle_best_effort(
-                ctx,
-                lifecycle,
-                "Configuration runtime apply was "
-                "interrupted");
-            throw_recovery_required(
-                ctx,
-                std::string(
+        std::exception_ptr apply_failure;
+        if (config_operation.uses_production_admission()) {
+            RuntimeMutationAdmission::Lease returned_lease;
+            try {
+                returned_lease = config_operation.take_lease();
+                apply_result =
+                    ctx.enqueue_apply_validated_config_with_lease_return_fn(
+                        prepared.config,
+                        prepared.serialized,
+                        returned_lease);
+            } catch (...) {
+                apply_failure = std::current_exception();
+            }
+
+            // This is the first operation after the owner callback, on both
+            // success and failure. Until the same physical admission claim is
+            // back in the request guard, neither the callback's result nor the
+            // durable rollback snapshot is safe to interpret.
+            if (!config_operation.restore_lease(returned_lease)) {
+                fail_lifecycle_best_effort(
+                    ctx,
+                    lifecycle,
+                    "Configuration runtime apply did not return its "
+                    "mutation lease");
+                throw_recovery_required(
+                    ctx,
+                    "Configuration runtime apply did not return the "
+                    "exact mutation lease; runtime state is unknown",
+                    false,
+                    false);
+            }
+
+            if (!apply_failure) {
+                try {
+                    inject_config_save_fault(
+                        runtime_options,
+                        ConfigSaveCheckpoint::apply_returned);
+                } catch (...) {
+                    apply_failure = std::current_exception();
+                }
+            }
+        } else {
+            try {
+                apply_result =
+                    ctx.enqueue_apply_validated_config(
+                        prepared.config,
+                        prepared.serialized);
+                inject_config_save_fault(
+                    runtime_options,
+                    ConfigSaveCheckpoint::apply_returned);
+            } catch (...) {
+                apply_failure = std::current_exception();
+            }
+        }
+
+        if (apply_failure) {
+            try {
+                std::rethrow_exception(apply_failure);
+            } catch (const ApiError&) {
+                fail_lifecycle_best_effort(
+                    ctx,
+                    lifecycle,
                     "Configuration runtime apply was "
-                    "interrupted: ") +
-                    error.what(),
-                false,
-                false);
-        } catch (...) {
-            fail_lifecycle_best_effort(
-                ctx,
-                lifecycle,
-                "Configuration runtime apply was "
-                "interrupted");
-            throw_recovery_required(
-                ctx,
-                "Configuration runtime apply was "
-                "interrupted; runtime state is unknown",
-                false,
-                false);
+                    "interrupted");
+                throw_recovery_required(
+                    ctx,
+                    "Configuration runtime apply was "
+                    "interrupted; runtime state is unknown",
+                    false,
+                    false);
+            } catch (const std::exception& error) {
+                fail_lifecycle_best_effort(
+                    ctx,
+                    lifecycle,
+                    "Configuration runtime apply was "
+                    "interrupted");
+                throw_recovery_required(
+                    ctx,
+                    std::string(
+                        "Configuration runtime apply was "
+                        "interrupted: ") +
+                        error.what(),
+                    false,
+                    false);
+            } catch (...) {
+                fail_lifecycle_best_effort(
+                    ctx,
+                    lifecycle,
+                    "Configuration runtime apply was "
+                    "interrupted");
+                throw_recovery_required(
+                    ctx,
+                    "Configuration runtime apply was "
+                    "interrupted; runtime state is unknown",
+                    false,
+                    false);
+            }
         }
 
         if (!apply_result.error.empty() ||

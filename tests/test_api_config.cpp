@@ -248,6 +248,38 @@ void install_fake_maintenance(
     };
 }
 
+void install_runtime_mutation_admission(
+    ApiContext& context,
+    RuntimeMutationAdmission& admission,
+    std::vector<std::string>* events = nullptr,
+    std::size_t* handoff_gate_calls = nullptr) {
+    context.acquire_runtime_mutation_fn =
+        [&admission](std::string label, bool, bool) {
+            auto lease = admission.try_acquire(std::move(label));
+            if (!lease.has_value()) {
+                throw std::runtime_error(
+                    "injected runtime mutation admission conflict");
+            }
+            return std::move(*lease);
+        };
+    context.validate_runtime_mutation_lease_fn =
+        [&admission, events](
+            const RuntimeMutationAdmission::Lease& lease) {
+            if (events != nullptr) {
+                events->push_back("runtime-lease-restored");
+            }
+            return admission.owns(lease);
+        };
+    context.try_acquire_runtime_mutation_handoff_gate_fn =
+        [&admission, handoff_gate_calls](
+            const RuntimeMutationAdmission::Lease& lease) noexcept {
+            if (handoff_gate_calls != nullptr) {
+                ++*handoff_gate_calls;
+            }
+            return admission.try_acquire_handoff_gate(lease);
+        };
+}
+
 std::size_t event_index(
     const std::vector<std::string>& events,
     const std::string& expected) {
@@ -2526,6 +2558,631 @@ TEST_CASE(
     CHECK(stop_calls == 0U);
     RestoreJournal journal(config_save_journal_path(directory));
     CHECK_FALSE(journal.read_active().has_value());
+}
+
+TEST_CASE(
+    "production config save requires the complete exact-handoff seam") {
+    ConfigApiTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    const Config original =
+        make_valid_config("127.0.0.1:18318");
+    const std::string original_json =
+        nlohmann::json(original).dump(1, '\t') + "\n";
+    const Config staged =
+        make_valid_config("127.0.0.1:18319");
+    const std::string staged_json =
+        nlohmann::json(staged).dump(1, '\t') + "\n";
+    write_text(config_path, original_json);
+
+    SseBroadcaster broadcaster;
+    std::size_t begin_calls = 0;
+    std::size_t finish_calls = 0;
+    std::size_t legacy_apply_calls = 0;
+    auto context = make_config_context(
+        config_path.string(),
+        broadcaster,
+        staged,
+        staged_json,
+        begin_calls,
+        finish_calls,
+        legacy_apply_calls);
+    const auto maintenance =
+        std::make_shared<FakeMaintenanceState>();
+    install_fake_maintenance(context, maintenance);
+    RuntimeMutationAdmission admission;
+    install_runtime_mutation_admission(context, admission);
+    std::size_t exact_apply_calls = 0;
+    SUBCASE("missing exact-handoff callback") {}
+    SUBCASE("missing lease validator") {
+        context.enqueue_apply_validated_config_with_lease_return_fn =
+            [&](Config,
+                std::string,
+                RuntimeMutationAdmission::Lease&) {
+                ++exact_apply_calls;
+                return ConfigApplyResult{};
+            };
+        context.validate_runtime_mutation_lease_fn = {};
+    }
+    SUBCASE("missing handoff gate callback") {
+        context.enqueue_apply_validated_config_with_lease_return_fn =
+            [&](Config,
+                std::string,
+                RuntimeMutationAdmission::Lease&) {
+                ++exact_apply_calls;
+                return ConfigApplyResult{};
+            };
+        context.try_acquire_runtime_mutation_handoff_gate_fn = {};
+    }
+
+    std::size_t prepare_calls = 0;
+    std::size_t write_calls = 0;
+    try {
+        (void)commit_prepared_config_for_test(
+            context,
+            "missing-owner-config-seam",
+            [&] {
+                ++prepare_calls;
+                PreparedConfigCommit prepared;
+                prepared.config = staged;
+                prepared.serialized = staged_json;
+                return prepared;
+            },
+            [&](const std::string& path,
+                const std::string& body) {
+                ++write_calls;
+                write_config_atomically(path, body);
+            });
+        FAIL("production must not fall back to legacy config apply");
+    } catch (const ApiError& error) {
+        CHECK(error.status() == 503);
+        REQUIRE(error.body().has_value());
+        const auto payload =
+            nlohmann::json::parse(*error.body());
+        CHECK(
+            payload.at("error") ==
+            "Runtime configuration owner is unavailable");
+        CHECK(payload.at("saved") == false);
+        CHECK(payload.at("applied") == false);
+        CHECK(payload.at("rolled_back") == false);
+        CHECK(payload.at("recovery_required") == false);
+    }
+
+    CHECK(prepare_calls == 0U);
+    CHECK(write_calls == 0U);
+    CHECK(exact_apply_calls == 0U);
+    CHECK(legacy_apply_calls == 0U);
+    CHECK(read_text(config_path) == original_json);
+    CHECK_FALSE(
+        RestoreJournal(config_save_journal_path(directory))
+            .read_active()
+            .has_value());
+    auto subsequent = admission.try_acquire(
+        "after-missing-owner-config-seam");
+    REQUIRE(subsequent.has_value());
+    subsequent->release();
+}
+
+TEST_CASE(
+    "owner-backed config apply restores its exact lease before WAL commit") {
+    ConfigApiTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    const Config original =
+        make_valid_config("127.0.0.1:18320");
+    const Config staged =
+        make_valid_config("127.0.0.1:18321");
+    const std::string staged_json =
+        nlohmann::json(staged).dump(1, '\t') + "\n";
+    write_text(
+        config_path,
+        nlohmann::json(original).dump(1, '\t') + "\n");
+
+    SseBroadcaster broadcaster;
+    std::size_t begin_calls = 0;
+    std::size_t finish_calls = 0;
+    std::size_t legacy_apply_calls = 0;
+    auto context = make_config_context(
+        config_path.string(),
+        broadcaster,
+        staged,
+        staged_json,
+        begin_calls,
+        finish_calls,
+        legacy_apply_calls);
+    const auto maintenance =
+        std::make_shared<FakeMaintenanceState>();
+    install_fake_maintenance(context, maintenance);
+
+    RuntimeMutationAdmission admission;
+    install_runtime_mutation_admission(
+        context, admission, &maintenance->events);
+    std::size_t owner_apply_calls = 0;
+    context.enqueue_apply_validated_config_with_lease_return_fn =
+        [&](Config,
+            std::string serialized,
+            RuntimeMutationAdmission::Lease& request_lease) {
+            ++owner_apply_calls;
+            maintenance->events.push_back("owner-apply");
+            CHECK(serialized == staged_json);
+            CHECK(admission.owns(request_lease));
+
+            auto owner_lease = std::move(request_lease);
+            CHECK_FALSE(static_cast<bool>(request_lease));
+            CHECK(admission.owns(owner_lease));
+            request_lease = std::move(owner_lease);
+
+            ConfigApplyResult result;
+            result.applied = true;
+            return result;
+        };
+
+    const auto response = nlohmann::json::parse(
+        commit_prepared_config_for_test(
+            context,
+            "owner-backed-config-success",
+            [&] {
+                PreparedConfigCommit prepared;
+                prepared.config = staged;
+                prepared.serialized = staged_json;
+                return prepared;
+            },
+            [](const std::string& path,
+               const std::string& body) {
+                write_config_atomically(path, body);
+            }));
+
+    CHECK(response.at("saved") == true);
+    CHECK(response.at("applied") == true);
+    CHECK(read_text(config_path) == staged_json);
+    CHECK(owner_apply_calls == 1U);
+    CHECK(legacy_apply_calls == 0U);
+    CHECK(begin_calls == 0U);
+    CHECK(finish_calls == 0U);
+    CHECK(
+        event_index(
+            maintenance->events,
+            "runtime-lease-restored") <
+        event_index(maintenance->events, "verify-held"));
+    CHECK_FALSE(admission.active().has_value());
+    CHECK_FALSE(
+        RestoreJournal(config_save_journal_path(directory))
+            .read_active()
+            .has_value());
+}
+
+TEST_CASE(
+    "owner preapply clean failure returns lease before exact file rollback") {
+    ConfigApiTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    const Config original =
+        make_valid_config("127.0.0.1:18322");
+    const std::string original_json =
+        nlohmann::json(original).dump(1, '\t') + "\n";
+    const Config staged =
+        make_valid_config("127.0.0.1:18323");
+    const std::string staged_json =
+        nlohmann::json(staged).dump(1, '\t') + "\n";
+    write_text(config_path, original_json);
+
+    SseBroadcaster broadcaster;
+    std::size_t begin_calls = 0;
+    std::size_t finish_calls = 0;
+    std::size_t legacy_apply_calls = 0;
+    auto context = make_config_context(
+        config_path.string(),
+        broadcaster,
+        staged,
+        staged_json,
+        begin_calls,
+        finish_calls,
+        legacy_apply_calls);
+    const auto maintenance =
+        std::make_shared<FakeMaintenanceState>();
+    install_fake_maintenance(context, maintenance);
+
+    RuntimeMutationAdmission admission;
+    install_runtime_mutation_admission(context, admission);
+    context.validate_runtime_mutation_lease_fn =
+        [&](const RuntimeMutationAdmission::Lease& lease) {
+            // Reclaim is required while the candidate is still durable. If
+            // rollback ran first this assertion would observe original_json.
+            CHECK(read_text(config_path) == staged_json);
+            maintenance->events.push_back(
+                "runtime-lease-restored");
+            return admission.owns(lease);
+        };
+    std::size_t quiesce_calls = 0;
+    context.emergency_quiesce_runtime_fn =
+        [&] { ++quiesce_calls; };
+    std::size_t owner_apply_calls = 0;
+    context.enqueue_apply_validated_config_with_lease_return_fn =
+        [&](Config,
+            std::string,
+            RuntimeMutationAdmission::Lease& request_lease) {
+            ++owner_apply_calls;
+            auto owner_lease = std::move(request_lease);
+            request_lease = std::move(owner_lease);
+
+            ConfigApplyResult result;
+            result.error = "owner preapply failed cleanly";
+            result.runtime_unchanged = true;
+            return result;
+        };
+
+    try {
+        (void)commit_prepared_config_for_test(
+            context,
+            "owner-backed-config-clean-failure",
+            [&] {
+                PreparedConfigCommit prepared;
+                prepared.config = staged;
+                prepared.serialized = staged_json;
+                return prepared;
+            },
+            [](const std::string& path,
+               const std::string& body) {
+                write_config_atomically(path, body);
+            });
+        FAIL("clean owner preapply failure must reject the save");
+    } catch (const ApiError& error) {
+        CHECK(error.status() == 500);
+        REQUIRE(error.body().has_value());
+        const auto payload =
+            nlohmann::json::parse(*error.body());
+        CHECK(payload.at("recovery_required") == false);
+        CHECK(payload.at("runtime_unchanged") == true);
+        CHECK(payload.at("file_rolled_back") == true);
+    }
+
+    CHECK(read_text(config_path) == original_json);
+    CHECK(owner_apply_calls == 1U);
+    CHECK(legacy_apply_calls == 0U);
+    CHECK(quiesce_calls == 0U);
+    CHECK_FALSE(admission.active().has_value());
+    CHECK_FALSE(
+        RestoreJournal(config_save_journal_path(directory))
+            .read_active()
+            .has_value());
+}
+
+TEST_CASE(
+    "owner exception is interpreted only after exact lease reclaim") {
+    ConfigApiTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    const Config original =
+        make_valid_config("127.0.0.1:18330");
+    const Config staged =
+        make_valid_config("127.0.0.1:18331");
+    const std::string staged_json =
+        nlohmann::json(staged).dump(1, '\t') + "\n";
+    write_text(
+        config_path,
+        nlohmann::json(original).dump(1, '\t') + "\n");
+
+    SseBroadcaster broadcaster;
+    std::size_t begin_calls = 0;
+    std::size_t finish_calls = 0;
+    std::size_t legacy_apply_calls = 0;
+    auto context = make_config_context(
+        config_path.string(),
+        broadcaster,
+        staged,
+        staged_json,
+        begin_calls,
+        finish_calls,
+        legacy_apply_calls);
+    const auto maintenance =
+        std::make_shared<FakeMaintenanceState>();
+    install_fake_maintenance(context, maintenance);
+
+    RuntimeMutationAdmission admission;
+    std::size_t handoff_gate_calls = 0;
+    install_runtime_mutation_admission(
+        context,
+        admission,
+        &maintenance->events,
+        &handoff_gate_calls);
+    std::size_t quiesce_calls = 0;
+    context.emergency_quiesce_runtime_fn = [&] {
+        ++quiesce_calls;
+        maintenance->events.push_back("runtime-quiesced");
+    };
+    std::size_t owner_apply_calls = 0;
+    context.enqueue_apply_validated_config_with_lease_return_fn =
+        [&](Config,
+            std::string,
+            RuntimeMutationAdmission::Lease& request_lease)
+            -> ConfigApplyResult {
+            ++owner_apply_calls;
+            CHECK(admission.owns(request_lease));
+
+            auto owner_lease = std::move(request_lease);
+            CHECK_FALSE(static_cast<bool>(request_lease));
+            request_lease = std::move(owner_lease);
+            CHECK(admission.owns(request_lease));
+
+            throw std::runtime_error(
+                "injected owner failure after exact lease return");
+        };
+
+    try {
+        (void)commit_prepared_config_for_test(
+            context,
+            "owner-throws-after-exact-return",
+            [&] {
+                PreparedConfigCommit prepared;
+                prepared.config = staged;
+                prepared.serialized = staged_json;
+                return prepared;
+            },
+            [](const std::string& path,
+               const std::string& body) {
+                write_config_atomically(path, body);
+            });
+        FAIL("owner exception after exact return must require recovery");
+    } catch (const ApiError& error) {
+        CHECK(error.status() == 503);
+        REQUIRE(error.body().has_value());
+        const auto payload =
+            nlohmann::json::parse(*error.body());
+        CHECK(
+            payload.at("error") ==
+            "Configuration runtime apply was interrupted: "
+            "injected owner failure after exact lease return");
+        CHECK(payload.at("saved") == false);
+        CHECK(payload.at("applied") == false);
+        CHECK(payload.at("rolled_back") == false);
+        CHECK(payload.at("recovery_required") == true);
+        CHECK(payload.at("runtime_quiesced") == true);
+    }
+
+    CHECK(owner_apply_calls == 1U);
+    CHECK(legacy_apply_calls == 0U);
+    CHECK(handoff_gate_calls == 1U);
+    CHECK(quiesce_calls == 1U);
+    CHECK(
+        event_index(
+            maintenance->events,
+            "runtime-lease-restored") <
+        event_index(maintenance->events, "runtime-quiesced"));
+    CHECK(read_text(config_path) == staged_json);
+    RestoreJournal journal(config_save_journal_path(directory));
+    const auto active = journal.read_active();
+    REQUIRE(active.has_value());
+    CHECK(
+        active->phase ==
+        RestoreJournalPhase::files_committed);
+    CHECK_FALSE(admission.active().has_value());
+    auto subsequent = admission.try_acquire(
+        "after-owner-throws-exact-return");
+    REQUIRE(subsequent.has_value());
+    subsequent->release();
+}
+
+TEST_CASE(
+    "owner-backed config apply requires the exact lease on every return") {
+    for (const bool return_foreign_lease : {false, true}) {
+        CAPTURE(return_foreign_lease);
+        ConfigApiTempDir directory;
+        const auto config_path = directory.path / "config.json";
+        const Config original = make_valid_config(
+            return_foreign_lease
+                ? "127.0.0.1:18324"
+                : "127.0.0.1:18326");
+        const Config staged = make_valid_config(
+            return_foreign_lease
+                ? "127.0.0.1:18325"
+                : "127.0.0.1:18327");
+        const std::string staged_json =
+            nlohmann::json(staged).dump(1, '\t') + "\n";
+        write_text(
+            config_path,
+            nlohmann::json(original).dump(1, '\t') + "\n");
+
+        SseBroadcaster broadcaster;
+        std::size_t begin_calls = 0;
+        std::size_t finish_calls = 0;
+        std::size_t legacy_apply_calls = 0;
+        auto context = make_config_context(
+            config_path.string(),
+            broadcaster,
+            staged,
+            staged_json,
+            begin_calls,
+            finish_calls,
+            legacy_apply_calls);
+        const auto maintenance =
+            std::make_shared<FakeMaintenanceState>();
+        install_fake_maintenance(context, maintenance);
+
+        RuntimeMutationAdmission admission;
+        RuntimeMutationAdmission foreign_admission;
+        std::size_t handoff_gate_calls = 0;
+        install_runtime_mutation_admission(
+            context,
+            admission,
+            nullptr,
+            &handoff_gate_calls);
+        std::optional<RuntimeMutationAdmission::Lease>
+            retained_exact_lease;
+        std::size_t quiesce_calls = 0;
+        context.emergency_quiesce_runtime_fn =
+            [&] { ++quiesce_calls; };
+        context.enqueue_apply_validated_config_with_lease_return_fn =
+            [&](Config,
+                std::string,
+                RuntimeMutationAdmission::Lease& request_lease) {
+                CHECK(admission.owns(request_lease));
+                if (return_foreign_lease) {
+                    retained_exact_lease.emplace(
+                        std::move(request_lease));
+                    auto foreign = foreign_admission.try_acquire(
+                        "foreign-config-operation");
+                    REQUIRE(foreign.has_value());
+                    request_lease = std::move(*foreign);
+                } else {
+                    request_lease.release();
+                }
+                CHECK_FALSE(
+                    admission.try_acquire(
+                        "during-invalid-config-handback")
+                        .has_value());
+
+                ConfigApplyResult result;
+                result.error = "untrusted clean failure claim";
+                result.runtime_unchanged = true;
+                return result;
+            };
+
+        try {
+            (void)commit_prepared_config_for_test(
+                context,
+                "owner-backed-config-invalid-return",
+                [&] {
+                    PreparedConfigCommit prepared;
+                    prepared.config = staged;
+                    prepared.serialized = staged_json;
+                    return prepared;
+                },
+                [](const std::string& path,
+                   const std::string& body) {
+                    write_config_atomically(path, body);
+                });
+            FAIL("an empty or foreign lease must fail closed");
+        } catch (const ApiError& error) {
+            CHECK(error.status() == 503);
+            REQUIRE(error.body().has_value());
+            const auto payload =
+                nlohmann::json::parse(*error.body());
+            CHECK(payload.at("recovery_required") == true);
+            CHECK(payload.at("applied") == false);
+            CHECK(payload.at("rolled_back") == false);
+            CHECK_FALSE(payload.contains("runtime_unchanged"));
+        }
+
+        CHECK(read_text(config_path) == staged_json);
+        CHECK(legacy_apply_calls == 0U);
+        CHECK(quiesce_calls == 1U);
+        CHECK(handoff_gate_calls == 1U);
+        RestoreJournal journal(
+            config_save_journal_path(directory));
+        const auto active = journal.read_active();
+        REQUIRE(active.has_value());
+        CHECK(
+            active->phase ==
+            RestoreJournalPhase::files_committed);
+        CHECK(
+            admission.active().has_value() ==
+            return_foreign_lease);
+        CHECK_FALSE(foreign_admission.active().has_value());
+        if (return_foreign_lease) {
+            CHECK_FALSE(
+                admission.try_acquire(
+                    "before-retained-exact-release")
+                    .has_value());
+        }
+        retained_exact_lease.reset();
+        CHECK_FALSE(admission.active().has_value());
+        auto subsequent = admission.try_acquire(
+            "after-invalid-config-handback");
+        REQUIRE(subsequent.has_value());
+        subsequent->release();
+    }
+}
+
+TEST_CASE(
+    "unverifiable exact handback releases its gate after request unwind") {
+    ConfigApiTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    const Config original =
+        make_valid_config("127.0.0.1:18328");
+    const Config staged =
+        make_valid_config("127.0.0.1:18329");
+    const std::string staged_json =
+        nlohmann::json(staged).dump(1, '\t') + "\n";
+    write_text(
+        config_path,
+        nlohmann::json(original).dump(1, '\t') + "\n");
+
+    SseBroadcaster broadcaster;
+    std::size_t begin_calls = 0;
+    std::size_t finish_calls = 0;
+    std::size_t legacy_apply_calls = 0;
+    auto context = make_config_context(
+        config_path.string(),
+        broadcaster,
+        staged,
+        staged_json,
+        begin_calls,
+        finish_calls,
+        legacy_apply_calls);
+    const auto maintenance =
+        std::make_shared<FakeMaintenanceState>();
+    install_fake_maintenance(context, maintenance);
+
+    RuntimeMutationAdmission admission;
+    std::size_t handoff_gate_calls = 0;
+    install_runtime_mutation_admission(
+        context,
+        admission,
+        nullptr,
+        &handoff_gate_calls);
+    context.validate_runtime_mutation_lease_fn =
+        [](const RuntimeMutationAdmission::Lease&) -> bool {
+            throw std::runtime_error(
+                "injected lease validator failure");
+        };
+    std::size_t quiesce_calls = 0;
+    context.emergency_quiesce_runtime_fn =
+        [&] { ++quiesce_calls; };
+    context.enqueue_apply_validated_config_with_lease_return_fn =
+        [&](Config,
+            std::string,
+            RuntimeMutationAdmission::Lease& request_lease) {
+            CHECK(admission.owns(request_lease));
+            auto owner_lease = std::move(request_lease);
+            request_lease = std::move(owner_lease);
+            ConfigApplyResult result;
+            result.applied = true;
+            return result;
+        };
+
+    try {
+        (void)commit_prepared_config_for_test(
+            context,
+            "unverifiable-exact-config-handback",
+            [&] {
+                PreparedConfigCommit prepared;
+                prepared.config = staged;
+                prepared.serialized = staged_json;
+                return prepared;
+            },
+            [](const std::string& path,
+               const std::string& body) {
+                write_config_atomically(path, body);
+            });
+        FAIL("validator failure must require recovery");
+    } catch (const ApiError& error) {
+        CHECK(error.status() == 503);
+        REQUIRE(error.body().has_value());
+        CHECK(
+            nlohmann::json::parse(*error.body())
+                .at("recovery_required") == true);
+    }
+
+    CHECK(handoff_gate_calls == 1U);
+    CHECK(quiesce_calls == 1U);
+    CHECK_FALSE(admission.active().has_value());
+    auto subsequent = admission.try_acquire(
+        "after-validator-failure-unwind");
+    REQUIRE(subsequent.has_value());
+    subsequent->release();
+    RestoreJournal journal(
+        config_save_journal_path(directory));
+    const auto active = journal.read_active();
+    REQUIRE(active.has_value());
+    CHECK(
+        active->phase ==
+        RestoreJournalPhase::files_committed);
 }
 
 TEST_CASE(
