@@ -133,7 +133,13 @@ public:
         write_file(root / "later", kNetstatHeader + rows);
         listeners_from = std::to_string(call);
     }
-    void no_netstat() { fs::remove(root / "mock-bin/netstat"); }
+    void no_netstat() {
+        // Keep the shim first on PATH. Removing it would let a host-provided
+        // netstat satisfy the lookup, so the test would no longer model a
+        // missing command on developer machines or GitHub runners that ship
+        // net-tools.
+        write_file(root / "mock-bin/netstat", "#!/bin/sh\nexit 127\n", true);
+    }
     void pidfile(const std::string& body) {
         write_file(root / "opt/var/run/dropbear.pid", body);
     }
