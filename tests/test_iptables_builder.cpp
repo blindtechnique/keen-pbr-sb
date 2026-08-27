@@ -2065,6 +2065,326 @@ TEST_CASE("iptables restore wait capability cache is independent per tool") {
   testing::reset_restore_wait_option_probe_for_test();
 }
 
+TEST_CASE("iptables control wait capability and argv are independent per family") {
+  IptablesTestTempDir temp;
+  const auto v4_calls = temp.path() / "v4-control-calls";
+  const auto v6_calls = temp.path() / "v6-control-calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "printf '%s\\n' \"$*\" >> \"$KPBR_V4_CONTROL_CALLS\"\n"
+      "case \"$*\" in\n"
+      "  '-w 0 -t filter -S KeenPbrWaitProbe')\n"
+      "    echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "    exit 1 ;;\n"
+      "  '-w 2 -t filter -S') echo v4-wait; exit 0 ;;\n"
+      "esac\n"
+      "echo unexpected >&2\n"
+      "exit 64\n");
+  write_iptables_test_executable(
+      temp.path() / "ip6tables",
+      "#!/bin/sh\n"
+      "printf '%s\\n' \"$*\" >> \"$KPBR_V6_CONTROL_CALLS\"\n"
+      "case \"$*\" in\n"
+      "  '-w 0 -t filter -S KeenPbrWaitProbe')\n"
+      "    echo \"ip6tables: unknown option '-w'\" >&2\n"
+      "    exit 2 ;;\n"
+      "  '-t filter -S') echo v6-legacy; exit 0 ;;\n"
+      "esac\n"
+      "echo unexpected >&2\n"
+      "exit 64\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment v4_calls_env("KPBR_V4_CONTROL_CALLS");
+  IptablesTestEnvironment v6_calls_env("KPBR_V6_CONTROL_CALLS");
+  use_iptables_test_path(path, temp.path());
+  v4_calls_env.set(v4_calls.string());
+  v6_calls_env.set(v6_calls.string());
+
+  testing::reset_iptables_control_runner_for_test();
+  testing::reset_restore_wait_option_probe_for_test();
+  const auto v4_support =
+      testing::control_wait_option_supported_for_test("iptables");
+  const auto v6_support =
+      testing::control_wait_option_supported_for_test("ip6tables");
+  REQUIRE(v4_support.has_value());
+  REQUIRE(v6_support.has_value());
+  CHECK(*v4_support);
+  CHECK_FALSE(*v6_support);
+
+  // Both second lookups are cached, while the real commands use the exact
+  // argv appropriate for their independently detected binaries.
+  CHECK(*testing::control_wait_option_supported_for_test("iptables"));
+  CHECK_FALSE(*testing::control_wait_option_supported_for_test("ip6tables"));
+  const auto v4 = testing::run_iptables_control_for_test(
+      {"iptables", "-t", "filter", "-S"});
+  const auto v6 = testing::run_iptables_control_for_test(
+      {"ip6tables", "-t", "filter", "-S"});
+  CHECK(v4.exit_code == 0);
+  CHECK(v4.stdout_output.find("v4-wait") != std::string::npos);
+  CHECK(v6.exit_code == 0);
+  CHECK(v6.stdout_output.find("v6-legacy") != std::string::npos);
+  CHECK(read_iptables_test_file(v4_calls) ==
+        "-w 0 -t filter -S KeenPbrWaitProbe\n"
+        "-w 2 -t filter -S\n");
+  CHECK(read_iptables_test_file(v6_calls) ==
+        "-w 0 -t filter -S KeenPbrWaitProbe\n"
+        "-t filter -S\n");
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("busy iptables control wait probe does not poison capability cache") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "control-probe-calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "count=0\n"
+      "[ -f \"$KPBR_CONTROL_PROBE_CALLS\" ] && "
+      "count=$(/bin/cat \"$KPBR_CONTROL_PROBE_CALLS\")\n"
+      "count=$((count + 1))\n"
+      "printf '%s\\n' \"$count\" > \"$KPBR_CONTROL_PROBE_CALLS\"\n"
+      "if [ \"$count\" -eq 1 ]; then\n"
+      "  echo 'Another app is currently holding the xtables lock' >&2\n"
+      "  exit 4\n"
+      "fi\n"
+      "echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "exit 1\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_CONTROL_PROBE_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK_FALSE(
+      testing::control_wait_option_supported_for_test("iptables")
+          .has_value());
+  const auto recovered =
+      testing::control_wait_option_supported_for_test("iptables");
+  REQUIRE(recovered.has_value());
+  CHECK(*recovered);
+  CHECK(*testing::control_wait_option_supported_for_test("iptables"));
+  CHECK(read_iptables_test_file(calls) == "2\n");
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("busy control probe uses bounded wait for the current command") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "busy-control-calls";
+  write_iptables_test_executable(
+      temp.path() / "ip6tables",
+      "#!/bin/sh\n"
+      "printf '%s\\n' \"$*\" >> \"$KPBR_BUSY_CONTROL_CALLS\"\n"
+      "case \"$*\" in\n"
+      "  '-w 0 -t filter -S KeenPbrWaitProbe')\n"
+      "    echo 'xtables lock is temporarily unavailable' >&2\n"
+      "    exit 4 ;;\n"
+      "  '-w 2 -t filter -S') echo recovered; exit 0 ;;\n"
+      "esac\n"
+      "exit 64\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_BUSY_CONTROL_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+
+  testing::reset_restore_wait_option_probe_for_test();
+  const auto result = testing::run_iptables_control_for_test(
+      {"ip6tables", "-t", "filter", "-S"});
+  CHECK(result.exit_code == 0);
+  CHECK(result.stdout_output.find("recovered") != std::string::npos);
+  CHECK(read_iptables_test_file(calls) ==
+        "-w 0 -t filter -S KeenPbrWaitProbe\n"
+        "-w 2 -t filter -S\n");
+  // Busy was intentionally not cached; a later lookup probes again.
+  CHECK_FALSE(
+      testing::control_wait_option_supported_for_test("ip6tables")
+          .has_value());
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("Keenetic bare wait dialect is detected and bounded externally") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "keenetic-bare-wait-calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "printf '%s\\n' \"$*\" >> \"$KPBR_BARE_WAIT_CALLS\"\n"
+      "case \"$*\" in\n"
+      "  '-w 0 -t filter -S KeenPbrWaitProbe')\n"
+      "    echo \"iptables v1.4.21: Bad argument '0'\" >&2\n"
+      "    exit 2 ;;\n"
+      "  '-w -t filter -S KeenPbrWaitProbe')\n"
+      "    echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "    exit 1 ;;\n"
+      "  '-w -t filter -S') echo bare-wait; exit 0 ;;\n"
+      "esac\n"
+      "echo unexpected >&2\n"
+      "exit 64\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_BARE_WAIT_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+
+  testing::reset_iptables_control_runner_for_test();
+  testing::reset_restore_wait_option_probe_for_test();
+  const auto supported =
+      testing::control_wait_option_supported_for_test("iptables");
+  REQUIRE(supported.has_value());
+  CHECK(*supported);
+  CHECK(*testing::control_wait_option_supported_for_test("iptables"));
+  const auto result = testing::run_iptables_control_for_test(
+      {"iptables", "-t", "filter", "-S"});
+  CHECK(result.exit_code == 0);
+  CHECK(result.stdout_output.find("bare-wait") != std::string::npos);
+  CHECK(read_iptables_test_file(calls) ==
+        "-w 0 -t filter -S KeenPbrWaitProbe\n"
+        "-w -t filter -S KeenPbrWaitProbe\n"
+        "-w -t filter -S\n");
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("Keenetic busy bare probe protects the current command") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "keenetic-busy-bare-calls";
+  write_iptables_test_executable(
+      temp.path() / "ip6tables",
+      "#!/bin/sh\n"
+      "printf '%s\\n' \"$*\" >> \"$KPBR_BUSY_BARE_CALLS\"\n"
+      "case \"$*\" in\n"
+      "  '-w 0 -t filter -S KeenPbrWaitProbe')\n"
+      "    echo \"ip6tables v1.4.21: Bad argument '0'\" >&2\n"
+      "    exit 2 ;;\n"
+      "  '-w -t filter -S KeenPbrWaitProbe')\n"
+      "    /bin/sleep 3\n"
+      "    exit 4 ;;\n"
+      "  '-w -t filter -S') echo recovered-after-lock; exit 0 ;;\n"
+      "esac\n"
+      "exit 64\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_BUSY_BARE_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+
+  testing::reset_iptables_control_runner_for_test();
+  testing::reset_restore_wait_option_probe_for_test();
+  const auto result = testing::run_iptables_control_for_test(
+      {"ip6tables", "-t", "filter", "-S"});
+  CHECK(result.exit_code == 0);
+  CHECK(result.stdout_output.find("recovered-after-lock") !=
+        std::string::npos);
+  CHECK(read_iptables_test_file(calls) ==
+        "-w 0 -t filter -S KeenPbrWaitProbe\n"
+        "-w -t filter -S KeenPbrWaitProbe\n"
+        "-w -t filter -S\n");
+  // The timed-out probe selected bare -w only for that invocation.
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("uncertain bare probe termination blocks the actual command") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "uncertain-bare-calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "printf '%s\\n' \"$*\" >> \"$KPBR_UNCERTAIN_BARE_CALLS\"\n"
+      "case \"$*\" in\n"
+      "  '-w 0 -t filter -S KeenPbrWaitProbe')\n"
+      "    echo \"iptables v1.4.21: Bad argument '0'\" >&2\n"
+      "    exit 2 ;;\n"
+      "  '-w -t filter -S KeenPbrWaitProbe')\n"
+      "    echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "    /usr/bin/setsid /bin/sh -c '/bin/sleep 5'\n"
+      "    exit 4 ;;\n"
+      "  '-w -t filter -S') echo must-not-run; exit 0 ;;\n"
+      "esac\n"
+      "exit 64\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_UNCERTAIN_BARE_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+
+  testing::reset_iptables_control_runner_for_test();
+  testing::reset_restore_wait_option_probe_for_test();
+  const auto result = testing::run_iptables_control_for_test(
+      {"iptables", "-t", "filter", "-S"});
+  CHECK(result.timed_out);
+  CHECK(result.termination_uncertain);
+  CHECK(result.exit_code < 0);
+  // Neither the actual command output nor the probe's missing-chain marker
+  // may reach semantic absence parsers.
+  CHECK(result.stdout_output.empty());
+  CHECK(read_iptables_test_file(calls) ==
+        "-w 0 -t filter -S KeenPbrWaitProbe\n"
+        "-w -t filter -S KeenPbrWaitProbe\n");
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("uncertain actual output is normalized after bare capability cache") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "uncertain-actual-calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "printf '%s\\n' \"$*\" >> \"$KPBR_UNCERTAIN_ACTUAL_CALLS\"\n"
+      "case \"$*\" in\n"
+      "  '-w 0 -t filter -S KeenPbrWaitProbe')\n"
+      "    echo \"iptables v1.4.21: Bad argument '0'\" >&2\n"
+      "    exit 2 ;;\n"
+      "  '-w -t filter -S KeenPbrWaitProbe')\n"
+      "    echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "    exit 1 ;;\n"
+      "  '-w -t filter -S')\n"
+      "    echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "    /usr/bin/setsid /bin/sh -c '/bin/sleep 6'\n"
+      "    exit 4 ;;\n"
+      "esac\n"
+      "exit 64\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_UNCERTAIN_ACTUAL_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+
+  testing::reset_iptables_control_runner_for_test();
+  testing::reset_restore_wait_option_probe_for_test();
+  const auto supported =
+      testing::control_wait_option_supported_for_test("iptables");
+  REQUIRE(supported.has_value());
+  CHECK(*supported);
+  const auto result = testing::run_iptables_control_for_test(
+      {"iptables", "-t", "filter", "-S"});
+  CHECK(result.timed_out);
+  CHECK(result.termination_uncertain);
+  CHECK(result.exit_code < 0);
+  CHECK(result.stdout_output.empty());
+  CHECK(read_iptables_test_file(calls) ==
+        "-w 0 -t filter -S KeenPbrWaitProbe\n"
+        "-w -t filter -S KeenPbrWaitProbe\n"
+        "-w -t filter -S\n");
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("uncertain injected control result is normalized at the boundary") {
+  std::size_t calls = 0;
+  testing::set_iptables_control_runner_for_test(
+      [&calls](const std::vector<std::string>&) {
+        ++calls;
+        return testing::IptablesControlResultForTest{
+            "iptables: No chain/target/match by that name.",
+            -1,
+            false,
+            true,
+            true,
+        };
+      });
+  const auto result = testing::run_iptables_control_for_test(
+      {"iptables", "-t", "filter", "-S"});
+  CHECK(calls == 1U);
+  CHECK(result.stdout_output.empty());
+  CHECK(result.exit_code < 0);
+  CHECK(result.timed_out);
+  CHECK(result.termination_uncertain);
+  testing::reset_iptables_control_runner_for_test();
+}
+
 TEST_CASE("legacy iptables restore retries a transient COMMIT race") {
   IptablesTestTempDir temp;
   const auto calls = temp.path() / "calls";

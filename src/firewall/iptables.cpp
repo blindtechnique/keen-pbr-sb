@@ -714,6 +714,215 @@ static std::atomic<int>& restore_test_support_cache(const std::string& program) 
     return program == "ip6tables-restore" ? ipv6 : ipv4;
 }
 
+static bool restore_test_option_explicitly_unsupported(
+    std::string error_output);
+
+// The control binaries can differ just like the restore binaries do on an
+// Entware installation. In particular, an IPv4 userspace upgrade must not
+// make us pass -w to an older ip6tables (or vice versa).
+static std::atomic<int>& control_wait_support_cache(
+    const std::string& program) {
+    // -1 unknown, 0 unsupported, 1 bare -w, 2 timed -w <seconds>.
+    static std::atomic<int> ipv4{-1};
+    static std::atomic<int> ipv6{-1};
+    return program == "ip6tables" ? ipv6 : ipv4;
+}
+
+enum class ControlWaitMode {
+    Unsupported,
+    Bare,
+    Timed,
+    BusyBare,
+    BusyTimed,
+    Unsafe,
+    Inconclusive,
+};
+
+static constexpr const char* kControlWaitProbeChain =
+    "KeenPbrWaitProbe";
+static constexpr int kControlWaitSeconds = 2;
+
+static std::string normalized_control_probe_output(
+    std::string output) {
+    std::transform(
+        output.begin(),
+        output.end(),
+        output.begin(),
+        [](unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+        });
+    return output;
+}
+
+static bool control_wait_probe_reports_lock_busy(
+    const ExecCaptureResult& probe) {
+    if (probe.exit_code == 4) {
+        return true;
+    }
+    const std::string output =
+        normalized_control_probe_output(probe.stdout_output);
+    constexpr std::array<std::string_view, 5> lock_markers{
+        "xtables lock",
+        "holding the xtables lock",
+        "resource temporarily unavailable",
+        "temporarily unavailable",
+        "device or resource busy",
+    };
+    return std::any_of(
+        lock_markers.begin(),
+        lock_markers.end(),
+        [&output](std::string_view marker) {
+            return output.find(marker) != std::string::npos;
+        });
+}
+
+static bool control_wait_probe_proves_option_parsed(
+    const ExecCaptureResult& probe) {
+    const std::string output =
+        normalized_control_probe_output(probe.stdout_output);
+    return output.find("no chain/target/match") != std::string::npos ||
+           output.find("does a matching rule exist") != std::string::npos;
+}
+
+static bool control_wait_probe_rejects_numeric_zero(
+    const ExecCaptureResult& probe) {
+    const std::string output =
+        normalized_control_probe_output(probe.stdout_output);
+    return output.find("bad argument '0'") != std::string::npos ||
+           output.find("bad argument `0'") != std::string::npos ||
+           output.find("bad argument \"0\"") != std::string::npos;
+}
+
+static ExecCaptureResult run_control_wait_probe(
+    const std::string& program,
+    bool timed) {
+    // A deliberately absent chain makes a parsed -w distinguishable from an
+    // old binary rejecting the option. Merely accepting exit 0 would make a
+    // wrapper that ignores argv look wait-capable and is therefore avoided.
+    std::vector<std::string> args{program, "-w"};
+    if (timed) {
+        args.emplace_back("0");
+    }
+    args.insert(
+        args.end(),
+        {"-t", "filter", "-S", kControlWaitProbeChain});
+    return safe_exec_capture(
+        args,
+        /*suppress_stderr=*/false,
+        /*max_bytes=*/4U * 1024U,
+        /*capture_stderr=*/true,
+        /*drain_after_limit=*/true,
+        SafeExecFailureLog::Suppressed,
+        SafeExecTimeouts{
+            std::chrono::seconds{2},
+            std::chrono::milliseconds{500}});
+}
+
+static ControlWaitMode probe_control_wait_option(
+    const std::string& program,
+    ExecCaptureResult* unsafe_failure) {
+    const auto numeric_probe = run_control_wait_probe(program, /*timed=*/true);
+
+    // Timeouts and incomplete diagnostics are not evidence about argv
+    // support. Leave the cache unknown so a later bounded attempt probes
+    // again after the firmware releases its resources.
+    if (numeric_probe.timed_out) {
+        if (numeric_probe.termination_uncertain) {
+            if (unsafe_failure != nullptr) {
+                *unsafe_failure = numeric_probe;
+            }
+            return ControlWaitMode::Unsafe;
+        }
+        return ControlWaitMode::Inconclusive;
+    }
+    if (numeric_probe.truncated || numeric_probe.exit_code < 0) {
+        return ControlWaitMode::Inconclusive;
+    }
+    if (control_wait_probe_reports_lock_busy(numeric_probe)) {
+        // Exit 4 (or the equivalent diagnostic) means -w was parsed. Use a
+        // bounded wait for this invocation, but do not persist a capability
+        // decision made while xtables itself was unavailable.
+        return ControlWaitMode::BusyTimed;
+    }
+    if (restore_test_option_explicitly_unsupported(
+            numeric_probe.stdout_output)) {
+        return ControlWaitMode::Unsupported;
+    }
+    if (control_wait_probe_proves_option_parsed(numeric_probe)) {
+        return ControlWaitMode::Timed;
+    }
+
+    // Keenetic's legacy xtables accepts bare -w but rejects every numeric
+    // argument with exactly "Bad argument '0'". Probe that dialect without
+    // relying on an unbounded child: safe_exec_capture remains authoritative
+    // for the total two-second probe deadline.
+    if (!control_wait_probe_rejects_numeric_zero(numeric_probe)) {
+        return ControlWaitMode::Inconclusive;
+    }
+    const auto bare_probe = run_control_wait_probe(program, /*timed=*/false);
+    if (bare_probe.timed_out) {
+        if (bare_probe.termination_uncertain) {
+            if (unsafe_failure != nullptr) {
+                *unsafe_failure = bare_probe;
+            }
+            return ControlWaitMode::Unsafe;
+        }
+        // Numeric -w 0 was already parsed and rejected in the exact legacy
+        // dialect. A bare probe that then reaches our external deadline is
+        // therefore waiting on xtables, not disproving bare -w. Do not cache
+        // the inference, but let this invocation use bare -w under the same
+        // externally bounded execution contract.
+        return ControlWaitMode::BusyBare;
+    }
+    if (bare_probe.truncated || bare_probe.exit_code < 0) {
+        return ControlWaitMode::Inconclusive;
+    }
+    if (control_wait_probe_reports_lock_busy(bare_probe)) {
+        return ControlWaitMode::BusyBare;
+    }
+    if (restore_test_option_explicitly_unsupported(
+            bare_probe.stdout_output)) {
+        return ControlWaitMode::Unsupported;
+    }
+    if (control_wait_probe_proves_option_parsed(bare_probe)) {
+        return ControlWaitMode::Bare;
+    }
+    return ControlWaitMode::Inconclusive;
+}
+
+static ControlWaitMode control_wait_option_support(
+    const std::string& program,
+    ExecCaptureResult* unsafe_failure = nullptr) {
+    auto& cache = control_wait_support_cache(program);
+    const int cached = cache.load(std::memory_order_acquire);
+    if (cached >= 0) {
+        if (cached == 1) {
+            return ControlWaitMode::Bare;
+        }
+        if (cached == 2) {
+            return ControlWaitMode::Timed;
+        }
+        return ControlWaitMode::Unsupported;
+    }
+
+    const auto result = probe_control_wait_option(program, unsafe_failure);
+    if (result == ControlWaitMode::Bare ||
+        result == ControlWaitMode::Timed ||
+        result == ControlWaitMode::Unsupported) {
+        const int cached_mode = result == ControlWaitMode::Bare
+            ? 1
+            : result == ControlWaitMode::Timed ? 2 : 0;
+        cache.store(cached_mode, std::memory_order_release);
+        Logger::instance().verbose(
+            "{} xtables control wait option mode: {}",
+            program,
+            cached_mode == 1
+                ? "bare"
+                : cached_mode == 2 ? "timed" : "unsupported");
+    }
+    return result;
+}
+
 static bool restore_failure_is_transient(
     const std::string& error_output,
     const std::string& script);
@@ -843,6 +1052,19 @@ bool restore_test_option_supported_for_test(const std::string& program) {
     return restore_test_option_supported(program);
 }
 
+std::optional<bool> control_wait_option_supported_for_test(
+    const std::string& program) {
+    const auto result = control_wait_option_support(program);
+    if (result == ControlWaitMode::Bare ||
+        result == ControlWaitMode::Timed) {
+        return true;
+    }
+    if (result == ControlWaitMode::Unsupported) {
+        return false;
+    }
+    return std::nullopt;
+}
+
 void reset_restore_wait_option_probe_for_test() {
     restore_wait_support_cache("iptables-restore").store(
         -1, std::memory_order_release);
@@ -851,6 +1073,10 @@ void reset_restore_wait_option_probe_for_test() {
     restore_test_support_cache("iptables-restore").store(
         -1, std::memory_order_release);
     restore_test_support_cache("ip6tables-restore").store(
+        -1, std::memory_order_release);
+    control_wait_support_cache("iptables").store(
+        -1, std::memory_order_release);
+    control_wait_support_cache("ip6tables").store(
         -1, std::memory_order_release);
 }
 
@@ -1041,6 +1267,12 @@ static IptablesCommandOutcome classify_iptables_command(
     if (result.exit_code == 0 && !result.timed_out && !result.truncated) {
         return IptablesCommandOutcome::Success;
     }
+    if (result.termination_uncertain) {
+        // A descendant may still be alive after the bounded kill/drain
+        // sequence. Retrying as a transient xtables race could overlap that
+        // process with a mutation, so this outcome is deliberately fail-closed.
+        return IptablesCommandOutcome::PermanentFailure;
+    }
     if (result.truncated) {
         // A complete table snapshot is required for exact hook counting. A
         // stable oversized result will not heal by retrying.
@@ -1097,6 +1329,24 @@ void reset_iptables_control_runner_for_test() {
 } // namespace testing
 #endif
 
+static ExecCaptureResult normalize_iptables_control_result(
+    ExecCaptureResult result) {
+    if (!result.termination_uncertain) {
+        return result;
+    }
+    // No captured byte is semantic evidence while a descendant may still be
+    // producing output or touching xtables. Consumers historically inspect
+    // stdout before classification, so normalize once at the runner boundary
+    // instead of relying on every parser to remember this safety rule.
+    return ExecCaptureResult{
+        {},
+        -1,
+        false,
+        true,
+        true,
+    };
+}
+
 static ExecCaptureResult run_iptables_control(
     const std::vector<std::string>& args) {
 #ifdef KEEN_PBR3_TESTING
@@ -1107,32 +1357,97 @@ static ExecCaptureResult run_iptables_control(
     }
     if (test_runner) {
         const auto result = test_runner(args);
-        return ExecCaptureResult{
+        return normalize_iptables_control_result(ExecCaptureResult{
             result.stdout_output,
             result.exit_code,
             result.truncated,
             result.timed_out,
-        };
+            result.termination_uncertain,
+        });
     }
 #endif
-    return safe_exec_capture(
-        args,
+    std::vector<std::string> effective_args = args;
+    bool wait_enabled = false;
+    bool timed_wait = false;
+    if (!args.empty() &&
+        (args.front() == "iptables" || args.front() == "ip6tables") &&
+        std::find(args.begin() + 1, args.end(), "-w") == args.end() &&
+        std::find(args.begin() + 1, args.end(), "--wait") == args.end()) {
+        ExecCaptureResult unsafe_failure;
+        const auto support = control_wait_option_support(
+            args.front(), &unsafe_failure);
+        if (support == ControlWaitMode::Unsafe) {
+            // The probe's process group or capture pipe may still be alive.
+            // Starting even a read-only xtables command could overlap it, and
+            // callers may use this runner for mutations as well. Probe stdout
+            // is not the requested table/chain snapshot: returning it would
+            // let an absence parser mistake the probe's deliberately missing
+            // chain for proof about the real target. Preserve only the typed
+            // execution state and fail closed before actual argv.
+            return normalize_iptables_control_result(
+                std::move(unsafe_failure));
+        }
+        wait_enabled =
+            support == ControlWaitMode::Bare ||
+            support == ControlWaitMode::Timed ||
+            support == ControlWaitMode::BusyBare ||
+            support == ControlWaitMode::BusyTimed;
+        timed_wait =
+            support == ControlWaitMode::Timed ||
+            support == ControlWaitMode::BusyTimed;
+        if (wait_enabled) {
+            effective_args.reserve(args.size() + 2U);
+            effective_args.clear();
+            effective_args.push_back(args.front());
+            effective_args.emplace_back("-w");
+            if (timed_wait) {
+                effective_args.emplace_back(
+                    std::to_string(kControlWaitSeconds));
+            }
+            effective_args.insert(
+                effective_args.end(), args.begin() + 1, args.end());
+        }
+    }
+    return normalize_iptables_control_result(safe_exec_capture(
+        effective_args,
         /*suppress_stderr=*/false,
         /*max_bytes=*/256U * 1024U,
         /*capture_stderr=*/true,
         /*drain_after_limit=*/true,
         SafeExecFailureLog::Suppressed,
         SafeExecTimeouts{
-            std::chrono::seconds{2},
-            std::chrono::milliseconds{500}});
+            wait_enabled
+                ? std::chrono::seconds{kControlWaitSeconds + 1}
+                : std::chrono::seconds{2},
+            std::chrono::milliseconds{500}}));
 }
+
+#ifdef KEEN_PBR3_TESTING
+namespace testing {
+
+IptablesControlResultForTest run_iptables_control_for_test(
+    const std::vector<std::string>& args) {
+    const auto result = run_iptables_control(args);
+    return {
+        result.stdout_output,
+        result.exit_code,
+        result.truncated,
+        result.timed_out,
+        result.termination_uncertain,
+    };
+}
+
+} // namespace testing
+#endif
 
 static void record_iptables_control_failure(
     const std::vector<std::string>& args,
     const ExecCaptureResult& result,
     std::string_view fallback_reason = "nonzero_exit") {
     const std::string_view reason =
-        result.timed_out
+        result.termination_uncertain
+            ? std::string_view{"termination_uncertain"}
+            : result.timed_out
             ? std::string_view{"timeout"}
             : result.truncated
                 ? std::string_view{"output_truncated"}

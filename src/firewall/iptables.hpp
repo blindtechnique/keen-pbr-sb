@@ -23,6 +23,7 @@ struct IptablesControlResultForTest {
     int exit_code{-1};
     bool truncated{false};
     bool timed_out{false};
+    bool termination_uncertain{false};
 };
 using IptablesControlRunnerForTest = std::function<
     IptablesControlResultForTest(const std::vector<std::string>&)>;
@@ -32,6 +33,10 @@ void set_iptables_control_runner_for_test(
 void reset_iptables_control_runner_for_test();
 bool restore_wait_option_supported_for_test(const std::string& program);
 bool restore_test_option_supported_for_test(const std::string& program);
+std::optional<bool> control_wait_option_supported_for_test(
+    const std::string& program);
+IptablesControlResultForTest run_iptables_control_for_test(
+    const std::vector<std::string>& args);
 void reset_restore_wait_option_probe_for_test();
 bool xtables_match_registered_for_test(
     const std::string& inventory_path,
