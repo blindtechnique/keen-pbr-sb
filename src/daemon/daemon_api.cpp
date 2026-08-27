@@ -1210,6 +1210,10 @@ void Daemon::setup_api() {
                 require_runtime_running,
                 require_runtime_stopped);
         };
+    api_ctx_->validate_runtime_mutation_lease_fn =
+        [this](const RuntimeMutationAdmission::Lease& lease) noexcept {
+            return runtime_mutation_admission_.owns(lease);
+        };
     api_ctx_->start_runtime_with_lease_fn =
         [this](RuntimeMutationAdmission::Lease lease) {
             start_routing_runtime_with_lease(std::move(lease));

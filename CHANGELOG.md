@@ -334,6 +334,23 @@
   `unknown=false`; прежний IPK `3.3.0-20260825071624` сохранён как rollback
   previous с SHA-256
   `e95b8085586f7c72724e429cb2c80fb7ad041e7dafd898edfbc1a6b54f4b95b4`.
+- Для следующего pre-generation SNAT-среза подготовлен типизированный
+  `config_preapply` foundation без включения незавершённого пути в production.
+  Worker различает обязательный exact cleanup remainder и полный снимок,
+  разрешённый только после собственного наблюдения missing SNAT; healthy,
+  unknown, malformed generation/mask/IPv6 scope, неподдерживаемый cleanup mode
+  и неоднозначный COMMIT не получают расширенной destructive authority.
+  `RuntimeFirewallOperationOwner` переносит тот же move-only mutation lease и
+  одноразовый `noexcept` continuation через bounded retry/defer и возвращает их
+  только после типизированного `TerminalOwner::FinalizationProof`; обычный
+  shutdown возвращает точный token, а деструктор не вызывает внешний callback.
+  API guard умеет один раз принять обратно тот же физический lease и проверяет
+  одновременно token и принадлежность исходному `RuntimeMutationAdmission`,
+  поэтому foreign lease с совпавшим номером отклоняется. Узкий owner/terminal
+  suite прошёл 80/80 сценариев и 1382/1382 assertions; затронутые production и
+  test-объекты собраны реальным Entware/Keenetic GCC 8.4, итоговое независимое
+  review не нашло оставшихся P0/P1. Старый синхронный barrier пока сохранён;
+  полный suite, IPK и роутер этим foundation-срезом не запускались.
 - Router-info обновляется single-flight без RCI I/O под cache mutex. Принятый
   снимок живёт 30 секунд, конкурентные читатели получают stale LKG, а полный
   RCI failure повторяется не чаще раза в 30 секунд и не затирает LKG.

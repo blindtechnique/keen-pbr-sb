@@ -35,7 +35,7 @@ constexpr std::size_t kForegroundTransportRetryLimit = 4U;
 
 std::size_t bounded_retry_count(
     RuntimeFirewallLifecycleKind lifecycle_kind) noexcept {
-    return runtime_firewall_lifecycle_is_start(lifecycle_kind)
+    return runtime_firewall_lifecycle_uses_hot_retry(lifecycle_kind)
         ? kStartRetryDelays.size()
         : kRetryDelays.size();
 }
@@ -43,7 +43,7 @@ std::size_t bounded_retry_count(
 std::chrono::milliseconds bounded_retry_delay(
     RuntimeFirewallLifecycleKind lifecycle_kind,
     std::size_t attempt) noexcept {
-    if (runtime_firewall_lifecycle_is_start(lifecycle_kind)) {
+    if (runtime_firewall_lifecycle_uses_hot_retry(lifecycle_kind)) {
         return kStartRetryDelays[attempt];
     }
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -60,13 +60,16 @@ bool context_has_preowned_authority(
     const RuntimeFirewallOperationOwner::ContextPtr& context) noexcept {
     return context &&
            (context->retained_mutation_lease ||
-            context->lifecycle_completion);
+            context->lifecycle_completion ||
+            context->preowned_terminal_continuation);
 }
 
 void return_unaccepted_preowned_authority(
     const RuntimeFirewallOperationOwner::ContextPtr& context,
     RuntimeFirewallOperationOwner::MutationLeasePtr* mutation_lease,
-    RuntimeFirewallLifecycleCompletion::Source* lifecycle_completion)
+    RuntimeFirewallLifecycleCompletion::Source* lifecycle_completion,
+    RuntimeFirewallOperationOwner::PreownedTerminalContinuation*
+        terminal_continuation)
     noexcept {
     if (!context) return;
     if (mutation_lease && context->retained_mutation_lease) {
@@ -77,6 +80,20 @@ void return_unaccepted_preowned_authority(
         *lifecycle_completion =
             std::move(context->lifecycle_completion);
     }
+    if (terminal_continuation &&
+        context->preowned_terminal_continuation) {
+        *terminal_continuation =
+            std::move(context->preowned_terminal_continuation);
+    }
+}
+
+void invoke_preowned_terminal_continuation(
+    RuntimeFirewallOperationOwner::PreownedTerminalContinuation continuation,
+    RuntimeFirewallOperationOwner::MutationLeasePtr mutation_lease,
+    RuntimeFirewallLifecycleTerminal terminal) noexcept {
+    if (!continuation) return;
+    continuation.invoke(
+        std::move(terminal), std::move(mutation_lease));
 }
 
 } // namespace
@@ -117,7 +134,11 @@ RuntimeFirewallOperationOwner::~RuntimeFirewallOperationOwner() {
         } catch (...) {
         }
     }
-    cancel_pending_work();
+    // Destruction is a last-resort resource fallback and must never re-enter
+    // an external continuation while the owner object is being torn down.
+    // Normal Daemon shutdown calls cancel_pending_work() while the owner is
+    // still alive and publishes the typed shutdown handoff there.
+    cancel_pending_work_impl(/*publish_preowned_terminal=*/false);
     shutdown_executor();
 
     if (retiring_context) {
@@ -131,6 +152,7 @@ RuntimeFirewallOperationOwner::~RuntimeFirewallOperationOwner() {
         retiring_context->pump_worker_checkpoint = {};
         retiring_context->cancel_worker_checkpoint = {};
         retiring_context->lifecycle_completion = {};
+        retiring_context->preowned_terminal_continuation = {};
     }
     reset_active();
 }
@@ -299,12 +321,19 @@ RuntimeFirewallOperationOwner::start_immediate_preowned(
     const RuntimeMutationAdmission& admission,
     MutationLeasePtr mutation_lease,
     RuntimeFirewallLifecycleCompletion::Source lifecycle_completion,
-    RuntimeFirewallLifecycleKind lifecycle_kind) {
+    RuntimeFirewallLifecycleKind lifecycle_kind,
+    PreownedTerminalContinuation terminal_continuation) {
     PreownedImmediateStartResult result;
     result.unaccepted_lease = std::move(mutation_lease);
+    result.unaccepted_continuation = std::move(terminal_continuation);
+    const bool has_terminal_continuation =
+        static_cast<bool>(result.unaccepted_continuation);
     if (!result.unaccepted_lease ||
         !static_cast<bool>(*result.unaccepted_lease) ||
         !admission.owns(*result.unaccepted_lease) ||
+        (has_terminal_continuation && lifecycle_completion) ||
+        (has_terminal_continuation !=
+         runtime_firewall_lifecycle_is_preapply(lifecycle_kind)) ||
         shutdown_requested() || !domain_state || active_context_ ||
         pending_successor_ || launching_pending_successor_) {
         return result;
@@ -339,6 +368,8 @@ RuntimeFirewallOperationOwner::start_immediate_preowned(
     context->retained_mutation_lease =
         std::move(result.unaccepted_lease);
     context->lifecycle_completion = std::move(lifecycle_completion);
+    context->preowned_terminal_continuation =
+        std::move(result.unaccepted_continuation);
     context->lifecycle_kind = lifecycle_kind;
 
     const auto weak_self = weak_from_this();
@@ -394,6 +425,8 @@ RuntimeFirewallOperationOwner::start_immediate_preowned(
         cancel_completion_watchdog();
         result.unaccepted_lease =
             std::move(context->retained_mutation_lease);
+        result.unaccepted_continuation =
+            std::move(context->preowned_terminal_continuation);
         lifecycle_completion =
             std::move(context->lifecycle_completion);
         reset_if_active(context);
@@ -409,6 +442,8 @@ RuntimeFirewallOperationOwner::start_immediate_preowned(
     if (context->retained_mutation_lease) {
         result.unaccepted_lease =
             std::move(context->retained_mutation_lease);
+        result.unaccepted_continuation =
+            std::move(context->preowned_terminal_continuation);
         lifecycle_completion =
             std::move(context->lifecycle_completion);
         reset_if_active(context);
@@ -478,6 +513,7 @@ void RuntimeFirewallOperationOwner::merge_pending_intent(
         pending_successor_->schedule_catalog_refresh,
         {},
         pending_successor_->lifecycle_completion,
+        {},
         pending_successor_->lifecycle_kind,
         pending_successor_->foreground_transport_rejections};
     merged.snat_recovery = merge_owned_snat_recovery(
@@ -523,6 +559,8 @@ void RuntimeFirewallOperationOwner::merge_pending_intent(
         std::move(pending_successor_->retained_mutation_lease);
     merged.lifecycle_completion =
         std::move(pending_successor_->lifecycle_completion);
+    merged.preowned_terminal_continuation =
+        std::move(pending_successor_->preowned_terminal_continuation);
     *pending_successor_ = std::move(merged);
 }
 
@@ -562,6 +600,7 @@ void RuntimeFirewallOperationOwner::schedule(
         /*schedule_catalog_refresh=*/true,
         nullptr,
         nullptr,
+        nullptr,
         RuntimeFirewallLifecycleKind::background);
 }
 
@@ -573,6 +612,7 @@ bool RuntimeFirewallOperationOwner::schedule_fresh(
     bool schedule_catalog_refresh,
     MutationLeasePtr* retained_mutation_lease,
     RuntimeFirewallLifecycleCompletion::Source* lifecycle_completion,
+    PreownedTerminalContinuation* terminal_continuation,
     RuntimeFirewallLifecycleKind lifecycle_kind) {
     if (shutdown_requested()) return false;
 
@@ -594,6 +634,10 @@ bool RuntimeFirewallOperationOwner::schedule_fresh(
     if (lifecycle_completion && *lifecycle_completion) {
         context->lifecycle_completion =
             std::move(*lifecycle_completion);
+    }
+    if (terminal_continuation && *terminal_continuation) {
+        context->preowned_terminal_continuation =
+            std::move(*terminal_continuation);
     }
     context->lifecycle_kind = lifecycle_kind;
     const bool carried_preowned_authority =
@@ -658,7 +702,8 @@ bool RuntimeFirewallOperationOwner::schedule_fresh(
             return_unaccepted_preowned_authority(
                 context,
                 retained_mutation_lease,
-                lifecycle_completion);
+                lifecycle_completion,
+                terminal_continuation);
             reset_if_active(context);
             throw;
         }
@@ -672,7 +717,8 @@ bool RuntimeFirewallOperationOwner::schedule_fresh(
             return_unaccepted_preowned_authority(
                 context,
                 retained_mutation_lease,
-                lifecycle_completion);
+                lifecycle_completion,
+                terminal_continuation);
             reset_if_active(context);
         }
         throw;
@@ -688,7 +734,8 @@ bool RuntimeFirewallOperationOwner::schedule_fresh(
             return_unaccepted_preowned_authority(
                 context,
                 retained_mutation_lease,
-                lifecycle_completion);
+                lifecycle_completion,
+                terminal_continuation);
             reset_if_active(context);
             return false;
         }
@@ -700,7 +747,8 @@ bool RuntimeFirewallOperationOwner::schedule_fresh(
         return_unaccepted_preowned_authority(
             context,
             retained_mutation_lease,
-            lifecycle_completion);
+            lifecycle_completion,
+            terminal_continuation);
         if (!coordinator_owns_operation) {
             reset_if_active(context);
         }
@@ -757,6 +805,7 @@ void RuntimeFirewallOperationOwner::defer(
         std::move(snat_recovery),
         nullptr,
         nullptr,
+        nullptr,
         RuntimeFirewallLifecycleKind::background);
 }
 
@@ -768,6 +817,7 @@ bool RuntimeFirewallOperationOwner::defer_fresh(
     OwnedSnatRecovery snat_recovery,
     MutationLeasePtr* retained_mutation_lease,
     RuntimeFirewallLifecycleCompletion::Source* lifecycle_completion,
+    PreownedTerminalContinuation* terminal_continuation,
     RuntimeFirewallLifecycleKind lifecycle_kind) {
     if (shutdown_requested()) return false;
 
@@ -789,6 +839,10 @@ bool RuntimeFirewallOperationOwner::defer_fresh(
     if (lifecycle_completion && *lifecycle_completion) {
         context->lifecycle_completion =
             std::move(*lifecycle_completion);
+    }
+    if (terminal_continuation && *terminal_continuation) {
+        context->preowned_terminal_continuation =
+            std::move(*terminal_continuation);
     }
     context->lifecycle_kind = lifecycle_kind;
     const bool carried_preowned_authority =
@@ -850,7 +904,8 @@ bool RuntimeFirewallOperationOwner::defer_fresh(
             return_unaccepted_preowned_authority(
                 context,
                 retained_mutation_lease,
-                lifecycle_completion);
+                lifecycle_completion,
+                terminal_continuation);
             reset_if_active(context);
             return false;
         } else if (context->terminal_ready.load(
@@ -863,7 +918,8 @@ bool RuntimeFirewallOperationOwner::defer_fresh(
             return_unaccepted_preowned_authority(
                 context,
                 retained_mutation_lease,
-                lifecycle_completion);
+                lifecycle_completion,
+                terminal_continuation);
             reset_if_active(context);
             Logger::instance().error(
                 "Runtime firewall admission retry was rejected; the periodic "
@@ -884,7 +940,8 @@ bool RuntimeFirewallOperationOwner::defer_fresh(
             return_unaccepted_preowned_authority(
                 context,
                 retained_mutation_lease,
-                lifecycle_completion);
+                lifecycle_completion,
+                terminal_continuation);
             reset_if_active(context);
             return false;
         }
@@ -896,7 +953,8 @@ bool RuntimeFirewallOperationOwner::defer_fresh(
         return_unaccepted_preowned_authority(
             context,
             retained_mutation_lease,
-            lifecycle_completion);
+            lifecycle_completion,
+            terminal_continuation);
         if (!coordinator_.retry_pending()) {
             reset_if_active(context);
         }
@@ -908,7 +966,8 @@ bool RuntimeFirewallOperationOwner::defer_fresh(
             return_unaccepted_preowned_authority(
                 context,
                 retained_mutation_lease,
-                lifecycle_completion);
+                lifecycle_completion,
+                terminal_continuation);
             reset_if_active(context);
             return false;
         }
@@ -920,7 +979,8 @@ bool RuntimeFirewallOperationOwner::defer_fresh(
         return_unaccepted_preowned_authority(
             context,
             retained_mutation_lease,
-            lifecycle_completion);
+            lifecycle_completion,
+            terminal_continuation);
         if (!coordinator_.retry_pending()) {
             reset_if_active(context);
         }
@@ -1018,6 +1078,8 @@ bool RuntimeFirewallOperationOwner::retain_pending_successor(
         (exact_foreground_authority &&
          (completed_context->watchdog_task_id < 0 ||
           completed_context->watchdog_serial == 0U)) ||
+        (detach_foreground &&
+         completed_context->preowned_terminal_continuation) ||
         mode == Context::SuccessorMode::none) {
         return false;
     }
@@ -1034,6 +1096,10 @@ bool RuntimeFirewallOperationOwner::retain_pending_successor(
         detach_foreground
             ? RuntimeFirewallLifecycleCompletion::Source{}
             : std::move(completed_context->lifecycle_completion),
+        detach_foreground
+            ? PreownedTerminalContinuation{}
+            : std::move(
+                  completed_context->preowned_terminal_continuation),
         detach_foreground
             ? RuntimeFirewallLifecycleKind::background
             : completed_context->lifecycle_kind,
@@ -1071,20 +1137,32 @@ bool RuntimeFirewallOperationOwner::launch_pending_successor() {
         pending_successor_->schedule_catalog_refresh,
         {},
         pending_successor_->lifecycle_completion,
+        {},
         pending_successor_->lifecycle_kind,
         pending_successor_->foreground_transport_rejections};
     if (candidate.mode == Context::SuccessorMode::none) {
-        pending_successor_->retained_mutation_lease.reset();
-        if (pending_successor_->lifecycle_completion) {
-            RuntimeFirewallLifecycleTerminal terminal;
-            terminal.outcome =
-                RuntimeFirewallLifecycleOutcome::not_verified;
-            terminal.commit_ambiguous = false;
-            (void)pending_successor_->lifecycle_completion.settle(
-                std::move(terminal));
-        }
+        auto mutation_lease =
+            std::move(pending_successor_->retained_mutation_lease);
+        auto lifecycle_completion =
+            std::move(pending_successor_->lifecycle_completion);
+        auto terminal_continuation = std::move(
+            pending_successor_->preowned_terminal_continuation);
         pending_successor_.reset();
         cancel_pending_successor_watchdog();
+        RuntimeFirewallLifecycleTerminal terminal;
+        terminal.outcome = RuntimeFirewallLifecycleOutcome::not_verified;
+        terminal.commit_ambiguous = false;
+        if (terminal_continuation) {
+            invoke_preowned_terminal_continuation(
+                std::move(terminal_continuation),
+                std::move(mutation_lease),
+                std::move(terminal));
+        } else {
+            mutation_lease.reset();
+            if (lifecycle_completion) {
+                (void)lifecycle_completion.settle(std::move(terminal));
+            }
+        }
         return true;
     }
 
@@ -1119,6 +1197,7 @@ bool RuntimeFirewallOperationOwner::launch_pending_successor() {
                 std::move(candidate.snat_recovery),
                 &pending_successor_->retained_mutation_lease,
                 &pending_successor_->lifecycle_completion,
+                &pending_successor_->preowned_terminal_continuation,
                 candidate.lifecycle_kind);
         } else {
             accepted = schedule_fresh(
@@ -1129,6 +1208,7 @@ bool RuntimeFirewallOperationOwner::launch_pending_successor() {
                 candidate.schedule_catalog_refresh,
                 &pending_successor_->retained_mutation_lease,
                 &pending_successor_->lifecycle_completion,
+                &pending_successor_->preowned_terminal_continuation,
                 candidate.lifecycle_kind);
         }
     } catch (...) {
@@ -1181,19 +1261,31 @@ bool RuntimeFirewallOperationOwner::launch_pending_successor() {
         // A normal no-plan result means the bounded policy intentionally
         // completed. This differs from defer rejection, where periodic health
         // must get another chance to launch the exact retained intent.
-        // Release mutation admission before waking the lifecycle caller. The
-        // HTTP response must never race a still-owned exact writer token.
-        pending_successor_->retained_mutation_lease.reset();
-        if (pending_successor_->lifecycle_completion) {
-            RuntimeFirewallLifecycleTerminal terminal;
-            terminal.outcome =
-                RuntimeFirewallLifecycleOutcome::not_verified;
-            terminal.commit_ambiguous = false;
-            (void)pending_successor_->lifecycle_completion.settle(
-                std::move(terminal));
-        }
+        // START/RESTART release admission before waking their waiter. Config
+        // pre-apply instead returns the same physical token to the durable
+        // caller continuation; no second acquisition is permitted.
+        auto mutation_lease =
+            std::move(pending_successor_->retained_mutation_lease);
+        auto lifecycle_completion =
+            std::move(pending_successor_->lifecycle_completion);
+        auto terminal_continuation = std::move(
+            pending_successor_->preowned_terminal_continuation);
         pending_successor_.reset();
         cancel_pending_successor_watchdog();
+        RuntimeFirewallLifecycleTerminal terminal;
+        terminal.outcome = RuntimeFirewallLifecycleOutcome::not_verified;
+        terminal.commit_ambiguous = false;
+        if (terminal_continuation) {
+            invoke_preowned_terminal_continuation(
+                std::move(terminal_continuation),
+                std::move(mutation_lease),
+                std::move(terminal));
+        } else {
+            mutation_lease.reset();
+            if (lifecycle_completion) {
+                (void)lifecycle_completion.settle(std::move(terminal));
+            }
+        }
         return true;
     }
     return retain_pending_transport_retry_or_finish()
@@ -1208,6 +1300,34 @@ bool RuntimeFirewallOperationOwner::pending_successor() const noexcept {
 const RuntimeFirewallOperationOwner::PendingSuccessor*
 RuntimeFirewallOperationOwner::pending_successor_state() const noexcept {
     return pending_successor_ ? &*pending_successor_ : nullptr;
+}
+
+bool RuntimeFirewallOperationOwner::complete_preowned_continuation(
+    const ContextPtr& context,
+    TerminalFinalizationProof&& finalization_proof,
+    RuntimeFirewallLifecycleTerminal terminal) noexcept {
+    if (!is_active(context) ||
+        coordinator_.retry_pending() || pending_successor_ ||
+        launching_pending_successor_ ||
+        !runtime_firewall_lifecycle_is_preapply(context->lifecycle_kind) ||
+        context->lifecycle_completion ||
+        !context->preowned_terminal_continuation ||
+        !context->retained_mutation_lease ||
+        !context->terminal_owner ||
+        !finalization_proof.consume_for(context->terminal_owner.get())) {
+        return false;
+    }
+
+    auto continuation =
+        std::move(context->preowned_terminal_continuation);
+    auto mutation_lease = std::move(context->retained_mutation_lease);
+    cancel_completion_watchdog();
+    reset_if_active(context);
+    invoke_preowned_terminal_continuation(
+        std::move(continuation),
+        std::move(mutation_lease),
+        std::move(terminal));
+    return true;
 }
 
 bool RuntimeFirewallOperationOwner::
@@ -1255,6 +1375,8 @@ terminalize_pending_foreground_transport_exhaustion() noexcept {
         std::move(pending_successor_->retained_mutation_lease);
     context->lifecycle_completion =
         std::move(pending_successor_->lifecycle_completion);
+    context->preowned_terminal_continuation =
+        std::move(pending_successor_->preowned_terminal_continuation);
     context->lifecycle_kind = pending_successor_->lifecycle_kind;
     context->foreground_transport_rejections =
         pending_successor_->foreground_transport_rejections;
@@ -1660,25 +1782,47 @@ void RuntimeFirewallOperationOwner::pump_terminal_for_shutdown() noexcept {
 }
 
 void RuntimeFirewallOperationOwner::cancel_pending_work() noexcept {
+    cancel_pending_work_impl(/*publish_preowned_terminal=*/true);
+}
+
+void RuntimeFirewallOperationOwner::cancel_pending_work_impl(
+    bool publish_preowned_terminal) noexcept {
     // Shutdown calls this before waiting for mutation admission to become
-    // idle. A retry intent which has not entered a fresh context is the sole
-    // owner of its foreground token, so discard it explicitly here.
-    cancel_pending_successor_watchdog();
+    // idle. First retire the durable slot and its watchdog; only then may a
+    // normal shutdown continuation re-enter the caller with the exact token.
+    MutationLeasePtr mutation_lease;
+    RuntimeFirewallLifecycleCompletion::Source lifecycle_completion;
+    PreownedTerminalContinuation terminal_continuation;
     if (pending_successor_) {
-        // Match normal lifecycle ordering: release exact mutation admission
-        // before publishing the terminal observed by the caller.
-        pending_successor_->retained_mutation_lease.reset();
-    }
-    if (pending_successor_ &&
-        pending_successor_->lifecycle_completion) {
-        RuntimeFirewallLifecycleTerminal terminal;
-        terminal.outcome = RuntimeFirewallLifecycleOutcome::shutdown;
-        terminal.commit_ambiguous = false;
-        (void)pending_successor_->lifecycle_completion.settle(
-            std::move(terminal));
+        mutation_lease =
+            std::move(pending_successor_->retained_mutation_lease);
+        lifecycle_completion =
+            std::move(pending_successor_->lifecycle_completion);
+        terminal_continuation = std::move(
+            pending_successor_->preowned_terminal_continuation);
     }
     pending_successor_.reset();
+    cancel_pending_successor_watchdog();
     launching_pending_successor_ = false;
+
+    RuntimeFirewallLifecycleTerminal terminal;
+    terminal.outcome = RuntimeFirewallLifecycleOutcome::shutdown;
+    terminal.commit_ambiguous = false;
+    if (publish_preowned_terminal && terminal_continuation) {
+        invoke_preowned_terminal_continuation(
+            std::move(terminal_continuation),
+            std::move(mutation_lease),
+            std::move(terminal));
+    } else {
+        // START/RESTART preserve their existing waiter contract. A destructor
+        // fallback deliberately destroys a config-preapply callback without
+        // invoking external code; its lease is then released here.
+        terminal_continuation = {};
+        mutation_lease.reset();
+        if (lifecycle_completion) {
+            (void)lifecycle_completion.settle(std::move(terminal));
+        }
+    }
     try {
         executor_.cancel_pending();
     } catch (...) {

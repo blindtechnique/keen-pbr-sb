@@ -54,6 +54,24 @@ public:
     std::unique_ptr<httplib::Client> client;
 };
 
+void wire_runtime_mutation_admission(
+    ApiContext& context,
+    RuntimeMutationAdmission& admission) {
+    context.acquire_runtime_mutation_fn =
+        [&admission](std::string label, bool, bool) {
+            auto lease = admission.try_acquire(std::move(label));
+            if (!lease.has_value()) {
+                throw ApiError("runtime mutation busy", 409);
+            }
+            return std::move(*lease);
+        };
+    context.validate_runtime_mutation_lease_fn =
+        [&admission](
+            const RuntimeMutationAdmission::Lease& lease) noexcept {
+            return admission.owns(lease);
+        };
+}
+
 } // namespace
 
 TEST_CASE("service lifecycle endpoints invoke exactly one matching action") {
@@ -210,6 +228,152 @@ TEST_CASE("API mutation guard hands off its production lease without releasing a
     CHECK(static_cast<bool>(*transferred));
     CHECK(admission.active().has_value());
     transferred->release();
+    CHECK_FALSE(admission.active().has_value());
+}
+
+TEST_CASE(
+    "API mutation guard reclaims its exact production lease without an "
+    "admission gap") {
+    RuntimeMutationAdmission admission;
+    SseBroadcaster broadcaster;
+    auto context = test_support::make_minimal_api_context(
+        broadcaster, "/tmp/keen-pbr-reload-lease-return-test.json");
+    wire_runtime_mutation_admission(context, admission);
+
+    std::uint64_t token = 0U;
+    {
+        ApiRuntimeMutationGuard mutation(
+            context, "save-config", false, false);
+        auto returned = mutation.take_lease();
+        REQUIRE(static_cast<bool>(returned));
+        token = returned.token();
+
+        const auto active_during_handoff = admission.active();
+        REQUIRE(active_during_handoff.has_value());
+        CHECK(active_during_handoff->token == token);
+        CHECK_FALSE(admission.try_acquire("competing-writer").has_value());
+
+        RuntimeMutationAdmission::Lease empty;
+        CHECK_FALSE(mutation.restore_lease(empty));
+        CHECK(static_cast<bool>(returned));
+        CHECK(mutation.restore_lease(returned));
+        CHECK_FALSE(static_cast<bool>(returned));
+
+        const auto active_after_restore = admission.active();
+        REQUIRE(active_after_restore.has_value());
+        CHECK(active_after_restore->token == token);
+        CHECK_FALSE(admission.try_acquire("competing-writer").has_value());
+    }
+
+    CHECK_FALSE(admission.active().has_value());
+}
+
+TEST_CASE("API mutation guard rejects restore before handoff") {
+    RuntimeMutationAdmission admission;
+    RuntimeMutationAdmission foreign_admission;
+    SseBroadcaster broadcaster;
+    auto context = test_support::make_minimal_api_context(
+        broadcaster, "/tmp/keen-pbr-reload-restore-before-take.json");
+    wire_runtime_mutation_admission(context, admission);
+    auto foreign = foreign_admission.try_acquire("foreign");
+    REQUIRE(foreign.has_value());
+
+    {
+        ApiRuntimeMutationGuard mutation(
+            context, "save-config", false, false);
+        CHECK_FALSE(mutation.restore_lease(*foreign));
+        CHECK(static_cast<bool>(*foreign));
+        CHECK(admission.active().has_value());
+        CHECK(foreign_admission.active().has_value());
+    }
+
+    CHECK_FALSE(admission.active().has_value());
+    CHECK(foreign_admission.active().has_value());
+    foreign->release();
+    CHECK_FALSE(foreign_admission.active().has_value());
+}
+
+TEST_CASE(
+    "API mutation guard rejects a foreign lease with the same token") {
+    RuntimeMutationAdmission admission;
+    RuntimeMutationAdmission foreign_admission;
+    SseBroadcaster broadcaster;
+    auto context = test_support::make_minimal_api_context(
+        broadcaster, "/tmp/keen-pbr-reload-foreign-lease.json");
+    wire_runtime_mutation_admission(context, admission);
+    auto foreign = foreign_admission.try_acquire("foreign");
+    REQUIRE(foreign.has_value());
+
+    {
+        ApiRuntimeMutationGuard mutation(
+            context, "save-config", false, false);
+        auto returned = mutation.take_lease();
+        REQUIRE(static_cast<bool>(returned));
+        CHECK(returned.token() == foreign->token());
+
+        CHECK_FALSE(mutation.restore_lease(*foreign));
+        CHECK(static_cast<bool>(*foreign));
+        CHECK(static_cast<bool>(returned));
+        CHECK(mutation.restore_lease(returned));
+        CHECK_FALSE(static_cast<bool>(returned));
+    }
+
+    CHECK_FALSE(admission.active().has_value());
+    CHECK(foreign_admission.active().has_value());
+    foreign->release();
+    CHECK_FALSE(foreign_admission.active().has_value());
+}
+
+TEST_CASE("API mutation guard rejects restore after finish") {
+    RuntimeMutationAdmission admission;
+    SseBroadcaster broadcaster;
+    auto context = test_support::make_minimal_api_context(
+        broadcaster, "/tmp/keen-pbr-reload-restore-after-finish.json");
+    wire_runtime_mutation_admission(context, admission);
+
+    RuntimeMutationAdmission::Lease returned;
+    {
+        ApiRuntimeMutationGuard mutation(
+            context, "save-config", false, false);
+        returned = mutation.take_lease();
+        REQUIRE(static_cast<bool>(returned));
+        mutation.finish();
+
+        CHECK_FALSE(mutation.restore_lease(returned));
+        CHECK(static_cast<bool>(returned));
+        CHECK_THROWS_AS(
+            mutation.take_lease(),
+            std::logic_error);
+    }
+
+    CHECK(admission.active().has_value());
+    returned.release();
+    CHECK_FALSE(admission.active().has_value());
+}
+
+TEST_CASE(
+    "API mutation guard permits only one restore and one lease handoff") {
+    RuntimeMutationAdmission admission;
+    SseBroadcaster broadcaster;
+    auto context = test_support::make_minimal_api_context(
+        broadcaster, "/tmp/keen-pbr-reload-single-handoff.json");
+    wire_runtime_mutation_admission(context, admission);
+
+    {
+        ApiRuntimeMutationGuard mutation(
+            context, "save-config", false, false);
+        auto returned = mutation.take_lease();
+        REQUIRE(static_cast<bool>(returned));
+        CHECK(mutation.restore_lease(returned));
+        CHECK_FALSE(static_cast<bool>(returned));
+
+        CHECK_FALSE(mutation.restore_lease(returned));
+        CHECK_THROWS_AS(
+            mutation.take_lease(),
+            std::logic_error);
+        CHECK(admission.active().has_value());
+    }
+
     CHECK_FALSE(admission.active().has_value());
 }
 

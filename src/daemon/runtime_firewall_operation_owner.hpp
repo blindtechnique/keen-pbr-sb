@@ -18,6 +18,7 @@
 #include <optional>
 #include <string>
 #include <type_traits>
+#include <utility>
 
 namespace keen_pbr3 {
 
@@ -35,13 +36,99 @@ using RuntimeFirewallDelayedTerminalOwner = RuntimeFirewallTerminalOwner<
     RuntimeFirewallWorkerAttemptInput,
     RuntimeFirewallWorkerAttemptResult>;
 
-// Foreground lifecycle operations keep stronger route/firewall/resolver
-// semantics and retain their exact request admission through every successor.
-// A typed kind avoids invalid combinations of independent start/restart flags.
+// Move-only, one-shot continuation for returning the exact pre-owned writer
+// after the firewall terminal. Only callbacks whose invocation is statically
+// noexcept are accepted: a throwing callback could otherwise unwind after
+// taking the lease and silently release mutation admission before the durable
+// commit/rollback phase has finished.
+class RuntimeFirewallPreownedTerminalContinuation final {
+public:
+    using MutationLeasePtr =
+        std::unique_ptr<RuntimeMutationAdmission::Lease>;
+
+    RuntimeFirewallPreownedTerminalContinuation() noexcept = default;
+
+    template <
+        typename Callback,
+        std::enable_if_t<
+            !std::is_same_v<
+                std::decay_t<Callback>,
+                RuntimeFirewallPreownedTerminalContinuation> &&
+                std::is_nothrow_invocable_r_v<
+                    void,
+                    std::decay_t<Callback>&,
+                    RuntimeFirewallLifecycleTerminal,
+                    MutationLeasePtr>,
+            int> = 0>
+    RuntimeFirewallPreownedTerminalContinuation(Callback&& callback)
+        : callback_(std::make_unique<Model<std::decay_t<Callback>>>(
+              std::forward<Callback>(callback))) {}
+
+    RuntimeFirewallPreownedTerminalContinuation(
+        RuntimeFirewallPreownedTerminalContinuation&&) noexcept = default;
+    RuntimeFirewallPreownedTerminalContinuation& operator=(
+        RuntimeFirewallPreownedTerminalContinuation&&) noexcept = default;
+
+    RuntimeFirewallPreownedTerminalContinuation(
+        const RuntimeFirewallPreownedTerminalContinuation&) = delete;
+    RuntimeFirewallPreownedTerminalContinuation& operator=(
+        const RuntimeFirewallPreownedTerminalContinuation&) = delete;
+
+    explicit operator bool() const noexcept {
+        return static_cast<bool>(callback_);
+    }
+
+    void invoke(RuntimeFirewallLifecycleTerminal terminal,
+                MutationLeasePtr mutation_lease) noexcept {
+        auto callback = std::move(callback_);
+        if (!callback) return;
+        callback->invoke(
+            std::move(terminal), std::move(mutation_lease));
+    }
+
+private:
+    struct Interface {
+        virtual ~Interface() = default;
+        virtual void invoke(
+            RuntimeFirewallLifecycleTerminal terminal,
+            MutationLeasePtr mutation_lease) noexcept = 0;
+    };
+
+    template <typename Callback>
+    struct Model final : Interface {
+        template <typename Value>
+        explicit Model(Value&& callback)
+            : callback_(std::forward<Value>(callback)) {}
+
+        void invoke(
+            RuntimeFirewallLifecycleTerminal terminal,
+            MutationLeasePtr mutation_lease) noexcept override {
+            callback_(
+                std::move(terminal), std::move(mutation_lease));
+        }
+
+        Callback callback_;
+    };
+
+    std::unique_ptr<Interface> callback_;
+};
+
+static_assert(
+    std::is_nothrow_move_constructible_v<
+        RuntimeFirewallPreownedTerminalContinuation>);
+static_assert(
+    std::is_nothrow_move_assignable_v<
+        RuntimeFirewallPreownedTerminalContinuation>);
+
+// Foreground lifecycle operations retain their exact request admission through
+// every successor. START/RESTART additionally require resolver publication;
+// config pre-apply is a current-generation firewall fence without that tail.
+// A typed kind avoids invalid combinations of independent lifecycle flags.
 enum class RuntimeFirewallLifecycleKind : std::uint8_t {
     background,
     start_from_stopped,
     restart_active,
+    config_preapply,
 };
 
 constexpr bool runtime_firewall_lifecycle_is_foreground(
@@ -57,6 +144,23 @@ constexpr bool runtime_firewall_lifecycle_is_start(
 constexpr bool runtime_firewall_lifecycle_is_restart(
     RuntimeFirewallLifecycleKind kind) noexcept {
     return kind == RuntimeFirewallLifecycleKind::restart_active;
+}
+
+constexpr bool runtime_firewall_lifecycle_is_preapply(
+    RuntimeFirewallLifecycleKind kind) noexcept {
+    return kind == RuntimeFirewallLifecycleKind::config_preapply;
+}
+
+constexpr bool runtime_firewall_lifecycle_requires_resolver(
+    RuntimeFirewallLifecycleKind kind) noexcept {
+    return runtime_firewall_lifecycle_is_start(kind) ||
+           runtime_firewall_lifecycle_is_restart(kind);
+}
+
+constexpr bool runtime_firewall_lifecycle_uses_hot_retry(
+    RuntimeFirewallLifecycleKind kind) noexcept {
+    return runtime_firewall_lifecycle_is_start(kind) ||
+           runtime_firewall_lifecycle_is_preapply(kind);
 }
 
 constexpr std::size_t kRuntimeFirewallStartBoundedRetryCount = 3U;
@@ -109,6 +213,12 @@ struct RuntimeFirewallOperationContext final {
     // as the pre-owned admission and is settled only by the final control-side
     // terminal (or conservatively by source abandonment).
     RuntimeFirewallLifecycleCompletion::Source lifecycle_completion;
+    // Config pre-apply cannot release admission at its firewall terminal: the
+    // exact writer must continue into the caller's durable commit/rollback.
+    // The owner therefore returns the physical lease through this one-shot
+    // continuation only after the final context has been retired.
+    RuntimeFirewallPreownedTerminalContinuation
+        preowned_terminal_continuation;
     // Foreground lifecycle intent follows the same exact successor chain.
     RuntimeFirewallLifecycleKind lifecycle_kind{
         RuntimeFirewallLifecycleKind::background};
@@ -173,6 +283,10 @@ public:
         std::unique_ptr<RuntimeMutationAdmission::Lease>;
     using DomainStatePtr =
         std::shared_ptr<RuntimeFirewallOperationDomainState>;
+    using PreownedTerminalContinuation =
+        RuntimeFirewallPreownedTerminalContinuation;
+    using TerminalFinalizationProof =
+        RuntimeFirewallDelayedTerminalOwner::FinalizationProof;
     using WorkerRunner = std::function<RuntimeFirewallWorkerAttemptResultPtr(
         const RuntimeFirewallWorkerAttemptInput&,
         const RuntimeFirewallDelayedWorker::RunningClaim&)>;
@@ -189,6 +303,7 @@ public:
         // this empty and acquire admission only when their worker is ready.
         MutationLeasePtr retained_mutation_lease;
         RuntimeFirewallLifecycleCompletion::Source lifecycle_completion;
+        PreownedTerminalContinuation preowned_terminal_continuation;
         RuntimeFirewallLifecycleKind lifecycle_kind{
             RuntimeFirewallLifecycleKind::background};
         std::size_t foreground_transport_rejections{0U};
@@ -198,6 +313,7 @@ public:
         RuntimeFirewallImmediateDisposition disposition{
             RuntimeFirewallImmediateDisposition::rejected};
         MutationLeasePtr unaccepted_lease;
+        PreownedTerminalContinuation unaccepted_continuation;
     };
 
     static_assert(
@@ -278,7 +394,8 @@ public:
         MutationLeasePtr mutation_lease,
         RuntimeFirewallLifecycleCompletion::Source lifecycle_completion = {},
         RuntimeFirewallLifecycleKind lifecycle_kind =
-            RuntimeFirewallLifecycleKind::background);
+            RuntimeFirewallLifecycleKind::background,
+        PreownedTerminalContinuation terminal_continuation = {});
 
     void schedule(std::size_t attempt,
                   std::uint64_t runtime_generation,
@@ -306,6 +423,15 @@ public:
     bool launch_pending_successor();
     bool pending_successor() const noexcept;
     const PendingSuccessor* pending_successor_state() const noexcept;
+
+    // Completes a pre-owned lifecycle whose caller must keep the exact
+    // mutation token after the firewall terminal. The active slot is retired
+    // before the callback is invoked, so the continuation may safely begin
+    // the next phase without colliding with its own firewall owner context.
+    bool complete_preowned_continuation(
+        const ContextPtr& context,
+        TerminalFinalizationProof&& finalization_proof,
+        RuntimeFirewallLifecycleTerminal terminal) noexcept;
 
     void terminate_before_worker(
         const ContextPtr& context,
@@ -348,6 +474,8 @@ private:
     bool retain_pending_transport_retry_or_finish() noexcept;
     bool terminalize_pending_foreground_transport_exhaustion() noexcept;
     void cancel_pending_successor_watchdog() noexcept;
+    void cancel_pending_work_impl(
+        bool publish_preowned_terminal) noexcept;
     void retain_trailing_intent(
         const ContextPtr& context,
         std::size_t attempt,
@@ -369,6 +497,7 @@ private:
         bool schedule_catalog_refresh,
         MutationLeasePtr* retained_mutation_lease,
         RuntimeFirewallLifecycleCompletion::Source* lifecycle_completion,
+        PreownedTerminalContinuation* terminal_continuation,
         RuntimeFirewallLifecycleKind lifecycle_kind);
     bool defer_fresh(
         std::size_t attempt,
@@ -378,6 +507,7 @@ private:
         OwnedSnatRecovery snat_recovery,
         MutationLeasePtr* retained_mutation_lease,
         RuntimeFirewallLifecycleCompletion::Source* lifecycle_completion,
+        PreownedTerminalContinuation* terminal_continuation,
         RuntimeFirewallLifecycleKind lifecycle_kind);
 
     RuntimeFirewallRetryCoordinator& coordinator_;

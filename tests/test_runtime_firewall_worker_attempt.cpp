@@ -248,6 +248,7 @@ RuntimeFirewallWorkerAttemptInput worker_attempt_input(
     cleanup_snapshot.owned_mask = 0x00FF0000U;
     cleanup_snapshot.marks = {0x00070000U};
     cleanup_snapshot.priority_marks = {0x00070000U};
+    cleanup_snapshot.ipv6_enabled = false;
     input.pre_mutation_owned_conntrack_cleanup_snapshot =
         std::move(cleanup_snapshot);
     input.transaction.operation_serial = 71U;
@@ -370,6 +371,11 @@ TEST_CASE("route preparation rejects stale acknowledgement before firewall backe
     WorkerAttemptTempDirectory temp;
     auto input = worker_attempt_input(temp.path() / "cache");
     enable_route_preparation(input);
+    input.operation_kind =
+        RuntimeFirewallWorkerOperationKind::config_preapply;
+    input.owned_conntrack_cleanup_mode =
+        RuntimeFirewallOwnedConntrackCleanupMode::
+            exact_pre_mutation_snapshot;
     input.route_reconcile_mode = RouteReconcileMode::Strict;
     WorkerAttemptRouteHealthServices route_services;
     int route_mutation_calls = 0;
@@ -414,6 +420,16 @@ TEST_CASE("route preparation rejects stale acknowledgement before firewall backe
     CHECK_FALSE(result->transaction_executed);
     CHECK_FALSE(result->transaction.commit_entered);
     CHECK(result->previous_generation_certainly_retained());
+    CHECK(result->operation_kind ==
+          RuntimeFirewallWorkerOperationKind::config_preapply);
+    CHECK(result->owned_conntrack_cleanup_mode ==
+          RuntimeFirewallOwnedConntrackCleanupMode::
+              exact_pre_mutation_snapshot);
+    CHECK(result->exact_cleanup_authority_valid);
+    CHECK(result->owned_snat_inspection_required);
+    CHECK_FALSE(result->owned_snat_before.attempted);
+    CHECK_FALSE(result->owned_snat_after.attempted);
+    CHECK_FALSE(result->config_preapply_verified());
     REQUIRE(result->route_preparation.mutation_ack.has_value());
     CHECK(*result->route_preparation.mutation_ack ==
           RuntimeRouteMutationAck::stale);
@@ -549,7 +565,8 @@ TEST_CASE("worker attempt keeps observations and commit in exact order") {
 TEST_CASE("START owned conntrack cleanup runs only after committed firewall") {
     WorkerAttemptTempDirectory temp;
     auto input = worker_attempt_input(temp.path() / "cache");
-    input.cleanup_owned_conntrack_after_commit = true;
+    input.owned_conntrack_cleanup_mode =
+        RuntimeFirewallOwnedConntrackCleanupMode::committed_candidate;
     std::vector<std::string> order;
     std::vector<std::vector<std::string>> cleanup_commands;
     ConntrackManager conntrack_manager(
@@ -600,6 +617,450 @@ TEST_CASE("START owned conntrack cleanup runs only after committed firewall") {
         "inspect:snat-after",
         "cleanup:owned",
     });
+}
+
+TEST_CASE(
+    "missing pre-apply SNAT merges broad and mandatory cleanup authority") {
+    WorkerAttemptTempDirectory temp;
+    auto input = worker_attempt_input(temp.path() / "cache");
+    input.operation_kind =
+        RuntimeFirewallWorkerOperationKind::config_preapply;
+    input.owned_conntrack_cleanup_mode =
+        RuntimeFirewallOwnedConntrackCleanupMode::
+            exact_pre_mutation_snapshot;
+    input.pre_mutation_owned_conntrack_cleanup_snapshot->marks = {
+        0x00030000U, 0x00070000U};
+    input.pre_mutation_owned_conntrack_cleanup_snapshot->priority_marks = {
+        0x00030000U};
+    input.mandatory_owned_conntrack_cleanup_snapshot =
+        input.pre_mutation_owned_conntrack_cleanup_snapshot;
+    input.mandatory_owned_conntrack_cleanup_snapshot->marks = {
+        0x00090000U};
+    input.mandatory_owned_conntrack_cleanup_snapshot->priority_marks = {
+        0x00090000U};
+    input.transaction.previous_native_vpn_direct_egress_snat_selectors = {
+        {"nwg0", "198.51.100.0/24"}};
+    input.transaction.candidate_native_vpn_direct_egress_snat_selectors = {
+        {"nwg1", "198.51.100.0/24"}};
+
+    std::vector<std::string> order;
+    std::vector<std::vector<std::string>> cleanup_commands;
+    ConntrackManager conntrack_manager(
+        [&](const std::vector<std::string>& args) {
+            order.push_back("cleanup:owned");
+            cleanup_commands.push_back(args);
+            return ConntrackManager::CommandResult{0, {}};
+        });
+    WorkerAttemptFirewall firewall{order};
+    WorkerAttemptMetaServices meta_services{order};
+
+    const auto result = execute_runtime_firewall_worker_attempt(
+        input, firewall, meta_services, conntrack_manager);
+
+    REQUIRE(result.transaction.committed());
+    CHECK(result.exact_cleanup_authority_valid);
+    CHECK(result.exact_cleanup_required);
+    CHECK(result.config_preapply_verified());
+    CHECK_FALSE(result.native_direct_egress_source_cleanup.attempted);
+    CHECK(result.native_direct_egress_source_cleanup
+              .affected_source_cidrs.empty());
+    const auto& cleanup = result.post_commit_owned_conntrack_cleanup;
+    REQUIRE(cleanup.attempted);
+    REQUIRE(cleanup.snapshot.has_value());
+    CHECK(cleanup.snapshot->runtime_generation == 83U);
+    CHECK(cleanup.snapshot->owned_mask == 0x00FF0000U);
+    CHECK(cleanup.snapshot->marks ==
+          std::set<std::uint32_t>{
+              0x00030000U, 0x00070000U, 0x00090000U});
+    CHECK(cleanup.snapshot->priority_marks ==
+          std::set<std::uint32_t>{0x00030000U, 0x00090000U});
+    CHECK(cleanup_commands.size() == 3U);
+    REQUIRE(cleanup_commands[0].size() == 6U);
+    REQUIRE(cleanup_commands[1].size() == 6U);
+    REQUIRE(cleanup_commands[2].size() == 6U);
+    CHECK(cleanup_commands[0][5] == "196608/16711680");
+    CHECK(cleanup_commands[1][5] == "589824/16711680");
+    CHECK(cleanup_commands[2][5] == "458752/16711680");
+    CHECK(order == std::vector<std::string>{
+        "inspect:snat-before",
+        "stage",
+        "meta:fastnat",
+        "meta:capability",
+        "meta:interfaces",
+        "meta:observation",
+        "commit",
+        "inspect:snat-after",
+        "cleanup:owned",
+        "cleanup:owned",
+        "cleanup:owned",
+    });
+}
+
+TEST_CASE(
+    "healthy pre-apply cleans only mandatory retry authority") {
+    WorkerAttemptTempDirectory temp;
+    auto input = worker_attempt_input(temp.path() / "cache");
+    input.operation_kind =
+        RuntimeFirewallWorkerOperationKind::config_preapply;
+    input.owned_conntrack_cleanup_mode =
+        RuntimeFirewallOwnedConntrackCleanupMode::
+            exact_pre_mutation_snapshot;
+    input.pre_mutation_owned_conntrack_cleanup_snapshot->marks = {
+        0x00030000U, 0x00070000U};
+    input.pre_mutation_owned_conntrack_cleanup_snapshot->priority_marks = {
+        0x00070000U};
+    input.mandatory_owned_conntrack_cleanup_snapshot =
+        input.pre_mutation_owned_conntrack_cleanup_snapshot;
+    input.mandatory_owned_conntrack_cleanup_snapshot->marks = {
+        0x00030000U};
+    input.mandatory_owned_conntrack_cleanup_snapshot->priority_marks.clear();
+
+    std::vector<std::string> order;
+    std::size_t cleanup_calls = 0U;
+    std::vector<std::vector<std::string>> cleanup_commands;
+    ConntrackManager conntrack_manager(
+        [&](const std::vector<std::string>& args) {
+            ++cleanup_calls;
+            order.push_back("cleanup:owned");
+            cleanup_commands.push_back(args);
+            return ConntrackManager::CommandResult{0, {}};
+        });
+    WorkerAttemptFirewall firewall{order};
+    firewall.owned_snat_states = {
+        OwnedSnatState::healthy, OwnedSnatState::healthy};
+    WorkerAttemptMetaServices meta_services{order};
+
+    const auto result = execute_runtime_firewall_worker_attempt(
+        input, firewall, meta_services, conntrack_manager);
+
+    CHECK_FALSE(result.transaction_executed);
+    CHECK_FALSE(result.transaction.commit_entered);
+    CHECK(firewall.apply_calls == 0U);
+    REQUIRE(result.owned_snat_before.state.has_value());
+    CHECK(*result.owned_snat_before.state == OwnedSnatState::healthy);
+    REQUIRE(result.owned_snat_after.state.has_value());
+    CHECK(*result.owned_snat_after.state == OwnedSnatState::healthy);
+    CHECK(cleanup_calls == 1U);
+    REQUIRE(result.selected_owned_conntrack_cleanup_snapshot.has_value());
+    CHECK(result.selected_owned_conntrack_cleanup_snapshot->marks ==
+          std::set<std::uint32_t>{0x00030000U});
+    CHECK(result.selected_owned_conntrack_cleanup_snapshot
+              ->priority_marks.empty());
+    REQUIRE(cleanup_commands.size() == 1U);
+    REQUIRE(cleanup_commands[0].size() == 6U);
+    CHECK(cleanup_commands[0][5] == "196608/16711680");
+    CHECK(result.post_commit_owned_conntrack_cleanup.attempted);
+    CHECK(result.config_preapply_verified());
+    CHECK(order == std::vector<std::string>{
+        "inspect:snat-before",
+        "inspect:snat-after",
+        "cleanup:owned",
+    });
+}
+
+TEST_CASE(
+    "healthy pre-apply without mandatory cleanup does not touch conntrack") {
+    WorkerAttemptTempDirectory temp;
+    auto input = worker_attempt_input(temp.path() / "cache");
+    input.operation_kind =
+        RuntimeFirewallWorkerOperationKind::config_preapply;
+    input.owned_conntrack_cleanup_mode =
+        RuntimeFirewallOwnedConntrackCleanupMode::
+            exact_pre_mutation_snapshot;
+    REQUIRE(input.pre_mutation_owned_conntrack_cleanup_snapshot.has_value());
+    CHECK_FALSE(input.pre_mutation_owned_conntrack_cleanup_snapshot
+                    ->marks.empty());
+    CHECK_FALSE(
+        input.mandatory_owned_conntrack_cleanup_snapshot.has_value());
+
+    std::vector<std::string> order;
+    std::size_t cleanup_calls = 0U;
+    ConntrackManager conntrack_manager(
+        [&](const std::vector<std::string>&) {
+            ++cleanup_calls;
+            return ConntrackManager::CommandResult{0, {}};
+        });
+    WorkerAttemptFirewall firewall{order};
+    firewall.owned_snat_states = {
+        OwnedSnatState::healthy, OwnedSnatState::healthy};
+    WorkerAttemptMetaServices meta_services{order};
+
+    const auto result = execute_runtime_firewall_worker_attempt(
+        input, firewall, meta_services, conntrack_manager);
+
+    CHECK_FALSE(result.transaction_executed);
+    CHECK_FALSE(result.transaction.commit_entered);
+    CHECK(firewall.apply_calls == 0U);
+    CHECK(result.missing_snat_cleanup_authority_valid);
+    CHECK(result.mandatory_cleanup_authority_valid);
+    CHECK(result.exact_cleanup_authority_valid);
+    CHECK_FALSE(result.exact_cleanup_required);
+    CHECK_FALSE(
+        result.selected_owned_conntrack_cleanup_snapshot.has_value());
+    CHECK(cleanup_calls == 0U);
+    CHECK_FALSE(result.post_commit_owned_conntrack_cleanup.attempted);
+    CHECK(result.config_preapply_verified());
+    CHECK(order == std::vector<std::string>{
+        "inspect:snat-before",
+        "inspect:snat-after",
+    });
+}
+
+TEST_CASE(
+    "pre-apply verdict rejects incomplete exact conntrack cleanup") {
+    WorkerAttemptTempDirectory temp;
+    auto input = worker_attempt_input(temp.path() / "cache");
+    input.operation_kind =
+        RuntimeFirewallWorkerOperationKind::config_preapply;
+    input.owned_conntrack_cleanup_mode =
+        RuntimeFirewallOwnedConntrackCleanupMode::
+            exact_pre_mutation_snapshot;
+    input.mandatory_owned_conntrack_cleanup_snapshot =
+        input.pre_mutation_owned_conntrack_cleanup_snapshot;
+
+    std::vector<std::string> order;
+    ConntrackManager conntrack_manager(
+        [&](const std::vector<std::string>&) {
+            order.push_back("cleanup:owned");
+            return ConntrackManager::CommandResult{1, {}};
+        });
+    WorkerAttemptFirewall firewall{order};
+    firewall.owned_snat_states = {
+        OwnedSnatState::healthy, OwnedSnatState::healthy};
+    WorkerAttemptMetaServices meta_services{order};
+
+    const auto result = execute_runtime_firewall_worker_attempt(
+        input, firewall, meta_services, conntrack_manager);
+
+    CHECK(result.post_commit_owned_conntrack_cleanup.attempted);
+    CHECK(result.post_commit_owned_conntrack_cleanup.summary.failed == 1U);
+    CHECK_FALSE(result.config_preapply_verified());
+}
+
+TEST_CASE(
+    "pre-apply unknown baseline never authorizes destructive cleanup") {
+    WorkerAttemptTempDirectory temp;
+    auto input = worker_attempt_input(temp.path() / "cache");
+    input.operation_kind =
+        RuntimeFirewallWorkerOperationKind::config_preapply;
+    input.owned_conntrack_cleanup_mode =
+        RuntimeFirewallOwnedConntrackCleanupMode::
+            exact_pre_mutation_snapshot;
+    input.mandatory_owned_conntrack_cleanup_snapshot =
+        input.pre_mutation_owned_conntrack_cleanup_snapshot;
+
+    std::vector<std::string> order;
+    std::size_t cleanup_calls = 0U;
+    ConntrackManager conntrack_manager(
+        [&](const std::vector<std::string>&) {
+            ++cleanup_calls;
+            return ConntrackManager::CommandResult{0, {}};
+        });
+    WorkerAttemptFirewall firewall{order};
+    firewall.owned_snat_states = {
+        OwnedSnatState::unknown, OwnedSnatState::healthy};
+    WorkerAttemptMetaServices meta_services{order};
+
+    const auto result = execute_runtime_firewall_worker_attempt(
+        input, firewall, meta_services, conntrack_manager);
+
+    CHECK_FALSE(result.transaction_executed);
+    CHECK(result.exact_cleanup_authority_valid);
+    CHECK(result.exact_cleanup_required);
+    CHECK(cleanup_calls == 0U);
+    CHECK_FALSE(result.post_commit_owned_conntrack_cleanup.attempted);
+    CHECK_FALSE(result.config_preapply_verified());
+    CHECK(order == std::vector<std::string>{
+        "inspect:snat-before",
+        "inspect:snat-after",
+    });
+}
+
+TEST_CASE(
+    "pre-apply malformed authority fails before COMMIT or conntrack") {
+    WorkerAttemptTempDirectory temp;
+    auto input = worker_attempt_input(temp.path() / "cache");
+    input.operation_kind =
+        RuntimeFirewallWorkerOperationKind::config_preapply;
+    input.owned_conntrack_cleanup_mode =
+        RuntimeFirewallOwnedConntrackCleanupMode::
+            exact_pre_mutation_snapshot;
+    REQUIRE(input.pre_mutation_owned_conntrack_cleanup_snapshot.has_value());
+
+    std::vector<std::string> order;
+    std::size_t cleanup_calls = 0U;
+    ConntrackManager conntrack_manager(
+        [&](const std::vector<std::string>&) {
+            ++cleanup_calls;
+            return ConntrackManager::CommandResult{0, {}};
+        });
+    WorkerAttemptFirewall firewall{order};
+    WorkerAttemptMetaServices meta_services{order};
+
+    bool expected_missing_snat_authority_valid = true;
+    bool expected_mandatory_authority_valid = true;
+    SUBCASE("generation mismatch") {
+        input.pre_mutation_owned_conntrack_cleanup_snapshot
+            ->runtime_generation = 82U;
+        expected_missing_snat_authority_valid = false;
+    }
+    SUBCASE("mask mismatch") {
+        input.pre_mutation_owned_conntrack_cleanup_snapshot->owned_mask =
+            0x000F0000U;
+        expected_missing_snat_authority_valid = false;
+    }
+    SUBCASE("IPv6 scope mismatch") {
+        input.pre_mutation_owned_conntrack_cleanup_snapshot
+            ->ipv6_enabled = true;
+        expected_missing_snat_authority_valid = false;
+    }
+    SUBCASE("mandatory generation mismatch") {
+        input.mandatory_owned_conntrack_cleanup_snapshot =
+            input.pre_mutation_owned_conntrack_cleanup_snapshot;
+        input.mandatory_owned_conntrack_cleanup_snapshot
+            ->runtime_generation = 82U;
+        expected_mandatory_authority_valid = false;
+    }
+    SUBCASE("mandatory mask mismatch") {
+        input.mandatory_owned_conntrack_cleanup_snapshot =
+            input.pre_mutation_owned_conntrack_cleanup_snapshot;
+        input.mandatory_owned_conntrack_cleanup_snapshot->owned_mask =
+            0x000F0000U;
+        expected_mandatory_authority_valid = false;
+    }
+    SUBCASE("mandatory IPv6 scope mismatch") {
+        input.mandatory_owned_conntrack_cleanup_snapshot =
+            input.pre_mutation_owned_conntrack_cleanup_snapshot;
+        input.mandatory_owned_conntrack_cleanup_snapshot
+            ->ipv6_enabled = true;
+        expected_mandatory_authority_valid = false;
+    }
+
+    const auto result = execute_runtime_firewall_worker_attempt(
+        input, firewall, meta_services, conntrack_manager);
+
+    CHECK_FALSE(result.transaction_executed);
+    CHECK_FALSE(result.transaction.commit_entered);
+    CHECK(firewall.apply_calls == 0U);
+    CHECK(result.missing_snat_cleanup_authority_valid ==
+          expected_missing_snat_authority_valid);
+    CHECK(result.mandatory_cleanup_authority_valid ==
+          expected_mandatory_authority_valid);
+    CHECK_FALSE(result.exact_cleanup_authority_valid);
+    CHECK_FALSE(result.exact_cleanup_required);
+    CHECK(cleanup_calls == 0U);
+    CHECK_FALSE(result.post_commit_owned_conntrack_cleanup.attempted);
+    CHECK_FALSE(result.config_preapply_verified());
+    CHECK(order == std::vector<std::string>{
+        "inspect:snat-before",
+    });
+}
+
+TEST_CASE(
+    "pre-apply failed transaction never authorizes exact cleanup") {
+    WorkerAttemptTempDirectory temp;
+    auto input = worker_attempt_input(temp.path() / "cache");
+    input.operation_kind =
+        RuntimeFirewallWorkerOperationKind::config_preapply;
+    input.owned_conntrack_cleanup_mode =
+        RuntimeFirewallOwnedConntrackCleanupMode::
+            exact_pre_mutation_snapshot;
+
+    std::vector<std::string> order;
+    std::size_t cleanup_calls = 0U;
+    ConntrackManager conntrack_manager(
+        [&](const std::vector<std::string>&) {
+            ++cleanup_calls;
+            return ConntrackManager::CommandResult{0, {}};
+        });
+    WorkerAttemptFirewall firewall{order};
+    WorkerAttemptMetaServices meta_services{order};
+
+    SUBCASE("pre-commit failure") {
+        meta_services.throw_fastnat_on_call = 1U;
+    }
+    SUBCASE("ambiguous commit") {
+        firewall.throw_after_publication = true;
+    }
+
+    const auto result = execute_runtime_firewall_worker_attempt(
+        input, firewall, meta_services, conntrack_manager);
+
+    CHECK(result.transaction_executed);
+    CHECK_FALSE(result.transaction.committed());
+    CHECK(cleanup_calls == 0U);
+    CHECK_FALSE(result.post_commit_owned_conntrack_cleanup.attempted);
+    CHECK_FALSE(result.config_preapply_verified());
+}
+
+TEST_CASE("unsupported owned cleanup mode combinations fail closed") {
+    WorkerAttemptTempDirectory temp;
+    auto input = worker_attempt_input(temp.path() / "cache");
+
+    SUBCASE("pre-apply cannot use a committed candidate") {
+        input.operation_kind =
+            RuntimeFirewallWorkerOperationKind::config_preapply;
+        input.owned_conntrack_cleanup_mode =
+            RuntimeFirewallOwnedConntrackCleanupMode::
+                committed_candidate;
+    }
+    SUBCASE("unknown cleanup mode cannot become committed candidate") {
+        input.owned_conntrack_cleanup_mode =
+            static_cast<RuntimeFirewallOwnedConntrackCleanupMode>(0xffU);
+    }
+
+    std::vector<std::string> order;
+    std::size_t cleanup_calls = 0U;
+    ConntrackManager conntrack_manager(
+        [&](const std::vector<std::string>&) {
+            ++cleanup_calls;
+            return ConntrackManager::CommandResult{0, {}};
+        });
+    WorkerAttemptFirewall firewall{order};
+    WorkerAttemptMetaServices meta_services{order};
+
+    const auto result = execute_runtime_firewall_worker_attempt(
+        input, firewall, meta_services, conntrack_manager);
+
+    CHECK(cleanup_calls == 0U);
+    CHECK_FALSE(result.post_commit_owned_conntrack_cleanup.attempted);
+    CHECK_FALSE(result.config_preapply_verified());
+}
+
+TEST_CASE(
+    "pre-apply authoritative empty mark set is a verified no-op") {
+    WorkerAttemptTempDirectory temp;
+    auto input = worker_attempt_input(temp.path() / "cache");
+    input.operation_kind =
+        RuntimeFirewallWorkerOperationKind::config_preapply;
+    input.owned_conntrack_cleanup_mode =
+        RuntimeFirewallOwnedConntrackCleanupMode::
+            exact_pre_mutation_snapshot;
+    REQUIRE(input.pre_mutation_owned_conntrack_cleanup_snapshot.has_value());
+    input.pre_mutation_owned_conntrack_cleanup_snapshot->marks.clear();
+    input.pre_mutation_owned_conntrack_cleanup_snapshot
+        ->priority_marks.clear();
+
+    std::vector<std::string> order;
+    std::size_t cleanup_calls = 0U;
+    ConntrackManager conntrack_manager(
+        [&](const std::vector<std::string>&) {
+            ++cleanup_calls;
+            return ConntrackManager::CommandResult{0, {}};
+        });
+    WorkerAttemptFirewall firewall{order};
+    firewall.owned_snat_states = {
+        OwnedSnatState::healthy, OwnedSnatState::healthy};
+    WorkerAttemptMetaServices meta_services{order};
+
+    const auto result = execute_runtime_firewall_worker_attempt(
+        input, firewall, meta_services, conntrack_manager);
+
+    CHECK(result.exact_cleanup_authority_valid);
+    CHECK_FALSE(result.exact_cleanup_required);
+    CHECK(cleanup_calls == 0U);
+    CHECK_FALSE(result.post_commit_owned_conntrack_cleanup.attempted);
+    CHECK(result.config_preapply_verified());
 }
 
 TEST_CASE("durable worker adapter publishes the normal typed result") {
@@ -818,7 +1279,8 @@ TEST_CASE("worker retains typed native source cleanup failure") {
 TEST_CASE("worker attempt records Meta preflight refusal without commit") {
     WorkerAttemptTempDirectory temp;
     auto input = worker_attempt_input(temp.path() / "cache");
-    input.cleanup_owned_conntrack_after_commit = true;
+    input.owned_conntrack_cleanup_mode =
+        RuntimeFirewallOwnedConntrackCleanupMode::committed_candidate;
     std::vector<std::string> order;
     WorkerAttemptFirewall firewall{order};
     WorkerAttemptMetaServices meta_services{order};
@@ -864,7 +1326,8 @@ TEST_CASE("worker attempt records Meta preflight refusal without commit") {
 TEST_CASE("worker attempt preserves ambiguous commit evidence") {
     WorkerAttemptTempDirectory temp;
     auto input = worker_attempt_input(temp.path() / "cache");
-    input.cleanup_owned_conntrack_after_commit = true;
+    input.owned_conntrack_cleanup_mode =
+        RuntimeFirewallOwnedConntrackCleanupMode::committed_candidate;
     input.transaction
         .previous_native_vpn_direct_egress_snat_selectors = {
             {"nwg0", "198.51.100.0/24"}};

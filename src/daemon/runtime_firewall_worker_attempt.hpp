@@ -14,11 +14,33 @@
 
 namespace keen_pbr3 {
 
+enum class RuntimeFirewallWorkerOperationKind : std::uint8_t {
+    reconcile_generation,
+    // Verify/repair only the currently published generation before a caller
+    // is allowed to reuse its numerical marks for a prepared candidate.
+    config_preapply,
+};
+
+enum class RuntimeFirewallOwnedConntrackCleanupMode : std::uint8_t {
+    none,
+    // START retires marks described by the firewall candidate which has just
+    // reached a verified COMMIT.
+    committed_candidate,
+    // A pre-apply barrier consumes immutable current-generation authorities:
+    // an already-mandatory remainder is always selected, while the complete
+    // pre-mutation snapshot is selected only after observing missing SNAT.
+    // It must never manufacture either authority from post-COMMIT state,
+    // where the same numerical marks may already have a new owner.
+    exact_pre_mutation_snapshot,
+};
+
 // One fully-owned worker input. The control loop decides whether owned-SNAT
 // health is part of this attempt; the worker then keeps both inspections and
 // the firewall transaction inside the same externally serialized backend
 // boundary.
 struct RuntimeFirewallWorkerAttemptInput {
+    RuntimeFirewallWorkerOperationKind operation_kind{
+        RuntimeFirewallWorkerOperationKind::reconcile_generation};
     RuntimeFirewallBackendTransactionInput transaction;
     // Optional central-runtime preflight. The worker takes one coherent live
     // route/interface observation, applies it through the combined routing
@@ -37,15 +59,24 @@ struct RuntimeFirewallWorkerAttemptInput {
     // exact control-loop snapshots used for worker-side source-flow cleanup.
     // The worker never reads or mutates Daemon's published selector cursor.
     bool inspect_owned_snat{false};
-    // Captured on the control loop before the worker can enter COMMIT. If the
-    // pre-observation reports missing SNAT, only this exact mark-generation
-    // authority may be used for the later selective conntrack cleanup.
+    // Captured on the control loop before the worker can enter COMMIT. For a
+    // config pre-apply operation this is the complete current-generation
+    // authority which becomes destructive only when the worker itself
+    // observes missing SNAT. A healthy observation must not clean this broad
+    // snapshot merely because a later configuration may reuse its marks.
     std::optional<OwnedConntrackCleanupSnapshot>
         pre_mutation_owned_conntrack_cleanup_snapshot;
-    // START installs the complete new firewall before retiring only marks
-    // owned by this exact runtime generation. The worker performs the first
+    // Exact current-generation remainder which was already pending before
+    // config pre-apply admission (for example, a bounded cleanup retry). It
+    // must converge even when SNAT is healthy, but it must never be widened to
+    // the broad missing-SNAT snapshot above.
+    std::optional<OwnedConntrackCleanupSnapshot>
+        mandatory_owned_conntrack_cleanup_snapshot;
+    // Selects the only snapshot authority which may be used after the worker's
+    // verified observation/transaction boundary. The worker performs the
     // bounded cleanup attempt so the control loop never runs conntrack CLI.
-    bool cleanup_owned_conntrack_after_commit{false};
+    RuntimeFirewallOwnedConntrackCleanupMode owned_conntrack_cleanup_mode{
+        RuntimeFirewallOwnedConntrackCleanupMode::none};
 };
 
 struct RuntimeFirewallWorkerRoutePreparation {
@@ -118,6 +149,18 @@ struct RuntimeFirewallWorkerOwnedConntrackCleanup {
 // Daemon or another control-loop object, so this value may remain in a worker
 // mailbox until the control loop (or shutdown drain) consumes it.
 struct RuntimeFirewallWorkerAttemptResult {
+    RuntimeFirewallWorkerOperationKind operation_kind{
+        RuntimeFirewallWorkerOperationKind::reconcile_generation};
+    RuntimeFirewallOwnedConntrackCleanupMode owned_conntrack_cleanup_mode{
+        RuntimeFirewallOwnedConntrackCleanupMode::none};
+    // Both pre-apply authorities are validated independently against the
+    // immutable transaction generation and fwmark mask. An absent mandatory
+    // authority means there is no already-pending cleanup; an authoritative
+    // empty mark set is likewise a successful no-op.
+    bool missing_snat_cleanup_authority_valid{false};
+    bool mandatory_cleanup_authority_valid{false};
+    bool exact_cleanup_authority_valid{false};
+    bool exact_cleanup_required{false};
     RuntimeFirewallWorkerRoutePreparation route_preparation;
     bool transaction_executed{false};
     RuntimeFirewallBackendTransactionResult transaction;
@@ -130,6 +173,13 @@ struct RuntimeFirewallWorkerAttemptResult {
     // already belong to a different runtime generation.
     std::optional<OwnedConntrackCleanupSnapshot>
         pre_mutation_owned_conntrack_cleanup_snapshot;
+    std::optional<OwnedConntrackCleanupSnapshot>
+        mandatory_owned_conntrack_cleanup_snapshot;
+    // The only snapshot authorized for this attempt after the owned-SNAT
+    // observation: mandatory-only while healthy, or the union with the broad
+    // pre-mutation snapshot after a missing observation.
+    std::optional<OwnedConntrackCleanupSnapshot>
+        selected_owned_conntrack_cleanup_snapshot;
 
     std::uint64_t meta_publication_epoch_before{0U};
     std::uint64_t meta_publication_epoch_after{0U};
@@ -154,6 +204,48 @@ struct RuntimeFirewallWorkerAttemptResult {
     // cannot make an entered backend command safe to replay.
     bool previous_generation_certainly_retained() const noexcept {
         return !transaction.commit_entered;
+    }
+
+    bool config_preapply_verified() const noexcept {
+        if (operation_kind !=
+                RuntimeFirewallWorkerOperationKind::config_preapply ||
+             owned_conntrack_cleanup_mode !=
+                 RuntimeFirewallOwnedConntrackCleanupMode::
+                     exact_pre_mutation_snapshot ||
+             !exact_cleanup_authority_valid ||
+             !owned_snat_inspection_required ||
+             !owned_snat_before.attempted ||
+             (owned_snat_before.state !=
+                  std::optional<OwnedSnatState>{OwnedSnatState::healthy} &&
+              owned_snat_before.state !=
+                  std::optional<OwnedSnatState>{OwnedSnatState::missing}) ||
+             owned_snat_before.failure.failed() ||
+             !owned_snat_after.attempted ||
+             owned_snat_after.state !=
+                 std::optional<OwnedSnatState>{OwnedSnatState::healthy} ||
+            owned_snat_after.failure.failed() ||
+            (transaction_executed && !transaction.committed())) {
+            return false;
+        }
+        if (!exact_cleanup_required) {
+            return true;
+        }
+        if (!selected_owned_conntrack_cleanup_snapshot.has_value() ||
+            !selected_owned_conntrack_cleanup_snapshot->valid()) {
+            return false;
+        }
+        return post_commit_owned_conntrack_cleanup.attempted &&
+               post_commit_owned_conntrack_cleanup.snapshot.has_value() &&
+               owned_conntrack_cleanup_snapshot_equal(
+                   *post_commit_owned_conntrack_cleanup.snapshot,
+                   *selected_owned_conntrack_cleanup_snapshot) &&
+               !post_commit_owned_conntrack_cleanup.failure.failed() &&
+               !post_commit_owned_conntrack_cleanup.summary
+                    .command_unavailable &&
+               post_commit_owned_conntrack_cleanup.summary.failed == 0U &&
+               post_commit_owned_conntrack_cleanup.summary.skipped == 0U &&
+               post_commit_owned_conntrack_cleanup.summary
+                    .remaining_marks.empty();
     }
 };
 

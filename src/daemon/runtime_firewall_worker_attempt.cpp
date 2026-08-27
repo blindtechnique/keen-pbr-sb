@@ -103,6 +103,101 @@ void initialize_transaction_identity(
     result.transaction.runtime_generation = input.runtime_generation;
 }
 
+bool owned_conntrack_cleanup_authority_valid(
+    const RuntimeFirewallWorkerAttemptInput& input,
+    const OwnedConntrackCleanupSnapshot& snapshot,
+    bool expected_ipv6_enabled) {
+    const auto expected_mask = fwmark_mask_value(
+        input.transaction.config.fwmark.value_or(FwmarkConfig{}));
+    bool marks_well_formed = expected_mask != 0U;
+    for (const auto mark : snapshot.marks) {
+        if (mark == 0U || (mark & ~expected_mask) != 0U) {
+            marks_well_formed = false;
+            break;
+        }
+    }
+    if (marks_well_formed) {
+        for (const auto mark : snapshot.priority_marks) {
+            if (snapshot.marks.count(mark) == 0U) {
+                marks_well_formed = false;
+                break;
+            }
+        }
+    }
+
+    return snapshot.runtime_generation ==
+               input.transaction.runtime_generation &&
+           snapshot.runtime_generation != 0U &&
+           snapshot.owned_mask == expected_mask &&
+           snapshot.ipv6_enabled == expected_ipv6_enabled &&
+           marks_well_formed;
+}
+
+void initialize_owned_conntrack_cleanup_authority(
+    RuntimeFirewallWorkerAttemptResult& result,
+    const RuntimeFirewallWorkerAttemptInput& input) {
+    result.owned_conntrack_cleanup_mode =
+        input.owned_conntrack_cleanup_mode;
+    if (input.owned_conntrack_cleanup_mode !=
+        RuntimeFirewallOwnedConntrackCleanupMode::
+            exact_pre_mutation_snapshot) {
+        return;
+    }
+    const bool expected_ipv6_enabled =
+        resolve_ipv6_support(input.transaction.config).enabled;
+
+    const auto& missing_snat_snapshot =
+        input.pre_mutation_owned_conntrack_cleanup_snapshot;
+    result.missing_snat_cleanup_authority_valid =
+        missing_snat_snapshot.has_value() &&
+        owned_conntrack_cleanup_authority_valid(
+            input, *missing_snat_snapshot, expected_ipv6_enabled);
+
+    const auto& mandatory_snapshot =
+        input.mandatory_owned_conntrack_cleanup_snapshot;
+    result.mandatory_cleanup_authority_valid =
+        !mandatory_snapshot.has_value() ||
+        owned_conntrack_cleanup_authority_valid(
+            input, *mandatory_snapshot, expected_ipv6_enabled);
+
+    result.exact_cleanup_authority_valid =
+        result.missing_snat_cleanup_authority_valid &&
+        result.mandatory_cleanup_authority_valid;
+}
+
+void select_owned_conntrack_cleanup_authority(
+    RuntimeFirewallWorkerAttemptResult& result,
+    const RuntimeFirewallWorkerAttemptInput& input) {
+    if (input.operation_kind !=
+            RuntimeFirewallWorkerOperationKind::config_preapply ||
+        input.owned_conntrack_cleanup_mode !=
+            RuntimeFirewallOwnedConntrackCleanupMode::
+                exact_pre_mutation_snapshot ||
+        !result.exact_cleanup_authority_valid) {
+        return;
+    }
+
+    std::optional<OwnedConntrackCleanupSnapshot> selected =
+        input.mandatory_owned_conntrack_cleanup_snapshot;
+    if (result.owned_snat_before.state ==
+        std::optional<OwnedSnatState>{OwnedSnatState::missing}) {
+        if (selected.has_value()) {
+            selected = merge_owned_conntrack_cleanup_snapshot(
+                std::move(*selected),
+                *input.pre_mutation_owned_conntrack_cleanup_snapshot);
+        } else {
+            selected =
+                input.pre_mutation_owned_conntrack_cleanup_snapshot;
+        }
+    }
+
+    result.selected_owned_conntrack_cleanup_snapshot =
+        std::move(selected);
+    result.exact_cleanup_required =
+        result.selected_owned_conntrack_cleanup_snapshot.has_value() &&
+        !result.selected_owned_conntrack_cleanup_snapshot->marks.empty();
+}
+
 static_assert(
     std::is_nothrow_destructible_v<
         RuntimeFirewallWorkerRoutePreparation> &&
@@ -128,11 +223,18 @@ void replace_route_preparation(
 void initialize_conservative_durable_result(
     RuntimeFirewallWorkerAttemptResult& result,
     const RuntimeFirewallWorkerAttemptInput& input) {
+    result.operation_kind = input.operation_kind;
+    initialize_owned_conntrack_cleanup_authority(result, input);
     initialize_transaction_identity(result, input.transaction);
     result.transaction_executed = true;
-    result.owned_snat_inspection_required = input.inspect_owned_snat;
+    result.owned_snat_inspection_required =
+        input.inspect_owned_snat ||
+        input.operation_kind ==
+            RuntimeFirewallWorkerOperationKind::config_preapply;
     result.pre_mutation_owned_conntrack_cleanup_snapshot =
         input.pre_mutation_owned_conntrack_cleanup_snapshot;
+    result.mandatory_owned_conntrack_cleanup_snapshot =
+        input.mandatory_owned_conntrack_cleanup_snapshot;
 
     // The runner is the complete stage/preflight/COMMIT/inspection boundary.
     // If it escapes, this adapter cannot prove which part completed. Prepare
@@ -193,7 +295,9 @@ void cleanup_native_direct_egress_sources(
     const RuntimeFirewallWorkerAttemptInput& input,
     ConntrackManager& conntrack_manager,
     RuntimeFirewallWorkerAttemptResult& result) {
-    if (!result.transaction.committed()) {
+    if (input.operation_kind ==
+            RuntimeFirewallWorkerOperationKind::config_preapply ||
+        !result.transaction.committed()) {
         // commit_entered without a returned committed candidate is ambiguous.
         // It must trigger a fresh resnapshot, never destructive cleanup under
         // selectors which may not be authoritative in the kernel.
@@ -229,19 +333,58 @@ void cleanup_owned_conntrack_after_commit(
     const RuntimeFirewallWorkerAttemptInput& input,
     ConntrackManager& conntrack_manager,
     RuntimeFirewallWorkerAttemptResult& result) {
-    if (!result.transaction.committed() ||
-        !input.cleanup_owned_conntrack_after_commit) {
+    select_owned_conntrack_cleanup_authority(result, input);
+    const bool exact_pre_mutation_cleanup =
+        input.owned_conntrack_cleanup_mode ==
+        RuntimeFirewallOwnedConntrackCleanupMode::
+            exact_pre_mutation_snapshot;
+    const bool committed_candidate_cleanup =
+        input.owned_conntrack_cleanup_mode ==
+            RuntimeFirewallOwnedConntrackCleanupMode::
+                committed_candidate &&
+        input.operation_kind ==
+            RuntimeFirewallWorkerOperationKind::reconcile_generation;
+    const bool exact_preapply_observation_admitted =
+        (result.owned_snat_before.state ==
+             std::optional<OwnedSnatState>{OwnedSnatState::healthy} ||
+         result.owned_snat_before.state ==
+             std::optional<OwnedSnatState>{OwnedSnatState::missing}) &&
+        !result.owned_snat_before.failure.failed();
+    const bool exact_preapply_verified =
+        exact_pre_mutation_cleanup &&
+        input.operation_kind ==
+            RuntimeFirewallWorkerOperationKind::config_preapply &&
+        result.exact_cleanup_authority_valid &&
+        result.exact_cleanup_required &&
+        exact_preapply_observation_admitted &&
+        result.owned_snat_after.state ==
+            std::optional<OwnedSnatState>{OwnedSnatState::healthy} &&
+        !result.owned_snat_after.failure.failed() &&
+        (!result.transaction_executed ||
+         result.transaction.committed());
+    if (input.owned_conntrack_cleanup_mode ==
+            RuntimeFirewallOwnedConntrackCleanupMode::none ||
+        (!exact_pre_mutation_cleanup &&
+         !committed_candidate_cleanup) ||
+        (exact_pre_mutation_cleanup && !exact_preapply_verified) ||
+        (committed_candidate_cleanup &&
+         !result.transaction.committed())) {
         return;
     }
 
     auto& cleanup = result.post_commit_owned_conntrack_cleanup;
-    cleanup.snapshot = make_owned_conntrack_cleanup_snapshot(
-        input.transaction.runtime_generation,
-        input.transaction.config,
-        input.transaction.outbound_marks,
-        result.transaction.committed_firewall->rule_states,
-        input.transaction.urltest_selections);
-    if (!cleanup.snapshot->valid()) {
+    if (exact_pre_mutation_cleanup) {
+        cleanup.snapshot =
+            result.selected_owned_conntrack_cleanup_snapshot;
+    } else {
+        cleanup.snapshot = make_owned_conntrack_cleanup_snapshot(
+            input.transaction.runtime_generation,
+            input.transaction.config,
+            input.transaction.outbound_marks,
+            result.transaction.committed_firewall->rule_states,
+            input.transaction.urltest_selections);
+    }
+    if (!cleanup.snapshot.has_value() || !cleanup.snapshot->valid()) {
         return;
     }
     cleanup.attempted = true;
@@ -287,20 +430,48 @@ RuntimeFirewallWorkerAttemptResult execute_runtime_firewall_worker_attempt(
     Firewall& firewall,
     MetaUdp443ActivationBackendServices& meta_services) {
     RuntimeFirewallWorkerAttemptResult result;
+    result.operation_kind = input.operation_kind;
+    initialize_owned_conntrack_cleanup_authority(result, input);
     initialize_transaction_identity(result, input.transaction);
-    result.owned_snat_inspection_required = input.inspect_owned_snat;
+    const bool config_preapply = input.operation_kind ==
+        RuntimeFirewallWorkerOperationKind::config_preapply;
+    result.owned_snat_inspection_required =
+        input.inspect_owned_snat || config_preapply;
     result.pre_mutation_owned_conntrack_cleanup_snapshot =
         input.pre_mutation_owned_conntrack_cleanup_snapshot;
+    result.mandatory_owned_conntrack_cleanup_snapshot =
+        input.mandatory_owned_conntrack_cleanup_snapshot;
     result.meta_publication_epoch_before =
         firewall.meta_udp443_publication_epoch();
     result.meta_publication_epoch_after =
         result.meta_publication_epoch_before;
 
-    if (input.inspect_owned_snat) {
+    if (result.owned_snat_inspection_required) {
         inspect_owned_snat(firewall, result.owned_snat_before);
         if (result.owned_snat_before.failure.failed()) {
             // A required pre-observation is admission, not mutation. Do not
             // execute or replay the transaction without its exact baseline.
+            result.meta_publication_epoch_after =
+                firewall.meta_udp443_publication_epoch();
+            return result;
+        }
+        if (config_preapply &&
+            !result.exact_cleanup_authority_valid) {
+            // Repairing missing SNAT without the exact old-generation cleanup
+            // authority would leave the generation barrier unverifiable.
+            // Healthy state is likewise not permission to ignore a malformed
+            // mandatory remainder.
+            result.meta_publication_epoch_after =
+                firewall.meta_udp443_publication_epoch();
+            return result;
+        }
+        if (config_preapply &&
+            result.owned_snat_before.state !=
+                std::optional<OwnedSnatState>{OwnedSnatState::missing}) {
+            // Healthy state needs a second observation around the exact
+            // cleanup boundary but no redundant firewall COMMIT. Unknown is
+            // deliberately not repaired or treated as success.
+            inspect_owned_snat(firewall, result.owned_snat_after);
             result.meta_publication_epoch_after =
                 firewall.meta_udp443_publication_epoch();
             return result;
@@ -334,7 +505,7 @@ RuntimeFirewallWorkerAttemptResult execute_runtime_firewall_worker_attempt(
     result.meta_publication_epoch_after =
         firewall.meta_udp443_publication_epoch();
 
-    if (result.transaction.commit_entered) {
+    if (result.transaction.commit_entered && !config_preapply) {
         inspect_forward_udp_reject(
             firewall, result.forward_udp_reject_after_commit);
         if (result.transaction.meta_activation_plan.has_value()) {
@@ -344,7 +515,7 @@ RuntimeFirewallWorkerAttemptResult execute_runtime_firewall_worker_attempt(
             inspect_fastnat(meta_services, result.fastnat_after_commit);
         }
     }
-    if (input.inspect_owned_snat) {
+    if (result.owned_snat_inspection_required) {
         inspect_owned_snat(firewall, result.owned_snat_after);
     }
     return result;
@@ -414,7 +585,18 @@ execute_runtime_firewall_worker_attempt_with_route_preparation(
     RuntimeRouteWorkerMutationRunner run_route_mutation,
     RuntimeFirewallWorkerAttemptRunner run_firewall_attempt) {
     RuntimeFirewallWorkerAttemptResult preparation_result;
+    preparation_result.operation_kind = input.operation_kind;
+    initialize_owned_conntrack_cleanup_authority(
+        preparation_result, input);
     initialize_transaction_identity(preparation_result, input.transaction);
+    preparation_result.owned_snat_inspection_required =
+        input.inspect_owned_snat ||
+        input.operation_kind ==
+            RuntimeFirewallWorkerOperationKind::config_preapply;
+    preparation_result.pre_mutation_owned_conntrack_cleanup_snapshot =
+        input.pre_mutation_owned_conntrack_cleanup_snapshot;
+    preparation_result.mandatory_owned_conntrack_cleanup_snapshot =
+        input.mandatory_owned_conntrack_cleanup_snapshot;
     auto& route_preparation = preparation_result.route_preparation;
     route_preparation.required =
         static_cast<bool>(input.route_mutation_checkpoint);

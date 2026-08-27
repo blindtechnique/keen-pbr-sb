@@ -456,6 +456,13 @@ struct ApiContext {
         return request_netfilter_runtime_refresh_fn &&
                request_netfilter_runtime_refresh_fn();
     }
+
+    // Literal aggregate tail: production binds this to the same admission
+    // which supplies acquire_runtime_mutation_fn. Restore must prove both the
+    // original token and the unforgeable admission state identity; an absent
+    // validator makes lease return unavailable rather than trusting a token.
+    std::function<bool(const RuntimeMutationAdmission::Lease&)>
+        validate_runtime_mutation_lease_fn;
 };
 
 // Request-scoped compatibility wrapper.  Production owns an unforgeable
@@ -470,6 +477,8 @@ public:
                             bool require_runtime_stopped = false)
         : context_(context) {
         if (context_.acquire_runtime_mutation_fn) {
+            validate_returned_lease_fn_ =
+                context_.validate_runtime_mutation_lease_fn;
             lease_.emplace(
                 context_.acquire_runtime_mutation_fn(
                     std::move(label),
@@ -479,6 +488,8 @@ public:
                 throw std::runtime_error(
                     "Runtime mutation admission returned an empty lease");
             }
+            production_lease_token_ = lease_->token();
+            production_state_ = ProductionState::production_owned;
             return;
         }
 
@@ -487,7 +498,7 @@ public:
     }
 
     ~ApiRuntimeMutationGuard() noexcept {
-        if (!active()) {
+        if (!unfinished()) {
             return;
         }
         try {
@@ -506,10 +517,17 @@ public:
     ApiRuntimeMutationGuard& operator=(const ApiRuntimeMutationGuard&) = delete;
 
     void finish() {
-        if (lease_.has_value()) {
-            lease_->release();
-            lease_.reset();
-            return;
+        if (production_state_ == ProductionState::production_owned) {
+            if (lease_.has_value()) {
+                lease_->release();
+                lease_.reset();
+            }
+            production_state_ = ProductionState::finished;
+        } else if (
+            production_state_ == ProductionState::handed_off) {
+            // The external continuation still owns the physical lease.
+            // Finishing only closes this guard's right to reclaim it.
+            production_state_ = ProductionState::finished;
         }
         if (legacy_active_) {
             context_.finish_config_operation();
@@ -518,22 +536,66 @@ public:
     }
 
     RuntimeMutationAdmission::Lease take_lease() {
-        if (!lease_.has_value() || legacy_active_) {
+        if (production_state_ != ProductionState::production_owned ||
+            production_handoff_taken_ ||
+            !lease_.has_value() ||
+            !static_cast<bool>(*lease_) ||
+            legacy_active_) {
             throw std::logic_error(
                 "Runtime mutation lease handoff requires production admission");
         }
         auto lease = std::move(*lease_);
         lease_.reset();
+        production_handoff_taken_ = true;
+        production_state_ = ProductionState::handed_off;
         return lease;
     }
 
+    // Reclaim the same physical production lease after an asynchronous
+    // control-side continuation. The caller retains ownership on rejection,
+    // so a programming error cannot accidentally open an admission gap.
+    bool restore_lease(
+        RuntimeMutationAdmission::Lease& returned_lease) noexcept {
+        if (production_state_ != ProductionState::handed_off ||
+            legacy_active_ ||
+            lease_.has_value() ||
+            !production_handoff_taken_ ||
+            !static_cast<bool>(returned_lease) ||
+            returned_lease.token() != production_lease_token_ ||
+            !validate_returned_lease_fn_) {
+            return false;
+        }
+        try {
+            if (!validate_returned_lease_fn_(returned_lease)) {
+                return false;
+            }
+        } catch (...) {
+            return false;
+        }
+        lease_.emplace(std::move(returned_lease));
+        production_state_ = ProductionState::production_owned;
+        return true;
+    }
+
 private:
-    bool active() const noexcept {
-        return lease_.has_value() || legacy_active_;
+    enum class ProductionState : std::uint8_t {
+        production_owned,
+        handed_off,
+        finished,
+    };
+
+    bool unfinished() const noexcept {
+        return production_state_ != ProductionState::finished ||
+               legacy_active_;
     }
 
     ApiContext& context_;
     std::optional<RuntimeMutationAdmission::Lease> lease_;
+    std::function<bool(const RuntimeMutationAdmission::Lease&)>
+        validate_returned_lease_fn_;
+    std::uint64_t production_lease_token_{0U};
+    ProductionState production_state_{ProductionState::finished};
+    bool production_handoff_taken_{false};
     bool legacy_active_{false};
 };
 

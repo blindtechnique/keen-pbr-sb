@@ -103,6 +103,50 @@ public:
         std::weak_ptr<Owner> owner_;
     };
 
+    class DrainGuard;
+
+    // Move-only evidence that this exact terminal owner accepted and closed
+    // one authoritative DrainGuard terminal. It can be minted only by a
+    // successful finish_worker_terminal()/finish_coordinator_terminal() and
+    // consumed only once for the same owner instance. A bare coordinator
+    // completion is deliberately insufficient evidence.
+    class FinalizationProof final {
+    public:
+        FinalizationProof() noexcept = default;
+
+        FinalizationProof(FinalizationProof&&) noexcept = default;
+        FinalizationProof& operator=(FinalizationProof&&) noexcept = default;
+
+        FinalizationProof(const FinalizationProof&) = delete;
+        FinalizationProof& operator=(const FinalizationProof&) = delete;
+
+        explicit operator bool() const noexcept {
+            return !owner_.expired();
+        }
+
+        bool consume_for(const Owner* expected_owner) noexcept {
+            const auto retained = owner_.lock();
+            if (!expected_owner || retained.get() != expected_owner) {
+                return false;
+            }
+            owner_.reset();
+            return true;
+        }
+
+    private:
+        friend class DrainGuard;
+
+        explicit FinalizationProof(const OwnerPtr& owner) noexcept
+            : owner_(owner) {}
+
+        std::weak_ptr<Owner> owner_;
+    };
+
+    static_assert(
+        std::is_nothrow_move_constructible_v<FinalizationProof>);
+    static_assert(
+        std::is_nothrow_move_assignable_v<FinalizationProof>);
+
     // Exclusive, move-only right to inspect and advance one retained terminal.
     // Unless finish_* succeeds, destruction re-arms the same stable terminal
     // for a later control pass. This is the exception boundary around daemon
@@ -228,22 +272,30 @@ public:
                 : MutationLeasePtr{};
         }
 
-        bool finish_worker_terminal() noexcept {
-            if (!owner_ ||
-                !owner_->finish_worker_terminal(serial_, kind_)) {
-                return false;
+        std::optional<FinalizationProof>
+        finish_worker_terminal() noexcept {
+            const auto finalized_owner = owner_;
+            if (!finalized_owner ||
+                !finalized_owner->finish_worker_terminal(
+                    serial_, kind_)) {
+                return std::nullopt;
             }
             disarm();
-            return true;
+            auto proof = FinalizationProof{finalized_owner};
+            return std::optional<FinalizationProof>{std::move(proof)};
         }
 
-        bool finish_coordinator_terminal() noexcept {
-            if (!owner_ ||
-                !owner_->finish_coordinator_terminal(serial_, kind_)) {
-                return false;
+        std::optional<FinalizationProof>
+        finish_coordinator_terminal() noexcept {
+            const auto finalized_owner = owner_;
+            if (!finalized_owner ||
+                !finalized_owner->finish_coordinator_terminal(
+                    serial_, kind_)) {
+                return std::nullopt;
             }
             disarm();
-            return true;
+            auto proof = FinalizationProof{finalized_owner};
+            return std::optional<FinalizationProof>{std::move(proof)};
         }
 
         void retry() noexcept {

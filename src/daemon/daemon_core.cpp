@@ -4279,8 +4279,9 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
             worker_input.pre_mutation_owned_conntrack_cleanup_snapshot =
                 snapshot_owned_conntrack_marks();
         }
-        worker_input.cleanup_owned_conntrack_after_commit =
-            lifecycle_start;
+        worker_input.owned_conntrack_cleanup_mode = lifecycle_start
+            ? RuntimeFirewallOwnedConntrackCleanupMode::committed_candidate
+            : RuntimeFirewallOwnedConntrackCleanupMode::none;
 
         if (!lifecycle_start) {
             state.previous_meta_cleanup = pending_meta_udp443_cleanup_;
