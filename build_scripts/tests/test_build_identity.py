@@ -432,6 +432,10 @@ class BuildIdentityTest(unittest.TestCase):
 
     def test_all_package_pipelines_use_explicit_identity_handoff(self) -> None:
         required_snippets = {
+            ".github/workflows/release-keenetic.yml": [
+                "path: ${{ runner.temp }}/frontend-dist",
+                'cp -a "$RUNNER_TEMP/frontend-dist/." frontend/dist/',
+            ],
             "build_scripts/keenetic.mk": ["KEEN_PBR_COMMIT_OVERRIDE"],
             "build_scripts/openwrt.mk": ["KEEN_PBR_COMMIT_OVERRIDE"],
             "build_scripts/debian.mk": ["KEEN_PBR_COMMIT_OVERRIDE"],
@@ -478,6 +482,11 @@ class BuildIdentityTest(unittest.TestCase):
             with self.subTest(path=relative_path, identity_scope="untracked"):
                 self.assertIn("--untracked-files=normal", content)
                 self.assertNotRegex(content, r"--untracked-files=no(?:\s|$)")
+
+        workflow = (ROOT / ".github/workflows/release-keenetic.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("\n          path: frontend-dist\n", workflow)
 
 
 class FrontendDistFreshnessTest(unittest.TestCase):

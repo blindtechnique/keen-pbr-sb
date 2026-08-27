@@ -253,13 +253,15 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: frontend-dist
-          path: frontend-dist
+          # Keep workflow artifacts outside the checkout. Build identity treats
+          # every untracked source-tree path as a deliberate dirty build.
+          path: ${{ runner.temp }}/frontend-dist
 
       - name: Stage frontend bundle
         run: |
           rm -rf frontend/dist
           mkdir -p frontend/dist
-          cp -a frontend-dist/. frontend/dist/
+          cp -a "$RUNNER_TEMP/frontend-dist/." frontend/dist/
 
       - name: Set up Go
         uses: actions/setup-go@v6
