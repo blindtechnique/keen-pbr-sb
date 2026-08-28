@@ -64,6 +64,7 @@
 #include "runtime_firewall_immediate_completion.hpp"
 #include "runtime_firewall_lifecycle_completion.hpp"
 #include "runtime_recovery_policy.hpp"
+#include "runtime_resolver_generation_snapshot.hpp"
 #include "targeted_probe_admission.hpp"
 #include "runtime_state_store.hpp"
 #include "resolver_sync_state_machine.hpp"
@@ -439,18 +440,6 @@ inline bool internal_vpn_resolution_requires_catalog_refresh(
     return config_has_stable_internal_vpn_server_policy(config) &&
            state != InternalVpnRuntimeResolutionState::verified;
 }
-
-struct ResolverGenerationSnapshot {
-    Config config;
-    KeeneticDnsCacheView keenetic_dns;
-    std::shared_ptr<const ListCacheGenerationSnapshot> list_cache_snapshot;
-    ResolverType resolver_type;
-    ResolverIpv6Policy ipv6_policy;
-    std::vector<std::string> trusted_dns_interfaces;
-    std::string expected_hash;
-    std::uint64_t generation{0};
-    std::uint64_t stream_epoch{0};
-};
 
 // Shared by background resolver recovery and foreground lifecycle activation.
 // The lifetime owns the single IPC gate and the exact streamed generation

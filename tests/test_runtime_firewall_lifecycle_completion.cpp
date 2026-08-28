@@ -1,7 +1,9 @@
 #include <doctest/doctest.h>
 
+#include "daemon/runtime_config_terminal_policy.hpp"
 #include "daemon/runtime_firewall_lifecycle_completion.hpp"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <optional>
@@ -34,6 +36,22 @@ LifecycleTerminal unverified_terminal(std::string detail) {
         true,
         true,
         std::move(detail)};
+}
+
+constexpr ConfigTerminalOperationIdentity candidate_identity() noexcept {
+    return {
+        ConfigTerminalOperationKind::candidate,
+        17U,
+        41U,
+        42U};
+}
+
+constexpr ConfigTerminalOperationIdentity rollback_identity() noexcept {
+    return {
+        ConfigTerminalOperationKind::rollback,
+        18U,
+        42U,
+        41U};
 }
 
 } // namespace
@@ -156,4 +174,226 @@ TEST_CASE("runtime firewall lifecycle completion preserves shutdown") {
     CHECK_FALSE(terminal.commit_ambiguous);
     CHECK_FALSE(terminal.transient);
     CHECK(terminal.detail == "daemon shutdown");
+}
+
+TEST_CASE("config candidate terminal policy is evidence complete") {
+    struct CandidateCase {
+        const char* name;
+        bool exact_lease_owned;
+        bool base_generation_current;
+        LifecycleOutcome outcome;
+        bool committed;
+        bool commit_ambiguous;
+        bool candidate_noop_verified;
+        bool previous_generation_certainly_retained;
+        bool exact_rollback_available;
+        ConfigCandidateAction expected;
+    };
+
+    const std::array<CandidateCase, 11> cases{{
+        {"verified no-op publishes",
+         true, true, LifecycleOutcome::verified_success,
+         false, false, true, true, true,
+         ConfigCandidateAction::publish_candidate},
+        {"verified commit publishes",
+         true, true, LifecycleOutcome::verified_success,
+         true, false, false, false, true,
+         ConfigCandidateAction::publish_candidate},
+        {"generic uncommitted success starts rollback",
+         true, true, LifecycleOutcome::verified_success,
+         false, false, false, true, true,
+         ConfigCandidateAction::begin_exact_rollback},
+        {"clean pre-commit rejection preserves runtime",
+         true, true, LifecycleOutcome::not_verified,
+         false, false, false, true, true,
+         ConfigCandidateAction::reject_runtime_unchanged},
+        {"committed unverified candidate starts rollback",
+         true, true, LifecycleOutcome::not_verified,
+         true, false, false, false, true,
+         ConfigCandidateAction::begin_exact_rollback},
+        {"ambiguous candidate starts distinct rollback",
+         true, true, LifecycleOutcome::not_verified,
+         false, true, false, false, true,
+         ConfigCandidateAction::begin_exact_rollback},
+        {"ambiguous candidate without rollback requires recovery",
+         true, true, LifecycleOutcome::not_verified,
+         false, true, false, false, false,
+         ConfigCandidateAction::recovery_required},
+        {"lost exact lease dominates verified terminal",
+         false, true, LifecycleOutcome::verified_success,
+         true, false, false, false, true,
+         ConfigCandidateAction::recovery_required},
+        {"stale base generation never publishes",
+         true, false, LifecycleOutcome::verified_success,
+         true, false, false, false, true,
+         ConfigCandidateAction::recovery_required},
+        {"shutdown never claims a clean rejection",
+         true, true, LifecycleOutcome::shutdown,
+         false, false, false, true, true,
+         ConfigCandidateAction::recovery_required},
+        {"inconsistent pre-commit evidence uses rollback",
+         true, true, LifecycleOutcome::not_verified,
+         false, false, false, false, true,
+         ConfigCandidateAction::begin_exact_rollback},
+    }};
+
+    for (const auto& test : cases) {
+        CAPTURE(test.name);
+        ConfigCandidateEvidence evidence;
+        evidence.expected_identity = candidate_identity();
+        evidence.observed_terminal_identity = candidate_identity();
+        evidence.exact_lease_owned = test.exact_lease_owned;
+        evidence.base_generation_current =
+            test.base_generation_current;
+        evidence.outcome = test.outcome;
+        evidence.committed = test.committed;
+        evidence.commit_ambiguous = test.commit_ambiguous;
+        evidence.candidate_noop_verified =
+            test.candidate_noop_verified;
+        evidence.previous_generation_certainly_retained =
+            test.previous_generation_certainly_retained;
+        evidence.exact_rollback_available =
+            test.exact_rollback_available;
+        CHECK(plan_config_candidate_terminal(evidence) == test.expected);
+    }
+}
+
+TEST_CASE("config candidate terminal policy binds exact operation identity") {
+    struct IdentityCase {
+        const char* name;
+        ConfigTerminalOperationIdentity expected;
+        ConfigTerminalOperationIdentity observed;
+    };
+
+    auto wrong_kind = candidate_identity();
+    wrong_kind.kind = ConfigTerminalOperationKind::rollback;
+    auto preapply = candidate_identity();
+    preapply.kind = ConfigTerminalOperationKind::config_preapply;
+    auto wrong_serial = candidate_identity();
+    ++wrong_serial.operation_serial;
+    auto wrong_base = candidate_identity();
+    ++wrong_base.base_runtime_generation;
+    auto wrong_target = candidate_identity();
+    ++wrong_target.target_runtime_generation;
+    auto zero_target = candidate_identity();
+    zero_target.target_runtime_generation = 0U;
+
+    const std::array<IdentityCase, 7> cases{{
+        {"wrong operation kind", candidate_identity(), wrong_kind},
+        {"preapply terminal", candidate_identity(), preapply},
+        {"wrong operation serial", candidate_identity(), wrong_serial},
+        {"wrong base generation", candidate_identity(), wrong_base},
+        {"wrong target generation", candidate_identity(), wrong_target},
+        {"missing expected identity", {}, candidate_identity()},
+        {"zero observed identity field", candidate_identity(), zero_target},
+    }};
+
+    for (const auto& test : cases) {
+        CAPTURE(test.name);
+        ConfigCandidateEvidence evidence;
+        evidence.expected_identity = test.expected;
+        evidence.observed_terminal_identity = test.observed;
+        evidence.exact_lease_owned = true;
+        evidence.base_generation_current = true;
+        evidence.outcome = LifecycleOutcome::verified_success;
+        evidence.committed = true;
+        evidence.commit_ambiguous = false;
+        evidence.exact_rollback_available = true;
+        CHECK(plan_config_candidate_terminal(evidence) ==
+              ConfigCandidateAction::recovery_required);
+    }
+}
+
+TEST_CASE("config rollback terminal policy accepts only exact verified proof") {
+    struct RollbackCase {
+        const char* name;
+        ConfigTerminalOperationIdentity expected_identity;
+        ConfigTerminalOperationIdentity observed_identity;
+        bool exact_lease_owned;
+        bool base_generation_current;
+        LifecycleOutcome outcome;
+        bool commit_ambiguous;
+        ConfigRollbackAction expected;
+    };
+
+    auto wrong_kind = rollback_identity();
+    wrong_kind.kind = ConfigTerminalOperationKind::candidate;
+    auto preapply = rollback_identity();
+    preapply.kind = ConfigTerminalOperationKind::config_preapply;
+    auto wrong_serial = rollback_identity();
+    ++wrong_serial.operation_serial;
+    auto wrong_base = rollback_identity();
+    ++wrong_base.base_runtime_generation;
+    auto wrong_target = rollback_identity();
+    ++wrong_target.target_runtime_generation;
+    auto zero_serial = rollback_identity();
+    zero_serial.operation_serial = 0U;
+
+    const std::array<RollbackCase, 13> cases{{
+        {"verified rollback is accepted",
+         rollback_identity(), rollback_identity(),
+         true, true, LifecycleOutcome::verified_success, false,
+         ConfigRollbackAction::accept_verified_rollback},
+        {"lost exact lease requires recovery",
+         rollback_identity(), rollback_identity(),
+         false, true, LifecycleOutcome::verified_success, false,
+         ConfigRollbackAction::recovery_required},
+        {"stale rollback identity requires recovery",
+         rollback_identity(), rollback_identity(),
+         true, false, LifecycleOutcome::verified_success, false,
+         ConfigRollbackAction::recovery_required},
+        {"unverified rollback requires recovery",
+         rollback_identity(), rollback_identity(),
+         true, true, LifecycleOutcome::not_verified, false,
+         ConfigRollbackAction::recovery_required},
+        {"ambiguous rollback requires recovery",
+         rollback_identity(), rollback_identity(),
+         true, true, LifecycleOutcome::verified_success, true,
+         ConfigRollbackAction::recovery_required},
+        {"shutdown rollback requires recovery",
+         rollback_identity(), rollback_identity(),
+         true, true, LifecycleOutcome::shutdown, false,
+         ConfigRollbackAction::recovery_required},
+        {"rollback rejects candidate terminal",
+         rollback_identity(), wrong_kind,
+         true, true, LifecycleOutcome::verified_success, false,
+         ConfigRollbackAction::recovery_required},
+        {"rollback rejects preapply terminal",
+         rollback_identity(), preapply,
+         true, true, LifecycleOutcome::verified_success, false,
+         ConfigRollbackAction::recovery_required},
+        {"rollback rejects wrong serial",
+         rollback_identity(), wrong_serial,
+         true, true, LifecycleOutcome::verified_success, false,
+         ConfigRollbackAction::recovery_required},
+        {"rollback rejects wrong base",
+         rollback_identity(), wrong_base,
+         true, true, LifecycleOutcome::verified_success, false,
+         ConfigRollbackAction::recovery_required},
+        {"rollback rejects wrong target",
+         rollback_identity(), wrong_target,
+         true, true, LifecycleOutcome::verified_success, false,
+         ConfigRollbackAction::recovery_required},
+        {"rollback rejects missing expected identity",
+         {}, rollback_identity(),
+         true, true, LifecycleOutcome::verified_success, false,
+         ConfigRollbackAction::recovery_required},
+        {"rollback rejects zero observed identity",
+         rollback_identity(), zero_serial,
+         true, true, LifecycleOutcome::verified_success, false,
+         ConfigRollbackAction::recovery_required},
+    }};
+
+    for (const auto& test : cases) {
+        CAPTURE(test.name);
+        ConfigRollbackEvidence evidence;
+        evidence.expected_identity = test.expected_identity;
+        evidence.observed_terminal_identity = test.observed_identity;
+        evidence.exact_lease_owned = test.exact_lease_owned;
+        evidence.base_generation_current =
+            test.base_generation_current;
+        evidence.outcome = test.outcome;
+        evidence.commit_ambiguous = test.commit_ambiguous;
+        CHECK(plan_config_rollback_terminal(evidence) == test.expected);
+    }
 }

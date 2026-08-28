@@ -26,6 +26,7 @@
 #include "../runtime/whatsapp_catalog_identity.hpp"
 #include "../util/ipv6_support.hpp"
 #include "internal_vpn_runtime_resolution.hpp"
+#include "runtime_config_terminal_policy.hpp"
 
 namespace keen_pbr3 {
 

@@ -7,6 +7,7 @@ add_executable(keen-pbr-tests
   test_runtime_firewall_worker_operation.cpp
   test_runtime_firewall_terminal_owner.cpp
   test_runtime_firewall_operation_owner.cpp
+  test_runtime_firewall_generation_input.cpp
   test_runtime_firewall_worker_attempt.cpp
   test_runtime_route_health_plan.cpp
   test_runtime_firewall_immediate_completion.cpp
@@ -176,6 +177,7 @@ add_executable(keen-pbr-tests
   test_rescue_integrity.cpp
   test_api_static.cpp
   test_resolver_health.cpp
+  test_runtime_resolver_generation_snapshot.cpp
   test_system_resolver_hook.cpp
   test_system_info.cpp
   test_network_routes.cpp
@@ -207,11 +209,13 @@ add_executable(keen-pbr-tests
   ../src/daemon/daemon_core.cpp
   ../src/daemon/daemon_runtime.cpp
   ../src/daemon/daemon_resolver.cpp
+  ../src/daemon/runtime_resolver_generation_snapshot.cpp
   ../src/daemon/keenetic_dns_refresh_coordinator.cpp
   ../src/daemon/resolver_stream_coordinator.cpp
   ../src/daemon/runtime_firewall_backend_transaction.cpp
   ../src/daemon/runtime_firewall_immediate_completion.cpp
   ../src/daemon/runtime_firewall_lifecycle_completion.cpp
+  ../src/daemon/runtime_firewall_generation_input.cpp
   ../src/daemon/runtime_firewall_operation_owner.cpp
   ../src/daemon/runtime_firewall_worker_attempt.cpp
   ../src/daemon/runtime_route_health_plan.cpp
@@ -805,6 +809,71 @@ add_test(
   COMMAND keen-pbr-resolver-stream-tests
 )
 
+# Keep candidate resolver generation independently buildable. This target
+# proves that hashing consumes only the explicit immutable candidate input,
+# without constructing Daemon or a live CacheManager. CacheManager's snapshot
+# methods remain a link dependency of ListStreamer.
+add_executable(keen-pbr-runtime-resolver-generation-tests
+  test_main.cpp
+  test_runtime_resolver_generation_snapshot.cpp
+  ../src/cache/cache_manager.cpp
+  ../src/daemon/runtime_resolver_generation_snapshot.cpp
+  ../src/config/config_writer.cpp
+  ../src/dns/dns_router.cpp
+  ../src/dns/dns_server.cpp
+  ../src/dns/dnsmasq_access_policy.cpp
+  ../src/dns/dnsmasq_gen.cpp
+  ../src/http/http_client.cpp
+  ../src/http/http_transport.cpp
+  ../src/http/curl_runtime.cpp
+  ../src/lists/list_streamer.cpp
+  ../src/lists/srs_decoder.cpp
+  ../src/config/list_parser.cpp
+  ../src/log/logger.cpp
+  ../src/log/trace.cpp
+)
+set_target_properties(
+  keen-pbr-runtime-resolver-generation-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_include_directories(
+  keen-pbr-runtime-resolver-generation-tests PRIVATE
+  ${KEEN_PBR_GENERATED_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+)
+target_link_libraries(
+  keen-pbr-runtime-resolver-generation-tests PRIVATE
+  nlohmann_json::nlohmann_json
+  fmt::fmt-header-only
+  ${KEEN_PBR_CURL_TARGET}
+  PkgConfig::ZLIB
+  Threads::Threads
+)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+   CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+  target_link_libraries(
+    keen-pbr-runtime-resolver-generation-tests PRIVATE stdc++fs)
+endif()
+target_compile_options(
+  keen-pbr-runtime-resolver-generation-tests PRIVATE
+  -ffunction-sections
+  -fdata-sections
+)
+target_link_options(
+  keen-pbr-runtime-resolver-generation-tests PRIVATE
+  -Wl,--gc-sections
+)
+keen_pbr_apply_project_options(
+  keen-pbr-runtime-resolver-generation-tests)
+add_test(
+  NAME keen-pbr-runtime-resolver-generation-tests
+  COMMAND keen-pbr-runtime-resolver-generation-tests
+)
+
 # Keep the lifecycle completion bridge independently buildable. It is the
 # allocation-safe hand-off between asynchronous firewall publication and a
 # non-control lifecycle caller; no daemon integration belongs in this target.
@@ -840,6 +909,7 @@ add_test(
 # the owner-specific scheduler, watchdog, coalescing and shutdown seams.
 add_executable(keen-pbr-runtime-firewall-owner-tests
   test_main.cpp
+  test_runtime_firewall_generation_input.cpp
   test_runtime_firewall_immediate_completion.cpp
   test_runtime_firewall_operation_owner.cpp
   test_runtime_firewall_terminal_owner.cpp
@@ -847,6 +917,7 @@ add_executable(keen-pbr-runtime-firewall-owner-tests
   ../src/daemon/runtime_firewall_operation_owner.cpp
   ../src/daemon/runtime_firewall_immediate_completion.cpp
   ../src/daemon/runtime_firewall_lifecycle_completion.cpp
+  ../src/daemon/runtime_firewall_generation_input.cpp
   ../src/runtime/periodic_task_metrics.cpp
   ../src/util/blocking_executor.cpp
   ../src/util/traced_mutex.cpp

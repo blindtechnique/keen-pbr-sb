@@ -63,6 +63,17 @@
   marks. Чистый отказ до handoff возвращает тот же lease и закрывает WAL как
   неизменённый runtime; неоднозначный или уже committed terminal сохраняет
   recovery evidence без нового пользовательского сценария восстановления.
+- Для следующего P0-1 этапа candidate/rollback выделены три явные границы без
+  преждевременного переключения production config-save. Единый immutable
+  builder формирует route-request только из той же firewall-транзакции и
+  переносит exact conntrack authority без смешивания поколений; terminal policy
+  исчерпывающе различает публикацию кандидата, доказанный неизменённый runtime,
+  отдельный точный rollback и обязательное recovery; resolver generation и её
+  hash теперь можно построить из подготовленных config, Keenetic DNS, pinned
+  list snapshot, IPv6 policy и trusted interfaces без чтения глобального
+  состояния `Daemon`. Существующие runtime-пути уже используют общий builder,
+  но синхронный candidate/rollback leg остаётся включённым до отдельного
+  цельного owner-switch с async resolver и тем же физическим lease.
 - Внутренние изменения runtime/firewall из восстановления правил, URLTest,
   Keenetic DNS, отложенного старта и автообновления списков проходят через
   единого владельца мутации. Занятый владелец сохраняет один ограниченный

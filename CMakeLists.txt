@@ -545,11 +545,13 @@ set(SOURCES
   src/daemon/daemon_core.cpp
   src/daemon/daemon_runtime.cpp
   src/daemon/daemon_resolver.cpp
+  src/daemon/runtime_resolver_generation_snapshot.cpp
   src/daemon/keenetic_dns_refresh_coordinator.cpp
   src/daemon/resolver_stream_coordinator.cpp
   src/daemon/runtime_firewall_backend_transaction.cpp
   src/daemon/runtime_firewall_immediate_completion.cpp
   src/daemon/runtime_firewall_lifecycle_completion.cpp
+  src/daemon/runtime_firewall_generation_input.cpp
   src/daemon/runtime_firewall_operation_owner.cpp
   src/daemon/runtime_firewall_worker_attempt.cpp
   src/daemon/runtime_route_health_plan.cpp

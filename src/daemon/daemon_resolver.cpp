@@ -2,12 +2,9 @@
 #include "runtime_firewall_operation_owner.hpp"
 #include "keenetic_dns_refresh_transaction.hpp"
 
-#include "../dns/dns_router.hpp"
 #include "../dns/dnsmasq_access_policy.hpp"
 #include "../dns/keenetic_dns.hpp"
 #include "../dns/dns_txt_client.hpp"
-#include "../dns/dnsmasq_gen.hpp"
-#include "../lists/list_streamer.hpp"
 #include "../log/logger.hpp"
 #ifdef WITH_API
 #include "../api/status_stream.hpp"
@@ -82,53 +79,34 @@ ResolverGenerationSnapshot Daemon::make_resolver_generation_snapshot(
         list_cache_snapshot,
     std::optional<std::vector<std::string>>
         trusted_dns_interfaces_override) {
-    ResolverGenerationSnapshot snapshot;
-    snapshot.config = config_;
-    snapshot.keenetic_dns = active_keenetic_dns_;
     if (!list_cache_snapshot) {
         list_cache_snapshot =
-            capture_relevant_list_cache_generation(snapshot.config);
+            capture_relevant_list_cache_generation(config_);
     }
-    snapshot.list_cache_snapshot = std::move(list_cache_snapshot);
-    snapshot.resolver_type =
+    const ResolverType resolver_type =
         firewall_->backend() == FirewallBackend::nftables
             ? ResolverType::DNSMASQ_NFTSET
             : ResolverType::DNSMASQ_IPSET;
-    const DnsConfig dns_cfg = snapshot.config.dns.value_or(DnsConfig{});
     const Ipv6SupportDecision ipv6_decision =
-        resolve_ipv6_support(snapshot.config);
+        resolve_ipv6_support(config_);
     log_ipv6_support_decision_once(ipv6_decision);
-    snapshot.ipv6_policy = resolver_ipv6_policy(ipv6_decision);
-    snapshot.trusted_dns_interfaces =
+    auto trusted_dns_interfaces =
         select_dnsmasq_trusted_interfaces(
             std::move(trusted_dns_interfaces_override),
             resolved_internal_vpn_servers_,
             resolved_internal_vpn_service_targets_);
-    snapshot.generation =
+    RuntimeResolverGenerationInput input;
+    input.config = config_;
+    input.keenetic_dns = active_keenetic_dns_;
+    input.list_cache_snapshot = std::move(list_cache_snapshot);
+    input.list_max_file_size_bytes = max_file_size_bytes(config_);
+    input.resolver_type = resolver_type;
+    input.ipv6_policy = resolver_ipv6_policy(ipv6_decision);
+    input.trusted_dns_interfaces =
+        std::move(trusted_dns_interfaces);
+    input.generation =
         runtime_generation_.load(std::memory_order_acquire);
-    ListStreamer streamer(
-        list_service_.cache_manager(), snapshot.list_cache_snapshot);
-    DnsServerRegistry dns_registry(
-        dns_cfg, snapshot.keenetic_dns.snapshot);
-    // DnsmasqGenerator retains references while computing the hash. Keep
-    // optional defaults alive for the complete call.
-    const RouteConfig route_cfg =
-        snapshot.config.route.value_or(RouteConfig{});
-    const std::map<std::string, ListConfig> lists =
-        snapshot.config.lists.value_or(
-            std::map<std::string, ListConfig>{});
-    DnsmasqGenerator generator(
-        dns_registry,
-        streamer,
-        route_cfg,
-        dns_cfg,
-        lists,
-        snapshot.resolver_type,
-        KEEN_PBR3_VERSION_FULL_STRING,
-        snapshot.ipv6_policy,
-        snapshot.trusted_dns_interfaces);
-    snapshot.expected_hash = generator.compute_config_hash();
-    return snapshot;
+    return build_runtime_resolver_generation_snapshot(input);
 }
 
 void Daemon::update_resolver_config_hash() {

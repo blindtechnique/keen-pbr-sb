@@ -62,6 +62,7 @@
 #include "../util/ipv6_support.hpp"
 #include "../util/time_utils.hpp"
 #include "../dns/dns_probe_server.hpp" // IWYU pragma: keep
+#include "runtime_firewall_generation_input.hpp"
 #include "runtime_firewall_operation_owner.hpp"
 #include "owned_conntrack_cleanup_operation.hpp"
 #include "runtime_route_health_plan.hpp"
@@ -4324,11 +4325,11 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                 : resolver_generation_snapshot_->list_cache_snapshot;
         }
 
-        RuntimeFirewallWorkerAttemptInput worker_input;
-        worker_input.operation_kind = lifecycle_preapply
+        RuntimeFirewallGenerationSnapshot generation_snapshot;
+        generation_snapshot.operation_kind = lifecycle_preapply
             ? RuntimeFirewallWorkerOperationKind::config_preapply
             : RuntimeFirewallWorkerOperationKind::reconcile_generation;
-        auto& transaction = worker_input.transaction;
+        auto& transaction = generation_snapshot.transaction;
         transaction.operation_serial = queued_claim.serial;
         transaction.runtime_generation = queued_claim.runtime_generation;
         transaction.config = config_;
@@ -4352,7 +4353,7 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
         transaction.committed_meta_udp443_owned_mask =
             committed_meta_udp443_owned_mask_;
         transaction.list_max_file_size_bytes =
-            max_file_size_bytes(config_);
+            max_file_size_bytes(transaction.config);
         transaction.list_cache_snapshot = state.list_cache_snapshot;
         transaction.requested_list_fingerprints =
             state.list_cache_snapshot
@@ -4375,27 +4376,18 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
         transaction.previous_native_vpn_direct_egress_snat_selectors =
             applied_native_vpn_direct_egress_snat_selectors_;
 
-        worker_input.route_health_request.operation_serial =
-            queued_claim.serial;
-        worker_input.route_health_request.runtime_generation =
-            queued_claim.runtime_generation;
-        worker_input.route_health_request.route_epoch =
+        generation_snapshot.route.route_epoch =
             routing_observation_epoch_.load(std::memory_order_acquire);
-        worker_input.route_health_request.config = transaction.config;
-        worker_input.route_health_request.outbound_marks =
-            transaction.outbound_marks;
-        worker_input.route_health_request.urltest_selections =
-            transaction.urltest_selections;
-        worker_input.route_reconcile_mode =
+        generation_snapshot.route.reconcile_mode =
             runtime_firewall_lifecycle_is_foreground(
                 context->lifecycle_kind)
             ? RouteReconcileMode::Strict
             : RouteReconcileMode::DeferredRepair;
         if (!lifecycle_preapply) {
-            worker_input.route_mutation_checkpoint =
+            generation_snapshot.route.mutation_checkpoint =
                 std::make_shared<RuntimeRouteMutationCheckpoint>();
             state.route_mutation_checkpoint =
-                worker_input.route_mutation_checkpoint;
+                generation_snapshot.route.mutation_checkpoint;
 
             std::weak_ptr<RuntimeFirewallOperationContext> weak_context{
                 context};
@@ -4405,14 +4397,15 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                 pump_runtime_route_health_checkpoint(retained);
             };
             const auto route_mutation_checkpoint =
-                worker_input.route_mutation_checkpoint;
+                generation_snapshot.route.mutation_checkpoint;
             context->cancel_worker_checkpoint =
                 [route_mutation_checkpoint]() noexcept {
                     (void)route_mutation_checkpoint->cancel();
                 };
         }
 
-        const auto route_config = config_.route.value_or(RouteConfig{});
+        const auto route_config =
+            transaction.config.route.value_or(RouteConfig{});
         const bool has_explicit_inbound_scope =
             route_config.inbound_interfaces.has_value() &&
             !route_config.inbound_interfaces->empty();
@@ -4430,31 +4423,37 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
         transaction.forwarded_scope_allows_unmarked_cleanup =
             !has_explicit_inbound_scope && !has_native_vpn_bypass;
 
-        worker_input.inspect_owned_snat =
+        generation_snapshot.cleanup.inspect_owned_snat =
             lifecycle_preapply || snat_recovery.requested;
         if (lifecycle_preapply) {
-            worker_input.pre_mutation_owned_conntrack_cleanup_snapshot =
+            generation_snapshot.cleanup
+                .pre_mutation_owned_conntrack_cleanup_snapshot =
                 snapshot_owned_conntrack_marks();
             if (snat_recovery.cleanup_snapshot.has_value()) {
                 // Mandatory authority is evidence, not an optional hint. Pass
                 // malformed or stale payloads through so the worker rejects
                 // them fail-closed instead of laundering them into absence.
-                worker_input.mandatory_owned_conntrack_cleanup_snapshot =
+                generation_snapshot.cleanup
+                    .mandatory_owned_conntrack_cleanup_snapshot =
                     snat_recovery.cleanup_snapshot;
             }
-            worker_input.owned_conntrack_cleanup_mode =
+            generation_snapshot.cleanup.mode =
                 RuntimeFirewallOwnedConntrackCleanupMode::
                     exact_pre_mutation_snapshot;
-        } else if (worker_input.inspect_owned_snat) {
-            worker_input.pre_mutation_owned_conntrack_cleanup_snapshot =
+        } else if (generation_snapshot.cleanup.inspect_owned_snat) {
+            generation_snapshot.cleanup
+                .pre_mutation_owned_conntrack_cleanup_snapshot =
                 snapshot_owned_conntrack_marks();
         }
         if (!lifecycle_preapply) {
-            worker_input.owned_conntrack_cleanup_mode = lifecycle_start
+            generation_snapshot.cleanup.mode = lifecycle_start
                 ? RuntimeFirewallOwnedConntrackCleanupMode::
                       committed_candidate
                 : RuntimeFirewallOwnedConntrackCleanupMode::none;
         }
+
+        auto worker_input = make_runtime_firewall_worker_attempt_input(
+            std::move(generation_snapshot));
 
         if (!lifecycle_start && !lifecycle_preapply) {
             state.previous_meta_cleanup = pending_meta_udp443_cleanup_;
