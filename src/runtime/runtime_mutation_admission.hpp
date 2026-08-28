@@ -244,4 +244,111 @@ private:
     std::shared_ptr<State> state_;
 };
 
+// A copyable handle around one exact move-only mutation lease. Copies share
+// the handoff state, but only the first successful take() receives ownership
+// of the Lease. This is intentionally not a shared_ptr<Lease>: after transfer
+// there is one unambiguous owner which must carry the lease through commit and
+// rollback.
+enum class RuntimeMutationLeaseHandoffState : std::uint8_t {
+    Empty,
+    Ready,
+    Taken,
+    Invalid,
+};
+
+enum class RuntimeMutationLeaseTakeStatus : std::uint8_t {
+    Acquired,
+    Empty,
+    AlreadyTaken,
+    Invalid,
+};
+
+struct RuntimeMutationLeaseTakeResult {
+    RuntimeMutationLeaseTakeStatus status{
+        RuntimeMutationLeaseTakeStatus::Empty};
+    std::unique_ptr<RuntimeMutationAdmission::Lease> lease;
+
+    explicit operator bool() const noexcept {
+        return status == RuntimeMutationLeaseTakeStatus::Acquired && lease &&
+               static_cast<bool>(*lease);
+    }
+};
+
+class RuntimeMutationLeaseHandoff final {
+public:
+    using Lease = RuntimeMutationAdmission::Lease;
+    using LeasePtr = std::unique_ptr<Lease>;
+
+    RuntimeMutationLeaseHandoff() noexcept = default;
+
+    // A null pointer or an already-empty Lease creates an explicit Invalid
+    // handle. Callers can therefore reject a broken ownership handoff instead
+    // of silently treating it as a read-only operation.
+    explicit RuntimeMutationLeaseHandoff(LeasePtr lease)
+        : state_(std::make_shared<SharedState>(std::move(lease))) {}
+
+    RuntimeMutationLeaseHandoff(const RuntimeMutationLeaseHandoff&) noexcept =
+        default;
+    RuntimeMutationLeaseHandoff& operator=(
+        const RuntimeMutationLeaseHandoff&) noexcept = default;
+    RuntimeMutationLeaseHandoff(RuntimeMutationLeaseHandoff&&) noexcept =
+        default;
+    RuntimeMutationLeaseHandoff& operator=(
+        RuntimeMutationLeaseHandoff&&) noexcept = default;
+
+    RuntimeMutationLeaseHandoffState state() const {
+        if (!state_) {
+            return RuntimeMutationLeaseHandoffState::Empty;
+        }
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        return state_->handoff_state;
+    }
+
+    RuntimeMutationLeaseTakeResult take() const {
+        if (!state_) {
+            return {RuntimeMutationLeaseTakeStatus::Empty, {}};
+        }
+
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        switch (state_->handoff_state) {
+        case RuntimeMutationLeaseHandoffState::Empty:
+            return {RuntimeMutationLeaseTakeStatus::Empty, {}};
+        case RuntimeMutationLeaseHandoffState::Taken:
+            return {RuntimeMutationLeaseTakeStatus::AlreadyTaken, {}};
+        case RuntimeMutationLeaseHandoffState::Invalid:
+            return {RuntimeMutationLeaseTakeStatus::Invalid, {}};
+        case RuntimeMutationLeaseHandoffState::Ready:
+            break;
+        }
+
+        if (!state_->lease || !static_cast<bool>(*state_->lease)) {
+            state_->lease.reset();
+            state_->handoff_state =
+                RuntimeMutationLeaseHandoffState::Invalid;
+            return {RuntimeMutationLeaseTakeStatus::Invalid, {}};
+        }
+
+        state_->handoff_state = RuntimeMutationLeaseHandoffState::Taken;
+        return {RuntimeMutationLeaseTakeStatus::Acquired,
+                std::move(state_->lease)};
+    }
+
+private:
+    struct SharedState {
+        explicit SharedState(LeasePtr exact_lease)
+            : lease(std::move(exact_lease)),
+              handoff_state(
+                  lease && static_cast<bool>(*lease)
+                      ? RuntimeMutationLeaseHandoffState::Ready
+                      : RuntimeMutationLeaseHandoffState::Invalid) {}
+
+        std::mutex mutex;
+        LeasePtr lease;
+        RuntimeMutationLeaseHandoffState handoff_state{
+            RuntimeMutationLeaseHandoffState::Invalid};
+    };
+
+    std::shared_ptr<SharedState> state_;
+};
+
 } // namespace keen_pbr3

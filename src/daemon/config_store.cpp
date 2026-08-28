@@ -97,6 +97,22 @@ PreparedActiveConfigCommit ConfigStore::prepare_active_commit(
     };
 }
 
+PreparedActiveRuntimeReloadCommit
+ConfigStore::prepare_active_runtime_reload_commit(
+    ActiveConfigSnapshotHandle base,
+    Config candidate_config,
+    OutboundMarkMap candidate_outbound_marks) {
+    auto candidate = std::make_shared<const ActiveConfigSnapshot>(
+        ActiveConfigSnapshot{
+            std::move(candidate_config),
+            std::move(candidate_outbound_marks),
+        });
+    return PreparedActiveRuntimeReloadCommit{
+        std::move(base),
+        std::move(candidate),
+    };
+}
+
 void ConfigStore::stage_config(Config staged_config, std::string staged_config_json) {
     KPBR_SHARED_UNIQUE_LOCK(lock, mutex_);
     staged_config_ = std::move(staged_config);

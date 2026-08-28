@@ -95,7 +95,7 @@ void ListRefreshTaskCoordinator::publish_noexcept(
 
 ListRefreshTaskBeginResult ListRefreshTaskCoordinator::begin(
     std::size_t total,
-    std::shared_ptr<void> operation_lifetime,
+    std::optional<RuntimeMutationLeaseHandoff> mutation_lease,
     bool upgrade_active,
     bool force_new) {
     ListRefreshTaskBeginResult result;
@@ -104,8 +104,10 @@ ListRefreshTaskBeginResult ListRefreshTaskCoordinator::begin(
         KPBR_LOCK_GUARD(mutex_);
         if (active_) {
             result.task = active_->snapshot;
-            if (upgrade_active && operation_lifetime &&
-                !active_->operation_lifetime &&
+            if (upgrade_active && mutation_lease &&
+                mutation_lease->state() ==
+                    RuntimeMutationLeaseHandoffState::Ready &&
+                !active_->mutation_lease &&
                 !active_->snapshot.cancel_requested &&
                 (active_->snapshot.status == ListRefreshTaskStatus::Queued ||
                  active_->snapshot.status == ListRefreshTaskStatus::Running)) {
@@ -113,14 +115,19 @@ ListRefreshTaskBeginResult ListRefreshTaskCoordinator::begin(
                 // worker may already have committed cache data, so the lease
                 // and force-reconcile bit must become visible together before
                 // terminalization can observe either one.
-                active_->operation_lifetime =
-                    std::move(operation_lifetime);
+                active_->mutation_lease = std::move(mutation_lease);
                 active_->force_reconcile = true;
                 result.accepted = true;
                 result.coalesced = true;
                 result.cancellation = ListRefreshCancellationToken(
                     active_->cancellation_flag);
             }
+            return result;
+        }
+
+        if (mutation_lease &&
+            mutation_lease->state() !=
+                RuntimeMutationLeaseHandoffState::Ready) {
             return result;
         }
 
@@ -138,7 +145,7 @@ ListRefreshTaskBeginResult ListRefreshTaskCoordinator::begin(
         active_ = ActiveTask{
             snapshot,
             cancellation_flag,
-            std::move(operation_lifetime),
+            std::move(mutation_lease),
             force_new};
         callback = publish_callback_;
         result.accepted = true;
@@ -208,10 +215,38 @@ bool ListRefreshTaskCoordinator::mark_applying(const std::string& id) {
     });
 }
 
+ListRefreshMutationLeaseTakeResult
+ListRefreshTaskCoordinator::take_mutation_lease(const std::string& id) {
+    KPBR_LOCK_GUARD(mutex_);
+    if (!active_ || active_->snapshot.id != id) {
+        return {ListRefreshMutationLeaseTakeStatus::TaskNotActive, {}};
+    }
+    if (active_->snapshot.status == ListRefreshTaskStatus::Queued) {
+        return {ListRefreshMutationLeaseTakeStatus::TaskNotReady, {}};
+    }
+    if (!active_->mutation_lease) {
+        return {ListRefreshMutationLeaseTakeStatus::NoLease, {}};
+    }
+
+    auto taken = active_->mutation_lease->take();
+    switch (taken.status) {
+    case RuntimeMutationLeaseTakeStatus::Acquired:
+        return {ListRefreshMutationLeaseTakeStatus::Acquired,
+                std::move(taken.lease)};
+    case RuntimeMutationLeaseTakeStatus::Empty:
+        return {ListRefreshMutationLeaseTakeStatus::NoLease, {}};
+    case RuntimeMutationLeaseTakeStatus::AlreadyTaken:
+        return {ListRefreshMutationLeaseTakeStatus::AlreadyTaken, {}};
+    case RuntimeMutationLeaseTakeStatus::Invalid:
+        return {ListRefreshMutationLeaseTakeStatus::Invalid, {}};
+    }
+    return {ListRefreshMutationLeaseTakeStatus::Invalid, {}};
+}
+
 bool ListRefreshTaskCoordinator::request_cancel(const std::string& id) {
     ListRefreshTaskSnapshot published;
     PublishCallback callback;
-    std::shared_ptr<void> operation_lifetime;
+    std::unique_ptr<RuntimeMutationAdmission::Lease> mutation_lease;
     {
         KPBR_LOCK_GUARD(mutex_);
         if (!active_ || active_->snapshot.id != id ||
@@ -244,13 +279,15 @@ bool ListRefreshTaskCoordinator::request_cancel(const std::string& id) {
             while (terminal_history_.size() > terminal_history_limit_) {
                 terminal_history_.pop_back();
             }
-            operation_lifetime =
-                std::move(active_->operation_lifetime);
+            if (active_->mutation_lease) {
+                auto taken = active_->mutation_lease->take();
+                mutation_lease = std::move(taken.lease);
+            }
             active_.reset();
         }
     }
     publish_noexcept(callback, published);
-    (void)operation_lifetime;
+    (void)mutation_lease;
     return true;
 }
 
@@ -271,7 +308,7 @@ bool ListRefreshTaskCoordinator::finish(
 
     ListRefreshTaskSnapshot published;
     PublishCallback callback;
-    std::shared_ptr<void> operation_lifetime;
+    std::unique_ptr<RuntimeMutationAdmission::Lease> mutation_lease;
     {
         KPBR_LOCK_GUARD(mutex_);
         if (!active_ || active_->snapshot.id != id) return false;
@@ -309,11 +346,14 @@ bool ListRefreshTaskCoordinator::finish(
         while (terminal_history_.size() > terminal_history_limit_) {
             terminal_history_.pop_back();
         }
-        operation_lifetime = std::move(active_->operation_lifetime);
+        if (active_->mutation_lease) {
+            auto taken = active_->mutation_lease->take();
+            mutation_lease = std::move(taken.lease);
+        }
         active_.reset();
     }
     publish_noexcept(callback, published);
-    (void)operation_lifetime;
+    (void)mutation_lease;
     return true;
 }
 

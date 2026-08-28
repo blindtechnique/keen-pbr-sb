@@ -15,6 +15,16 @@ std::string success_response(const std::string& message) {
     return nlohmann::json(resp).dump();
 }
 
+RuntimeMutationAdmission::Lease take_lifecycle_lease(
+    ApiRuntimeMutationGuard& mutation) {
+    if (!mutation.uses_production_admission() ||
+        !mutation.arm_handoff_gate()) {
+        throw ApiError(
+            "Runtime lifecycle owner is unavailable", 503);
+    }
+    return mutation.take_lease();
+}
+
 std::string run_lifecycle(ApiContext& ctx,
                           LifecycleOperationType type,
                           std::vector<LifecycleOperationStage> stages,
@@ -75,7 +85,8 @@ void register_reload_handler(ApiServer& server, ApiContext& ctx) {
             "start_routing",
             [&ctx](ApiRuntimeMutationGuard& mutation) {
                 if (ctx.can_start_runtime_with_lease()) {
-                    ctx.start_runtime_with_lease(mutation.take_lease());
+                    ctx.start_runtime_with_lease(
+                        take_lifecycle_lease(mutation));
                     return;
                 }
                 ctx.start_runtime();
@@ -99,7 +110,8 @@ void register_reload_handler(ApiServer& server, ApiContext& ctx) {
             "restart_routing",
             [&ctx](ApiRuntimeMutationGuard& mutation) {
                 if (ctx.can_restart_runtime_with_lease()) {
-                    ctx.restart_runtime_with_lease(mutation.take_lease());
+                    ctx.restart_runtime_with_lease(
+                        take_lifecycle_lease(mutation));
                     return;
                 }
                 ctx.restart_runtime();

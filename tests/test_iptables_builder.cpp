@@ -2613,6 +2613,12 @@ TEST_CASE("hook reconciliation verifies state after an ambiguous mutation") {
       temp.path() / "iptables",
       "#!/bin/sh\n"
       "printf '%s\\n' \"$*\" >> \"$KPBR_HOOK_ARGUMENTS\"\n"
+      "case \"$*\" in\n"
+      "  '-w 0 -t filter -S KeenPbrWaitProbe')\n"
+      "    echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "    exit 1 ;;\n"
+      "esac\n"
+      "[ \"$1\" = -w ] && [ \"$2\" = 2 ] && shift 2\n"
       "count=0\n"
       "[ -f \"$KPBR_HOOK_CALLS\" ] && count=$(/bin/cat \"$KPBR_HOOK_CALLS\")\n"
       "count=$((count + 1))\n"
@@ -2627,13 +2633,16 @@ TEST_CASE("hook reconciliation verifies state after an ambiguous mutation") {
   calls_env.set(calls.string());
   arguments_env.set(arguments.string());
 
+  testing::reset_restore_wait_option_probe_for_test();
   CHECK_NOTHROW(T::reconcile_hook(
       "iptables", "mangle", "OUTPUT", "KeenPbrOutput"));
   CHECK(read_iptables_test_file(calls) == "3\n");
   CHECK(read_iptables_test_file(arguments) ==
-        "-t mangle -S OUTPUT\n"
-        "-t mangle -A OUTPUT -j KeenPbrOutput\n"
-        "-t mangle -S OUTPUT\n");
+        "-w 0 -t filter -S KeenPbrWaitProbe\n"
+        "-w 2 -t mangle -S OUTPUT\n"
+        "-w 2 -t mangle -A OUTPUT -j KeenPbrOutput\n"
+        "-w 2 -t mangle -S OUTPUT\n");
+  testing::reset_restore_wait_option_probe_for_test();
 }
 
 TEST_CASE("vanished hook target is a transient publication race") {
@@ -2643,6 +2652,12 @@ TEST_CASE("vanished hook target is a transient publication race") {
       temp.path() / "iptables",
       "#!/bin/sh\n"
       "printf '%s\\n' \"$*\" >> \"$KPBR_HOOK_CALLS\"\n"
+      "case \"$*\" in\n"
+      "  '-w 0 -t filter -S KeenPbrWaitProbe')\n"
+      "    echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "    exit 1 ;;\n"
+      "esac\n"
+      "[ \"$1\" = -w ] && [ \"$2\" = 2 ] && shift 2\n"
       "case \"$*\" in\n"
       "  '-t mangle -S PREROUTING') exit 0 ;;\n"
       "  '-t mangle -A PREROUTING -j KeenPbrTable')\n"
@@ -2657,13 +2672,16 @@ TEST_CASE("vanished hook target is a transient publication race") {
   calls_env.set(calls.string());
   IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
 
+  testing::reset_restore_wait_option_probe_for_test();
   CHECK_THROWS_AS(
       T::reconcile_hook(
           "iptables", "mangle", "PREROUTING", "KeenPbrTable"),
       TransientFirewallError);
   CHECK(read_iptables_test_file(calls) ==
-        "-t mangle -S PREROUTING\n"
-        "-t mangle -A PREROUTING -j KeenPbrTable\n");
+        "-w 0 -t filter -S KeenPbrWaitProbe\n"
+        "-w 2 -t mangle -S PREROUTING\n"
+        "-w 2 -t mangle -A PREROUTING -j KeenPbrTable\n");
+  testing::reset_restore_wait_option_probe_for_test();
 }
 
 TEST_CASE("legacy Keenetic iptables reports vanished hook target as transient") {
@@ -2673,6 +2691,12 @@ TEST_CASE("legacy Keenetic iptables reports vanished hook target as transient") 
       temp.path() / "iptables",
       "#!/bin/sh\n"
       "printf '%s\\n' \"$*\" >> \"$KPBR_HOOK_CALLS\"\n"
+      "case \"$*\" in\n"
+      "  '-w 0 -t filter -S KeenPbrWaitProbe')\n"
+      "    echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "    exit 1 ;;\n"
+      "esac\n"
+      "[ \"$1\" = -w ] && [ \"$2\" = 2 ] && shift 2\n"
       "case \"$*\" in\n"
       "  '-t mangle -S PREROUTING') exit 0 ;;\n"
       "  '-t mangle -A PREROUTING -j KeenPbrTable')\n"
@@ -2688,13 +2712,16 @@ TEST_CASE("legacy Keenetic iptables reports vanished hook target as transient") 
   calls_env.set(calls.string());
   IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
 
+  testing::reset_restore_wait_option_probe_for_test();
   CHECK_THROWS_AS(
       T::reconcile_hook(
           "iptables", "mangle", "PREROUTING", "KeenPbrTable"),
       TransientFirewallError);
   CHECK(read_iptables_test_file(calls) ==
-        "-t mangle -S PREROUTING\n"
-        "-t mangle -A PREROUTING -j KeenPbrTable\n");
+        "-w 0 -t filter -S KeenPbrWaitProbe\n"
+        "-w 2 -t mangle -S PREROUTING\n"
+        "-w 2 -t mangle -A PREROUTING -j KeenPbrTable\n");
+  testing::reset_restore_wait_option_probe_for_test();
 }
 
 TEST_CASE("vanished duplicate hook target is a transient publication race") {
@@ -2704,6 +2731,12 @@ TEST_CASE("vanished duplicate hook target is a transient publication race") {
       temp.path() / "iptables",
       "#!/bin/sh\n"
       "printf '%s\\n' \"$*\" >> \"$KPBR_HOOK_CALLS\"\n"
+      "case \"$*\" in\n"
+      "  '-w 0 -t filter -S KeenPbrWaitProbe')\n"
+      "    echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "    exit 1 ;;\n"
+      "esac\n"
+      "[ \"$1\" = -w ] && [ \"$2\" = 2 ] && shift 2\n"
       "case \"$*\" in\n"
       "  '-t mangle -S OUTPUT')\n"
       "    echo '-A OUTPUT -j KeenPbrOutput'\n"
@@ -2722,13 +2755,16 @@ TEST_CASE("vanished duplicate hook target is a transient publication race") {
   calls_env.set(calls.string());
   IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
 
+  testing::reset_restore_wait_option_probe_for_test();
   CHECK_THROWS_AS(
       T::reconcile_hook(
           "iptables", "mangle", "OUTPUT", "KeenPbrOutput"),
       TransientFirewallError);
   CHECK(read_iptables_test_file(calls) ==
-        "-t mangle -S OUTPUT\n"
-        "-t mangle -D OUTPUT -j KeenPbrOutput\n");
+        "-w 0 -t filter -S KeenPbrWaitProbe\n"
+        "-w 2 -t mangle -S OUTPUT\n"
+        "-w 2 -t mangle -D OUTPUT -j KeenPbrOutput\n");
+  testing::reset_restore_wait_option_probe_for_test();
 }
 
 TEST_CASE("hook reconciliation surfaces permanent command failures immediately") {
@@ -2737,6 +2773,12 @@ TEST_CASE("hook reconciliation surfaces permanent command failures immediately")
   write_iptables_test_executable(
       temp.path() / "iptables",
       "#!/bin/sh\n"
+      "case \"$*\" in\n"
+      "  '-w 0 -t filter -S KeenPbrWaitProbe')\n"
+      "    echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "    exit 1 ;;\n"
+      "esac\n"
+      "[ \"$1\" = -w ] && [ \"$2\" = 2 ] && shift 2\n"
       "printf x >> \"$KPBR_HOOK_CALLS\"\n"
       "exit 2\n");
   IptablesTestEnvironment path("PATH");
@@ -2745,11 +2787,13 @@ TEST_CASE("hook reconciliation surfaces permanent command failures immediately")
   calls_env.set(calls.string());
   IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
 
+  testing::reset_restore_wait_option_probe_for_test();
   CHECK_THROWS_AS(
       T::reconcile_hook(
           "iptables", "mangle", "OUTPUT", "KeenPbrOutput"),
       FirewallError);
   CHECK(read_iptables_test_file(calls) == "x");
+  testing::reset_restore_wait_option_probe_for_test();
 }
 
 TEST_CASE("generation verification retries a coherent publication mismatch") {
@@ -2758,6 +2802,12 @@ TEST_CASE("generation verification retries a coherent publication mismatch") {
   write_iptables_test_executable(
       temp.path() / "iptables",
       "#!/bin/sh\n"
+      "case \"$*\" in\n"
+      "  '-w 0 -t filter -S KeenPbrWaitProbe')\n"
+      "    echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "    exit 1 ;;\n"
+      "esac\n"
+      "[ \"$1\" = -w ] && [ \"$2\" = 2 ] && shift 2\n"
       "count=0\n"
       "[ -f \"$KPBR_VERIFY_CALLS\" ] && count=$(/bin/cat \"$KPBR_VERIFY_CALLS\")\n"
       "count=$((count + 1))\n"
@@ -2773,9 +2823,11 @@ TEST_CASE("generation verification retries a coherent publication mismatch") {
   use_iptables_test_path(path, temp.path());
   calls_env.set(calls.string());
 
+  testing::reset_restore_wait_option_probe_for_test();
   CHECK_NOTHROW(T::verify_applied_generation(
       FirewallSetGeneration::A));
   CHECK(read_iptables_test_file(calls) == "4\n");
+  testing::reset_restore_wait_option_probe_for_test();
 }
 
 TEST_CASE("persistent generation verification mismatch stays transient") {
@@ -2784,6 +2836,12 @@ TEST_CASE("persistent generation verification mismatch stays transient") {
   write_iptables_test_executable(
       temp.path() / "iptables",
       "#!/bin/sh\n"
+      "case \"$*\" in\n"
+      "  '-w 0 -t filter -S KeenPbrWaitProbe')\n"
+      "    echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "    exit 1 ;;\n"
+      "esac\n"
+      "[ \"$1\" = -w ] && [ \"$2\" = 2 ] && shift 2\n"
       "printf x >> \"$KPBR_VERIFY_CALLS\"\n"
       "echo '-A KeenPbrTable -j KeenPbrTable_B'\n"
       "echo '-A PREROUTING -j KeenPbrTable'\n"
@@ -2794,10 +2852,12 @@ TEST_CASE("persistent generation verification mismatch stays transient") {
   use_iptables_test_path(path, temp.path());
   calls_env.set(calls.string());
 
+  testing::reset_restore_wait_option_probe_for_test();
   CHECK_THROWS_AS(
       T::verify_applied_generation(FirewallSetGeneration::A),
       TransientFirewallError);
   CHECK(read_iptables_test_file(calls).size() == 10);
+  testing::reset_restore_wait_option_probe_for_test();
 }
 
 TEST_CASE("RulesOnly keeps the static generations of the previous apply") {

@@ -121,7 +121,8 @@ inline ConfigRuntimeTerminalAction plan_config_runtime_terminal(
             ConfigTerminalOperationKind::candidate &&
         terminal.outcome ==
             RuntimeFirewallLifecycleOutcome::verified_success &&
-        terminal.committed && !terminal.commit_ambiguous;
+        (terminal.committed || terminal.candidate_noop_verified) &&
+        !terminal.commit_ambiguous;
     const bool exact_rollback_verified =
         terminal.observed_config_identity &&
         terminal.observed_config_identity->kind ==

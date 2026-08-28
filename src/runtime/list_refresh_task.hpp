@@ -2,6 +2,7 @@
 
 #include "../daemon/list_service.hpp"
 #include "../util/traced_mutex.hpp"
+#include "runtime_mutation_admission.hpp"
 
 #include <atomic>
 #include <cstddef>
@@ -68,6 +69,26 @@ struct ListRefreshTaskBeginResult {
     ListRefreshCancellationToken cancellation;
 };
 
+enum class ListRefreshMutationLeaseTakeStatus : std::uint8_t {
+    Acquired,
+    TaskNotActive,
+    TaskNotReady,
+    NoLease,
+    AlreadyTaken,
+    Invalid,
+};
+
+struct ListRefreshMutationLeaseTakeResult {
+    ListRefreshMutationLeaseTakeStatus status{
+        ListRefreshMutationLeaseTakeStatus::TaskNotActive};
+    std::unique_ptr<RuntimeMutationAdmission::Lease> lease;
+
+    explicit operator bool() const noexcept {
+        return status == ListRefreshMutationLeaseTakeStatus::Acquired &&
+               lease && static_cast<bool>(*lease);
+    }
+};
+
 class ListRefreshTaskCoordinator {
 public:
     using Clock = std::function<std::int64_t()>;
@@ -76,16 +97,15 @@ public:
     explicit ListRefreshTaskCoordinator(std::size_t terminal_history_limit = 8,
                                         Clock clock = {});
 
-    // Retains the admitted operation lifetime until terminal publication (or
-    // queued cancellation). The daemon uses this to keep its exact runtime
-    // mutation lease across worker refresh, control-loop apply/rollback and
-    // final task publication without a second ownership mechanism. A
+    // Retains a typed one-shot handoff for the admitted mutation lease until
+    // the control-loop owner takes it or terminal publication releases it. A
     // `upgrade_active` can atomically attach a reload to an active read-only
     // task. `force_new` carries the same durable reconcile obligation when a
     // deferred retry starts only after that original task has terminalized.
     ListRefreshTaskBeginResult begin(
         std::size_t total,
-        std::shared_ptr<void> operation_lifetime = {},
+        std::optional<RuntimeMutationLeaseHandoff> mutation_lease =
+            std::nullopt,
         bool upgrade_active = false,
         bool force_new = false);
     bool mark_running(const std::string& id,
@@ -94,6 +114,11 @@ public:
                          std::size_t completed,
                          std::optional<std::string> current = std::nullopt);
     bool mark_applying(const std::string& id);
+    // Running is accepted as well as Applying because a refresh may have
+    // durably committed list cache before cancellation and still require an
+    // exact reconcile/rollback owner. Queued and stale tasks fail closed.
+    ListRefreshMutationLeaseTakeResult take_mutation_lease(
+        const std::string& id);
     bool request_cancel(const std::string& id);
     bool request_cancel_active();
 
@@ -119,7 +144,7 @@ private:
     struct ActiveTask {
         ListRefreshTaskSnapshot snapshot;
         std::shared_ptr<std::atomic<bool>> cancellation_flag;
-        std::shared_ptr<void> operation_lifetime;
+        std::optional<RuntimeMutationLeaseHandoff> mutation_lease;
         bool force_reconcile{false};
     };
 

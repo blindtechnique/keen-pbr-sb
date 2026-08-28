@@ -3339,6 +3339,8 @@ void Daemon::commit_remote_list_refresh_task_result(
     std::string error,
     std::string source,
     TraceId trace_id) {
+    (void)config_snapshot;
+    (void)runtime_active_snapshot;
     const bool reschedule = source == "autoupdate" || source == "post-apply";
     const std::string fallback_task_id = task_id;
     const ListRefreshCancellationToken fallback_cancellation = cancellation;
@@ -3349,8 +3351,6 @@ void Daemon::commit_remote_list_refresh_task_result(
         [this,
          task_id = std::move(task_id),
          cancellation = std::move(cancellation),
-         config_snapshot = std::move(config_snapshot),
-         runtime_active_snapshot,
          generation,
          reload,
          completion_result,
@@ -3380,37 +3380,323 @@ void Daemon::commit_remote_list_refresh_task_result(
                     refresh_result.value_or(RemoteListsRefreshResult{}));
                 schedule_next();
             };
-            const auto reconcile_committed_cache =
-                [this, reload, force_reconcile, &source](
-                    RemoteListsRefreshResult& committed,
-                    bool& reloaded) -> std::optional<std::string> {
-                if (!should_reconcile_committed_list_cache(
-                        reload,
-                        force_reconcile,
-                        routing_runtime_active(),
-                        committed.any_changed())) {
-                    return std::nullopt;
-                }
+            struct ListRefreshReconcileCompletion final {
+                std::string task_id;
+                ListRefreshCancellationToken cancellation;
+                RemoteListsRefreshResult refresh_result;
+                std::string refresh_error;
+                std::string source;
+                bool reschedule{false};
+                std::uint64_t expected_lease_token{0U};
+            };
+
+            const auto schedule_forced_reconcile =
+                [this](const std::string& retry_source) noexcept {
                 try {
-                    // Cache writes are already durable enough for the next
-                    // startup and cannot be undone here. Re-apply the current
-                    // configuration (never the worker's stale snapshot) so a
-                    // subsequent HTTP 304 cannot leave live routing/DNS on
-                    // the previous list contents.
-                    const Config current_config = config_;
-                    bool rolled_back = false;
-                    apply_config_with_rollback(
-                        current_config, rolled_back, false);
-                    reloaded = true;
-                    Logger::instance().info(
-                        "Lists refresh ({}): reconciled committed cache "
-                        "against the current runtime generation",
-                        source);
-                    return std::nullopt;
-                } catch (const std::exception& reconcile_error) {
-                    return std::string(
-                               "failed to reconcile committed list cache: ") +
-                           reconcile_error.what();
+                    schedule_deferred_list_refresh(
+                        retry_source,
+                        runtime_generation_.load(
+                            std::memory_order_acquire),
+                        /*force_reconcile=*/true);
+                } catch (const std::exception& retry_error) {
+                    try {
+                        Logger::instance().error(
+                            "Lists refresh forced reconcile could not be "
+                            "scheduled: {}",
+                            retry_error.what());
+                    } catch (...) {
+                    }
+                } catch (...) {
+                    try {
+                        Logger::instance().error(
+                            "Lists refresh forced reconcile could not be "
+                            "scheduled");
+                    } catch (...) {
+                    }
+                }
+            };
+
+            const auto start_runtime_reconcile =
+                [this,
+                 &task_id,
+                 &cancellation,
+                 &source,
+                 reschedule,
+                 schedule_forced_reconcile](
+                    RemoteListsRefreshResult committed,
+                    std::string completion_error) {
+                std::shared_ptr<ListRefreshReconcileCompletion> state;
+                try {
+                    state =
+                        std::make_shared<ListRefreshReconcileCompletion>();
+                    state->task_id = task_id;
+                    state->cancellation = cancellation;
+                    state->source = source;
+                    state->reschedule = reschedule;
+                    state->refresh_error = std::move(completion_error);
+                    state->refresh_result = std::move(committed);
+                } catch (const std::exception& setup_error) {
+                    const bool cancelled =
+                        cancellation.cancellation_requested();
+                    if (cancelled) {
+                        (void)list_refresh_tasks_.finish_cancelled(
+                            task_id,
+                            "list refresh cancelled after committing "
+                            "completed lists",
+                            std::move(committed),
+                            false);
+                    } else {
+                        (void)list_refresh_tasks_.fail(
+                            task_id,
+                            setup_error.what(),
+                            std::move(committed),
+                            false);
+                    }
+                    schedule_forced_reconcile(source);
+                    return;
+                } catch (...) {
+                    if (cancellation.cancellation_requested()) {
+                        (void)list_refresh_tasks_.finish_cancelled(
+                            task_id,
+                            "list refresh cancelled after committing "
+                            "completed lists",
+                            std::move(committed),
+                            false);
+                    } else {
+                        (void)list_refresh_tasks_.fail(
+                            task_id,
+                            "failed to prepare committed list reconcile",
+                            std::move(committed),
+                            false);
+                    }
+                    schedule_forced_reconcile(source);
+                    return;
+                }
+
+                const auto fail_before_owner =
+                    [this,
+                     state,
+                     schedule_forced_reconcile](
+                        std::string message,
+                        std::unique_ptr<
+                            RuntimeMutationAdmission::Lease> exact) {
+                    try {
+                        if (state->cancellation.cancellation_requested()) {
+                            (void)list_refresh_tasks_.finish_cancelled(
+                                state->task_id,
+                                "list refresh cancelled after committing "
+                                "completed lists",
+                                std::move(state->refresh_result),
+                                false);
+                        } else {
+                            (void)list_refresh_tasks_.fail(
+                                state->task_id,
+                                std::move(message),
+                                std::move(state->refresh_result),
+                                false);
+                        }
+                    } catch (...) {
+                    }
+                    exact.reset();
+                    schedule_forced_reconcile(state->source);
+                };
+
+                const bool applying =
+                    list_refresh_tasks_.mark_applying(state->task_id);
+                if (!applying &&
+                    !state->cancellation.cancellation_requested()) {
+                    fail_before_owner(
+                        "list refresh task left the running state before "
+                        "runtime reconcile",
+                        {});
+                    return;
+                }
+
+                ActiveConfigSnapshotHandle base_active_snapshot;
+                PreparedRuntimeInputs candidate;
+                PreparedRuntimeInputs rollback;
+                try {
+                    base_active_snapshot =
+                        config_store_.pin_active_snapshot();
+                    if (!base_active_snapshot) {
+                        fail_before_owner(
+                            "active configuration snapshot is unavailable",
+                            {});
+                        return;
+                    }
+                    // The worker has already atomically committed cache files.
+                    // Candidate preparation therefore sees the new immutable
+                    // cache generation. The active-reload transaction replaces
+                    // rollback resolver/list inputs with its exact published
+                    // generation before either firewall phase starts.
+                    candidate = prepare_runtime_inputs(
+                        base_active_snapshot->config,
+                        RemoteListPreparationMode::None);
+                    rollback = prepare_runtime_inputs(
+                        base_active_snapshot->config,
+                        RemoteListPreparationMode::None);
+                } catch (const std::exception& preparation_error) {
+                    fail_before_owner(
+                        std::string{
+                            "failed to prepare committed list reconcile: "} +
+                            preparation_error.what(),
+                        {});
+                    return;
+                } catch (...) {
+                    fail_before_owner(
+                        "failed to prepare committed list reconcile",
+                        {});
+                    return;
+                }
+
+                auto taken = list_refresh_tasks_.take_mutation_lease(
+                    state->task_id);
+                if (!taken || !taken.lease ||
+                    !runtime_mutation_admission_.owns(*taken.lease)) {
+                    fail_before_owner(
+                        "committed list reconcile did not receive its exact "
+                        "mutation lease",
+                        std::move(taken.lease));
+                    return;
+                }
+                state->expected_lease_token = taken.lease->token();
+
+                try {
+                    RuntimeFirewallPreownedTerminalContinuation continuation{
+                        [this,
+                         state,
+                         schedule_forced_reconcile](
+                            RuntimeFirewallLifecycleTerminal terminal,
+                            std::unique_ptr<
+                                RuntimeMutationAdmission::Lease> exact) mutable
+                            noexcept {
+                            const bool exact_lease_returned = exact &&
+                                static_cast<bool>(*exact) &&
+                                exact->token() ==
+                                    state->expected_lease_token &&
+                                runtime_mutation_admission_.owns(*exact);
+                            const bool verified_terminal =
+                                terminal.outcome ==
+                                    RuntimeFirewallLifecycleOutcome::
+                                        verified_success &&
+                                !terminal.commit_ambiguous &&
+                                terminal.observed_config_identity.has_value();
+                            const bool candidate_published =
+                                exact_lease_returned && verified_terminal &&
+                                terminal.observed_config_identity->kind ==
+                                    ConfigTerminalOperationKind::candidate &&
+                                (terminal.committed ||
+                                 terminal.candidate_noop_verified);
+                            const bool rollback_verified =
+                                exact_lease_returned && verified_terminal &&
+                                terminal.observed_config_identity->kind ==
+                                    ConfigTerminalOperationKind::rollback &&
+                                (terminal.committed ||
+                                 terminal.candidate_noop_verified);
+
+                            std::string owner_error;
+                            try {
+                                if (!exact_lease_returned) {
+                                    owner_error =
+                                        "runtime reconcile did not return its "
+                                        "exact mutation lease";
+                                } else if (rollback_verified) {
+                                    owner_error = terminal.detail.empty()
+                                        ? "committed list reconcile was "
+                                          "rolled back"
+                                        : terminal.detail;
+                                } else if (!candidate_published) {
+                                    owner_error = terminal.detail.empty()
+                                        ? "committed list reconcile terminal "
+                                          "is unknown"
+                                        : terminal.detail;
+                                }
+
+                                if (state->cancellation.
+                                        cancellation_requested()) {
+                                    std::string cancellation_error =
+                                        "list refresh cancelled after "
+                                        "committing completed lists";
+                                    if (!candidate_published &&
+                                        !owner_error.empty()) {
+                                        cancellation_error += ": ";
+                                        cancellation_error += owner_error;
+                                    }
+                                    (void)list_refresh_tasks_.
+                                        finish_cancelled(
+                                            state->task_id,
+                                            std::move(cancellation_error),
+                                            std::move(
+                                                state->refresh_result),
+                                            candidate_published);
+                                } else if (!candidate_published) {
+                                    (void)list_refresh_tasks_.fail(
+                                        state->task_id,
+                                        std::move(owner_error),
+                                        std::move(state->refresh_result),
+                                        false);
+                                } else if (!state->refresh_error.empty()) {
+                                    (void)list_refresh_tasks_.fail(
+                                        state->task_id,
+                                        std::move(state->refresh_error),
+                                        std::move(state->refresh_result),
+                                        true);
+                                } else if (
+                                    state->refresh_result.any_failed()) {
+                                    const std::string message =
+                                        "failed to refresh list(s): " +
+                                        format_list_names(
+                                            state->refresh_result.
+                                                failed_lists);
+                                    (void)list_refresh_tasks_.fail(
+                                        state->task_id,
+                                        message,
+                                        std::move(state->refresh_result),
+                                        true);
+                                } else {
+                                    (void)list_refresh_tasks_.succeed(
+                                        state->task_id,
+                                        std::move(state->refresh_result),
+                                        true);
+                                }
+                            } catch (...) {
+                                try {
+                                    (void)list_refresh_tasks_.fail(
+                                        state->task_id,
+                                        "committed list reconcile "
+                                        "continuation failed",
+                                        std::move(state->refresh_result),
+                                        candidate_published);
+                                } catch (...) {
+                                }
+                            }
+
+                            // Task terminal publication is complete. Return
+                            // global mutation admission before installing
+                            // either retry/cadence scheduler work.
+                            exact.reset();
+                            if (!candidate_published) {
+                                schedule_forced_reconcile(state->source);
+                            } else if (state->reschedule) {
+                                try {
+                                    schedule_lists_autoupdate();
+                                } catch (...) {
+                                }
+                            }
+                        }};
+                    begin_preowned_runtime_firewall_active_reload(
+                        std::move(taken.lease),
+                        std::move(base_active_snapshot),
+                        std::move(candidate),
+                        std::move(rollback),
+                        std::move(continuation));
+                } catch (const std::exception& owner_error) {
+                    fail_before_owner(
+                        owner_error.what(), std::move(taken.lease));
+                } catch (...) {
+                    fail_before_owner(
+                        "committed list reconcile owner setup failed",
+                        std::move(taken.lease));
                 }
             };
 
@@ -3446,15 +3732,18 @@ void Daemon::commit_remote_list_refresh_task_result(
                 RemoteListsRefreshResult committed =
                     std::move(*refresh_result);
                 refresh_result.reset();
+                if (should_reconcile_committed_list_cache(
+                        reload,
+                        force_reconcile,
+                        routing_runtime_active(),
+                        committed.any_changed())) {
+                    start_runtime_reconcile(
+                        std::move(committed), error);
+                    return;
+                }
+
                 bool reloaded = false;
-                if (const auto reconcile_error =
-                        reconcile_committed_cache(committed, reloaded)) {
-                    (void)list_refresh_tasks_.fail(
-                        task_id,
-                        *reconcile_error,
-                        std::move(committed),
-                        reloaded);
-                } else if (cancellation.cancellation_requested()) {
+                if (cancellation.cancellation_requested()) {
                     (void)list_refresh_tasks_.finish_cancelled(
                         task_id,
                         "list refresh cancelled after committing completed lists",
@@ -3498,33 +3787,25 @@ void Daemon::commit_remote_list_refresh_task_result(
                 finish_failed(message);
                 return;
             }
-            if (!error.empty() &&
-                !cancellation.cancellation_requested()) {
-                Logger::instance().error(
-                    "Lists refresh ({}) failed: {}", source, error);
-                finish_failed(error);
-                return;
-            }
 
             if (cancellation.cancellation_requested()) {
                 RemoteListsRefreshResult committed =
                     std::move(*refresh_result);
                 refresh_result.reset();
-                bool reloaded = false;
-                if (const auto reconcile_error =
-                        reconcile_committed_cache(committed, reloaded)) {
-                    (void)list_refresh_tasks_.fail(
-                        task_id,
-                        *reconcile_error,
-                        std::move(committed),
-                        reloaded);
-                } else {
-                    (void)list_refresh_tasks_.finish_cancelled(
-                        task_id,
-                        "list refresh cancelled after committing completed lists",
-                        std::move(committed),
-                        reloaded);
+                if (should_reconcile_committed_list_cache(
+                        reload,
+                        force_reconcile,
+                        routing_runtime_active(),
+                        committed.any_changed())) {
+                    start_runtime_reconcile(
+                        std::move(committed), error);
+                    return;
                 }
+                (void)list_refresh_tasks_.finish_cancelled(
+                    task_id,
+                    "list refresh cancelled after committing completed lists",
+                    std::move(committed),
+                    false);
                 schedule_next();
                 return;
             }
@@ -3547,6 +3828,28 @@ void Daemon::commit_remote_list_refresh_task_result(
                     source);
             }
 
+            if (!error.empty()) {
+                if (should_reconcile_committed_list_cache(
+                        reload,
+                        force_reconcile,
+                        routing_runtime_active(),
+                        result.refresh_result.any_changed())) {
+                    start_runtime_reconcile(
+                        std::move(result.refresh_result), error);
+                    return;
+                }
+                Logger::instance().error(
+                    "Lists refresh ({}) failed: {}",
+                    source,
+                    error);
+                (void)list_refresh_tasks_.fail(
+                    task_id,
+                    error,
+                    std::move(result.refresh_result),
+                    false);
+                schedule_next();
+                return;
+            }
             if (force_reconcile &&
                 should_reconcile_committed_list_cache(
                     reload,
@@ -3557,96 +3860,19 @@ void Daemon::commit_remote_list_refresh_task_result(
                     "Lists refresh ({}): applying an upgraded reload request "
                     "against the current runtime generation",
                     source);
-                if (!list_refresh_tasks_.mark_applying(task_id)) {
-                    if (cancellation.cancellation_requested()) {
-                        if (const auto reconcile_error =
-                                reconcile_committed_cache(
-                                    result.refresh_result,
-                                    result.reloaded)) {
-                            (void)list_refresh_tasks_.fail(
-                                task_id,
-                                *reconcile_error,
-                                std::move(result.refresh_result),
-                                result.reloaded);
-                        } else {
-                            (void)list_refresh_tasks_.finish_cancelled(
-                                task_id,
-                                "list refresh cancelled after committing completed lists",
-                                std::move(result.refresh_result),
-                                result.reloaded);
-                        }
-                    } else {
-                        (void)list_refresh_tasks_.fail(
-                            task_id,
-                            "list refresh task left the running state before apply",
-                            std::move(result.refresh_result),
-                            result.reloaded);
-                    }
-                    schedule_next();
-                    return;
-                }
-                if (const auto reconcile_error =
-                        reconcile_committed_cache(
-                            result.refresh_result, result.reloaded)) {
-                    (void)list_refresh_tasks_.fail(
-                        task_id,
-                        *reconcile_error,
-                        std::move(result.refresh_result),
-                        result.reloaded);
-                    schedule_next();
-                    return;
-                }
+                start_runtime_reconcile(
+                    std::move(result.refresh_result), error);
+                return;
             } else if (reload && should_reload_runtime_after_list_refresh(
-                                     runtime_active_snapshot,
+                                     routing_runtime_active(),
                                      result.refresh_result)) {
                 Logger::instance().info(
                     "Lists refresh ({}): relevant list(s) changed ({}), reloading runtime",
                     source,
                     format_list_names(result.refresh_result.relevant_changed_lists));
-                if (!list_refresh_tasks_.mark_applying(task_id)) {
-                    if (cancellation.cancellation_requested()) {
-                        if (const auto reconcile_error =
-                                reconcile_committed_cache(
-                                    result.refresh_result,
-                                    result.reloaded)) {
-                            (void)list_refresh_tasks_.fail(
-                                task_id,
-                                *reconcile_error,
-                                std::move(result.refresh_result),
-                                result.reloaded);
-                        } else {
-                            (void)list_refresh_tasks_.finish_cancelled(
-                                task_id,
-                                "list refresh cancelled after committing completed lists",
-                                std::move(result.refresh_result),
-                                result.reloaded);
-                        }
-                    } else {
-                        (void)list_refresh_tasks_.fail(
-                            task_id,
-                            "list refresh task left the running state before apply",
-                            std::move(result.refresh_result),
-                            result.reloaded);
-                    }
-                    schedule_next();
-                    return;
-                }
-                try {
-                    bool rolled_back = false;
-                    apply_config_with_rollback(config_snapshot, rolled_back, false);
-                    result.reloaded = true;
-                } catch (const std::exception& e) {
-                    const std::string message = e.what();
-                    Logger::instance().error(
-                        "Lists refresh ({}) reload failed: {}", source, message);
-                    (void)list_refresh_tasks_.fail(
-                        task_id,
-                        message,
-                        std::move(result.refresh_result),
-                        result.reloaded);
-                    schedule_next();
-                    return;
-                }
+                start_runtime_reconcile(
+                    std::move(result.refresh_result), error);
+                return;
             } else if (result.refresh_result.any_relevant_changed()) {
                 Logger::instance().info(
                     (reload || force_reconcile)
@@ -3714,7 +3940,8 @@ RemoteListRefreshTaskStartResult Daemon::start_remote_list_refresh_task(
         return {false, {}, "daemon is shutting down"};
     }
 
-    std::shared_ptr<RuntimeMutationAdmission::Lease> mutation_lease;
+    std::optional<RuntimeMutationLeaseHandoff>
+        mutation_lease_handoff;
     if (reload) {
         auto admitted = runtime_mutation_admission_.try_acquire(
             "lists-refresh-" + source);
@@ -3724,9 +3951,10 @@ RemoteListRefreshTaskStartResult Daemon::start_remote_list_refresh_task(
                 list_refresh_tasks_.active().has_value());
             return {false, {}, "busy", retain_force};
         }
-        mutation_lease =
-            std::make_shared<RuntimeMutationAdmission::Lease>(
-                std::move(*admitted));
+        mutation_lease_handoff.emplace(
+            std::make_unique<
+                RuntimeMutationAdmission::Lease>(
+                    std::move(*admitted)));
     }
 
     const Config config_snapshot = config_;
@@ -3738,7 +3966,7 @@ RemoteListRefreshTaskStartResult Daemon::start_remote_list_refresh_task(
 
     auto started = list_refresh_tasks_.begin(
         target_selection.list_names.size(),
-        mutation_lease,
+        std::move(mutation_lease_handoff),
         /*upgrade_active=*/reload,
         /*force_new=*/force_reconcile);
     if (started.coalesced) {
@@ -3867,13 +4095,14 @@ void Daemon::refresh_lists_and_maybe_reload_async(
     const bool reschedule = source == "autoupdate" || source == "post-apply";
     const auto start = start_remote_list_refresh_task(
         true, source, force_reconcile);
-    if (!start.accepted && reschedule) {
-        if (start.error == "busy") {
+    if (!start.accepted) {
+        if (start.error == "busy" &&
+            (reschedule || start.force_reconcile)) {
             schedule_deferred_list_refresh(
                 std::move(source),
                 runtime_generation_.load(std::memory_order_acquire),
                 start.force_reconcile);
-        } else {
+        } else if (reschedule) {
             schedule_lists_autoupdate();
         }
     }
@@ -3917,14 +4146,19 @@ void Daemon::schedule_deferred_list_refresh(
             const bool deferred_force_reconcile =
                 lists_runtime_mutation_retry_force_reconcile_;
             lists_runtime_mutation_retry_force_reconcile_ = false;
-            if (!deferred_runtime_mutation_intent_is_current(
-                    accept_posted_control_tasks_.load(
-                        std::memory_order_acquire),
-                    runtime_generation,
-                    runtime_generation_.load(
-                        std::memory_order_acquire))) {
+            const bool accepting_control_tasks =
+                accept_posted_control_tasks_.load(
+                    std::memory_order_acquire);
+            const auto current_runtime_generation =
+                runtime_generation_.load(std::memory_order_acquire);
+            if (!accepting_control_tasks ||
+                (!deferred_force_reconcile &&
+                 runtime_generation != current_runtime_generation)) {
                 return;
             }
+            // A normal delayed refresh belongs to its exact generation. A
+            // forced reconcile instead represents durable cache data that
+            // cannot be rolled back; rebind it to the current generation.
             refresh_lists_and_maybe_reload_async(
                 std::move(source), deferred_force_reconcile);
         },
@@ -7632,35 +7866,5 @@ void Daemon::apply_config(Config config, bool refresh_remote_lists) {
                              : RemoteListPreparationMode::None));
 }
 
-void Daemon::apply_config_with_rollback(const Config& next_config,
-                                        bool& rolled_back,
-                                        bool refresh_remote_lists) {
-    Config previous_config = config_;
-    const KeeneticDnsCacheView previous_keenetic_dns =
-        active_keenetic_dns_;
-
-    try {
-        apply_config(next_config, refresh_remote_lists);
-        rolled_back = false;
-    } catch (...) {
-        try {
-            auto rollback = prepare_runtime_inputs(
-                previous_config,
-                RemoteListPreparationMode::None);
-            rollback.keenetic_dns = previous_keenetic_dns;
-            apply_prepared_runtime_inputs(std::move(rollback));
-            rolled_back = true;
-            Logger::instance().warn(
-                "Configuration apply failed; previous runtime was restored");
-        } catch (const std::exception& rollback_error) {
-            Logger::instance().error("Rollback to previous config failed: {}", rollback_error.what());
-            rolled_back = false;
-        } catch (...) {
-            Logger::instance().error("Rollback to previous config failed: unknown error");
-            rolled_back = false;
-        }
-        throw;
-    }
-}
 
 } // namespace keen_pbr3

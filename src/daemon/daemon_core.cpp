@@ -394,14 +394,17 @@ struct DaemonRuntimeFirewallOperationState final
         private_resolver_generation;
 };
 
-// One API/WAL save owns this object from the verified old-generation
-// pre-apply fence until either candidate publication or exact rollback has
-// completed. Kernel/resolver candidates may advance while every published
-// Daemon/ConfigStore cursor remains on base_runtime_generation.
+// One staged save or active-runtime reload owns this object from the verified
+// old-generation pre-apply fence until either candidate publication or exact
+// rollback has completed. Kernel/resolver candidates may advance while every
+// published Daemon/ConfigStore cursor remains on base_runtime_generation.
 struct DaemonConfigGenerationTransaction final {
+    RuntimeConfigGenerationPublicationMode publication_mode{
+        RuntimeConfigGenerationPublicationMode::staged_save};
     PreparedRuntimeInputs candidate;
     PreparedRuntimeInputs rollback;
     PreparedActiveConfigCommit active_commit;
+    PreparedActiveRuntimeReloadCommit active_runtime_reload_commit;
     FirewallConfigApplyPolicy candidate_firewall_policy;
     FirewallConfigApplyPolicy rollback_firewall_policy;
     OutboundMarkMap candidate_firewall_outbound_marks;
@@ -3427,7 +3430,7 @@ void Daemon::handle_sighup() {
     }
     const ConfigReloadClaim claim = request.claim;
 
-    std::shared_ptr<RuntimeMutationAdmission::Lease> mutation_lease;
+    RuntimeMutationLeaseHandoff mutation_lease;
     try {
         // SIGHUP is another configuration writer. Serialize it with API
         // staging and transactional commits so a disk reload cannot replace
@@ -3444,9 +3447,10 @@ void Daemon::handle_sighup() {
             defer_sighup_reload(claim);
             return;
         }
-        mutation_lease =
-            std::make_shared<RuntimeMutationAdmission::Lease>(
-                std::move(*admitted));
+        const auto expected_lease_token = admitted->token();
+        mutation_lease = RuntimeMutationLeaseHandoff{
+            std::make_unique<RuntimeMutationAdmission::Lease>(
+                std::move(*admitted))};
 
         // A disk reload must not make an in-memory draft disappear or apply a
         // different generation behind it. Check before admitting any worker
@@ -3456,9 +3460,10 @@ void Daemon::handle_sighup() {
                 "SIGHUP: reload rejected because a configuration draft is "
                 "staged; save or discard the draft first");
             (void)sighup_reload_coordinator_.cancel(claim);
+            auto exact = mutation_lease.take();
             complete_sighup_reload(
                 claim,
-                mutation_lease,
+                std::move(exact.lease),
                 /*allow_coalesced_rerun=*/false);
             return;
         }
@@ -3477,6 +3482,7 @@ void Daemon::handle_sighup() {
              rollback_snapshot,
              claim,
              mutation_lease,
+             expected_lease_token,
              expected_runtime_generation,
              trace_id]() mutable {
                 bool posted = false;
@@ -3525,8 +3531,10 @@ void Daemon::handle_sighup() {
                         [this,
                          prepared,
                          rollback_prepared,
+                         rollback_snapshot,
                          claim,
                          mutation_lease,
+                         expected_lease_token,
                          expected_runtime_generation,
                          preparation_error =
                              std::move(preparation_error)]() mutable {
@@ -3540,6 +3548,38 @@ void Daemon::handle_sighup() {
                             bool allow_coalesced_rerun =
                                 commit_claim !=
                                 ConfigReloadCommitStatus::stopped;
+                            const auto schedule_cache_reconcile =
+                                [this]() noexcept {
+                                    if (!accept_posted_control_tasks_.load(
+                                            std::memory_order_acquire) ||
+                                        !running_.load(
+                                            std::memory_order_acquire)) {
+                                        return;
+                                    }
+                                    try {
+                                        schedule_deferred_list_refresh(
+                                            "sighup-cache-recovery",
+                                            runtime_generation_.load(
+                                                std::memory_order_acquire),
+                                            /*force_reconcile=*/true);
+                                    } catch (const std::exception& error) {
+                                        try {
+                                            Logger::instance().error(
+                                                "SIGHUP: could not schedule "
+                                                "list-cache recovery: {}",
+                                                error.what());
+                                        } catch (...) {
+                                        }
+                                    } catch (...) {
+                                        try {
+                                            Logger::instance().error(
+                                                "SIGHUP: could not schedule "
+                                                "list-cache recovery");
+                                        } catch (...) {
+                                        }
+                                    }
+                                };
+                            bool force_cache_reconcile = false;
                             try {
                                 // This is the callback's outermost boundary
                                 // after commit ownership is claimed. Every
@@ -3575,6 +3615,7 @@ void Daemon::handle_sighup() {
                                         "change; scheduling "
                                         "a fresh preparation");
                                 } else if (!preparation_error.empty()) {
+                                    force_cache_reconcile = true;
                                     commit_log.error(
                                         "SIGHUP: reload preparation failed: "
                                         "{}",
@@ -3602,68 +3643,157 @@ void Daemon::handle_sighup() {
                                         prepared->keenetic_dns =
                                             active_keenetic_dns_;
                                     }
-                                    try {
-                                        apply_prepared_runtime_inputs(
-                                            std::move(*prepared));
-                                        commit_log.info(
-                                            "SIGHUP: full reload complete");
-                                    } catch (
-                                        const std::exception& apply_error) {
-                                        try {
-                                            apply_prepared_runtime_inputs(
-                                                std::move(
-                                                    *rollback_prepared));
-                                            commit_log.warn(
-                                                "SIGHUP: reload failed; "
-                                                "previous runtime was "
-                                                "restored: {}",
-                                                apply_error.what());
-                                        } catch (
-                                            const std::exception&
-                                                rollback_error) {
-                                            commit_log.error(
-                                                "SIGHUP: reload failed and "
-                                                "rollback could not restore "
-                                                "the previous runtime: {}; "
-                                                "rollback error: {}",
-                                                apply_error.what(),
-                                                rollback_error.what());
-                                        } catch (...) {
-                                            commit_log.error(
-                                                "SIGHUP: reload failed and "
-                                                "rollback could not restore "
-                                                "the previous runtime: {}; "
-                                                "rollback error: unknown",
-                                                apply_error.what());
-                                        }
-                                    } catch (...) {
-                                        try {
-                                            apply_prepared_runtime_inputs(
-                                                std::move(
-                                                    *rollback_prepared));
-                                            commit_log.warn(
-                                                "SIGHUP: reload failed with "
-                                                "an unknown error; previous "
-                                                "runtime was restored");
-                                        } catch (
-                                            const std::exception&
-                                                rollback_error) {
-                                            commit_log.error(
-                                                "SIGHUP: reload failed with "
-                                                "an unknown error and "
-                                                "rollback could not restore "
-                                                "the previous runtime: {}",
-                                                rollback_error.what());
-                                        } catch (...) {
-                                            commit_log.error(
-                                                "SIGHUP: reload failed with "
-                                                "an unknown error and "
-                                                "rollback also failed with "
-                                                "an unknown error");
-                                        }
+                                    RuntimeFirewallPreownedTerminalContinuation
+                                        final_continuation{
+                                            [this,
+                                             claim,
+                                             expected_lease_token,
+                                             allow_coalesced_rerun,
+                                             schedule_cache_reconcile](
+                                                RuntimeFirewallLifecycleTerminal
+                                                    terminal,
+                                                std::unique_ptr<
+                                                    RuntimeMutationAdmission::
+                                                        Lease>
+                                                    exact) mutable noexcept {
+                                                const bool
+                                                    exact_lease_returned =
+                                                        exact &&
+                                                        static_cast<bool>(
+                                                            *exact) &&
+                                                        exact->token() ==
+                                                            expected_lease_token &&
+                                                        runtime_mutation_admission_
+                                                            .owns(*exact);
+                                                const bool
+                                                    candidate_published =
+                                                        exact_lease_returned &&
+                                                        terminal.outcome ==
+                                                            RuntimeFirewallLifecycleOutcome::
+                                                                verified_success &&
+                                                        !terminal
+                                                             .commit_ambiguous &&
+                                                        terminal
+                                                            .observed_config_identity &&
+                                                        terminal
+                                                                .observed_config_identity
+                                                                ->kind ==
+                                                            ConfigTerminalOperationKind::
+                                                                candidate &&
+                                                        (terminal.committed ||
+                                                         terminal
+                                                             .candidate_noop_verified);
+                                                try {
+                                                    auto& terminal_log =
+                                                        Logger::instance();
+                                                    const auto terminal_kind =
+                                                        terminal
+                                                            .observed_config_identity
+                                                        ? terminal
+                                                              .observed_config_identity
+                                                              ->kind
+                                                        : ConfigTerminalOperationKind::
+                                                              config_preapply;
+                                                    const bool
+                                                        verified_unambiguous =
+                                                            terminal.outcome ==
+                                                                RuntimeFirewallLifecycleOutcome::
+                                                                    verified_success &&
+                                                            !terminal
+                                                                 .commit_ambiguous;
+                                                    if (!exact_lease_returned) {
+                                                        terminal_log.error(
+                                                            "SIGHUP: reload "
+                                                            "did not return "
+                                                            "its exact "
+                                                            "mutation lease");
+                                                    } else if (
+                                                        candidate_published) {
+                                                        terminal_log.info(
+                                                            "SIGHUP: full "
+                                                            "reload complete");
+                                                    } else if (
+                                                        verified_unambiguous &&
+                                                        terminal_kind ==
+                                                            ConfigTerminalOperationKind::
+                                                                rollback &&
+                                                        (terminal.committed ||
+                                                         terminal
+                                                             .candidate_noop_verified)) {
+                                                        if (terminal.detail
+                                                                .empty()) {
+                                                            terminal_log.warn(
+                                                                "SIGHUP: "
+                                                                "reload "
+                                                                "failed; "
+                                                                "previous "
+                                                                "runtime was "
+                                                                "restored");
+                                                        } else {
+                                                            terminal_log.warn(
+                                                                "SIGHUP: "
+                                                                "reload "
+                                                                "failed; "
+                                                                "previous "
+                                                                "runtime was "
+                                                                "restored: "
+                                                                "{}",
+                                                                terminal
+                                                                    .detail);
+                                                        }
+                                                    } else if (
+                                                        terminal.detail
+                                                            .empty()) {
+                                                        terminal_log.error(
+                                                            "SIGHUP: reload "
+                                                            "was not "
+                                                            "verified");
+                                                    } else {
+                                                        terminal_log.error(
+                                                            "SIGHUP: reload "
+                                                            "was not "
+                                                            "verified: {}",
+                                                            terminal.detail);
+                                                    }
+                                                } catch (...) {
+                                                }
+                                                complete_sighup_reload(
+                                                    claim,
+                                                    std::move(exact),
+                                                    allow_coalesced_rerun);
+                                                if (!candidate_published) {
+                                                    schedule_cache_reconcile();
+                                                }
+                                            }};
+                                    PreparedRuntimeInputs candidate{
+                                        std::move(*prepared)};
+                                    PreparedRuntimeInputs rollback{
+                                        std::move(*rollback_prepared)};
+                                    auto exact = mutation_lease.take();
+                                    if (!exact) {
+                                        commit_log.error(
+                                            "SIGHUP: reload commit owner "
+                                            "could not take its exact "
+                                            "mutation lease");
+                                        complete_sighup_reload(
+                                            claim,
+                                            std::move(exact.lease),
+                                            allow_coalesced_rerun);
+                                        schedule_cache_reconcile();
+                                        return;
                                     }
+                                    begin_preowned_runtime_firewall_active_reload(
+                                        std::move(exact.lease),
+                                        rollback_snapshot,
+                                        std::move(candidate),
+                                        std::move(rollback),
+                                        std::move(final_continuation));
+                                    return;
                                 }
                             } catch (const std::exception& commit_error) {
+                                force_cache_reconcile =
+                                    commit_claim ==
+                                    ConfigReloadCommitStatus::claimed;
                                 try {
                                     Logger::instance().error(
                                         "SIGHUP: reload commit callback "
@@ -3672,6 +3802,9 @@ void Daemon::handle_sighup() {
                                 } catch (...) {
                                 }
                             } catch (...) {
+                                force_cache_reconcile =
+                                    commit_claim ==
+                                    ConfigReloadCommitStatus::claimed;
                                 try {
                                     Logger::instance().error(
                                         "SIGHUP: reload commit callback "
@@ -3679,11 +3812,14 @@ void Daemon::handle_sighup() {
                                 } catch (...) {
                                 }
                             }
-
+                            auto exact = mutation_lease.take();
                             complete_sighup_reload(
                                 claim,
-                                mutation_lease,
+                                std::move(exact.lease),
                                 allow_coalesced_rerun);
+                            if (force_cache_reconcile) {
+                                schedule_cache_reconcile();
+                            }
                         },
                         "sighup-reload-commit");
                 } catch (const std::exception& worker_error) {
@@ -3710,9 +3846,10 @@ void Daemon::handle_sighup() {
                     // atomically cancels the prepare claim before a queued
                     // callback claims commit.
                     if (sighup_reload_coordinator_.cancel(claim)) {
+                        auto exact = mutation_lease.take();
                         complete_sighup_reload(
                             claim,
-                            mutation_lease,
+                            std::move(exact.lease),
                             /*allow_coalesced_rerun=*/false);
                     }
                 }
@@ -3723,25 +3860,28 @@ void Daemon::handle_sighup() {
                 "SIGHUP: reload rejected because the blocking executor is "
                 "unavailable");
             if (sighup_reload_coordinator_.cancel(claim)) {
+                auto exact = mutation_lease.take();
                 complete_sighup_reload(
                     claim,
-                    mutation_lease,
+                    std::move(exact.lease),
                     /*allow_coalesced_rerun=*/false);
             }
         }
     } catch (const std::exception& e) {
         if (sighup_reload_coordinator_.cancel(claim)) {
+            auto exact = mutation_lease.take();
             complete_sighup_reload(
                 claim,
-                mutation_lease,
+                std::move(exact.lease),
                 /*allow_coalesced_rerun=*/false);
         }
         log.error("SIGHUP: reload rejected: {}", e.what());
     } catch (...) {
         if (sighup_reload_coordinator_.cancel(claim)) {
+            auto exact = mutation_lease.take();
             complete_sighup_reload(
                 claim,
-                mutation_lease,
+                std::move(exact.lease),
                 /*allow_coalesced_rerun=*/false);
         }
         log.error("SIGHUP: reload rejected: unknown error");
@@ -3828,19 +3968,16 @@ void Daemon::defer_sighup_reload(ConfigReloadClaim claim) {
 
 void Daemon::complete_sighup_reload(
     ConfigReloadClaim claim,
-    std::shared_ptr<RuntimeMutationAdmission::Lease> mutation_lease,
+    std::unique_ptr<RuntimeMutationAdmission::Lease> mutation_lease,
     bool allow_coalesced_rerun) noexcept {
     const auto completion =
         sighup_reload_coordinator_.complete(claim);
     if (!completion.owned) {
         return;
     }
-    // Release before starting a coalesced reload. All shared references point
-    // to this same move-only lease, and release() is token-checked and
-    // idempotent for the single completion owner selected above.
-    if (mutation_lease) {
-        mutation_lease->release();
-    }
+    // Destroy the exact unique lease before starting a coalesced reload so
+    // the trailing request can acquire fresh writer admission.
+    mutation_lease.reset();
 
     if (!completion.rerun_requested || !allow_coalesced_rerun ||
         !accept_posted_control_tasks_.load(std::memory_order_acquire) ||
@@ -4367,6 +4504,42 @@ void Daemon::begin_preowned_runtime_firewall_config_apply(
     std::string saved_config_json,
     RuntimeFirewallPreownedTerminalContinuation final_continuation)
     noexcept {
+    begin_preowned_runtime_firewall_config_generation(
+        RuntimeConfigGenerationPublicationMode::staged_save,
+        std::move(lease),
+        std::move(base_active_snapshot),
+        std::move(candidate),
+        std::move(rollback),
+        std::move(saved_config_json),
+        std::move(final_continuation));
+}
+
+void Daemon::begin_preowned_runtime_firewall_active_reload(
+    std::unique_ptr<RuntimeMutationAdmission::Lease> lease,
+    ActiveConfigSnapshotHandle base_active_snapshot,
+    PreparedRuntimeInputs candidate,
+    PreparedRuntimeInputs rollback,
+    RuntimeFirewallPreownedTerminalContinuation final_continuation)
+    noexcept {
+    begin_preowned_runtime_firewall_config_generation(
+        RuntimeConfigGenerationPublicationMode::active_runtime_reload,
+        std::move(lease),
+        std::move(base_active_snapshot),
+        std::move(candidate),
+        std::move(rollback),
+        {},
+        std::move(final_continuation));
+}
+
+void Daemon::begin_preowned_runtime_firewall_config_generation(
+    RuntimeConfigGenerationPublicationMode publication_mode,
+    std::unique_ptr<RuntimeMutationAdmission::Lease> lease,
+    ActiveConfigSnapshotHandle base_active_snapshot,
+    PreparedRuntimeInputs candidate,
+    PreparedRuntimeInputs rollback,
+    std::string staged_serialized,
+    RuntimeFirewallPreownedTerminalContinuation final_continuation)
+    noexcept {
     const auto reject = [this](
         RuntimeFirewallPreownedTerminalContinuation continuation,
         std::unique_ptr<RuntimeMutationAdmission::Lease> exact,
@@ -4424,13 +4597,17 @@ void Daemon::begin_preowned_runtime_firewall_config_apply(
                 true);
             return;
         }
-        const auto staged = config_store_.staged_snapshot();
-        if (!staged || staged->second != saved_config_json) {
-            reject(
-                std::move(final_continuation), std::move(lease),
-                "staged configuration changed before candidate admission",
-                true);
-            return;
+        if (publication_mode ==
+            RuntimeConfigGenerationPublicationMode::staged_save) {
+            const auto staged = config_store_.staged_snapshot();
+            if (!staged || staged->second != staged_serialized) {
+                reject(
+                    std::move(final_continuation), std::move(lease),
+                    "staged configuration changed before candidate "
+                    "admission",
+                    true);
+                return;
+            }
         }
         const auto base_runtime_generation =
             runtime_generation_.load(std::memory_order_acquire);
@@ -4480,8 +4657,9 @@ void Daemon::begin_preowned_runtime_firewall_config_apply(
         transaction =
             std::make_shared<DaemonConfigGenerationTransaction>();
         // From this point every failure must return the exact lease through
-        // the API/WAL waiter. Move the continuation before any resolver/list
-        // preparation which may allocate or throw.
+        // the initiating waiter. Move the continuation before any resolver/
+        // list preparation which may allocate or throw.
+        transaction->publication_mode = publication_mode;
         transaction->final_continuation =
             std::move(final_continuation);
         transaction->base_runtime_generation =
@@ -4561,12 +4739,23 @@ void Daemon::begin_preowned_runtime_firewall_config_apply(
         transaction->candidate_resolver_sync.runtime_active = true;
         transaction->candidate_resolver_sync.resolver_configured = true;
 
-        transaction->active_commit =
-            ConfigStore::prepare_active_commit(
-                std::move(base_active_snapshot),
-                candidate.config,
-                candidate.outbound_marks,
-                std::move(saved_config_json));
+        switch (publication_mode) {
+        case RuntimeConfigGenerationPublicationMode::staged_save:
+            transaction->active_commit =
+                ConfigStore::prepare_active_commit(
+                    std::move(base_active_snapshot),
+                    candidate.config,
+                    candidate.outbound_marks,
+                    std::move(staged_serialized));
+            break;
+        case RuntimeConfigGenerationPublicationMode::active_runtime_reload:
+            transaction->active_runtime_reload_commit =
+                ConfigStore::prepare_active_runtime_reload_commit(
+                    std::move(base_active_snapshot),
+                    candidate.config,
+                    candidate.outbound_marks);
+            break;
+        }
         transaction->candidate = std::move(candidate);
         transaction->rollback = std::move(rollback);
     } catch (const std::exception& error) {
@@ -5000,8 +5189,7 @@ bool Daemon::publish_prepared_runtime_firewall_config_candidate(
         return false;
     }
     try {
-        const auto committed = config_store_.commit_prepared_active(
-            transaction->active_commit,
+        const auto publish_candidate =
             [this, &transaction, candidate_fwmark]() noexcept {
                 using std::swap;
                 auto& publication =
@@ -5054,9 +5242,24 @@ bool Daemon::publish_prepared_runtime_firewall_config_candidate(
                 runtime_generation_.store(
                     transaction->candidate_runtime_generation,
                     std::memory_order_release);
-            });
-        if (committed !=
-            PreparedActiveConfigCommitResult::committed) {
+            };
+        bool committed = false;
+        switch (transaction->publication_mode) {
+        case RuntimeConfigGenerationPublicationMode::staged_save:
+            committed = config_store_.commit_prepared_active(
+                transaction->active_commit,
+                publish_candidate) ==
+                PreparedActiveConfigCommitResult::committed;
+            break;
+        case RuntimeConfigGenerationPublicationMode::active_runtime_reload:
+            committed =
+                config_store_.commit_prepared_active_runtime_reload(
+                    transaction->active_runtime_reload_commit,
+                    publish_candidate) ==
+                PreparedActiveRuntimeReloadCommitResult::committed;
+            break;
+        }
+        if (!committed) {
             return false;
         }
         transaction->candidate_published = true;

@@ -63,6 +63,24 @@ struct CanCommitPreparedActive<
 
 static_assert(CanCommitPreparedActive<NoexceptPublication>::value);
 static_assert(!CanCommitPreparedActive<ThrowingPublication>::value);
+
+template <typename Publication, typename = void>
+struct CanCommitPreparedActiveRuntimeReload : std::false_type {};
+
+template <typename Publication>
+struct CanCommitPreparedActiveRuntimeReload<
+    Publication,
+    std::void_t<decltype(
+        std::declval<ConfigStore&>()
+            .commit_prepared_active_runtime_reload(
+                std::declval<
+                    const PreparedActiveRuntimeReloadCommit&>(),
+                std::declval<Publication>()))>> : std::true_type {};
+
+static_assert(
+    CanCommitPreparedActiveRuntimeReload<NoexceptPublication>::value);
+static_assert(
+    !CanCommitPreparedActiveRuntimeReload<ThrowingPublication>::value);
 static_assert(std::is_nothrow_swappable_v<Config>);
 
 } // namespace
@@ -203,6 +221,109 @@ TEST_CASE("prepared active commit preserves a pinned old active handle") {
     CHECK(
         store.active_config().daemon->cache_dir ==
         "/tmp/pinned-prepared-new");
+}
+
+TEST_CASE(
+    "prepared runtime reload publishes exact base and preserves staged draft") {
+    constexpr std::uint32_t old_mark = 0x10000U;
+    constexpr std::uint32_t new_mark = 0x90000U;
+    const auto active =
+        interface_config_named("reload-old", "nwg-old");
+    const auto candidate =
+        interface_config_named("reload-new", "nwg-new");
+    const auto draft = config_named("reload-draft");
+    const auto draft_serialized = staged_json(draft);
+    ConfigStore store(active);
+    store.replace_active(
+        active,
+        OutboundMarkMap{{"reused-interface", old_mark}});
+    const auto base = store.pin_active_snapshot();
+    store.stage_config(draft, draft_serialized);
+    const auto staged_before = store.staged_cas_snapshot();
+    REQUIRE(staged_before.has_value());
+
+    const auto prepared =
+        ConfigStore::prepare_active_runtime_reload_commit(
+            base,
+            candidate,
+            OutboundMarkMap{{"reused-interface", new_mark}});
+    bool published = false;
+    REQUIRE(
+        store.commit_prepared_active_runtime_reload(
+            prepared,
+            NoexceptPublication{&published}) ==
+        PreparedActiveRuntimeReloadCommitResult::committed);
+
+    CHECK(published);
+    CHECK(store.pin_active_snapshot() == prepared.candidate);
+    CHECK(base != store.pin_active_snapshot());
+    CHECK(
+        base->config.outbounds->front().interface ==
+        std::optional<std::string>{"nwg-old"});
+    const auto committed = store.pin_active_snapshot();
+    CHECK(
+        committed->config.outbounds->front().interface ==
+        std::optional<std::string>{"nwg-new"});
+    CHECK(committed->outbound_marks.at("reused-interface") == new_mark);
+
+    const auto staged_after = store.staged_cas_snapshot();
+    REQUIRE(staged_after.has_value());
+    CHECK(staged_after->config.daemon->cache_dir == "/tmp/reload-draft");
+    CHECK(staged_after->serialized == draft_serialized);
+    CHECK(staged_after->base_revision == staged_before->base_revision);
+    CHECK(staged_after->active_revision != staged_before->active_revision);
+}
+
+TEST_CASE(
+    "prepared runtime reload rejects base drift without publishing or touching draft") {
+    const auto active = config_named("reload-base-old");
+    const auto candidate = config_named("reload-base-candidate");
+    const auto drifted = config_named("reload-base-drifted");
+    const auto draft = config_named("reload-base-draft");
+    const auto draft_serialized = staged_json(draft);
+    ConfigStore store(active);
+    const auto prepared =
+        ConfigStore::prepare_active_runtime_reload_commit(
+            store.pin_active_snapshot(),
+            candidate,
+            OutboundMarkMap{});
+    store.stage_config(draft, draft_serialized);
+    const auto staged_before = store.staged_cas_snapshot();
+    REQUIRE(staged_before.has_value());
+    store.replace_active(drifted, OutboundMarkMap{});
+
+    bool published = false;
+    CHECK(
+        store.commit_prepared_active_runtime_reload(
+            prepared,
+            NoexceptPublication{&published}) ==
+        PreparedActiveRuntimeReloadCommitResult::base_mismatch);
+    CHECK_FALSE(published);
+    CHECK(
+        store.active_config().daemon->cache_dir ==
+        "/tmp/reload-base-drifted");
+    const auto staged_after = store.staged_cas_snapshot();
+    REQUIRE(staged_after.has_value());
+    CHECK(
+        staged_after->config.daemon->cache_dir ==
+        "/tmp/reload-base-draft");
+    CHECK(staged_after->serialized == draft_serialized);
+    CHECK(staged_after->base_revision == staged_before->base_revision);
+}
+
+TEST_CASE(
+    "prepared runtime reload rejects missing handles without publication") {
+    ConfigStore store(config_named("reload-invalid"));
+    bool published = false;
+    CHECK(
+        store.commit_prepared_active_runtime_reload(
+            PreparedActiveRuntimeReloadCommit{},
+            NoexceptPublication{&published}) ==
+        PreparedActiveRuntimeReloadCommitResult::base_mismatch);
+    CHECK_FALSE(published);
+    CHECK(
+        store.active_config().daemon->cache_dir ==
+        "/tmp/reload-invalid");
 }
 
 TEST_CASE("config store visible snapshot identifies active and draft states") {

@@ -1162,8 +1162,13 @@ Daemon::apply_validated_config_via_control_task_with_lease_return(
 }
 
 ListRefreshOperationResult Daemon::refresh_lists_via_api(std::optional<std::string> requested_name) {
+    if (is_event_loop_thread()) {
+        throw ApiError(
+            "List refresh completion cannot wait on the control loop", 503);
+    }
     auto mutation = acquire_runtime_mutation_or_throw(
         "refresh-lists", false, false);
+    const auto expected_lease_token = mutation.token();
     if (config_store_.config_is_draft()) {
         throw ApiError("List refresh is unavailable while a draft config is staged", 409);
     }
@@ -1184,6 +1189,18 @@ ListRefreshOperationResult Daemon::refresh_lists_via_api(std::optional<std::stri
         }
     }
 
+    // Preserve the currently published runtime inputs before the durable
+    // list cache can change. If the candidate cannot be verified, the owner
+    // must roll back to these exact pre-refresh inputs rather than rebuilding
+    // a nominal rollback from the already-updated cache.
+    std::shared_ptr<PreparedRuntimeInputs> rollback_prepared;
+    if (runtime_active_snapshot) {
+        rollback_prepared = std::make_shared<PreparedRuntimeInputs>(
+            prepare_runtime_inputs(
+                config_snapshot,
+                RemoteListPreparationMode::None));
+    }
+
     {
         const std::set<std::string> relevant_lists = collect_relevant_list_names(config_snapshot);
         const std::set<std::string> dns_relevant_lists = collect_dns_relevant_list_names(config_snapshot);
@@ -1191,7 +1208,7 @@ ListRefreshOperationResult Daemon::refresh_lists_via_api(std::optional<std::stri
                                                  target_selection.list_names.end());
         RemoteListRefreshControl control;
         control.cache_commit = make_guarded_cache_commit_callback();
-        const RemoteListsRefreshResult refresh_result =
+        RemoteListsRefreshResult refresh_result =
             list_service_.refresh_remote_lists(
                 config_snapshot,
                 marks_snapshot,
@@ -1210,18 +1227,111 @@ ListRefreshOperationResult Daemon::refresh_lists_via_api(std::optional<std::stri
             Logger::instance().info("Lists refresh (api): all checked list(s) are up-to-date.");
         }
 
-        bool reloaded = false;
+        ListRefreshOperationResult operation_result;
+        operation_result.refreshed_lists = refresh_result.refreshed_lists;
+        operation_result.changed_lists = refresh_result.changed_lists;
+        operation_result.failed_lists = refresh_result.failed_lists;
+
+        const bool reload_required =
+            should_reload_runtime_after_list_refresh(
+                runtime_active_snapshot, refresh_result);
+        if (!reload_required) {
+            if (!target_selection.ok()) {
+                return operation_result;
+            }
+            if (operation_result.refreshed_lists.empty()) {
+                operation_result.message = "No URL-backed lists to refresh";
+            } else if (!operation_result.failed_lists.empty()) {
+                operation_result.message = "Lists refreshed with failures";
+            } else if (operation_result.changed_lists.empty()) {
+                operation_result.message = "Lists refreshed; no updates found";
+            } else if (refresh_result.any_relevant_changed()) {
+                operation_result.message =
+                    "Lists refreshed; runtime is stopped so changes will apply on next start";
+            } else {
+                operation_result.message = "Lists refreshed";
+            }
+            return operation_result;
+        }
+
+        const auto schedule_force_reconcile = [this]() noexcept {
+            try {
+                enqueue_control_task(
+                    [this]() {
+                        schedule_deferred_list_refresh(
+                            "api-refresh-recovery",
+                            runtime_generation_.load(std::memory_order_acquire),
+                            true);
+                    },
+                    false,
+                    "api-refresh-lists-recovery",
+                    true);
+            } catch (const std::exception& error) {
+                try {
+                    Logger::instance().error(
+                        "Could not schedule forced list-cache reconciliation: {}",
+                        error.what());
+                } catch (...) {
+                }
+            } catch (...) {
+                try {
+                    Logger::instance().error(
+                        "Could not schedule forced list-cache reconciliation");
+                } catch (...) {
+                }
+            }
+        };
+
+        std::shared_ptr<PreparedRuntimeInputs> candidate_prepared;
+        try {
+            candidate_prepared = std::make_shared<PreparedRuntimeInputs>(
+                prepare_runtime_inputs(
+                    active_snapshot->config,
+                    RemoteListPreparationMode::None));
+        } catch (const std::exception& error) {
+            mutation.release();
+            schedule_force_reconcile();
+            Logger::instance().error(
+                "Lists refresh (api) candidate preparation failed after "
+                "the cache commit: {}",
+                error.what());
+            operation_result.message =
+                "Lists refreshed; runtime reload preparation failed and recovery was scheduled";
+            return operation_result;
+        }
+
+        struct ReturnedLeaseSlot final {
+            std::unique_ptr<RuntimeMutationAdmission::Lease> lease;
+        };
+        auto returned = std::make_shared<ReturnedLeaseSlot>();
+        auto completion = RuntimeFirewallLifecycleCompletion::create();
+        auto completion_source = std::move(completion.source);
+        RuntimeMutationLeaseHandoff handoff{
+            std::make_unique<RuntimeMutationAdmission::Lease>(
+                std::move(mutation))};
+
         bool stale_runtime = false;
         const auto generation = runtime_generation_.load(std::memory_order_acquire);
+        bool owner_started = false;
+        bool handoff_task_completed = false;
+        std::string handoff_error;
 
-        enqueue_control_task(
+        try {
+            enqueue_control_task(
             [this,
-             &reloaded,
+             &owner_started,
+             &handoff_task_completed,
+             &handoff_error,
              &stale_runtime,
              active_snapshot,
-             generation,
-             runtime_active_snapshot,
-             refresh_result]() mutable {
+             candidate_prepared,
+             rollback_prepared,
+             returned,
+             completion_source = std::move(completion_source),
+             handoff,
+             expected_lease_token,
+             generation]() mutable {
+                handoff_task_completed = true;
                 if (generation != runtime_generation_.load(std::memory_order_acquire)) {
                     stale_runtime = true;
                     Logger::instance().trace("lists_refresh_skip",
@@ -1230,22 +1340,127 @@ ListRefreshOperationResult Daemon::refresh_lists_via_api(std::optional<std::stri
                     return;
                 }
 
-                if (should_reload_runtime_after_list_refresh(runtime_active_snapshot,
-                                                            refresh_result)) {
-                    bool rolled_back = false;
-                    apply_config_with_rollback(
-                        active_snapshot->config, rolled_back, false);
-                    reloaded = true;
+                auto taken = handoff.take();
+                if (!taken) {
+                    handoff_error =
+                        "API list refresh could not take its exact mutation lease";
+                    return;
                 }
+
+                RuntimeFirewallPreownedTerminalContinuation continuation{
+                    [this,
+                     returned,
+                     completion_source = std::move(completion_source),
+                     expected_lease_token](
+                        RuntimeFirewallLifecycleTerminal terminal,
+                        std::unique_ptr<RuntimeMutationAdmission::Lease> exact)
+                        mutable noexcept {
+                        try {
+                            if (!exact || !static_cast<bool>(*exact) ||
+                                exact->token() != expected_lease_token ||
+                                !runtime_mutation_admission_.owns(*exact)) {
+                                terminal.outcome =
+                                    RuntimeFirewallLifecycleOutcome::not_verified;
+                                terminal.previous_generation_certainly_retained =
+                                    false;
+                                terminal.detail =
+                                    "API list refresh did not return its exact mutation lease";
+                            }
+                        } catch (...) {
+                            terminal.outcome =
+                                RuntimeFirewallLifecycleOutcome::not_verified;
+                            terminal.previous_generation_certainly_retained = false;
+                        }
+                        returned->lease = std::move(exact);
+                        (void)completion_source.settle(std::move(terminal));
+                    }};
+                begin_preowned_runtime_firewall_active_reload(
+                    std::move(taken.lease),
+                    active_snapshot,
+                    std::move(*candidate_prepared),
+                    std::move(*rollback_prepared),
+                    std::move(continuation));
+                owner_started = true;
             },
             true,
-            "api-refresh-lists-commit");
+            "api-refresh-lists-owner",
+            true);
+        } catch (const std::exception& error) {
+            handoff_error = error.what();
+        } catch (...) {
+            handoff_error = "unknown owner handoff failure";
+        }
 
-        ListRefreshOperationResult operation_result;
-        operation_result.refreshed_lists = std::move(refresh_result.refreshed_lists);
-        operation_result.changed_lists = std::move(refresh_result.changed_lists);
-        operation_result.failed_lists = std::move(refresh_result.failed_lists);
-        operation_result.reloaded = reloaded;
+        if (!owner_started) {
+            auto reclaimed = handoff.take();
+            if (reclaimed) {
+                reclaimed.lease.reset();
+            }
+            schedule_force_reconcile();
+            if (!handoff_task_completed) {
+                operation_result.message =
+                    "Lists refreshed; runtime owner handoff failed and recovery was scheduled";
+            } else if (stale_runtime) {
+                operation_result.message =
+                    "Lists refreshed; runtime changed and recovery was scheduled";
+            } else {
+                operation_result.message = handoff_error.empty()
+                    ? "Lists refreshed; runtime reload was deferred"
+                    : "Lists refreshed; runtime owner rejected the reload and recovery was scheduled";
+            }
+            return operation_result;
+        }
+
+        RuntimeFirewallLifecycleTerminal terminal;
+        try {
+            terminal = completion.wait.wait();
+        } catch (const std::exception& error) {
+            if (returned->lease) {
+                returned->lease.reset();
+            }
+            schedule_force_reconcile();
+            Logger::instance().error(
+                "Lists refresh (api) terminal could not be read: {}",
+                error.what());
+            operation_result.message =
+                "Lists refreshed; runtime result was not available";
+            return operation_result;
+        }
+
+        const bool exact_lease_returned =
+            returned->lease && static_cast<bool>(*returned->lease) &&
+            returned->lease->token() == expected_lease_token &&
+            runtime_mutation_admission_.owns(*returned->lease);
+        const bool candidate_published =
+            exact_lease_returned &&
+            terminal.outcome ==
+                RuntimeFirewallLifecycleOutcome::verified_success &&
+            !terminal.commit_ambiguous &&
+            terminal.observed_config_identity &&
+            terminal.observed_config_identity->kind ==
+                ConfigTerminalOperationKind::candidate &&
+            (terminal.committed || terminal.candidate_noop_verified);
+        const bool rollback_verified =
+            exact_lease_returned &&
+            terminal.outcome ==
+                RuntimeFirewallLifecycleOutcome::verified_success &&
+            !terminal.commit_ambiguous &&
+            terminal.observed_config_identity &&
+            terminal.observed_config_identity->kind ==
+                ConfigTerminalOperationKind::rollback &&
+            (terminal.committed || terminal.candidate_noop_verified);
+
+        operation_result.reloaded = candidate_published;
+        if (returned->lease) {
+            returned->lease.reset();
+        }
+        if (!candidate_published) {
+            // The durable cache is already newer than the published runtime.
+            // Release an exact returned writer first. If ownership was lost,
+            // the deferred path still waits for admission before its bounded
+            // reconcile against the current generation.
+            schedule_force_reconcile();
+        }
 
         if (!target_selection.ok()) {
             return operation_result;
@@ -1261,9 +1476,15 @@ ListRefreshOperationResult Daemon::refresh_lists_via_api(std::optional<std::stri
             operation_result.message = "Lists refreshed; no updates found";
         } else if (operation_result.reloaded) {
             operation_result.message = "Lists refreshed and runtime reloaded";
+        } else if (rollback_verified) {
+            operation_result.message =
+                "Lists refreshed; runtime reload was rolled back and recovery was scheduled";
+        } else if (exact_lease_returned) {
+            operation_result.message =
+                "Lists refreshed; runtime reload was not verified and recovery was scheduled";
         } else if (refresh_result.any_relevant_changed()) {
             operation_result.message =
-                "Lists refreshed; runtime is stopped so changes will apply on next start";
+                "Lists refreshed; runtime reload did not return its owner lease and recovery was scheduled";
         } else {
             operation_result.message = "Lists refreshed";
         }

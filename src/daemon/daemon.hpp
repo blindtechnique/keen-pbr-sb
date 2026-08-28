@@ -85,6 +85,10 @@ class RuntimeFirewallOperationOwner;
 class RuntimeFirewallPreownedTerminalContinuation;
 struct RuntimeFirewallOperationContext;
 enum class RuntimeFirewallLifecycleKind : std::uint8_t;
+enum class RuntimeConfigGenerationPublicationMode : std::uint8_t {
+    staged_save,
+    active_runtime_reload,
+};
 struct DaemonConfigGenerationTransaction;
 struct PlannedRoutingState;
 struct NdmsCatalogSnapshot;
@@ -602,7 +606,7 @@ private:
     void handle_sighup();
     void defer_sighup_reload(ConfigReloadClaim claim);
     void complete_sighup_reload(ConfigReloadClaim claim,
-                                std::shared_ptr<RuntimeMutationAdmission::Lease>
+                                std::unique_ptr<RuntimeMutationAdmission::Lease>
                                     mutation_lease,
                                 bool allow_coalesced_rerun) noexcept;
     void handle_interface_monitor_events(uint32_t events);
@@ -816,9 +820,6 @@ private:
     void schedule_internal_vpn_catalog_refresh_retry(
         std::uint64_t runtime_generation);
     void cancel_internal_vpn_catalog_refresh_retry();
-    void apply_config_with_rollback(const Config& next_config,
-                                    bool& rolled_back,
-                                    bool refresh_remote_lists = true);
     void stop_routing_runtime();
     bool routing_runtime_active() const;
     OwnedConntrackCleanupSnapshot
@@ -982,6 +983,25 @@ private:
         PreparedRuntimeInputs candidate,
         PreparedRuntimeInputs rollback,
         std::string saved_config_json,
+        RuntimeFirewallPreownedTerminalContinuation final_continuation)
+        noexcept;
+    // Sibling of staged-save publication for SIGHUP/list-refresh callers.
+    // It keeps the exact pre-owned lease and candidate/rollback machinery but
+    // commits only against the pinned active base, without consuming a draft.
+    void begin_preowned_runtime_firewall_active_reload(
+        std::unique_ptr<RuntimeMutationAdmission::Lease> lease,
+        ActiveConfigSnapshotHandle base_active_snapshot,
+        PreparedRuntimeInputs candidate,
+        PreparedRuntimeInputs rollback,
+        RuntimeFirewallPreownedTerminalContinuation final_continuation)
+        noexcept;
+    void begin_preowned_runtime_firewall_config_generation(
+        RuntimeConfigGenerationPublicationMode publication_mode,
+        std::unique_ptr<RuntimeMutationAdmission::Lease> lease,
+        ActiveConfigSnapshotHandle base_active_snapshot,
+        PreparedRuntimeInputs candidate,
+        PreparedRuntimeInputs rollback,
+        std::string staged_serialized,
         RuntimeFirewallPreownedTerminalContinuation final_continuation)
         noexcept;
     bool start_preowned_runtime_firewall_config_phase(
@@ -1376,8 +1396,8 @@ private:
     // observation is retried once after an active resolver stream retires.
     bool keenetic_dns_refresh_deferred_by_resolver_stream_{false};
     // One authority admits every externally requested runtime mutation. API
-    // requests own move-only leases; asynchronous SIGHUP shares one lease
-    // until the reload coordinator chooses its single completion owner.
+    // requests own move-only leases; asynchronous SIGHUP carries a copyable
+    // handoff whose single completion owner takes the exact unique lease.
     ConfigReloadCoordinator sighup_reload_coordinator_;
     CoalescedSingleFlightGate internal_vpn_catalog_refresh_gate_;
     int internal_vpn_catalog_refresh_retry_task_id_{-1};

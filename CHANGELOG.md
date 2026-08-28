@@ -90,6 +90,14 @@
   единого владельца мутации. Занятый владелец сохраняет один ограниченный
   поколением отложенный запрос без расходования бюджета повторов; принудительное
   применение обновлённого списка не теряется при совпадении с read-only/304.
+- SIGHUP, синхронное API-обновление списков и фоновый list-refresh больше не
+  используют legacy `apply_config_with_rollback`. Одна exact move-only mutation
+  lease через типизированный одноразовый handoff проходит общий
+  candidate/rollback owner; active `ConfigStore` публикуется только exact-base
+  CAS и не читает и не меняет panel draft. После durable cache commit отказ,
+  stale либо ambiguous terminal сначала возвращает lease, затем ставит один
+  bounded forced reconcile: coalesced SIGHUP и deferred list refresh не создают
+  второго writer и не теряют уже сохранённое обновление списка.
 - Для следующего этапа выноса firewall I/O подготовлены неизменяемая
   backend-транзакция и один фазовый retry-handoff. Транзакция различает вход в
   commit и его возврат, проверяет Meta UDP/443 перед первоначальным и резервным
@@ -305,8 +313,10 @@
   функциональных группах: cold startup, Keenetic DNS candidate/rollback,
   pre-apply SNAT repair, URLTEST candidate/rollback и общий synchronous
   config wrapper. Текущий owner-switch убрал из последней группы активный API
-  config-save; stopped-runtime save, SIGHUP и list-refresh пока используют
-  прежнюю обёртку, поэтому сами legacy call sites ещё не удалены.
+  config-save; на том checkpoint stopped-runtime save, SIGHUP и list-refresh
+  ещё использовали прежнюю обёртку. Текущий SIGHUP/list-refresh owner-switch
+  удалил её и все legacy call sites; stopped-runtime путь остаётся частью
+  отдельного inactive-runtime/cold-start среза.
   В том же несобранном batch устранены terminal/liveness-разрывы: firmware
   netfilter refresh не отменяет foreground lifecycle timer; trailing source
   после verified START/restart отделяется в background successor; последняя
@@ -409,6 +419,20 @@
 
 ### Исправлено
 
+- Два последовательных GitHub Actions failure разделены по причинам. Run
+  `33203448079` выявил coverage guard, в котором отсутствовали два уже
+  существующих обязательных test target; CI-only коммит `0b6b39b6` добавил их
+  в матрицу. В run `33204658857` все 15 записанных падений относились к
+  устаревшему test harness, а не к production build/runtime: восемь reload-
+  тестов не подключали `try_acquire_runtime_mutation_handoff_gate_fn`, а семь
+  iptables-fakes считали read-only capability probe `-w 0` реальной мутацией.
+  Отдельно при разборе найден реальный production-дефект: API START/restart
+  забирал production mutation lease без предварительного exact handoff gate.
+  Теперь недоступный lifecycle-owner даёт 503 до мутации вместо внутреннего
+  `logic_error`. Локальный production binary и monolithic test target
+  перелинкованы с кодом 0; точные фильтры прошли `8/8` (75/75 assertions) и
+  `7/7` (15/15 assertions). Этот batch пока не отправлен в GitHub и не входит
+  в установленный на роутере baseline `31c12a58`.
 - Колокольчик больше не показывает десятки одинаковых записей о кратких сбоях
   Meta/WhatsApp UDP/443 и PPE de-offload: внутри одного процесса сохраняется
   только самый новый инцидент каждого вида, а записи предыдущего процесса

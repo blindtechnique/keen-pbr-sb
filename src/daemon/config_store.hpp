@@ -48,6 +48,19 @@ enum class PreparedActiveConfigCommitResult {
     staged_mismatch,
 };
 
+// A runtime reload is not an API draft save. It publishes a pre-built active
+// snapshot only while the exact pinned active base is still current, and it
+// must neither require nor modify a concurrently visible panel draft.
+struct PreparedActiveRuntimeReloadCommit {
+    ActiveConfigSnapshotHandle base;
+    ActiveConfigSnapshotHandle candidate;
+};
+
+enum class PreparedActiveRuntimeReloadCommitResult {
+    committed,
+    base_mismatch,
+};
+
 class ConfigStore {
 public:
     explicit ConfigStore(Config active_config = {});
@@ -81,6 +94,11 @@ public:
         Config candidate_config,
         OutboundMarkMap candidate_outbound_marks,
         std::string staged_serialized);
+    static PreparedActiveRuntimeReloadCommit
+    prepare_active_runtime_reload_commit(
+        ActiveConfigSnapshotHandle base,
+        Config candidate_config,
+        OutboundMarkMap candidate_outbound_marks);
 
     // The caller prepares both shared handles and the exact staged bytes
     // before entering this seam. A throwing publisher is rejected during
@@ -117,6 +135,37 @@ public:
         staged_config_json_.reset();
         staged_base_revision_.reset();
         return PreparedActiveConfigCommitResult::committed;
+    }
+
+    // Runtime reload publication has a separate exact-base CAS so it cannot
+    // accidentally inherit the staged-save contract above. The no-throw
+    // callback runs under the same unique lock as the active handle switch;
+    // on any failed precondition it is not invoked and no state changes.
+    // Existing staged data is deliberately left byte-for-byte intact.
+    template <
+        typename Publication,
+        std::enable_if_t<
+            std::is_nothrow_invocable_v<Publication&>,
+            int> = 0>
+    PreparedActiveRuntimeReloadCommitResult
+    commit_prepared_active_runtime_reload(
+        const PreparedActiveRuntimeReloadCommit& prepared,
+        Publication&& publication) {
+        if (!prepared.base || !prepared.candidate) {
+            return PreparedActiveRuntimeReloadCommitResult::base_mismatch;
+        }
+
+        KPBR_SHARED_UNIQUE_LOCK(lock, mutex_);
+        if (active_snapshot_ != prepared.base) {
+            return PreparedActiveRuntimeReloadCommitResult::base_mismatch;
+        }
+
+        publication();
+        // Both handles were allocated before entering the lock. Assignment is
+        // noexcept and the pinned base keeps the old generation alive until
+        // the caller retires its transaction.
+        active_snapshot_ = prepared.candidate;
+        return PreparedActiveRuntimeReloadCommitResult::committed;
     }
 
     void stage_config(Config staged_config, std::string staged_config_json);

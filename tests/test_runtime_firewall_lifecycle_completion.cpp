@@ -477,6 +477,13 @@ TEST_CASE("config runtime terminal policy fails closed on unknown state") {
               /*candidate_published=*/false, candidate) ==
           ConfigRuntimeTerminalAction::fail_closed);
 
+    auto candidate_noop = candidate;
+    candidate_noop.committed = false;
+    candidate_noop.candidate_noop_verified = true;
+    CHECK(plan_config_runtime_terminal(
+              /*candidate_published=*/true, candidate_noop) ==
+          ConfigRuntimeTerminalAction::keep_active);
+
     auto rollback = verified_terminal("rollback");
     rollback.observed_config_identity = rollback_identity();
     CHECK(plan_config_runtime_terminal(false, rollback) ==

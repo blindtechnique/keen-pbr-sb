@@ -70,6 +70,11 @@ void wire_runtime_mutation_admission(
             const RuntimeMutationAdmission::Lease& lease) noexcept {
             return admission.owns(lease);
         };
+    context.try_acquire_runtime_mutation_handoff_gate_fn =
+        [&admission](
+            const RuntimeMutationAdmission::Lease& lease) noexcept {
+            return admission.try_acquire_handoff_gate(lease);
+        };
 }
 
 } // namespace
@@ -205,14 +210,7 @@ TEST_CASE("API mutation guard hands off its production lease without releasing a
     SseBroadcaster broadcaster;
     auto context = test_support::make_minimal_api_context(
         broadcaster, "/tmp/keen-pbr-reload-lease-handoff-test.json");
-    context.acquire_runtime_mutation_fn =
-        [&admission](std::string label, bool, bool) {
-            auto lease = admission.try_acquire(std::move(label));
-            if (!lease.has_value()) {
-                throw ApiError("runtime mutation busy", 409);
-            }
-            return std::move(*lease);
-        };
+    wire_runtime_mutation_admission(context, admission);
 
     std::optional<RuntimeMutationAdmission::Lease> transferred;
     {
@@ -221,6 +219,7 @@ TEST_CASE("API mutation guard hands off its production lease without releasing a
         const auto active = admission.active();
         REQUIRE(active.has_value());
         CHECK(active->label == "restart-runtime");
+        REQUIRE(mutation.arm_handoff_gate());
         transferred.emplace(mutation.take_lease());
     }
 
@@ -244,6 +243,7 @@ TEST_CASE(
     {
         ApiRuntimeMutationGuard mutation(
             context, "save-config", false, false);
+        REQUIRE(mutation.arm_handoff_gate());
         auto returned = mutation.take_lease();
         REQUIRE(static_cast<bool>(returned));
         token = returned.token();
@@ -307,6 +307,7 @@ TEST_CASE(
     {
         ApiRuntimeMutationGuard mutation(
             context, "save-config", false, false);
+        REQUIRE(mutation.arm_handoff_gate());
         auto returned = mutation.take_lease();
         REQUIRE(static_cast<bool>(returned));
         CHECK(returned.token() == foreign->token());
@@ -335,6 +336,7 @@ TEST_CASE("API mutation guard rejects restore after finish") {
     {
         ApiRuntimeMutationGuard mutation(
             context, "save-config", false, false);
+        REQUIRE(mutation.arm_handoff_gate());
         returned = mutation.take_lease();
         REQUIRE(static_cast<bool>(returned));
         mutation.finish();
@@ -362,6 +364,7 @@ TEST_CASE(
     {
         ApiRuntimeMutationGuard mutation(
             context, "save-config", false, false);
+        REQUIRE(mutation.arm_handoff_gate());
         auto returned = mutation.take_lease();
         REQUIRE(static_cast<bool>(returned));
         CHECK(mutation.restore_lease(returned));
@@ -380,14 +383,7 @@ TEST_CASE(
 TEST_CASE("restart endpoint hands the exact production lease to its tail callback") {
     RuntimeMutationAdmission admission;
     ReloadApiFixture fixture(test_support::isolated_api_port(5));
-    fixture.context.acquire_runtime_mutation_fn =
-        [&admission](std::string label, bool, bool) {
-            auto lease = admission.try_acquire(std::move(label));
-            if (!lease.has_value()) {
-                throw ApiError("runtime mutation busy", 409);
-            }
-            return std::move(*lease);
-        };
+    wire_runtime_mutation_admission(fixture.context, admission);
 
     std::optional<RuntimeMutationAdmission::Lease> transferred;
     std::size_t legacy_restart_calls = 0U;
@@ -420,6 +416,7 @@ TEST_CASE("start endpoint hands the exact production lease to its tail callback"
     ReloadApiFixture fixture(test_support::isolated_api_port(6));
     bool require_running = true;
     bool require_stopped = false;
+    wire_runtime_mutation_admission(fixture.context, admission);
     fixture.context.acquire_runtime_mutation_fn =
         [&admission, &require_running, &require_stopped](
             std::string label,
@@ -465,14 +462,7 @@ TEST_CASE("start endpoint hands the exact production lease to its tail callback"
 TEST_CASE("start endpoint releases its exact lease when tail handoff throws") {
     RuntimeMutationAdmission admission;
     ReloadApiFixture fixture(test_support::isolated_api_port(7));
-    fixture.context.acquire_runtime_mutation_fn =
-        [&admission](std::string label, bool, bool) {
-            auto lease = admission.try_acquire(std::move(label));
-            if (!lease.has_value()) {
-                throw ApiError("runtime mutation busy", 409);
-            }
-            return std::move(*lease);
-        };
+    wire_runtime_mutation_admission(fixture.context, admission);
     fixture.context.start_runtime_with_lease_fn =
         [](RuntimeMutationAdmission::Lease lease) {
             CHECK(static_cast<bool>(lease));
