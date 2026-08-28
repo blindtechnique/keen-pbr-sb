@@ -63,6 +63,7 @@
 #include "../util/time_utils.hpp"
 #include "../dns/dns_probe_server.hpp" // IWYU pragma: keep
 #include "runtime_firewall_operation_owner.hpp"
+#include "owned_conntrack_cleanup_operation.hpp"
 #include "runtime_route_health_plan.hpp"
 #include "scheduler.hpp"
 
@@ -3977,6 +3978,126 @@ void Daemon::begin_preowned_runtime_firewall_restart(
     } catch (...) {
     }
 }
+
+std::optional<RuntimeFirewallImmediateDisposition>
+Daemon::begin_preowned_runtime_firewall_config_preapply(
+    std::unique_ptr<RuntimeMutationAdmission::Lease>& mutation_lease,
+    RuntimeFirewallPreownedTerminalContinuation& continuation) {
+    if (!mutation_lease || !static_cast<bool>(*mutation_lease) ||
+        !runtime_mutation_admission_.owns(*mutation_lease) ||
+        !continuation) {
+        return RuntimeFirewallImmediateDisposition::rejected;
+    }
+    if (!routing_runtime_active()) {
+        return std::nullopt;
+    }
+    if (runtime_firewall_owner_->shutdown_requested()) {
+        return RuntimeFirewallImmediateDisposition::rejected;
+    }
+
+    OwnedSnatRecovery recovery =
+        runtime_firewall_retry_.pending_owned_snat_recovery();
+    // Config pre-apply is itself a strict current-generation SNAT
+    // verification request. Mark it requested even when no earlier netfilter
+    // event was latched so a verified terminal clears the exact coordinator
+    // payload instead of leaving its broad snapshot behind.
+    recovery.requested = true;
+    const auto generation =
+        runtime_generation_.load(std::memory_order_acquire);
+    const auto merge_cleanup_retry = [&recovery, generation](
+        const OwnedConntrackCleanupRetry& retry) {
+        if (!retry.valid() ||
+            retry.snapshot.runtime_generation != generation) {
+            return;
+        }
+        auto exact_remainder =
+            owned_conntrack_cleanup_retry_remainder(retry);
+        if (recovery.cleanup_snapshot.has_value()) {
+            recovery.cleanup_snapshot =
+                merge_owned_conntrack_cleanup_snapshot(
+                    std::move(*recovery.cleanup_snapshot),
+                    std::move(exact_remainder));
+        } else {
+            recovery.cleanup_snapshot =
+                std::move(exact_remainder);
+        }
+    };
+    if (active_owned_conntrack_cleanup_operation_) {
+        merge_cleanup_retry(
+            active_owned_conntrack_cleanup_operation_->retry());
+    }
+    if (pending_owned_conntrack_cleanup_retry_.has_value()) {
+        merge_cleanup_retry(*pending_owned_conntrack_cleanup_retry_);
+    }
+
+    const bool background_timer_was_pending =
+        runtime_firewall_retry_.retry_pending();
+    runtime_firewall_owner_->cancel_retry();
+    if (runtime_firewall_owner_->active_context() ||
+        runtime_firewall_owner_->pending_successor()) {
+        if (background_timer_was_pending) {
+            schedule_netfilter_runtime_refresh_noexcept(
+                NetfilterRefreshReason::full,
+                "config pre-apply could not replace background timer");
+        }
+        return RuntimeFirewallImmediateDisposition::rejected;
+    }
+
+    RuntimeFirewallOperationOwner::PreownedImmediateStartResult result;
+    try {
+        auto state =
+            std::make_shared<DaemonRuntimeFirewallOperationState>();
+        result = runtime_firewall_owner_->start_immediate_preowned(
+            0U,
+            generation,
+            std::move(recovery),
+            {},
+            /*schedule_catalog_refresh=*/false,
+            state,
+            runtime_mutation_admission_,
+            std::move(mutation_lease),
+            {},
+            RuntimeFirewallLifecycleKind::config_preapply,
+            std::move(continuation));
+    } catch (...) {
+        if (background_timer_was_pending) {
+            schedule_netfilter_runtime_refresh_noexcept(
+                NetfilterRefreshReason::full,
+                "config pre-apply construction failed after timer replacement");
+        }
+        throw;
+    }
+    if (result.disposition ==
+        RuntimeFirewallImmediateDisposition::handed_off) {
+        // The accepted owner now carries the merged mandatory exact
+        // remainder. Retire the old timer/operation before either can observe
+        // admission after the request eventually crosses its generation.
+        if (owned_conntrack_cleanup_retry_task_id_ >= 0) {
+            const auto task_id =
+                std::exchange(owned_conntrack_cleanup_retry_task_id_, -1);
+            try {
+                scheduler_->cancel(task_id);
+            } catch (...) {
+                // The callback is harmless after both durable retry slots are
+                // cleared below: it observes no pending/active operation.
+            }
+        }
+        pending_owned_conntrack_cleanup_retry_.reset();
+        auto previous_cleanup =
+            std::move(active_owned_conntrack_cleanup_operation_);
+        if (previous_cleanup) previous_cleanup->cancel();
+        return result.disposition;
+    }
+
+    mutation_lease = std::move(result.unaccepted_lease);
+    continuation = std::move(result.unaccepted_continuation);
+    if (background_timer_was_pending) {
+        schedule_netfilter_runtime_refresh_noexcept(
+            NetfilterRefreshReason::full,
+            "config pre-apply owner rejected after timer replacement");
+    }
+    return RuntimeFirewallImmediateDisposition::rejected;
+}
 #endif
 
 void Daemon::dispatch_runtime_firewall_worker_attempt(
@@ -3995,6 +4116,9 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
         return;
     }
     auto& state = runtime_firewall_domain_state(context);
+    const bool lifecycle_preapply =
+        runtime_firewall_lifecycle_is_preapply(
+            context->lifecycle_kind);
 
     context->queued_claim = queued_claim;
     context->submitted_snat_recovery = std::move(snat_recovery_input);
@@ -4061,14 +4185,16 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
             state.preworker_failure_detail =
                 "runtime mutation admission failed";
         }
-        const bool retry_required =
-            runtime_firewall_preworker_retry_required(
-                snat_recovery.requested,
-                config_has_native_vpn_catalog_policy(config_),
-                urltest_after_firewall_gate_.waiting_for(
-                    queued_claim.runtime_generation),
-                queued_claim.attempt,
-                RUNTIME_FIREWALL_RETRY_DELAYS.size());
+        const bool retry_required = lifecycle_preapply
+            ? runtime_firewall_preapply_preworker_retry_available(
+                  queued_claim.attempt)
+            : runtime_firewall_preworker_retry_required(
+                  snat_recovery.requested,
+                  config_has_native_vpn_catalog_policy(config_),
+                  urltest_after_firewall_gate_.waiting_for(
+                      queued_claim.runtime_generation),
+                  queued_claim.attempt,
+                  RUNTIME_FIREWALL_RETRY_DELAYS.size());
         state.suppress_coordinator_rerun = !retry_required;
         terminalize_before_worker(
             retry_required
@@ -4086,14 +4212,16 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                 "runtime mutation admission failed with an unknown error";
         } catch (...) {
         }
-        const bool retry_required =
-            runtime_firewall_preworker_retry_required(
-                snat_recovery.requested,
-                config_has_native_vpn_catalog_policy(config_),
-                urltest_after_firewall_gate_.waiting_for(
-                    queued_claim.runtime_generation),
-                queued_claim.attempt,
-                RUNTIME_FIREWALL_RETRY_DELAYS.size());
+        const bool retry_required = lifecycle_preapply
+            ? runtime_firewall_preapply_preworker_retry_available(
+                  queued_claim.attempt)
+            : runtime_firewall_preworker_retry_required(
+                  snat_recovery.requested,
+                  config_has_native_vpn_catalog_policy(config_),
+                  urltest_after_firewall_gate_.waiting_for(
+                      queued_claim.runtime_generation),
+                  queued_claim.attempt,
+                  RUNTIME_FIREWALL_RETRY_DELAYS.size());
         state.suppress_coordinator_rerun = !retry_required;
         terminalize_before_worker(
             retry_required
@@ -4121,45 +4249,68 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
         const bool lifecycle_start =
             runtime_firewall_lifecycle_is_start(
                 context->lifecycle_kind);
-        state.internal_vpn_resolution =
-            prepared_native_vpn_catalog
-            ? prepared_native_vpn_catalog->interface_resolution
-            : prepare_internal_vpn_server_resolution_from_cache();
-        state.internal_vpn_service_resolution =
-            prepared_native_vpn_catalog
-            ? prepared_native_vpn_catalog->service_resolution
-            : prepare_internal_vpn_service_resolution_from_cache();
-        if (prepared_native_vpn_catalog) {
-            context->schedule_catalog_refresh =
-                prepared_native_vpn_catalog->schedule_catalog_refresh;
-            context->successor_schedule_catalog_refresh =
-                context->schedule_catalog_refresh;
-        }
-        if (context->schedule_catalog_refresh) {
-            schedule_internal_vpn_catalog_refresh_if_needed(
-                state.internal_vpn_resolution.state,
-                state.internal_vpn_service_resolution.state);
-        }
+        if (lifecycle_preapply) {
+            // Fence exactly the published generation. A cache refresh here
+            // would silently turn pre-apply into candidate generation.
+            state.internal_vpn_resolution.effective_servers =
+                resolved_internal_vpn_servers_;
+            state.internal_vpn_service_resolution.effective_targets =
+                resolved_internal_vpn_service_targets_;
+            state.lifecycle_trusted_dns_interfaces =
+                resolver_generation_snapshot_
+                ? resolver_generation_snapshot_->trusted_dns_interfaces
+                : build_dnsmasq_trusted_interfaces(
+                      resolved_internal_vpn_servers_,
+                      resolved_internal_vpn_service_targets_);
+            state.resolver_refresh_required = false;
+            state.lifecycle_resolver_verified = true;
+            state.list_cache_snapshot =
+                resolver_generation_snapshot_ &&
+                        resolver_generation_snapshot_->list_cache_snapshot
+                ? resolver_generation_snapshot_->list_cache_snapshot
+                : capture_relevant_list_cache_generation(config_);
+        } else {
+            state.internal_vpn_resolution =
+                prepared_native_vpn_catalog
+                ? prepared_native_vpn_catalog->interface_resolution
+                : prepare_internal_vpn_server_resolution_from_cache();
+            state.internal_vpn_service_resolution =
+                prepared_native_vpn_catalog
+                ? prepared_native_vpn_catalog->service_resolution
+                : prepare_internal_vpn_service_resolution_from_cache();
+            if (prepared_native_vpn_catalog) {
+                context->schedule_catalog_refresh =
+                    prepared_native_vpn_catalog->schedule_catalog_refresh;
+                context->successor_schedule_catalog_refresh =
+                    context->schedule_catalog_refresh;
+            }
+            if (context->schedule_catalog_refresh) {
+                schedule_internal_vpn_catalog_refresh_if_needed(
+                    state.internal_vpn_resolution.state,
+                    state.internal_vpn_service_resolution.state);
+            }
 
-        state.lifecycle_trusted_dns_interfaces =
-            build_dnsmasq_trusted_interfaces(
-                state.internal_vpn_resolution.effective_servers,
-                state.internal_vpn_service_resolution.effective_targets);
-        const auto& next_resolver_access_policy =
-            state.lifecycle_trusted_dns_interfaces;
-        const auto current_resolver_access_policy =
-            resolver_generation_snapshot_
-            ? resolver_generation_snapshot_->trusted_dns_interfaces
-            : build_dnsmasq_trusted_interfaces(
-                  resolved_internal_vpn_servers_,
-                  resolved_internal_vpn_service_targets_);
-        state.resolver_refresh_required =
-            runtime_firewall_lifecycle_is_foreground(
-                context->lifecycle_kind) ||
-            current_resolver_access_policy != next_resolver_access_policy ||
-            !resolver_generation_snapshot_ ||
-            !resolver_generation_snapshot_->list_cache_snapshot;
-        if (lifecycle_start) {
+            state.lifecycle_trusted_dns_interfaces =
+                build_dnsmasq_trusted_interfaces(
+                    state.internal_vpn_resolution.effective_servers,
+                    state.internal_vpn_service_resolution.effective_targets);
+            const auto& next_resolver_access_policy =
+                state.lifecycle_trusted_dns_interfaces;
+            const auto current_resolver_access_policy =
+                resolver_generation_snapshot_
+                ? resolver_generation_snapshot_->trusted_dns_interfaces
+                : build_dnsmasq_trusted_interfaces(
+                      resolved_internal_vpn_servers_,
+                      resolved_internal_vpn_service_targets_);
+            state.resolver_refresh_required =
+                runtime_firewall_lifecycle_is_foreground(
+                    context->lifecycle_kind) ||
+                current_resolver_access_policy !=
+                    next_resolver_access_policy ||
+                !resolver_generation_snapshot_ ||
+                !resolver_generation_snapshot_->list_cache_snapshot;
+        }
+        if (!lifecycle_preapply && lifecycle_start) {
             // START activates the already-pinned resolver/list generation.
             // Requiring activation is not authority to advance remote bodies.
             state.list_cache_snapshot =
@@ -4167,13 +4318,16 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                         resolver_generation_snapshot_->list_cache_snapshot
                     ? resolver_generation_snapshot_->list_cache_snapshot
                     : capture_relevant_list_cache_generation(config_);
-        } else {
+        } else if (!lifecycle_preapply) {
             state.list_cache_snapshot = state.resolver_refresh_required
                 ? capture_relevant_list_cache_generation(config_)
                 : resolver_generation_snapshot_->list_cache_snapshot;
         }
 
         RuntimeFirewallWorkerAttemptInput worker_input;
+        worker_input.operation_kind = lifecycle_preapply
+            ? RuntimeFirewallWorkerOperationKind::config_preapply
+            : RuntimeFirewallWorkerOperationKind::reconcile_generation;
         auto& transaction = worker_input.transaction;
         transaction.operation_serial = queued_claim.serial;
         transaction.runtime_generation = queued_claim.runtime_generation;
@@ -4237,24 +4391,26 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                 context->lifecycle_kind)
             ? RouteReconcileMode::Strict
             : RouteReconcileMode::DeferredRepair;
-        worker_input.route_mutation_checkpoint =
-            std::make_shared<RuntimeRouteMutationCheckpoint>();
-        state.route_mutation_checkpoint =
-            worker_input.route_mutation_checkpoint;
+        if (!lifecycle_preapply) {
+            worker_input.route_mutation_checkpoint =
+                std::make_shared<RuntimeRouteMutationCheckpoint>();
+            state.route_mutation_checkpoint =
+                worker_input.route_mutation_checkpoint;
 
-        std::weak_ptr<RuntimeFirewallOperationContext> weak_context{
-            context};
-        context->pump_worker_checkpoint = [this, weak_context]() noexcept {
-            const auto retained = weak_context.lock();
-            if (!retained) return;
-            pump_runtime_route_health_checkpoint(retained);
-        };
-        const auto route_mutation_checkpoint =
-            worker_input.route_mutation_checkpoint;
-        context->cancel_worker_checkpoint =
-            [route_mutation_checkpoint]() noexcept {
-                (void)route_mutation_checkpoint->cancel();
+            std::weak_ptr<RuntimeFirewallOperationContext> weak_context{
+                context};
+            context->pump_worker_checkpoint = [this, weak_context]() noexcept {
+                const auto retained = weak_context.lock();
+                if (!retained) return;
+                pump_runtime_route_health_checkpoint(retained);
             };
+            const auto route_mutation_checkpoint =
+                worker_input.route_mutation_checkpoint;
+            context->cancel_worker_checkpoint =
+                [route_mutation_checkpoint]() noexcept {
+                    (void)route_mutation_checkpoint->cancel();
+                };
+        }
 
         const auto route_config = config_.route.value_or(RouteConfig{});
         const bool has_explicit_inbound_scope =
@@ -4274,21 +4430,36 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
         transaction.forwarded_scope_allows_unmarked_cleanup =
             !has_explicit_inbound_scope && !has_native_vpn_bypass;
 
-        worker_input.inspect_owned_snat = snat_recovery.requested;
-        if (worker_input.inspect_owned_snat) {
+        worker_input.inspect_owned_snat =
+            lifecycle_preapply || snat_recovery.requested;
+        if (lifecycle_preapply) {
+            worker_input.pre_mutation_owned_conntrack_cleanup_snapshot =
+                snapshot_owned_conntrack_marks();
+            if (snat_recovery.cleanup_snapshot.has_value()) {
+                // Mandatory authority is evidence, not an optional hint. Pass
+                // malformed or stale payloads through so the worker rejects
+                // them fail-closed instead of laundering them into absence.
+                worker_input.mandatory_owned_conntrack_cleanup_snapshot =
+                    snat_recovery.cleanup_snapshot;
+            }
+            worker_input.owned_conntrack_cleanup_mode =
+                RuntimeFirewallOwnedConntrackCleanupMode::
+                    exact_pre_mutation_snapshot;
+        } else if (worker_input.inspect_owned_snat) {
             worker_input.pre_mutation_owned_conntrack_cleanup_snapshot =
                 snapshot_owned_conntrack_marks();
         }
-        worker_input.owned_conntrack_cleanup_mode = lifecycle_start
-            ? RuntimeFirewallOwnedConntrackCleanupMode::committed_candidate
-            : RuntimeFirewallOwnedConntrackCleanupMode::none;
-
-        if (!lifecycle_start) {
-            state.previous_meta_cleanup = pending_meta_udp443_cleanup_;
+        if (!lifecycle_preapply) {
+            worker_input.owned_conntrack_cleanup_mode = lifecycle_start
+                ? RuntimeFirewallOwnedConntrackCleanupMode::
+                      committed_candidate
+                : RuntimeFirewallOwnedConntrackCleanupMode::none;
         }
-        cancel_idle_stall_observer();
-        cancel_meta_udp443_activation_cleanup();
-        if (!lifecycle_start) {
+
+        if (!lifecycle_start && !lifecycle_preapply) {
+            state.previous_meta_cleanup = pending_meta_udp443_cleanup_;
+            cancel_idle_stall_observer();
+            cancel_meta_udp443_activation_cleanup();
             state.preworker_side_effects_armed = true;
         }
         state.meta_cleanup_epoch = meta_udp443_cleanup_epoch_.load(
@@ -4502,10 +4673,13 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
             state.preworker_failure_detail =
                 "runtime route interface is unavailable";
         }
-        const bool retry_required =
-            snat_recovery.requested ||
-            urltest_after_firewall_gate_.waiting_for(
-                queued_claim.runtime_generation);
+        const bool retry_required = lifecycle_preapply
+            ? runtime_firewall_preapply_preworker_retry_available(
+                  queued_claim.attempt)
+            : snat_recovery.requested ||
+                  urltest_after_firewall_gate_.waiting_for(
+                      queued_claim.runtime_generation);
+        state.suppress_coordinator_rerun = !retry_required;
         terminalize_before_worker(
             retry_required
                 ? RuntimeFirewallOperationContext::SuccessorMode::
@@ -4532,15 +4706,18 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
             context->worker_operation.reset();
         } else {
             const bool retry_required = transport_rejected ||
-                (!runtime_firewall_lifecycle_is_start(
-                     context->lifecycle_kind) &&
-                 runtime_firewall_preworker_retry_required(
-                    snat_recovery.requested,
-                    config_has_native_vpn_catalog_policy(config_),
-                    urltest_after_firewall_gate_.waiting_for(
-                        queued_claim.runtime_generation),
-                    queued_claim.attempt,
-                    RUNTIME_FIREWALL_RETRY_DELAYS.size()));
+                (lifecycle_preapply
+                     ? runtime_firewall_preapply_preworker_retry_available(
+                           queued_claim.attempt)
+                     : (!runtime_firewall_lifecycle_is_start(
+                            context->lifecycle_kind) &&
+                        runtime_firewall_preworker_retry_required(
+                            snat_recovery.requested,
+                            config_has_native_vpn_catalog_policy(config_),
+                            urltest_after_firewall_gate_.waiting_for(
+                                queued_claim.runtime_generation),
+                            queued_claim.attempt,
+                            RUNTIME_FIREWALL_RETRY_DELAYS.size())));
             if (!transport_rejected) {
                 state.suppress_coordinator_rerun = !retry_required;
             }
@@ -4578,15 +4755,18 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
             context->worker_operation.reset();
         } else {
             const bool retry_required = transport_rejected ||
-                (!runtime_firewall_lifecycle_is_start(
-                     context->lifecycle_kind) &&
-                 runtime_firewall_preworker_retry_required(
-                    snat_recovery.requested,
-                    config_has_native_vpn_catalog_policy(config_),
-                    urltest_after_firewall_gate_.waiting_for(
-                        queued_claim.runtime_generation),
-                    queued_claim.attempt,
-                    RUNTIME_FIREWALL_RETRY_DELAYS.size()));
+                (lifecycle_preapply
+                     ? runtime_firewall_preapply_preworker_retry_available(
+                           queued_claim.attempt)
+                     : (!runtime_firewall_lifecycle_is_start(
+                            context->lifecycle_kind) &&
+                        runtime_firewall_preworker_retry_required(
+                            snat_recovery.requested,
+                            config_has_native_vpn_catalog_policy(config_),
+                            urltest_after_firewall_gate_.waiting_for(
+                                queued_claim.runtime_generation),
+                            queued_claim.attempt,
+                            RUNTIME_FIREWALL_RETRY_DELAYS.size())));
             if (!transport_rejected) {
                 state.suppress_coordinator_rerun = !retry_required;
             }
@@ -5124,6 +5304,9 @@ void Daemon::drain_runtime_firewall_terminal(
         return;
     }
     auto& state = runtime_firewall_domain_state(context);
+    const bool lifecycle_preapply =
+        runtime_firewall_lifecycle_is_preapply(
+            context->lifecycle_kind);
 
     auto drain = context->terminal_owner->try_begin_drain();
     if (!drain.has_value()) return;
@@ -5226,7 +5409,8 @@ void Daemon::drain_runtime_firewall_terminal(
             if (!context->lifecycle_completion) return;
             RuntimeFirewallLifecycleTerminal terminal;
             terminal.outcome = outcome;
-            terminal.committed = state.core_publication.committed;
+            terminal.committed = state.core_publication.committed ||
+                context->preapply_commit_observed;
             terminal.commit_ambiguous =
                 context->worker_commit_ambiguous;
             terminal.transient = state.worker_failure_transient ||
@@ -5374,8 +5558,57 @@ void Daemon::drain_runtime_firewall_terminal(
         };
 
     const auto finish_preworker_failure_policy =
-        [this, &context, &state, shutdown]() {
+        [this, &context, &state, shutdown, lifecycle_preapply]() {
             if (state.preworker_failure_policy_finished) return;
+            if (lifecycle_preapply) {
+                // Config pre-apply owns no URLTest, resolver or runtime-state
+                // lifecycle. A transport/preparation failure must return its
+                // exact request authority without publishing unrelated
+                // incidents or moving the running runtime to broken.
+                const auto kind = context->foreground_transport_exhausted
+                    ? DaemonRuntimeFirewallOperationState::
+                          PreworkerFailureKind::transport_rejected
+                    : state.preworker_failure_kind;
+                if (kind ==
+                    DaemonRuntimeFirewallOperationState::
+                        PreworkerFailureKind::transport_rejected) {
+                    if (!runtime_firewall_owner_->
+                            note_foreground_transport_rejection(context)) {
+                        context->successor_mode =
+                            RuntimeFirewallOperationContext::SuccessorMode::
+                                none;
+                        context->force_successor = false;
+                        state.suppress_coordinator_rerun = true;
+                        try {
+                            state.lifecycle_failure_detail =
+                                "configuration pre-apply worker transport "
+                                "retry limit was exhausted";
+                        } catch (...) {
+                        }
+                    }
+                } else if (
+                    kind != DaemonRuntimeFirewallOperationState::
+                                PreworkerFailureKind::none &&
+                    !runtime_firewall_preapply_preworker_retry_available(
+                        context->queued_claim.attempt)) {
+                    // The old-generation SNAT recovery remains eligible for a
+                    // background refresh after the exact request lease is
+                    // returned. It must never turn this HTTP/WAL operation
+                    // into the coordinator's unbounded maintenance loop.
+                    context->successor_mode =
+                        RuntimeFirewallOperationContext::SuccessorMode::none;
+                    context->force_successor = false;
+                    state.suppress_coordinator_rerun = true;
+                    try {
+                        state.lifecycle_failure_detail =
+                            "configuration pre-apply preparation retry limit "
+                            "was exhausted";
+                    } catch (...) {
+                    }
+                }
+                state.preworker_failure_policy_finished = true;
+                return;
+            }
             if (shutdown) {
                 state.preworker_failure_policy_finished = true;
                 return;
@@ -5722,6 +5955,135 @@ void Daemon::drain_runtime_firewall_terminal(
         }
     };
 
+    const auto prepare_preapply_terminal =
+        [&context, &state](RuntimeFirewallLifecycleOutcome outcome) {
+            RuntimeFirewallLifecycleTerminal terminal;
+            terminal.outcome = outcome;
+            terminal.committed = state.core_publication.committed ||
+                context->preapply_commit_observed;
+            terminal.commit_ambiguous =
+                context->worker_commit_ambiguous;
+            terminal.transient = state.worker_failure_transient;
+            if (!state.lifecycle_failure_detail.empty()) {
+                terminal.detail = state.lifecycle_failure_detail;
+            } else if (!state.worker_failure_detail.empty()) {
+                terminal.detail = state.worker_failure_detail;
+            } else {
+                terminal.detail = state.preworker_failure_detail;
+            }
+            return terminal;
+        };
+
+    const auto complete_finalized_preapply =
+        [this, &context, &state, shutdown](
+            RuntimeFirewallOperationOwner::
+                PreownedContinuationFinalizationPermit&& permit,
+            RuntimeFirewallOperationOwner::TerminalFinalizationProof&& proof,
+            RuntimeFirewallLifecycleTerminal terminal,
+            OwnedSnatRecovery successor_recovery) noexcept {
+            auto successor_mode = context->successor_mode;
+            const bool completion_requests_successor =
+                runtime_firewall_terminal_requests_successor(
+                    terminal.commit_ambiguous,
+                    context->completion.rerun_requested,
+                    context->force_successor,
+                    state.suppress_coordinator_rerun);
+            const bool successor_requested = !shutdown &&
+                !terminal.commit_ambiguous &&
+                (successor_mode !=
+                     RuntimeFirewallOperationContext::SuccessorMode::none ||
+                 completion_requests_successor);
+            if (successor_requested) {
+                if (successor_mode ==
+                    RuntimeFirewallOperationContext::SuccessorMode::none) {
+                    successor_mode =
+                        RuntimeFirewallOperationContext::SuccessorMode::
+                            defer_same_attempt;
+                }
+                const auto successor_generation =
+                    context->successor_runtime_generation != 0U
+                    ? context->successor_runtime_generation
+                    : context->queued_claim.runtime_generation;
+                if (runtime_firewall_lifecycle_generation_is_current(
+                        context->lifecycle_kind,
+                        successor_generation)) {
+                    successor_recovery.requested = true;
+                    const bool retained =
+                        runtime_firewall_owner_->retain_pending_successor(
+                            context,
+                            successor_mode,
+                            context->successor_attempt,
+                            successor_generation,
+                            std::move(successor_recovery),
+                            {},
+                            /*schedule_catalog_refresh=*/false,
+                            /*detach_foreground=*/false);
+                    if (retained) {
+                        runtime_firewall_owner_->
+                            cancel_completion_watchdog();
+                        runtime_firewall_owner_->reset_if_active(context);
+                        try {
+                            (void)runtime_firewall_owner_->
+                                launch_pending_successor();
+                        } catch (const std::exception& error) {
+                            try {
+                                Logger::instance().error(
+                                    "Could not arm retained config pre-apply "
+                                    "successor: {}",
+                                    error.what());
+                            } catch (...) {
+                            }
+                        } catch (...) {
+                        }
+                        return true;
+                    }
+                    try {
+                        terminal.detail =
+                            "configuration pre-apply could not retain its "
+                            "exact successor";
+                    } catch (...) {
+                    }
+                } else {
+                    try {
+                        terminal.detail =
+                            "configuration pre-apply generation became stale";
+                    } catch (...) {
+                    }
+                }
+                terminal.outcome =
+                    RuntimeFirewallLifecycleOutcome::not_verified;
+            }
+
+            const bool refresh_after_return =
+                terminal.commit_ambiguous || terminal.committed ||
+                context->completion.snat_recovery.requested;
+            const bool full_refresh = terminal.commit_ambiguous ||
+                terminal.committed || context->completion.rerun_requested;
+            const bool completed =
+                runtime_firewall_owner_->complete_preowned_continuation(
+                    std::move(permit),
+                    std::move(proof),
+                    std::move(terminal));
+            if (!completed) {
+                try {
+                    Logger::instance().error(
+                        "Finalized config pre-apply could not return its "
+                        "reserved exact continuation");
+                } catch (...) {
+                }
+            }
+            if (completed && refresh_after_return) {
+                schedule_netfilter_runtime_refresh_noexcept(
+                    full_refresh
+                        ? NetfilterRefreshReason::full
+                        : NetfilterRefreshReason::nat_only,
+                    full_refresh
+                        ? "config pre-apply requires a fresh backend snapshot"
+                        : "config pre-apply retained exact SNAT recovery");
+            }
+            return completed;
+        };
+
     if (drain->kind() ==
         RuntimeFirewallDelayedTerminalOwner::DrainKind::coordinator) {
         const auto* terminal = drain->coordinator_terminal();
@@ -5751,8 +6113,34 @@ void Daemon::drain_runtime_firewall_terminal(
                           not_verified)) {
             return;
         }
-        if (!drain->finish_coordinator_terminal()) return;
-        finish_context();
+        std::optional<RuntimeFirewallLifecycleTerminal>
+            preapply_terminal;
+        std::optional<OwnedSnatRecovery>
+            preapply_successor_recovery;
+        if (lifecycle_preapply) {
+            preapply_terminal = prepare_preapply_terminal(
+                shutdown
+                    ? RuntimeFirewallLifecycleOutcome::shutdown
+                    : RuntimeFirewallLifecycleOutcome::not_verified);
+            preapply_successor_recovery =
+                context->completion.snat_recovery;
+        }
+        auto preapply_permit = lifecycle_preapply
+            ? runtime_firewall_owner_->
+                  prepare_preowned_continuation_finalization(context)
+            : std::nullopt;
+        if (lifecycle_preapply && !preapply_permit.has_value()) return;
+        auto proof = drain->finish_coordinator_terminal();
+        if (!proof.has_value()) return;
+        if (lifecycle_preapply) {
+            (void)complete_finalized_preapply(
+                std::move(*preapply_permit),
+                std::move(*proof),
+                std::move(*preapply_terminal),
+                std::move(*preapply_successor_recovery));
+        } else {
+            finish_context();
+        }
         return;
     }
 
@@ -5789,8 +6177,34 @@ void Daemon::drain_runtime_firewall_terminal(
                           not_verified)) {
             return;
         }
-        if (!drain->finish_worker_terminal()) return;
-        finish_context();
+        std::optional<RuntimeFirewallLifecycleTerminal>
+            preapply_terminal;
+        std::optional<OwnedSnatRecovery>
+            preapply_successor_recovery;
+        if (lifecycle_preapply) {
+            preapply_terminal = prepare_preapply_terminal(
+                shutdown
+                    ? RuntimeFirewallLifecycleOutcome::shutdown
+                    : RuntimeFirewallLifecycleOutcome::not_verified);
+            preapply_successor_recovery =
+                context->completion.snat_recovery;
+        }
+        auto preapply_permit = lifecycle_preapply
+            ? runtime_firewall_owner_->
+                  prepare_preowned_continuation_finalization(context)
+            : std::nullopt;
+        if (lifecycle_preapply && !preapply_permit.has_value()) return;
+        auto proof = drain->finish_worker_terminal();
+        if (!proof.has_value()) return;
+        if (lifecycle_preapply) {
+            (void)complete_finalized_preapply(
+                std::move(*preapply_permit),
+                std::move(*proof),
+                std::move(*preapply_terminal),
+                std::move(*preapply_successor_recovery));
+        } else {
+            finish_context();
+        }
         return;
     }
 
@@ -5811,6 +6225,209 @@ void Daemon::drain_runtime_firewall_terminal(
         terminal->mutation_lease.return_policy ==
         RuntimeFirewallDelayedWorker::MutationLeaseReturnPolicy::
             return_to_operation_owner;
+    if (lifecycle_preapply) {
+        if (!state.core_publication.prepared) {
+            DaemonRuntimeFirewallOperationState::CorePublication publication;
+            OwnedSnatRecovery processed_recovery =
+                context->submitted_snat_recovery;
+            processed_recovery.requested = true;
+            const bool result_valid =
+                terminal->status ==
+                    RuntimeFirewallDelayedWorker::TerminalStatus::result &&
+                worker_result != nullptr && context->worker_input &&
+                worker_result->operation_kind ==
+                    RuntimeFirewallWorkerOperationKind::config_preapply &&
+                context->worker_input->operation_kind ==
+                    RuntimeFirewallWorkerOperationKind::config_preapply &&
+                worker_result->transaction.operation_serial ==
+                    context->queued_claim.serial &&
+                worker_result->transaction.runtime_generation ==
+                    context->queued_claim.runtime_generation &&
+                context->worker_input->transaction.operation_serial ==
+                    context->queued_claim.serial &&
+                context->worker_input->transaction.runtime_generation ==
+                    context->queued_claim.runtime_generation;
+            const bool current_generation =
+                runtime_firewall_lifecycle_generation_is_current(
+                    context->lifecycle_kind,
+                    context->queued_claim.runtime_generation);
+            const bool commit_ambiguous = !result_valid ||
+                (worker_result->transaction.commit_entered &&
+                 !worker_result->transaction.committed());
+            const bool committed = result_valid &&
+                worker_result->transaction.committed();
+            const bool verified = result_valid && current_generation &&
+                !shutdown && worker_result->config_preapply_verified();
+
+            OwnedSnatState inspected_after = OwnedSnatState::unknown;
+            if (result_valid) {
+                OwnedSnatState inspected_before = OwnedSnatState::unknown;
+                if (worker_result->owned_snat_before.state.has_value() &&
+                    !worker_result->owned_snat_before.failure.failed()) {
+                    inspected_before =
+                        *worker_result->owned_snat_before.state;
+                }
+                processed_recovery = observe_owned_snat_state(
+                    std::move(processed_recovery),
+                    inspected_before,
+                    inspected_before == OwnedSnatState::missing
+                        ? worker_result
+                              ->pre_mutation_owned_conntrack_cleanup_snapshot
+                        : std::nullopt);
+                if (worker_result->owned_snat_after.state.has_value() &&
+                    !worker_result->owned_snat_after.failure.failed()) {
+                    inspected_after =
+                        *worker_result->owned_snat_after.state;
+                }
+                processed_recovery = observe_owned_snat_state(
+                    std::move(processed_recovery), inspected_after);
+
+                const auto& cleanup =
+                    worker_result->post_commit_owned_conntrack_cleanup;
+                if (cleanup.attempted && cleanup.snapshot.has_value()) {
+                    auto remaining = cleanup.summary.remaining_marks;
+                    const bool cleanup_incomplete =
+                        cleanup.failure.failed() ||
+                        cleanup.summary.command_unavailable ||
+                        cleanup.summary.failed != 0U ||
+                        cleanup.summary.skipped != 0U;
+                    if (cleanup_incomplete && remaining.empty()) {
+                        remaining = ordered_owned_conntrack_marks(
+                            *cleanup.snapshot);
+                    }
+                    if (remaining.empty() && !cleanup_incomplete) {
+                        processed_recovery.cleanup_snapshot.reset();
+                    } else if (!remaining.empty()) {
+                        processed_recovery.cleanup_snapshot =
+                            restrict_owned_conntrack_cleanup_snapshot(
+                                *cleanup.snapshot, remaining);
+                        processed_recovery.requested = true;
+                    }
+                }
+            }
+
+            std::string failure_detail;
+            if (!verified) {
+                if (!result_valid) {
+                    failure_detail =
+                        "configuration pre-apply returned no exact typed "
+                        "worker result";
+                } else if (worker_result->transaction.failure.has_value()) {
+                    failure_detail =
+                        worker_result->transaction.failure->message;
+                } else if (
+                    worker_result->owned_snat_before.failure.failed()) {
+                    failure_detail =
+                        worker_result->owned_snat_before.failure.message;
+                } else if (
+                    worker_result->owned_snat_after.failure.failed()) {
+                    failure_detail =
+                        worker_result->owned_snat_after.failure.message;
+                } else if (!worker_result->exact_cleanup_authority_valid) {
+                    failure_detail =
+                        "configuration pre-apply exact cleanup authority "
+                        "was not verified";
+                } else if (committed) {
+                    failure_detail =
+                        "configuration pre-apply committed a repair but its "
+                        "post-commit verification did not complete";
+                } else if (commit_ambiguous) {
+                    failure_detail =
+                        "configuration pre-apply firewall COMMIT outcome is "
+                        "ambiguous";
+                } else if (worker_result
+                               ->post_commit_owned_conntrack_cleanup
+                               .attempted) {
+                    failure_detail =
+                        "configuration pre-apply exact conntrack cleanup "
+                        "remains incomplete";
+                } else if (!current_generation) {
+                    failure_detail =
+                        "configuration pre-apply generation became stale";
+                } else {
+                    failure_detail =
+                        "configuration pre-apply did not reach a verified "
+                        "terminal";
+                }
+            }
+
+            const bool retry = !verified && !commit_ambiguous &&
+                current_generation && !shutdown &&
+                runtime_firewall_start_retry_available(
+                    context->queued_claim.attempt);
+            state.worker_failure_detail = std::move(failure_detail);
+            publication.prepared = true;
+            publication.committed = committed;
+            state.core_publication = std::move(publication);
+            state.processed_snat_recovery =
+                std::move(processed_recovery);
+            state.inspected_snat_after = inspected_after;
+            state.worker_result_valid = result_valid;
+            state.worker_failure_transient = retry;
+            state.lifecycle_resolver_verified = true;
+            context->worker_succeeded = verified;
+            context->worker_commit_ambiguous = commit_ambiguous;
+            context->preapply_commit_observed =
+                context->preapply_commit_observed || committed;
+            context->successor_mode = retry
+                ? RuntimeFirewallOperationContext::SuccessorMode::
+                      reschedule_retry
+                : RuntimeFirewallOperationContext::SuccessorMode::none;
+            state.suppress_coordinator_rerun = true;
+        }
+
+        if (!drain->begin_worker_control(runtime_firewall_retry_)) return;
+        if (!drain->publish_worker_control([]() noexcept { return true; })) {
+            return;
+        }
+        if (!state.processed_snat_recovery.has_value()) {
+            state.processed_snat_recovery =
+                context->submitted_snat_recovery;
+        }
+        if (!drain->complete_worker_control(
+                runtime_firewall_retry_,
+                !shutdown && context->worker_succeeded,
+                *state.processed_snat_recovery)) {
+            return;
+        }
+        const auto* completion = drain->worker_control_completion();
+        if (!completion || !completion->owned) return;
+        capture_completion(*completion);
+        if (!retained_worker_lease ||
+            !absorb_retained_mutation_lease()) {
+            return;
+        }
+        if (!settle_immediate_completion(
+                shutdown
+                    ? RuntimeFirewallImmediateTerminalOutcome::shutdown
+                    : (context->worker_succeeded
+                           ? RuntimeFirewallImmediateTerminalOutcome::
+                                 verified_success
+                           : RuntimeFirewallImmediateTerminalOutcome::
+                                 not_verified))) {
+            return;
+        }
+
+        auto preapply_terminal = prepare_preapply_terminal(
+            shutdown
+                ? RuntimeFirewallLifecycleOutcome::shutdown
+                : (context->worker_succeeded
+                       ? RuntimeFirewallLifecycleOutcome::verified_success
+                       : RuntimeFirewallLifecycleOutcome::not_verified));
+        auto preapply_successor_recovery =
+            context->completion.snat_recovery;
+        auto preapply_permit = runtime_firewall_owner_->
+            prepare_preowned_continuation_finalization(context);
+        if (!preapply_permit.has_value()) return;
+        auto proof = drain->finish_worker_terminal();
+        if (!proof.has_value()) return;
+        (void)complete_finalized_preapply(
+            std::move(*preapply_permit),
+            std::move(*proof),
+            std::move(preapply_terminal),
+            std::move(preapply_successor_recovery));
+        return;
+    }
     if (!state.core_publication.prepared) {
         DaemonRuntimeFirewallOperationState::CorePublication publication;
         std::optional<MetaUdp443ActivationPlan> candidate_meta_plan;

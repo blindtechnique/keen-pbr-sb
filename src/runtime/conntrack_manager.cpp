@@ -801,15 +801,24 @@ ConntrackCleanupSummary ConntrackManager::delete_marks_ordered(
         const std::string selector =
             std::to_string(mark & owned_mask) + "/" +
             std::to_string(owned_mask);
-        const auto delete_family = [this, &selector](const char* family) {
-            const auto result =
-                runner_({"conntrack", "-D", "-f", family, "--mark", selector});
-            if (result.exit_code == 127) {
-                return ConntrackCleanupResult::CommandUnavailable;
-            }
-            return result.exit_code == 0 || is_empty_delete_result(result)
-                       ? ConntrackCleanupResult::Succeeded
-                       : ConntrackCleanupResult::Failed;
+        const auto delete_family =
+            [this, &selector](const char* family) noexcept {
+                try {
+                    const auto result = runner_({
+                        "conntrack", "-D", "-f", family, "--mark", selector});
+                    if (result.exit_code == 127) {
+                        return ConntrackCleanupResult::CommandUnavailable;
+                    }
+                    return result.exit_code == 0 ||
+                            is_empty_delete_result(result)
+                        ? ConntrackCleanupResult::Succeeded
+                        : ConntrackCleanupResult::Failed;
+                } catch (...) {
+                    // Preserve per-mark progress. A throwing command adapter
+                    // makes this exact selector retryable, but must not erase
+                    // evidence that earlier/later selectors completed.
+                    return ConntrackCleanupResult::Failed;
+                }
         };
 
         const auto ipv4 = delete_family("ipv4");

@@ -43,6 +43,7 @@
 #include "../util/system_info.hpp"
 #include "../util/time_utils.hpp"
 #include "scheduler.hpp"
+#include "runtime_firewall_operation_owner.hpp"
 
 #ifndef KEEN_PBR_FRONTEND_ROOT
 #define KEEN_PBR_FRONTEND_ROOT "/usr/share/keen-pbr/frontend"
@@ -688,7 +689,8 @@ void Daemon::restart_routing_runtime_with_lease(
 
 ConfigApplyResult Daemon::apply_validated_config_via_control_task(
     Config config,
-    std::string saved_config_json) {
+    std::string saved_config_json,
+    ConfigGenerationFence generation_fence) {
     auto result = std::make_shared<ConfigApplyResult>();
     auto prepared = std::make_shared<PreparedRuntimeInputs>();
     auto rollback_prepared = std::make_shared<PreparedRuntimeInputs>();
@@ -712,51 +714,75 @@ ConfigApplyResult Daemon::apply_validated_config_via_control_task(
         return *result;
     }
 
-    const std::int64_t apply_started_ts = unix_timestamp_now_seconds();
-    result->apply_started_ts = apply_started_ts;
-    apply_started_ts_.store(apply_started_ts, std::memory_order_release);
-
     enqueue_control_task(
         [this,
          result,
          prepared,
          rollback_prepared,
          refresh_remote_lists_after_apply,
+         generation_fence,
          saved_config_json = std::move(saved_config_json)]() mutable {
-            try {
-                // Rollback must restore the exact DNS snapshot that belongs
-                // to the currently committed runtime generation. The shared
-                // prepare cache may have advanced after both candidates were
-                // prepared on the API worker.
-                rollback_prepared->keenetic_dns = active_keenetic_dns_;
-                apply_prepared_runtime_inputs(std::move(*prepared));
-                result->applied = true;
-                result->rolled_back = false;
-                result->runtime_unchanged = false;
-                config_store_.clear_staged_if_matches(saved_config_json);
-                if (refresh_remote_lists_after_apply) {
-                    refresh_lists_and_maybe_reload_async("post-apply");
-                }
-            } catch (const std::exception& e) {
-                result->error = e.what();
-                Logger::instance().error("Apply staged config task failed: {}", e.what());
-
-                try {
-                    apply_prepared_runtime_inputs(std::move(*rollback_prepared));
-                    result->rolled_back = true;
-                } catch (const std::exception& rollback_error) {
-                    result->rolled_back = false;
-                    Logger::instance().error("Rollback to previous config failed: {}",
-                                             rollback_error.what());
-                } catch (...) {
-                    result->rolled_back = false;
-                    Logger::instance().error("Rollback to previous config failed: unknown error");
-                }
-            }
+            *result = apply_prepared_validated_config_on_control_loop(
+                std::move(*prepared),
+                std::move(*rollback_prepared),
+                refresh_remote_lists_after_apply,
+                std::move(saved_config_json),
+                generation_fence);
         },
         true,
         "api-apply-config");
     return *result;
+}
+
+ConfigApplyResult
+Daemon::apply_prepared_validated_config_on_control_loop(
+    PreparedRuntimeInputs prepared,
+    PreparedRuntimeInputs rollback_prepared,
+    bool refresh_remote_lists_after_apply,
+    std::string saved_config_json,
+    ConfigGenerationFence generation_fence) {
+    ConfigApplyResult result;
+    const std::int64_t apply_started_ts = unix_timestamp_now_seconds();
+    result.apply_started_ts = apply_started_ts;
+    apply_started_ts_.store(apply_started_ts, std::memory_order_release);
+
+    try {
+        // Rollback must restore the exact DNS snapshot that belongs to the
+        // currently committed runtime generation. The shared prepare cache
+        // may have advanced after both candidates were prepared.
+        rollback_prepared.keenetic_dns = active_keenetic_dns_;
+        apply_prepared_runtime_inputs(
+            std::move(prepared), generation_fence);
+        result.applied = true;
+        result.rolled_back = false;
+        result.runtime_unchanged = false;
+        config_store_.clear_staged_if_matches(saved_config_json);
+        if (refresh_remote_lists_after_apply) {
+            refresh_lists_and_maybe_reload_async("post-apply");
+        }
+    } catch (const std::exception& error) {
+        result.error = error.what();
+        Logger::instance().error(
+            "Apply staged config task failed: {}", error.what());
+
+        try {
+            // Rollback remains on the established synchronous fence until its
+            // own lifecycle is migrated. It must never inherit the verified
+            // fence of the candidate which just failed.
+            apply_prepared_runtime_inputs(std::move(rollback_prepared));
+            result.rolled_back = true;
+        } catch (const std::exception& rollback_error) {
+            result.rolled_back = false;
+            Logger::instance().error(
+                "Rollback to previous config failed: {}",
+                rollback_error.what());
+        } catch (...) {
+            result.rolled_back = false;
+            Logger::instance().error(
+                "Rollback to previous config failed: unknown error");
+        }
+    }
+    return result;
 }
 
 ConfigApplyResult
@@ -775,8 +801,277 @@ Daemon::apply_validated_config_via_control_task_with_lease_return(
 
     RuntimeMutationAdmission::Lease owner{std::move(lease)};
     const ExactLeaseReturn return_exact{lease, owner};
-    return apply_validated_config_via_control_task(
-        std::move(config), std::move(saved_config_json));
+    const auto expected_lease_token = owner.token();
+
+    if (is_event_loop_thread()) {
+        ConfigApplyResult result;
+        result.error =
+            "Configuration pre-apply cannot wait on the control loop";
+        result.runtime_unchanged = true;
+        return result;
+    }
+
+    struct PreapplyLeaseSlot final {
+        std::unique_ptr<RuntimeMutationAdmission::Lease> lease;
+    };
+
+    std::shared_ptr<ConfigApplyResult> result;
+    std::shared_ptr<PreparedRuntimeInputs> prepared;
+    std::shared_ptr<PreparedRuntimeInputs> rollback_prepared;
+    std::shared_ptr<std::string> saved_config;
+    std::shared_ptr<PreapplyLeaseSlot> returned;
+    RuntimeFirewallLifecycleCompletion::Pair completion;
+    RuntimeFirewallPreownedTerminalContinuation continuation;
+    std::unique_ptr<RuntimeMutationAdmission::Lease> lease_owner;
+    bool refresh_remote_lists_after_apply = false;
+    try {
+        // Everything through lease_owner is private request setup. No
+        // control-loop callback can observe it yet, so any exception here is
+        // a clean rejection and ExactLeaseReturn restores the exact writer.
+        result = std::make_shared<ConfigApplyResult>();
+        prepared = std::make_shared<PreparedRuntimeInputs>();
+        rollback_prepared = std::make_shared<PreparedRuntimeInputs>();
+        saved_config =
+            std::make_shared<std::string>(std::move(saved_config_json));
+        const auto active_snapshot = config_store_.pin_active_snapshot();
+        const Config& active_config = active_snapshot->config;
+        refresh_remote_lists_after_apply =
+            remote_list_sources_changed(active_config, config);
+        *prepared = prepare_runtime_inputs(
+            config,
+            RemoteListPreparationMode::MissingOrInvalid);
+        *rollback_prepared = prepare_runtime_inputs(
+            active_config,
+            RemoteListPreparationMode::None);
+        completion = RuntimeFirewallLifecycleCompletion::create();
+        returned = std::make_shared<PreapplyLeaseSlot>();
+        auto completion_source = std::move(completion.source);
+        continuation = RuntimeFirewallPreownedTerminalContinuation{
+            [this,
+             returned,
+             result,
+             prepared,
+             rollback_prepared,
+             saved_config,
+             refresh_remote_lists_after_apply,
+             expected_lease_token,
+             completion_source = std::move(completion_source)](
+                RuntimeFirewallLifecycleTerminal terminal,
+                std::unique_ptr<RuntimeMutationAdmission::Lease> exact) mutable
+                noexcept {
+                try {
+                    const bool exact_lease_returned = exact &&
+                        static_cast<bool>(*exact) &&
+                        exact->token() == expected_lease_token &&
+                        runtime_mutation_admission_.owns(*exact);
+                    if (!exact_lease_returned) {
+                        result->error =
+                            "Configuration pre-apply did not return its exact "
+                            "mutation lease";
+                        result->runtime_unchanged = false;
+                    } else if (
+                        terminal.outcome ==
+                            RuntimeFirewallLifecycleOutcome::verified_success &&
+                        !terminal.commit_ambiguous) {
+                        // The owner retired its final context immediately
+                        // before invoking this continuation. Applying here
+                        // makes the verified firewall terminal the last
+                        // control-loop boundary before the candidate changes
+                        // generation.
+                        *result =
+                            apply_prepared_validated_config_on_control_loop(
+                                std::move(*prepared),
+                                std::move(*rollback_prepared),
+                                refresh_remote_lists_after_apply,
+                                std::move(*saved_config),
+                                ConfigGenerationFence::owner_verified);
+                    } else {
+                        result->error = terminal.detail.empty()
+                            ? "Configuration pre-apply was not verified"
+                            : terminal.detail;
+                        result->runtime_unchanged =
+                            terminal.outcome ==
+                                RuntimeFirewallLifecycleOutcome::not_verified &&
+                            !terminal.committed && !terminal.commit_ambiguous;
+                    }
+                } catch (const std::exception& error) {
+                    try {
+                        result->error = error.what();
+                    } catch (...) {
+                    }
+                    result->runtime_unchanged = false;
+                } catch (...) {
+                    try {
+                        result->error =
+                            "Configuration apply continuation failed";
+                    } catch (...) {
+                    }
+                    result->runtime_unchanged = false;
+                }
+                returned->lease = std::move(exact);
+                (void)completion_source.settle(std::move(terminal));
+            }};
+        lease_owner = std::make_unique<RuntimeMutationAdmission::Lease>(
+            std::move(owner));
+    } catch (const std::exception& error) {
+        ConfigApplyResult setup_failure;
+        setup_failure.runtime_unchanged = true;
+        try {
+            setup_failure.error = error.what();
+        } catch (...) {
+        }
+        try {
+            Logger::instance().error(
+                "Configuration pre-apply setup failed: {}", error.what());
+        } catch (...) {
+        }
+        return setup_failure;
+    } catch (...) {
+        ConfigApplyResult setup_failure;
+        setup_failure.runtime_unchanged = true;
+        try {
+            setup_failure.error =
+                "Configuration pre-apply setup failed";
+        } catch (...) {
+        }
+        try {
+            Logger::instance().error(
+                "Configuration pre-apply setup failed: unknown error");
+        } catch (...) {
+        }
+        return setup_failure;
+    }
+    std::optional<RuntimeFirewallImmediateDisposition> disposition;
+    bool handoff_task_completed = false;
+    std::exception_ptr handoff_failure;
+    try {
+        // Only this short ownership handoff is synchronous. The API worker,
+        // never the control loop, waits for the typed terminal below.
+        enqueue_control_task(
+            [this,
+             &lease_owner,
+             &continuation,
+             &disposition,
+             &handoff_task_completed,
+             &handoff_failure]() mutable {
+                try {
+                    disposition =
+                        begin_preowned_runtime_firewall_config_preapply(
+                            lease_owner, continuation);
+                } catch (...) {
+                    handoff_failure = std::current_exception();
+                }
+                handoff_task_completed = true;
+            },
+            true,
+            "api-config-preapply-owner",
+            true);
+    } catch (...) {
+        handoff_failure = std::current_exception();
+    }
+
+    if (!handoff_task_completed) {
+        if (lease_owner) {
+            owner = std::move(*lease_owner);
+        }
+        ConfigApplyResult result;
+        result.error =
+            "Configuration pre-apply owner handoff did not complete";
+        result.runtime_unchanged = true;
+        return result;
+    }
+
+    if (handoff_failure) {
+        const bool exact_lease_still_unaccepted =
+            lease_owner && static_cast<bool>(*lease_owner) &&
+            lease_owner->token() == expected_lease_token &&
+            runtime_mutation_admission_.owns(*lease_owner);
+        if (exact_lease_still_unaccepted) {
+            owner = std::move(*lease_owner);
+        }
+        result->error =
+            "Configuration pre-apply owner handoff failed";
+        // The task may fail while copying its private recovery snapshot,
+        // before start_immediate_preowned consumes the token. The still-live
+        // exact token proves that case clean. Once it has moved, conservatively
+        // keep WAL/recovery because part of the firewall transaction may have
+        // run before the exception surfaced.
+        result->runtime_unchanged = exact_lease_still_unaccepted;
+        return *result;
+    }
+
+    if (!disposition.has_value()) {
+        // A stopped runtime has no published generation to fence. Keep the
+        // established cold-start/synchronous path until that lifecycle is
+        // migrated separately.
+        if (!lease_owner || !static_cast<bool>(*lease_owner)) {
+            result->error =
+                "Configuration pre-apply lost its inactive-runtime lease";
+            result->runtime_unchanged = false;
+            return *result;
+        }
+        owner = std::move(*lease_owner);
+        enqueue_control_task(
+            [this,
+             result,
+             prepared,
+             rollback_prepared,
+             saved_config,
+             refresh_remote_lists_after_apply]() mutable {
+                *result = apply_prepared_validated_config_on_control_loop(
+                    std::move(*prepared),
+                    std::move(*rollback_prepared),
+                    refresh_remote_lists_after_apply,
+                    std::move(*saved_config),
+                    ConfigGenerationFence::synchronous_legacy);
+            },
+            true,
+            "api-apply-config-stopped");
+        return *result;
+    }
+
+    if (*disposition !=
+        RuntimeFirewallImmediateDisposition::handed_off) {
+        if (lease_owner) {
+            owner = std::move(*lease_owner);
+        }
+        result->error = "Configuration pre-apply owner is busy";
+        result->runtime_unchanged = true;
+        return *result;
+    }
+
+    try {
+        (void)completion.wait.wait();
+    } catch (...) {
+        // settle() stores the exact lease before waking this waiter. A
+        // terminal string copy may still throw under allocation pressure,
+        // but that must not turn a returned physical token into an emergency
+        // release or a second acquisition.
+        if (returned->lease &&
+            static_cast<bool>(*returned->lease) &&
+            returned->lease->token() == expected_lease_token &&
+            runtime_mutation_admission_.owns(*returned->lease)) {
+            owner = std::move(*returned->lease);
+        }
+        result->runtime_unchanged = false;
+        try {
+            result->error =
+                "Configuration pre-apply completion could not be read";
+        } catch (...) {
+        }
+        return *result;
+    }
+    if (!returned->lease ||
+        !static_cast<bool>(*returned->lease) ||
+        returned->lease->token() != expected_lease_token ||
+        !runtime_mutation_admission_.owns(*returned->lease)) {
+        result->error =
+            "Configuration pre-apply did not return its exact mutation lease";
+        result->runtime_unchanged = false;
+        return *result;
+    }
+    owner = std::move(*returned->lease);
+    return *result;
 }
 
 ListRefreshOperationResult Daemon::refresh_lists_via_api(std::optional<std::string> requested_name) {

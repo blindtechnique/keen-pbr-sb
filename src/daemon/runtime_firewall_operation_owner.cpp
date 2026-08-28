@@ -515,7 +515,8 @@ void RuntimeFirewallOperationOwner::merge_pending_intent(
         pending_successor_->lifecycle_completion,
         {},
         pending_successor_->lifecycle_kind,
-        pending_successor_->foreground_transport_rejections};
+        pending_successor_->foreground_transport_rejections,
+        pending_successor_->preapply_commit_observed};
     merged.snat_recovery = merge_owned_snat_recovery(
         std::move(merged.snat_recovery),
         std::move(snat_recovery));
@@ -1105,7 +1106,10 @@ bool RuntimeFirewallOperationOwner::retain_pending_successor(
             : completed_context->lifecycle_kind,
         detach_foreground
             ? 0U
-            : completed_context->foreground_transport_rejections});
+            : completed_context->foreground_transport_rejections,
+        detach_foreground
+            ? false
+            : completed_context->preapply_commit_observed});
     // Promote the already-proven repeating wake before the old terminal is
     // retired. A failed successor oneshot registration therefore cannot leave
     // the exact lifecycle lease/source waiting for an unrelated future event.
@@ -1139,7 +1143,8 @@ bool RuntimeFirewallOperationOwner::launch_pending_successor() {
         pending_successor_->lifecycle_completion,
         {},
         pending_successor_->lifecycle_kind,
-        pending_successor_->foreground_transport_rejections};
+        pending_successor_->foreground_transport_rejections,
+        pending_successor_->preapply_commit_observed};
     if (candidate.mode == Context::SuccessorMode::none) {
         auto mutation_lease =
             std::move(pending_successor_->retained_mutation_lease);
@@ -1151,6 +1156,7 @@ bool RuntimeFirewallOperationOwner::launch_pending_successor() {
         cancel_pending_successor_watchdog();
         RuntimeFirewallLifecycleTerminal terminal;
         terminal.outcome = RuntimeFirewallLifecycleOutcome::not_verified;
+        terminal.committed = candidate.preapply_commit_observed;
         terminal.commit_ambiguous = false;
         if (terminal_continuation) {
             invoke_preowned_terminal_continuation(
@@ -1214,6 +1220,10 @@ bool RuntimeFirewallOperationOwner::launch_pending_successor() {
     } catch (...) {
         launching_pending_successor_ = false;
         const auto terminal_context = active_context_;
+        if (terminal_context) {
+            terminal_context->preapply_commit_observed =
+                candidate.preapply_commit_observed;
+        }
         // schedule/defer may throw after an inline callback has already
         // transferred exact ownership. Clear the duplicate durable slot only
         // when another owner now demonstrably retains the operation.
@@ -1239,6 +1249,8 @@ bool RuntimeFirewallOperationOwner::launch_pending_successor() {
         if (terminal_context) {
             terminal_context->foreground_transport_rejections =
                 candidate.foreground_transport_rejections;
+            terminal_context->preapply_commit_observed =
+                candidate.preapply_commit_observed;
         }
         pending_successor_.reset();
         cancel_pending_successor_watchdog();
@@ -1274,6 +1286,7 @@ bool RuntimeFirewallOperationOwner::launch_pending_successor() {
         cancel_pending_successor_watchdog();
         RuntimeFirewallLifecycleTerminal terminal;
         terminal.outcome = RuntimeFirewallLifecycleOutcome::not_verified;
+        terminal.committed = candidate.preapply_commit_observed;
         terminal.commit_ambiguous = false;
         if (terminal_continuation) {
             invoke_preowned_terminal_continuation(
@@ -1302,20 +1315,48 @@ RuntimeFirewallOperationOwner::pending_successor_state() const noexcept {
     return pending_successor_ ? &*pending_successor_ : nullptr;
 }
 
-bool RuntimeFirewallOperationOwner::complete_preowned_continuation(
-    const ContextPtr& context,
-    TerminalFinalizationProof&& finalization_proof,
-    RuntimeFirewallLifecycleTerminal terminal) noexcept {
-    if (!is_active(context) ||
-        coordinator_.retry_pending() || pending_successor_ ||
+std::optional<RuntimeFirewallOperationOwner::
+    PreownedContinuationFinalizationPermit>
+RuntimeFirewallOperationOwner::prepare_preowned_continuation_finalization(
+    const ContextPtr& context) const noexcept {
+    if (!is_active(context) || pending_successor_ ||
         launching_pending_successor_ ||
         !runtime_firewall_lifecycle_is_preapply(context->lifecycle_kind) ||
         context->lifecycle_completion ||
         !context->preowned_terminal_continuation ||
         !context->retained_mutation_lease ||
-        !context->terminal_owner ||
+        !context->terminal_owner) {
+        return std::nullopt;
+    }
+    return PreownedContinuationFinalizationPermit{context};
+}
+
+bool RuntimeFirewallOperationOwner::complete_preowned_continuation(
+    PreownedContinuationFinalizationPermit&& permit,
+    TerminalFinalizationProof&& finalization_proof,
+    RuntimeFirewallLifecycleTerminal terminal) noexcept {
+    const auto context = permit.context_;
+    if (!context || !context->terminal_owner ||
         !finalization_proof.consume_for(context->terminal_owner.get())) {
         return false;
+    }
+    permit.context_.reset();
+
+    if (coordinator_.retry_pending()) {
+        // The exact terminal is already closed, so rejecting here would
+        // strand the request lease forever. Return it conservatively and let
+        // the retained coordinator retry continue only as background work.
+        terminal.outcome = RuntimeFirewallLifecycleOutcome::not_verified;
+        terminal.commit_ambiguous = true;
+        terminal.transient = true;
+        try {
+            if (terminal.detail.empty()) {
+                terminal.detail =
+                    "configuration pre-apply retained a pending firewall "
+                    "retry after terminal finalization";
+            }
+        } catch (...) {
+        }
     }
 
     auto continuation =
@@ -1380,6 +1421,8 @@ terminalize_pending_foreground_transport_exhaustion() noexcept {
     context->lifecycle_kind = pending_successor_->lifecycle_kind;
     context->foreground_transport_rejections =
         pending_successor_->foreground_transport_rejections;
+    context->preapply_commit_observed =
+        pending_successor_->preapply_commit_observed;
     context->foreground_transport_exhausted = true;
     context->queued_claim.runtime_generation =
         pending_successor_->runtime_generation;
@@ -1793,6 +1836,7 @@ void RuntimeFirewallOperationOwner::cancel_pending_work_impl(
     MutationLeasePtr mutation_lease;
     RuntimeFirewallLifecycleCompletion::Source lifecycle_completion;
     PreownedTerminalContinuation terminal_continuation;
+    bool preapply_commit_observed = false;
     if (pending_successor_) {
         mutation_lease =
             std::move(pending_successor_->retained_mutation_lease);
@@ -1800,6 +1844,8 @@ void RuntimeFirewallOperationOwner::cancel_pending_work_impl(
             std::move(pending_successor_->lifecycle_completion);
         terminal_continuation = std::move(
             pending_successor_->preowned_terminal_continuation);
+        preapply_commit_observed =
+            pending_successor_->preapply_commit_observed;
     }
     pending_successor_.reset();
     cancel_pending_successor_watchdog();
@@ -1807,6 +1853,7 @@ void RuntimeFirewallOperationOwner::cancel_pending_work_impl(
 
     RuntimeFirewallLifecycleTerminal terminal;
     terminal.outcome = RuntimeFirewallLifecycleOutcome::shutdown;
+    terminal.committed = preapply_commit_observed;
     terminal.commit_ambiguous = false;
     if (publish_preowned_terminal && terminal_continuation) {
         invoke_preowned_terminal_continuation(

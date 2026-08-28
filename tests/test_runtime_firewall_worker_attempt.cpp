@@ -367,6 +367,47 @@ TEST_CASE("route preparation admits firewall backend only after applied acknowle
     CHECK(route_services.interface_calls == 1);
 }
 
+TEST_CASE("config preapply skips compatibility route mutation") {
+    WorkerAttemptTempDirectory temp;
+    auto input = worker_attempt_input(temp.path() / "cache");
+    input.operation_kind =
+        RuntimeFirewallWorkerOperationKind::config_preapply;
+    input.owned_conntrack_cleanup_mode =
+        RuntimeFirewallOwnedConntrackCleanupMode::
+            exact_pre_mutation_snapshot;
+    REQUIRE_FALSE(input.route_mutation_checkpoint);
+    WorkerAttemptRouteHealthServices route_services;
+    int route_mutation_calls = 0;
+    int firewall_calls = 0;
+
+    const auto result =
+        execute_runtime_firewall_worker_attempt_with_route_preparation(
+            input,
+            route_services,
+            [&](const RuntimeRouteHealthPlan&, RouteReconcileMode) {
+                ++route_mutation_calls;
+                RuntimeRouteWorkerMutationResult mutation;
+                mutation.ack = RuntimeRouteMutationAck::applied;
+                return mutation;
+            },
+            [&]() {
+                ++firewall_calls;
+                RuntimeFirewallWorkerAttemptResult completed;
+                completed.operation_kind =
+                    RuntimeFirewallWorkerOperationKind::config_preapply;
+                return completed;
+            });
+
+    CHECK(route_mutation_calls == 0);
+    CHECK(route_services.ipv6_calls == 0);
+    CHECK(route_services.route_calls == 0);
+    CHECK(route_services.interface_calls == 0);
+    CHECK(firewall_calls == 1);
+    CHECK_FALSE(result.route_preparation.required);
+    CHECK_FALSE(result.route_preparation.worker_mutation_ack.has_value());
+    CHECK_FALSE(result.route_preparation.mutation_ack.has_value());
+}
+
 TEST_CASE("route preparation rejects stale acknowledgement before firewall backend") {
     WorkerAttemptTempDirectory temp;
     auto input = worker_attempt_input(temp.path() / "cache");
@@ -834,6 +875,55 @@ TEST_CASE(
 
     CHECK(result.post_commit_owned_conntrack_cleanup.attempted);
     CHECK(result.post_commit_owned_conntrack_cleanup.summary.failed == 1U);
+    CHECK_FALSE(result.config_preapply_verified());
+}
+
+TEST_CASE(
+    "pre-apply cleanup preserves progress across a throwing mark command") {
+    WorkerAttemptTempDirectory temp;
+    auto input = worker_attempt_input(temp.path() / "cache");
+    input.operation_kind =
+        RuntimeFirewallWorkerOperationKind::config_preapply;
+    input.owned_conntrack_cleanup_mode =
+        RuntimeFirewallOwnedConntrackCleanupMode::
+            exact_pre_mutation_snapshot;
+    input.mandatory_owned_conntrack_cleanup_snapshot =
+        input.pre_mutation_owned_conntrack_cleanup_snapshot;
+    input.mandatory_owned_conntrack_cleanup_snapshot->marks = {
+        0x00030000U, 0x00070000U, 0x00090000U};
+    input.mandatory_owned_conntrack_cleanup_snapshot->priority_marks = {
+        0x00030000U, 0x00070000U, 0x00090000U};
+
+    std::vector<std::string> order;
+    std::vector<std::string> attempted_selectors;
+    ConntrackManager conntrack_manager(
+        [&](const std::vector<std::string>& args) {
+            attempted_selectors.push_back(args.at(5));
+            if (attempted_selectors.size() == 2U) {
+                throw std::runtime_error("conntrack runner failed");
+            }
+            return ConntrackManager::CommandResult{0, {}};
+        });
+    WorkerAttemptFirewall firewall{order};
+    firewall.owned_snat_states = {
+        OwnedSnatState::healthy, OwnedSnatState::healthy};
+    WorkerAttemptMetaServices meta_services{order};
+
+    const auto result = execute_runtime_firewall_worker_attempt(
+        input, firewall, meta_services, conntrack_manager);
+
+    const auto& cleanup = result.post_commit_owned_conntrack_cleanup;
+    REQUIRE(cleanup.attempted);
+    CHECK_FALSE(cleanup.failure.failed());
+    CHECK(cleanup.summary.failed == 1U);
+    CHECK(cleanup.summary.skipped == 0U);
+    CHECK(cleanup.summary.remaining_marks ==
+          std::vector<std::uint32_t>{0x00070000U});
+    CHECK(attempted_selectors == std::vector<std::string>{
+        "196608/16711680",
+        "458752/16711680",
+        "589824/16711680",
+    });
     CHECK_FALSE(result.config_preapply_verified());
 }
 

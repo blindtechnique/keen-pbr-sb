@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -295,6 +296,28 @@ std::unique_ptr<RuntimeMutationAdmission::Lease> acquire_test_lease(
         std::move(*lease));
 }
 
+TEST_CASE("owned conntrack cleanup remainder cannot expand exact authority") {
+    const OwnedConntrackCleanupRetry retry{
+        OwnedConntrackCleanupSnapshot{
+            /*runtime_generation=*/17U,
+            /*owned_mask=*/0x00ff0000U,
+            /*marks=*/{0x00010000U, 0x00020000U},
+            /*priority_marks=*/{0x00010000U},
+            /*ipv6_enabled=*/true},
+        /*ordered_marks=*/{0x00020000U, 0x00030000U},
+        /*no_progress_attempt=*/1U};
+
+    const auto remainder =
+        owned_conntrack_cleanup_retry_remainder(retry);
+
+    CHECK(remainder.runtime_generation == 17U);
+    CHECK(remainder.owned_mask == 0x00ff0000U);
+    CHECK(remainder.marks ==
+          std::set<std::uint32_t>{0x00020000U});
+    CHECK(remainder.priority_marks.empty());
+    CHECK(remainder.ipv6_enabled);
+}
+
 TEST_CASE("runtime firewall operation owner coordinator hands off exact immediate attempt") {
     RuntimeFirewallRetryCoordinator coordinator;
     RuntimeFirewallOperationClaim queued_claim;
@@ -488,10 +511,14 @@ TEST_CASE("runtime firewall config preapply returns the exact lease after retiri
     CHECK(context->retained_mutation_lease->token() == token);
     CHECK(context->preowned_terminal_continuation);
 
+    auto finalization_permit = harness.owner->
+        prepare_preowned_continuation_finalization(context);
+    REQUIRE(finalization_permit.has_value());
+
     // A caller cannot retire the lease before the coordinator's exact
     // terminal has won.
     CHECK_FALSE(harness.owner->complete_preowned_continuation(
-        context,
+        std::move(*finalization_permit),
         RuntimeFirewallOperationOwner::TerminalFinalizationProof{},
         RuntimeFirewallLifecycleTerminal{}));
     CHECK(harness.owner->active_context() == context);
@@ -505,7 +532,7 @@ TEST_CASE("runtime firewall config preapply returns the exact lease after retiri
     // Direct coordinator termination is still not a TerminalOwner-finalized
     // control result and therefore cannot release the continuation.
     CHECK_FALSE(harness.owner->complete_preowned_continuation(
-        context,
+        std::move(*finalization_permit),
         RuntimeFirewallOperationOwner::TerminalFinalizationProof{},
         RuntimeFirewallLifecycleTerminal{}));
     CHECK(harness.owner->active_context() == context);
@@ -523,12 +550,11 @@ TEST_CASE("runtime firewall config preapply returns the exact lease after retiri
         drain->finish_coordinator_terminal();
     REQUIRE(finalization_proof.has_value());
     REQUIRE(static_cast<bool>(*finalization_proof));
-    // A rejected owner/context match must not consume the only proof; the
-    // same finalized terminal remains usable by its exact context.
-    CHECK_FALSE(harness.owner->complete_preowned_continuation(
-        {},
-        std::move(*finalization_proof),
-        RuntimeFirewallLifecycleTerminal{}));
+    // A rejected owner/context match cannot mint a finalization permit or
+    // consume the only proof retained for the exact context.
+    CHECK_FALSE(harness.owner->
+                    prepare_preowned_continuation_finalization({})
+                    .has_value());
     CHECK(static_cast<bool>(*finalization_proof));
     RuntimeFirewallLifecycleTerminal terminal;
     terminal.outcome =
@@ -536,7 +562,7 @@ TEST_CASE("runtime firewall config preapply returns the exact lease after retiri
     terminal.committed = true;
     terminal.commit_ambiguous = false;
     REQUIRE(harness.owner->complete_preowned_continuation(
-        context,
+        std::move(*finalization_permit),
         std::move(*finalization_proof),
         std::move(terminal)));
 
@@ -553,11 +579,103 @@ TEST_CASE("runtime firewall config preapply returns the exact lease after retiri
     CHECK(returned_lease->token() == token);
     CHECK(admission.owns(*returned_lease));
 
-    CHECK_FALSE(harness.owner->complete_preowned_continuation(
-        context,
-        RuntimeFirewallOperationOwner::TerminalFinalizationProof{},
-        RuntimeFirewallLifecycleTerminal{}));
+    CHECK_FALSE(harness.owner->
+                    prepare_preowned_continuation_finalization(context)
+                    .has_value());
     CHECK(continuation_calls == 1U);
+    returned_lease.reset();
+    CHECK_FALSE(admission.active().has_value());
+}
+
+TEST_CASE("runtime firewall config preapply returns its lease when a retry appears after terminal close") {
+    OwnerHarness harness;
+    harness.create_owner();
+    RuntimeMutationAdmission admission;
+    auto lease = acquire_test_lease(
+        admission, "config-preapply-trailing-retry");
+    REQUIRE(lease);
+    auto* const exact_lease = lease.get();
+    std::optional<RuntimeFirewallLifecycleTerminal> returned_terminal;
+    RuntimeFirewallOperationOwner::MutationLeasePtr returned_lease;
+
+    RuntimeFirewallOperationOwner::PreownedTerminalContinuation
+        continuation{
+            [&](RuntimeFirewallLifecycleTerminal terminal,
+                RuntimeFirewallOperationOwner::MutationLeasePtr exact)
+                noexcept {
+                returned_terminal.emplace(std::move(terminal));
+                returned_lease = std::move(exact);
+            }};
+    auto start = harness.owner->start_immediate_preowned(
+        /*attempt=*/0U,
+        /*runtime_generation=*/77U,
+        {},
+        {},
+        /*schedule_catalog_refresh=*/false,
+        std::make_shared<TestDomainState>(),
+        admission,
+        std::move(lease),
+        {},
+        RuntimeFirewallLifecycleKind::config_preapply,
+        std::move(continuation));
+    REQUIRE(start.disposition ==
+            RuntimeFirewallImmediateDisposition::handed_off);
+    const auto context = harness.owner->active_context();
+    REQUIRE(context);
+
+    auto completion =
+        harness.coordinator.terminate_operation_for_resnapshot(
+            harness.dispatched_claim,
+            /*force_rerun=*/false);
+    REQUIRE(completion.owned);
+    harness.reject_control_post = true;
+    context->terminal_owner->coordinator_terminal_sink()(
+        std::move(completion));
+    harness.reject_control_post = false;
+    auto drain = context->terminal_owner->try_begin_drain();
+    REQUIRE(drain.has_value());
+    auto permit = harness.owner->
+        prepare_preowned_continuation_finalization(context);
+    REQUIRE(permit.has_value());
+    auto proof = drain->finish_coordinator_terminal();
+    REQUIRE(proof.has_value());
+
+    const auto retry = harness.coordinator.schedule(
+        /*attempt=*/0U,
+        /*runtime_generation=*/77U,
+        /*bounded_retry_count=*/3U,
+        {},
+        [](const RuntimeFirewallRetryPlan&, auto) { return 919; },
+        [](std::uint64_t) { return true; },
+        [](std::size_t, OwnedSnatRecovery) {});
+    REQUIRE(retry.schedule);
+    REQUIRE(harness.coordinator.retry_pending());
+
+    RuntimeFirewallLifecycleTerminal terminal;
+    terminal.outcome =
+        RuntimeFirewallLifecycleOutcome::verified_success;
+    terminal.committed = true;
+    terminal.commit_ambiguous = false;
+    REQUIRE(harness.owner->complete_preowned_continuation(
+        std::move(*permit),
+        std::move(*proof),
+        std::move(terminal)));
+
+    CHECK_FALSE(harness.owner->active_context());
+    REQUIRE(returned_terminal.has_value());
+    CHECK(returned_terminal->outcome ==
+          RuntimeFirewallLifecycleOutcome::not_verified);
+    CHECK(returned_terminal->committed);
+    CHECK(returned_terminal->commit_ambiguous);
+    CHECK(returned_terminal->transient);
+    REQUIRE(returned_lease);
+    CHECK(returned_lease.get() == exact_lease);
+    CHECK(admission.owns(*returned_lease));
+
+    int cancelled_task = -1;
+    harness.coordinator.cancel(
+        [&](int task_id) { cancelled_task = task_id; });
+    CHECK(cancelled_task == 919);
     returned_lease.reset();
     CHECK_FALSE(admission.active().has_value());
 }
@@ -660,6 +778,7 @@ TEST_CASE("runtime firewall config preapply defer keeps one token and creates fr
     const auto completed = harness.owner->active_context();
     REQUIRE(completed);
     CHECK(completed->domain_state == first_domain);
+    completed->preapply_commit_observed = true;
 
     auto completion =
         harness.coordinator.terminate_operation_for_resnapshot(
@@ -686,6 +805,7 @@ TEST_CASE("runtime firewall config preapply defer keeps one token and creates fr
     CHECK(pending->retained_mutation_lease.get() == exact_lease);
     CHECK(pending->retained_mutation_lease->token() == token);
     CHECK(pending->preowned_terminal_continuation);
+    CHECK(pending->preapply_commit_observed);
     auto pending_watchdog = harness.timer_with_label(
         "runtime-firewall-terminal-watchdog").callback;
 
@@ -712,6 +832,7 @@ TEST_CASE("runtime firewall config preapply defer keeps one token and creates fr
     CHECK(successor->retained_mutation_lease.get() == exact_lease);
     CHECK(successor->retained_mutation_lease->token() == token);
     CHECK(successor->preowned_terminal_continuation);
+    CHECK(successor->preapply_commit_observed);
     CHECK(continuation_calls == 0U);
 
     auto& admission_retry = harness.timer_with_label(
@@ -732,6 +853,9 @@ TEST_CASE("runtime firewall config preapply defer keeps one token and creates fr
     REQUIRE(drain.has_value());
     CHECK(drain->kind() ==
           RuntimeFirewallDelayedTerminalOwner::DrainKind::coordinator);
+    auto finalization_permit = harness.owner->
+        prepare_preowned_continuation_finalization(successor);
+    REQUIRE(finalization_permit.has_value());
     auto finalization_proof =
         drain->finish_coordinator_terminal();
     REQUIRE(finalization_proof.has_value());
@@ -741,13 +865,82 @@ TEST_CASE("runtime firewall config preapply defer keeps one token and creates fr
     terminal.committed = true;
     terminal.commit_ambiguous = false;
     REQUIRE(harness.owner->complete_preowned_continuation(
-        successor,
+        std::move(*finalization_permit),
         std::move(*finalization_proof),
         std::move(terminal)));
     CHECK(continuation_calls == 1U);
     REQUIRE(returned_lease);
     CHECK(returned_lease.get() == exact_lease);
     CHECK(returned_lease->token() == token);
+    CHECK(admission.owns(*returned_lease));
+    returned_lease.reset();
+    CHECK_FALSE(admission.active().has_value());
+}
+
+TEST_CASE("runtime firewall config preapply no-plan terminal preserves prior commit") {
+    OwnerHarness harness;
+    harness.create_owner();
+    RuntimeMutationAdmission admission;
+    auto lease = acquire_test_lease(
+        admission, "config-preapply-no-plan");
+    REQUIRE(lease);
+    auto* const exact_lease = lease.get();
+    std::optional<RuntimeFirewallLifecycleTerminal> returned_terminal;
+    RuntimeFirewallOperationOwner::MutationLeasePtr returned_lease;
+
+    RuntimeFirewallOperationOwner::PreownedTerminalContinuation
+        continuation{
+            [&](RuntimeFirewallLifecycleTerminal terminal,
+                RuntimeFirewallOperationOwner::MutationLeasePtr exact)
+                noexcept {
+                returned_terminal.emplace(std::move(terminal));
+                returned_lease = std::move(exact);
+            }};
+    auto start = harness.owner->start_immediate_preowned(
+        /*attempt=*/0U,
+        /*runtime_generation=*/77U,
+        {},
+        {},
+        /*schedule_catalog_refresh=*/false,
+        std::make_shared<TestDomainState>(),
+        admission,
+        std::move(lease),
+        {},
+        RuntimeFirewallLifecycleKind::config_preapply,
+        std::move(continuation));
+    REQUIRE(start.disposition ==
+            RuntimeFirewallImmediateDisposition::handed_off);
+    const auto completed = harness.owner->active_context();
+    REQUIRE(completed);
+    completed->preapply_commit_observed = true;
+
+    auto completion =
+        harness.coordinator.terminate_operation_for_resnapshot(
+            harness.dispatched_claim,
+            /*force_rerun=*/true);
+    REQUIRE(completion.owned);
+    REQUIRE(harness.owner->retain_pending_successor(
+        completed,
+        RuntimeFirewallOperationContext::SuccessorMode::
+            reschedule_retry,
+        /*attempt=*/3U,
+        /*runtime_generation=*/77U,
+        {},
+        {},
+        /*schedule_catalog_refresh=*/false));
+    harness.owner->cancel_completion_watchdog();
+    harness.owner->reset_if_active(completed);
+
+    REQUIRE(harness.owner->launch_pending_successor());
+    CHECK_FALSE(harness.owner->pending_successor());
+    CHECK_FALSE(harness.owner->active_context());
+    REQUIRE(returned_terminal.has_value());
+    CHECK(returned_terminal->outcome ==
+          RuntimeFirewallLifecycleOutcome::not_verified);
+    CHECK(returned_terminal->committed);
+    CHECK_FALSE(returned_terminal->commit_ambiguous);
+    REQUIRE(returned_lease);
+    CHECK(returned_lease.get() == exact_lease);
     CHECK(admission.owns(*returned_lease));
     returned_lease.reset();
     CHECK_FALSE(admission.active().has_value());
@@ -795,6 +988,7 @@ TEST_CASE("runtime firewall config preapply shutdown publishes only outside its 
             RuntimeFirewallImmediateDisposition::handed_off);
     const auto completed = harness.owner->active_context();
     REQUIRE(completed);
+    completed->preapply_commit_observed = true;
     auto completion =
         harness.coordinator.terminate_operation_for_resnapshot(
             harness.dispatched_claim,
@@ -812,6 +1006,8 @@ TEST_CASE("runtime firewall config preapply shutdown publishes only outside its 
     harness.owner->cancel_completion_watchdog();
     harness.owner->reset_if_active(completed);
     REQUIRE(harness.owner->pending_successor());
+    CHECK(harness.owner->pending_successor_state()
+              ->preapply_commit_observed);
 
     SUBCASE("normal shutdown returns the exact lease") {
         harness.owner->request_shutdown();
@@ -822,6 +1018,7 @@ TEST_CASE("runtime firewall config preapply shutdown publishes only outside its 
         REQUIRE(returned_terminal.has_value());
         CHECK(returned_terminal->outcome ==
               RuntimeFirewallLifecycleOutcome::shutdown);
+        CHECK(returned_terminal->committed);
         CHECK_FALSE(returned_terminal->commit_ambiguous);
         REQUIRE(returned_lease);
         CHECK(returned_lease.get() == exact_lease);
@@ -2221,6 +2418,13 @@ TEST_CASE("runtime firewall config preapply uses bounded hot retry without resol
         RuntimeFirewallLifecycleKind::restart_active));
     CHECK_FALSE(runtime_firewall_lifecycle_requires_resolver(
         RuntimeFirewallLifecycleKind::background));
+    CHECK(runtime_firewall_preapply_preworker_retry_available(0U));
+    CHECK(runtime_firewall_preapply_preworker_retry_available(1U));
+    CHECK(runtime_firewall_preapply_preworker_retry_available(2U));
+    CHECK_FALSE(
+        runtime_firewall_preapply_preworker_retry_available(3U));
+    CHECK_FALSE(
+        runtime_firewall_preapply_preworker_retry_available(99U));
 }
 
 TEST_CASE("runtime firewall START rollback handoff has a finite budget") {

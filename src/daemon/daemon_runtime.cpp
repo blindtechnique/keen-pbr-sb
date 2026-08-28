@@ -7264,7 +7264,9 @@ void Daemon::execute_committed_stale_flow_reconnect(
     }
 }
 
-void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
+void Daemon::apply_prepared_runtime_inputs(
+    PreparedRuntimeInputs prepared,
+    ConfigGenerationFence generation_fence) {
     if (event_loop_active_.load(std::memory_order_acquire) && !is_event_loop_thread()) {
         throw DaemonError("apply_prepared_runtime_inputs must run on the control/event-loop thread");
     }
@@ -7346,7 +7348,10 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
     // publishing `applying` or reassigning numerical marks. A transient
     // firmware race here must reject the save while the old runtime remains
     // active, not falsely publish a broken state.
-    complete_pending_snat_recovery_before_generation_change();
+    if (generation_fence ==
+        ConfigGenerationFence::synchronous_legacy) {
+        complete_pending_snat_recovery_before_generation_change();
+    }
     if (!drain_exact_tcp_reset_cleanups_before_generation_change()) {
         resume_exact_tcp_reset_cleanups();
         throw TransientFirewallError(

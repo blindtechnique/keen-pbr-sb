@@ -565,6 +565,28 @@ struct OwnedConntrackCleanupSnapshot {
     }
 };
 
+inline OwnedConntrackCleanupSnapshot
+restrict_owned_conntrack_cleanup_snapshot(
+    OwnedConntrackCleanupSnapshot snapshot,
+    const std::vector<std::uint32_t>& exact_marks) {
+    const auto owned_marks = std::move(snapshot.marks);
+    snapshot.marks.clear();
+    for (const auto mark : exact_marks) {
+        if (owned_marks.find(mark) != owned_marks.end()) {
+            snapshot.marks.insert(mark);
+        }
+    }
+    for (auto iterator = snapshot.priority_marks.begin();
+         iterator != snapshot.priority_marks.end();) {
+        if (snapshot.marks.find(*iterator) == snapshot.marks.end()) {
+            iterator = snapshot.priority_marks.erase(iterator);
+        } else {
+            ++iterator;
+        }
+    }
+    return snapshot;
+}
+
 struct OwnedConntrackCleanupRetry {
     OwnedConntrackCleanupSnapshot snapshot;
     std::vector<std::uint32_t> ordered_marks;
@@ -818,6 +840,13 @@ struct RuntimeFirewallOperationClaim {
         return serial != 0U;
     }
 };
+
+inline OwnedConntrackCleanupSnapshot
+owned_conntrack_cleanup_retry_remainder(
+    const OwnedConntrackCleanupRetry& retry) {
+    return restrict_owned_conntrack_cleanup_snapshot(
+        retry.snapshot, retry.ordered_marks);
+}
 
 struct RuntimeFirewallOperationCompletion {
     bool owned{false};

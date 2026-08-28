@@ -171,6 +171,11 @@ constexpr bool runtime_firewall_start_retry_available(
            kRuntimeFirewallStartBoundedRetryCount;
 }
 
+constexpr bool runtime_firewall_preapply_preworker_retry_available(
+    std::size_t completed_attempt) noexcept {
+    return runtime_firewall_start_retry_available(completed_attempt);
+}
+
 constexpr std::size_t
     kRuntimeFirewallStartRollbackHandoffRetryLimit = 4U;
 
@@ -244,6 +249,10 @@ struct RuntimeFirewallOperationContext final {
     // operations bound this transport-only loop separately from ordinary
     // firewall retry attempts; a running worker resets the counter.
     std::size_t foreground_transport_rejections{0U};
+    // Config pre-apply may COMMIT one current-generation SNAT repair and then
+    // continue through a cleanup/verification successor. Preserve that fact
+    // so a later failure cannot be mislabeled as a clean no-mutation result.
+    bool preapply_commit_observed{false};
     // The owner exhausted all bounded pre-worker transport attempts after a
     // foreground successor had already left its previous terminal context.
     // A synthetic owned terminal returns this lifecycle to Daemon so START
@@ -291,6 +300,37 @@ public:
         const RuntimeFirewallWorkerAttemptInput&,
         const RuntimeFirewallDelayedWorker::RunningClaim&)>;
 
+    class PreownedContinuationFinalizationPermit final {
+    public:
+        PreownedContinuationFinalizationPermit(
+            PreownedContinuationFinalizationPermit&&) noexcept = default;
+        PreownedContinuationFinalizationPermit& operator=(
+            PreownedContinuationFinalizationPermit&&) noexcept = default;
+
+        PreownedContinuationFinalizationPermit(
+            const PreownedContinuationFinalizationPermit&) = delete;
+        PreownedContinuationFinalizationPermit& operator=(
+            const PreownedContinuationFinalizationPermit&) = delete;
+
+        explicit operator bool() const noexcept {
+            return static_cast<bool>(context_);
+        }
+
+    private:
+        friend class RuntimeFirewallOperationOwner;
+
+        explicit PreownedContinuationFinalizationPermit(
+            ContextPtr context) noexcept
+            : context_(std::move(context)) {}
+
+        ContextPtr context_;
+    };
+
+    static_assert(std::is_nothrow_move_constructible_v<
+                  PreownedContinuationFinalizationPermit>);
+    static_assert(std::is_nothrow_move_assignable_v<
+                  PreownedContinuationFinalizationPermit>);
+
     struct PendingSuccessor final {
         Context::SuccessorMode mode{Context::SuccessorMode::none};
         std::size_t attempt{0U};
@@ -307,6 +347,7 @@ public:
         RuntimeFirewallLifecycleKind lifecycle_kind{
             RuntimeFirewallLifecycleKind::background};
         std::size_t foreground_transport_rejections{0U};
+        bool preapply_commit_observed{false};
     };
 
     struct PreownedImmediateStartResult final {
@@ -428,8 +469,11 @@ public:
     // mutation token after the firewall terminal. The active slot is retired
     // before the callback is invoked, so the continuation may safely begin
     // the next phase without colliding with its own firewall owner context.
+    std::optional<PreownedContinuationFinalizationPermit>
+    prepare_preowned_continuation_finalization(
+        const ContextPtr& context) const noexcept;
     bool complete_preowned_continuation(
-        const ContextPtr& context,
+        PreownedContinuationFinalizationPermit&& permit,
         TerminalFinalizationProof&& finalization_proof,
         RuntimeFirewallLifecycleTerminal terminal) noexcept;
 

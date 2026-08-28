@@ -81,6 +81,7 @@ struct DnsProbeEvent;
 class ConntrackEventMonitor;
 class OwnedConntrackCleanupOperation;
 class RuntimeFirewallOperationOwner;
+class RuntimeFirewallPreownedTerminalContinuation;
 struct RuntimeFirewallOperationContext;
 enum class RuntimeFirewallLifecycleKind : std::uint8_t;
 struct PlannedRoutingState;
@@ -724,7 +725,14 @@ private:
                                       std::map<std::string, URLTestResult> results,
                                       TraceId trace_id);
     void apply_config(Config config, bool refresh_remote_lists = true);
-    void apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared);
+    enum class ConfigGenerationFence : std::uint8_t {
+        synchronous_legacy,
+        owner_verified,
+    };
+    void apply_prepared_runtime_inputs(
+        PreparedRuntimeInputs prepared,
+        ConfigGenerationFence generation_fence =
+            ConfigGenerationFence::synchronous_legacy);
     void execute_committed_stale_flow_reconnect(
         std::uint64_t committed_runtime_generation,
         bool previous_runtime_active,
@@ -943,7 +951,15 @@ private:
         bool require_runtime_stopped);
     ConfigApplyResult apply_validated_config_via_control_task(
         Config config,
-        std::string saved_config_json);
+        std::string saved_config_json,
+        ConfigGenerationFence generation_fence =
+            ConfigGenerationFence::synchronous_legacy);
+    ConfigApplyResult apply_prepared_validated_config_on_control_loop(
+        PreparedRuntimeInputs prepared,
+        PreparedRuntimeInputs rollback_prepared,
+        bool refresh_remote_lists_after_apply,
+        std::string saved_config_json,
+        ConfigGenerationFence generation_fence);
     ConfigApplyResult apply_validated_config_via_control_task_with_lease_return(
         Config config,
         std::string saved_config_json,
@@ -961,6 +977,10 @@ private:
     void begin_preowned_runtime_firewall_restart(
         std::unique_ptr<RuntimeMutationAdmission::Lease> lease,
         RuntimeFirewallLifecycleCompletion::Source completion);
+    std::optional<RuntimeFirewallImmediateDisposition>
+    begin_preowned_runtime_firewall_config_preapply(
+        std::unique_ptr<RuntimeMutationAdmission::Lease>& lease,
+        RuntimeFirewallPreownedTerminalContinuation& continuation);
     ListRefreshOperationResult refresh_lists_via_api(std::optional<std::string> requested_name);
     void setup_conntrack_events();
     void handle_conntrack_events(uint32_t events);
