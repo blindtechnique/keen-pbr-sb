@@ -144,7 +144,9 @@ NARROW_TEST_TARGETS := \
 	keen-pbr-maintenance-lock-tests \
 	keen-pbr-update-lock-protocol-tests \
 	keen-pbr-runtime-firewall-lifecycle-completion-tests \
-	keen-pbr-runtime-firewall-owner-tests
+	keen-pbr-runtime-firewall-owner-tests \
+	keen-pbr-runtime-resolver-generation-tests \
+	test_config_store
 
 test: ## Build and run unit tests (doctest)
 	sh -n install.sh
