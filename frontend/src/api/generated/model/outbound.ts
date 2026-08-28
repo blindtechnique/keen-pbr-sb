@@ -72,8 +72,11 @@ export interface Outbound {
   **Unset behaves as `delete_on_failure`**, except that a nested selector child is never cleaned by the default (its group mark may be shared). A child retired for being unhealthy would otherwise keep every established flow pinned to its dead table until conntrack expiry. Writing `preserve` explicitly restores the old behaviour - the escape hatch is stating it.
    */
   conntrack_on_switch?: ConntrackOnSwitch;
-  /** Ordered list of outbound groups. Required for `urltest` outbound type. Groups are tried by ascending weight and then by declaration order. Selection within a group follows `selection_mode`.
-   */
+  /**
+     * Ordered list of outbound groups. Required for `urltest` outbound type. Groups are tried by ascending weight and then by declaration order. Selection within a group follows `selection_mode`.
+
+     * @minItems 1
+     */
   outbound_groups?: OutboundGroup[];
   retry?: RetryConfig;
   circuit_breaker?: CircuitBreakerConfig;

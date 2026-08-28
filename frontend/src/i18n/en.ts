@@ -45,9 +45,9 @@ export const enTranslation = {
     restorePointMissing:
       "Nothing to restore yet. Files are saved automatically just before an upgrade started from this panel.",
     bootRecoveryRan:
-      "The daemon already examined this record at startup: plan \"{{plan}}\", outcome \"{{outcome}}\". The journal is kept on purpose - the exact package state is not proven.",
+      'The daemon already examined this record at startup: plan "{{plan}}", outcome "{{outcome}}". The journal is kept on purpose - the exact package state is not proven.',
     bootRecoveryFailed:
-      "At startup the daemon attempted a recovery (plan \"{{plan}}\") and it did not succeed. The journal is kept: the exact package state is not proven.",
+      'At startup the daemon attempted a recovery (plan "{{plan}}") and it did not succeed. The journal is kept: the exact package state is not proven.',
     interruptedTransactionTitle: "A package operation did not finish",
     interruptedTransactionDescription:
       "An upgrade or restore of nfqws2 started and never reported an end — most likely the router restarted while it was running. Check that nfqws2 works before upgrading again; the next upgrade will refuse until this is resolved.",
@@ -3389,13 +3389,16 @@ export const enTranslation = {
         },
         conntrackOnSwitch: "Established connections on switch",
         conntrackOnSwitchOptions: {
+          default: "Automatic (recommended)",
           preserve: "Keep on the previous route",
           delete_on_failure: "Reconnect only after failure",
           delete: "Reconnect through the new route",
         },
         conntrackOnSwitchHints: {
+          default:
+            "When a regular VPN fails, its established flows reconnect through the backup. Flows are not removed for a nested group.",
           preserve:
-            "Existing flows stay on their original path while new flows use the selected route. This is the safest default.",
+            "Existing flows stay on their original path while new flows use the selected route. This is the most conservative mode.",
           delete_on_failure:
             "When the selected exit fails, its flows are removed so applications reconnect through the backup. On return to the preferred exit, existing backup flows are preserved and only new flows use the preferred route.",
           delete:
@@ -3453,6 +3456,26 @@ export const enTranslation = {
         duplicateTag: 'Route tag "{{tag}}" already exists.',
         missingReference:
           'Route "{{outbound}}" references missing route "{{referenced}}".',
+        groupRequired: "Add at least one group tier.",
+        groupStepRequired: "Add a VPN or proxy to tier {{index}}.",
+        groupDuplicate:
+          'VPN or proxy "{{target}}" is already present in another tier.',
+        groupMissingReference: 'Group member "{{target}}" no longer exists.',
+        groupCycle:
+          "Groups cannot reference each other in a cycle. Change the group members.",
+        urlRequired: "Enter a probe URL.",
+        urlHttpRequired: "The probe URL must start with http:// or https://.",
+        integerRange: "Enter an integer from {{minimum}} through {{maximum}}.",
+        conntrackNested:
+          'This mode cannot be used with nested group "{{target}}". Choose Automatic or keep established connections.',
+        conntrackShared:
+          'VPN or proxy "{{target}}" is also used by another group. Choose Automatic, keep connections, or reconnect only after failure.',
+        conntrackRoute:
+          'VPN or proxy "{{target}}" is also used by a routing rule. Choose a less aggressive connection mode.',
+        conntrackDns:
+          'VPN or proxy "{{target}}" is also used by a DNS server. Choose a less aggressive connection mode.',
+        conntrackList:
+          'VPN or proxy "{{target}}" is also used to download lists. Choose a less aggressive connection mode.',
       },
     },
     dnsRules: {

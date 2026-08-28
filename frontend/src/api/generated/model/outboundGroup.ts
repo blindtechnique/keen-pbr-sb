@@ -13,6 +13,9 @@ export interface OutboundGroup {
      * @maximum 4294967295
      */
   weight?: number;
-  /** Ordered list of outbound tags to try within this group. */
+  /**
+     * Ordered list of outbound tags to try within this group.
+     * @minItems 1
+     */
   outbounds: string[];
 }

@@ -73,14 +73,17 @@ import { useInterfaceProtocols } from "@/hooks/use-interface-protocols"
 import { excludeIngressServerInterfaces } from "@/lib/native-interfaces"
 import {
   createDefaultOutboundDraft,
+  isOutboundGroupsValidationPath,
   mapOutboundToDraft,
   normalizeOutboundDraftForPersistence,
   normalizeOutboundGroups,
-  type ConntrackOnSwitchMode,
+  type ConntrackOnSwitchOption,
   type OutboundDraft,
+  type OutboundDraftValidationIssue,
   type OutboundGroupDraft,
   type StrictEnforcementOption,
   type UrltestSelectionMode,
+  validateUrltestOutboundDraft,
 } from "@/pages/outbound-upsert-utils"
 import {
   Select,
@@ -132,11 +135,12 @@ const urltestSelectionModes = [
   "priority",
 ] as const satisfies readonly UrltestSelectionMode[]
 
-const conntrackOnSwitchModes = [
+const conntrackOnSwitchOptions = [
+  "default",
   "preserve",
   "delete_on_failure",
   "delete",
-] as const satisfies readonly ConntrackOnSwitchMode[]
+] as const satisfies readonly ConntrackOnSwitchOption[]
 
 const outboundTypeOptions: Outbound["type"][] = [
   "interface",
@@ -383,6 +387,38 @@ function OutboundForm({
   const [baselinePayload] = useState(() =>
     normalizeOutboundDraftForPersistence(initialDraft)
   )
+  const prepareCandidate = (value: OutboundDraft) => {
+    const valueToPersist =
+      mode === "create" && !value.tag.trim()
+        ? {
+            ...value,
+            tag: makeTechnicalId(
+              value.displayName,
+              existingOutbounds.map((outbound) => outbound.tag),
+              { prefix: "outbound" }
+            ),
+          }
+        : value
+    const payload = normalizeOutboundDraftForPersistence(valueToPersist)
+    const nextOutbounds =
+      mode === "create"
+        ? [...existingOutbounds, payload]
+        : existingOutbounds.map((outbound) =>
+            outbound.tag === outboundId ? payload : outbound
+          )
+
+    return { valueToPersist, payload, nextOutbounds }
+  }
+  const validateDraft = (value: OutboundDraft) => {
+    const { valueToPersist, nextOutbounds } = prepareCandidate(value)
+    return getOutboundDraftValidationFieldErrors(
+      validateUrltestOutboundDraft(valueToPersist, nextOutbounds, {
+        ...loadedConfig,
+        outbounds: nextOutbounds,
+      }),
+      t
+    )
+  }
 
   const form = useForm({
     defaultValues: initialDraft,
@@ -391,6 +427,10 @@ function OutboundForm({
       modeAfterSubmission: "change",
     }),
     validators: {
+      onChange: ({ value }) => {
+        const fields = validateDraft(value)
+        return Object.keys(fields).length ? { fields } : undefined
+      },
       onSubmitAsync: async ({ value }) => {
         clearFormServerErrors(form)
         const displayNameError = getDisplayNameError(value.displayName, t)
@@ -407,17 +447,8 @@ function OutboundForm({
           }
         }
 
-        const valueToPersist =
-          mode === "create" && !value.tag.trim()
-            ? {
-                ...value,
-                tag: makeTechnicalId(
-                  value.displayName,
-                  existingOutbounds.map((outbound) => outbound.tag),
-                  { prefix: "outbound" }
-                ),
-              }
-            : value
+        const { valueToPersist, payload, nextOutbounds } =
+          prepareCandidate(value)
         const tagError = getOutboundTagError(
           valueToPersist.tag,
           existingOutbounds,
@@ -437,13 +468,10 @@ function OutboundForm({
           }
         }
 
-        const payload = normalizeOutboundDraftForPersistence(valueToPersist)
-        const nextOutbounds =
-          mode === "create"
-            ? [...existingOutbounds, payload]
-            : existingOutbounds.map((outbound) =>
-                outbound.tag === outboundId ? payload : outbound
-              )
+        const localFieldErrors = validateDraft(valueToPersist)
+        if (Object.keys(localFieldErrors).length) {
+          return { fields: localFieldErrors }
+        }
 
         const urltestReferencesError = validateUrltestGroupReferences(
           nextOutbounds,
@@ -926,6 +954,10 @@ function OutboundForm({
           {(field) => {
             const error = getFirstFieldError(field.state.meta.errors)
             const groups = normalizeOutboundGroups(field.state.value)
+            const nextAvailableOutbounds = getNextAvailableOutbounds(
+              interfaceOutboundOptions,
+              groups
+            )
             return (
               <SectionCard
                 flat
@@ -1091,14 +1123,12 @@ function OutboundForm({
                   ))}
                   <div className="flex justify-start">
                     <Button
+                      disabled={!nextAvailableOutbounds.length}
                       onClick={() =>
                         field.handleChange([
                           ...groups,
                           {
-                            outbounds: getNextAvailableOutbounds(
-                              interfaceOutboundOptions,
-                              groups
-                            ),
+                            outbounds: nextAvailableOutbounds,
                             weight: "",
                           },
                         ])
@@ -1139,16 +1169,6 @@ function OutboundForm({
                       const nextMode =
                         (value as UrltestSelectionMode | null) ?? "latency"
                       field.handleChange(nextMode)
-                      if (
-                        nextMode !== "priority" &&
-                        form.state.values.conntrackOnSwitch ===
-                          "delete_on_failure"
-                      ) {
-                        form.setFieldValue(
-                          OUTBOUND_FIELD_NAMES.conntrackOnSwitch,
-                          "preserve"
-                        )
-                      }
                     }}
                     value={field.state.value}
                   >
@@ -1178,55 +1198,53 @@ function OutboundForm({
           </form.Field>
 
           <form.Field name={OUTBOUND_FIELD_NAMES.conntrackOnSwitch}>
-            {(field) => (
-              <Field>
-                <FieldLabel>
-                  {t("pages.outboundUpsert.urltest.conntrackOnSwitch")}
-                </FieldLabel>
-                <FieldContent>
-                  <Select
-                    items={conntrackOnSwitchModes.map((mode) => ({
-                      value: mode,
-                      label: t(
-                        `pages.outboundUpsert.urltest.conntrackOnSwitchOptions.${mode}`
-                      ),
-                    }))}
-                    onValueChange={(value) => {
-                      const nextMode =
-                        (value as ConntrackOnSwitchMode | null) ?? "preserve"
-                      field.handleChange(nextMode)
-                      if (nextMode === "delete_on_failure") {
-                        form.setFieldValue(
-                          OUTBOUND_FIELD_NAMES.selectionMode,
-                          "priority"
-                        )
-                      }
-                    }}
-                    value={field.state.value}
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectGroup>
-                        {conntrackOnSwitchModes.map((mode) => (
-                          <SelectItem key={mode} value={mode}>
-                            {t(
-                              `pages.outboundUpsert.urltest.conntrackOnSwitchOptions.${mode}`
-                            )}
-                          </SelectItem>
-                        ))}
-                      </SelectGroup>
-                    </SelectContent>
-                  </Select>
-                  <FieldHint
-                    description={t(
-                      `pages.outboundUpsert.urltest.conntrackOnSwitchHints.${field.state.value}`
-                    )}
-                  />
-                </FieldContent>
-              </Field>
-            )}
+            {(field) => {
+              const error = getFirstFieldError(field.state.meta.errors)
+              return (
+                <Field invalid={Boolean(error)}>
+                  <FieldLabel>
+                    {t("pages.outboundUpsert.urltest.conntrackOnSwitch")}
+                  </FieldLabel>
+                  <FieldContent>
+                    <Select
+                      items={conntrackOnSwitchOptions.map((mode) => ({
+                        value: mode,
+                        label: t(
+                          `pages.outboundUpsert.urltest.conntrackOnSwitchOptions.${mode}`
+                        ),
+                      }))}
+                      onValueChange={(value) => {
+                        const nextMode =
+                          (value as ConntrackOnSwitchOption | null) ?? "default"
+                        field.handleChange(nextMode)
+                      }}
+                      value={field.state.value}
+                    >
+                      <SelectTrigger aria-invalid={Boolean(error)}>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectGroup>
+                          {conntrackOnSwitchOptions.map((mode) => (
+                            <SelectItem key={mode} value={mode}>
+                              {t(
+                                `pages.outboundUpsert.urltest.conntrackOnSwitchOptions.${mode}`
+                              )}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                    <FieldHint
+                      description={t(
+                        `pages.outboundUpsert.urltest.conntrackOnSwitchHints.${field.state.value}`
+                      )}
+                      error={error ?? null}
+                    />
+                  </FieldContent>
+                </Field>
+              )
+            }}
           </form.Field>
         </div>
       ) : null}
@@ -1663,6 +1681,58 @@ function getFirstFieldError(errors: unknown[]) {
   return typeof firstError === "string" ? firstError : null
 }
 
+function getOutboundDraftValidationFieldErrors(
+  issues: OutboundDraftValidationIssue[],
+  t: (key: string, options?: Record<string, unknown>) => string
+): Partial<Record<OutboundFieldName, string>> {
+  const fields: Partial<Record<OutboundFieldName, string>> = {}
+  for (const issue of issues) {
+    fields[issue.field] ??= translateOutboundDraftValidationIssue(issue, t)
+  }
+  return fields
+}
+
+function translateOutboundDraftValidationIssue(
+  issue: OutboundDraftValidationIssue,
+  t: (key: string, options?: Record<string, unknown>) => string
+) {
+  const values = {
+    index: issue.index,
+    target: issue.target,
+    minimum: issue.minimum,
+    maximum: issue.maximum,
+  }
+
+  switch (issue.code) {
+    case "groupRequired":
+      return t("pages.outboundUpsert.validation.groupRequired")
+    case "groupStepRequired":
+      return t("pages.outboundUpsert.validation.groupStepRequired", values)
+    case "groupDuplicate":
+      return t("pages.outboundUpsert.validation.groupDuplicate", values)
+    case "groupMissingReference":
+      return t("pages.outboundUpsert.validation.groupMissingReference", values)
+    case "groupCycle":
+      return t("pages.outboundUpsert.validation.groupCycle")
+    case "urlRequired":
+      return t("pages.outboundUpsert.validation.urlRequired")
+    case "urlHttpRequired":
+      return t("pages.outboundUpsert.validation.urlHttpRequired")
+    case "integerRange":
+      return t("pages.outboundUpsert.validation.integerRange", values)
+    case "conntrackNested":
+      return t("pages.outboundUpsert.validation.conntrackNested", values)
+    case "conntrackShared":
+      return t("pages.outboundUpsert.validation.conntrackShared", values)
+    case "conntrackRoute":
+      return t("pages.outboundUpsert.validation.conntrackRoute", values)
+    case "conntrackDns":
+      return t("pages.outboundUpsert.validation.conntrackDns", values)
+    case "conntrackList":
+      return t("pages.outboundUpsert.validation.conntrackList", values)
+  }
+}
+
 function getOutboundTagError(
   value: string,
   outbounds: Outbound[],
@@ -1850,9 +1920,7 @@ function resolveOutboundFieldPath(
 
   if (
     path === `${prefix}.outbound_groups` ||
-    new RegExp(
-      `^${prefix.replaceAll(".", "\\.")}\\.outbound_groups(?:\\[\\d+\\])?(?:\\.(?:outbounds|weight))?$`
-    ).test(path)
+    isOutboundGroupsValidationPath(path, normalizedTag)
   ) {
     return OUTBOUND_FIELD_NAMES.outboundGroups
   }
@@ -1871,6 +1939,14 @@ function resolveOutboundFieldPath(
 
   if (path === `${prefix}.tolerance_ms`) {
     return OUTBOUND_FIELD_NAMES.tolerance
+  }
+
+  if (path === `${prefix}.selection_mode`) {
+    return OUTBOUND_FIELD_NAMES.selectionMode
+  }
+
+  if (path === `${prefix}.conntrack_on_switch`) {
+    return OUTBOUND_FIELD_NAMES.conntrackOnSwitch
   }
 
   if (path === `${prefix}.retry.attempts`) {
