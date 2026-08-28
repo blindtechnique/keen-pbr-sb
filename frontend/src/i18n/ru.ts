@@ -1935,12 +1935,27 @@ export const ruTranslation = {
       noChecksDescription:
         "Для диагностики маршрутизации нет записей для отображения.",
       sections: {
-        firewall: "Firewall",
+        firewall: "Межсетевой экран",
         routes: "Маршруты",
         policies: "Политики",
       },
+      statuses: {
+        ok: "Исправно",
+        degraded: "Есть проблемы",
+        error: "Ошибка проверки",
+        missing: "Отсутствует",
+        mismatch: "Не совпадает",
+      },
+      actions: {
+        mark: "маркировка",
+        drop: "блокировка",
+        pass: "пропуск",
+      },
       details: {
         disabledByConfiguration: "Отключено в настройках",
+        ruleNotFound:
+          "Правило не найдено в таблице {{table}} {{backend}} ({{family}}, условие: {{criteria}})",
+        criteriaAny: "любое",
       },
       ppe: {
         title: "Видимость трафика при аппаратном ускорении",
@@ -1978,8 +1993,8 @@ export const ruTranslation = {
         counterCaveat:
           "Это сырые попадания пакетов в правила, а не число соединений и не доказательство возврата потока в аппаратное ускорение после окна CPU.",
       },
-      chain: "chain",
-      prerouting: "prerouting",
+      chain: "цепочка",
+      prerouting: "до маршрутизации",
       defaultRoute: "default",
       ipv4: "IPv4",
       ipv6: "IPv6",

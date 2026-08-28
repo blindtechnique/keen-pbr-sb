@@ -446,6 +446,43 @@ TEST_CASE("IptablesFirewallVerifier::verify_rules accepts active A/B static set"
     CHECK(checks[0].set_name == "kpbr4_sites");
 }
 
+TEST_CASE("IptablesFirewallVerifier::verify_rules tolerates stale static set generation") {
+    const std::string dispatcher =
+        "-N KeenPbrTable\n"
+        "-A KeenPbrTable -j KeenPbrTable_B\n";
+    const std::string generation =
+        "-N KeenPbrTable_B\n"
+        "-A KeenPbrTable_B -m set --match-set kpbr4S_sites dst "
+        "-j MARK --set-xmark 0x20000/0xff0000\n";
+    const std::string prerouting =
+        "-A PREROUTING -j KeenPbrTable\n";
+
+    auto runner = [&](const std::vector<std::string>& args) -> CommandResult {
+        if (matches_args(args, {"iptables", "-t", "mangle", "-S", "KeenPbrTable"})) {
+            return command_result(dispatcher);
+        }
+        if (matches_args(args, {"iptables", "-t", "mangle", "-S", "KeenPbrTable_B"})) {
+            return command_result(generation);
+        }
+        if (matches_args(args, {"iptables", "-t", "mangle", "-S", "PREROUTING"})) {
+            return command_result(prerouting);
+        }
+        return command_result({}, 1);
+    };
+    IptablesFirewallVerifier verifier(runner);
+    verifier.set_expected_fwmark_mask(0x00ff0000u);
+
+    RuleState stale_state;
+    stale_state.set_names = {"kpbr4s_sites"};
+    stale_state.action_type = RuleActionType::Mark;
+    stale_state.fwmark = 0x20000u;
+
+    const auto checks = verifier.verify_rules({stale_state});
+    REQUIRE(checks.size() == 1);
+    CHECK(checks[0].status == CheckStatus::ok);
+    CHECK(checks[0].set_name == "kpbr4s_sites");
+}
+
 TEST_CASE("IptablesFirewallVerifier::verify_rules: mark rule missing") {
     const std::string prerouting =
         "-P PREROUTING ACCEPT\n"

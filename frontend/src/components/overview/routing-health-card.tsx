@@ -14,7 +14,11 @@ import {
   formatPpePorts,
   getPpeDeoffloadPresentation,
 } from "@/components/overview/ppe-deoffload-status-model"
-import { localizeRoutingHealthDetail } from "@/components/overview/routing-health-detail-model"
+import {
+  localizeFirewallAction,
+  localizeRoutingHealthDetail,
+  localizeRoutingHealthStatus,
+} from "@/components/overview/routing-health-detail-model"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
 
@@ -56,7 +60,7 @@ export function RoutingHealthCard({
     <div className="flex flex-1 flex-col space-y-4">
       <div className="flex flex-wrap items-center gap-2">
         <StatusBadge tone={mapCheckTone(routingHealth.overall)}>
-          {routingHealth.overall}
+          {localizeRoutingHealthStatus(routingHealth.overall, t)}
         </StatusBadge>
         <Badge size="xs" variant="outline">
           {routingHealth.firewall_backend}
@@ -111,7 +115,7 @@ export function RoutingHealthCard({
                   <span className="font-mono text-[12px] sm:text-sm">
                     {rule.set_name}
                   </span>
-                  <InlineMeta>{rule.action}</InlineMeta>
+                  <InlineMeta>{localizeFirewallAction(rule.action, t)}</InlineMeta>
                   {renderFirewallMark(
                     rule.expected_fwmark,
                     rule.actual_fwmark,
@@ -381,13 +385,17 @@ function CompactDiagnosticRow({
   primary: ReactNode
   status: string
 }) {
+  const { t } = useTranslation()
+
   return (
     <div className="rounded-md border border-border/70 bg-muted/20 px-3 py-1.5">
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
           {primary}
         </div>
-        <StatusBadge tone={mapCheckTone(status)}>{status}</StatusBadge>
+        <StatusBadge tone={mapCheckTone(status)}>
+          {localizeRoutingHealthStatus(status, t)}
+        </StatusBadge>
       </div>
     </div>
   )

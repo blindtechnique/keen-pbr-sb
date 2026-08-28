@@ -1927,8 +1927,23 @@ export const enTranslation = {
         routes: "Routes",
         policies: "Policies",
       },
+      statuses: {
+        ok: "Healthy",
+        degraded: "Degraded",
+        error: "Check failed",
+        missing: "Missing",
+        mismatch: "Mismatch",
+      },
+      actions: {
+        mark: "mark",
+        drop: "drop",
+        pass: "pass",
+      },
       details: {
         disabledByConfiguration: "Disabled by configuration",
+        ruleNotFound:
+          "Rule not found in the {{backend}} {{table}} table ({{family}}, criteria: {{criteria}})",
+        criteriaAny: "any",
       },
       ppe: {
         title: "Hardware acceleration visibility",

@@ -177,18 +177,34 @@ bool set_name_matches(const std::string& expected,
                       const std::string& actual) {
     if (expected == actual) return true;
 
-    const auto matches_generation = [&](const char* logical_prefix,
-                                        const char* generation_a_prefix,
-                                        const char* generation_b_prefix) {
-        const std::string logical(logical_prefix);
-        if (expected.rfind(logical, 0) != 0) return false;
-        const auto suffix = expected.substr(logical.size());
-        return actual == std::string(generation_a_prefix) + suffix ||
-               actual == std::string(generation_b_prefix) + suffix;
+    const auto logical_static_name = [](const std::string& name)
+        -> std::optional<std::string> {
+        const auto normalize = [&](const char* logical_prefix,
+                                   const char* generation_a_prefix,
+                                   const char* generation_b_prefix)
+            -> std::optional<std::string> {
+            for (const char* prefix : {
+                     logical_prefix,
+                     generation_a_prefix,
+                     generation_b_prefix}) {
+                const std::string physical(prefix);
+                if (name.rfind(physical, 0) == 0) {
+                    return std::string(logical_prefix) +
+                           name.substr(physical.size());
+                }
+            }
+            return std::nullopt;
+        };
+
+        auto normalized = normalize("kpbr4_", "kpbr4s_", "kpbr4S_");
+        if (normalized.has_value()) return normalized;
+        return normalize("kpbr6_", "kpbr6s_", "kpbr6S_");
     };
 
-    return matches_generation("kpbr4_", "kpbr4s_", "kpbr4S_") ||
-           matches_generation("kpbr6_", "kpbr6s_", "kpbr6S_");
+    const auto expected_logical = logical_static_name(expected);
+    const auto actual_logical = logical_static_name(actual);
+    return expected_logical.has_value() && actual_logical.has_value() &&
+           *expected_logical == *actual_logical;
 }
 
 std::vector<ExpectedIptablesRule> expand_expected_rule_states(
