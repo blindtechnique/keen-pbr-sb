@@ -1,47 +1,11 @@
 #pragma once
 
+#include "runtime_config_operation_identity.hpp"
 #include "runtime_firewall_lifecycle_completion.hpp"
 
 #include <cstdint>
 
 namespace keen_pbr3 {
-
-enum class ConfigTerminalOperationKind : std::uint8_t {
-    config_preapply,
-    candidate,
-    rollback,
-};
-
-struct ConfigTerminalOperationIdentity {
-    ConfigTerminalOperationKind kind{
-        ConfigTerminalOperationKind::config_preapply};
-    std::uint64_t operation_serial{0U};
-    std::uint64_t base_runtime_generation{0U};
-    std::uint64_t target_runtime_generation{0U};
-
-    constexpr bool valid() const noexcept {
-        return operation_serial != 0U &&
-               base_runtime_generation != 0U &&
-               target_runtime_generation != 0U;
-    }
-
-    constexpr bool operator==(
-        const ConfigTerminalOperationIdentity& other) const noexcept {
-        return kind == other.kind &&
-               operation_serial == other.operation_serial &&
-               base_runtime_generation == other.base_runtime_generation &&
-               target_runtime_generation == other.target_runtime_generation;
-    }
-};
-
-inline bool config_terminal_identity_matches(
-    const ConfigTerminalOperationIdentity& expected,
-    const ConfigTerminalOperationIdentity& observed,
-    ConfigTerminalOperationKind required_kind) noexcept {
-    return expected.valid() && observed.valid() &&
-           expected.kind == required_kind &&
-           observed.kind == required_kind && expected == observed;
-}
 
 // Pure decision boundary between an asynchronous candidate-firewall owner and
 // the config/WAL publisher. It deliberately carries evidence rather than an
@@ -56,46 +20,44 @@ enum class ConfigCandidateAction : std::uint8_t {
 
 struct ConfigCandidateEvidence {
     ConfigTerminalOperationIdentity expected_identity;
-    ConfigTerminalOperationIdentity observed_terminal_identity;
     bool exact_lease_owned{false};
-    bool base_generation_current{false};
-    RuntimeFirewallLifecycleOutcome outcome{
-        RuntimeFirewallLifecycleOutcome::not_verified};
-    bool committed{false};
-    bool commit_ambiguous{true};
-    bool candidate_noop_verified{false};
-    bool previous_generation_certainly_retained{false};
+    bool published_generation_current{false};
+    RuntimeFirewallLifecycleTerminal terminal;
     bool exact_rollback_available{false};
 };
 
 inline ConfigCandidateAction plan_config_candidate_terminal(
     const ConfigCandidateEvidence& evidence) noexcept {
-    if (!config_terminal_identity_matches(
+    if (!evidence.terminal.observed_config_identity ||
+        !config_terminal_identity_matches(
             evidence.expected_identity,
-            evidence.observed_terminal_identity,
+            *evidence.terminal.observed_config_identity,
             ConfigTerminalOperationKind::candidate) ||
         !evidence.exact_lease_owned ||
-        !evidence.base_generation_current ||
-        evidence.outcome == RuntimeFirewallLifecycleOutcome::shutdown) {
+        !evidence.published_generation_current ||
+        evidence.terminal.outcome ==
+            RuntimeFirewallLifecycleOutcome::shutdown) {
         return ConfigCandidateAction::recovery_required;
     }
 
     // An uncommitted verified_success is not enough by itself: a preapply or
     // incomplete candidate could otherwise be mistaken for a candidate no-op.
-    if (evidence.outcome ==
+    if (evidence.terminal.outcome ==
             RuntimeFirewallLifecycleOutcome::verified_success &&
-        !evidence.commit_ambiguous &&
-        (evidence.committed || evidence.candidate_noop_verified)) {
+        !evidence.terminal.commit_ambiguous &&
+        (evidence.terminal.committed ||
+         evidence.terminal.candidate_noop_verified)) {
         return ConfigCandidateAction::publish_candidate;
     }
 
     // This is the only terminal which proves that the old runtime remained
     // intact. Every post-COMMIT or internally inconsistent terminal must use
     // the separately prepared old-generation transaction instead.
-    if (evidence.outcome ==
+    if (evidence.terminal.outcome ==
             RuntimeFirewallLifecycleOutcome::not_verified &&
-        evidence.previous_generation_certainly_retained &&
-        !evidence.committed && !evidence.commit_ambiguous) {
+        evidence.terminal.previous_generation_certainly_retained &&
+        !evidence.terminal.committed &&
+        !evidence.terminal.commit_ambiguous) {
         return ConfigCandidateAction::reject_runtime_unchanged;
     }
 
@@ -111,27 +73,72 @@ enum class ConfigRollbackAction : std::uint8_t {
 
 struct ConfigRollbackEvidence {
     ConfigTerminalOperationIdentity expected_identity;
-    ConfigTerminalOperationIdentity observed_terminal_identity;
     bool exact_lease_owned{false};
-    bool base_generation_current{false};
-    RuntimeFirewallLifecycleOutcome outcome{
-        RuntimeFirewallLifecycleOutcome::not_verified};
-    bool commit_ambiguous{true};
+    bool published_generation_current{false};
+    RuntimeFirewallLifecycleTerminal terminal;
 };
 
 inline ConfigRollbackAction plan_config_rollback_terminal(
     const ConfigRollbackEvidence& evidence) noexcept {
-    return config_terminal_identity_matches(
+    return evidence.terminal.observed_config_identity &&
+           config_terminal_identity_matches(
                evidence.expected_identity,
-               evidence.observed_terminal_identity,
+               *evidence.terminal.observed_config_identity,
                ConfigTerminalOperationKind::rollback) &&
-                   evidence.exact_lease_owned &&
-                   evidence.base_generation_current &&
-                   evidence.outcome ==
-                       RuntimeFirewallLifecycleOutcome::verified_success &&
-                   !evidence.commit_ambiguous
+           evidence.exact_lease_owned &&
+           evidence.published_generation_current &&
+           evidence.terminal.outcome ==
+               RuntimeFirewallLifecycleOutcome::verified_success &&
+           !evidence.terminal.commit_ambiguous &&
+           (evidence.terminal.committed ||
+            evidence.terminal.candidate_noop_verified)
         ? ConfigRollbackAction::accept_verified_rollback
         : ConfigRollbackAction::recovery_required;
+}
+
+enum class ConfigRuntimeTerminalAction : std::uint8_t {
+    keep_active,
+    fail_closed,
+    shutdown,
+};
+
+// The user-visible/runtime-active cursor may remain healthy only after one of
+// three exact proofs: the candidate was published, rollback was verified, or
+// the worker proved that the base generation was never mutated. Any other
+// terminal is an unknown kernel/routes/resolver state and must fail closed
+// before the mutation lease is returned.
+inline ConfigRuntimeTerminalAction plan_config_runtime_terminal(
+    bool candidate_published,
+    const RuntimeFirewallLifecycleTerminal& terminal) noexcept {
+    if (terminal.outcome ==
+        RuntimeFirewallLifecycleOutcome::shutdown) {
+        return ConfigRuntimeTerminalAction::shutdown;
+    }
+    const bool exact_candidate_published =
+        candidate_published &&
+        terminal.observed_config_identity &&
+        terminal.observed_config_identity->kind ==
+            ConfigTerminalOperationKind::candidate &&
+        terminal.outcome ==
+            RuntimeFirewallLifecycleOutcome::verified_success &&
+        terminal.committed && !terminal.commit_ambiguous;
+    const bool exact_rollback_verified =
+        terminal.observed_config_identity &&
+        terminal.observed_config_identity->kind ==
+            ConfigTerminalOperationKind::rollback &&
+        terminal.outcome ==
+            RuntimeFirewallLifecycleOutcome::verified_success &&
+        (terminal.committed || terminal.candidate_noop_verified) &&
+        !terminal.commit_ambiguous;
+    const bool exact_base_unchanged =
+        terminal.outcome ==
+            RuntimeFirewallLifecycleOutcome::not_verified &&
+        terminal.previous_generation_certainly_retained &&
+        !terminal.committed && !terminal.commit_ambiguous;
+    return exact_candidate_published || exact_rollback_verified ||
+            exact_base_unchanged
+        ? ConfigRuntimeTerminalAction::keep_active
+        : ConfigRuntimeTerminalAction::fail_closed;
 }
 
 } // namespace keen_pbr3

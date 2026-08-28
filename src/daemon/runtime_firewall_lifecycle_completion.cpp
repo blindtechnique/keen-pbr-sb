@@ -33,12 +33,9 @@ private:
 };
 
 RuntimeFirewallLifecycleTerminal abandoned_terminal() {
-    return {
-        RuntimeFirewallLifecycleOutcome::not_verified,
-        false,
-        true,
-        false,
-        "runtime firewall lifecycle source abandoned"};
+    RuntimeFirewallLifecycleTerminal terminal;
+    terminal.detail = "runtime firewall lifecycle source abandoned";
+    return terminal;
 }
 
 void replace_terminal(

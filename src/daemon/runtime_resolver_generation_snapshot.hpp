@@ -8,9 +8,12 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace keen_pbr3 {
+
+enum class RuntimeState;
 
 struct ResolverGenerationSnapshot {
     Config config;
@@ -23,6 +26,73 @@ struct ResolverGenerationSnapshot {
     std::uint64_t generation{0};
     std::uint64_t stream_epoch{0};
 };
+
+// Selection for one generate-resolver-config IPC request.  The caller must
+// reject a malformed non-empty requested_attempt_id before entering this
+// seam.  Keeping validation at the protocol boundary lets this helper remain
+// independent from the resolver-hook process launcher.
+enum class RuntimeResolverStreamSelectionError {
+    none,
+    stream_busy,
+    attempt_mismatch,
+    generation_unavailable,
+};
+
+struct RuntimeResolverStreamSelection {
+    std::shared_ptr<const ResolverGenerationSnapshot> generation;
+    std::uint64_t stream_epoch{0};
+    bool correlated_attempt{false};
+    RuntimeResolverStreamSelectionError error{
+        RuntimeResolverStreamSelectionError::none};
+
+    explicit operator bool() const noexcept {
+        return generation != nullptr &&
+               error == RuntimeResolverStreamSelectionError::none;
+    }
+};
+
+// An active hook owns a private immutable generation.  Only its exact opaque
+// attempt id may select that generation; an uncorrelated/manual request never
+// falls through to it.  With no active hook, both an ordinary request and a
+// valid stale helper token select only the committed generation.
+RuntimeResolverStreamSelection select_runtime_resolver_stream_generation(
+    std::string_view requested_attempt_id,
+    std::string_view active_attempt_id,
+    const std::shared_ptr<const ResolverGenerationSnapshot>&
+        committed_generation,
+    const std::shared_ptr<const ResolverGenerationSnapshot>&
+        active_generation) noexcept;
+
+std::string_view runtime_resolver_stream_selection_error_code(
+    RuntimeResolverStreamSelectionError error) noexcept;
+
+// Authorizes the already selected immutable generation against lifecycle
+// state.  A correlated active hook may stream a private candidate/rollback
+// while the old runtime is routing, even when no committed pointer exists.
+// An uncorrelated request is always pointer-bound to the committed generation.
+// With routing inactive, retain the narrower lifecycle-start exception: only
+// the exact committed activation pointer may stream during starting/applying.
+bool runtime_resolver_stream_selection_available(
+    RuntimeState runtime_state,
+    bool routing_runtime_active,
+    const RuntimeResolverStreamSelection& selection,
+    const std::shared_ptr<const ResolverGenerationSnapshot>&
+        committed_generation,
+    const std::shared_ptr<const ResolverGenerationSnapshot>&
+        inactive_activation_generation) noexcept;
+
+// Completion acknowledges a hook only while the same attempt still owns the
+// same immutable pointer and the stream epoch captured at admission.  This is
+// intentionally independent from the committed generation: config candidate
+// and rollback streams remain private until their outer transaction publishes.
+bool runtime_resolver_stream_completion_is_exact(
+    std::string_view completed_attempt_id,
+    std::uint64_t completed_stream_epoch,
+    const std::shared_ptr<const ResolverGenerationSnapshot>&
+        completed_generation,
+    std::string_view active_attempt_id,
+    const std::shared_ptr<const ResolverGenerationSnapshot>&
+        active_generation) noexcept;
 
 // Complete immutable input for one resolver generation. The builder below
 // must not consult Daemon, a live CacheManager, the Keenetic cache or kernel

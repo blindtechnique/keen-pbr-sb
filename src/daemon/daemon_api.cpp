@@ -819,6 +819,7 @@ Daemon::apply_validated_config_via_control_task_with_lease_return(
     std::shared_ptr<PreparedRuntimeInputs> prepared;
     std::shared_ptr<PreparedRuntimeInputs> rollback_prepared;
     std::shared_ptr<std::string> saved_config;
+    ActiveConfigSnapshotHandle base_active_snapshot;
     std::shared_ptr<PreapplyLeaseSlot> returned;
     RuntimeFirewallLifecycleCompletion::Pair completion;
     RuntimeFirewallPreownedTerminalContinuation continuation;
@@ -833,8 +834,8 @@ Daemon::apply_validated_config_via_control_task_with_lease_return(
         rollback_prepared = std::make_shared<PreparedRuntimeInputs>();
         saved_config =
             std::make_shared<std::string>(std::move(saved_config_json));
-        const auto active_snapshot = config_store_.pin_active_snapshot();
-        const Config& active_config = active_snapshot->config;
+        base_active_snapshot = config_store_.pin_active_snapshot();
+        const Config& active_config = base_active_snapshot->config;
         refresh_remote_lists_after_apply =
             remote_list_sources_changed(active_config, config);
         *prepared = prepare_runtime_inputs(
@@ -845,20 +846,20 @@ Daemon::apply_validated_config_via_control_task_with_lease_return(
             RemoteListPreparationMode::None);
         completion = RuntimeFirewallLifecycleCompletion::create();
         returned = std::make_shared<PreapplyLeaseSlot>();
+        const auto apply_started_ts = unix_timestamp_now_seconds();
+        result->apply_started_ts = apply_started_ts;
         auto completion_source = std::move(completion.source);
-        continuation = RuntimeFirewallPreownedTerminalContinuation{
+        RuntimeFirewallPreownedTerminalContinuation final_continuation{
             [this,
              returned,
              result,
-             prepared,
-             rollback_prepared,
-             saved_config,
              refresh_remote_lists_after_apply,
              expected_lease_token,
              completion_source = std::move(completion_source)](
                 RuntimeFirewallLifecycleTerminal terminal,
                 std::unique_ptr<RuntimeMutationAdmission::Lease> exact) mutable
                 noexcept {
+                bool request_post_apply_list_refresh = false;
                 try {
                     const bool exact_lease_returned = exact &&
                         static_cast<bool>(*exact) &&
@@ -866,33 +867,50 @@ Daemon::apply_validated_config_via_control_task_with_lease_return(
                         runtime_mutation_admission_.owns(*exact);
                     if (!exact_lease_returned) {
                         result->error =
-                            "Configuration pre-apply did not return its exact "
+                            "Configuration apply did not return its exact "
                             "mutation lease";
                         result->runtime_unchanged = false;
                     } else if (
                         terminal.outcome ==
                             RuntimeFirewallLifecycleOutcome::verified_success &&
                         !terminal.commit_ambiguous) {
-                        // The owner retired its final context immediately
-                        // before invoking this continuation. Applying here
-                        // makes the verified firewall terminal the last
-                        // control-loop boundary before the candidate changes
-                        // generation.
-                        *result =
-                            apply_prepared_validated_config_on_control_loop(
-                                std::move(*prepared),
-                                std::move(*rollback_prepared),
-                                refresh_remote_lists_after_apply,
-                                std::move(*saved_config),
-                                ConfigGenerationFence::owner_verified);
+                        const auto kind =
+                            terminal.observed_config_identity
+                            ? terminal.observed_config_identity->kind
+                            : ConfigTerminalOperationKind::config_preapply;
+                        if (kind ==
+                            ConfigTerminalOperationKind::candidate) {
+                            result->applied = true;
+                            result->rolled_back = false;
+                            result->runtime_unchanged = false;
+                            result->error.clear();
+                            request_post_apply_list_refresh =
+                                refresh_remote_lists_after_apply;
+                        } else if (
+                            kind ==
+                            ConfigTerminalOperationKind::rollback) {
+                            result->applied = false;
+                            result->rolled_back = true;
+                            result->runtime_unchanged = false;
+                            result->error = terminal.detail.empty()
+                                ? "Configuration candidate was rolled back"
+                                : terminal.detail;
+                        } else {
+                            result->error =
+                                "Configuration generation returned an "
+                                "unexpected terminal identity";
+                            result->runtime_unchanged = false;
+                        }
                     } else {
                         result->error = terminal.detail.empty()
-                            ? "Configuration pre-apply was not verified"
+                            ? "Configuration apply was not verified"
                             : terminal.detail;
                         result->runtime_unchanged =
                             terminal.outcome ==
                                 RuntimeFirewallLifecycleOutcome::not_verified &&
-                            !terminal.committed && !terminal.commit_ambiguous;
+                            terminal.previous_generation_certainly_retained &&
+                            !terminal.committed &&
+                            !terminal.commit_ambiguous;
                     }
                 } catch (const std::exception& error) {
                     try {
@@ -910,6 +928,75 @@ Daemon::apply_validated_config_via_control_task_with_lease_return(
                 }
                 returned->lease = std::move(exact);
                 (void)completion_source.settle(std::move(terminal));
+                // The result, exact lease and waiter are authoritative before
+                // any ancillary work is attempted. A list refresh can then
+                // fail or defer without relabelling an already-published
+                // candidate or extending its writer authority.
+                if (request_post_apply_list_refresh) {
+                    try {
+                        refresh_lists_and_maybe_reload_async(
+                            "post-apply");
+                    } catch (const std::exception& error) {
+                        try {
+                            Logger::instance().info(
+                                "Post-configuration list refresh was "
+                                "deferred after the candidate had already "
+                                "been published: {}",
+                                error.what());
+                        } catch (...) {
+                        }
+                    } catch (...) {
+                        try {
+                            Logger::instance().info(
+                                "Post-configuration list refresh was "
+                                "deferred after the candidate had already "
+                                "been published");
+                        } catch (...) {
+                        }
+                    }
+                }
+            }};
+        continuation = RuntimeFirewallPreownedTerminalContinuation{
+            [this,
+             prepared,
+             rollback_prepared,
+             saved_config,
+             base_active_snapshot,
+             expected_lease_token,
+             final_continuation = std::move(final_continuation)](
+                RuntimeFirewallLifecycleTerminal terminal,
+                std::unique_ptr<RuntimeMutationAdmission::Lease> exact) mutable
+                noexcept {
+                const bool exact_lease_returned = exact &&
+                    static_cast<bool>(*exact) &&
+                    exact->token() == expected_lease_token &&
+                    runtime_mutation_admission_.owns(*exact);
+                if (exact_lease_returned &&
+                    terminal.outcome ==
+                        RuntimeFirewallLifecycleOutcome::verified_success &&
+                    !terminal.commit_ambiguous) {
+                    begin_preowned_runtime_firewall_config_apply(
+                        std::move(exact),
+                        base_active_snapshot,
+                        std::move(*prepared),
+                        std::move(*rollback_prepared),
+                        std::move(*saved_config),
+                        std::move(final_continuation));
+                    return;
+                }
+                if (!exact_lease_returned) {
+                    terminal.outcome =
+                        RuntimeFirewallLifecycleOutcome::not_verified;
+                    terminal.previous_generation_certainly_retained = false;
+                    try {
+                        terminal.detail =
+                            "Configuration pre-apply did not return its "
+                            "exact mutation lease";
+                    } catch (...) {
+                    }
+                }
+                final_continuation.invoke(
+                    std::move(terminal), std::move(exact));
             }};
         lease_owner = std::make_unique<RuntimeMutationAdmission::Lease>(
             std::move(owner));

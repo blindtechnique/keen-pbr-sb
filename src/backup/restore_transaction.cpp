@@ -33,6 +33,17 @@ RestoreTransaction::RestoreTransaction(
     : operation_(operation),
       journal_(restore_transaction_state_directory(state_root, operation)) {}
 
+#ifdef KEEN_PBR3_TESTING
+RestoreTransaction::RestoreTransaction(
+    std::filesystem::path state_root,
+    RestoreTransactionOperation operation,
+    RestoreJournalTestHooks hooks)
+    : operation_(operation),
+      journal_(
+          restore_transaction_state_directory(state_root, operation),
+          std::move(hooks)) {}
+#endif
+
 RestoreJournalEntry RestoreTransaction::begin(
     const std::string& transaction_id,
     const std::string& exact_rollback_payload,

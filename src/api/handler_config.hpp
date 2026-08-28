@@ -11,6 +11,8 @@
 #include <utility>
 
 #ifdef KEEN_PBR3_TESTING
+#include "../backup/restore_journal.hpp"
+
 #include <filesystem>
 #endif
 
@@ -97,6 +99,7 @@ struct ConfigSaveTestOptions {
     // consults this option and always uses the fixed recovery state root.
     std::filesystem::path recovery_state_root;
     std::function<void(ConfigSaveFaultStage)> fault_injector;
+    RestoreJournalTestHooks restore_journal_hooks;
 };
 
 std::string commit_prepared_config_for_test(

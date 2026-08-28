@@ -874,6 +874,52 @@ add_test(
   COMMAND keen-pbr-runtime-resolver-generation-tests
 )
 
+# Keep ConfigStore's allocation-free prepared publication seam independently
+# buildable. It does not pull daemon lifecycle or API integration into this
+# target; those layers consume the exact-handle CAS in a later slice.
+add_executable(test_config_store
+  test_main.cpp
+  test_config_store.cpp
+  ../src/config/config.cpp
+  ../src/daemon/config_store.cpp
+  ../src/dns/dns_probe_server.cpp
+  ../src/dns/dns_server.cpp
+  ../src/firewall/port_spec_util.cpp
+  ../src/http/curl_runtime.cpp
+  ../src/http/http_client.cpp
+  ../src/http/http_transport.cpp
+  ../src/log/logger.cpp
+  ../src/log/trace.cpp
+  ../src/util/system_info.cpp
+  ../src/util/traced_mutex.cpp
+)
+set_target_properties(test_config_store PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_include_directories(test_config_store PRIVATE
+  ${KEEN_PBR_GENERATED_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+)
+target_link_libraries(test_config_store PRIVATE
+  nlohmann_json::nlohmann_json
+  fmt::fmt-header-only
+  ${KEEN_PBR_CURL_TARGET}
+  Threads::Threads
+)
+target_compile_options(test_config_store PRIVATE
+  -ffunction-sections
+  -fdata-sections
+)
+target_link_options(test_config_store PRIVATE
+  -Wl,--gc-sections
+)
+keen_pbr_apply_project_options(test_config_store)
+add_test(NAME test_config_store COMMAND test_config_store)
+
 # Keep the lifecycle completion bridge independently buildable. It is the
 # allocation-safe hand-off between asynchronous firewall publication and a
 # non-control lifecycle caller; no daemon integration belongs in this target.

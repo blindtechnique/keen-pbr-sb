@@ -68,6 +68,11 @@ public:
     // Set outbound mark assignments
     void set_outbound_marks(OutboundMarkMap marks);
 
+    // Exchange the complete mark assignment without allocation. Config
+    // generation publication prepares the replacement before entering its
+    // no-throw commit boundary and keeps the old map in the caller.
+    void swap_outbound_marks(OutboundMarkMap& marks) noexcept;
+
     // Get the configured fwmark mask used by mark rules and policy rules.
     uint32_t get_fwmark_mask() const;
 

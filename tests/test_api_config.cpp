@@ -1897,6 +1897,103 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "config save marks UNKNOWN when exact rollback WAL removal fails") {
+    ConfigApiTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    const Config original =
+        make_valid_config("127.0.0.1:18340");
+    const std::string original_json =
+        nlohmann::json(original).dump(1, '\t') + "\n";
+    const Config staged =
+        make_valid_config("127.0.0.1:18341");
+    const std::string staged_json =
+        nlohmann::json(staged).dump(1, '\t') + "\n";
+    write_text(config_path, original_json);
+
+    SseBroadcaster broadcaster;
+    std::size_t begin_calls = 0;
+    std::size_t finish_calls = 0;
+    std::size_t apply_calls = 0;
+    auto context = make_config_context(
+        config_path.string(),
+        broadcaster,
+        staged,
+        staged_json,
+        begin_calls,
+        finish_calls,
+        apply_calls);
+    const auto maintenance =
+        std::make_shared<FakeMaintenanceState>();
+    install_fake_maintenance(context, maintenance);
+    context.enqueue_apply_validated_config_fn =
+        [&](Config, std::string) {
+            ++apply_calls;
+            ConfigApplyResult result;
+            result.error = "injected runtime apply failure";
+            result.rolled_back = true;
+            return result;
+        };
+    std::size_t quiesce_calls = 0;
+    context.emergency_quiesce_runtime_fn =
+        [&] { ++quiesce_calls; };
+
+    ConfigSaveTestOptions options;
+    options.restore_journal_hooks.fault_injector =
+        [](RestoreJournalFaultStage stage) {
+            if (stage == RestoreJournalFaultStage::active_remove) {
+                throw std::runtime_error(
+                    "injected config-save active marker removal failure");
+            }
+        };
+
+    try {
+        (void)commit_prepared_config_for_test(
+            context,
+            "config-save-rollback-removal-failure",
+            [&] {
+                PreparedConfigCommit prepared;
+                prepared.config = staged;
+                prepared.serialized = staged_json;
+                return prepared;
+            },
+            [](const std::string& path,
+               const std::string& body) {
+                write_config_atomically(path, body);
+            },
+            std::move(options));
+        FAIL("an unproven rollback WAL removal must fail closed");
+    } catch (const ApiError& error) {
+        CHECK(error.status() == 503);
+        REQUIRE(error.body().has_value());
+        const auto payload =
+            nlohmann::json::parse(*error.body());
+        CHECK(payload.at("saved") == false);
+        CHECK(payload.at("applied") == false);
+        CHECK(payload.at("rolled_back") == true);
+        CHECK(payload.at("recovery_required") == true);
+        CHECK(payload.at("runtime_quiesced") == true);
+        CHECK(payload.at("recovery_error")
+                  .get<std::string>()
+                  .find(
+                      "injected config-save active marker removal failure") !=
+              std::string::npos);
+    }
+
+    const auto recovery_root =
+        directory.path / ".keen-pbr-recovery";
+    const auto operation_journal =
+        config_save_journal_path(directory);
+    CHECK(read_text(config_path) == original_json);
+    CHECK(apply_calls == 1U);
+    CHECK(quiesce_calls == 1U);
+    CHECK(std::filesystem::exists(
+        operation_journal / "active.json"));
+    CHECK(RestoreJournal(operation_journal).unknown_present());
+    CHECK(RestoreJournal(recovery_root).unknown_present());
+    CHECK(maintenance->active_leases == 0U);
+}
+
+TEST_CASE(
     "config save restores the file without quiescing an unchanged runtime") {
     constexpr int api_port = 18259;
     ConfigApiTempDir directory;

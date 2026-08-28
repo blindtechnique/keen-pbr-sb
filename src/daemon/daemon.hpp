@@ -85,6 +85,7 @@ class RuntimeFirewallOperationOwner;
 class RuntimeFirewallPreownedTerminalContinuation;
 struct RuntimeFirewallOperationContext;
 enum class RuntimeFirewallLifecycleKind : std::uint8_t;
+struct DaemonConfigGenerationTransaction;
 struct PlannedRoutingState;
 struct NdmsCatalogSnapshot;
 struct NdmsVpnServerServiceSnapshot;
@@ -970,6 +971,39 @@ private:
     begin_preowned_runtime_firewall_config_preapply(
         std::unique_ptr<RuntimeMutationAdmission::Lease>& lease,
         RuntimeFirewallPreownedTerminalContinuation& continuation);
+    // Continues a verified config-preapply terminal without returning or
+    // reacquiring its physical mutation lease. Candidate route/firewall and
+    // resolver work stays private until one no-I/O publication; any
+    // post-mutation failure starts the separately prepared rollback target
+    // under the same lease before the API/WAL waiter is released.
+    void begin_preowned_runtime_firewall_config_apply(
+        std::unique_ptr<RuntimeMutationAdmission::Lease> lease,
+        ActiveConfigSnapshotHandle base_active_snapshot,
+        PreparedRuntimeInputs candidate,
+        PreparedRuntimeInputs rollback,
+        std::string saved_config_json,
+        RuntimeFirewallPreownedTerminalContinuation final_continuation)
+        noexcept;
+    bool start_preowned_runtime_firewall_config_phase(
+        const std::shared_ptr<DaemonConfigGenerationTransaction>& transaction,
+        RuntimeFirewallLifecycleKind lifecycle_kind,
+        std::unique_ptr<RuntimeMutationAdmission::Lease>& lease,
+        RuntimeFirewallPreownedTerminalContinuation& continuation) noexcept;
+    void complete_preowned_runtime_firewall_config_candidate(
+        const std::shared_ptr<DaemonConfigGenerationTransaction>& transaction,
+        RuntimeFirewallLifecycleTerminal terminal,
+        std::unique_ptr<RuntimeMutationAdmission::Lease> lease) noexcept;
+    void complete_preowned_runtime_firewall_config_rollback(
+        const std::shared_ptr<DaemonConfigGenerationTransaction>& transaction,
+        RuntimeFirewallLifecycleTerminal terminal,
+        std::unique_ptr<RuntimeMutationAdmission::Lease> lease) noexcept;
+    bool publish_prepared_runtime_firewall_config_candidate(
+        const std::shared_ptr<DaemonConfigGenerationTransaction>& transaction)
+        noexcept;
+    void finish_preowned_runtime_firewall_config_apply(
+        const std::shared_ptr<DaemonConfigGenerationTransaction>& transaction,
+        RuntimeFirewallLifecycleTerminal terminal,
+        std::unique_ptr<RuntimeMutationAdmission::Lease> lease) noexcept;
     ListRefreshOperationResult refresh_lists_via_api(std::optional<std::string> requested_name);
     void setup_conntrack_events();
     void handle_conntrack_events(uint32_t events);

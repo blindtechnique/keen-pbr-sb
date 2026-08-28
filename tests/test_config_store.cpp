@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -39,7 +40,170 @@ std::string staged_json(const Config& config) {
     return nlohmann::json(config).dump();
 }
 
+struct NoexceptPublication {
+    bool* called{nullptr};
+
+    void operator()() noexcept { *called = true; }
+};
+
+struct ThrowingPublication {
+    void operator()() {}
+};
+
+template <typename Publication, typename = void>
+struct CanCommitPreparedActive : std::false_type {};
+
+template <typename Publication>
+struct CanCommitPreparedActive<
+    Publication,
+    std::void_t<decltype(
+        std::declval<ConfigStore&>().commit_prepared_active(
+            std::declval<const PreparedActiveConfigCommit&>(),
+            std::declval<Publication>()))>> : std::true_type {};
+
+static_assert(CanCommitPreparedActive<NoexceptPublication>::value);
+static_assert(!CanCommitPreparedActive<ThrowingPublication>::value);
+static_assert(std::is_nothrow_swappable_v<Config>);
+
 } // namespace
+
+TEST_CASE("config generations use the no-throw ADL relocation swap") {
+    auto left = config_named("swap-left");
+    auto right = config_named("swap-right");
+    left.api = ApiConfig{};
+    left.api->listen = "127.0.0.1:12121";
+    right.api = ApiConfig{};
+    right.api->listen = "192.0.2.1:12121";
+    const auto left_before = staged_json(left);
+    const auto right_before = staged_json(right);
+
+    using std::swap;
+    swap(left, right);
+    CHECK(staged_json(left) == right_before);
+    CHECK(staged_json(right) == left_before);
+
+    swap(left, left);
+    CHECK(staged_json(left) == right_before);
+}
+
+TEST_CASE(
+    "prepared active commit publishes and clears the matching staged draft") {
+    constexpr std::uint32_t old_mark = 0x10000U;
+    constexpr std::uint32_t new_mark = 0x90000U;
+    const auto active =
+        interface_config_named("prepared-old", "nwg-old");
+    const auto candidate =
+        interface_config_named("prepared-new", "nwg-new");
+    const auto serialized = staged_json(candidate);
+    ConfigStore store(active);
+    store.replace_active(
+        active,
+        OutboundMarkMap{{"reused-interface", old_mark}});
+    store.stage_config(candidate, serialized);
+
+    const auto base = store.pin_active_snapshot();
+    const auto prepared = ConfigStore::prepare_active_commit(
+        base,
+        candidate,
+        OutboundMarkMap{{"reused-interface", new_mark}},
+        serialized);
+    bool published = false;
+
+    CHECK(
+        store.commit_prepared_active(
+            prepared,
+            NoexceptPublication{&published}) ==
+        PreparedActiveConfigCommitResult::committed);
+    CHECK(published);
+    CHECK_FALSE(store.staged_cas_snapshot().has_value());
+    const auto committed = store.pin_active_snapshot();
+    CHECK(committed == prepared.candidate);
+    CHECK(
+        committed->config.outbounds->front().interface ==
+        std::optional<std::string>{"nwg-new"});
+    CHECK(committed->outbound_marks.at("reused-interface") == new_mark);
+}
+
+TEST_CASE("prepared active commit rejects exact base drift before publication") {
+    const auto active = config_named("base-old");
+    const auto candidate = config_named("base-candidate");
+    const auto serialized = staged_json(candidate);
+    ConfigStore store(active);
+    store.stage_config(candidate, serialized);
+    const auto prepared = ConfigStore::prepare_active_commit(
+        store.pin_active_snapshot(),
+        candidate,
+        OutboundMarkMap{},
+        serialized);
+
+    const auto drifted = config_named("base-drifted");
+    store.replace_active(drifted, OutboundMarkMap{});
+    bool published = false;
+    CHECK(
+        store.commit_prepared_active(
+            prepared,
+            NoexceptPublication{&published}) ==
+        PreparedActiveConfigCommitResult::base_mismatch);
+    CHECK_FALSE(published);
+    CHECK(store.staged_cas_snapshot().has_value());
+    CHECK(store.active_config().daemon->cache_dir == "/tmp/base-drifted");
+}
+
+TEST_CASE(
+    "prepared active commit rejects a different staged serialization") {
+    const auto active = config_named("staged-old");
+    const auto candidate = config_named("staged-candidate");
+    const auto replacement_draft = config_named("staged-replacement");
+    ConfigStore store(active);
+    const auto base = store.pin_active_snapshot();
+    const auto prepared = ConfigStore::prepare_active_commit(
+        base,
+        candidate,
+        OutboundMarkMap{},
+        staged_json(candidate));
+    store.stage_config(replacement_draft, staged_json(replacement_draft));
+
+    bool published = false;
+    CHECK(
+        store.commit_prepared_active(
+            prepared,
+            NoexceptPublication{&published}) ==
+        PreparedActiveConfigCommitResult::staged_mismatch);
+    CHECK_FALSE(published);
+    const auto staged = store.staged_snapshot();
+    REQUIRE(staged.has_value());
+    CHECK(staged->first.daemon->cache_dir == "/tmp/staged-replacement");
+    CHECK(store.pin_active_snapshot() == base);
+}
+
+TEST_CASE("prepared active commit preserves a pinned old active handle") {
+    const auto active = config_named("pinned-prepared-old");
+    const auto candidate = config_named("pinned-prepared-new");
+    const auto serialized = staged_json(candidate);
+    ConfigStore store(active);
+    store.stage_config(candidate, serialized);
+    const auto pinned_old = store.pin_active_snapshot();
+    const auto prepared = ConfigStore::prepare_active_commit(
+        pinned_old,
+        candidate,
+        OutboundMarkMap{},
+        serialized);
+
+    bool published = false;
+    REQUIRE(
+        store.commit_prepared_active(
+            prepared,
+            NoexceptPublication{&published}) ==
+        PreparedActiveConfigCommitResult::committed);
+    REQUIRE(published);
+    CHECK(pinned_old != store.pin_active_snapshot());
+    CHECK(
+        pinned_old->config.daemon->cache_dir ==
+        "/tmp/pinned-prepared-old");
+    CHECK(
+        store.active_config().daemon->cache_dir ==
+        "/tmp/pinned-prepared-new");
+}
 
 TEST_CASE("config store visible snapshot identifies active and draft states") {
     const auto active = config_named("active");

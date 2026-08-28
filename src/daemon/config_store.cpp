@@ -80,6 +80,23 @@ void ConfigStore::replace_active(Config active_config, OutboundMarkMap outbound_
     active_snapshot_ = std::move(replacement);
 }
 
+PreparedActiveConfigCommit ConfigStore::prepare_active_commit(
+    ActiveConfigSnapshotHandle base,
+    Config candidate_config,
+    OutboundMarkMap candidate_outbound_marks,
+    std::string staged_serialized) {
+    auto candidate = std::make_shared<const ActiveConfigSnapshot>(
+        ActiveConfigSnapshot{
+            std::move(candidate_config),
+            std::move(candidate_outbound_marks),
+        });
+    return PreparedActiveConfigCommit{
+        std::move(base),
+        std::move(candidate),
+        std::move(staged_serialized),
+    };
+}
+
 void ConfigStore::stage_config(Config staged_config, std::string staged_config_json) {
     KPBR_SHARED_UNIQUE_LOCK(lock, mutex_);
     staged_config_ = std::move(staged_config);

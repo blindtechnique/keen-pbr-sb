@@ -33,6 +33,12 @@ class RestoreTransaction {
 public:
     RestoreTransaction(std::filesystem::path state_root,
                        RestoreTransactionOperation operation);
+#ifdef KEEN_PBR3_TESTING
+    RestoreTransaction(
+        std::filesystem::path state_root,
+        RestoreTransactionOperation operation,
+        RestoreJournalTestHooks hooks);
+#endif
     ~RestoreTransaction() = default;
 
     RestoreTransaction(const RestoreTransaction&) = delete;

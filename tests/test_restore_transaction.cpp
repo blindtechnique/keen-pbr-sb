@@ -201,4 +201,34 @@ TEST_CASE("restore transaction completes an explicit verified rollback") {
     CHECK_FALSE(inspection.read_active().has_value());
 }
 
+TEST_CASE("restore transaction exposes rollback marker removal failure") {
+    RestoreTransactionTempDir temporary;
+    RestoreJournalTestHooks hooks;
+    hooks.fault_injector =
+        [](RestoreJournalFaultStage stage) {
+            if (stage == RestoreJournalFaultStage::active_remove) {
+                throw std::runtime_error(
+                    "injected rollback marker removal failure");
+            }
+        };
+    RestoreTransaction transaction(
+        temporary.path,
+        RestoreTransactionOperation::config_save,
+        std::move(hooks));
+    transaction.begin(
+        kConfigTransaction,
+        "rollback",
+        {RestoreJournalEffect::files});
+
+    CHECK_THROWS_WITH(
+        transaction.complete_rollback(),
+        "injected rollback marker removal failure");
+
+    RestoreJournal inspection(transaction.state_directory());
+    const auto active = inspection.read_active();
+    REQUIRE(active.has_value());
+    CHECK(active->transaction_id == kConfigTransaction);
+    CHECK_FALSE(inspection.unknown_present());
+}
+
 } // namespace keen_pbr3

@@ -3,14 +3,43 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
+#include <new>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "../api/generated/api_types.hpp"
 #include "../firewall/firewall.hpp"
 
 namespace keen_pbr3 {
+
+namespace api {
+
+// Entware GCC 8 with the old string ABI does not mark std::string move
+// assignment (and therefore aggregate std::swap) noexcept, although move
+// construction is noexcept. Config publication must exchange both exact
+// generations inside a no-throw checkpoint. Relocate the two complete objects
+// using only operations the target toolchain proves cannot throw. ConfigObject
+// is transparently replaceable by an object of the same type, so existing
+// names and references designate the replacements under C++17 lifetime rules.
+inline void swap(ConfigObject& left, ConfigObject& right) noexcept {
+    static_assert(std::is_nothrow_move_constructible_v<ConfigObject>);
+    static_assert(std::is_nothrow_destructible_v<ConfigObject>);
+    if (std::addressof(left) == std::addressof(right)) return;
+
+    void* const left_storage = static_cast<void*>(std::addressof(left));
+    void* const right_storage = static_cast<void*>(std::addressof(right));
+    ConfigObject saved(std::move(left));
+    left.~ConfigObject();
+    ::new (left_storage) ConfigObject(std::move(right));
+    right.~ConfigObject();
+    ::new (right_storage) ConfigObject(std::move(saved));
+}
+
+} // namespace api
 
 class ConfigError : public std::runtime_error {
 public:

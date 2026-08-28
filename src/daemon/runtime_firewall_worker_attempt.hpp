@@ -19,7 +19,19 @@ enum class RuntimeFirewallWorkerOperationKind : std::uint8_t {
     // Verify/repair only the currently published generation before a caller
     // is allowed to reuse its numerical marks for a prepared candidate.
     config_preapply,
+    // Apply a prepared configuration generation while Daemon keeps every
+    // user-visible/config-store cursor on the previous generation. Candidate
+    // and rollback are deliberately distinct operation epochs: an ambiguous
+    // candidate is never replayed as a rollback or vice versa.
+    config_candidate,
+    config_rollback,
 };
+
+constexpr bool runtime_firewall_worker_operation_is_config_generation(
+    RuntimeFirewallWorkerOperationKind kind) noexcept {
+    return kind == RuntimeFirewallWorkerOperationKind::config_candidate ||
+           kind == RuntimeFirewallWorkerOperationKind::config_rollback;
+}
 
 enum class RuntimeFirewallOwnedConntrackCleanupMode : std::uint8_t {
     none,

@@ -38,6 +38,11 @@ void FirewallState::set_outbound_marks(OutboundMarkMap marks) {
     outbound_marks_ = std::move(marks);
 }
 
+void FirewallState::swap_outbound_marks(
+    OutboundMarkMap& marks) noexcept {
+    outbound_marks_.swap(marks);
+}
+
 uint32_t FirewallState::get_fwmark_mask() const {
     return fwmark_mask_;
 }

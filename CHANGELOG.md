@@ -63,17 +63,28 @@
   marks. Чистый отказ до handoff возвращает тот же lease и закрывает WAL как
   неизменённый runtime; неоднозначный или уже committed terminal сохраняет
   recovery evidence без нового пользовательского сценария восстановления.
-- Для следующего P0-1 этапа candidate/rollback выделены три явные границы без
-  преждевременного переключения production config-save. Единый immutable
-  builder формирует route-request только из той же firewall-транзакции и
-  переносит exact conntrack authority без смешивания поколений; terminal policy
-  исчерпывающе различает публикацию кандидата, доказанный неизменённый runtime,
-  отдельный точный rollback и обязательное recovery; resolver generation и её
-  hash теперь можно построить из подготовленных config, Keenetic DNS, pinned
-  list snapshot, IPv6 policy и trusted interfaces без чтения глобального
-  состояния `Daemon`. Существующие runtime-пути уже используют общий builder,
-  но синхронный candidate/rollback leg остаётся включённым до отдельного
-  цельного owner-switch с async resolver и тем же физическим lease.
+- При активном runtime production config-save теперь проводит `config_preapply`,
+  candidate и при необходимости rollback в контуре единственного
+  `RuntimeFirewallOperationOwner`, не освобождая и не получая заново тот же
+  физический mutation lease. До первой мутации закрепляются exact committed
+  resolver/list snapshot базового поколения; candidate использует собственные
+  pinned list/resolver inputs и точный route checkpoint. Candidate `G -> G+1`
+  остаётся приватным до подтверждённых route/firewall и resolver stream, после
+  чего `ConfigStore` CAS и один небросающий checkpoint публикуют согласованные
+  config, outbound marks, реализованный firewall core, resolver cursor и runtime
+  generation. Typed rollback имеет terminal identity `G+1 -> G+2`, возвращает
+  опубликованный runtime к базовому `G` и после вошедшего COMMIT использует
+  сохранённый realized candidate core как firewall preimage; базовый preimage
+  допустим только при доказанном отсутствии candidate-мутации, а неоднозначный
+  исход fail closed. Candidate и подтверждённый rollback по одному разу
+  выполняют соответствующие Meta, native-VPN и stale-flow tails. Пришедшие во
+  время операции SNAT/catalog изменения не переигрывают старый candidate:
+  после возврата lease запускается свежий NAT/full backend resnapshot. Точный
+  файловый rollback теперь сам закрывает WAL; ошибка удаления или fsync active
+  marker переводит операцию в `UNKNOWN`/`recovery_required`, не выдавая ложный
+  rollback-success. Для Entware/Keenetic GCC 8 old ABI точная публикация
+  Config использует доказуемый no-throw relocation-swap через move construction
+  вместо недоказуемого для старого `std::string` aggregate swap.
 - Внутренние изменения runtime/firewall из восстановления правил, URLTest,
   Keenetic DNS, отложенного старта и автообновления списков проходят через
   единого владельца мутации. Занятый владелец сохраняет один ограниченный
@@ -290,9 +301,12 @@
   равны 100/200/400 мс. Любой окончательный отказ, потерянный resolver control
   handoff либо ошибка обязательной runtime-публикации удерживает тот же
   terminal/lease до off-loop rollback routes, firewall и resolver. Поэтому
-  прямых `apply_firewall()` осталось восемь в пяти функциональных группах:
-  cold startup, Keenetic DNS candidate/rollback, pre-apply SNAT repair,
-  URLTEST candidate/rollback и config transaction.
+  на этом checkpoint прямых `apply_firewall()` оставалось восемь в пяти
+  функциональных группах: cold startup, Keenetic DNS candidate/rollback,
+  pre-apply SNAT repair, URLTEST candidate/rollback и общий synchronous
+  config wrapper. Текущий owner-switch убрал из последней группы активный API
+  config-save; stopped-runtime save, SIGHUP и list-refresh пока используют
+  прежнюю обёртку, поэтому сами legacy call sites ещё не удалены.
   В том же несобранном batch устранены terminal/liveness-разрывы: firmware
   netfilter refresh не отменяет foreground lifecycle timer; trailing source
   после verified START/restart отделяется в background successor; последняя
@@ -335,8 +349,9 @@
   completion `4/4` и `28/28`, все обязательные native/rescue/DNS/router-info/
   resolver/journal/lock narrow-цели и crash smoke. Реальный Entware/Keenetic
   GCC 8.4 собрал 285 target-объектов; IPK прошёл identity validator и
-  изолированный install/reinstall/remove/recovery lifecycle. P0-1 остаётся
-  открытым для пяти sync apply-групп, exact raw routing backend и дальнейшего
+  изолированный install/reinstall/remove/recovery lifecycle. На том checkpoint
+  P0-1 оставался открытым для пяти sync apply-групп, exact raw routing backend
+  и дальнейшего
   извлечения daemon-specific publication tail. Следующий pre-generation SNAT
   barrier нельзя делегировать простым ранним исключением: API и SIGHUP приняли
   бы его за изменившийся runtime и запустили ложный rollback. Для этого среза

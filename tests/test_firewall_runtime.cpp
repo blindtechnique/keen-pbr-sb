@@ -421,6 +421,41 @@ TEST_CASE("iptables capacity changes force one destructive replacement") {
     CHECK(policy.force_clear_dynamic_sets);
 }
 
+TEST_CASE("iptables capacity policy is symmetric for candidate and rollback") {
+    Config old_config;
+    old_config.daemon = DaemonConfig{};
+    old_config.daemon->ipset_hashsize = 1024;
+    old_config.daemon->ipset_maxelem = 65536;
+
+    const auto check_round_trip = [&](const Config& candidate) {
+        const auto apply = firewall_config_apply_policy(
+            FirewallBackend::iptables, old_config, candidate);
+        const auto rollback = firewall_config_apply_policy(
+            FirewallBackend::iptables, candidate, old_config);
+        CHECK(apply.mode == FirewallApplyMode::Destructive);
+        CHECK(rollback.mode == apply.mode);
+        CHECK(apply.force_clear_dynamic_sets);
+        CHECK(rollback.force_clear_dynamic_sets);
+
+        const auto nft_apply = firewall_config_apply_policy(
+            FirewallBackend::nftables, old_config, candidate);
+        const auto nft_rollback = firewall_config_apply_policy(
+            FirewallBackend::nftables, candidate, old_config);
+        CHECK(nft_apply.mode == FirewallApplyMode::PreserveSets);
+        CHECK(nft_rollback.mode == nft_apply.mode);
+        CHECK_FALSE(nft_apply.force_clear_dynamic_sets);
+        CHECK_FALSE(nft_rollback.force_clear_dynamic_sets);
+    };
+
+    Config changed_hashsize = old_config;
+    changed_hashsize.daemon->ipset_hashsize = 2048;
+    check_round_trip(changed_hashsize);
+
+    Config changed_maxelem = old_config;
+    changed_maxelem.daemon->ipset_maxelem = 131072;
+    check_round_trip(changed_maxelem);
+}
+
 TEST_CASE("ipset defaults and normalized hashsize preserve existing sets") {
     Config defaults;
     Config explicit_defaults;

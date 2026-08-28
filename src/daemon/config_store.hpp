@@ -6,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
 
 namespace keen_pbr3 {
@@ -29,6 +30,22 @@ struct StagedConfigSnapshot {
     std::string serialized;
     std::string base_revision;
     std::string active_revision;
+};
+
+// Everything that can allocate for an active-config publication is prepared
+// before ConfigStore takes its publication lock. The base handle is an exact
+// generation identity, rather than a digest that could be recomputed from a
+// different in-memory snapshot.
+struct PreparedActiveConfigCommit {
+    ActiveConfigSnapshotHandle base;
+    ActiveConfigSnapshotHandle candidate;
+    std::string staged_serialized;
+};
+
+enum class PreparedActiveConfigCommitResult {
+    committed,
+    base_mismatch,
+    staged_mismatch,
 };
 
 class ConfigStore {
@@ -59,6 +76,49 @@ public:
     bool config_is_draft() const;
 
     void replace_active(Config active_config, OutboundMarkMap outbound_marks);
+    static PreparedActiveConfigCommit prepare_active_commit(
+        ActiveConfigSnapshotHandle base,
+        Config candidate_config,
+        OutboundMarkMap candidate_outbound_marks,
+        std::string staged_serialized);
+
+    // The caller prepares both shared handles and the exact staged bytes
+    // before entering this seam. A throwing publisher is rejected during
+    // overload resolution: once the CAS succeeds there is no fallible step
+    // between publication and the ConfigStore generation switch.
+    template <
+        typename Publication,
+        std::enable_if_t<
+            std::is_nothrow_invocable_v<Publication&>,
+            int> = 0>
+    PreparedActiveConfigCommitResult commit_prepared_active(
+        const PreparedActiveConfigCommit& prepared,
+        Publication&& publication) {
+        if (!prepared.base || !prepared.candidate) {
+            return PreparedActiveConfigCommitResult::base_mismatch;
+        }
+
+        KPBR_SHARED_UNIQUE_LOCK(lock, mutex_);
+        if (active_snapshot_ != prepared.base) {
+            return PreparedActiveConfigCommitResult::base_mismatch;
+        }
+        if (!staged_config_.has_value() ||
+            !staged_config_json_.has_value() ||
+            *staged_config_json_ != prepared.staged_serialized) {
+            return PreparedActiveConfigCommitResult::staged_mismatch;
+        }
+
+        publication();
+        // shared_ptr assignment and optional reset do not allocate. The
+        // prepared base retains the old generation until after this lock is
+        // released, so replacing active_snapshot_ cannot destroy it here.
+        active_snapshot_ = prepared.candidate;
+        staged_config_.reset();
+        staged_config_json_.reset();
+        staged_base_revision_.reset();
+        return PreparedActiveConfigCommitResult::committed;
+    }
+
     void stage_config(Config staged_config, std::string staged_config_json);
     bool stage_config_if_visible_revision(
         const std::string& expected_visible_revision,

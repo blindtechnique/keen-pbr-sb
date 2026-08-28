@@ -1,5 +1,7 @@
 #pragma once
 
+#include "runtime_config_operation_identity.hpp"
+
 #include <chrono>
 #include <cstdint>
 #include <memory>
@@ -26,6 +28,9 @@ struct RuntimeFirewallLifecycleTerminal final {
     bool commit_ambiguous{true};
     bool transient{false};
     std::string detail;
+    std::optional<ConfigTerminalOperationIdentity> observed_config_identity;
+    bool previous_generation_certainly_retained{false};
+    bool candidate_noop_verified{false};
 };
 
 class RuntimeFirewallLifecycleCompletion final {

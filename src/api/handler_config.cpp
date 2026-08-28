@@ -66,6 +66,7 @@ struct ConfigSaveRuntimeOptions {
     fs::path recovery_state_root{kRecoveryStateRoot};
 #ifdef KEEN_PBR3_TESTING
     std::function<void(ConfigSaveFaultStage)> fault_injector;
+    RestoreJournalTestHooks restore_journal_hooks;
 #endif
 };
 
@@ -588,7 +589,12 @@ std::string commit_prepared_config_impl(
                 std::make_unique<RestoreTransaction>(
                     runtime_options.recovery_state_root,
                     RestoreTransactionOperation::
-                        config_save);
+                        config_save
+#ifdef KEEN_PBR3_TESTING
+                    ,
+                    runtime_options.restore_journal_hooks
+#endif
+                );
         } catch (...) {
             fail_lifecycle_best_effort(
                 ctx,
@@ -653,6 +659,26 @@ std::string commit_prepared_config_impl(
                 }
                 prepared.transport->restore_revision(
                     *previous_transport_revision, *maintenance);
+            };
+        const auto complete_exact_persistent_rollback =
+            [&rollback_transport,
+             &runtime_options,
+             &transaction]() {
+                rollback_transport();
+                try {
+                    // RecoveryCoordinator has already restored and verified
+                    // the exact files when this hook runs. The production
+                    // config-save owner, not an implicit destructor or later
+                    // request, now retires its own exact WAL.
+                    transaction->complete_rollback();
+                } catch (...) {
+                    // Failure at active.json removal/fsync means neither
+                    // completed nor safely active can be claimed. Block all
+                    // automatic interpretation before surfacing the error.
+                    mark_config_save_unknown_best_effort(
+                        runtime_options, *transaction);
+                    throw;
+                }
             };
 
         try {
@@ -770,7 +796,7 @@ std::string commit_prepared_config_impl(
             if (!lease_verified || !restore_exact_config_snapshot(
                     runtime_options,
                     persistent_layout,
-                    rollback_transport,
+                    complete_exact_persistent_rollback,
                     recovery_error)) {
                 fail_lifecycle_best_effort(
                     ctx,
@@ -931,7 +957,7 @@ std::string commit_prepared_config_impl(
             if (!lease_verified || !restore_exact_config_snapshot(
                     runtime_options,
                     persistent_layout,
-                    rollback_transport,
+                    complete_exact_persistent_rollback,
                     recovery_error)) {
                 fail_lifecycle_best_effort(
                     ctx,
@@ -1073,6 +1099,8 @@ std::string commit_prepared_config_for_test(
             : std::move(options.recovery_state_root);
     runtime_options.fault_injector =
         std::move(options.fault_injector);
+    runtime_options.restore_journal_hooks =
+        std::move(options.restore_journal_hooks);
     return commit_prepared_config_impl(
         ctx,
         std::move(maintenance_operation),

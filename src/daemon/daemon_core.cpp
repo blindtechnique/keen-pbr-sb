@@ -13,6 +13,7 @@
 #include <fstream>
 #include <future>
 #include <grp.h>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <new>
@@ -385,7 +386,281 @@ struct DaemonRuntimeFirewallOperationState final
     std::vector<std::string> preworker_failed_urltest_tags;
     std::shared_ptr<RuntimeRouteMutationCheckpoint>
         route_mutation_checkpoint;
+    std::shared_ptr<DaemonConfigGenerationTransaction>
+        config_generation_transaction;
+    std::optional<ConfigTerminalOperationIdentity>
+        config_operation_identity;
+    std::shared_ptr<const ResolverGenerationSnapshot>
+        private_resolver_generation;
 };
+
+// One API/WAL save owns this object from the verified old-generation
+// pre-apply fence until either candidate publication or exact rollback has
+// completed. Kernel/resolver candidates may advance while every published
+// Daemon/ConfigStore cursor remains on base_runtime_generation.
+struct DaemonConfigGenerationTransaction final {
+    PreparedRuntimeInputs candidate;
+    PreparedRuntimeInputs rollback;
+    PreparedActiveConfigCommit active_commit;
+    FirewallConfigApplyPolicy candidate_firewall_policy;
+    FirewallConfigApplyPolicy rollback_firewall_policy;
+    OutboundMarkMap candidate_firewall_outbound_marks;
+    std::map<std::string, std::string> candidate_urltest_selections;
+    std::map<std::string, std::string> rollback_urltest_selections;
+    std::shared_ptr<const ListCacheGenerationSnapshot>
+        candidate_list_cache_snapshot;
+    std::shared_ptr<const ListCacheGenerationSnapshot>
+        rollback_list_cache_snapshot;
+    std::shared_ptr<const ResolverGenerationSnapshot>
+        candidate_resolver_generation;
+    std::shared_ptr<const ResolverGenerationSnapshot>
+        rollback_resolver_generation;
+    ResolverSyncCheckpoint candidate_resolver_sync;
+    DaemonRuntimeFirewallOperationState::CorePublication
+        candidate_core_publication;
+    std::optional<MetaUdp443ActivationPlan> candidate_meta_activation_plan;
+    std::optional<MetaUdp443ActivationPlan> rollback_meta_activation_plan;
+    ConntrackDestinationRetirementCoverage candidate_normal_retirement;
+    ConntrackDestinationRetirementCoverage candidate_aggressive_retirement;
+    std::vector<std::string> candidate_native_source_cleanup_cidrs;
+    ConntrackDestinationRetirementCoverage rollback_normal_retirement;
+    ConntrackDestinationRetirementCoverage rollback_aggressive_retirement;
+    std::vector<std::string> rollback_native_source_cleanup_cidrs;
+    RuntimeFirewallPreownedTerminalContinuation final_continuation;
+    ConfigTerminalOperationIdentity candidate_identity;
+    ConfigTerminalOperationIdentity rollback_identity;
+    std::uint64_t base_runtime_generation{0U};
+    std::uint64_t candidate_runtime_generation{0U};
+    std::uint64_t mutation_lease_token{0U};
+    std::uint64_t candidate_route_epoch{0U};
+    std::uint64_t rollback_route_epoch{0U};
+    std::int64_t apply_started_ts{0};
+    bool candidate_core_publication_ready{false};
+    bool candidate_firewall_preimage_is_base{false};
+    bool candidate_meta_filter_healthy{false};
+    bool candidate_meta_fastnat_healthy{false};
+    bool rollback_meta_filter_healthy{false};
+    bool rollback_meta_fastnat_healthy{false};
+    bool previous_runtime_active{false};
+    bool candidate_forwarded_scope_exact{false};
+    bool rollback_forwarded_scope_exact{false};
+    bool meta_cleanup_invalidated{false};
+    bool rollback_tail_scheduled{false};
+    bool rollback_cleanup_scope_prepared{false};
+    OwnedSnatRecovery post_terminal_snat_recovery;
+    bool post_terminal_refresh_required{false};
+    bool post_terminal_full_refresh{false};
+    bool candidate_resolver_may_have_changed{false};
+    bool candidate_published{false};
+    std::string candidate_failure_detail;
+};
+
+static_assert(
+    std::is_nothrow_swappable_v<Config> &&
+        std::is_nothrow_swappable_v<OutboundMarkMap> &&
+        std::is_nothrow_swappable_v<KeeneticDnsCacheView>,
+    "config generation publication requires no-throw prepared-state swaps");
+
+std::map<std::string, std::string>
+normalized_urltest_selections_for_config(
+    const Config& config,
+    const OutboundMarkMap& outbound_marks,
+    const std::map<std::string, std::string>& current) {
+    std::map<std::string, std::string> normalized;
+    for (const auto& outbound :
+         config.outbounds.value_or(std::vector<Outbound>{})) {
+        if (outbound.type != OutboundType::URLTEST) continue;
+        const auto selection = current.find(outbound.tag);
+        if (selection == current.end()) continue;
+        const auto groups = outbound.outbound_groups.value_or(
+            std::vector<OutboundGroup>{});
+        const bool contains_child = std::any_of(
+            groups.begin(),
+            groups.end(),
+            [&selection](const OutboundGroup& group) {
+                return std::find(
+                           group.outbounds.begin(),
+                           group.outbounds.end(),
+                           selection->second) != group.outbounds.end();
+            });
+        if (contains_child &&
+            outbound_marks.find(selection->second) !=
+                outbound_marks.end()) {
+            normalized.emplace(selection->first, selection->second);
+        }
+    }
+    return normalized;
+}
+
+bool config_forwarded_scope_restricted(
+    const Config& config,
+    const std::vector<InternalVpnServer>& internal_vpn_servers,
+    const std::vector<InternalVpnRuntimeTarget>& internal_vpn_targets) {
+    const auto route_config = config.route.value_or(RouteConfig{});
+    const bool explicit_inbound_scope =
+        route_config.inbound_interfaces.has_value() &&
+        !route_config.inbound_interfaces->empty();
+    const bool native_vpn_bypass = std::any_of(
+        internal_vpn_servers.begin(),
+        internal_vpn_servers.end(),
+        [](const InternalVpnServer& server) {
+            return !server.process_clients;
+        }) || std::any_of(
+        internal_vpn_targets.begin(),
+        internal_vpn_targets.end(),
+        [](const InternalVpnRuntimeTarget& target) {
+            return !target.process_clients;
+        });
+    return explicit_inbound_scope || native_vpn_bypass;
+}
+
+struct ConfigTransitionCleanupPlan final {
+    bool forwarded_scope_exact{false};
+    std::vector<std::string> native_source_cleanup_cidrs;
+    ConntrackDestinationRetirementCoverage normal_retirement;
+    ConntrackDestinationRetirementCoverage aggressive_retirement;
+};
+
+ConfigTransitionCleanupPlan prepare_config_transition_cleanup_plan(
+    bool previous_runtime_active,
+    const Config& previous_config,
+    const std::vector<RuleState>& previous_rules,
+    const AppliedListContentState& previous_list_content,
+    const std::vector<FirewallSourceEgressSnatSelector>&
+        previous_native_snat_selectors,
+    const std::vector<InternalVpnServer>& previous_internal_vpn_servers,
+    const std::vector<InternalVpnRuntimeTarget>&
+        previous_internal_vpn_targets,
+    const Config& next_config,
+    const DaemonRuntimeFirewallOperationState::CorePublication&
+        next_publication) {
+    ConfigTransitionCleanupPlan result;
+    const bool previous_forwarded_scope_restricted =
+        config_forwarded_scope_restricted(
+            previous_config,
+            previous_internal_vpn_servers,
+            previous_internal_vpn_targets);
+    const bool next_forwarded_scope_restricted =
+        config_forwarded_scope_restricted(
+            next_config,
+            next_publication.internal_vpn_servers,
+            next_publication.internal_vpn_service_targets);
+    result.forwarded_scope_exact = !next_forwarded_scope_restricted;
+    result.native_source_cleanup_cidrs =
+        changed_native_vpn_direct_egress_source_cidrs(
+            previous_native_snat_selectors,
+            next_publication.native_vpn_direct_egress_snat_selectors);
+
+    if (!previous_runtime_active ||
+        !reconnect_unmarked_flows_on_routing_change_enabled(next_config)) {
+        return result;
+    }
+
+    const auto previous_owned_lists =
+        reconnect_owned_flows_on_routing_change_list_names(previous_config);
+    const auto next_owned_lists =
+        reconnect_owned_flows_on_routing_change_list_names(next_config);
+    std::set<std::string> newly_enabled_owned_lists;
+    std::set_difference(
+        next_owned_lists.begin(),
+        next_owned_lists.end(),
+        previous_owned_lists.begin(),
+        previous_owned_lists.end(),
+        std::inserter(
+            newly_enabled_owned_lists,
+            newly_enabled_owned_lists.end()));
+
+    std::set<std::string> changed_list_names;
+    for (const auto& [list_name, next_destinations] :
+         next_publication.list_content_state.static_destinations) {
+        const auto previous =
+            previous_list_content.static_destinations.find(list_name);
+        if (previous == previous_list_content.static_destinations.end() ||
+            previous->second != next_destinations) {
+            changed_list_names.insert(list_name);
+        }
+    }
+    for (const auto& [list_name, previous_destinations] :
+         previous_list_content.static_destinations) {
+        const auto next =
+            next_publication.list_content_state.static_destinations.find(
+                list_name);
+        if (next ==
+                next_publication.list_content_state.static_destinations.end() ||
+            next->second != previous_destinations) {
+            changed_list_names.insert(list_name);
+        }
+    }
+    for (const auto& list_name :
+         next_publication.list_content_state.domain_entry_lists) {
+        if (previous_list_content.domain_entry_lists.count(list_name) == 0U) {
+            changed_list_names.insert(list_name);
+        }
+    }
+    for (const auto& list_name : previous_list_content.domain_entry_lists) {
+        if (next_publication.list_content_state.domain_entry_lists.count(
+                list_name) == 0U) {
+            changed_list_names.insert(list_name);
+        }
+    }
+    for (const auto& list_name :
+         next_publication.list_content_state
+             .truncated_static_destination_lists) {
+        if (previous_list_content.truncated_static_destination_lists.count(
+                list_name) == 0U) {
+            changed_list_names.insert(list_name);
+        }
+    }
+    for (const auto& list_name :
+         previous_list_content.truncated_static_destination_lists) {
+        if (next_publication.list_content_state
+                .truncated_static_destination_lists.count(list_name) == 0U) {
+            changed_list_names.insert(list_name);
+        }
+    }
+
+    const std::vector<RuleState> no_previous_rules;
+    const auto& comparison_rules =
+        previous_forwarded_scope_restricted &&
+            !next_forwarded_scope_restricted
+        ? no_previous_rules
+        : previous_rules;
+    const auto normal_plan =
+        plan_conntrack_destination_retirement(
+            comparison_rules,
+            next_publication.rules,
+            changed_list_names);
+    result.normal_retirement =
+        merge_conntrack_destination_retirement_coverage(
+            collect_conntrack_destination_retirement_coverage(
+                normal_plan,
+                next_publication.list_content_state),
+            collect_conntrack_destination_retirement_coverage(
+                normal_plan,
+                previous_list_content));
+
+    const auto owned_reconnect_lists =
+        plan_conntrack_owned_destination_reconnect(
+            previous_rules,
+            next_publication.rules,
+            next_owned_lists,
+            changed_list_names,
+            newly_enabled_owned_lists);
+    if (!owned_reconnect_lists.empty()) {
+        const auto owned_plan =
+            destination_retirement_plan_for_lists(
+                owned_reconnect_lists);
+        result.aggressive_retirement =
+            merge_conntrack_destination_retirement_coverage(
+                collect_conntrack_destination_retirement_coverage(
+                    owned_plan,
+                    next_publication.list_content_state),
+                collect_conntrack_destination_retirement_coverage(
+                    owned_plan,
+                    previous_list_content));
+    }
+    return result;
+}
 
 struct RuntimeFirewallStartRollbackResult final {
     std::atomic<bool> ready{false};
@@ -1356,32 +1631,55 @@ void Daemon::handle_ipc_control_socket() {
                 // stay fail-closed.
                 const auto committed_resolver_generation =
                     resolver_generation_snapshot_;
-                const bool committed_snapshot_available =
-                    committed_resolver_generation &&
-                    committed_resolver_generation->list_cache_snapshot;
                 const std::string resolver_attempt_id =
                     request.value("resolver_attempt_id", "");
-                bool exact_activation_stream_authorized = false;
+                RuntimeResolverStreamSelection selection;
+                std::shared_ptr<const ResolverGenerationSnapshot>
+                    inactive_activation_generation;
+                std::string selection_error;
                 if (!resolver_attempt_id.empty() &&
-                    is_valid_resolver_attempt_id(resolver_attempt_id)) {
-                    KPBR_LOCK_GUARD(resolver_stream_attempt_mutex_);
-                    exact_activation_stream_authorized =
-                        active_resolver_stream_attempt_id_ ==
-                            resolver_attempt_id &&
-                        active_resolver_stream_generation_ &&
-                        active_resolver_stream_generation_ ==
-                            committed_resolver_generation &&
-                        inactive_resolver_activation_generation_ ==
-                            committed_resolver_generation &&
-                        committed_resolver_generation->stream_epoch != 0U;
+                    !is_valid_resolver_attempt_id(
+                        resolver_attempt_id)) {
+                    selection_error = "resolver_attempt_invalid";
+                } else {
+                    KPBR_LOCK_GUARD(
+                        resolver_stream_attempt_mutex_);
+                    selection =
+                        select_runtime_resolver_stream_generation(
+                            resolver_attempt_id,
+                            active_resolver_stream_attempt_id_,
+                            committed_resolver_generation,
+                            active_resolver_stream_generation_);
+                    inactive_activation_generation =
+                        inactive_resolver_activation_generation_;
+                    if (selection.error !=
+                        RuntimeResolverStreamSelectionError::none) {
+                        selection_error.assign(
+                            runtime_resolver_stream_selection_error_code(
+                                selection.error));
+                    }
                 }
                 const bool resolver_generation_available =
-                    resolver_lkg_stream_available(
+                    selection_error.empty() &&
+                    runtime_resolver_stream_selection_available(
                         runtime_state,
                         routing_runtime_active(),
-                        committed_snapshot_available,
-                        exact_activation_stream_authorized);
-                if (!resolver_generation_available) {
+                        selection,
+                        committed_resolver_generation,
+                        inactive_activation_generation);
+                if (!selection_error.empty()) {
+                    response = ipc::make_error_response(
+                        request,
+                        selection_error,
+                        selection_error == "resolver_stream_busy"
+                            ? "a resolver stream is already in progress"
+                            : (selection_error ==
+                                       "resolver_generation_unavailable"
+                                   ? "the committed resolver generation "
+                                     "is no longer current"
+                                   : "resolver attempt does not match "
+                                     "the active stream"));
+                } else if (!resolver_generation_available) {
                     const auto runtime_snapshot =
                         runtime_state_store_.snapshot();
                     response = ipc::make_error_response(
@@ -1389,59 +1687,10 @@ void Daemon::handle_ipc_control_socket() {
                         resolver_runtime_reason(runtime_snapshot),
                         "resolver runtime is not active");
                 } else {
-                    std::shared_ptr<const ResolverGenerationSnapshot>
-                        generation;
-                    bool correlated_attempt = false;
-                    std::string selection_error;
-                    if (!resolver_attempt_id.empty() &&
-                        !is_valid_resolver_attempt_id(
-                            resolver_attempt_id)) {
-                        selection_error = "resolver_attempt_invalid";
-                    } else {
-                        KPBR_LOCK_GUARD(
-                            resolver_stream_attempt_mutex_);
-                        if (!active_resolver_stream_attempt_id_.empty()) {
-                            if (resolver_attempt_id.empty()) {
-                                selection_error =
-                                    "resolver_stream_busy";
-                            } else if (
-                                resolver_attempt_id !=
-                                active_resolver_stream_attempt_id_) {
-                                selection_error =
-                                    "resolver_attempt_mismatch";
-                            } else {
-                                generation =
-                                    active_resolver_stream_generation_;
-                                if (!generation ||
-                                    generation !=
-                                        committed_resolver_generation) {
-                                    selection_error =
-                                        "resolver_generation_unavailable";
-                                } else {
-                                    correlated_attempt = true;
-                                }
-                            }
-                        } else {
-                            // A valid token left in tmpfs by an older helper
-                            // is an ordinary manual stream after the matching
-                            // attempt has ended. It may read the current
-                            // generation, but cannot acknowledge any hook.
-                            generation = committed_resolver_generation;
-                        }
-                    }
-                    if (!selection_error.empty()) {
-                        response = ipc::make_error_response(
-                            request,
-                            selection_error,
-                            selection_error == "resolver_stream_busy"
-                                ? "a resolver stream is already in progress"
-                                : (selection_error ==
-                                           "resolver_generation_unavailable"
-                                       ? "the committed resolver generation "
-                                         "is no longer current"
-                                       : "resolver attempt does not match "
-                                         "the active stream"));
-                    } else if (!generation) {
+                    auto generation = selection.generation;
+                    const bool correlated_attempt =
+                        selection.correlated_attempt;
+                    if (!generation) {
                         response = ipc::make_error_response(
                             request,
                             "resolver_generation_unavailable",
@@ -3995,6 +4244,18 @@ Daemon::begin_preowned_runtime_firewall_config_preapply(
     if (runtime_firewall_owner_->shutdown_requested()) {
         return RuntimeFirewallImmediateDisposition::rejected;
     }
+    const auto generation =
+        runtime_generation_.load(std::memory_order_acquire);
+    const auto committed_resolver_generation =
+        resolver_generation_snapshot_;
+    if (!committed_resolver_generation ||
+        !committed_resolver_generation->list_cache_snapshot ||
+        committed_resolver_generation->generation != generation) {
+        // Exact rollback inputs are a prerequisite, not something to
+        // reconstruct after the pre-apply worker has already repaired SNAT.
+        // Leave the physical writer lease and every runtime owner untouched.
+        return RuntimeFirewallImmediateDisposition::rejected;
+    }
 
     OwnedSnatRecovery recovery =
         runtime_firewall_retry_.pending_owned_snat_recovery();
@@ -4003,8 +4264,6 @@ Daemon::begin_preowned_runtime_firewall_config_preapply(
     // event was latched so a verified terminal clears the exact coordinator
     // payload instead of leaving its broad snapshot behind.
     recovery.requested = true;
-    const auto generation =
-        runtime_generation_.load(std::memory_order_acquire);
     const auto merge_cleanup_retry = [&recovery, generation](
         const OwnedConntrackCleanupRetry& retry) {
         if (!retry.valid() ||
@@ -4099,6 +4358,946 @@ Daemon::begin_preowned_runtime_firewall_config_preapply(
     }
     return RuntimeFirewallImmediateDisposition::rejected;
 }
+
+void Daemon::begin_preowned_runtime_firewall_config_apply(
+    std::unique_ptr<RuntimeMutationAdmission::Lease> lease,
+    ActiveConfigSnapshotHandle base_active_snapshot,
+    PreparedRuntimeInputs candidate,
+    PreparedRuntimeInputs rollback,
+    std::string saved_config_json,
+    RuntimeFirewallPreownedTerminalContinuation final_continuation)
+    noexcept {
+    const auto reject = [this](
+        RuntimeFirewallPreownedTerminalContinuation continuation,
+        std::unique_ptr<RuntimeMutationAdmission::Lease> exact,
+        std::string_view detail,
+        bool previous_retained) noexcept {
+        RuntimeFirewallLifecycleTerminal terminal;
+        terminal.outcome = RuntimeFirewallLifecycleOutcome::not_verified;
+        terminal.committed = false;
+        terminal.commit_ambiguous = false;
+        terminal.previous_generation_certainly_retained =
+            previous_retained;
+        try {
+            terminal.detail.assign(detail.data(), detail.size());
+        } catch (...) {
+        }
+        if (continuation) {
+            continuation.invoke(
+                std::move(terminal), std::move(exact));
+        }
+    };
+
+    if (!lease || !static_cast<bool>(*lease) ||
+        !runtime_mutation_admission_.owns(*lease) ||
+        !base_active_snapshot || !final_continuation) {
+        reject(
+            std::move(final_continuation), std::move(lease),
+            "configuration candidate did not receive its exact prepared "
+            "authority",
+            true);
+        return;
+    }
+    if (!routing_runtime_active() ||
+        runtime_firewall_owner_->shutdown_requested()) {
+        reject(
+            std::move(final_continuation), std::move(lease),
+            "configuration candidate requires an active runtime owner",
+            true);
+        return;
+    }
+    if (!pending_exact_tcp_reset_cleanups_.empty()) {
+        reject(
+            std::move(final_continuation), std::move(lease),
+            "exact TCP reset cleanup is still pending before the next "
+            "configuration generation",
+            true);
+        return;
+    }
+
+    std::shared_ptr<DaemonConfigGenerationTransaction> transaction;
+    try {
+        if (config_store_.pin_active_snapshot() != base_active_snapshot) {
+            reject(
+                std::move(final_continuation), std::move(lease),
+                "active configuration changed before candidate admission",
+                true);
+            return;
+        }
+        const auto staged = config_store_.staged_snapshot();
+        if (!staged || staged->second != saved_config_json) {
+            reject(
+                std::move(final_continuation), std::move(lease),
+                "staged configuration changed before candidate admission",
+                true);
+            return;
+        }
+        const auto base_runtime_generation =
+            runtime_generation_.load(std::memory_order_acquire);
+        const auto committed_resolver_generation =
+            resolver_generation_snapshot_;
+        if (!committed_resolver_generation ||
+            !committed_resolver_generation->list_cache_snapshot ||
+            committed_resolver_generation->generation !=
+                base_runtime_generation) {
+            reject(
+                std::move(final_continuation), std::move(lease),
+                "active runtime has no exact committed resolver/list "
+                "snapshot for configuration rollback",
+                true);
+            return;
+        }
+
+        // Rebind only the candidate from the current cache-only NDMS view.
+        // Rollback below is the exact already-published generation, not a
+        // newly interpreted version of the old JSON.
+        if (config_has_stable_internal_vpn_server_policy(
+                candidate.config)) {
+            candidate.internal_vpn_resolution =
+                resolve_internal_vpn_servers_for_runtime(
+                    candidate.config,
+                    false,
+                    snapshot_internal_vpn_verified_includes_lkg());
+        }
+        if (config_requires_internal_vpn_service_inventory(
+                candidate.config)) {
+            candidate.internal_vpn_service_resolution =
+                resolve_internal_vpn_services_for_runtime(
+                    candidate.config,
+                    false,
+                    snapshot_internal_vpn_service_verified_includes_lkg());
+        }
+
+        rollback.config = config_;
+        rollback.outbound_marks = outbound_marks_;
+        rollback.keenetic_dns =
+            committed_resolver_generation->keenetic_dns;
+        rollback.internal_vpn_resolution.effective_servers =
+            resolved_internal_vpn_servers_;
+        rollback.internal_vpn_service_resolution.effective_targets =
+            resolved_internal_vpn_service_targets_;
+
+        transaction =
+            std::make_shared<DaemonConfigGenerationTransaction>();
+        // From this point every failure must return the exact lease through
+        // the API/WAL waiter. Move the continuation before any resolver/list
+        // preparation which may allocate or throw.
+        transaction->final_continuation =
+            std::move(final_continuation);
+        transaction->base_runtime_generation =
+            base_runtime_generation;
+        transaction->candidate_runtime_generation =
+            transaction->base_runtime_generation + 1U;
+        transaction->mutation_lease_token = lease->token();
+        transaction->apply_started_ts =
+            unix_timestamp_now_seconds();
+        transaction->previous_runtime_active =
+            routing_runtime_active();
+        transaction->candidate_firewall_policy =
+            firewall_config_apply_policy(
+                firewall_->backend(), config_, candidate.config);
+        transaction->rollback_firewall_policy =
+            firewall_config_apply_policy(
+                firewall_->backend(), candidate.config, rollback.config);
+        transaction->candidate_firewall_outbound_marks =
+            candidate.outbound_marks;
+        const auto current_urltest_selections =
+            firewall_state_.get_urltest_selections();
+        transaction->candidate_urltest_selections =
+            normalized_urltest_selections_for_config(
+                candidate.config,
+                candidate.outbound_marks,
+                current_urltest_selections);
+        transaction->rollback_urltest_selections =
+            current_urltest_selections;
+        transaction->candidate_list_cache_snapshot =
+            capture_relevant_list_cache_generation(candidate.config);
+        transaction->rollback_list_cache_snapshot =
+            committed_resolver_generation->list_cache_snapshot;
+
+        const auto make_private_resolver_generation = [this](
+            const PreparedRuntimeInputs& prepared,
+            std::shared_ptr<const ListCacheGenerationSnapshot> list_snapshot,
+            std::vector<std::string> trusted_interfaces,
+            std::uint64_t generation) {
+            RuntimeResolverGenerationInput input;
+            input.config = prepared.config;
+            input.keenetic_dns = prepared.keenetic_dns;
+            input.list_cache_snapshot = std::move(list_snapshot);
+            input.list_max_file_size_bytes =
+                max_file_size_bytes(prepared.config);
+            input.resolver_type =
+                firewall_->backend() == FirewallBackend::nftables
+                    ? ResolverType::DNSMASQ_NFTSET
+                    : ResolverType::DNSMASQ_IPSET;
+            input.ipv6_policy = resolver_ipv6_policy(
+                resolve_ipv6_support(prepared.config));
+            input.trusted_dns_interfaces =
+                std::move(trusted_interfaces);
+            input.generation = generation;
+            return std::make_shared<const ResolverGenerationSnapshot>(
+                build_runtime_resolver_generation_snapshot(input));
+        };
+
+        transaction->candidate_resolver_generation =
+            make_private_resolver_generation(
+                candidate,
+                transaction->candidate_list_cache_snapshot,
+                build_dnsmasq_trusted_interfaces(
+                    candidate.internal_vpn_resolution.effective_servers,
+                    candidate.internal_vpn_service_resolution
+                        .effective_targets),
+                transaction->candidate_runtime_generation);
+        transaction->rollback_resolver_generation =
+            committed_resolver_generation;
+
+        transaction->candidate_resolver_sync =
+            resolver_sync_.checkpoint();
+        transaction->candidate_resolver_sync.expected_hash =
+            transaction->candidate_resolver_generation->expected_hash;
+        transaction->candidate_resolver_sync.apply_started_ts =
+            transaction->apply_started_ts;
+        transaction->candidate_resolver_sync.consecutive_probe_failures = 0;
+        transaction->candidate_resolver_sync.runtime_active = true;
+        transaction->candidate_resolver_sync.resolver_configured = true;
+
+        transaction->active_commit =
+            ConfigStore::prepare_active_commit(
+                std::move(base_active_snapshot),
+                candidate.config,
+                candidate.outbound_marks,
+                std::move(saved_config_json));
+        transaction->candidate = std::move(candidate);
+        transaction->rollback = std::move(rollback);
+    } catch (const std::exception& error) {
+        reject(
+            transaction
+                ? std::move(transaction->final_continuation)
+                : std::move(final_continuation),
+            std::move(lease), error.what(), true);
+        return;
+    } catch (...) {
+        reject(
+            transaction
+                ? std::move(transaction->final_continuation)
+                : std::move(final_continuation),
+            std::move(lease),
+            "configuration candidate preparation failed", true);
+        return;
+    }
+
+    RuntimeFirewallPreownedTerminalContinuation continuation;
+    try {
+        continuation = RuntimeFirewallPreownedTerminalContinuation{
+            [this, transaction](
+                RuntimeFirewallLifecycleTerminal terminal,
+                std::unique_ptr<RuntimeMutationAdmission::Lease> exact)
+                noexcept {
+                complete_preowned_runtime_firewall_config_candidate(
+                    transaction,
+                    std::move(terminal),
+                    std::move(exact));
+            }};
+    } catch (...) {
+        reject(
+            std::move(transaction->final_continuation),
+            std::move(lease),
+            "configuration candidate continuation could not be prepared",
+            true);
+        return;
+    }
+    try {
+        // Invalidate the old generation's delayed Meta cleanup before any
+        // private candidate can touch the firewall. Taking the same barrier
+        // after the epoch bump waits out an already-running exact cleanup;
+        // no old selector can then race candidate or rollback COMMIT.
+        cancel_meta_udp443_activation_cleanup();
+        transaction->meta_cleanup_invalidated = true;
+        {
+            KPBR_LOCK_GUARD(udp_call_affinity_mutation_mutex_);
+        }
+    } catch (...) {
+        schedule_netfilter_runtime_refresh_noexcept(
+            NetfilterRefreshReason::full,
+            "configuration candidate could not fence Meta cleanup");
+        reject(
+            std::move(transaction->final_continuation),
+            std::move(lease),
+            "configuration candidate could not fence delayed Meta cleanup",
+            true);
+        return;
+    }
+    if (!start_preowned_runtime_firewall_config_phase(
+            transaction,
+            RuntimeFirewallLifecycleKind::config_candidate,
+            lease,
+            continuation)) {
+        schedule_netfilter_runtime_refresh_noexcept(
+            NetfilterRefreshReason::full,
+            "configuration candidate owner rejected after Meta cleanup "
+            "invalidation");
+        reject(
+            std::move(transaction->final_continuation),
+            std::move(lease),
+            "configuration candidate owner did not accept the operation",
+            true);
+    }
+}
+
+bool Daemon::start_preowned_runtime_firewall_config_phase(
+    const std::shared_ptr<DaemonConfigGenerationTransaction>& transaction,
+    RuntimeFirewallLifecycleKind lifecycle_kind,
+    std::unique_ptr<RuntimeMutationAdmission::Lease>& lease,
+    RuntimeFirewallPreownedTerminalContinuation& continuation) noexcept {
+    if (!transaction || !lease || !static_cast<bool>(*lease) ||
+        lease->token() != transaction->mutation_lease_token ||
+        !runtime_mutation_admission_.owns(*lease) || !continuation ||
+        !runtime_firewall_lifecycle_is_config_generation(lifecycle_kind) ||
+        runtime_generation_.load(std::memory_order_acquire) !=
+            transaction->base_runtime_generation ||
+        runtime_firewall_owner_->shutdown_requested()) {
+        return false;
+    }
+    try {
+        auto state =
+            std::make_shared<DaemonRuntimeFirewallOperationState>();
+        state->config_generation_transaction = transaction;
+        auto result = runtime_firewall_owner_->start_immediate_preowned(
+            0U,
+            transaction->base_runtime_generation,
+            {},
+            {},
+            /*schedule_catalog_refresh=*/false,
+            state,
+            runtime_mutation_admission_,
+            std::move(lease),
+            {},
+            lifecycle_kind,
+            std::move(continuation));
+        if (result.disposition ==
+            RuntimeFirewallImmediateDisposition::handed_off) {
+            return true;
+        }
+        lease = std::move(result.unaccepted_lease);
+        continuation =
+            std::move(result.unaccepted_continuation);
+    } catch (...) {
+    }
+    return false;
+}
+
+void Daemon::complete_preowned_runtime_firewall_config_candidate(
+    const std::shared_ptr<DaemonConfigGenerationTransaction>& transaction,
+    RuntimeFirewallLifecycleTerminal terminal,
+    std::unique_ptr<RuntimeMutationAdmission::Lease> lease) noexcept {
+    if (!transaction) return;
+    const bool exact_lease_owned = lease && static_cast<bool>(*lease) &&
+        lease->token() == transaction->mutation_lease_token &&
+        runtime_mutation_admission_.owns(*lease);
+    ConfigCandidateEvidence evidence;
+    evidence.expected_identity = transaction->candidate_identity;
+    evidence.exact_lease_owned = exact_lease_owned;
+    evidence.published_generation_current =
+        runtime_generation_.load(std::memory_order_acquire) ==
+        transaction->base_runtime_generation;
+    evidence.terminal = std::move(terminal);
+    evidence.exact_rollback_available = exact_lease_owned &&
+        transaction->rollback_resolver_generation &&
+        !runtime_firewall_owner_->shutdown_requested();
+    const auto action = plan_config_candidate_terminal(evidence);
+
+    if (!evidence.terminal.detail.empty()) {
+        try {
+            transaction->candidate_failure_detail =
+                evidence.terminal.detail;
+        } catch (...) {
+        }
+    }
+    if (action == ConfigCandidateAction::publish_candidate) {
+        if (publish_prepared_runtime_firewall_config_candidate(
+                transaction)) {
+            finish_preowned_runtime_firewall_config_apply(
+                transaction,
+                std::move(evidence.terminal),
+                std::move(lease));
+            return;
+        }
+        try {
+            transaction->candidate_failure_detail =
+                "candidate was verified in the router but its exact "
+                "ConfigStore publication was rejected";
+        } catch (...) {
+        }
+    } else if (action ==
+               ConfigCandidateAction::reject_runtime_unchanged) {
+        finish_preowned_runtime_firewall_config_apply(
+            transaction,
+            std::move(evidence.terminal),
+            std::move(lease));
+        return;
+    } else if (action == ConfigCandidateAction::recovery_required) {
+        evidence.terminal.outcome =
+            RuntimeFirewallLifecycleOutcome::not_verified;
+        evidence.terminal.previous_generation_certainly_retained = false;
+        finish_preowned_runtime_firewall_config_apply(
+            transaction,
+            std::move(evidence.terminal),
+            std::move(lease));
+        return;
+    }
+
+    RuntimeFirewallPreownedTerminalContinuation rollback_continuation;
+    try {
+        rollback_continuation =
+            RuntimeFirewallPreownedTerminalContinuation{
+                [this, transaction](
+                    RuntimeFirewallLifecycleTerminal rollback_terminal,
+                    std::unique_ptr<RuntimeMutationAdmission::Lease> exact)
+                    noexcept {
+                    complete_preowned_runtime_firewall_config_rollback(
+                        transaction,
+                        std::move(rollback_terminal),
+                        std::move(exact));
+                }};
+    } catch (...) {
+        evidence.terminal.outcome =
+            RuntimeFirewallLifecycleOutcome::not_verified;
+        evidence.terminal.previous_generation_certainly_retained = false;
+        finish_preowned_runtime_firewall_config_apply(
+            transaction,
+            std::move(evidence.terminal),
+            std::move(lease));
+        return;
+    }
+    if (!start_preowned_runtime_firewall_config_phase(
+            transaction,
+            RuntimeFirewallLifecycleKind::config_rollback,
+            lease,
+            rollback_continuation)) {
+        evidence.terminal.outcome =
+            RuntimeFirewallLifecycleOutcome::not_verified;
+        evidence.terminal.previous_generation_certainly_retained = false;
+        try {
+            evidence.terminal.detail =
+                "exact configuration rollback owner was not admitted";
+        } catch (...) {
+        }
+        finish_preowned_runtime_firewall_config_apply(
+            transaction,
+            std::move(evidence.terminal),
+            std::move(lease));
+    }
+}
+
+void Daemon::complete_preowned_runtime_firewall_config_rollback(
+    const std::shared_ptr<DaemonConfigGenerationTransaction>& transaction,
+    RuntimeFirewallLifecycleTerminal terminal,
+    std::unique_ptr<RuntimeMutationAdmission::Lease> lease) noexcept {
+    if (!transaction) return;
+    ConfigRollbackEvidence evidence;
+    evidence.expected_identity = transaction->rollback_identity;
+    evidence.exact_lease_owned = lease && static_cast<bool>(*lease) &&
+        lease->token() == transaction->mutation_lease_token &&
+        runtime_mutation_admission_.owns(*lease);
+    evidence.published_generation_current =
+        runtime_generation_.load(std::memory_order_acquire) ==
+        transaction->base_runtime_generation;
+    evidence.terminal = std::move(terminal);
+    const bool verified_rollback =
+        plan_config_rollback_terminal(evidence) ==
+        ConfigRollbackAction::accept_verified_rollback;
+    if (!verified_rollback) {
+        evidence.terminal.outcome =
+            RuntimeFirewallLifecycleOutcome::not_verified;
+        evidence.terminal.previous_generation_certainly_retained = false;
+        try {
+            const auto rollback_detail = evidence.terminal.detail;
+            evidence.terminal.detail =
+                "configuration rollback was not verified";
+            if (!rollback_detail.empty()) {
+                evidence.terminal.detail += ": ";
+                evidence.terminal.detail += rollback_detail;
+            }
+        } catch (...) {
+        }
+    } else {
+        try {
+            evidence.terminal.detail =
+                transaction->candidate_failure_detail;
+        } catch (...) {
+        }
+        if (!transaction->rollback_tail_scheduled) {
+            transaction->rollback_tail_scheduled = true;
+            try {
+                cancel_meta_udp443_activation_cleanup();
+                const auto cleanup_epoch =
+                    meta_udp443_cleanup_epoch_.load(
+                        std::memory_order_acquire);
+                if (transaction
+                        ->rollback_meta_activation_plan.has_value()) {
+                    if (transaction->rollback_meta_fastnat_healthy &&
+                        transaction->rollback_meta_filter_healthy) {
+                        meta_udp443_incidents_.reset(
+                            "meta-udp443-activation");
+                        schedule_meta_udp443_activation_cleanup_retry(
+                            std::move(
+                                *transaction
+                                     ->rollback_meta_activation_plan),
+                            transaction->base_runtime_generation,
+                            cleanup_epoch,
+                            /*attempt=*/0U);
+                    } else {
+                        report_meta_udp443_degraded(
+                            !transaction->rollback_meta_fastnat_healthy
+                                ? "FastNAT was re-enabled during "
+                                  "configuration rollback"
+                                : "the exact owned first FORWARD hook "
+                                  "could not be reverified after "
+                                  "configuration rollback");
+                        schedule_meta_udp443_activation_cleanup_retry(
+                            std::move(
+                                *transaction
+                                     ->rollback_meta_activation_plan),
+                            transaction->base_runtime_generation,
+                            cleanup_epoch,
+                            /*attempt=*/1U);
+                        if (transaction
+                                ->rollback_meta_fastnat_healthy) {
+                            transaction
+                                ->post_terminal_refresh_required = true;
+                            transaction
+                                ->post_terminal_full_refresh = true;
+                        }
+                    }
+                } else if (
+                    transaction->rollback_meta_filter_healthy) {
+                    meta_udp443_incidents_.reset(
+                        "meta-udp443-activation");
+                } else {
+                    report_meta_udp443_degraded(
+                        "configuration rollback could not verify absence "
+                        "of owned UDP/443 artifacts");
+                    transaction->post_terminal_refresh_required = true;
+                    transaction->post_terminal_full_refresh = true;
+                }
+            } catch (...) {
+                transaction->post_terminal_refresh_required = true;
+                transaction->post_terminal_full_refresh = true;
+            }
+
+            if (transaction->rollback_cleanup_scope_prepared) {
+                try {
+                    if (transaction->previous_runtime_active &&
+                        runtime_generation_.load(
+                            std::memory_order_acquire) ==
+                            transaction->base_runtime_generation &&
+                        !transaction
+                             ->rollback_native_source_cleanup_cidrs
+                             .empty()) {
+                        const auto cleanup =
+                            conntrack_manager_
+                                .delete_ipv4_source_cidrs(
+                                    transaction
+                                        ->rollback_native_source_cleanup_cidrs,
+                                    ConntrackSourceCleanupOptions{
+                                        std::chrono::seconds{4},
+                                        /*max_source_cidrs=*/32U});
+                        if (cleanup.command_unavailable) {
+                            Logger::instance().info(
+                                "Native VPN direct-egress SNAT was "
+                                "rolled back, but targeted conntrack "
+                                "cleanup is unavailable; existing flows "
+                                "will converge as they expire");
+                        } else if (
+                            cleanup.failed != 0U ||
+                            cleanup.skipped != 0U) {
+                            Logger::instance().info(
+                                "Native VPN direct-egress rollback "
+                                "cleanup left {} failed and {} skipped "
+                                "source selector(s)",
+                                cleanup.failed,
+                                cleanup.skipped);
+                        }
+                    }
+                } catch (...) {
+                    try {
+                        Logger::instance().info(
+                            "Native VPN direct-egress rollback cleanup "
+                            "was skipped; existing flows will converge "
+                            "as they expire");
+                    } catch (...) {
+                    }
+                }
+                try {
+                    const auto rollback_fwmark = fwmark_mask_value(
+                        transaction->rollback.config.fwmark.value_or(
+                            FwmarkConfig{}));
+                    execute_committed_stale_flow_reconnect(
+                        transaction->base_runtime_generation,
+                        transaction->previous_runtime_active,
+                        transaction->rollback_forwarded_scope_exact,
+                        rollback_fwmark,
+                        transaction->rollback_normal_retirement,
+                        transaction->rollback_aggressive_retirement);
+                } catch (...) {
+                    transaction->post_terminal_refresh_required = true;
+                    transaction->post_terminal_full_refresh = true;
+                }
+            } else {
+                transaction->post_terminal_refresh_required = true;
+                transaction->post_terminal_full_refresh = true;
+            }
+            try {
+                reset_idle_stall_observer(
+                    /*schedule_if_eligible=*/true);
+            } catch (...) {
+            }
+        }
+    }
+    finish_preowned_runtime_firewall_config_apply(
+        transaction,
+        std::move(evidence.terminal),
+        std::move(lease));
+}
+
+bool Daemon::publish_prepared_runtime_firewall_config_candidate(
+    const std::shared_ptr<DaemonConfigGenerationTransaction>& transaction)
+    noexcept {
+    if (!transaction || transaction->candidate_published ||
+        !transaction->candidate_core_publication_ready ||
+        !transaction->candidate_resolver_generation ||
+        runtime_generation_.load(std::memory_order_acquire) !=
+            transaction->base_runtime_generation) {
+        return false;
+    }
+    const auto candidate_fwmark = fwmark_mask_value(
+        transaction->candidate.config.fwmark.value_or(FwmarkConfig{}));
+    try {
+        auto& publication =
+            transaction->candidate_core_publication;
+        auto cleanup = prepare_config_transition_cleanup_plan(
+            transaction->previous_runtime_active,
+            config_,
+            firewall_state_.get_rules(),
+            applied_list_content_state_,
+            applied_native_vpn_direct_egress_snat_selectors_,
+            resolved_internal_vpn_servers_,
+            resolved_internal_vpn_service_targets_,
+            transaction->candidate.config,
+            publication);
+        transaction->candidate_forwarded_scope_exact =
+            cleanup.forwarded_scope_exact;
+        transaction->candidate_native_source_cleanup_cidrs =
+            std::move(cleanup.native_source_cleanup_cidrs);
+        transaction->candidate_normal_retirement =
+            std::move(cleanup.normal_retirement);
+        transaction->candidate_aggressive_retirement =
+            std::move(cleanup.aggressive_retirement);
+    } catch (...) {
+        // No irreversible post-COMMIT cleanup may be improvised. Failure to
+        // prepare its exact bounded scope keeps ConfigStore on the base
+        // generation and sends the already-mutated candidate to rollback.
+        return false;
+    }
+    try {
+        const auto committed = config_store_.commit_prepared_active(
+            transaction->active_commit,
+            [this, &transaction, candidate_fwmark]() noexcept {
+                using std::swap;
+                auto& publication =
+                    transaction->candidate_core_publication;
+                swap(config_, transaction->candidate.config);
+                outbound_marks_.swap(
+                    transaction->candidate.outbound_marks);
+                swap(active_keenetic_dns_,
+                     transaction->candidate.keenetic_dns);
+                firewall_state_.swap_outbound_marks(
+                    transaction->candidate_firewall_outbound_marks);
+                firewall_state_.set_fwmark_mask(candidate_fwmark);
+                firewall_state_.swap_urltest_selections(
+                    transaction->candidate_urltest_selections);
+                firewall_state_.swap_rules(publication.rules);
+                applied_list_content_state_.static_destinations.swap(
+                    publication.list_content_state.static_destinations);
+                applied_list_content_state_.domain_entry_lists.swap(
+                    publication.list_content_state.domain_entry_lists);
+                applied_list_content_state_.
+                    truncated_static_destination_lists.swap(
+                        publication.list_content_state.
+                            truncated_static_destination_lists);
+                applied_list_usage_.swap(publication.list_usage);
+                applied_list_fingerprints_.swap(
+                    publication.list_fingerprints);
+                resolved_internal_vpn_servers_.swap(
+                    publication.internal_vpn_servers);
+                resolved_internal_vpn_service_targets_.swap(
+                    publication.internal_vpn_service_targets);
+                applied_native_vpn_direct_egress_snat_selectors_.swap(
+                    publication.
+                        native_vpn_direct_egress_snat_selectors);
+                committed_meta_udp443_fwmark_ =
+                    publication.committed_meta_fwmark;
+                committed_meta_udp443_owned_mask_ =
+                    publication.committed_meta_owned_mask;
+                resolver_generation_snapshot_.swap(
+                    transaction->candidate_resolver_generation);
+                resolver_sync_.restore(
+                    std::move(
+                        transaction->candidate_resolver_sync));
+                resolver_config_hash_actual_retry_attempt_ = 0U;
+                apply_started_ts_.store(
+                    transaction->apply_started_ts,
+                    std::memory_order_release);
+                // This is the publication fence. ConfigStore readers are
+                // blocked by its unique lock until the prepared active handle
+                // is swapped immediately after this callback returns.
+                runtime_generation_.store(
+                    transaction->candidate_runtime_generation,
+                    std::memory_order_release);
+            });
+        if (committed !=
+            PreparedActiveConfigCommitResult::committed) {
+            return false;
+        }
+        transaction->candidate_published = true;
+    } catch (...) {
+        return false;
+    }
+
+    // Everything below is ancillary and may allocate or touch service
+    // sockets. The kernel+resolver candidate is already verified and the
+    // generation is published; an ancillary failure must not launch rollback.
+    cancel_meta_udp443_activation_cleanup();
+    const auto meta_cleanup_epoch =
+        meta_udp443_cleanup_epoch_.load(std::memory_order_acquire);
+    if (transaction->candidate_meta_activation_plan.has_value()) {
+        if (transaction->candidate_meta_fastnat_healthy &&
+            transaction->candidate_meta_filter_healthy) {
+            meta_udp443_incidents_.reset("meta-udp443-activation");
+            schedule_meta_udp443_activation_cleanup_retry(
+                std::move(
+                    *transaction->candidate_meta_activation_plan),
+                transaction->candidate_runtime_generation,
+                meta_cleanup_epoch,
+                /*attempt=*/0U);
+        } else {
+            report_meta_udp443_degraded(
+                !transaction->candidate_meta_fastnat_healthy
+                    ? "FastNAT was re-enabled during configuration "
+                      "publication"
+                    : "the exact owned first FORWARD hook could not be "
+                      "reverified after configuration publication");
+            schedule_meta_udp443_activation_cleanup_retry(
+                std::move(
+                    *transaction->candidate_meta_activation_plan),
+                transaction->candidate_runtime_generation,
+                meta_cleanup_epoch,
+                /*attempt=*/1U);
+            if (transaction->candidate_meta_fastnat_healthy) {
+                schedule_netfilter_runtime_refresh_noexcept(
+                    NetfilterRefreshReason::full,
+                    "could not repair configuration Meta UDP/443 "
+                    "publication");
+            }
+        }
+    } else if (transaction->candidate_meta_filter_healthy) {
+        meta_udp443_incidents_.reset("meta-udp443-activation");
+    } else {
+        report_meta_udp443_degraded(
+            "configuration publication could not verify absence of owned "
+            "UDP/443 artifacts");
+        schedule_netfilter_runtime_refresh_noexcept(
+            NetfilterRefreshReason::full,
+            "could not clean stale configuration Meta UDP/443 artifacts");
+    }
+    try {
+        if (transaction->previous_runtime_active &&
+            runtime_generation_.load(std::memory_order_acquire) ==
+                transaction->candidate_runtime_generation &&
+            !transaction->candidate_native_source_cleanup_cidrs.empty()) {
+            const auto cleanup =
+                conntrack_manager_.delete_ipv4_source_cidrs(
+                    transaction
+                        ->candidate_native_source_cleanup_cidrs,
+                    ConntrackSourceCleanupOptions{
+                        std::chrono::seconds{4},
+                        /*max_source_cidrs=*/32U});
+            if (cleanup.command_unavailable) {
+                Logger::instance().info(
+                    "Native VPN direct-egress SNAT changed, but targeted "
+                    "post-configuration conntrack cleanup is unavailable; "
+                    "existing flows will converge as they expire");
+            } else if (
+                cleanup.failed != 0U || cleanup.skipped != 0U) {
+                Logger::instance().info(
+                    "Native VPN direct-egress SNAT changed; targeted "
+                    "post-configuration cleanup left {} failed and {} "
+                    "skipped source selector(s)",
+                    cleanup.failed,
+                    cleanup.skipped);
+            }
+        }
+    } catch (const std::exception& error) {
+        try {
+            Logger::instance().info(
+                "Native VPN direct-egress post-configuration cleanup was "
+                "skipped: {}; existing flows will converge as they expire",
+                error.what());
+        } catch (...) {
+        }
+    } catch (...) {
+        try {
+            Logger::instance().info(
+                "Native VPN direct-egress post-configuration cleanup was "
+                "skipped by an unknown error; existing flows will converge "
+                "as they expire");
+        } catch (...) {
+        }
+    }
+    execute_committed_stale_flow_reconnect(
+        transaction->candidate_runtime_generation,
+        transaction->previous_runtime_active,
+        transaction->candidate_forwarded_scope_exact,
+        candidate_fwmark,
+        transaction->candidate_normal_retirement,
+        transaction->candidate_aggressive_retirement);
+    try {
+        update_internal_vpn_verified_includes_lkg(
+            transaction->candidate.internal_vpn_resolution);
+        update_internal_vpn_service_verified_includes_lkg(
+            transaction->candidate.internal_vpn_service_resolution);
+    } catch (...) {
+    }
+    try {
+        if (urltest_manager_) urltest_manager_->clear();
+        register_urltest_outbounds();
+    } catch (...) {
+    }
+    try {
+        teardown_dns_probe();
+        setup_dns_probe();
+    } catch (...) {
+    }
+    try {
+        schedule_keenetic_dns_refresh();
+        schedule_lists_autoupdate();
+        schedule_internal_vpn_catalog_refresh_if_needed(
+            transaction->candidate.internal_vpn_resolution.state,
+            transaction->candidate.internal_vpn_service_resolution.state);
+    } catch (...) {
+    }
+    try {
+        refresh_interface_traffic_config_targets(config_);
+    } catch (...) {
+    }
+    try {
+        refresh_resolver_config_hash_actual_async();
+    } catch (...) {
+    }
+    try {
+        reset_idle_stall_observer(/*schedule_if_eligible=*/true);
+    } catch (...) {
+    }
+    try {
+        request_remote_access_reconcile_from_control(
+            "configuration generation publication");
+    } catch (...) {
+    }
+    try {
+        publish_runtime_state();
+    } catch (...) {
+    }
+    return true;
+}
+
+void Daemon::finish_preowned_runtime_firewall_config_apply(
+    const std::shared_ptr<DaemonConfigGenerationTransaction>& transaction,
+    RuntimeFirewallLifecycleTerminal terminal,
+    std::unique_ptr<RuntimeMutationAdmission::Lease> lease) noexcept {
+    if (!transaction || !transaction->final_continuation) return;
+    const auto runtime_terminal_action =
+        plan_config_runtime_terminal(
+            transaction->candidate_published, terminal);
+    const bool runtime_terminal_safe =
+        runtime_terminal_action ==
+            ConfigRuntimeTerminalAction::keep_active;
+    if (runtime_terminal_action ==
+        ConfigRuntimeTerminalAction::fail_closed) {
+        // An unknown candidate/rollback terminal is not a healthy base
+        // generation. Fail closed before returning the mutation lease so no
+        // later writer or health reader can trust the old running label.
+        runtime_state_store_.set_routing_runtime_active(false);
+        cancel_idle_stall_observer();
+        cancel_meta_udp443_activation_cleanup();
+        cancel_resolver_reload_retry();
+        try {
+            transition_runtime_or_throw(
+                RuntimeState::broken,
+                "configuration generation terminal is unknown");
+            publish_runtime_state();
+        } catch (const std::exception& error) {
+            try {
+                Logger::instance().error(
+                    "Could not publish broken runtime after an unknown "
+                    "configuration terminal: {}",
+                    error.what());
+            } catch (...) {
+            }
+        } catch (...) {
+        }
+    }
+    const auto terminal_route_epoch =
+        terminal.observed_config_identity &&
+                terminal.observed_config_identity->kind ==
+                    ConfigTerminalOperationKind::candidate
+            ? transaction->candidate_route_epoch
+            : transaction->rollback_route_epoch;
+    bool refresh_after_lease_return =
+        runtime_terminal_safe &&
+        transaction->post_terminal_refresh_required;
+    bool full_refresh_after_lease_return =
+        transaction->post_terminal_full_refresh;
+    if (runtime_terminal_safe &&
+        terminal_route_epoch != 0U &&
+        routing_observation_epoch_.load(std::memory_order_acquire) !=
+            terminal_route_epoch) {
+        refresh_after_lease_return = true;
+        full_refresh_after_lease_return = true;
+    }
+    if (runtime_terminal_safe &&
+        transaction->meta_cleanup_invalidated &&
+        !transaction->candidate_published &&
+        !transaction->rollback_tail_scheduled) {
+        // A clean pre-worker rejection still invalidated the old delayed
+        // cleanup epoch. Recreate maintenance from a fresh published-state
+        // snapshot instead of replaying the private candidate.
+        refresh_after_lease_return = true;
+        full_refresh_after_lease_return = true;
+    }
+    if (refresh_after_lease_return) {
+        try {
+            (void)runtime_firewall_retry_.retain_recovery(
+                transaction->post_terminal_snat_recovery);
+        } catch (...) {
+            full_refresh_after_lease_return = true;
+        }
+    }
+    auto continuation =
+        std::move(transaction->final_continuation);
+    continuation.invoke(
+        std::move(terminal), std::move(lease));
+    if (refresh_after_lease_return) {
+        schedule_netfilter_runtime_refresh_noexcept(
+            full_refresh_after_lease_return
+                ? NetfilterRefreshReason::full
+                : NetfilterRefreshReason::nat_only,
+            full_refresh_after_lease_return
+                ? "configuration transaction requires a fresh backend "
+                  "snapshot"
+                : "configuration transaction retained exact SNAT "
+                  "recovery");
+    }
+}
 #endif
 
 void Daemon::dispatch_runtime_firewall_worker_attempt(
@@ -4120,8 +5319,51 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
     const bool lifecycle_preapply =
         runtime_firewall_lifecycle_is_preapply(
             context->lifecycle_kind);
+    const bool lifecycle_config_generation =
+        runtime_firewall_lifecycle_is_config_generation(
+            context->lifecycle_kind);
+    const bool lifecycle_preowned =
+        runtime_firewall_lifecycle_uses_preowned_continuation(
+            context->lifecycle_kind);
 
     context->queued_claim = queued_claim;
+    if (lifecycle_config_generation) {
+        const auto transaction =
+            state.config_generation_transaction;
+        if (!transaction) {
+            state.preworker_failure_kind =
+                DaemonRuntimeFirewallOperationState::PreworkerFailureKind::
+                    preparation_failure;
+            state.preworker_failure_detail =
+                "configuration generation transaction is unavailable";
+            runtime_firewall_owner_->terminate_before_worker(
+                context,
+                queued_claim,
+                RuntimeFirewallOperationContext::SuccessorMode::none,
+                /*force_rerun=*/false);
+            return;
+        }
+        ConfigTerminalOperationIdentity identity;
+        identity.kind = context->lifecycle_kind ==
+                RuntimeFirewallLifecycleKind::config_candidate
+            ? ConfigTerminalOperationKind::candidate
+            : ConfigTerminalOperationKind::rollback;
+        identity.operation_serial = queued_claim.serial;
+        identity.base_runtime_generation = identity.kind ==
+                ConfigTerminalOperationKind::candidate
+            ? transaction->base_runtime_generation
+            : transaction->candidate_runtime_generation;
+        identity.target_runtime_generation = identity.kind ==
+                ConfigTerminalOperationKind::candidate
+            ? transaction->candidate_runtime_generation
+            : transaction->candidate_runtime_generation + 1U;
+        state.config_operation_identity = identity;
+        if (identity.kind == ConfigTerminalOperationKind::candidate) {
+            transaction->candidate_identity = identity;
+        } else {
+            transaction->rollback_identity = identity;
+        }
+    }
     context->submitted_snat_recovery = std::move(snat_recovery_input);
     auto& snat_recovery = context->submitted_snat_recovery;
     context->prepared_native_vpn_catalog =
@@ -4186,7 +5428,7 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
             state.preworker_failure_detail =
                 "runtime mutation admission failed";
         }
-        const bool retry_required = lifecycle_preapply
+        const bool retry_required = lifecycle_preowned
             ? runtime_firewall_preapply_preworker_retry_available(
                   queued_claim.attempt)
             : runtime_firewall_preworker_retry_required(
@@ -4213,7 +5455,7 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                 "runtime mutation admission failed with an unknown error";
         } catch (...) {
         }
-        const bool retry_required = lifecycle_preapply
+        const bool retry_required = lifecycle_preowned
             ? runtime_firewall_preapply_preworker_retry_available(
                   queued_claim.attempt)
             : runtime_firewall_preworker_retry_required(
@@ -4250,7 +5492,36 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
         const bool lifecycle_start =
             runtime_firewall_lifecycle_is_start(
                 context->lifecycle_kind);
-        if (lifecycle_preapply) {
+        if (lifecycle_config_generation) {
+            const auto& config_transaction =
+                *state.config_generation_transaction;
+            const bool candidate_phase = context->lifecycle_kind ==
+                RuntimeFirewallLifecycleKind::config_candidate;
+            const auto& prepared = candidate_phase
+                ? config_transaction.candidate
+                : config_transaction.rollback;
+            state.internal_vpn_resolution =
+                prepared.internal_vpn_resolution;
+            state.internal_vpn_service_resolution =
+                prepared.internal_vpn_service_resolution;
+            state.private_resolver_generation = candidate_phase
+                ? config_transaction.candidate_resolver_generation
+                : config_transaction.rollback_resolver_generation;
+            if (!state.private_resolver_generation) {
+                throw DaemonError(
+                    "configuration resolver generation is unavailable");
+            }
+            state.lifecycle_trusted_dns_interfaces =
+                state.private_resolver_generation
+                    ->trusted_dns_interfaces;
+            state.list_cache_snapshot = candidate_phase
+                ? config_transaction.candidate_list_cache_snapshot
+                : config_transaction.rollback_list_cache_snapshot;
+            state.resolver_refresh_required = candidate_phase ||
+                config_transaction.candidate_resolver_may_have_changed;
+            state.lifecycle_resolver_verified =
+                !state.resolver_refresh_required;
+        } else if (lifecycle_preapply) {
             // Fence exactly the published generation. A cache refresh here
             // would silently turn pre-apply into candidate generation.
             state.internal_vpn_resolution.effective_servers =
@@ -4311,7 +5582,7 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                 !resolver_generation_snapshot_ ||
                 !resolver_generation_snapshot_->list_cache_snapshot;
         }
-        if (!lifecycle_preapply && lifecycle_start) {
+        if (!lifecycle_preowned && lifecycle_start) {
             // START activates the already-pinned resolver/list generation.
             // Requiring activation is not authority to advance remote bodies.
             state.list_cache_snapshot =
@@ -4319,7 +5590,7 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                         resolver_generation_snapshot_->list_cache_snapshot
                     ? resolver_generation_snapshot_->list_cache_snapshot
                     : capture_relevant_list_cache_generation(config_);
-        } else if (!lifecycle_preapply) {
+        } else if (!lifecycle_preowned) {
             state.list_cache_snapshot = state.resolver_refresh_required
                 ? capture_relevant_list_cache_generation(config_)
                 : resolver_generation_snapshot_->list_cache_snapshot;
@@ -4328,14 +5599,58 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
         RuntimeFirewallGenerationSnapshot generation_snapshot;
         generation_snapshot.operation_kind = lifecycle_preapply
             ? RuntimeFirewallWorkerOperationKind::config_preapply
-            : RuntimeFirewallWorkerOperationKind::reconcile_generation;
+            : (context->lifecycle_kind ==
+                       RuntimeFirewallLifecycleKind::config_candidate
+                   ? RuntimeFirewallWorkerOperationKind::config_candidate
+                   : (context->lifecycle_kind ==
+                              RuntimeFirewallLifecycleKind::config_rollback
+                          ? RuntimeFirewallWorkerOperationKind::
+                                config_rollback
+                          : RuntimeFirewallWorkerOperationKind::
+                                reconcile_generation));
         auto& transaction = generation_snapshot.transaction;
         transaction.operation_serial = queued_claim.serial;
         transaction.runtime_generation = queued_claim.runtime_generation;
-        transaction.config = config_;
-        transaction.outbound_marks = outbound_marks_;
-        transaction.urltest_selections =
-            firewall_state_.get_urltest_selections();
+        const PreparedRuntimeInputs* config_generation_target = nullptr;
+        const DaemonRuntimeFirewallOperationState::CorePublication*
+            config_generation_previous_publication = nullptr;
+        if (lifecycle_config_generation) {
+            const bool candidate_phase = context->lifecycle_kind ==
+                RuntimeFirewallLifecycleKind::config_candidate;
+            config_generation_target = candidate_phase
+                ? &state.config_generation_transaction->candidate
+                : &state.config_generation_transaction->rollback;
+            if (!candidate_phase) {
+                const auto& realized_candidate =
+                    state.config_generation_transaction
+                        ->candidate_core_publication;
+                if (state.config_generation_transaction
+                        ->candidate_core_publication_ready &&
+                    realized_candidate.committed) {
+                    config_generation_previous_publication =
+                        &realized_candidate;
+                } else if (!state.config_generation_transaction
+                                ->candidate_firewall_preimage_is_base) {
+                    throw DaemonError(
+                        "configuration rollback has no exact candidate "
+                        "firewall terminal class");
+                }
+            }
+        }
+        transaction.config = config_generation_target
+            ? config_generation_target->config
+            : config_;
+        transaction.outbound_marks = config_generation_target
+            ? config_generation_target->outbound_marks
+            : outbound_marks_;
+        transaction.urltest_selections = lifecycle_config_generation
+            ? (context->lifecycle_kind ==
+                       RuntimeFirewallLifecycleKind::config_candidate
+                   ? state.config_generation_transaction
+                         ->candidate_urltest_selections
+                   : state.config_generation_transaction
+                         ->rollback_urltest_selections)
+            : firewall_state_.get_urltest_selections();
         transaction.effective_internal_vpn_servers =
             state.internal_vpn_resolution.effective_servers;
         transaction.effective_internal_vpn_targets =
@@ -4349,9 +5664,15 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
             select_native_vpn_direct_egress_snat_selectors(
                 transaction.effective_internal_vpn_targets);
         transaction.committed_meta_udp443_fwmark =
-            committed_meta_udp443_fwmark_;
+            config_generation_previous_publication
+            ? config_generation_previous_publication
+                  ->committed_meta_fwmark
+            : committed_meta_udp443_fwmark_;
         transaction.committed_meta_udp443_owned_mask =
-            committed_meta_udp443_owned_mask_;
+            config_generation_previous_publication
+            ? config_generation_previous_publication
+                  ->committed_meta_owned_mask
+            : committed_meta_udp443_owned_mask_;
         transaction.list_max_file_size_bytes =
             max_file_size_bytes(transaction.config);
         transaction.list_cache_snapshot = state.list_cache_snapshot;
@@ -4360,24 +5681,74 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
             ? state.list_cache_snapshot->fingerprints()
             : std::map<std::string, std::string>{};
         transaction.requested_mode =
-            runtime_firewall_lifecycle_is_foreground(
-                context->lifecycle_kind)
-            ? FirewallApplyMode::PreserveSets
-            : runtime_refresh_firewall_mode();
+            context->lifecycle_kind ==
+                    RuntimeFirewallLifecycleKind::config_candidate
+            ? state.config_generation_transaction
+                  ->candidate_firewall_policy.mode
+            : (context->lifecycle_kind ==
+                       RuntimeFirewallLifecycleKind::config_rollback
+                   ? state.config_generation_transaction
+                         ->rollback_firewall_policy.mode
+            : (runtime_firewall_lifecycle_is_foreground(
+                   context->lifecycle_kind)
+                   ? FirewallApplyMode::PreserveSets
+                   : runtime_refresh_firewall_mode()));
+        transaction.force_clear_dynamic_sets =
+            context->lifecycle_kind ==
+                    RuntimeFirewallLifecycleKind::config_candidate
+            ? state.config_generation_transaction
+                  ->candidate_firewall_policy.force_clear_dynamic_sets
+            : (context->lifecycle_kind ==
+                       RuntimeFirewallLifecycleKind::config_rollback &&
+                   state.config_generation_transaction
+                       ->rollback_firewall_policy.force_clear_dynamic_sets);
         transaction.udp_call_affinity_ipset_available =
             opts_.udp_call_affinity_ipset_available;
-        transaction.keenetic_dns_snapshot = active_keenetic_dns_.snapshot;
-        transaction.previous_rules = firewall_state_.get_rules();
-        transaction.previous_list_usage = applied_list_usage_;
-        transaction.previous_list_content_state =
-            applied_list_content_state_;
-        transaction.previous_list_fingerprints =
-            applied_list_fingerprints_;
-        transaction.previous_native_vpn_direct_egress_snat_selectors =
-            applied_native_vpn_direct_egress_snat_selectors_;
+        transaction.keenetic_dns_snapshot = config_generation_target
+            ? config_generation_target->keenetic_dns.snapshot
+            : active_keenetic_dns_.snapshot;
+        if (config_generation_previous_publication) {
+            transaction.previous_rules =
+                config_generation_previous_publication->rules;
+            transaction.previous_list_usage =
+                config_generation_previous_publication->list_usage;
+            transaction.previous_list_content_state =
+                config_generation_previous_publication
+                    ->list_content_state;
+            transaction.previous_list_fingerprints =
+                config_generation_previous_publication
+                    ->list_fingerprints;
+            transaction
+                .previous_native_vpn_direct_egress_snat_selectors =
+                    config_generation_previous_publication
+                        ->native_vpn_direct_egress_snat_selectors;
+        } else {
+            transaction.previous_rules =
+                firewall_state_.get_rules();
+            transaction.previous_list_usage = applied_list_usage_;
+            transaction.previous_list_content_state =
+                applied_list_content_state_;
+            transaction.previous_list_fingerprints =
+                applied_list_fingerprints_;
+            transaction
+                .previous_native_vpn_direct_egress_snat_selectors =
+                    applied_native_vpn_direct_egress_snat_selectors_;
+        }
 
         generation_snapshot.route.route_epoch =
             routing_observation_epoch_.load(std::memory_order_acquire);
+        if (lifecycle_config_generation) {
+            if (context->lifecycle_kind ==
+                RuntimeFirewallLifecycleKind::config_candidate) {
+                state.config_generation_transaction
+                    ->candidate_route_epoch =
+                        generation_snapshot.route.route_epoch;
+            } else {
+                state.config_generation_transaction
+                    ->rollback_route_epoch =
+                        generation_snapshot.route.route_epoch;
+            }
+        }
         generation_snapshot.route.reconcile_mode =
             runtime_firewall_lifecycle_is_foreground(
                 context->lifecycle_kind)
@@ -4424,7 +5795,8 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
             !has_explicit_inbound_scope && !has_native_vpn_bypass;
 
         generation_snapshot.cleanup.inspect_owned_snat =
-            lifecycle_preapply || snat_recovery.requested;
+            !lifecycle_config_generation &&
+            (lifecycle_preapply || snat_recovery.requested);
         if (lifecycle_preapply) {
             generation_snapshot.cleanup
                 .pre_mutation_owned_conntrack_cleanup_snapshot =
@@ -4445,7 +5817,7 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                 .pre_mutation_owned_conntrack_cleanup_snapshot =
                 snapshot_owned_conntrack_marks();
         }
-        if (!lifecycle_preapply) {
+        if (!lifecycle_preowned) {
             generation_snapshot.cleanup.mode = lifecycle_start
                 ? RuntimeFirewallOwnedConntrackCleanupMode::
                       committed_candidate
@@ -4455,7 +5827,7 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
         auto worker_input = make_runtime_firewall_worker_attempt_input(
             std::move(generation_snapshot));
 
-        if (!lifecycle_start && !lifecycle_preapply) {
+        if (!lifecycle_start && !lifecycle_preowned) {
             state.previous_meta_cleanup = pending_meta_udp443_cleanup_;
             cancel_idle_stall_observer();
             cancel_meta_udp443_activation_cleanup();
@@ -4672,7 +6044,7 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
             state.preworker_failure_detail =
                 "runtime route interface is unavailable";
         }
-        const bool retry_required = lifecycle_preapply
+        const bool retry_required = lifecycle_preowned
             ? runtime_firewall_preapply_preworker_retry_available(
                   queued_claim.attempt)
             : snat_recovery.requested ||
@@ -4705,7 +6077,7 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
             context->worker_operation.reset();
         } else {
             const bool retry_required = transport_rejected ||
-                (lifecycle_preapply
+                (lifecycle_preowned
                      ? runtime_firewall_preapply_preworker_retry_available(
                            queued_claim.attempt)
                      : (!runtime_firewall_lifecycle_is_start(
@@ -4754,7 +6126,7 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
             context->worker_operation.reset();
         } else {
             const bool retry_required = transport_rejected ||
-                (lifecycle_preapply
+                (lifecycle_preowned
                      ? runtime_firewall_preapply_preworker_retry_available(
                            queued_claim.attempt)
                      : (!runtime_firewall_lifecycle_is_start(
@@ -4890,8 +6262,12 @@ bool Daemon::begin_runtime_firewall_lifecycle_resolver(
         runtime_firewall_lifecycle_is_start(context->lifecycle_kind);
     const bool lifecycle_restart = context &&
         runtime_firewall_lifecycle_is_restart(context->lifecycle_kind);
+    const bool lifecycle_config_generation = context &&
+        runtime_firewall_lifecycle_is_config_generation(
+            context->lifecycle_kind);
     if (!context || !runtime_firewall_owner_->is_active(context) ||
-        (!lifecycle_start && !lifecycle_restart) ||
+        (!lifecycle_start && !lifecycle_restart &&
+         !lifecycle_config_generation) ||
         !context->domain_state) {
         return false;
     }
@@ -4899,7 +6275,8 @@ bool Daemon::begin_runtime_firewall_lifecycle_resolver(
         *context->domain_state);
     using Phase = DaemonRuntimeFirewallOperationState::
         LifecycleTailPhase;
-    if (lifecycle_restart && !state.resolver_refresh_required) {
+    if ((lifecycle_restart || lifecycle_config_generation) &&
+        !state.resolver_refresh_required) {
         state.lifecycle_resolver_verified = true;
         state.lifecycle_resolver_phase = Phase::completed;
         return false;
@@ -4965,7 +6342,8 @@ bool Daemon::begin_runtime_firewall_lifecycle_resolver(
                      : "runtime restart resolver list generation is unavailable");
             return false;
         }
-        if (!state.resolver_generation_published) {
+        if (!lifecycle_config_generation &&
+            !state.resolver_generation_published) {
             apply_started_ts_.store(
                 unix_timestamp_now_seconds(),
                 std::memory_order_release);
@@ -4975,13 +6353,21 @@ bool Daemon::begin_runtime_firewall_lifecycle_resolver(
                     state.lifecycle_trusted_dns_interfaces));
             state.resolver_generation_published = true;
         }
-        if (!resolver_generation_snapshot_) {
+        if (lifecycle_config_generation &&
+            !state.private_resolver_generation) {
+            fail("private configuration resolver generation is unavailable");
+            return false;
+        }
+        if (!lifecycle_config_generation &&
+            !resolver_generation_snapshot_) {
             fail("lifecycle resolver generation was not published");
             return false;
         }
 
         auto generation = std::make_shared<ResolverGenerationSnapshot>(
-            *resolver_generation_snapshot_);
+            *(lifecycle_config_generation
+                  ? state.private_resolver_generation
+                  : resolver_generation_snapshot_));
         generation->stream_epoch =
             resolver_stream_epoch_.fetch_add(
                 1U, std::memory_order_acq_rel) + 1U;
@@ -5015,7 +6401,21 @@ bool Daemon::begin_runtime_firewall_lifecycle_resolver(
                     }
                 }
             });
-        resolver_generation_snapshot_ = generation;
+        if (!lifecycle_config_generation) {
+            resolver_generation_snapshot_ = generation;
+        } else {
+            state.private_resolver_generation = generation;
+            if (state.config_generation_transaction) {
+                if (context->lifecycle_kind ==
+                    RuntimeFirewallLifecycleKind::config_candidate) {
+                    state.config_generation_transaction
+                        ->candidate_resolver_generation = generation;
+                } else {
+                    state.config_generation_transaction
+                        ->rollback_resolver_generation = generation;
+                }
+            }
+        }
         {
             KPBR_LOCK_GUARD(resolver_stream_attempt_mutex_);
             active_resolver_stream_attempt_id_ = attempt_id;
@@ -5040,7 +6440,7 @@ bool Daemon::begin_runtime_firewall_lifecycle_resolver(
             return hook_command_executor_(args);
         };
         operation.completion =
-            [this, weak_context](
+            [this, weak_context, generation](
                 const ResolverStreamOperation& completed_operation,
                 const ResolverStreamResult& result) noexcept {
                 const auto retained = weak_context.lock();
@@ -5059,6 +6459,18 @@ bool Daemon::begin_runtime_firewall_lifecycle_resolver(
                     CompletedPhase::in_flight) {
                     return;
                 }
+                bool exact_active_stream = false;
+                {
+                    KPBR_LOCK_GUARD(
+                        resolver_stream_attempt_mutex_);
+                    exact_active_stream =
+                        runtime_resolver_stream_completion_is_exact(
+                            completed_operation.attempt_id,
+                            completed_operation.stream_epoch,
+                            generation,
+                            active_resolver_stream_attempt_id_,
+                            active_resolver_stream_generation_);
+                }
                 const bool exact =
                     runtime_firewall_lifecycle_generation_is_current(
                         retained->lifecycle_kind,
@@ -5069,9 +6481,7 @@ bool Daemon::begin_runtime_firewall_lifecycle_resolver(
                     completed_operation.stream_epoch ==
                         completed_state
                             .lifecycle_resolver_stream_epoch &&
-                    resolver_generation_snapshot_ &&
-                    resolver_generation_snapshot_->stream_epoch ==
-                        completed_operation.stream_epoch;
+                    exact_active_stream;
                 completed_state.lifecycle_resolver_verified =
                     exact && result.completed &&
                     result.hook_exit_code == 0;
@@ -5099,6 +6509,13 @@ bool Daemon::begin_runtime_firewall_lifecycle_resolver(
             resolver_stream_coordinator_.request(std::move(operation));
         if (requested ==
             ResolverStreamCoordinator::RequestResult::started) {
+            if (lifecycle_config_generation &&
+                context->lifecycle_kind ==
+                    RuntimeFirewallLifecycleKind::config_candidate &&
+                state.config_generation_transaction) {
+                state.config_generation_transaction
+                    ->candidate_resolver_may_have_changed = true;
+            }
             state.lifecycle_resolver_phase = Phase::in_flight;
             return true;
         }
@@ -5306,11 +6723,59 @@ void Daemon::drain_runtime_firewall_terminal(
     const bool lifecycle_preapply =
         runtime_firewall_lifecycle_is_preapply(
             context->lifecycle_kind);
+    const bool lifecycle_config_generation =
+        runtime_firewall_lifecycle_is_config_generation(
+            context->lifecycle_kind);
+    const bool lifecycle_preowned =
+        runtime_firewall_lifecycle_uses_preowned_continuation(
+            context->lifecycle_kind);
 
     auto drain = context->terminal_owner->try_begin_drain();
     if (!drain.has_value()) return;
 
-    const auto capture_completion = [this, &context](
+    const auto retain_config_post_terminal_intent =
+        [&context, &state, lifecycle_config_generation]() {
+            if (!lifecycle_config_generation ||
+                !state.config_generation_transaction) {
+                return;
+            }
+            auto& transaction =
+                *state.config_generation_transaction;
+            try {
+                transaction.post_terminal_snat_recovery =
+                    merge_owned_snat_recovery(
+                        transaction.post_terminal_snat_recovery,
+                        context->completion.snat_recovery);
+                const bool exact_snat_intent =
+                    transaction.post_terminal_snat_recovery.requested ||
+                    transaction.post_terminal_snat_recovery
+                        .missing_observed ||
+                    transaction.post_terminal_snat_recovery
+                        .cleanup_snapshot.has_value();
+                const bool full_refresh =
+                    context->completion.rerun_requested ||
+                    static_cast<bool>(
+                        context->completion.next_prepared_catalog) ||
+                    context->force_successor;
+                transaction.post_terminal_refresh_required =
+                    transaction.post_terminal_refresh_required ||
+                    exact_snat_intent || full_refresh;
+                transaction.post_terminal_full_refresh =
+                    transaction.post_terminal_full_refresh ||
+                    full_refresh;
+            } catch (...) {
+                // The coordinator still owns its exact SNAT latch. A fresh
+                // full observation is the conservative continuation if the
+                // duplicate transaction-side checkpoint could not allocate.
+                transaction.post_terminal_refresh_required = true;
+                transaction.post_terminal_full_refresh = true;
+            }
+        };
+
+    const auto capture_completion =
+        [this,
+         &context,
+         &retain_config_post_terminal_intent](
         const RuntimeFirewallOperationCompletion& source) {
         if (context->completion_captured) {
             if (context->worker_commit_ambiguous) return;
@@ -5324,6 +6789,7 @@ void Daemon::drain_runtime_firewall_terminal(
                 context->trailing_snat_recovery,
                 context->trailing_prepared_native_vpn_catalog,
                 context->force_successor);
+            retain_config_post_terminal_intent();
             return;
         }
         auto captured = source;
@@ -5349,6 +6815,7 @@ void Daemon::drain_runtime_firewall_terminal(
         context->completion_captured = true;
         context->trailing_snat_recovery = {};
         context->trailing_prepared_native_vpn_catalog.reset();
+        retain_config_post_terminal_intent();
     };
 
     const auto restore_preworker_control_state =
@@ -5557,9 +7024,9 @@ void Daemon::drain_runtime_firewall_terminal(
         };
 
     const auto finish_preworker_failure_policy =
-        [this, &context, &state, shutdown, lifecycle_preapply]() {
+        [this, &context, &state, shutdown, lifecycle_preowned]() {
             if (state.preworker_failure_policy_finished) return;
-            if (lifecycle_preapply) {
+            if (lifecycle_preowned) {
                 // Config pre-apply owns no URLTest, resolver or runtime-state
                 // lifecycle. A transport/preparation failure must return its
                 // exact request authority without publishing unrelated
@@ -5973,6 +7440,30 @@ void Daemon::drain_runtime_firewall_terminal(
             return terminal;
         };
 
+    const auto prepare_config_generation_terminal =
+        [&context, &state](
+            RuntimeFirewallLifecycleOutcome outcome,
+            bool previous_generation_certainly_retained) {
+            RuntimeFirewallLifecycleTerminal terminal;
+            terminal.outcome = outcome;
+            terminal.committed = state.core_publication.committed;
+            terminal.commit_ambiguous =
+                context->worker_commit_ambiguous;
+            terminal.transient = state.worker_failure_transient;
+            terminal.observed_config_identity =
+                state.config_operation_identity;
+            terminal.previous_generation_certainly_retained =
+                previous_generation_certainly_retained;
+            if (!state.lifecycle_failure_detail.empty()) {
+                terminal.detail = state.lifecycle_failure_detail;
+            } else if (!state.worker_failure_detail.empty()) {
+                terminal.detail = state.worker_failure_detail;
+            } else {
+                terminal.detail = state.preworker_failure_detail;
+            }
+            return terminal;
+        };
+
     const auto complete_finalized_preapply =
         [this, &context, &state, shutdown](
             RuntimeFirewallOperationOwner::
@@ -6110,6 +7601,23 @@ void Daemon::drain_runtime_firewall_terminal(
                     ? RuntimeFirewallImmediateTerminalOutcome::shutdown
                     : RuntimeFirewallImmediateTerminalOutcome::
                           not_verified)) {
+                return;
+        }
+        if (lifecycle_config_generation) {
+            auto config_terminal = prepare_config_generation_terminal(
+                shutdown
+                    ? RuntimeFirewallLifecycleOutcome::shutdown
+                    : RuntimeFirewallLifecycleOutcome::not_verified,
+                !shutdown);
+            auto permit = runtime_firewall_owner_->
+                prepare_preowned_continuation_finalization(context);
+            if (!permit.has_value()) return;
+            auto proof = drain->finish_coordinator_terminal();
+            if (!proof.has_value()) return;
+            (void)runtime_firewall_owner_->complete_preowned_continuation(
+                std::move(*permit),
+                std::move(*proof),
+                std::move(config_terminal));
             return;
         }
         std::optional<RuntimeFirewallLifecycleTerminal>
@@ -6174,6 +7682,23 @@ void Daemon::drain_runtime_firewall_terminal(
                     ? RuntimeFirewallImmediateTerminalOutcome::shutdown
                     : RuntimeFirewallImmediateTerminalOutcome::
                           not_verified)) {
+                return;
+        }
+        if (lifecycle_config_generation) {
+            auto config_terminal = prepare_config_generation_terminal(
+                shutdown
+                    ? RuntimeFirewallLifecycleOutcome::shutdown
+                    : RuntimeFirewallLifecycleOutcome::not_verified,
+                !shutdown);
+            auto permit = runtime_firewall_owner_->
+                prepare_preowned_continuation_finalization(context);
+            if (!permit.has_value()) return;
+            auto proof = drain->finish_worker_terminal();
+            if (!proof.has_value()) return;
+            (void)runtime_firewall_owner_->complete_preowned_continuation(
+                std::move(*permit),
+                std::move(*proof),
+                std::move(config_terminal));
             return;
         }
         std::optional<RuntimeFirewallLifecycleTerminal>
@@ -6437,11 +7962,13 @@ void Daemon::drain_runtime_firewall_terminal(
             terminal->status ==
                 RuntimeFirewallDelayedWorker::TerminalStatus::result &&
             worker_result != nullptr &&
+            context->worker_input &&
+            worker_result->operation_kind ==
+                context->worker_input->operation_kind &&
             worker_result->transaction.operation_serial ==
                 context->queued_claim.serial &&
             worker_result->transaction.runtime_generation ==
                 context->queued_claim.runtime_generation &&
-            context->worker_input &&
             context->worker_input->transaction.operation_serial ==
                 context->queued_claim.serial &&
             context->worker_input->transaction.runtime_generation ==
@@ -6714,6 +8241,7 @@ void Daemon::drain_runtime_firewall_terminal(
                urltest_after_firewall_gate_.waiting_for(
                    context->queued_claim.runtime_generation));
         const bool bounded_retry_required =
+            !lifecycle_config_generation &&
             !worker_succeeded &&
             !commit_ambiguous &&
             retryable_failure &&
@@ -6745,6 +8273,218 @@ void Daemon::drain_runtime_firewall_terminal(
             ? RuntimeFirewallOperationContext::SuccessorMode::
                   reschedule_retry
             : RuntimeFirewallOperationContext::SuccessorMode::none;
+    }
+
+    if (lifecycle_config_generation) {
+        if (!drain->begin_worker_control(runtime_firewall_retry_)) return;
+        // Route and firewall have converged, but their candidate remains
+        // private. The control publication callback is deliberately empty;
+        // candidate core/config/resolver cursors are swapped only after the
+        // exact resolver stream below succeeds.
+        if (!drain->publish_worker_control(
+                []() noexcept { return true; })) {
+            return;
+        }
+
+        if (!shutdown && context->worker_succeeded &&
+            !state.resolver_tail_finished) {
+            if (begin_runtime_firewall_lifecycle_resolver(context)) {
+                drain->park_until_wake();
+                return;
+            }
+            state.resolver_tail_finished = true;
+            if (!state.lifecycle_resolver_verified) {
+                context->worker_succeeded = false;
+                state.worker_failure_transient = false;
+                if (state.worker_failure_detail.empty()) {
+                    state.worker_failure_detail =
+                        state.lifecycle_failure_detail.empty()
+                        ? "configuration resolver stream was not verified"
+                        : state.lifecycle_failure_detail;
+                }
+            }
+        } else if (!context->worker_succeeded) {
+            state.lifecycle_resolver_verified = false;
+            state.resolver_tail_finished = true;
+        }
+
+        const bool exact_generation =
+            runtime_generation_.load(std::memory_order_acquire) ==
+                context->queued_claim.runtime_generation;
+        const bool exact_route_checkpoint =
+            context->worker_input && worker_result &&
+            context->worker_input->route_health_request.route_epoch != 0U &&
+            routing_observation_epoch_.load(std::memory_order_acquire) ==
+                context->worker_input->route_health_request.route_epoch &&
+            worker_result->route_preparation.required &&
+            worker_result->route_preparation.worker_mutation_ack ==
+                std::optional<RuntimeRouteMutationAck>{
+                    RuntimeRouteMutationAck::applied} &&
+            worker_result->route_preparation.checkpoint_published &&
+            worker_result->route_preparation.mutation_ack ==
+                std::optional<RuntimeRouteMutationAck>{
+                    RuntimeRouteMutationAck::applied};
+        const bool verified = !shutdown && exact_generation &&
+            exact_route_checkpoint &&
+            context->worker_succeeded &&
+            state.lifecycle_resolver_verified;
+        if (!verified && context->worker_succeeded &&
+            state.lifecycle_resolver_verified &&
+            !exact_route_checkpoint &&
+            state.worker_failure_detail.empty()) {
+            try {
+                state.worker_failure_detail =
+                    "configuration route observation changed before "
+                    "candidate publication";
+            } catch (...) {
+            }
+        }
+        context->successor_mode =
+            RuntimeFirewallOperationContext::SuccessorMode::none;
+        state.suppress_coordinator_rerun = true;
+
+        if (context->lifecycle_kind ==
+                RuntimeFirewallLifecycleKind::config_candidate &&
+            state.config_generation_transaction) {
+            state.config_generation_transaction
+                ->candidate_firewall_preimage_is_base =
+                    !state.core_publication.committed &&
+                    !context->worker_commit_ambiguous;
+        }
+        if (context->lifecycle_kind ==
+                RuntimeFirewallLifecycleKind::config_candidate &&
+            state.config_generation_transaction &&
+            state.core_publication.committed &&
+            !state.config_generation_transaction
+                 ->candidate_core_publication_ready) {
+            auto& transaction =
+                *state.config_generation_transaction;
+            transaction.candidate_core_publication =
+                std::move(state.core_publication);
+            // Terminal evidence still has to report that the private
+            // candidate entered COMMIT even though its realized core is now
+            // retained by the transaction for publication or exact rollback.
+            state.core_publication.prepared = true;
+            state.core_publication.committed = true;
+            transaction.candidate_meta_activation_plan =
+                std::move(state.candidate_meta_activation_plan);
+            transaction.candidate_meta_filter_healthy =
+                    worker_result->forward_udp_reject_after_commit.state ==
+                        std::optional<OwnedForwardUdpRejectState>{
+                            OwnedForwardUdpRejectState::healthy} &&
+                    !worker_result->forward_udp_reject_after_commit
+                         .failure.failed();
+            transaction.candidate_meta_fastnat_healthy =
+                    !transaction.candidate_meta_activation_plan.has_value() ||
+                    (worker_result->fastnat_after_commit
+                             .disabled_or_unavailable ==
+                         std::optional<bool>{true} &&
+                     !worker_result->fastnat_after_commit.failure.failed());
+            transaction.candidate_core_publication_ready = true;
+        }
+
+        if (verified && context->lifecycle_kind ==
+                RuntimeFirewallLifecycleKind::config_rollback &&
+            state.config_generation_transaction &&
+            state.core_publication.committed) {
+            auto& transaction =
+                *state.config_generation_transaction;
+            transaction.rollback_meta_activation_plan =
+                std::move(state.candidate_meta_activation_plan);
+            transaction.rollback_meta_filter_healthy =
+                worker_result->forward_udp_reject_after_commit.state ==
+                    std::optional<OwnedForwardUdpRejectState>{
+                        OwnedForwardUdpRejectState::healthy} &&
+                !worker_result->forward_udp_reject_after_commit
+                     .failure.failed();
+            transaction.rollback_meta_fastnat_healthy =
+                !transaction.rollback_meta_activation_plan.has_value() ||
+                (worker_result->fastnat_after_commit
+                         .disabled_or_unavailable ==
+                     std::optional<bool>{true} &&
+                 !worker_result->fastnat_after_commit.failure.failed());
+            try {
+                if (!transaction.candidate_core_publication_ready ||
+                    !transaction
+                         .candidate_core_publication.committed) {
+                    throw std::logic_error(
+                        "realized configuration candidate is unavailable");
+                }
+                auto cleanup = prepare_config_transition_cleanup_plan(
+                    transaction.previous_runtime_active,
+                    transaction.candidate.config,
+                    transaction.candidate_core_publication.rules,
+                    transaction.candidate_core_publication
+                        .list_content_state,
+                    transaction.candidate_core_publication
+                        .native_vpn_direct_egress_snat_selectors,
+                    transaction.candidate_core_publication
+                        .internal_vpn_servers,
+                    transaction.candidate_core_publication
+                        .internal_vpn_service_targets,
+                    transaction.rollback.config,
+                    state.core_publication);
+                transaction.rollback_forwarded_scope_exact =
+                    cleanup.forwarded_scope_exact;
+                transaction.rollback_native_source_cleanup_cidrs =
+                    std::move(cleanup.native_source_cleanup_cidrs);
+                transaction.rollback_normal_retirement =
+                    std::move(cleanup.normal_retirement);
+                transaction.rollback_aggressive_retirement =
+                    std::move(cleanup.aggressive_retirement);
+                transaction.rollback_cleanup_scope_prepared = true;
+            } catch (...) {
+                transaction.rollback_cleanup_scope_prepared = false;
+                transaction.post_terminal_refresh_required = true;
+                transaction.post_terminal_full_refresh = true;
+            }
+        }
+
+        OwnedSnatRecovery no_config_cleanup;
+        if (!drain->complete_worker_control(
+                runtime_firewall_retry_, verified, no_config_cleanup)) {
+            return;
+        }
+        const auto* completion = drain->worker_control_completion();
+        if (!completion || !completion->owned) return;
+        capture_completion(*completion);
+        context->force_successor = false;
+        if (!retained_worker_lease ||
+            !absorb_retained_mutation_lease()) {
+            return;
+        }
+        if (!settle_immediate_completion(
+                shutdown
+                    ? RuntimeFirewallImmediateTerminalOutcome::shutdown
+                    : (verified
+                           ? RuntimeFirewallImmediateTerminalOutcome::
+                                 verified_success
+                           : RuntimeFirewallImmediateTerminalOutcome::
+                                 not_verified))) {
+            return;
+        }
+
+        auto config_terminal = prepare_config_generation_terminal(
+            shutdown
+                ? RuntimeFirewallLifecycleOutcome::shutdown
+                : (verified
+                       ? RuntimeFirewallLifecycleOutcome::verified_success
+                       : RuntimeFirewallLifecycleOutcome::not_verified),
+            /*previous_generation_certainly_retained=*/false);
+        if (verified) {
+            config_terminal.committed = true;
+            config_terminal.commit_ambiguous = false;
+        }
+        auto permit = runtime_firewall_owner_->
+            prepare_preowned_continuation_finalization(context);
+        if (!permit.has_value()) return;
+        auto proof = drain->finish_worker_terminal();
+        if (!proof.has_value()) return;
+        (void)runtime_firewall_owner_->complete_preowned_continuation(
+            std::move(*permit),
+            std::move(*proof),
+            std::move(config_terminal));
+        return;
     }
 
     if (!drain->begin_worker_control(runtime_firewall_retry_)) return;
