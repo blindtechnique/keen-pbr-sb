@@ -133,6 +133,32 @@ private:
     std::atomic<bool> primary_available_{true};
 };
 
+class BindingCaptureUrltestTransport final : public HttpTransport {
+public:
+    HttpTransportResponse perform(
+        const HttpTransportRequest& request) override {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            bind_interfaces_[request.fwmark] = request.bind_interface;
+        }
+        return HttpTransportResponse{
+            .status_code = 204,
+            .elapsed = std::chrono::milliseconds(1),
+        };
+    }
+
+    std::string bind_interface(std::uint32_t fwmark) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto found = bind_interfaces_.find(fwmark);
+        return found != bind_interfaces_.end() ? found->second
+                                               : std::string{};
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::map<std::uint32_t, std::string> bind_interfaces_;
+};
+
 class CoordinatedUrltestTransport final : public HttpTransport {
 public:
     HttpTransportResponse perform(const HttpTransportRequest& request) override {
@@ -454,6 +480,59 @@ TEST_CASE("initial urltest probe commits through the controller callback") {
           UrltestSelectionChangeReason::healthy_rebalance);
 }
 
+TEST_CASE("urltest binds direct interface children and keeps nested selectors mark-only") {
+    constexpr std::uint32_t kDirectMark = 0x30000;
+    constexpr std::uint32_t kNestedSelectorMark = 0x40000;
+    auto transport = std::make_shared<BindingCaptureUrltestTransport>();
+    URLTester tester(transport);
+    const OutboundMarkMap marks = {
+        {"direct", kDirectMark},
+        {"nested", kNestedSelectorMark},
+    };
+    FakeRepeatingScheduler scheduler;
+    BlockingExecutor executor(2, 8);
+    CommitQueue commits;
+
+    UrltestManager manager(
+        tester,
+        marks,
+        scheduler,
+        executor,
+        [](const UrltestSelectionChange&) { return true; },
+        [&commits](const std::string& tag,
+                   std::uint64_t generation,
+                   std::map<std::string, URLTestResult> results,
+                   TraceId) {
+            commits.push(tag, generation, std::move(results));
+            return true;
+        });
+
+    auto outbound = make_priority_urltest_outbound();
+    OutboundGroup group;
+    group.outbounds = {"direct", "nested"};
+    group.weight = 1;
+    outbound.outbound_groups = std::vector<OutboundGroup>{group};
+
+    // The daemon supplies only direct INTERFACE children. A nested URLTEST
+    // selector intentionally has no device because its mark resolves to a
+    // dynamic leaf.
+    manager.register_urltest(
+        outbound, {}, {{"direct", "nwg5"}});
+    auto initial = commits.pop();
+    REQUIRE(initial.results.count("direct") == 1);
+    REQUIRE(initial.results.count("nested") == 1);
+    CHECK(manager.commit_probe_results(initial.tag,
+                                       initial.generation,
+                                       std::move(initial.results)));
+
+    CHECK(transport->bind_interface(kDirectMark) == "nwg5");
+    CHECK(transport->bind_interface(kNestedSelectorMark).empty());
+    const auto state = manager.get_state("automatic");
+    REQUIRE(state.has_value());
+    CHECK(state->direct_child_interfaces.count("direct") == 1);
+    CHECK(state->direct_child_interfaces.count("nested") == 0);
+}
+
 TEST_CASE("retained urltest selection is the cursor for the first probe") {
     auto transport = std::make_shared<UrltestTransport>();
     transport->set_primary_available(false);
@@ -697,6 +776,111 @@ TEST_CASE("priority urltest returns to the first healthy declared outbound") {
     CHECK(changes[2].new_child_tag == "primary");
     CHECK(changes[2].reason ==
           UrltestSelectionChangeReason::healthy_rebalance);
+}
+
+TEST_CASE("priority urltest quarantines a failed preferred child until consecutive recovery successes") {
+    auto transport = std::make_shared<UrltestTransport>();
+    URLTester tester(transport);
+    const auto marks = make_marks();
+    FakeRepeatingScheduler scheduler;
+    BlockingExecutor executor(2, 8);
+    CommitQueue commits;
+    std::vector<UrltestSelectionChange> changes;
+
+    UrltestManager manager(
+        tester,
+        marks,
+        scheduler,
+        executor,
+        [&changes](const UrltestSelectionChange& change) {
+            changes.push_back(change);
+            return true;
+        },
+        [&commits](const std::string& tag,
+                   std::uint64_t generation,
+                   std::map<std::string, URLTestResult> results,
+                   TraceId) {
+            commits.push(tag, generation, std::move(results));
+            return true;
+        });
+
+    auto outbound = make_priority_urltest_outbound();
+    // Match the live configuration shape: one failed selected probe causes
+    // fail-away while the generic circuit remains CLOSED below its threshold.
+    outbound.circuit_breaker->failure_threshold = 5;
+    outbound.circuit_breaker->success_threshold = 2;
+    outbound.circuit_breaker->timeout_ms = 30000;
+
+    manager.register_urltest(
+        outbound,
+        {},
+        {{"primary", "nwg5"}, {"backup", "nwg6"}});
+    auto initial = commits.pop();
+    CHECK(manager.commit_probe_results(initial.tag,
+                                       initial.generation,
+                                       std::move(initial.results)));
+    CHECK(manager.get_selected("automatic") == "primary");
+
+    transport->set_primary_available(false);
+    manager.trigger_immediate_test("automatic");
+    auto failed_primary = commits.pop();
+    CHECK(manager.commit_probe_results(failed_primary.tag,
+                                       failed_primary.generation,
+                                       std::move(failed_primary.results)));
+    CHECK(manager.get_selected("automatic") == "backup");
+    auto state = manager.get_state("automatic");
+    REQUIRE(state.has_value());
+    CHECK(state->circuit_breakers.at("primary").state("primary") ==
+          CircuitState::closed);
+    CHECK(state->priority_recovery_successes.at("primary") == 0);
+
+    transport->set_primary_available(true);
+    manager.trigger_immediate_test("automatic");
+    auto first_success = commits.pop();
+    CHECK_FALSE(manager.commit_probe_results(first_success.tag,
+                                             first_success.generation,
+                                             std::move(first_success.results)));
+    CHECK(manager.get_selected("automatic") == "backup");
+    CHECK(manager.get_state("automatic")
+              ->priority_recovery_successes.at("primary") == 1);
+
+    // A failed recovery probe resets the consecutive-success streak even
+    // though the generic breaker remains CLOSED.
+    transport->set_primary_available(false);
+    manager.trigger_immediate_test("automatic");
+    auto interrupted_recovery = commits.pop();
+    CHECK_FALSE(manager.commit_probe_results(
+        interrupted_recovery.tag,
+        interrupted_recovery.generation,
+        std::move(interrupted_recovery.results)));
+    CHECK(manager.get_selected("automatic") == "backup");
+    CHECK(manager.get_state("automatic")
+              ->priority_recovery_successes.at("primary") == 0);
+
+    transport->set_primary_available(true);
+    manager.trigger_immediate_test("automatic");
+    auto restarted_recovery = commits.pop();
+    CHECK_FALSE(manager.commit_probe_results(
+        restarted_recovery.tag,
+        restarted_recovery.generation,
+        std::move(restarted_recovery.results)));
+    CHECK(manager.get_selected("automatic") == "backup");
+
+    manager.trigger_immediate_test("automatic");
+    auto recovered_primary = commits.pop();
+    CHECK(manager.commit_probe_results(recovered_primary.tag,
+                                       recovered_primary.generation,
+                                       std::move(recovered_primary.results)));
+    CHECK(manager.get_selected("automatic") == "primary");
+    state = manager.get_state("automatic");
+    REQUIRE(state.has_value());
+    CHECK(state->priority_recovery_successes.count("primary") == 0);
+
+    REQUIRE(changes.size() == 3);
+    CHECK(changes[1].previous_child_tag == "primary");
+    CHECK(changes[1].new_child_tag == "backup");
+    CHECK(changes[2].previous_child_tag == "backup");
+    CHECK(changes[2].new_child_tag == "primary");
 }
 
 TEST_CASE("priority urltest honors group weight before declaration order") {

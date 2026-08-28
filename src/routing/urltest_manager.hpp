@@ -17,11 +17,23 @@ namespace keen_pbr3 {
 
 class RepeatingTaskScheduler;
 
+// Only direct INTERFACE children have one stable device to bind a probe to.
+// Selector children deliberately stay absent: their mark resolves to a
+// dynamic leaf and binding them to one interface would change that contract.
+using UrltestDirectChildInterfaceMap =
+    std::map<std::string, std::string>;
+
 // Per-urltest outbound state: test results, circuit breakers, selected child.
 struct UrltestState {
     Outbound config;
     std::map<std::string, URLTestResult> last_results;
     std::map<std::string, CircuitBreaker> circuit_breakers;
+    UrltestDirectChildInterfaceMap direct_child_interfaces;
+    // Presence means a direct priority child has failed while selected and is
+    // not eligible for user traffic until this many consecutive bound probe
+    // successes reaches circuit_breaker.success_threshold. Nested selectors
+    // keep their existing mark-only circuit-breaker contract.
+    std::map<std::string, std::uint32_t> priority_recovery_successes;
     std::string selected_outbound;
     int scheduler_task_id{-1};
     bool probe_inflight{false};
@@ -113,7 +125,8 @@ public:
     // asynchronously when its probe result is committed.
     void register_urltest(
         const Outbound& ut,
-        std::string initial_selected_outbound = {});
+        std::string initial_selected_outbound = {},
+        const UrltestDirectChildInterfaceMap& direct_child_interfaces = {});
 
     // Run tests immediately for a specific urltest outbound (e.g. on SIGUSR1).
     // Invokes on_change_ if the selection changes.

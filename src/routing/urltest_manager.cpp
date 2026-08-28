@@ -19,6 +19,7 @@ namespace {
 struct TestCandidate {
     std::string child_tag;
     std::string url;
+    std::string bind_interface;
     uint32_t fwmark{0};
     uint32_t timeout_ms{0};
     RetryConfig retry;
@@ -146,7 +147,8 @@ UrltestManager::~UrltestManager() {
 
 void UrltestManager::register_urltest(
     const Outbound& ut,
-    std::string initial_selected_outbound) {
+    std::string initial_selected_outbound,
+    const UrltestDirectChildInterfaceMap& direct_child_interfaces) {
     {
         KPBR_SHARED_UNIQUE_LOCK(lock, mutex_);
 
@@ -158,6 +160,13 @@ void UrltestManager::register_urltest(
                 state.circuit_breakers.emplace(
                     child_tag,
                     CircuitBreaker(ut.circuit_breaker.value_or(CircuitBreakerConfig{})));
+                const auto direct_interface =
+                    direct_child_interfaces.find(child_tag);
+                if (direct_interface != direct_child_interfaces.end() &&
+                    !direct_interface->second.empty()) {
+                    state.direct_child_interfaces.emplace(
+                        child_tag, direct_interface->second);
+                }
             }
         }
         if (!initial_selected_outbound.empty() &&
@@ -263,6 +272,15 @@ bool UrltestManager::commit_probe_results(const std::string& urltest_tag,
         // of all begun requests until the no-throw swaps below publish the
         // complete candidate state.
         UrltestState candidate_state = state;
+        previous_selected = candidate_state.selected_outbound;
+        const bool priority_mode =
+            candidate_state.config.selection_mode.value_or(
+                UrltestSelectionMode::LATENCY) ==
+            UrltestSelectionMode::PRIORITY;
+        const auto recovery_success_threshold = static_cast<std::uint32_t>(
+            candidate_state.config.circuit_breaker
+                .value_or(CircuitBreakerConfig{})
+                .success_threshold.value_or(2));
         for (const auto& [child_tag, result] : results) {
             auto cb_it = candidate_state.circuit_breakers.find(child_tag);
             if (cb_it == candidate_state.circuit_breakers.end()) {
@@ -275,10 +293,38 @@ bool UrltestManager::commit_probe_results(const std::string& urltest_tag,
             } else {
                 cb_it->second.record_failure(child_tag);
             }
+
+            const bool direct_bound_child =
+                candidate_state.direct_child_interfaces.find(child_tag) !=
+                candidate_state.direct_child_interfaces.end();
+            if (priority_mode && direct_bound_child) {
+                auto recovery =
+                    candidate_state.priority_recovery_successes.find(
+                        child_tag);
+                if (!result.success) {
+                    // The first failed measurement of the path carrying user
+                    // traffic is enough to fail away. Keep it quarantined even
+                    // while the generic breaker is still CLOSED below its
+                    // independent failure_threshold.
+                    if (child_tag == previous_selected ||
+                        recovery !=
+                            candidate_state.priority_recovery_successes.end()) {
+                        candidate_state.priority_recovery_successes[child_tag] =
+                            0;
+                    }
+                } else if (
+                    recovery !=
+                    candidate_state.priority_recovery_successes.end()) {
+                    ++recovery->second;
+                    if (recovery->second >= recovery_success_threshold) {
+                        candidate_state.priority_recovery_successes.erase(
+                            recovery);
+                    }
+                }
+            }
             candidate_state.last_results[child_tag] = result;
         }
 
-        previous_selected = candidate_state.selected_outbound;
         new_selected = select_outbound_from_state(candidate_state);
         if (new_selected != previous_selected) {
             UrltestSelectionChangeReason reason =
@@ -325,6 +371,8 @@ bool UrltestManager::commit_probe_results(const std::string& urltest_tag,
         // remain the exact live objects validated above.
         state.last_results.swap(candidate_state.last_results);
         state.circuit_breakers.swap(candidate_state.circuit_breakers);
+        state.priority_recovery_successes.swap(
+            candidate_state.priority_recovery_successes);
         state.selected_outbound.swap(candidate_state.selected_outbound);
         // A changed selection remains single-flight until the controller
         // accepts the ordered transition below. This prevents another probe
@@ -900,6 +948,14 @@ bool UrltestManager::queue_probe_unlocked(const std::string& tag,
                 candidates.push_back(TestCandidate{
                     .child_tag = child_tag,
                     .url = state.config.url.value_or(""),
+                    .bind_interface = [&state, &child_tag]() {
+                        const auto direct =
+                            state.direct_child_interfaces.find(child_tag);
+                        return direct !=
+                                state.direct_child_interfaces.end()
+                            ? direct->second
+                            : std::string{};
+                    }(),
                     .fwmark = mark_it->second,
                     .timeout_ms = static_cast<uint32_t>(
                         state.config.probe_timeout_ms.value_or(kDefaultUrltestProbeTimeoutMs)),
@@ -1111,7 +1167,8 @@ bool UrltestManager::queue_probe_unlocked(const std::string& tag,
                         auto result = tester_.test(candidate.url,
                                                    candidate.fwmark,
                                                    candidate.timeout_ms,
-                                                   candidate.retry);
+                                                   candidate.retry,
+                                                   candidate.bind_interface);
 
                         const auto duration_ms =
                             std::chrono::duration_cast<
@@ -1212,8 +1269,19 @@ std::string UrltestManager::select_outbound_from_state(
                          return lhs.weight < rhs.weight;
                      });
 
-    const auto healthy_result = [&state](const std::string& child_tag)
+    const bool prefer_declared_priority =
+        ut.selection_mode.value_or(UrltestSelectionMode::LATENCY) ==
+        UrltestSelectionMode::PRIORITY;
+
+    const auto healthy_result =
+        [&state, prefer_declared_priority](const std::string& child_tag)
         -> const URLTestResult* {
+        if (prefer_declared_priority &&
+            state.priority_recovery_successes.find(child_tag) !=
+                state.priority_recovery_successes.end()) {
+            return nullptr;
+        }
+
         const auto cb_it = state.circuit_breakers.find(child_tag);
         // HALF_OPEN is probe-only. Routing user traffic through it before the
         // configured success threshold would bypass the circuit breaker's
@@ -1230,10 +1298,6 @@ std::string UrltestManager::select_outbound_from_state(
 
         return &result_it->second;
     };
-
-    const bool prefer_declared_priority =
-        ut.selection_mode.value_or(UrltestSelectionMode::LATENCY) ==
-        UrltestSelectionMode::PRIORITY;
 
     for (const auto& group_ref : sorted_groups) {
         const auto& group = groups[group_ref.index];

@@ -2708,6 +2708,15 @@ void Daemon::register_urltest_outbounds() {
             });
     }
 
+    UrltestDirectChildInterfaceMap direct_child_interfaces;
+    for (const auto& ob :
+         config_.outbounds.value_or(std::vector<Outbound>{})) {
+        if (ob.type == OutboundType::INTERFACE && ob.interface.has_value() &&
+            !ob.interface->empty()) {
+            direct_child_interfaces.emplace(ob.tag, *ob.interface);
+        }
+    }
+
     for (const auto& ob : config_.outbounds.value_or(std::vector<Outbound>{})) {
         if (ob.type == OutboundType::URLTEST) {
             const auto& selections =
@@ -2716,7 +2725,8 @@ void Daemon::register_urltest_outbounds() {
             urltest_manager_->register_urltest(
                 ob,
                 retained != selections.end() ? retained->second
-                                             : std::string{});
+                                             : std::string{},
+                direct_child_interfaces);
         }
     }
 }
