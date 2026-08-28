@@ -169,6 +169,7 @@ add_executable(keen-pbr-tests
   test_system_info.cpp
   test_network_routes.cpp
   test_netlink_errors.cpp
+  test_fib_lookup.cpp
   test_nfqws_config.cpp
   test_nfqws_file_writer.cpp
   test_nfqws_rotator_state.cpp
@@ -343,6 +344,7 @@ add_executable(keen-pbr-tests
   ../src/routing/firewall_state.cpp
   ../src/routing/urltest_manager.cpp
   ../src/routing/netlink.cpp
+  ../src/routing/fib_lookup.cpp
   ../src/routing/interface_monitor.cpp
   ../src/util/blocking_executor.cpp
   ../src/util/base64.cpp
