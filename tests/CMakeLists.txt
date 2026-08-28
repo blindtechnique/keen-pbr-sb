@@ -172,6 +172,7 @@ add_executable(keen-pbr-tests
   test_fib_lookup.cpp
   test_differential_probe.cpp
   test_probe_candidates.cpp
+  test_host_coverage.cpp
   test_nfqws_config.cpp
   test_nfqws_file_writer.cpp
   test_nfqws_rotator_state.cpp
@@ -343,6 +344,7 @@ add_executable(keen-pbr-tests
   ../src/health/exit_address_check.cpp
   ../src/health/differential_probe.cpp
   ../src/health/probe_candidates.cpp
+  ../src/health/host_coverage.cpp
   ../src/api/handler_transport_exit_check.cpp
   ../src/health/routing_health_checker.cpp
   ../src/routing/firewall_state.cpp
