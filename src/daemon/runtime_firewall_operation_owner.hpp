@@ -135,6 +135,10 @@ enum class RuntimeFirewallLifecycleKind : std::uint8_t {
     cold_boot,
     start_from_stopped,
     restart_active,
+    // Exact WhatsApp TCP reset publication/removal is a point transaction:
+    // it keeps one pre-owned physical mutation lease, never coalesces with a
+    // generation refresh, and never retries an install after ambiguity.
+    exact_tcp_reset_point_mutation,
     // STOP owns one immutable deletion target and returns the caller's exact
     // mutation lease only after route/firewall/resolver publication.
     stop_cleanup,
@@ -189,6 +193,12 @@ constexpr bool runtime_firewall_lifecycle_is_stop_cleanup(
     return kind == RuntimeFirewallLifecycleKind::stop_cleanup;
 }
 
+constexpr bool runtime_firewall_lifecycle_is_exact_tcp_reset_point(
+    RuntimeFirewallLifecycleKind kind) noexcept {
+    return kind ==
+        RuntimeFirewallLifecycleKind::exact_tcp_reset_point_mutation;
+}
+
 constexpr bool runtime_firewall_lifecycle_is_preapply(
     RuntimeFirewallLifecycleKind kind) noexcept {
     return kind == RuntimeFirewallLifecycleKind::config_preapply;
@@ -239,6 +249,7 @@ constexpr bool runtime_firewall_lifecycle_is_keenetic_dns_generation(
 constexpr bool runtime_firewall_lifecycle_uses_preowned_continuation(
     RuntimeFirewallLifecycleKind kind) noexcept {
     return runtime_firewall_lifecycle_is_cold_boot(kind) ||
+           runtime_firewall_lifecycle_is_exact_tcp_reset_point(kind) ||
            runtime_firewall_lifecycle_is_stop_cleanup(kind) ||
            runtime_firewall_lifecycle_is_preapply(kind) ||
            runtime_firewall_lifecycle_is_config_generation(kind) ||
@@ -258,7 +269,8 @@ constexpr bool runtime_firewall_lifecycle_uses_hot_retry(
     RuntimeFirewallLifecycleKind kind) noexcept {
     return runtime_firewall_lifecycle_uses_start_pipeline(kind) ||
            (runtime_firewall_lifecycle_uses_preowned_continuation(kind) &&
-            !runtime_firewall_lifecycle_is_stop_cleanup(kind));
+            !runtime_firewall_lifecycle_is_stop_cleanup(kind) &&
+            !runtime_firewall_lifecycle_is_exact_tcp_reset_point(kind));
 }
 
 constexpr bool runtime_firewall_restart_resolver_initially_verified(

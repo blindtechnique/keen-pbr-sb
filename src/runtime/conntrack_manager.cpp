@@ -1733,6 +1733,127 @@ ConntrackManager::observe_forwarded_destination_flows(
     return observation;
 }
 
+ConntrackExactFlowObservationResult
+ConntrackManager::observe_exact_forwarded_flow(
+    const ConntrackExactForwardedFlow& frozen_flow,
+    uint32_t owned_mask) const {
+    ConntrackExactFlowObservationResult observation;
+    if (owned_mask == 0U ||
+        frozen_flow.family != ConntrackFlowFamily::Ipv4 ||
+        frozen_flow.protocol != ConntrackFlowProtocol::Tcp ||
+        !frozen_flow.tcp_state.has_value() ||
+        frozen_flow.mark == 0U ||
+        (frozen_flow.mark & owned_mask) == 0U ||
+        (frozen_flow.mark & ~owned_mask) != 0U) {
+        return observation;
+    }
+
+    const std::string raw_source =
+        trim_ascii_whitespace(frozen_flow.source);
+    const std::string raw_destination =
+        trim_ascii_whitespace(frozen_flow.destination);
+    if (raw_source.empty() || raw_destination.empty() ||
+        raw_source.find('/') != std::string::npos ||
+        raw_destination.find('/') != std::string::npos) {
+        return observation;
+    }
+    const auto source = normalize_host_address(raw_source);
+    const auto destination = normalize_host_address(raw_destination);
+    if (!source.has_value() || !destination.has_value() ||
+        source->family != TargetAddressFamily::Ipv4 ||
+        destination->family != TargetAddressFamily::Ipv4) {
+        return observation;
+    }
+
+    const std::string mark_selector =
+        std::to_string(frozen_flow.mark) + "/4294967295";
+    CommandResult result;
+    try {
+        result = runner_({
+            "conntrack", "-L",
+            "-o", "extended",
+            "-f", "ipv4",
+            "-p", "tcp",
+            "-s", source->value,
+            "--sport", std::to_string(frozen_flow.source_port),
+            "-d", destination->value,
+            "--dport", std::to_string(frozen_flow.destination_port),
+            "--mark", mark_selector});
+    } catch (...) {
+        return observation;
+    }
+    if (result.exit_code == 127) {
+        observation.status =
+            ConntrackExactFlowObservationStatus::CommandUnavailable;
+        return observation;
+    }
+    if (result.exit_code == 1 &&
+        result.output.find("0 flow entries") != std::string::npos) {
+        observation.status = ConntrackExactFlowObservationStatus::Absent;
+        return observation;
+    }
+    if (result.exit_code != 0) {
+        return observation;
+    }
+
+    std::optional<ConntrackExactForwardedFlow> current_flow;
+    std::size_t cursor = 0U;
+    while (cursor < result.output.size()) {
+        const auto newline = result.output.find('\n', cursor);
+        const std::size_t line_end = newline == std::string::npos
+            ? result.output.size()
+            : newline;
+        const std::string line = trim_ascii_whitespace(
+            std::string_view{result.output}.substr(cursor, line_end - cursor));
+        cursor = newline == std::string::npos
+            ? result.output.size()
+            : newline + 1U;
+        if (line.empty()) {
+            continue;
+        }
+        if (line.find("flow entries have been shown") !=
+            std::string::npos) {
+            continue;
+        }
+
+        const auto parsed = parse_exact_conntrack_flow(line);
+        if (!parsed.has_value() ||
+            parsed->family != ConntrackFlowFamily::Ipv4 ||
+            parsed->protocol != ConntrackFlowProtocol::Tcp ||
+            parsed->original.source.value != source->value ||
+            parsed->original.destination.value != destination->value ||
+            parsed->original.source_port != frozen_flow.source_port ||
+            parsed->original.destination_port !=
+                frozen_flow.destination_port ||
+            parsed->mark != frozen_flow.mark ||
+            current_flow.has_value()) {
+            return observation;
+        }
+
+        current_flow = ConntrackExactForwardedFlow{
+            parsed->family,
+            parsed->protocol,
+            parsed->original.source.value,
+            parsed->original.destination.value,
+            parsed->original.source_port,
+            parsed->original.destination_port,
+            parsed->mark,
+            parsed->original.counters,
+            parsed->reply.counters,
+            parsed->tcp_state,
+            parsed->assured,
+            parsed->seen_reply,
+            parsed->fastnat};
+    }
+
+    if (!current_flow.has_value()) {
+        return observation;
+    }
+    observation.status = ConntrackExactFlowObservationStatus::Observed;
+    observation.flow = std::move(current_flow);
+    return observation;
+}
+
 ConntrackCleanupResult ConntrackManager::delete_exact_forwarded_flow(
     const ConntrackExactForwardedFlow& flow,
     uint32_t owned_mask,

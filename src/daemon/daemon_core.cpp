@@ -425,6 +425,9 @@ struct DaemonRuntimeFirewallOperationState final
     std::shared_ptr<DaemonColdBootTransaction> cold_boot_transaction;
     std::uint64_t cold_boot_mutation_lease_token{0U};
     std::optional<RuntimeStopCleanupTarget> stop_cleanup_target;
+    std::optional<RuntimeExactTcpResetPointMutationTarget>
+        exact_tcp_reset_point_target;
+    std::uint64_t exact_tcp_reset_point_mutation_lease_token{0U};
     bool stop_cleanup_generation_advanced{false};
     std::optional<ConfigTerminalOperationIdentity>
         config_operation_identity;
@@ -4382,6 +4385,63 @@ bool Daemon::begin_preowned_runtime_firewall_stop_cleanup(
     return false;
 }
 
+bool Daemon::begin_preowned_runtime_firewall_exact_tcp_reset_point(
+    std::unique_ptr<RuntimeMutationAdmission::Lease>& lease,
+    RuntimeExactTcpResetPointMutationTarget target,
+    RuntimeFirewallPreownedTerminalContinuation& continuation) noexcept {
+    bool runtime_active = false;
+    try {
+        runtime_active = routing_runtime_active();
+    } catch (...) {
+        return false;
+    }
+    if (!lease || !static_cast<bool>(*lease) ||
+        !runtime_mutation_admission_.owns(*lease) || !continuation ||
+        !target.valid() ||
+        target.runtime_generation !=
+            runtime_generation_.load(std::memory_order_acquire) ||
+        !runtime_active ||
+        (target.kind ==
+             RuntimeExactTcpResetPointMutationKind::
+                 install_then_delete_exact_flow &&
+         (!idle_stall_observer_enabled_.load(std::memory_order_acquire) ||
+          target.coverage_generation !=
+              idle_stall_coverage_generation_.load(
+                  std::memory_order_acquire))) ||
+        runtime_firewall_owner_->shutdown_requested() ||
+        runtime_firewall_owner_->active_context() ||
+        runtime_firewall_owner_->pending_successor()) {
+        return false;
+    }
+
+    try {
+        auto state =
+            std::make_shared<DaemonRuntimeFirewallOperationState>();
+        state->exact_tcp_reset_point_target = std::move(target);
+        state->exact_tcp_reset_point_mutation_lease_token = lease->token();
+        auto result = runtime_firewall_owner_->start_immediate_preowned(
+            0U,
+            state->exact_tcp_reset_point_target->runtime_generation,
+            {},
+            {},
+            /*schedule_catalog_refresh=*/false,
+            state,
+            runtime_mutation_admission_,
+            std::move(lease),
+            {},
+            RuntimeFirewallLifecycleKind::exact_tcp_reset_point_mutation,
+            std::move(continuation));
+        if (result.disposition ==
+            RuntimeFirewallImmediateDisposition::handed_off) {
+            return true;
+        }
+        lease = std::move(result.unaccepted_lease);
+        continuation = std::move(result.unaccepted_continuation);
+    } catch (...) {
+    }
+    return false;
+}
+
 bool Daemon::begin_preowned_runtime_firewall_cold_boot(
     const std::shared_ptr<DaemonColdBootTransaction>& transaction,
     std::unique_ptr<RuntimeMutationAdmission::Lease>& lease,
@@ -8198,6 +8258,9 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
     const bool lifecycle_stop_cleanup =
         runtime_firewall_lifecycle_is_stop_cleanup(
             context->lifecycle_kind);
+    const bool lifecycle_exact_tcp_reset_point =
+        runtime_firewall_lifecycle_is_exact_tcp_reset_point(
+            context->lifecycle_kind);
     const bool lifecycle_preowned =
         runtime_firewall_lifecycle_uses_preowned_continuation(
             context->lifecycle_kind);
@@ -8314,6 +8377,220 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
         terminalize_before_worker(
             RuntimeFirewallOperationContext::SuccessorMode::none,
             /*force_rerun=*/false);
+        return;
+    }
+
+    if (lifecycle_exact_tcp_reset_point) {
+        context->successor_mode =
+            RuntimeFirewallOperationContext::SuccessorMode::none;
+        context->force_successor = false;
+        state.suppress_coordinator_rerun = true;
+        if (!context->retained_mutation_lease ||
+            !state.exact_tcp_reset_point_target.has_value() ||
+            !state.exact_tcp_reset_point_target->valid() ||
+            state.exact_tcp_reset_point_target->runtime_generation !=
+                queued_claim.runtime_generation) {
+            state.preworker_failure_kind =
+                DaemonRuntimeFirewallOperationState::PreworkerFailureKind::
+                    preparation_failure;
+            state.preworker_failure_detail =
+                "exact TCP reset point target is unavailable";
+            terminalize_before_worker(
+                RuntimeFirewallOperationContext::SuccessorMode::none,
+                /*force_rerun=*/false);
+            return;
+        }
+
+        try {
+            auto worker_input =
+                std::make_shared<RuntimeFirewallWorkerAttemptInput>();
+            worker_input->operation_kind =
+                RuntimeFirewallWorkerOperationKind::
+                    exact_tcp_reset_point_mutation;
+            worker_input->transaction.operation_serial = queued_claim.serial;
+            worker_input->transaction.runtime_generation =
+                queued_claim.runtime_generation;
+            const auto target = *state.exact_tcp_reset_point_target;
+            worker_input->exact_tcp_reset_point_target = target;
+            state.preworker_failure_kind =
+                DaemonRuntimeFirewallOperationState::PreworkerFailureKind::
+                    transport_rejected;
+            state.preworker_failure_detail =
+                "exact TCP reset point worker queue rejected the target";
+
+            RuntimeFirewallOperationOwner::WorkerRunner runner{
+                [this, target](
+                    const RuntimeFirewallWorkerAttemptInput& input,
+                    const RuntimeFirewallDelayedWorker::RunningClaim&
+                        running_claim)
+                    -> RuntimeFirewallWorkerAttemptResultPtr {
+                    auto result =
+                        std::make_shared<RuntimeFirewallWorkerAttemptResult>();
+                    auto point = std::make_shared<
+                        RuntimeExactTcpResetPointMutationResult>();
+                    result->operation_kind =
+                        RuntimeFirewallWorkerOperationKind::
+                            exact_tcp_reset_point_mutation;
+                    result->transaction.operation_serial =
+                        input.transaction.operation_serial;
+                    result->transaction.runtime_generation =
+                        input.transaction.runtime_generation;
+                    point->target = target;
+                    result->exact_tcp_reset_point_mutation = point;
+
+                    const auto& raw_claim = running_claim.raw_claim();
+                    if (raw_claim.serial !=
+                            input.transaction.operation_serial ||
+                        raw_claim.runtime_generation !=
+                            input.transaction.runtime_generation ||
+                        !input.exact_tcp_reset_point_target.has_value() ||
+                        *input.exact_tcp_reset_point_target != target) {
+                        return result;
+                    }
+
+                    const auto compensate_install = [this, &point]() noexcept {
+                        point->removal_attempted = true;
+                        try {
+                            point->removal_verified = firewall_ &&
+                                firewall_->remove_exact_tcp_reset(
+                                    point->target.rule);
+                        } catch (...) {
+                            point->removal_verified = false;
+                        }
+                    };
+
+                    try {
+                        KPBR_UNIQUE_LOCK(
+                            affinity_mutation_lock,
+                            udp_call_affinity_mutation_mutex_);
+                        if (runtime_firewall_owner_->shutdown_requested() ||
+                            !firewall_ ||
+                            !running_.load(std::memory_order_acquire) ||
+                            !routing_runtime_active() ||
+                            runtime_generation_.load(
+                                std::memory_order_acquire) !=
+                                target.runtime_generation) {
+                            return result;
+                        }
+
+                        if (target.kind ==
+                            RuntimeExactTcpResetPointMutationKind::
+                                remove_rule) {
+                            point->mutation_boundary_entered = true;
+                            point->removal_attempted = true;
+                            try {
+                                point->removal_verified = firewall_ &&
+                                    firewall_->remove_exact_tcp_reset(
+                                        target.rule);
+                            } catch (...) {
+                                point->removal_verified = false;
+                            }
+                            return result;
+                        }
+
+                        if (!idle_stall_observer_enabled_.load(
+                                std::memory_order_acquire) ||
+                            idle_stall_coverage_generation_.load(
+                                std::memory_order_acquire) !=
+                                target.coverage_generation ||
+                            !target.exact_flow.has_value()) {
+                            return result;
+                        }
+                        const auto observed =
+                            conntrack_manager_.observe_exact_forwarded_flow(
+                                *target.exact_flow, target.owned_mask);
+                        if (observed.status !=
+                                ConntrackExactFlowObservationStatus::Observed ||
+                            !observed.flow.has_value() ||
+                            !(*observed.flow == *target.exact_flow)) {
+                            return result;
+                        }
+                        point->flow_revalidated = true;
+                        point->mutation_boundary_entered = true;
+                        try {
+                            point->install_result =
+                                firewall_->install_exact_tcp_reset(target.rule);
+                        } catch (...) {
+                            point->install_result =
+                                FirewallExactTcpResetResult::failed;
+                        }
+                        if (point->install_result ==
+                            FirewallExactTcpResetResult::installed) {
+                            point->conntrack_delete_attempted = true;
+                            try {
+                                point->conntrack_delete_result =
+                                    conntrack_manager_.
+                                        delete_exact_forwarded_flow(
+                                            *observed.flow,
+                                            target.owned_mask);
+                            } catch (...) {
+                                point->conntrack_delete_result =
+                                    ConntrackCleanupResult::Failed;
+                            }
+                        }
+                        if (!point->fully_verified()) {
+                            compensate_install();
+                        }
+                    } catch (...) {
+                        if (point->mutation_boundary_entered &&
+                            target.kind ==
+                                RuntimeExactTcpResetPointMutationKind::
+                                    install_then_delete_exact_flow) {
+                            try {
+                                KPBR_UNIQUE_LOCK(
+                                    compensation_lock,
+                                    udp_call_affinity_mutation_mutex_);
+                                compensate_install();
+                            } catch (...) {
+                                point->removal_attempted = true;
+                                point->removal_verified = false;
+                            }
+                        }
+                    }
+                    return result;
+                }};
+
+            const bool enqueued =
+                runtime_firewall_owner_->enqueue_worker_with_retained_lease(
+                    context,
+                    queued_claim,
+                    std::move(worker_input),
+                    std::move(runner));
+            if (enqueued) {
+                state.preworker_failure_kind =
+                    DaemonRuntimeFirewallOperationState::PreworkerFailureKind::
+                        none;
+                state.preworker_failure_detail.clear();
+            }
+        } catch (const std::exception& error) {
+            state.preworker_failure_kind =
+                DaemonRuntimeFirewallOperationState::PreworkerFailureKind::
+                    preparation_failure;
+            try {
+                state.preworker_failure_detail = error.what();
+            } catch (...) {
+            }
+            if (context->worker_operation) {
+                context->worker_operation.reset();
+            } else {
+                terminalize_before_worker(
+                    RuntimeFirewallOperationContext::SuccessorMode::none,
+                    /*force_rerun=*/false);
+            }
+        } catch (...) {
+            state.preworker_failure_kind =
+                DaemonRuntimeFirewallOperationState::PreworkerFailureKind::
+                    preparation_failure;
+            state.preworker_failure_detail =
+                "exact TCP reset point worker preparation failed";
+            if (context->worker_operation) {
+                context->worker_operation.reset();
+            } else {
+                terminalize_before_worker(
+                    RuntimeFirewallOperationContext::SuccessorMode::none,
+                    /*force_rerun=*/false);
+            }
+        }
         return;
     }
 
@@ -9962,9 +10239,241 @@ void Daemon::drain_runtime_firewall_terminal(
     const bool lifecycle_stop_cleanup =
         runtime_firewall_lifecycle_is_stop_cleanup(
             context->lifecycle_kind);
+    const bool lifecycle_exact_tcp_reset_point =
+        runtime_firewall_lifecycle_is_exact_tcp_reset_point(
+            context->lifecycle_kind);
 
     auto drain = context->terminal_owner->try_begin_drain();
     if (!drain.has_value()) return;
+
+    if (lifecycle_exact_tcp_reset_point) {
+        const auto return_exact_retained_lease =
+            [this, &context, &drain, &state]() noexcept {
+                if (!context->retained_mutation_lease) {
+                    auto returned = drain->take_retained_mutation_lease();
+                    if (returned) {
+                        context->retained_mutation_lease =
+                            std::move(returned);
+                    }
+                }
+                return context->retained_mutation_lease &&
+                    static_cast<bool>(*context->retained_mutation_lease) &&
+                    state.exact_tcp_reset_point_mutation_lease_token != 0U &&
+                    context->retained_mutation_lease->token() ==
+                        state.exact_tcp_reset_point_mutation_lease_token &&
+                    runtime_mutation_admission_.owns(
+                        *context->retained_mutation_lease);
+        };
+        const auto make_terminal = [](
+            RuntimeFirewallLifecycleOutcome outcome,
+            bool committed,
+            bool ambiguous,
+            std::string detail) {
+            RuntimeFirewallLifecycleTerminal terminal;
+            terminal.outcome = outcome;
+            terminal.committed = committed;
+            terminal.commit_ambiguous = ambiguous;
+            terminal.transient = false;
+            terminal.previous_generation_certainly_retained =
+                !committed && !ambiguous;
+            terminal.detail = std::move(detail);
+            return terminal;
+        };
+
+        if (drain->kind() ==
+            RuntimeFirewallDelayedTerminalOwner::DrainKind::coordinator) {
+            const auto* terminal = drain->coordinator_terminal();
+            if (!terminal || !terminal->owned) {
+                return;
+            }
+            const bool exact_lease_returned =
+                return_exact_retained_lease();
+            auto lifecycle_terminal = make_terminal(
+                !exact_lease_returned
+                    ? RuntimeFirewallLifecycleOutcome::not_verified
+                    : (shutdown
+                           ? RuntimeFirewallLifecycleOutcome::shutdown
+                           : RuntimeFirewallLifecycleOutcome::not_verified),
+                /*committed=*/false,
+                /*ambiguous=*/!exact_lease_returned,
+                !exact_lease_returned
+                    ? "exact TCP reset point did not return its physical "
+                      "mutation lease"
+                    : (state.preworker_failure_detail.empty()
+                           ? "exact TCP reset point ended before worker "
+                             "handoff"
+                           : state.preworker_failure_detail));
+            auto permit = runtime_firewall_owner_->
+                prepare_preowned_continuation_finalization(context);
+            if (!permit.has_value()) return;
+            auto proof = drain->finish_coordinator_terminal();
+            if (!proof.has_value()) return;
+            (void)runtime_firewall_owner_->complete_preowned_continuation(
+                std::move(*permit),
+                std::move(*proof),
+                std::move(lifecycle_terminal));
+            return;
+        }
+
+        const auto* terminal = drain->worker_terminal();
+        if (!terminal) return;
+        if (terminal->status ==
+            RuntimeFirewallDelayedWorker::TerminalStatus::queued_abandoned) {
+            if (!terminal->coordinator_completion.has_value() ||
+                !terminal->coordinator_completion->owned) {
+                return;
+            }
+            const bool exact_lease_returned =
+                return_exact_retained_lease();
+            auto lifecycle_terminal = make_terminal(
+                !exact_lease_returned
+                    ? RuntimeFirewallLifecycleOutcome::not_verified
+                    : (shutdown
+                           ? RuntimeFirewallLifecycleOutcome::shutdown
+                           : RuntimeFirewallLifecycleOutcome::not_verified),
+                /*committed=*/false,
+                /*ambiguous=*/!exact_lease_returned,
+                !exact_lease_returned
+                    ? "exact TCP reset point worker did not return its "
+                      "physical mutation lease"
+                    : (state.preworker_failure_detail.empty()
+                           ? "exact TCP reset point worker queue was abandoned"
+                           : state.preworker_failure_detail));
+            auto permit = runtime_firewall_owner_->
+                prepare_preowned_continuation_finalization(context);
+            if (!permit.has_value()) return;
+            auto proof = drain->finish_worker_terminal();
+            if (!proof.has_value()) return;
+            (void)runtime_firewall_owner_->complete_preowned_continuation(
+                std::move(*permit),
+                std::move(*proof),
+                std::move(lifecycle_terminal));
+            return;
+        }
+        if (!terminal->running_claim.has_value() ||
+            !terminal->mutation_lease) {
+            return;
+        }
+
+        const RuntimeFirewallWorkerAttemptResult* worker_result =
+            terminal->result.get();
+        const RuntimeExactTcpResetPointMutationResult* point_result =
+            worker_result && worker_result->exact_tcp_reset_point_mutation
+            ? worker_result->exact_tcp_reset_point_mutation.get()
+            : nullptr;
+        const bool terminal_lease_identity_valid =
+            terminal->mutation_lease.lease &&
+            static_cast<bool>(*terminal->mutation_lease.lease) &&
+            state.exact_tcp_reset_point_mutation_lease_token != 0U &&
+            terminal->mutation_lease.lease->token() ==
+                state.exact_tcp_reset_point_mutation_lease_token &&
+            runtime_mutation_admission_.owns(
+                *terminal->mutation_lease.lease);
+        const bool typed_identity_valid =
+            terminal->status ==
+                RuntimeFirewallDelayedWorker::TerminalStatus::result &&
+            context->worker_input && worker_result && point_result &&
+            terminal->running_claim->raw_claim().serial ==
+                context->queued_claim.serial &&
+            terminal->running_claim->raw_claim().runtime_generation ==
+                context->queued_claim.runtime_generation &&
+            terminal->running_claim->raw_claim().attempt ==
+                context->queued_claim.attempt &&
+            state.exact_tcp_reset_point_target.has_value() &&
+            context->worker_input->operation_kind ==
+                RuntimeFirewallWorkerOperationKind::
+                    exact_tcp_reset_point_mutation &&
+            worker_result->operation_kind ==
+                RuntimeFirewallWorkerOperationKind::
+                    exact_tcp_reset_point_mutation &&
+            context->worker_input->transaction.operation_serial ==
+                context->queued_claim.serial &&
+            context->worker_input->transaction.runtime_generation ==
+                context->queued_claim.runtime_generation &&
+            worker_result->transaction.operation_serial ==
+                context->queued_claim.serial &&
+            worker_result->transaction.runtime_generation ==
+                context->queued_claim.runtime_generation &&
+            context->worker_input->exact_tcp_reset_point_target.has_value() &&
+            *context->worker_input->exact_tcp_reset_point_target ==
+                *state.exact_tcp_reset_point_target &&
+            point_result->target == *state.exact_tcp_reset_point_target;
+        const bool worker_control_verified =
+            typed_identity_valid && terminal_lease_identity_valid &&
+            point_result->fully_verified();
+
+        if (!drain->begin_worker_control(runtime_firewall_retry_)) return;
+        if (!drain->publish_worker_control([]() noexcept { return true; })) {
+            return;
+        }
+        OwnedSnatRecovery no_point_recovery;
+        if (!drain->complete_worker_control(
+                runtime_firewall_retry_,
+                worker_control_verified,
+                std::move(no_point_recovery))) {
+            return;
+        }
+        const auto* completion = drain->worker_control_completion();
+        if (!completion || !completion->owned) {
+            return;
+        }
+        const bool exact_lease_returned =
+            return_exact_retained_lease();
+        const bool identity_valid =
+            typed_identity_valid && terminal_lease_identity_valid &&
+            exact_lease_returned;
+        const bool fully_verified =
+            identity_valid && point_result->fully_verified();
+        const bool ambiguous =
+            !identity_valid ||
+            (identity_valid && point_result->unsafe_publication_possible());
+        const bool committed =
+            typed_identity_valid && point_result->mutation_boundary_entered;
+
+        std::string detail;
+        if (!exact_lease_returned || !terminal_lease_identity_valid) {
+            detail =
+                "exact TCP reset point did not return its physical mutation "
+                "lease";
+        } else if (!typed_identity_valid) {
+            detail =
+                "exact TCP reset point worker returned no matching typed proof";
+        } else if (point_result->unsafe_publication_possible()) {
+            detail =
+                "exact TCP reset publication could not be proven removed";
+        } else if (!fully_verified) {
+            detail = point_result->target.kind ==
+                    RuntimeExactTcpResetPointMutationKind::remove_rule
+                ? "exact TCP reset removal was not verified"
+                : (point_result->flow_revalidated
+                       ? "exact TCP reset flow retirement was not verified"
+                       : "exact TCP reset target changed before mutation");
+        }
+
+        context->worker_succeeded = fully_verified;
+        context->worker_commit_ambiguous = ambiguous;
+        auto lifecycle_terminal = make_terminal(
+            !exact_lease_returned
+                ? RuntimeFirewallLifecycleOutcome::not_verified
+                : (shutdown
+                ? RuntimeFirewallLifecycleOutcome::shutdown
+                : (fully_verified
+                       ? RuntimeFirewallLifecycleOutcome::verified_success
+                       : RuntimeFirewallLifecycleOutcome::not_verified)),
+            committed,
+            ambiguous,
+            std::move(detail));
+        auto permit = runtime_firewall_owner_->
+            prepare_preowned_continuation_finalization(context);
+        if (!permit.has_value()) return;
+        auto proof = drain->finish_worker_terminal();
+        if (!proof.has_value()) return;
+        (void)runtime_firewall_owner_->complete_preowned_continuation(
+            std::move(*permit),
+            std::move(*proof),
+            std::move(lifecycle_terminal));
+        return;
+    }
 
     if (lifecycle_stop_cleanup) {
         const auto return_retained_lease = [&context, &drain]() noexcept {

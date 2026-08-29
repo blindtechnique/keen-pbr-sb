@@ -30,7 +30,103 @@ enum class RuntimeFirewallWorkerOperationKind : std::uint8_t {
     urltest_rollback,
     keenetic_dns_candidate,
     keenetic_dns_rollback,
+    // One exact, non-coalescing point mutation. The immutable target is
+    // re-observed and either completed or compensated under the same retained
+    // runtime-mutation lease; it never enters the generation-apply pipeline.
+    exact_tcp_reset_point_mutation,
     stop_cleanup,
+};
+
+enum class RuntimeExactTcpResetPointMutationKind : std::uint8_t {
+    install_then_delete_exact_flow,
+    remove_rule,
+};
+
+struct RuntimeExactTcpResetPointMutationTarget final {
+    RuntimeExactTcpResetPointMutationKind kind{
+        RuntimeExactTcpResetPointMutationKind::remove_rule};
+    std::uint64_t runtime_generation{0U};
+    std::uint64_t coverage_generation{0U};
+    std::uint64_t target_serial{0U};
+    FirewallExactTcpResetRule rule;
+    std::optional<ConntrackExactForwardedFlow> exact_flow;
+    std::uint32_t owned_mask{0U};
+
+    bool valid() const noexcept {
+        if (runtime_generation == 0U || target_serial == 0U ||
+            rule.source.empty() || rule.destination.empty() ||
+            rule.source_port == 0U || rule.destination_port == 0U ||
+            rule.full_mark == 0U) {
+            return false;
+        }
+        if (kind == RuntimeExactTcpResetPointMutationKind::remove_rule) {
+            return !exact_flow.has_value();
+        }
+        if (!exact_flow.has_value() || coverage_generation == 0U ||
+            owned_mask == 0U) {
+            return false;
+        }
+        const auto& flow = *exact_flow;
+        return flow.family == ConntrackFlowFamily::Ipv4 &&
+               flow.protocol == ConntrackFlowProtocol::Tcp &&
+               flow.tcp_state ==
+                   std::optional<ConntrackTcpState>{
+                       ConntrackTcpState::Established} &&
+               flow.destination_port == 443U && flow.mark == rule.full_mark &&
+               (flow.mark & owned_mask) != 0U &&
+               (flow.mark & ~owned_mask) == 0U &&
+               flow.source == rule.source &&
+               flow.destination == rule.destination &&
+               flow.source_port == rule.source_port &&
+               flow.destination_port == rule.destination_port;
+    }
+
+    bool operator==(
+        const RuntimeExactTcpResetPointMutationTarget& other) const {
+        return kind == other.kind &&
+               runtime_generation == other.runtime_generation &&
+               coverage_generation == other.coverage_generation &&
+               target_serial == other.target_serial && rule == other.rule &&
+               exact_flow == other.exact_flow &&
+               owned_mask == other.owned_mask;
+    }
+
+    bool operator!=(
+        const RuntimeExactTcpResetPointMutationTarget& other) const {
+        return !(*this == other);
+    }
+};
+
+struct RuntimeExactTcpResetPointMutationResult final {
+    RuntimeExactTcpResetPointMutationTarget target;
+    bool mutation_boundary_entered{false};
+    bool flow_revalidated{false};
+    FirewallExactTcpResetResult install_result{
+        FirewallExactTcpResetResult::failed};
+    bool conntrack_delete_attempted{false};
+    ConntrackCleanupResult conntrack_delete_result{
+        ConntrackCleanupResult::Failed};
+    bool removal_attempted{false};
+    bool removal_verified{false};
+
+    bool fully_verified() const noexcept {
+        if (target.kind ==
+            RuntimeExactTcpResetPointMutationKind::remove_rule) {
+            return removal_attempted && removal_verified;
+        }
+        return flow_revalidated &&
+               install_result == FirewallExactTcpResetResult::installed &&
+               conntrack_delete_attempted &&
+               conntrack_delete_result == ConntrackCleanupResult::Succeeded;
+    }
+
+    bool unsafe_publication_possible() const noexcept {
+        return target.kind ==
+                   RuntimeExactTcpResetPointMutationKind::
+                       install_then_delete_exact_flow &&
+               mutation_boundary_entered && !fully_verified() &&
+               !removal_verified;
+    }
 };
 
 constexpr bool runtime_firewall_worker_operation_is_config_generation(
@@ -109,6 +205,8 @@ struct RuntimeFirewallWorkerAttemptInput {
     // bounded cleanup attempt so the control loop never runs conntrack CLI.
     RuntimeFirewallOwnedConntrackCleanupMode owned_conntrack_cleanup_mode{
         RuntimeFirewallOwnedConntrackCleanupMode::none};
+    std::optional<RuntimeExactTcpResetPointMutationTarget>
+        exact_tcp_reset_point_target;
 };
 
 struct RuntimeFirewallWorkerRoutePreparation {
@@ -233,6 +331,8 @@ struct RuntimeFirewallWorkerAttemptResult {
     // STOP uses the same durable worker mailbox/lease as apply operations,
     // but its monotonic owned-state deletion has a distinct typed result.
     std::shared_ptr<const RuntimeStopCleanupResult> stop_cleanup;
+    std::shared_ptr<const RuntimeExactTcpResetPointMutationResult>
+        exact_tcp_reset_point_mutation;
 
     // This proof is intentionally based only on whether COMMIT was entered.
     // A changed publication epoch strengthens ambiguity, but an unchanged one

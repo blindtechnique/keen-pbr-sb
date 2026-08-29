@@ -5224,6 +5224,9 @@ bool Daemon::schedule_exact_tcp_reset_cleanup(
         pending_exact_tcp_reset_cleanups_.end(),
         [&rule](const auto& pending) { return pending.rule == rule; });
     if (existing != pending_exact_tcp_reset_cleanups_.end()) {
+        if (existing->worker_inflight) {
+            return false;
+        }
         const int stale_task_id = existing->task_id;
         existing->runtime_generation = expected_runtime_generation;
         existing->attempt = attempt;
@@ -5241,9 +5244,10 @@ bool Daemon::schedule_exact_tcp_reset_cleanup(
                 PendingExactTcpResetCleanup{
                     rule,
                     expected_runtime_generation,
-                    attempt,
-                    schedule_serial,
-                    -1});
+                     attempt,
+                     schedule_serial,
+                     -1,
+                     false});
         } catch (...) {
             return false;
         }
@@ -5315,7 +5319,7 @@ void Daemon::resume_exact_tcp_reset_cleanups() noexcept {
     try {
         std::vector<PendingExactTcpResetCleanup> dormant;
         for (const auto& pending : pending_exact_tcp_reset_cleanups_) {
-            if (pending.task_id < 0 &&
+            if (pending.task_id < 0 && !pending.worker_inflight &&
                 pending.runtime_generation ==
                     runtime_generation_.load(std::memory_order_acquire)) {
                 dormant.push_back(pending);
@@ -5348,32 +5352,228 @@ void Daemon::fence_exact_tcp_reset_cleanups_for_stop() noexcept {
     }
 }
 
+std::optional<std::uint64_t> Daemon::reserve_exact_tcp_reset_cleanup(
+    const FirewallExactTcpResetRule& rule,
+    std::uint64_t expected_runtime_generation) noexcept {
+    if (!scheduler_ || expected_runtime_generation == 0U ||
+        !running_.load(std::memory_order_acquire) ||
+        runtime_generation_.load(std::memory_order_acquire) !=
+            expected_runtime_generation) {
+        return std::nullopt;
+    }
+    const auto existing = std::find_if(
+        pending_exact_tcp_reset_cleanups_.begin(),
+        pending_exact_tcp_reset_cleanups_.end(),
+        [&rule](const auto& pending) { return pending.rule == rule; });
+    if (existing != pending_exact_tcp_reset_cleanups_.end()) {
+        return std::nullopt;
+    }
+    try {
+        const auto serial = ++exact_tcp_reset_cleanup_schedule_serial_;
+        pending_exact_tcp_reset_cleanups_.push_back(
+            PendingExactTcpResetCleanup{
+                rule,
+                expected_runtime_generation,
+                0U,
+                serial,
+                -1,
+                true});
+        return serial;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+bool Daemon::begin_idle_stall_exact_tcp_reset_point(
+    std::uint64_t expected_runtime_generation,
+    std::uint64_t expected_coverage_generation,
+    std::uint32_t owned_mask,
+    IdleStallDeleteDecision decision,
+    ConntrackExactForwardedFlow flow) noexcept {
+    if (flow.family != ConntrackFlowFamily::Ipv4 ||
+        flow.protocol != ConntrackFlowProtocol::Tcp ||
+        flow.tcp_state !=
+            std::optional<ConntrackTcpState>{
+                ConntrackTcpState::Established} ||
+        flow.destination_port != 443U || flow.mark == 0U ||
+        owned_mask == 0U || (flow.mark & owned_mask) == 0U ||
+        (flow.mark & ~owned_mask) != 0U) {
+        return false;
+    }
+
+    FirewallExactTcpResetRule rule{
+        flow.source,
+        flow.destination,
+        flow.source_port,
+        flow.destination_port,
+        flow.mark};
+    const auto target_serial = reserve_exact_tcp_reset_cleanup(
+        rule, expected_runtime_generation);
+    if (!target_serial.has_value()) {
+        return false;
+    }
+
+    const auto abandon_reservation = [this, &rule, target_serial]() noexcept {
+        const auto current = std::find_if(
+            pending_exact_tcp_reset_cleanups_.begin(),
+            pending_exact_tcp_reset_cleanups_.end(),
+            [target_serial](const auto& candidate) {
+                return candidate.schedule_serial == *target_serial;
+            });
+        if (current != pending_exact_tcp_reset_cleanups_.end()) {
+            current->worker_inflight = false;
+            forget_exact_tcp_reset_cleanup(rule);
+        }
+    };
+
+    try {
+        auto admitted = runtime_mutation_admission_.try_acquire(
+            "exact-whatsapp-tcp-reset-point");
+        if (!admitted.has_value()) {
+            abandon_reservation();
+            return false;
+        }
+        auto lease = std::make_unique<RuntimeMutationAdmission::Lease>(
+            std::move(*admitted));
+        const auto expected_lease_token = lease->token();
+
+        RuntimeExactTcpResetPointMutationTarget target;
+        target.kind = RuntimeExactTcpResetPointMutationKind::
+            install_then_delete_exact_flow;
+        target.runtime_generation = expected_runtime_generation;
+        target.coverage_generation = expected_coverage_generation;
+        target.target_serial = *target_serial;
+        target.rule = rule;
+        target.exact_flow = flow;
+        target.owned_mask = owned_mask;
+        if (!target.valid()) {
+            lease.reset();
+            abandon_reservation();
+            return false;
+        }
+
+        RuntimeFirewallPreownedTerminalContinuation continuation{
+            [this,
+             rule,
+             decision,
+             expected_runtime_generation,
+             expected_coverage_generation,
+             target_serial = *target_serial,
+             expected_lease_token](
+                RuntimeFirewallLifecycleTerminal terminal,
+                std::unique_ptr<RuntimeMutationAdmission::Lease> exact)
+                noexcept {
+                const bool exact_lease_returned = exact &&
+                        static_cast<bool>(*exact) &&
+                        exact->token() == expected_lease_token &&
+                        runtime_mutation_admission_.owns(*exact);
+                const bool succeeded = exact_lease_returned &&
+                        terminal.outcome ==
+                            RuntimeFirewallLifecycleOutcome::
+                                verified_success &&
+                        terminal.committed &&
+                        !terminal.commit_ambiguous;
+                try {
+                    const auto current = std::find_if(
+                        pending_exact_tcp_reset_cleanups_.begin(),
+                        pending_exact_tcp_reset_cleanups_.end(),
+                        [target_serial,
+                         expected_runtime_generation,
+                         &rule](const auto& candidate) {
+                            return candidate.schedule_serial ==
+                                       target_serial &&
+                                   candidate.runtime_generation ==
+                                       expected_runtime_generation &&
+                                   candidate.rule == rule;
+                        });
+                    if (current !=
+                        pending_exact_tcp_reset_cleanups_.end()) {
+                        current->worker_inflight = false;
+                        if (terminal.outcome ==
+                            RuntimeFirewallLifecycleOutcome::shutdown) {
+                            // STOP''s strict owned-firewall cleanup now owns
+                            // the tail; keep the exact ledger record dormant.
+                        } else if (succeeded) {
+                            (void)schedule_exact_tcp_reset_cleanup(
+                                rule,
+                                expected_runtime_generation,
+                                /*attempt=*/0U);
+                        } else if (!exact_lease_returned ||
+                                   terminal.commit_ambiguous) {
+                            (void)schedule_exact_tcp_reset_cleanup(
+                                rule,
+                                expected_runtime_generation,
+                                /*attempt=*/1U);
+                        } else {
+                            forget_exact_tcp_reset_cleanup(rule);
+                        }
+                    }
+                } catch (...) {
+                    // Keep the exact ledger record fail-closed. A later
+                    // observer/generation drain can resume its cleanup.
+                }
+                try {
+                    idle_stall_detector_.acknowledge_delete_result(
+                        decision,
+                        succeeded,
+                        IdleStallDetector::Clock::now());
+                } catch (...) {
+                    // Detector bookkeeping must never suppress the observer
+                    // follow-up after the owned terminal has completed.
+                }
+                try {
+                    if (terminal.outcome !=
+                            RuntimeFirewallLifecycleOutcome::shutdown &&
+                        running_.load(std::memory_order_acquire) &&
+                        routing_runtime_active() &&
+                        idle_stall_observer_enabled_.load(
+                            std::memory_order_acquire) &&
+                        runtime_generation_.load(
+                            std::memory_order_acquire) ==
+                            expected_runtime_generation &&
+                        idle_stall_coverage_generation_.load(
+                            std::memory_order_acquire) ==
+                            expected_coverage_generation) {
+                        const auto fast_followup =
+                            idle_stall_detector_.
+                                take_whatsapp_fast_followup_delay();
+                        schedule_idle_stall_observer_after(
+                            fast_followup.value_or(
+                                IDLE_STALL_ACTIVE_SCAN_INTERVAL));
+                    }
+                } catch (...) {
+                }
+                exact.reset();
+                if (succeeded) {
+                    try {
+                        Logger::instance().info(
+                            "Rotated one frozen WhatsApp TCP tuple with an "
+                            "exact short-lived reset");
+                    } catch (...) {
+                    }
+                }
+            }};
+        if (begin_preowned_runtime_firewall_exact_tcp_reset_point(
+                lease, std::move(target), continuation)) {
+            return true;
+        }
+        lease.reset();
+        abandon_reservation();
+        return false;
+    } catch (...) {
+        abandon_reservation();
+        return false;
+    }
+}
+
 bool Daemon::drain_exact_tcp_reset_cleanups_before_generation_change()
     noexcept {
-    std::size_t index = 0U;
-    while (index < pending_exact_tcp_reset_cleanups_.size()) {
-        bool removed = false;
-        try {
-            removed = firewall_ && firewall_->remove_exact_tcp_reset(
-                pending_exact_tcp_reset_cleanups_[index].rule);
-        } catch (...) {
-            removed = false;
-        }
-        if (!removed) {
-            ++index;
-            continue;
-        }
-        const int task_id =
-            pending_exact_tcp_reset_cleanups_[index].task_id;
-        pending_exact_tcp_reset_cleanups_.erase(
-            pending_exact_tcp_reset_cleanups_.begin() +
-            static_cast<std::ptrdiff_t>(index));
-        if (task_id >= 0 && scheduler_) {
-            try {
-                scheduler_->cancel(task_id);
-            } catch (...) {
-            }
-        }
+    // This caller already owns the generation mutation lease. It must not
+    // bypass the point owner with a direct firewall write, and it cannot
+    // acquire a second physical writer. Fence exact timers and reject this
+    // generation change until their typed cleanup has completed.
+    if (!pending_exact_tcp_reset_cleanups_.empty()) {
+        fence_exact_tcp_reset_cleanups_for_stop();
     }
     return pending_exact_tcp_reset_cleanups_.empty();
 }
@@ -5403,6 +5603,9 @@ void Daemon::run_exact_tcp_reset_cleanup(
     }
 
     pending->task_id = -1;
+    if (pending->worker_inflight) {
+        return;
+    }
     FirewallExactTcpResetRule rule;
     try {
         rule = pending->rule;
@@ -5438,28 +5641,112 @@ void Daemon::run_exact_tcp_reset_cleanup(
         return;
     }
 
-    bool removed = false;
-    try {
-        removed = firewall_ && firewall_->remove_exact_tcp_reset(rule);
-    } catch (...) {
-        removed = false;
-    }
-    if (removed) {
-        pending_exact_tcp_reset_cleanups_.erase(pending);
-        return;
-    }
-
     const std::size_t next_attempt =
         attempt < EXPERIMENTAL_TCP_RESET_CLEANUP_RETRY_DELAYS.size()
         ? attempt + 1U
         : EXPERIMENTAL_TCP_RESET_CLEANUP_RETRY_DELAYS.size() + 1U;
-    if (attempt == EXPERIMENTAL_TCP_RESET_CLEANUP_RETRY_DELAYS.size()) {
-        try {
-            Logger::instance().error(
-                "Exact WhatsApp TCP reset rule cleanup did not verify after "
-                "bounded retries; a quiet generation-fenced maintenance "
-                "retry remains armed until apply/stop cleanup");
-        } catch (...) {
+    std::optional<RuntimeMutationAdmission::Lease> admitted;
+    try {
+        admitted = runtime_mutation_admission_.try_acquire(
+            "exact-tcp-reset-cleanup");
+    } catch (...) {
+    }
+    if (!admitted.has_value()) {
+        (void)schedule_exact_tcp_reset_cleanup(
+            rule, expected_runtime_generation, next_attempt);
+        return;
+    }
+
+    try {
+        auto lease = std::make_unique<RuntimeMutationAdmission::Lease>(
+            std::move(*admitted));
+        const auto expected_lease_token = lease->token();
+        pending->worker_inflight = true;
+        RuntimeExactTcpResetPointMutationTarget target;
+        target.kind = RuntimeExactTcpResetPointMutationKind::remove_rule;
+        target.runtime_generation = expected_runtime_generation;
+        target.target_serial = schedule_serial;
+        target.rule = rule;
+        RuntimeFirewallPreownedTerminalContinuation continuation{
+            [this,
+             rule,
+             schedule_serial,
+             expected_runtime_generation,
+             next_attempt,
+             expected_lease_token](
+                RuntimeFirewallLifecycleTerminal terminal,
+                std::unique_ptr<RuntimeMutationAdmission::Lease> exact)
+                noexcept {
+                try {
+                    const bool exact_lease_returned = exact &&
+                        static_cast<bool>(*exact) &&
+                        exact->token() == expected_lease_token &&
+                        runtime_mutation_admission_.owns(*exact);
+                    const auto current = std::find_if(
+                        pending_exact_tcp_reset_cleanups_.begin(),
+                        pending_exact_tcp_reset_cleanups_.end(),
+                        [schedule_serial,
+                         expected_runtime_generation,
+                         &rule](const auto& candidate) {
+                            return candidate.schedule_serial ==
+                                       schedule_serial &&
+                                   candidate.runtime_generation ==
+                                       expected_runtime_generation &&
+                                   candidate.rule == rule;
+                        });
+                    if (current !=
+                        pending_exact_tcp_reset_cleanups_.end()) {
+                        current->worker_inflight = false;
+                    }
+                    const bool removed = exact_lease_returned &&
+                        terminal.outcome ==
+                            RuntimeFirewallLifecycleOutcome::
+                                verified_success &&
+                        !terminal.commit_ambiguous;
+                    if (removed) {
+                        forget_exact_tcp_reset_cleanup(rule);
+                    } else if (
+                        terminal.outcome !=
+                            RuntimeFirewallLifecycleOutcome::shutdown &&
+                        current !=
+                            pending_exact_tcp_reset_cleanups_.end() &&
+                        running_.load(std::memory_order_acquire) &&
+                        routing_runtime_active() &&
+                        runtime_generation_.load(
+                            std::memory_order_acquire) ==
+                            expected_runtime_generation) {
+                        (void)schedule_exact_tcp_reset_cleanup(
+                            rule,
+                            expected_runtime_generation,
+                            next_attempt);
+                    }
+                } catch (...) {
+                }
+                exact.reset();
+            }};
+        if (begin_preowned_runtime_firewall_exact_tcp_reset_point(
+                lease, std::move(target), continuation)) {
+            return;
+        }
+        const auto current = std::find_if(
+            pending_exact_tcp_reset_cleanups_.begin(),
+            pending_exact_tcp_reset_cleanups_.end(),
+            [schedule_serial](const auto& candidate) {
+                return candidate.schedule_serial == schedule_serial;
+            });
+        if (current != pending_exact_tcp_reset_cleanups_.end()) {
+            current->worker_inflight = false;
+        }
+        lease.reset();
+    } catch (...) {
+        const auto current = std::find_if(
+            pending_exact_tcp_reset_cleanups_.begin(),
+            pending_exact_tcp_reset_cleanups_.end(),
+            [schedule_serial](const auto& candidate) {
+                return candidate.schedule_serial == schedule_serial;
+            });
+        if (current != pending_exact_tcp_reset_cleanups_.end()) {
+            current->worker_inflight = false;
         }
     }
     (void)schedule_exact_tcp_reset_cleanup(
@@ -6871,32 +7158,58 @@ void Daemon::commit_idle_stall_observation(
                                 IdleStallDetector::Clock::now());
                             acknowledged_attempts.insert(decision.attempt_id);
                         };
-                    const auto retire_exact_tcp_reset =
-                        [this, expected_runtime_generation](
-                            const FirewallExactTcpResetRule& rule) noexcept {
-                            bool removed = false;
-                            try {
-                                removed = firewall_ &&
-                                    firewall_->remove_exact_tcp_reset(rule);
-                            } catch (...) {
-                                removed = false;
-                            }
-                            if (!removed) {
-                                (void)schedule_exact_tcp_reset_cleanup(
-                                    rule,
-                                    expected_runtime_generation,
-                                    /*attempt=*/1U);
-                            } else {
-                                forget_exact_tcp_reset_cleanup(rule);
-                            }
-                            return removed;
-                        };
-
                     if (!live_scope_changed) {
-                        // Exact deletion is deliberately serialized on the
-                        // control loop. Apply/stop tasks cannot change the
-                        // committed runtime generation between this final
-                        // fence and the irreversible 5-tuple operation.
+                        const auto reset_point = std::find_if(
+                            pending_deletes.begin(),
+                            pending_deletes.end(),
+                            [](const auto& pending) {
+                                return pending.decision.reason ==
+                                    IdleStallDecisionReason::
+                                        idle_packaged_whatsapp_tcp_reset_rotation;
+                            });
+                        if (reset_point != pending_deletes.end() &&
+                            begin_idle_stall_exact_tcp_reset_point(
+                                expected_runtime_generation,
+                                expected_coverage_generation,
+                                owned_mask,
+                                reset_point->decision,
+                                reset_point->flow)) {
+                            // One exact point mutation owns the physical
+                            // writer until its terminal. Release every other
+                            // detector reservation now; the continuation
+                            // acknowledges this exact target and schedules the
+                            // next observation only after the lease returns.
+                            for (const auto& decision : all_decisions) {
+                                if (decision.attempt_id !=
+                                    reset_point->decision.attempt_id) {
+                                    acknowledge(decision, false);
+                                }
+                            }
+                            return;
+                        }
+
+                        // Never fall back to a direct firewall writer. A
+                        // rejected/extra reset candidate is released and will
+                        // be reconsidered from a fresh observation.
+                        pending_deletes.erase(
+                            std::remove_if(
+                                pending_deletes.begin(),
+                                pending_deletes.end(),
+                                [&acknowledge, &failed](const auto& pending) {
+                                    if (pending.decision.reason !=
+                                        IdleStallDecisionReason::
+                                            idle_packaged_whatsapp_tcp_reset_rotation) {
+                                        return false;
+                                    }
+                                    ++failed;
+                                    acknowledge(pending.decision, false);
+                                    return true;
+                                }),
+                            pending_deletes.end());
+
+                        // Non-reset exact flow retirement keeps its existing
+                        // semantics. The firewall point writer above is now a
+                        // separate typed operation and cannot overlap it.
                         for (const auto& pending : pending_deletes) {
                             if (!generation_is_current()) {
                                 live_scope_changed = true;
@@ -6904,74 +7217,11 @@ void Daemon::commit_idle_stall_observation(
                             }
                             ConntrackCleanupResult result =
                                 ConntrackCleanupResult::Failed;
-                            std::optional<FirewallExactTcpResetRule>
-                                installed_reset_rule;
-                            if (pending.decision.reason ==
-                                IdleStallDecisionReason::
-                                    idle_packaged_whatsapp_tcp_reset_rotation) {
-                                if (pending.flow.family !=
-                                        ConntrackFlowFamily::Ipv4 ||
-                                    pending.flow.protocol !=
-                                        ConntrackFlowProtocol::Tcp ||
-                                    pending.flow.mark == 0U || !scheduler_) {
-                                    ++failed;
-                                    acknowledge(pending.decision, false);
-                                    continue;
-                                }
-                                FirewallExactTcpResetRule reset_rule{
-                                    pending.flow.source,
-                                    pending.flow.destination,
-                                    pending.flow.source_port,
-                                    pending.flow.destination_port,
-                                    pending.flow.mark};
-                                FirewallExactTcpResetResult install_result =
-                                    FirewallExactTcpResetResult::failed;
-                                try {
-                                    install_result = firewall_->
-                                        install_exact_tcp_reset(reset_rule);
-                                } catch (...) {
-                                    install_result =
-                                        FirewallExactTcpResetResult::failed;
-                                }
-                                if (install_result !=
-                                    FirewallExactTcpResetResult::installed) {
-                                    // A backend may have committed the exact
-                                    // rule and then lost its read-only proof.
-                                    // Never leave that uncertain publication
-                                    // without both backend rollback and this
-                                    // independent best-effort cleanup attempt.
-                                    (void)retire_exact_tcp_reset(reset_rule);
-                                    ++failed;
-                                    acknowledge(pending.decision, false);
-                                    continue;
-                                }
-                                try {
-                                    if (!schedule_exact_tcp_reset_cleanup(
-                                            reset_rule,
-                                            expected_runtime_generation,
-                                            /*attempt=*/0U)) {
-                                        throw std::runtime_error(
-                                            "could not own exact TCP reset "
-                                            "cleanup timer");
-                                    }
-                                    installed_reset_rule =
-                                        std::move(reset_rule);
-                                } catch (...) {
-                                    (void)retire_exact_tcp_reset(reset_rule);
-                                    ++failed;
-                                    acknowledge(pending.decision, false);
-                                    continue;
-                                }
-                            }
                             try {
                                 result = conntrack_manager_.
                                     delete_exact_forwarded_flow(
                                         pending.flow, owned_mask);
                             } catch (...) {
-                                if (installed_reset_rule.has_value()) {
-                                    (void)retire_exact_tcp_reset(
-                                        *installed_reset_rule);
-                                }
                                 ++failed;
                                 acknowledge(pending.decision, false);
                                 continue;
@@ -6979,25 +7229,14 @@ void Daemon::commit_idle_stall_observation(
                             if (result ==
                                 ConntrackCleanupResult::Succeeded) {
                                 ++succeeded;
-                                if (installed_reset_rule.has_value()) {
-                                    ++preventive_resets;
-                                }
                                 acknowledge(pending.decision, true);
                             } else if (result ==
                                        ConntrackCleanupResult::
                                            CommandUnavailable) {
-                                if (installed_reset_rule.has_value()) {
-                                    (void)retire_exact_tcp_reset(
-                                        *installed_reset_rule);
-                                }
                                 command_unavailable = true;
                                 acknowledge(pending.decision, false);
                                 break;
                             } else {
-                                if (installed_reset_rule.has_value()) {
-                                    (void)retire_exact_tcp_reset(
-                                        *installed_reset_rule);
-                                }
                                 ++failed;
                                 acknowledge(pending.decision, false);
                             }

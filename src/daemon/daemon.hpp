@@ -86,6 +86,7 @@ class RuntimeFirewallOperationOwner;
 class RuntimeFirewallPreownedTerminalContinuation;
 struct RuntimeFirewallOperationContext;
 enum class RuntimeFirewallLifecycleKind : std::uint8_t;
+struct RuntimeExactTcpResetPointMutationTarget;
 enum class RuntimeConfigGenerationPublicationMode : std::uint8_t {
     staged_save,
     staged_bootstrap_from_stopped,
@@ -304,6 +305,7 @@ struct PendingExactTcpResetCleanup {
     std::size_t attempt{0U};
     std::uint64_t schedule_serial{0U};
     int task_id{-1};
+    bool worker_inflight{false};
 };
 
 enum class RemoteListPreparationMode {
@@ -638,6 +640,10 @@ private:
     bool runtime_firewall_lifecycle_generation_is_current(
         RuntimeFirewallLifecycleKind lifecycle_kind,
         std::uint64_t expected_generation) const noexcept;
+    bool begin_preowned_runtime_firewall_exact_tcp_reset_point(
+        std::unique_ptr<RuntimeMutationAdmission::Lease>& lease,
+        RuntimeExactTcpResetPointMutationTarget target,
+        RuntimeFirewallPreownedTerminalContinuation& continuation) noexcept;
     bool begin_preowned_runtime_firewall_cold_boot(
         const std::shared_ptr<DaemonColdBootTransaction>& transaction,
         std::unique_ptr<RuntimeMutationAdmission::Lease>& lease,
@@ -806,6 +812,15 @@ private:
         const FirewallExactTcpResetRule& rule,
         std::uint64_t expected_runtime_generation,
         std::size_t attempt) noexcept;
+    std::optional<std::uint64_t> reserve_exact_tcp_reset_cleanup(
+        const FirewallExactTcpResetRule& rule,
+        std::uint64_t expected_runtime_generation) noexcept;
+    bool begin_idle_stall_exact_tcp_reset_point(
+        std::uint64_t expected_runtime_generation,
+        std::uint64_t expected_coverage_generation,
+        std::uint32_t owned_mask,
+        IdleStallDeleteDecision decision,
+        ConntrackExactForwardedFlow flow) noexcept;
     void run_exact_tcp_reset_cleanup(
         std::uint64_t schedule_serial) noexcept;
     void forget_exact_tcp_reset_cleanup(

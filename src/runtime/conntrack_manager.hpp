@@ -174,6 +174,19 @@ struct ConntrackExactForwardedFlow {
     }
 };
 
+enum class ConntrackExactFlowObservationStatus {
+    Observed,
+    Absent,
+    CommandUnavailable,
+    Failed,
+};
+
+struct ConntrackExactFlowObservationResult {
+    ConntrackExactFlowObservationStatus status{
+        ConntrackExactFlowObservationStatus::Failed};
+    std::optional<ConntrackExactForwardedFlow> flow;
+};
+
 struct ConntrackFlowObservationOptions {
     bool ipv6_enabled{true};
     std::size_t max_flows{256};
@@ -360,6 +373,16 @@ public:
         const std::vector<std::string>& media_seed_destination_cidrs = {},
         const std::set<uint32_t>& media_seed_owned_marks = {})
         const;
+
+    // Re-query one previously observed IPv4/TCP flow by its complete original
+    // 5-tuple and full-width non-zero keen-pbr-owned mark. A successful result
+    // returns the current TCP state and directional counters so a point
+    // mutation can prove that its frozen target has not progressed. Empty,
+    // unavailable, malformed, or ambiguous command results remain distinct;
+    // this method never mutates conntrack state.
+    ConntrackExactFlowObservationResult observe_exact_forwarded_flow(
+        const ConntrackExactForwardedFlow& frozen_flow,
+        uint32_t owned_mask) const;
 
     // Delete one previously observed flow by its full original 5-tuple and
     // full-width mark. By default marks with foreign bits are rejected. A

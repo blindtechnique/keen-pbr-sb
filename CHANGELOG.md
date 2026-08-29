@@ -66,6 +66,15 @@
   STOP-транзакцию со строгим доказательством, что и обычное завершение
   процесса, и лишь затем закрывает admission, owner и executors; недоказанный
   исход остаётся `broken`.
+- Короткоживущее exact TCP-reset правило для preventive WhatsApp recovery
+  больше не устанавливается и не удаляется прямыми вызовами из control loop или
+  timer callback. Установка правила, повторное read-only наблюдение того же
+  IPv4/TCP 5-tuple с неизменившимися state/counters, точное удаление conntrack
+  и компенсационное удаление правила выполняются одной non-coalescing
+  point-транзакцией под той же physical mutation lease. Cleanup ledger
+  резервируется до первой backend-команды; неоднозначная публикация сохраняет
+  точную цель для cleanup, а generation change не обходит owner отдельным
+  firewall writer.
 - Единственный ответ на вопрос, активна ли маршрутизация, теперь принадлежит
   `RuntimeStateStore`; отдельное изменяемое поле `Daemon` удалено, а API/SSE
   строят проекцию из того же состояния.
