@@ -27,6 +27,8 @@ enum class RuntimeFirewallWorkerOperationKind : std::uint8_t {
     config_rollback,
     urltest_candidate,
     urltest_rollback,
+    keenetic_dns_candidate,
+    keenetic_dns_rollback,
 };
 
 constexpr bool runtime_firewall_worker_operation_is_config_generation(
@@ -39,6 +41,14 @@ constexpr bool runtime_firewall_worker_operation_is_urltest_generation(
     RuntimeFirewallWorkerOperationKind kind) noexcept {
     return kind == RuntimeFirewallWorkerOperationKind::urltest_candidate ||
            kind == RuntimeFirewallWorkerOperationKind::urltest_rollback;
+}
+
+constexpr bool runtime_firewall_worker_operation_is_keenetic_dns_generation(
+    RuntimeFirewallWorkerOperationKind kind) noexcept {
+    return kind ==
+               RuntimeFirewallWorkerOperationKind::keenetic_dns_candidate ||
+           kind ==
+               RuntimeFirewallWorkerOperationKind::keenetic_dns_rollback;
 }
 
 enum class RuntimeFirewallOwnedConntrackCleanupMode : std::uint8_t {

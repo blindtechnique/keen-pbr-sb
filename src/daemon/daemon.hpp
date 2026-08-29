@@ -92,6 +92,7 @@ enum class RuntimeConfigGenerationPublicationMode : std::uint8_t {
 };
 struct DaemonConfigGenerationTransaction;
 struct DaemonUrltestSelectionTransaction;
+struct DaemonKeeneticDnsRefreshTransaction;
 struct PlannedRoutingState;
 struct NdmsCatalogSnapshot;
 struct NdmsVpnServerServiceSnapshot;
@@ -954,7 +955,41 @@ private:
         std::uint64_t runtime_generation);
     bool commit_keenetic_dns_refresh_result(
         std::uint64_t generation,
-        const KeeneticDnsRefreshResult& result);
+        const KeeneticDnsRefreshResult& result,
+        const RuntimeMutationLeaseHandoff& mutation_lease);
+    bool begin_preowned_runtime_firewall_keenetic_dns_refresh(
+        std::uint64_t generation,
+        KeeneticDnsCacheView candidate_view,
+        std::shared_ptr<const ListCacheGenerationSnapshot>
+            list_cache_snapshot,
+        std::unique_ptr<RuntimeMutationAdmission::Lease>& lease) noexcept;
+    bool start_preowned_runtime_firewall_keenetic_dns_phase(
+        const std::shared_ptr<DaemonKeeneticDnsRefreshTransaction>&
+            transaction,
+        RuntimeFirewallLifecycleKind lifecycle_kind,
+        std::unique_ptr<RuntimeMutationAdmission::Lease>& lease,
+        RuntimeFirewallPreownedTerminalContinuation& continuation) noexcept;
+    void complete_preowned_runtime_firewall_keenetic_dns_candidate(
+        const std::shared_ptr<DaemonKeeneticDnsRefreshTransaction>&
+            transaction,
+        RuntimeFirewallLifecycleTerminal terminal,
+        std::unique_ptr<RuntimeMutationAdmission::Lease> lease) noexcept;
+    void complete_preowned_runtime_firewall_keenetic_dns_rollback(
+        const std::shared_ptr<DaemonKeeneticDnsRefreshTransaction>&
+            transaction,
+        RuntimeFirewallLifecycleTerminal terminal,
+        std::unique_ptr<RuntimeMutationAdmission::Lease> lease) noexcept;
+    bool publish_prepared_runtime_firewall_keenetic_dns_candidate(
+        const std::shared_ptr<DaemonKeeneticDnsRefreshTransaction>&
+            transaction) noexcept;
+    bool publish_prepared_runtime_firewall_keenetic_dns_rollback(
+        const std::shared_ptr<DaemonKeeneticDnsRefreshTransaction>&
+            transaction) noexcept;
+    void finish_preowned_runtime_firewall_keenetic_dns_refresh(
+        const std::shared_ptr<DaemonKeeneticDnsRefreshTransaction>&
+            transaction,
+        RuntimeFirewallLifecycleTerminal terminal,
+        std::unique_ptr<RuntimeMutationAdmission::Lease> lease) noexcept;
     void reset_resolver_actual_state();
     void commit_resolver_hash_probe_result(const std::string& resolver_addr,
                                            std::uint64_t generation,
@@ -1125,7 +1160,9 @@ private:
         std::shared_ptr<const ListCacheGenerationSnapshot>
             list_cache_snapshot = nullptr,
         std::optional<std::vector<std::string>>
-            trusted_dns_interfaces_override = std::nullopt);
+            trusted_dns_interfaces_override = std::nullopt,
+        const KeeneticDnsCacheView*
+            keenetic_dns_override = nullptr);
     // Schedule (or reschedule) the periodic refresh of resolver_config_hash_actual_.
     void schedule_resolver_config_hash_actual_refresh();
     void schedule_resolver_config_hash_actual_after(

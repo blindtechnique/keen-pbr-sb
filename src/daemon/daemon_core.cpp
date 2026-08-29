@@ -1,4 +1,5 @@
 #include "daemon.hpp"
+#include "keenetic_dns_firewall_lifecycle_policy.hpp"
 
 #include "../keenetic/ndms_native_writer_lease.hpp"
 
@@ -303,6 +304,7 @@ nlohmann::json list_refresh_task_json(
 
 struct RuntimeFirewallStartRollbackResult;
 struct DaemonUrltestSelectionTransaction;
+struct DaemonKeeneticDnsRefreshTransaction;
 
 struct DaemonRuntimeFirewallOperationState final
     : RuntimeFirewallOperationDomainState {
@@ -393,6 +395,8 @@ struct DaemonRuntimeFirewallOperationState final
         config_generation_transaction;
     std::shared_ptr<DaemonUrltestSelectionTransaction>
         urltest_selection_transaction;
+    std::shared_ptr<DaemonKeeneticDnsRefreshTransaction>
+        keenetic_dns_refresh_transaction;
     std::optional<ConfigTerminalOperationIdentity>
         config_operation_identity;
     std::shared_ptr<const ResolverGenerationSnapshot>
@@ -492,6 +496,49 @@ struct DaemonUrltestSelectionTransaction final {
     // invalidated before the first private candidate is queued. A verified
     // candidate/rollback installs replacement maintenance; a clean
     // pre-COMMIT rejection requests one fresh published-state reconciliation.
+    bool maintenance_fence_invalidated{false};
+    bool candidate_published{false};
+    std::string candidate_failure_detail;
+};
+
+// One periodic Keenetic DNS observation owns this private transaction from
+// exact admission through either verified candidate publication, a verified
+// candidate+resolver rollback, or fail-closed recovery. Published DNS,
+// firewall and resolver cursors stay on the previous generation throughout
+// both worker phases.
+struct DaemonKeeneticDnsRefreshTransaction final {
+    KeeneticDnsFirewallTerminalOrchestrator terminal_orchestrator;
+    KeeneticDnsCacheView candidate_view;
+    KeeneticDnsCacheView rollback_view;
+    std::shared_ptr<const ListCacheGenerationSnapshot> list_cache_snapshot;
+    std::shared_ptr<const ResolverGenerationSnapshot>
+        candidate_resolver_generation;
+    std::shared_ptr<const ResolverGenerationSnapshot>
+        rollback_resolver_generation;
+    std::shared_ptr<const ResolverGenerationSnapshot>
+        published_resolver_generation;
+    ResolverSyncCheckpoint published_resolver_sync;
+    ResolverSyncCheckpoint candidate_resolver_sync;
+    DaemonRuntimeFirewallOperationState::CorePublication
+        candidate_core_publication;
+    DaemonRuntimeFirewallOperationState::CorePublication
+        rollback_core_publication;
+    std::optional<MetaUdp443ActivationPlan> candidate_meta_activation_plan;
+    std::optional<MetaUdp443ActivationPlan> rollback_meta_activation_plan;
+    std::uint64_t runtime_generation{0U};
+    std::uint64_t mutation_lease_token{0U};
+    std::uint32_t published_resolver_retry_attempt{0U};
+    std::int64_t published_apply_started_ts{0};
+    std::int64_t candidate_apply_started_ts{0};
+    bool candidate_core_publication_ready{false};
+    bool rollback_core_publication_ready{false};
+    bool candidate_meta_filter_healthy{false};
+    bool candidate_meta_fastnat_healthy{false};
+    bool rollback_meta_filter_healthy{false};
+    bool rollback_meta_fastnat_healthy{false};
+    bool candidate_route_firewall_commit_proven{false};
+    bool candidate_exact_rollback_available{false};
+    bool candidate_firewall_preimage_is_base{false};
     bool maintenance_fence_invalidated{false};
     bool candidate_published{false};
     std::string candidate_failure_detail;
@@ -795,10 +842,11 @@ Daemon::Daemon(Config config,
                   std::move(task), "keenetic-dns-refresh-commit");
           },
           [this](std::uint64_t generation,
-                 const KeeneticDnsRefreshResult& result) {
-              return commit_keenetic_dns_refresh_result(
-                  generation, result);
-          })
+                 const KeeneticDnsRefreshResult& result,
+                 const RuntimeMutationLeaseHandoff& mutation_lease) {
+               return commit_keenetic_dns_refresh_result(
+                   generation, result, mutation_lease);
+           })
     , hook_command_executor_(std::move(hook_command_executor))
     , resolver_stream_coordinator_(
           resolver_hook_executor_,
@@ -4116,6 +4164,560 @@ bool Daemon::runtime_firewall_lifecycle_generation_is_current(
                runtime_generation_.load(std::memory_order_acquire);
 }
 
+bool Daemon::begin_preowned_runtime_firewall_keenetic_dns_refresh(
+    std::uint64_t generation,
+    KeeneticDnsCacheView candidate_view,
+    std::shared_ptr<const ListCacheGenerationSnapshot> list_cache_snapshot,
+    std::unique_ptr<RuntimeMutationAdmission::Lease>& lease) noexcept {
+    if (!lease || !static_cast<bool>(*lease) ||
+        !runtime_mutation_admission_.owns(*lease) ||
+        !runtime_firewall_lifecycle_generation_is_current(
+            RuntimeFirewallLifecycleKind::keenetic_dns_candidate,
+            generation) ||
+        runtime_firewall_owner_->shutdown_requested() ||
+        runtime_firewall_owner_->active_context() ||
+        runtime_firewall_owner_->pending_successor() ||
+        !list_cache_snapshot ||
+        !resolver_generation_snapshot_ ||
+        resolver_generation_snapshot_->generation != generation ||
+        !resolver_generation_snapshot_->list_cache_snapshot ||
+        list_cache_snapshot->fingerprints() !=
+            resolver_generation_snapshot_
+                ->list_cache_snapshot->fingerprints()) {
+        return false;
+    }
+
+    try {
+        auto transaction =
+            std::make_shared<DaemonKeeneticDnsRefreshTransaction>();
+        transaction->candidate_view = std::move(candidate_view);
+        transaction->rollback_view = active_keenetic_dns_;
+        transaction->list_cache_snapshot =
+            resolver_generation_snapshot_->list_cache_snapshot;
+        transaction->published_resolver_generation =
+            resolver_generation_snapshot_;
+        transaction->published_resolver_sync =
+            resolver_sync_.checkpoint();
+        transaction->published_resolver_retry_attempt =
+            resolver_config_hash_actual_retry_attempt_;
+        transaction->published_apply_started_ts =
+            apply_started_ts_.load(std::memory_order_acquire);
+        transaction->runtime_generation = generation;
+        transaction->mutation_lease_token = lease->token();
+        if (!transaction->terminal_orchestrator.begin(
+                transaction->mutation_lease_token)) {
+            return false;
+        }
+
+        auto candidate_generation =
+            make_resolver_generation_snapshot(
+                transaction->list_cache_snapshot,
+                resolver_generation_snapshot_
+                    ->trusted_dns_interfaces,
+                &transaction->candidate_view);
+        transaction->candidate_resolver_generation =
+            std::make_shared<ResolverGenerationSnapshot>(
+                std::move(candidate_generation));
+        transaction->rollback_resolver_generation =
+            transaction->published_resolver_generation;
+        transaction->candidate_apply_started_ts =
+            unix_timestamp_now_seconds();
+        transaction->candidate_resolver_sync =
+            transaction->published_resolver_sync;
+        transaction->candidate_resolver_sync.expected_hash =
+            transaction->candidate_resolver_generation->expected_hash;
+        transaction->candidate_resolver_sync.apply_started_ts =
+            transaction->candidate_apply_started_ts;
+        transaction->candidate_resolver_sync.runtime_active = true;
+        transaction->candidate_resolver_sync.resolver_configured = true;
+        transaction->candidate_resolver_sync
+            .consecutive_probe_failures = 0;
+
+        RuntimeFirewallPreownedTerminalContinuation continuation{
+            [this, transaction](
+                RuntimeFirewallLifecycleTerminal terminal,
+                std::unique_ptr<RuntimeMutationAdmission::Lease> exact)
+                noexcept {
+                complete_preowned_runtime_firewall_keenetic_dns_candidate(
+                    transaction,
+                    std::move(terminal),
+                    std::move(exact));
+            }};
+
+        // Fence delayed Meta/idle writers before the private firewall
+        // generation enters its route checkpoint. The exact mutation lease
+        // remains the sole cross-phase writer authority.
+        cancel_idle_stall_observer();
+        cancel_meta_udp443_activation_cleanup();
+        transaction->maintenance_fence_invalidated = true;
+        {
+            KPBR_LOCK_GUARD(udp_call_affinity_mutation_mutex_);
+        }
+
+        return start_preowned_runtime_firewall_keenetic_dns_phase(
+            transaction,
+            RuntimeFirewallLifecycleKind::keenetic_dns_candidate,
+            lease,
+            continuation);
+    } catch (...) {
+        return false;
+    }
+}
+
+bool Daemon::start_preowned_runtime_firewall_keenetic_dns_phase(
+    const std::shared_ptr<DaemonKeeneticDnsRefreshTransaction>& transaction,
+    RuntimeFirewallLifecycleKind lifecycle_kind,
+    std::unique_ptr<RuntimeMutationAdmission::Lease>& lease,
+    RuntimeFirewallPreownedTerminalContinuation& continuation) noexcept {
+    if (!transaction ||
+        !runtime_firewall_lifecycle_is_keenetic_dns_generation(
+            lifecycle_kind) ||
+        !lease || !static_cast<bool>(*lease) ||
+        lease->token() != transaction->mutation_lease_token ||
+        !runtime_mutation_admission_.owns(*lease) ||
+        !runtime_firewall_lifecycle_generation_is_current(
+            lifecycle_kind, transaction->runtime_generation) ||
+        runtime_firewall_owner_->shutdown_requested()) {
+        return false;
+    }
+
+    try {
+        auto state =
+            std::make_shared<DaemonRuntimeFirewallOperationState>();
+        state->keenetic_dns_refresh_transaction = transaction;
+        auto result = runtime_firewall_owner_->start_immediate_preowned(
+            0U,
+            transaction->runtime_generation,
+            {},
+            {},
+            /*schedule_catalog_refresh=*/false,
+            state,
+            runtime_mutation_admission_,
+            std::move(lease),
+            {},
+            lifecycle_kind,
+            std::move(continuation));
+        if (result.disposition ==
+            RuntimeFirewallImmediateDisposition::handed_off) {
+            return true;
+        }
+        lease = std::move(result.unaccepted_lease);
+        continuation = std::move(result.unaccepted_continuation);
+    } catch (...) {
+    }
+    return false;
+}
+
+void Daemon::complete_preowned_runtime_firewall_keenetic_dns_candidate(
+    const std::shared_ptr<DaemonKeeneticDnsRefreshTransaction>& transaction,
+    RuntimeFirewallLifecycleTerminal terminal,
+    std::unique_ptr<RuntimeMutationAdmission::Lease> lease) noexcept {
+    if (!transaction) return;
+
+    const std::uint64_t observed_lease_token =
+        lease && static_cast<bool>(*lease) ? lease->token() : 0U;
+    const bool exact_lease_owned =
+        lease && static_cast<bool>(*lease) &&
+        lease->token() == transaction->mutation_lease_token &&
+        runtime_mutation_admission_.owns(*lease);
+    const bool generation_current =
+        runtime_generation_.load(std::memory_order_acquire) ==
+        transaction->runtime_generation;
+    if (!terminal.detail.empty()) {
+        try {
+            transaction->candidate_failure_detail = terminal.detail;
+        } catch (...) {
+        }
+    }
+
+    const bool candidate_terminal_verified =
+        terminal.outcome ==
+            RuntimeFirewallLifecycleOutcome::verified_success &&
+        terminal.committed && !terminal.commit_ambiguous &&
+        exact_lease_owned && generation_current &&
+        transaction->terminal_orchestrator.resolver_stream_verified(
+            observed_lease_token);
+    const bool candidate_publication_succeeded =
+        candidate_terminal_verified &&
+        publish_prepared_runtime_firewall_keenetic_dns_candidate(
+            transaction);
+    const auto action =
+        transaction->terminal_orchestrator.complete_candidate(
+        KeeneticDnsCandidateTerminalEvidence{
+            terminal.outcome,
+            terminal.committed,
+            terminal.commit_ambiguous,
+            terminal.previous_generation_certainly_retained,
+            exact_lease_owned,
+            generation_current,
+            transaction->candidate_firewall_preimage_is_base,
+            transaction->candidate_core_publication_ready &&
+                transaction->candidate_route_firewall_commit_proven &&
+                !runtime_firewall_owner_->shutdown_requested(),
+            candidate_publication_succeeded,
+            transaction->candidate_exact_rollback_available,
+        },
+        observed_lease_token);
+    if (action ==
+        KeeneticDnsCandidateTerminalAction::publish_candidate) {
+        terminal.previous_generation_certainly_retained = false;
+        finish_preowned_runtime_firewall_keenetic_dns_refresh(
+            transaction, std::move(terminal), std::move(lease));
+        return;
+    }
+    if (action ==
+        KeeneticDnsCandidateTerminalAction::finish_clean_precommit) {
+        terminal.previous_generation_certainly_retained = true;
+        finish_preowned_runtime_firewall_keenetic_dns_refresh(
+            transaction, std::move(terminal), std::move(lease));
+        return;
+    }
+    if (action ==
+        KeeneticDnsCandidateTerminalAction::request_fresh_recovery) {
+        terminal.outcome =
+            RuntimeFirewallLifecycleOutcome::not_verified;
+        terminal.previous_generation_certainly_retained = false;
+        finish_preowned_runtime_firewall_keenetic_dns_refresh(
+            transaction, std::move(terminal), std::move(lease));
+        return;
+    }
+
+    RuntimeFirewallPreownedTerminalContinuation continuation;
+    try {
+        continuation = RuntimeFirewallPreownedTerminalContinuation{
+            [this, transaction](
+                RuntimeFirewallLifecycleTerminal rollback_terminal,
+                std::unique_ptr<RuntimeMutationAdmission::Lease> exact)
+                noexcept {
+                complete_preowned_runtime_firewall_keenetic_dns_rollback(
+                    transaction,
+                    std::move(rollback_terminal),
+                    std::move(exact));
+            }};
+    } catch (...) {
+        (void)transaction->terminal_orchestrator.complete_rollback(
+            terminal,
+            exact_lease_owned,
+            generation_current,
+            /*rollback_publication_succeeded=*/false,
+            observed_lease_token);
+        terminal.outcome =
+            RuntimeFirewallLifecycleOutcome::not_verified;
+        terminal.previous_generation_certainly_retained = false;
+        finish_preowned_runtime_firewall_keenetic_dns_refresh(
+            transaction, std::move(terminal), std::move(lease));
+        return;
+    }
+
+    if (!start_preowned_runtime_firewall_keenetic_dns_phase(
+            transaction,
+            RuntimeFirewallLifecycleKind::keenetic_dns_rollback,
+            lease,
+            continuation)) {
+        (void)transaction->terminal_orchestrator.complete_rollback(
+            terminal,
+            exact_lease_owned,
+            generation_current,
+            /*rollback_publication_succeeded=*/false,
+            observed_lease_token);
+        terminal.outcome =
+            RuntimeFirewallLifecycleOutcome::not_verified;
+        terminal.previous_generation_certainly_retained = false;
+        try {
+            terminal.detail =
+                "exact Keenetic DNS rollback owner was not admitted";
+        } catch (...) {
+        }
+        finish_preowned_runtime_firewall_keenetic_dns_refresh(
+            transaction, std::move(terminal), std::move(lease));
+    }
+}
+
+void Daemon::complete_preowned_runtime_firewall_keenetic_dns_rollback(
+    const std::shared_ptr<DaemonKeeneticDnsRefreshTransaction>& transaction,
+    RuntimeFirewallLifecycleTerminal terminal,
+    std::unique_ptr<RuntimeMutationAdmission::Lease> lease) noexcept {
+    if (!transaction) return;
+    const std::uint64_t observed_lease_token =
+        lease && static_cast<bool>(*lease) ? lease->token() : 0U;
+    const bool exact_lease_owned =
+        lease && static_cast<bool>(*lease) &&
+        lease->token() == transaction->mutation_lease_token &&
+        runtime_mutation_admission_.owns(*lease);
+    const bool generation_current =
+        runtime_generation_.load(std::memory_order_acquire) ==
+        transaction->runtime_generation;
+    const bool rollback_terminal_verified =
+        terminal.outcome ==
+            RuntimeFirewallLifecycleOutcome::verified_success &&
+        terminal.committed && !terminal.commit_ambiguous &&
+        exact_lease_owned && generation_current &&
+        transaction->terminal_orchestrator.resolver_stream_verified(
+            observed_lease_token);
+    const bool rollback_publication_succeeded =
+        rollback_terminal_verified &&
+        publish_prepared_runtime_firewall_keenetic_dns_rollback(
+            transaction);
+    const bool verified =
+        transaction->terminal_orchestrator.complete_rollback(
+            terminal,
+            exact_lease_owned,
+            generation_current,
+            rollback_publication_succeeded,
+            observed_lease_token) ==
+        KeeneticDnsRollbackTerminalAction::finish_verified_rollback;
+    terminal.previous_generation_certainly_retained = verified;
+    if (verified) {
+        try {
+            terminal.detail = transaction->candidate_failure_detail;
+        } catch (...) {
+        }
+    } else {
+        terminal.outcome =
+            RuntimeFirewallLifecycleOutcome::not_verified;
+        try {
+            const auto detail = terminal.detail;
+            terminal.detail =
+                "Keenetic DNS rollback was not verified";
+            if (!detail.empty()) {
+                terminal.detail += ": ";
+                terminal.detail += detail;
+            }
+        } catch (...) {
+        }
+    }
+    finish_preowned_runtime_firewall_keenetic_dns_refresh(
+        transaction, std::move(terminal), std::move(lease));
+}
+
+bool Daemon::publish_prepared_runtime_firewall_keenetic_dns_candidate(
+    const std::shared_ptr<DaemonKeeneticDnsRefreshTransaction>& transaction)
+    noexcept {
+    if (!transaction) return false;
+    return publish_keenetic_dns_generation_if_current(
+        [this, &transaction]() noexcept {
+            return !transaction->candidate_published &&
+                transaction->candidate_core_publication_ready &&
+                transaction->candidate_resolver_generation &&
+                runtime_generation_.load(std::memory_order_acquire) ==
+                    transaction->runtime_generation &&
+                resolver_generation_snapshot_ ==
+                    transaction->published_resolver_generation &&
+                active_keenetic_dns_.status ==
+                    transaction->rollback_view.status &&
+                active_keenetic_dns_.refreshed ==
+                    transaction->rollback_view.refreshed &&
+                active_keenetic_dns_.changed ==
+                    transaction->rollback_view.changed &&
+                active_keenetic_dns_.generation ==
+                    transaction->rollback_view.generation &&
+                active_keenetic_dns_.error ==
+                    transaction->rollback_view.error &&
+                active_keenetic_dns_.snapshot.has_value() ==
+                    transaction->rollback_view.snapshot.has_value() &&
+                (!active_keenetic_dns_.snapshot.has_value() ||
+                 keenetic_dns_snapshots_equal(
+                     *active_keenetic_dns_.snapshot,
+                     *transaction->rollback_view.snapshot));
+        },
+        [this, &transaction]() noexcept {
+        auto& publication = transaction->candidate_core_publication;
+        using std::swap;
+        swap(active_keenetic_dns_, transaction->candidate_view);
+        firewall_state_.swap_rules(publication.rules);
+        applied_list_content_state_.static_destinations.swap(
+            publication.list_content_state.static_destinations);
+        applied_list_content_state_.domain_entry_lists.swap(
+            publication.list_content_state.domain_entry_lists);
+        applied_list_content_state_.truncated_static_destination_lists.swap(
+            publication.list_content_state
+                .truncated_static_destination_lists);
+        applied_list_usage_.swap(publication.list_usage);
+        applied_list_fingerprints_.swap(publication.list_fingerprints);
+        resolved_internal_vpn_servers_.swap(
+            publication.internal_vpn_servers);
+        resolved_internal_vpn_service_targets_.swap(
+            publication.internal_vpn_service_targets);
+        applied_native_vpn_direct_egress_snat_selectors_.swap(
+            publication.native_vpn_direct_egress_snat_selectors);
+        committed_meta_udp443_fwmark_ = publication.committed_meta_fwmark;
+        committed_meta_udp443_owned_mask_ =
+            publication.committed_meta_owned_mask;
+        resolver_generation_snapshot_ =
+            transaction->candidate_resolver_generation;
+        resolver_sync_.restore(
+            std::move(transaction->candidate_resolver_sync));
+        resolver_config_hash_actual_retry_attempt_ = 0;
+        apply_started_ts_.store(
+            transaction->candidate_apply_started_ts,
+            std::memory_order_release);
+        transaction->candidate_published = true;
+        });
+}
+
+bool Daemon::publish_prepared_runtime_firewall_keenetic_dns_rollback(
+    const std::shared_ptr<DaemonKeeneticDnsRefreshTransaction>& transaction)
+    noexcept {
+    if (!transaction) return false;
+    return publish_keenetic_dns_generation_if_current(
+        [this, &transaction]() noexcept {
+            return !transaction->candidate_published &&
+                transaction->rollback_core_publication_ready &&
+                transaction->rollback_resolver_generation &&
+                runtime_generation_.load(std::memory_order_acquire) ==
+                    transaction->runtime_generation &&
+                resolver_generation_snapshot_ ==
+                    transaction->published_resolver_generation &&
+                active_keenetic_dns_.status ==
+                    transaction->rollback_view.status &&
+                active_keenetic_dns_.refreshed ==
+                    transaction->rollback_view.refreshed &&
+                active_keenetic_dns_.changed ==
+                    transaction->rollback_view.changed &&
+                active_keenetic_dns_.generation ==
+                    transaction->rollback_view.generation &&
+                active_keenetic_dns_.error ==
+                    transaction->rollback_view.error &&
+                active_keenetic_dns_.snapshot.has_value() ==
+                    transaction->rollback_view.snapshot.has_value() &&
+                (!active_keenetic_dns_.snapshot.has_value() ||
+                 keenetic_dns_snapshots_equal(
+                     *active_keenetic_dns_.snapshot,
+                     *transaction->rollback_view.snapshot));
+        },
+        [this, &transaction]() noexcept {
+        auto& publication = transaction->rollback_core_publication;
+        firewall_state_.swap_rules(publication.rules);
+        applied_list_content_state_.static_destinations.swap(
+            publication.list_content_state.static_destinations);
+        applied_list_content_state_.domain_entry_lists.swap(
+            publication.list_content_state.domain_entry_lists);
+        applied_list_content_state_.truncated_static_destination_lists.swap(
+            publication.list_content_state
+                .truncated_static_destination_lists);
+        applied_list_usage_.swap(publication.list_usage);
+        applied_list_fingerprints_.swap(publication.list_fingerprints);
+        resolved_internal_vpn_servers_.swap(
+            publication.internal_vpn_servers);
+        resolved_internal_vpn_service_targets_.swap(
+            publication.internal_vpn_service_targets);
+        applied_native_vpn_direct_egress_snat_selectors_.swap(
+            publication.native_vpn_direct_egress_snat_selectors);
+        committed_meta_udp443_fwmark_ = publication.committed_meta_fwmark;
+        committed_meta_udp443_owned_mask_ =
+            publication.committed_meta_owned_mask;
+        resolver_generation_snapshot_ =
+            transaction->rollback_resolver_generation;
+        resolver_sync_.restore(
+            std::move(transaction->published_resolver_sync));
+        resolver_config_hash_actual_retry_attempt_ =
+            transaction->published_resolver_retry_attempt;
+        apply_started_ts_.store(
+            transaction->published_apply_started_ts,
+            std::memory_order_release);
+        });
+}
+
+void Daemon::finish_preowned_runtime_firewall_keenetic_dns_refresh(
+    const std::shared_ptr<DaemonKeeneticDnsRefreshTransaction>& transaction,
+    RuntimeFirewallLifecycleTerminal terminal,
+    std::unique_ptr<RuntimeMutationAdmission::Lease> lease) noexcept {
+    if (!transaction) return;
+    const bool shutdown =
+        terminal.outcome == RuntimeFirewallLifecycleOutcome::shutdown ||
+        runtime_firewall_owner_->shutdown_requested();
+    const bool candidate_published = transaction->candidate_published;
+    const bool previous_generation_verified =
+        !candidate_published &&
+        terminal.previous_generation_certainly_retained;
+    const bool rollback_verified =
+        previous_generation_verified &&
+        transaction->rollback_core_publication_ready;
+    const bool clean_candidate_rejection =
+        previous_generation_verified && !rollback_verified;
+    const bool recovery_required =
+        !shutdown && !candidate_published &&
+        !previous_generation_verified;
+
+    const auto finish_meta_tail =
+        [this, transaction](
+            const std::optional<MetaUdp443ActivationPlan>& plan,
+            bool fastnat_healthy,
+            bool filter_healthy) noexcept {
+            try {
+                const auto cleanup_epoch =
+                    meta_udp443_cleanup_epoch_.load(
+                        std::memory_order_acquire);
+                if (plan.has_value()) {
+                    schedule_meta_udp443_activation_cleanup_retry(
+                        *plan,
+                        transaction->runtime_generation,
+                        cleanup_epoch,
+                        fastnat_healthy && filter_healthy ? 0U : 1U);
+                } else if (filter_healthy) {
+                    meta_udp443_incidents_.reset(
+                        "meta-udp443-activation");
+                }
+            } catch (...) {
+            }
+        };
+    if (!shutdown && candidate_published) {
+        finish_meta_tail(
+            transaction->candidate_meta_activation_plan,
+            transaction->candidate_meta_fastnat_healthy,
+            transaction->candidate_meta_filter_healthy);
+        reset_idle_stall_observer(/*schedule_if_eligible=*/true);
+    } else if (!shutdown && rollback_verified) {
+        finish_meta_tail(
+            transaction->rollback_meta_activation_plan,
+            transaction->rollback_meta_fastnat_healthy,
+            transaction->rollback_meta_filter_healthy);
+        reset_idle_stall_observer(/*schedule_if_eligible=*/true);
+    }
+
+    // The typed DNS transaction ends here. No fresh recovery owner, resolver
+    // retry or state publication is started until the physical writer token
+    // has been released.
+    lease.reset();
+    const bool recovery_dispatch_allowed =
+        transaction->terminal_orchestrator
+            .fresh_recovery_dispatch_allowed(
+            recovery_required,
+            lease && static_cast<bool>(*lease));
+
+    if (!shutdown && clean_candidate_rejection &&
+        transaction->maintenance_fence_invalidated) {
+        schedule_netfilter_runtime_refresh_noexcept(
+            NetfilterRefreshReason::full,
+            "Keenetic DNS clean rejection invalidated runtime maintenance");
+    }
+    if (recovery_dispatch_allowed) {
+        resolver_after_firewall_gate_.wait_for(
+            transaction->runtime_generation);
+        try {
+            runtime_firewall_owner_->schedule(
+                0U, transaction->runtime_generation, OwnedSnatRecovery{});
+        } catch (...) {
+            (void)resolver_after_firewall_gate_.release(
+                transaction->runtime_generation);
+        }
+        schedule_resolver_reload_retry(
+            0U, transaction->runtime_generation);
+    }
+    if (!shutdown &&
+        (candidate_published || rollback_verified ||
+         recovery_required)) {
+        try {
+            refresh_resolver_config_hash_actual_async();
+        } catch (...) {
+        }
+    }
+    try {
+        publish_runtime_state();
+    } catch (...) {
+    }
+}
+
 bool Daemon::begin_preowned_runtime_firewall_urltest_selection(
     std::unique_ptr<RuntimeMutationAdmission::Lease>& lease,
     const UrltestSelectionChange& change,
@@ -6341,6 +6943,9 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
     const bool lifecycle_urltest_generation =
         runtime_firewall_lifecycle_is_urltest_generation(
             context->lifecycle_kind);
+    const bool lifecycle_keenetic_dns_generation =
+        runtime_firewall_lifecycle_is_keenetic_dns_generation(
+            context->lifecycle_kind);
     const bool lifecycle_preowned =
         runtime_firewall_lifecycle_uses_preowned_continuation(
             context->lifecycle_kind);
@@ -6390,6 +6995,20 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                 preparation_failure;
         state.preworker_failure_detail =
             "URLTEST selection transaction is unavailable";
+        runtime_firewall_owner_->terminate_before_worker(
+            context,
+            queued_claim,
+            RuntimeFirewallOperationContext::SuccessorMode::none,
+            /*force_rerun=*/false);
+        return;
+    }
+    if (lifecycle_keenetic_dns_generation &&
+        !state.keenetic_dns_refresh_transaction) {
+        state.preworker_failure_kind =
+            DaemonRuntimeFirewallOperationState::PreworkerFailureKind::
+                preparation_failure;
+        state.preworker_failure_detail =
+            "Keenetic DNS refresh transaction is unavailable";
         runtime_firewall_owner_->terminate_before_worker(
             context,
             queued_claim,
@@ -6572,6 +7191,33 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
             state.lifecycle_resolver_verified = true;
             state.list_cache_snapshot =
                 state.urltest_selection_transaction->list_cache_snapshot;
+        } else if (lifecycle_keenetic_dns_generation) {
+            const auto& transaction =
+                *state.keenetic_dns_refresh_transaction;
+            state.internal_vpn_resolution.effective_servers =
+                resolved_internal_vpn_servers_;
+            state.internal_vpn_service_resolution.effective_targets =
+                resolved_internal_vpn_service_targets_;
+            state.lifecycle_trusted_dns_interfaces =
+                transaction.published_resolver_generation
+                ? transaction.published_resolver_generation
+                      ->trusted_dns_interfaces
+                : build_dnsmasq_trusted_interfaces(
+                      resolved_internal_vpn_servers_,
+                      resolved_internal_vpn_service_targets_);
+            state.list_cache_snapshot =
+                transaction.list_cache_snapshot;
+            state.private_resolver_generation =
+                runtime_firewall_lifecycle_is_keenetic_dns_candidate(
+                    context->lifecycle_kind)
+                ? transaction.candidate_resolver_generation
+                : transaction.rollback_resolver_generation;
+            if (!state.private_resolver_generation) {
+                throw DaemonError(
+                    "private Keenetic DNS resolver generation is unavailable");
+            }
+            state.resolver_refresh_required = true;
+            state.lifecycle_resolver_verified = false;
         } else if (lifecycle_preapply) {
             // Fence exactly the published generation. A cache refresh here
             // would silently turn pre-apply into candidate generation.
@@ -6666,8 +7312,17 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                                                 urltest_rollback
                                         ? RuntimeFirewallWorkerOperationKind::
                                               urltest_rollback
-                                        : RuntimeFirewallWorkerOperationKind::
-                                              reconcile_generation))));
+                                        : (runtime_firewall_lifecycle_is_keenetic_dns_candidate(
+                                               context->lifecycle_kind)
+                                               ? RuntimeFirewallWorkerOperationKind::
+                                                     keenetic_dns_candidate
+                                               : (context->lifecycle_kind ==
+                                                          RuntimeFirewallLifecycleKind::
+                                                              keenetic_dns_rollback
+                                                      ? RuntimeFirewallWorkerOperationKind::
+                                                            keenetic_dns_rollback
+                                                      : RuntimeFirewallWorkerOperationKind::
+                                                            reconcile_generation))))));
         auto& transaction = generation_snapshot.transaction;
         transaction.operation_serial = queued_claim.serial;
         transaction.runtime_generation = queued_claim.runtime_generation;
@@ -6706,6 +7361,16 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                        ->candidate_core_publication.committed) {
             config_generation_previous_publication =
                 &state.urltest_selection_transaction
+                     ->candidate_core_publication;
+        } else if (lifecycle_keenetic_dns_generation &&
+                   context->lifecycle_kind ==
+                       RuntimeFirewallLifecycleKind::keenetic_dns_rollback &&
+                   state.keenetic_dns_refresh_transaction
+                       ->candidate_core_publication_ready &&
+                   state.keenetic_dns_refresh_transaction
+                       ->candidate_core_publication.committed) {
+            config_generation_previous_publication =
+                &state.keenetic_dns_refresh_transaction
                      ->candidate_core_publication;
         }
         transaction.config = config_generation_target
@@ -6786,7 +7451,14 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
             opts_.udp_call_affinity_ipset_available;
         transaction.keenetic_dns_snapshot = config_generation_target
             ? config_generation_target->keenetic_dns.snapshot
-            : active_keenetic_dns_.snapshot;
+            : (lifecycle_keenetic_dns_generation
+                   ? (runtime_firewall_lifecycle_is_keenetic_dns_candidate(
+                              context->lifecycle_kind)
+                          ? state.keenetic_dns_refresh_transaction
+                                ->candidate_view.snapshot
+                          : state.keenetic_dns_refresh_transaction
+                                ->rollback_view.snapshot)
+                   : active_keenetic_dns_.snapshot);
         if (config_generation_previous_publication) {
             transaction.previous_rules =
                 config_generation_previous_publication->rules;
@@ -7346,9 +8018,13 @@ bool Daemon::begin_runtime_firewall_lifecycle_resolver(
     const bool lifecycle_config_generation = context &&
         runtime_firewall_lifecycle_is_config_generation(
             context->lifecycle_kind);
+    const bool lifecycle_keenetic_dns_generation = context &&
+        runtime_firewall_lifecycle_is_keenetic_dns_generation(
+            context->lifecycle_kind);
     if (!context || !runtime_firewall_owner_->is_active(context) ||
         (!lifecycle_start && !lifecycle_restart &&
-         !lifecycle_config_generation) ||
+         !lifecycle_config_generation &&
+         !lifecycle_keenetic_dns_generation) ||
         !context->domain_state) {
         return false;
     }
@@ -7356,7 +8032,8 @@ bool Daemon::begin_runtime_firewall_lifecycle_resolver(
         *context->domain_state);
     using Phase = DaemonRuntimeFirewallOperationState::
         LifecycleTailPhase;
-    if ((lifecycle_restart || lifecycle_config_generation) &&
+    if ((lifecycle_restart || lifecycle_config_generation ||
+         lifecycle_keenetic_dns_generation) &&
         !state.resolver_refresh_required) {
         state.lifecycle_resolver_verified = true;
         state.lifecycle_resolver_phase = Phase::completed;
@@ -7424,6 +8101,7 @@ bool Daemon::begin_runtime_firewall_lifecycle_resolver(
             return false;
         }
         if (!lifecycle_config_generation &&
+            !lifecycle_keenetic_dns_generation &&
             !state.resolver_generation_published) {
             apply_started_ts_.store(
                 unix_timestamp_now_seconds(),
@@ -7434,19 +8112,22 @@ bool Daemon::begin_runtime_firewall_lifecycle_resolver(
                     state.lifecycle_trusted_dns_interfaces));
             state.resolver_generation_published = true;
         }
-        if (lifecycle_config_generation &&
+        if ((lifecycle_config_generation ||
+             lifecycle_keenetic_dns_generation) &&
             !state.private_resolver_generation) {
-            fail("private configuration resolver generation is unavailable");
+            fail("private lifecycle resolver generation is unavailable");
             return false;
         }
         if (!lifecycle_config_generation &&
+            !lifecycle_keenetic_dns_generation &&
             !resolver_generation_snapshot_) {
             fail("lifecycle resolver generation was not published");
             return false;
         }
 
         auto generation = std::make_shared<ResolverGenerationSnapshot>(
-            *(lifecycle_config_generation
+            *((lifecycle_config_generation ||
+               lifecycle_keenetic_dns_generation)
                   ? state.private_resolver_generation
                   : resolver_generation_snapshot_));
         generation->stream_epoch =
@@ -7482,7 +8163,8 @@ bool Daemon::begin_runtime_firewall_lifecycle_resolver(
                     }
                 }
             });
-        if (!lifecycle_config_generation) {
+        if (!lifecycle_config_generation &&
+            !lifecycle_keenetic_dns_generation) {
             resolver_generation_snapshot_ = generation;
         } else {
             state.private_resolver_generation = generation;
@@ -7493,6 +8175,17 @@ bool Daemon::begin_runtime_firewall_lifecycle_resolver(
                         ->candidate_resolver_generation = generation;
                 } else {
                     state.config_generation_transaction
+                        ->rollback_resolver_generation = generation;
+                }
+            }
+            if (lifecycle_keenetic_dns_generation &&
+                state.keenetic_dns_refresh_transaction) {
+                if (runtime_firewall_lifecycle_is_keenetic_dns_candidate(
+                        context->lifecycle_kind)) {
+                    state.keenetic_dns_refresh_transaction
+                        ->candidate_resolver_generation = generation;
+                } else {
+                    state.keenetic_dns_refresh_transaction
                         ->rollback_resolver_generation = generation;
                 }
             }
@@ -7809,6 +8502,9 @@ void Daemon::drain_runtime_firewall_terminal(
             context->lifecycle_kind);
     const bool lifecycle_urltest_generation =
         runtime_firewall_lifecycle_is_urltest_generation(
+            context->lifecycle_kind);
+    const bool lifecycle_keenetic_dns_generation =
+        runtime_firewall_lifecycle_is_keenetic_dns_generation(
             context->lifecycle_kind);
     const bool lifecycle_preowned =
         runtime_firewall_lifecycle_uses_preowned_continuation(
@@ -8743,6 +9439,23 @@ void Daemon::drain_runtime_firewall_terminal(
                 std::move(urltest_terminal));
             return;
         }
+        if (lifecycle_keenetic_dns_generation) {
+            auto dns_terminal = prepare_urltest_generation_terminal(
+                shutdown
+                    ? RuntimeFirewallLifecycleOutcome::shutdown
+                    : RuntimeFirewallLifecycleOutcome::not_verified,
+                !shutdown);
+            auto permit = runtime_firewall_owner_->
+                prepare_preowned_continuation_finalization(context);
+            if (!permit.has_value()) return;
+            auto proof = drain->finish_coordinator_terminal();
+            if (!proof.has_value()) return;
+            (void)runtime_firewall_owner_->complete_preowned_continuation(
+                std::move(*permit),
+                std::move(*proof),
+                std::move(dns_terminal));
+            return;
+        }
         std::optional<RuntimeFirewallLifecycleTerminal>
             preapply_terminal;
         std::optional<OwnedSnatRecovery>
@@ -8839,6 +9552,23 @@ void Daemon::drain_runtime_firewall_terminal(
                 std::move(*permit),
                 std::move(*proof),
                 std::move(urltest_terminal));
+            return;
+        }
+        if (lifecycle_keenetic_dns_generation) {
+            auto dns_terminal = prepare_urltest_generation_terminal(
+                shutdown
+                    ? RuntimeFirewallLifecycleOutcome::shutdown
+                    : RuntimeFirewallLifecycleOutcome::not_verified,
+                !shutdown);
+            auto permit = runtime_firewall_owner_->
+                prepare_preowned_continuation_finalization(context);
+            if (!permit.has_value()) return;
+            auto proof = drain->finish_worker_terminal();
+            if (!proof.has_value()) return;
+            (void)runtime_firewall_owner_->complete_preowned_continuation(
+                std::move(*permit),
+                std::move(*proof),
+                std::move(dns_terminal));
             return;
         }
         std::optional<RuntimeFirewallLifecycleTerminal>
@@ -9383,6 +10113,7 @@ void Daemon::drain_runtime_firewall_terminal(
         const bool bounded_retry_required =
             !lifecycle_config_generation &&
             !lifecycle_urltest_generation &&
+            !lifecycle_keenetic_dns_generation &&
             !worker_succeeded &&
             !commit_ambiguous &&
             retryable_failure &&
@@ -9414,6 +10145,208 @@ void Daemon::drain_runtime_firewall_terminal(
             ? RuntimeFirewallOperationContext::SuccessorMode::
                   reschedule_retry
             : RuntimeFirewallOperationContext::SuccessorMode::none;
+    }
+
+    if (lifecycle_keenetic_dns_generation) {
+        if (!drain->begin_worker_control(runtime_firewall_retry_)) return;
+        // The DNS/firewall candidate remains private until the exact resolver
+        // stream has published the matching generation.
+        if (!drain->publish_worker_control(
+                []() noexcept { return true; })) {
+            return;
+        }
+
+        auto transaction = state.keenetic_dns_refresh_transaction;
+        const bool candidate_phase =
+            runtime_firewall_lifecycle_is_keenetic_dns_candidate(
+                context->lifecycle_kind);
+        const bool exact_generation =
+            runtime_generation_.load(std::memory_order_acquire) ==
+                context->queued_claim.runtime_generation;
+        const bool exact_route_checkpoint =
+            context->worker_input && worker_result &&
+            context->worker_input->route_health_request.route_epoch != 0U &&
+            routing_observation_epoch_.load(std::memory_order_acquire) ==
+                context->worker_input->route_health_request.route_epoch &&
+            worker_result->route_preparation.required &&
+            worker_result->route_preparation.worker_mutation_ack ==
+                std::optional<RuntimeRouteMutationAck>{
+                    RuntimeRouteMutationAck::applied} &&
+            worker_result->route_preparation.checkpoint_published &&
+            worker_result->route_preparation.mutation_ack ==
+                std::optional<RuntimeRouteMutationAck>{
+                    RuntimeRouteMutationAck::applied};
+        const bool route_firewall_commit_proven =
+            transaction && !shutdown && exact_generation &&
+            exact_route_checkpoint && context->worker_succeeded &&
+            !context->worker_commit_ambiguous;
+        if (transaction && candidate_phase) {
+            transaction->candidate_route_firewall_commit_proven =
+                route_firewall_commit_proven;
+            transaction->candidate_exact_rollback_available =
+                !shutdown && exact_generation &&
+                exact_route_checkpoint &&
+                !context->worker_commit_ambiguous;
+        }
+
+        if (!shutdown && context->worker_succeeded &&
+            !state.resolver_tail_finished) {
+            const bool resolver_admitted = transaction &&
+                transaction->terminal_orchestrator
+                    .admit_resolver_stream_after_firewall(
+                        route_firewall_commit_proven,
+                        transaction->mutation_lease_token);
+            if (resolver_admitted &&
+                begin_runtime_firewall_lifecycle_resolver(context)) {
+                drain->park_until_wake();
+                return;
+            }
+            state.resolver_tail_finished = true;
+            const bool resolver_terminal_accepted =
+                resolver_admitted &&
+                transaction->terminal_orchestrator
+                    .observe_resolver_stream_terminal(
+                        state.lifecycle_resolver_verified,
+                        transaction->mutation_lease_token);
+            if (!resolver_terminal_accepted ||
+                !state.lifecycle_resolver_verified) {
+                context->worker_succeeded = false;
+                state.worker_failure_transient = false;
+                if (state.worker_failure_detail.empty()) {
+                    state.worker_failure_detail =
+                        !resolver_admitted
+                        ? "Keenetic DNS route/firewall COMMIT proof was not "
+                          "available before resolver publication"
+                        : (state.lifecycle_failure_detail.empty()
+                               ? "Keenetic DNS resolver stream was not "
+                                 "verified"
+                               : state.lifecycle_failure_detail);
+                }
+            }
+        } else if (!context->worker_succeeded) {
+            state.lifecycle_resolver_verified = false;
+            state.resolver_tail_finished = true;
+        }
+        const bool verified = !shutdown && exact_generation &&
+            exact_route_checkpoint && context->worker_succeeded &&
+            state.lifecycle_resolver_verified;
+
+        bool route_preimage_certainly_retained = false;
+        if (state.worker_result_valid && worker_result) {
+            const auto& route = worker_result->route_preparation;
+            if (!route.required || !route.observation_succeeded) {
+                route_preimage_certainly_retained = true;
+            } else if (route.worker_mutation_ack.has_value()) {
+                route_preimage_certainly_retained =
+                    *route.worker_mutation_ack ==
+                        RuntimeRouteMutationAck::stale ||
+                    *route.worker_mutation_ack ==
+                        RuntimeRouteMutationAck::route_unavailable;
+            }
+        }
+        const bool previous_generation_certainly_retained =
+            state.worker_result_valid && worker_result &&
+            worker_result->previous_generation_certainly_retained() &&
+            route_preimage_certainly_retained;
+
+        if (transaction && candidate_phase) {
+            transaction->candidate_firewall_preimage_is_base =
+                !state.core_publication.committed &&
+                !context->worker_commit_ambiguous &&
+                previous_generation_certainly_retained;
+        }
+        if (transaction && state.core_publication.committed) {
+            auto& retained_publication = candidate_phase
+                ? transaction->candidate_core_publication
+                : transaction->rollback_core_publication;
+            bool& retained_ready = candidate_phase
+                ? transaction->candidate_core_publication_ready
+                : transaction->rollback_core_publication_ready;
+            if (!retained_ready) {
+                retained_publication = std::move(state.core_publication);
+                state.core_publication.prepared = true;
+                state.core_publication.committed = true;
+                auto& retained_meta_plan = candidate_phase
+                    ? transaction->candidate_meta_activation_plan
+                    : transaction->rollback_meta_activation_plan;
+                retained_meta_plan =
+                    std::move(state.candidate_meta_activation_plan);
+                const bool filter_healthy = worker_result &&
+                    worker_result->forward_udp_reject_after_commit.state ==
+                        std::optional<OwnedForwardUdpRejectState>{
+                            OwnedForwardUdpRejectState::healthy} &&
+                    !worker_result->forward_udp_reject_after_commit
+                         .failure.failed();
+                const bool fastnat_healthy =
+                    !retained_meta_plan.has_value() ||
+                    (worker_result &&
+                     worker_result->fastnat_after_commit
+                             .disabled_or_unavailable ==
+                         std::optional<bool>{true} &&
+                     !worker_result->fastnat_after_commit.failure.failed());
+                if (candidate_phase) {
+                    transaction->candidate_meta_filter_healthy =
+                        filter_healthy;
+                    transaction->candidate_meta_fastnat_healthy =
+                        fastnat_healthy;
+                } else {
+                    transaction->rollback_meta_filter_healthy =
+                        filter_healthy;
+                    transaction->rollback_meta_fastnat_healthy =
+                        fastnat_healthy;
+                }
+                retained_ready = true;
+            }
+        }
+
+        context->successor_mode =
+            RuntimeFirewallOperationContext::SuccessorMode::none;
+        state.suppress_coordinator_rerun = true;
+        OwnedSnatRecovery no_dns_cleanup;
+        if (!drain->complete_worker_control(
+                runtime_firewall_retry_, verified, no_dns_cleanup)) {
+            return;
+        }
+        const auto* completion = drain->worker_control_completion();
+        if (!completion || !completion->owned) return;
+        capture_completion(*completion);
+        context->force_successor = false;
+        if (!retained_worker_lease ||
+            !absorb_retained_mutation_lease()) {
+            return;
+        }
+        if (!settle_immediate_completion(
+                shutdown
+                    ? RuntimeFirewallImmediateTerminalOutcome::shutdown
+                    : (verified
+                           ? RuntimeFirewallImmediateTerminalOutcome::
+                                 verified_success
+                           : RuntimeFirewallImmediateTerminalOutcome::
+                                 not_verified))) {
+            return;
+        }
+
+        auto dns_terminal = prepare_urltest_generation_terminal(
+            shutdown
+                ? RuntimeFirewallLifecycleOutcome::shutdown
+                : (verified
+                       ? RuntimeFirewallLifecycleOutcome::verified_success
+                       : RuntimeFirewallLifecycleOutcome::not_verified),
+            previous_generation_certainly_retained);
+        if (verified) {
+            dns_terminal.committed = true;
+            dns_terminal.commit_ambiguous = false;
+        }
+        auto permit = runtime_firewall_owner_->
+            prepare_preowned_continuation_finalization(context);
+        if (!permit.has_value()) return;
+        auto proof = drain->finish_worker_terminal();
+        if (!proof.has_value()) return;
+        (void)runtime_firewall_owner_->complete_preowned_continuation(
+            std::move(*permit),
+            std::move(*proof),
+            std::move(dns_terminal));
+        return;
     }
 
     if (lifecycle_urltest_generation) {

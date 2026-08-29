@@ -104,6 +104,19 @@
   completion первого owner и возврата той же exact lease, без фабрикации или
   получения нового claim. Это не завершает P0-1: хвосты DNS, STOP и cleanup
   остаются.
+- Периодическое обновление Keenetic DNS больше не выполняет прямые firewall-
+  записи из `daemon_resolver`: типизированный exact handoff передаёт одну
+  physical mutation lease через private candidate и при необходимости exact
+  rollback единственного `RuntimeFirewallOperationOwner`. Resolver stream
+  начинается только после точного доказательства route checkpoint и
+  однозначного firewall COMMIT; DNS view, реализованный firewall core и
+  resolver cursor публикуются одним небросающим CAS/swap checkpoint. Ошибка
+  resolver после подтверждённого candidate и точная route-мутация при
+  неслучившемся firewall COMMIT восстанавливаются тем же token. Ambiguous
+  COMMIT, generation/CAS mismatch и недоказанный preimage не повторяют тело и
+  переходят к свежему recovery только после возврата lease. Неизменившийся
+  снимок не забирает lease у coordinator. Этот срез не меняет cold boot, STOP
+  и cleanup tails.
 - Внутренние изменения runtime/firewall из восстановления правил, URLTest,
   Keenetic DNS, отложенного старта и автообновления списков проходят через
   единого владельца мутации. Занятый владелец сохраняет один ограниченный

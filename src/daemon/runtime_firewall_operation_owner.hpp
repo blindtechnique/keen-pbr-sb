@@ -142,6 +142,11 @@ enum class RuntimeFirewallLifecycleKind : std::uint8_t {
     // Candidate and rollback retain one exact pre-owned mutation lease.
     urltest_candidate,
     urltest_rollback,
+    // A changed Keenetic DNS cache remains private until its firewall
+    // generation and resolver stream are both verified. Resolver failure
+    // advances to one exact rollback phase under the same physical lease.
+    keenetic_dns_candidate,
+    keenetic_dns_rollback,
 };
 
 constexpr bool runtime_firewall_lifecycle_is_foreground(
@@ -195,18 +200,31 @@ constexpr bool runtime_firewall_lifecycle_is_urltest_generation(
            kind == RuntimeFirewallLifecycleKind::urltest_rollback;
 }
 
+constexpr bool runtime_firewall_lifecycle_is_keenetic_dns_candidate(
+    RuntimeFirewallLifecycleKind kind) noexcept {
+    return kind == RuntimeFirewallLifecycleKind::keenetic_dns_candidate;
+}
+
+constexpr bool runtime_firewall_lifecycle_is_keenetic_dns_generation(
+    RuntimeFirewallLifecycleKind kind) noexcept {
+    return runtime_firewall_lifecycle_is_keenetic_dns_candidate(kind) ||
+           kind == RuntimeFirewallLifecycleKind::keenetic_dns_rollback;
+}
+
 constexpr bool runtime_firewall_lifecycle_uses_preowned_continuation(
     RuntimeFirewallLifecycleKind kind) noexcept {
     return runtime_firewall_lifecycle_is_preapply(kind) ||
            runtime_firewall_lifecycle_is_config_generation(kind) ||
-           runtime_firewall_lifecycle_is_urltest_generation(kind);
+           runtime_firewall_lifecycle_is_urltest_generation(kind) ||
+           runtime_firewall_lifecycle_is_keenetic_dns_generation(kind);
 }
 
 constexpr bool runtime_firewall_lifecycle_requires_resolver(
     RuntimeFirewallLifecycleKind kind) noexcept {
     return runtime_firewall_lifecycle_is_start(kind) ||
            runtime_firewall_lifecycle_is_restart(kind) ||
-           runtime_firewall_lifecycle_is_config_generation(kind);
+           runtime_firewall_lifecycle_is_config_generation(kind) ||
+           runtime_firewall_lifecycle_is_keenetic_dns_generation(kind);
 }
 
 constexpr bool runtime_firewall_lifecycle_uses_hot_retry(

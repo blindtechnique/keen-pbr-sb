@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../dns/keenetic_dns.hpp"
+#include "../runtime/runtime_mutation_admission.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -29,6 +30,10 @@ public:
     using CommitFn = std::function<bool(
         std::uint64_t runtime_generation,
         const KeeneticDnsRefreshResult& result)>;
+    using CommitWithLeaseFn = std::function<bool(
+        std::uint64_t runtime_generation,
+        const KeeneticDnsRefreshResult& result,
+        const RuntimeMutationLeaseHandoff& mutation_lease)>;
 
     enum class RequestResult : std::uint8_t {
         started,
@@ -42,6 +47,12 @@ public:
         RefreshFn refresh,
         PostControlFn post_control,
         CommitFn commit);
+    KeeneticDnsRefreshCoordinator(
+        BlockingExecutor& executor,
+        PeriodicTaskMetricsRegistry& metrics,
+        RefreshFn refresh,
+        PostControlFn post_control,
+        CommitWithLeaseFn commit);
     ~KeeneticDnsRefreshCoordinator();
 
     KeeneticDnsRefreshCoordinator(
@@ -49,12 +60,14 @@ public:
     KeeneticDnsRefreshCoordinator& operator=(
         const KeeneticDnsRefreshCoordinator&) = delete;
 
-    // `operation_lifetime` is retained from worker admission through the
-    // terminal control-loop commit. Production uses it for the single runtime
-    // mutation lease; tests and read-only callers may leave it empty.
+    // The copyable handoff retains one exact move-only mutation lease from
+    // worker admission through the terminal control-loop commit. The commit
+    // callback may take it exactly once and transfer that same physical token
+    // into an asynchronous owner; an untaken handle releases the token when
+    // this single-flight claim retires.
     RequestResult request(
         std::uint64_t runtime_generation,
-        std::shared_ptr<void> operation_lifetime = {}) noexcept;
+        RuntimeMutationLeaseHandoff mutation_lease = {}) noexcept;
 
     // Prevents new work, waits for callbacks already using the owner, and
     // suppresses queued worker/control callbacks that have not started yet.

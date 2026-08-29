@@ -1,6 +1,5 @@
 #include "daemon.hpp"
 #include "runtime_firewall_operation_owner.hpp"
-#include "keenetic_dns_refresh_transaction.hpp"
 
 #include "../dns/dnsmasq_access_policy.hpp"
 #include "../dns/keenetic_dns.hpp"
@@ -78,7 +77,8 @@ ResolverGenerationSnapshot Daemon::make_resolver_generation_snapshot(
     std::shared_ptr<const ListCacheGenerationSnapshot>
         list_cache_snapshot,
     std::optional<std::vector<std::string>>
-        trusted_dns_interfaces_override) {
+        trusted_dns_interfaces_override,
+    const KeeneticDnsCacheView* keenetic_dns_override) {
     if (!list_cache_snapshot) {
         list_cache_snapshot =
             capture_relevant_list_cache_generation(config_);
@@ -97,7 +97,9 @@ ResolverGenerationSnapshot Daemon::make_resolver_generation_snapshot(
             resolved_internal_vpn_service_targets_);
     RuntimeResolverGenerationInput input;
     input.config = config_;
-    input.keenetic_dns = active_keenetic_dns_;
+    input.keenetic_dns = keenetic_dns_override
+        ? *keenetic_dns_override
+        : active_keenetic_dns_;
     input.list_cache_snapshot = std::move(list_cache_snapshot);
     input.list_max_file_size_bytes = max_file_size_bytes(config_);
     input.resolver_type = resolver_type;
@@ -280,13 +282,12 @@ void Daemon::request_keenetic_dns_refresh() {
         return;
     }
 
-    auto mutation_lease =
-        std::make_shared<RuntimeMutationAdmission::Lease>(
-            std::move(*admitted));
+    RuntimeMutationLeaseHandoff mutation_lease{
+        std::make_unique<RuntimeMutationAdmission::Lease>(
+            std::move(*admitted))};
     const auto request = keenetic_dns_refresh_coordinator_.request(
         generation, mutation_lease);
     if (request == KeeneticDnsRefreshCoordinator::RequestResult::rejected) {
-        mutation_lease.reset();
         Logger::instance().verbose(
             "Keenetic DNS refresh worker rejected generation {}.",
             generation);
@@ -330,7 +331,8 @@ void Daemon::schedule_deferred_keenetic_dns_refresh(
 
 bool Daemon::commit_keenetic_dns_refresh_result(
     std::uint64_t generation,
-    const KeeneticDnsRefreshResult& result) {
+    const KeeneticDnsRefreshResult& result,
+    const RuntimeMutationLeaseHandoff& mutation_lease) {
     if (generation != runtime_generation_.load(std::memory_order_acquire) ||
         !routing_runtime_active() ||
         !config_uses_keenetic_dns(config_.dns)) {
@@ -380,297 +382,38 @@ bool Daemon::commit_keenetic_dns_refresh_result(
         return false;
     }
 
-    // Capture once from the single-writer CacheManager. The immutable lease
-    // keeps every selected body alive while candidate apply, dnsmasq stream
-    // and rollback run, without blocking an unrelated list publication for
-    // the complete resolver IPC wait.
+    // From this point the control callback may only prepare immutable
+    // candidate state and transfer its exact writer. Firewall, route and
+    // resolver mutations are owned asynchronously by the typed lifecycle.
+    auto taken = mutation_lease.take();
+    if (!taken ||
+        !runtime_mutation_admission_.owns(*taken.lease)) {
+        Logger::instance().error(
+            "Keenetic DNS refresh lost its exact mutation lease before "
+            "firewall owner handoff");
+        return false;
+    }
+
     const auto list_cache_snapshot =
         capture_relevant_list_cache_generation(config_);
-
-    KeeneticDnsCacheView previous = active_keenetic_dns_;
-    auto previous_resolver_generation =
-        resolver_generation_snapshot_;
-    ResolverSyncCheckpoint previous_resolver_sync =
-        resolver_sync_.checkpoint();
-    ResolverSyncCheckpoint rollback_resolver_sync =
-        previous_resolver_sync;
-    const std::uint32_t previous_resolver_retry_attempt =
-        resolver_config_hash_actual_retry_attempt_;
-    const std::int64_t previous_apply_started_ts =
-        apply_started_ts_.load(std::memory_order_acquire);
-    const bool firewall_snapshot_changed =
-        !previous.snapshot.has_value() ||
-        previous.snapshot->addresses != result.snapshot->addresses;
-    const std::string previous_resolver_hash =
-        resolver_sync_.snapshot(unix_timestamp_now_seconds()).expected_hash;
-    KeeneticDnsCacheView candidate_view = refreshed_view;
-    static_assert(
-        std::is_nothrow_swappable_v<KeeneticDnsCacheView>,
-        "Keenetic DNS transaction requires noexcept cache-view restore");
-    bool resolver_hash_changed = false;
-    bool rollback_resolver_hash_changed = false;
-    const auto transaction = run_keenetic_dns_refresh_transaction(
-        firewall_snapshot_changed,
-        [this, &candidate_view]() noexcept {
-            using std::swap;
-            swap(active_keenetic_dns_, candidate_view);
-        },
-        [this, &list_cache_snapshot]() {
-            // Keenetic DNS addresses participate in OUTPUT/PREROUTING detour
-            // marks, so a changed address snapshot must reach firewall before
-            // the matching resolver generation is streamed. Do not run the
-            // hot-retry sleeps from this control-loop callback: one bounded
-            // attempt establishes the transaction result, while the existing
-            // generation-fenced runtime recovery owns any later retries.
-            apply_firewall(
-                FirewallApplyMode::PreserveSets,
-                list_cache_snapshot);
-        },
-        [this,
-         &list_cache_snapshot,
-         &resolver_hash_changed,
-         &previous_resolver_hash](bool& resolver_stream_attempted) {
-            auto resolver_generation =
-                make_resolver_generation_snapshot(list_cache_snapshot);
-            resolver_hash_changed =
-                resolver_generation.expected_hash != previous_resolver_hash;
-            if (resolver_hash_changed) {
-                apply_started_ts_.store(
-                    unix_timestamp_now_seconds(),
-                    std::memory_order_release);
-            }
-            commit_resolver_generation_snapshot(
-                std::move(resolver_generation));
-            if (resolver_hash_changed) {
-                resolver_stream_attempted = true;
-                if (!run_system_resolver_hook_stream_prepared(
-                        "reload", /*rebuild_snapshot=*/false)) {
-                    throw DaemonError(
-                        "Keenetic DNS resolver reload did not complete its configuration stream");
-                }
-            }
-        },
-        [this,
-         &previous,
-         &previous_resolver_generation,
-         &previous_resolver_sync,
-         previous_resolver_retry_attempt,
-         previous_apply_started_ts]() noexcept {
-            using std::swap;
-            swap(active_keenetic_dns_, previous);
-            resolver_generation_snapshot_.swap(
-                previous_resolver_generation);
-            resolver_sync_.restore(std::move(previous_resolver_sync));
-            resolver_config_hash_actual_retry_attempt_ =
-                previous_resolver_retry_attempt;
-            apply_started_ts_.store(
-                previous_apply_started_ts,
-                std::memory_order_release);
-        },
-        [this, &list_cache_snapshot]() {
-            // A list refresh may have published a new immutable cache body
-            // immediately before this transaction captured its lease. Rebuild
-            // the previous DNS view over that pinned list generation instead
-            // of claiming an exact historical list rollback. Rollback also
-            // gets one immediate attempt; a failure is handed to the same
-            // generation-fenced recovery chain instead of sleeping here.
-            apply_firewall(
-                FirewallApplyMode::PreserveSets,
-                list_cache_snapshot);
-        },
-        [this,
-         &list_cache_snapshot,
-         &rollback_resolver_sync,
-         &rollback_resolver_hash_changed,
-         &previous_resolver_hash,
-         previous_resolver_retry_attempt,
-         previous_apply_started_ts]() {
-            const std::int64_t rollback_started_ts =
-                unix_timestamp_now_seconds();
-            apply_started_ts_.store(
-                rollback_started_ts, std::memory_order_release);
-            resolver_sync_.apply_started(
-                rollback_started_ts, previous_resolver_hash);
-            const auto restore_observation = [this,
-                                              &rollback_resolver_sync,
-                                              previous_resolver_retry_attempt,
-                                              previous_apply_started_ts]()
-                                                 noexcept {
-                resolver_sync_.restore(
-                    std::move(rollback_resolver_sync));
-                resolver_config_hash_actual_retry_attempt_ =
-                    previous_resolver_retry_attempt;
-                apply_started_ts_.store(
-                    previous_apply_started_ts,
-                    std::memory_order_release);
-            };
-            try {
-                auto rollback_generation =
-                    make_resolver_generation_snapshot(
-                        list_cache_snapshot);
-                rollback_resolver_hash_changed =
-                    rollback_generation.expected_hash !=
-                    previous_resolver_hash;
-                if (!rollback_resolver_hash_changed) {
-                    rollback_resolver_sync.expected_hash =
-                        rollback_generation.expected_hash;
-                }
-                commit_resolver_generation_snapshot(
-                    std::move(rollback_generation));
-                if (!run_system_resolver_hook_stream_prepared(
-                        "reload", /*rebuild_snapshot=*/false)) {
-                    throw DaemonError(
-                        "Previous Keenetic DNS resolver generation did not complete its configuration stream");
-                }
-            } catch (...) {
-                const std::exception_ptr rollback_failure =
-                    std::current_exception();
-                // The candidate stream and its rollback are both uncertain.
-                // Do not restore a historical CONVERGED observation while
-                // dnsmasq may contain either (or partial) bytes. The bounded
-                // resolver retry and actual-hash probe own convergence now.
-                resolver_sync_.probe_failed(
-                    ResolverConfigHashProbeStatus::QUERY_FAILED,
-                    rollback_started_ts);
-                std::rethrow_exception(rollback_failure);
-            }
-            // Streaming the rollback is an external repair, not a new user
-            // apply. Preserve the previous probe/backoff observations instead
-            // of resetting them through commit_resolver_generation_snapshot().
-            if (!rollback_resolver_hash_changed) {
-                restore_observation();
-            }
-        });
-
-    if (transaction.committed) {
-        if (resolver_hash_changed) {
-            refresh_resolver_config_hash_actual_async();
-        }
-        publish_runtime_state();
-        return true;
+    auto lease = std::move(taken.lease);
+    if (!begin_preowned_runtime_firewall_keenetic_dns_refresh(
+            generation,
+            refreshed_view,
+            list_cache_snapshot,
+            lease)) {
+        // Rejection leaves the exact token in `lease`; its destruction
+        // releases admission before the coordinator can launch a trailing
+        // observation. No kernel or resolver body was submitted.
+        Logger::instance().verbose(
+            "Keenetic DNS firewall owner rejected the private candidate");
+        lease.reset();
+        schedule_netfilter_runtime_refresh_noexcept(
+            NetfilterRefreshReason::full,
+            "Keenetic DNS owner handoff rejected after maintenance fence");
+        return false;
     }
-
-    const auto describe_failure = [](const std::exception_ptr& failure) {
-        if (!failure) {
-            return std::string{"unknown error"};
-        }
-        try {
-            std::rethrow_exception(failure);
-        } catch (const std::exception& error) {
-            return std::string{error.what()};
-        } catch (...) {
-            return std::string{"unknown error"};
-        }
-    };
-
-    const auto current_generation =
-        runtime_generation_.load(std::memory_order_acquire);
-    if (transaction.recovery ==
-            KeeneticDnsRefreshRecovery::firewall_only ||
-        transaction.recovery ==
-            KeeneticDnsRefreshRecovery::firewall_then_resolver) {
-        try {
-            Logger::instance().error(
-                "Failed to restore the previous Keenetic DNS firewall "
-                "generation; bounded runtime recovery is pending: {}",
-                describe_failure(transaction.recovery_failure));
-        } catch (...) {
-        }
-    } else if (transaction.recovery ==
-               KeeneticDnsRefreshRecovery::resolver_only) {
-        try {
-            Logger::instance().error(
-                "Failed to restore the previous Keenetic DNS resolver "
-                "generation; bounded resolver recovery is pending: {}",
-                describe_failure(transaction.recovery_failure));
-        } catch (...) {
-        }
-    } else if (transaction.recovery_failure) {
-        try {
-            Logger::instance().error(
-                "Failed to restore the previous Keenetic DNS in-memory "
-                "generation: {}",
-                describe_failure(transaction.recovery_failure));
-        } catch (...) {
-        }
-    }
-
-    const std::exception_ptr recovery_dispatch_failure =
-        dispatch_keenetic_dns_refresh_recovery(
-            transaction.recovery,
-            [this, current_generation]() noexcept {
-                const bool already_waiting =
-                    resolver_after_firewall_gate_.waiting_for(
-                        current_generation);
-                resolver_after_firewall_gate_.wait_for(
-                    current_generation);
-                return !already_waiting;
-            },
-            [this, current_generation]() noexcept {
-                (void)resolver_after_firewall_gate_.release(
-                    current_generation);
-            },
-            [this, current_generation]() {
-                runtime_firewall_owner_->schedule(
-                    0, current_generation, OwnedSnatRecovery{});
-            },
-            [this, current_generation]() {
-                schedule_resolver_reload_retry(
-                    0, current_generation);
-            });
-    if (recovery_dispatch_failure) {
-        try {
-            const auto incident =
-                runtime_firewall_incidents_.record_failure(
-                    "keenetic-dns-refresh-recovery-dispatch",
-                    /*notify_immediately=*/true);
-            if (incident.notify) {
-                Logger::instance().error(
-                    "Keenetic DNS recovery could not be scheduled: {}. "
-                    "The original refresh failure remains authoritative; "
-                    "runtime diagnostics are degraded until the next "
-                    "reconciliation.",
-                    describe_failure(recovery_dispatch_failure));
-            }
-        } catch (...) {
-        }
-    }
-
-    const bool resolver_observation_changed =
-        transaction.recovery ==
-            KeeneticDnsRefreshRecovery::firewall_then_resolver ||
-        transaction.recovery ==
-            KeeneticDnsRefreshRecovery::resolver_only ||
-        rollback_resolver_hash_changed;
-    if (resolver_observation_changed) {
-        try {
-            refresh_resolver_config_hash_actual_async();
-        } catch (...) {
-            try {
-                Logger::instance().error(
-                    "Keenetic DNS recovery could not schedule its actual-hash probe: {}",
-                    describe_failure(std::current_exception()));
-            } catch (...) {
-            }
-        }
-    }
-    if (transaction.recovery != KeeneticDnsRefreshRecovery::none ||
-        rollback_resolver_hash_changed || recovery_dispatch_failure) {
-        try {
-            publish_runtime_state();
-        } catch (...) {
-            try {
-                Logger::instance().error(
-                    "Keenetic DNS recovery state publication failed: {}",
-                    describe_failure(std::current_exception()));
-            } catch (...) {
-            }
-        }
-    }
-    if (transaction.primary_failure) {
-        std::rethrow_exception(transaction.primary_failure);
-    }
-    throw DaemonError("Keenetic DNS refresh transaction failed");
+    return true;
 }
 
 void Daemon::reset_resolver_actual_state() {

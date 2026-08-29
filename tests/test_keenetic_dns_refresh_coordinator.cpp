@@ -151,8 +151,14 @@ TEST_CASE("Keenetic DNS refresh retains mutation lifetime through control commit
     PeriodicTaskMetricsRegistry metrics(
         {KeeneticDnsRefreshCoordinator::metric_label()});
     ManualControlQueue control;
-    auto exact_payload = std::make_shared<int>(53);
-    std::weak_ptr<int> observed = exact_payload;
+    RuntimeMutationAdmission admission;
+    auto acquired = admission.try_acquire("keenetic-dns-test");
+    REQUIRE(acquired.has_value());
+    const auto token = acquired->token();
+    RuntimeMutationLeaseHandoff handoff{
+        std::make_unique<RuntimeMutationAdmission::Lease>(
+            std::move(*acquired))};
+    std::unique_ptr<RuntimeMutationAdmission::Lease> received;
     bool commit_observed_lifetime = false;
 
     KeeneticDnsRefreshCoordinator coordinator(
@@ -163,24 +169,85 @@ TEST_CASE("Keenetic DNS refresh retains mutation lifetime through control commit
             return control.post(std::move(task));
         },
         [&](std::uint64_t generation,
-            const KeeneticDnsRefreshResult&) {
+            const KeeneticDnsRefreshResult&,
+            const RuntimeMutationLeaseHandoff& exact) {
             CHECK(generation == 23);
-            const auto payload = observed.lock();
-            REQUIRE(payload);
-            CHECK(*payload == 53);
+            CHECK(exact.state() ==
+                  RuntimeMutationLeaseHandoffState::Ready);
+            auto taken = exact.take();
+            REQUIRE(taken);
+            CHECK(taken.lease->token() == token);
+            CHECK(admission.owns(*taken.lease));
+            received = std::move(taken.lease);
             commit_observed_lifetime = true;
             return true;
         });
 
-    REQUIRE(coordinator.request(23, exact_payload) ==
+    REQUIRE(coordinator.request(23, handoff) ==
             KeeneticDnsRefreshCoordinator::RequestResult::started);
-    exact_payload.reset();
     REQUIRE(control.wait_for_size(1));
-    CHECK_FALSE(observed.expired());
+    CHECK(handoff.state() ==
+          RuntimeMutationLeaseHandoffState::Ready);
     control.run_one();
 
     CHECK(commit_observed_lifetime);
-    CHECK(observed.expired());
+    CHECK(handoff.state() ==
+          RuntimeMutationLeaseHandoffState::Taken);
+    REQUIRE(received);
+    CHECK(admission.owns(*received));
+    received.reset();
+    CHECK_FALSE(admission.active().has_value());
+    executor.shutdown();
+}
+
+TEST_CASE("Keenetic DNS unchanged commit releases exact lease without taking it") {
+    BlockingExecutor executor(1, 4);
+    PeriodicTaskMetricsRegistry metrics(
+        {KeeneticDnsRefreshCoordinator::metric_label()});
+    ManualControlQueue control;
+    RuntimeMutationAdmission admission;
+    auto acquired = admission.try_acquire("keenetic-dns-unchanged");
+    REQUIRE(acquired.has_value());
+    RuntimeMutationLeaseHandoff handoff{
+        std::make_unique<RuntimeMutationAdmission::Lease>(
+            std::move(*acquired))};
+    bool commit_observed_ready_lease = false;
+
+    KeeneticDnsRefreshCoordinator coordinator(
+        executor,
+        metrics,
+        []() {
+            KeeneticDnsRefreshResult result;
+            result.status = KeeneticDnsRefreshStatus::UNCHANGED;
+            return result;
+        },
+        [&](std::function<void()> task) {
+            return control.post(std::move(task));
+        },
+        [&](std::uint64_t,
+            const KeeneticDnsRefreshResult& result,
+            const RuntimeMutationLeaseHandoff& exact) {
+            CHECK(result.status == KeeneticDnsRefreshStatus::UNCHANGED);
+            commit_observed_ready_lease =
+                exact.state() ==
+                RuntimeMutationLeaseHandoffState::Ready;
+            // Production unchanged publication deliberately does not take
+            // the physical lease; retiring the coordinator claim releases it.
+            return true;
+        });
+
+    REQUIRE(coordinator.request(24, handoff) ==
+            KeeneticDnsRefreshCoordinator::RequestResult::started);
+    handoff = {};
+    REQUIRE(admission.active().has_value());
+    REQUIRE(control.wait_for_size(1));
+    control.run_one();
+
+    CHECK(commit_observed_ready_lease);
+    CHECK_FALSE(admission.active().has_value());
+    const auto snapshot = only_metrics(metrics);
+    CHECK(snapshot.noop == 1);
+    CHECK(snapshot.in_flight == 0);
     executor.shutdown();
 }
 

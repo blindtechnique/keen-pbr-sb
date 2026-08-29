@@ -58,15 +58,17 @@ struct KeeneticDnsRefreshCoordinator::State final
           PeriodicTaskMetricsRegistry& metrics_value,
           RefreshFn refresh_value,
           PostControlFn post_control_value,
-          CommitFn commit_value)
+          CommitFn commit_value,
+          CommitWithLeaseFn commit_with_lease_value = {})
         : executor(executor_value),
           metrics(metrics_value),
           refresh(std::move(refresh_value)),
           post_control(std::move(post_control_value)),
-          commit(std::move(commit_value)) {}
+          commit(std::move(commit_value)),
+          commit_with_lease(std::move(commit_with_lease_value)) {}
 
     RequestResult request(std::uint64_t runtime_generation,
-                          std::shared_ptr<void> operation_lifetime) noexcept {
+                          RuntimeMutationLeaseHandoff mutation_lease) noexcept {
         std::lock_guard<std::mutex> lock(state_mutex);
         if (stopping) {
             return RequestResult::rejected;
@@ -77,19 +79,19 @@ struct KeeneticDnsRefreshCoordinator::State final
 
         if (in_flight) {
             pending = true;
-            if (operation_lifetime) {
-                latest_operation_lifetime =
-                    std::move(operation_lifetime);
+            if (mutation_lease.state() !=
+                RuntimeMutationLeaseHandoffState::Empty) {
+                latest_mutation_lease = std::move(mutation_lease);
             }
             return RequestResult::coalesced;
         }
 
         in_flight = true;
-        active_operation_lifetime = std::move(operation_lifetime);
+        active_mutation_lease = std::move(mutation_lease);
         active_claim_id = next_claim_id_locked();
         claim_phase = ClaimPhase::worker;
         if (!enqueue_claimed_locked(latest_generation, active_claim_id)) {
-            active_operation_lifetime.reset();
+            active_mutation_lease = {};
             in_flight = false;
             active_claim_id = 0;
             claim_phase = ClaimPhase::idle;
@@ -106,8 +108,8 @@ struct KeeneticDnsRefreshCoordinator::State final
         callbacks_finished.wait(lock, [this]() {
             return active_callbacks == 0;
         });
-        latest_operation_lifetime.reset();
-        active_operation_lifetime.reset();
+        latest_mutation_lease = {};
+        active_mutation_lease = {};
     }
 
 private:
@@ -315,7 +317,11 @@ private:
         CallbackLease callback_lease{this};
 
         try {
-            if (!commit(generation, result)) {
+            const bool committed = commit_with_lease
+                ? commit_with_lease(
+                      generation, result, active_mutation_lease)
+                : commit(generation, result);
+            if (!committed) {
                 (void)task_metrics->abandon("stale runtime generation");
             } else {
                 finish_refresh_metrics(*task_metrics, result);
@@ -335,8 +341,8 @@ private:
         }
         if (stopping) {
             pending = false;
-            latest_operation_lifetime.reset();
-            active_operation_lifetime.reset();
+            latest_mutation_lease = {};
+            active_mutation_lease = {};
             in_flight = false;
             active_claim_id = 0;
             claim_phase = ClaimPhase::idle;
@@ -345,7 +351,7 @@ private:
         }
 
         if (!pending) {
-            active_operation_lifetime.reset();
+            active_mutation_lease = {};
             in_flight = false;
             active_claim_id = 0;
             claim_phase = ClaimPhase::idle;
@@ -354,12 +360,11 @@ private:
         }
 
         pending = false;
-        active_operation_lifetime =
-            std::move(latest_operation_lifetime);
+        active_mutation_lease = std::move(latest_mutation_lease);
         active_claim_id = next_claim_id_locked();
         claim_phase = ClaimPhase::worker;
         if (!enqueue_claimed_locked(latest_generation, active_claim_id)) {
-            active_operation_lifetime.reset();
+            active_mutation_lease = {};
             in_flight = false;
             active_claim_id = 0;
             claim_phase = ClaimPhase::idle;
@@ -380,6 +385,7 @@ private:
     RefreshFn refresh;
     PostControlFn post_control;
     CommitFn commit;
+    CommitWithLeaseFn commit_with_lease;
 
     std::mutex state_mutex;
     std::condition_variable callbacks_finished;
@@ -392,8 +398,8 @@ private:
     bool in_flight{false};
     bool pending{false};
     bool stopping{false};
-    std::shared_ptr<void> active_operation_lifetime;
-    std::shared_ptr<void> latest_operation_lifetime;
+    RuntimeMutationLeaseHandoff active_mutation_lease;
+    RuntimeMutationLeaseHandoff latest_mutation_lease;
 };
 
 KeeneticDnsRefreshCoordinator::KeeneticDnsRefreshCoordinator(
@@ -408,6 +414,19 @@ KeeneticDnsRefreshCoordinator::KeeneticDnsRefreshCoordinator(
                                      std::move(post_control),
                                      std::move(commit))) {}
 
+KeeneticDnsRefreshCoordinator::KeeneticDnsRefreshCoordinator(
+    BlockingExecutor& executor,
+    PeriodicTaskMetricsRegistry& metrics,
+    RefreshFn refresh,
+    PostControlFn post_control,
+    CommitWithLeaseFn commit)
+    : state_(std::make_shared<State>(executor,
+                                     metrics,
+                                     std::move(refresh),
+                                     std::move(post_control),
+                                     CommitFn{},
+                                     std::move(commit))) {}
+
 KeeneticDnsRefreshCoordinator::~KeeneticDnsRefreshCoordinator() {
     stop();
 }
@@ -415,12 +434,11 @@ KeeneticDnsRefreshCoordinator::~KeeneticDnsRefreshCoordinator() {
 KeeneticDnsRefreshCoordinator::RequestResult
 KeeneticDnsRefreshCoordinator::request(
     std::uint64_t runtime_generation,
-    std::shared_ptr<void> operation_lifetime) noexcept {
+    RuntimeMutationLeaseHandoff mutation_lease) noexcept {
     if (!state_) {
         return RequestResult::rejected;
     }
-    return state_->request(
-        runtime_generation, std::move(operation_lifetime));
+    return state_->request(runtime_generation, std::move(mutation_lease));
 }
 
 void KeeneticDnsRefreshCoordinator::stop() noexcept {

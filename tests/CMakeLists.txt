@@ -50,6 +50,7 @@ add_executable(keen-pbr-tests
   test_dns_server.cpp
   test_test_routing.cpp
   test_keenetic_dns.cpp
+  test_keenetic_dns_firewall_lifecycle_policy.cpp
   test_keenetic_dns_refresh_coordinator.cpp
   test_resolver_stream_coordinator.cpp
   test_ndms_interface_inventory.cpp
@@ -717,6 +718,7 @@ add_test(NAME keen-pbr-rescue-tests COMMAND keen-pbr-rescue-tests)
 add_executable(keen-pbr-keenetic-dns-refresh-tests
   test_main.cpp
   test_config_reload_coordinator.cpp
+  test_keenetic_dns_firewall_lifecycle_policy.cpp
   test_keenetic_dns_refresh_coordinator.cpp
   test_keenetic_dns_refresh_transaction.cpp
   ../src/daemon/keenetic_dns_refresh_coordinator.cpp

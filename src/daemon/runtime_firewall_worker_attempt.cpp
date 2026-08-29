@@ -301,6 +301,8 @@ void cleanup_native_direct_egress_sources(
             input.operation_kind) ||
         runtime_firewall_worker_operation_is_urltest_generation(
             input.operation_kind) ||
+        runtime_firewall_worker_operation_is_keenetic_dns_generation(
+            input.operation_kind) ||
         !result.transaction.committed()) {
         // commit_entered without a returned committed candidate is ambiguous.
         // It must trigger a fresh resnapshot, never destructive cleanup under
