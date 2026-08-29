@@ -81,6 +81,12 @@ void restore_backup_with_rollback_for_test(
     const nlohmann::json& backup,
     const std::string& rollback_path,
     const BackupRestoreHooksForTest& hooks);
+void restore_backup_with_runtime_owner_for_test(
+    ApiContext& ctx,
+    const nlohmann::json& backup,
+    const std::string& rollback_path,
+    const BackupRestoreRootsForTest& roots,
+    const BackupRestoreHooksForTest& hooks = {});
 void restore_persistent_rollback_for_test(
     const ApiContext& ctx,
     const std::string& rollback_path,

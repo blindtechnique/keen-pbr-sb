@@ -93,9 +93,17 @@
   Чистый отказ до COMMIT возвращает runtime в `stopped` и сохраняет draft;
   неоднозначный post-COMMIT terminal или отказ exact CAS после подтверждённого
   кандидата fail closed. Legacy pre-generation путь больше не выполняет прямой
-  missing-SNAT firewall repair перед переиспользованием marks. Это не завершает
-  перенос всех config writers: forward/rollback восстановления резервной копии
-  пока остаются на отдельном синхронном apply-пути.
+  missing-SNAT firewall repair перед переиспользованием marks.
+- Forward-восстановление резервной копии и поздний компенсирующий rollback
+  теперь проходят типизированного runtime firewall-owner с одной exact physical
+  mutation lease. Handoff gate вооружается до первой долговечной файловой
+  записи; чистый отказ до COMMIT откатывает файлы без повторной отправки тела,
+  а неоднозначный либо post-COMMIT исход fail closed и не запускает
+  автоматический повтор или rollback как будто операция отсутствовала.
+  Локальный backup guard допускает второй handoff только после terminal
+  completion первого owner и возврата той же exact lease, без фабрикации или
+  получения нового claim. Это не завершает P0-1: хвосты DNS, STOP и cleanup
+  остаются.
 - Внутренние изменения runtime/firewall из восстановления правил, URLTest,
   Keenetic DNS, отложенного старта и автообновления списков проходят через
   единого владельца мутации. Занятый владелец сохраняет один ограниченный

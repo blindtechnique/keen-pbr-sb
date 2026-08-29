@@ -867,16 +867,221 @@ PreparedRestore prepare_restore_bundle(const ApiContext& ctx,
     return prepared;
 }
 
+// Backup restore is a compound transaction: one request may need a verified
+// forward config generation and, only after a later service failure, one
+// compensating config generation. The ordinary API guard is intentionally a
+// one-shot handoff. This scoped guard retains one unforgeable physical lease
+// for the entire file/service transaction and permits a successor handoff only
+// after the previous owner terminal returned that exact token.
+class BackupRuntimeMutationGuard final {
+public:
+    BackupRuntimeMutationGuard(ApiContext& context, std::string label)
+        : context_(context) {
+        if (context_.acquire_runtime_mutation_fn) {
+            validate_returned_lease_fn_ =
+                context_.validate_runtime_mutation_lease_fn;
+            lease_.emplace(
+                context_.acquire_runtime_mutation_fn(
+                    std::move(label), false, false));
+            if (!static_cast<bool>(*lease_)) {
+                throw std::runtime_error(
+                    "Runtime mutation admission returned an empty lease");
+            }
+            production_lease_token_ = lease_->token();
+            production_owned_ = true;
+            return;
+        }
+        context_.begin_save_operation();
+        legacy_active_ = true;
+    }
+
+    ~BackupRuntimeMutationGuard() noexcept {
+        if (production_owned_ && lease_.has_value()) {
+            lease_->release();
+            lease_.reset();
+        }
+        if (legacy_active_) {
+            try {
+                context_.finish_config_operation();
+            } catch (...) {
+            }
+        }
+    }
+
+    BackupRuntimeMutationGuard(const BackupRuntimeMutationGuard&) = delete;
+    BackupRuntimeMutationGuard& operator=(
+        const BackupRuntimeMutationGuard&) = delete;
+
+    bool uses_production_admission() const noexcept {
+        return production_owned_ || handoff_active_;
+    }
+
+    bool arm_handoff_gate() noexcept {
+        if (!production_owned_ || handoff_active_ ||
+            handoff_gate_.has_value() || !lease_.has_value() ||
+            !static_cast<bool>(*lease_) ||
+            !context_.try_acquire_runtime_mutation_handoff_gate_fn ||
+            legacy_active_) {
+            return false;
+        }
+        try {
+            auto gate =
+                context_.try_acquire_runtime_mutation_handoff_gate_fn(
+                    *lease_);
+            if (!gate.has_value() || !static_cast<bool>(*gate)) {
+                return false;
+            }
+            handoff_gate_.emplace(std::move(*gate));
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    RuntimeMutationAdmission::Lease take_lease() {
+        if (!production_owned_ || handoff_active_ ||
+            !handoff_gate_.has_value() ||
+            !static_cast<bool>(*handoff_gate_) ||
+            !lease_.has_value() || !static_cast<bool>(*lease_) ||
+            legacy_active_) {
+            throw std::logic_error(
+                "Backup runtime mutation lease handoff is unavailable");
+        }
+        auto lease = std::move(*lease_);
+        lease_.reset();
+        production_owned_ = false;
+        handoff_active_ = true;
+        return lease;
+    }
+
+    bool restore_lease(
+        RuntimeMutationAdmission::Lease& returned_lease) noexcept {
+        if (!handoff_active_ || production_owned_ || lease_.has_value() ||
+            !static_cast<bool>(returned_lease) ||
+            returned_lease.token() != production_lease_token_ ||
+            !validate_returned_lease_fn_) {
+            return false;
+        }
+        try {
+            if (!validate_returned_lease_fn_(returned_lease)) {
+                return false;
+            }
+        } catch (...) {
+            return false;
+        }
+        lease_.emplace(std::move(returned_lease));
+        production_owned_ = true;
+        handoff_active_ = false;
+        handoff_gate_.reset();
+        return true;
+    }
+
+private:
+    ApiContext& context_;
+    std::optional<RuntimeMutationAdmission::Lease> lease_;
+    std::optional<RuntimeMutationAdmission::HandoffGate> handoff_gate_;
+    std::function<bool(const RuntimeMutationAdmission::Lease&)>
+        validate_returned_lease_fn_;
+    std::uint64_t production_lease_token_{0U};
+    bool production_owned_{false};
+    bool handoff_active_{false};
+    bool legacy_active_{false};
+};
+
 void apply_prepared_restore(
     const ApiContext& ctx,
     const PreparedRestore& prepared,
-    const RestoreExecutionHooks& hooks = {}) {
+    const RestoreExecutionHooks& hooks = {},
+    BackupRuntimeMutationGuard* mutation = nullptr,
+    bool runtime_handoff_already_armed = false) {
+    class RuntimeApplyStateUnknown final : public std::runtime_error {
+    public:
+        using std::runtime_error::runtime_error;
+    };
+
+    const bool typed_runtime_owner =
+        mutation != nullptr && mutation->uses_production_admission();
+    const auto arm_typed_runtime_handoff = [&]() {
+        if (!typed_runtime_owner) {
+            return;
+        }
+        if (!ctx.enqueue_apply_validated_config_with_lease_return_fn ||
+            !ctx.validate_runtime_mutation_lease_fn ||
+            !ctx.try_acquire_runtime_mutation_handoff_gate_fn ||
+            !mutation->arm_handoff_gate()) {
+            throw ApiError(
+                "Backup runtime configuration owner is unavailable", 503);
+        }
+    };
+    const auto apply_runtime_config = [
+        &ctx,
+        mutation,
+        typed_runtime_owner,
+        &arm_typed_runtime_handoff](
+            const Config& config,
+            const std::string& serialized,
+            bool handoff_already_armed) {
+        if (!typed_runtime_owner) {
+            return ctx.enqueue_apply_validated_config(config, serialized);
+        }
+
+        if (!handoff_already_armed) {
+            arm_typed_runtime_handoff();
+        }
+
+        RuntimeMutationAdmission::Lease returned_lease;
+        std::optional<ConfigApplyResult> result;
+        std::exception_ptr apply_failure;
+        try {
+            returned_lease = mutation->take_lease();
+            result =
+                ctx.enqueue_apply_validated_config_with_lease_return_fn(
+                    config, serialized, returned_lease);
+        } catch (...) {
+            apply_failure = std::current_exception();
+        }
+
+        // Interpret neither the callback result nor its exception until the
+        // same physical admission claim has returned. restore_lease also
+        // retires this handoff gate before a later compensating handoff can be
+        // armed.
+        if (!mutation->restore_lease(returned_lease)) {
+            throw RuntimeApplyStateUnknown(
+                "runtime owner did not return the exact mutation lease");
+        }
+        if (apply_failure) {
+            try {
+                std::rethrow_exception(apply_failure);
+            } catch (const std::exception& error) {
+                throw RuntimeApplyStateUnknown(
+                    std::string("runtime owner completion is unknown: ") +
+                    error.what());
+            } catch (...) {
+                throw RuntimeApplyStateUnknown(
+                    "runtime owner completion is unknown");
+            }
+        }
+        if (!result.has_value()) {
+            throw RuntimeApplyStateUnknown(
+                "runtime owner returned no completion result");
+        }
+        return std::move(*result);
+    };
+
     bool runtime_apply_attempted = false;
     bool transport_restart_attempted = false;
     bool nfqws_restart_attempted = false;
     persistent::FileMutationTransaction file_transaction(
         prepared.mutations, file_apply_hooks(hooks));
     try {
+        // The handoff gate must cover the first durable file write. The
+        // request still owns the exact lease, so a file-apply failure unwinds
+        // both claims without ever transferring runtime authority.
+        if (typed_runtime_owner && prepared.next_config.has_value() &&
+            !runtime_handoff_already_armed) {
+            arm_typed_runtime_handoff();
+            runtime_handoff_already_armed = true;
+        }
         file_transaction.apply();
 
         if (prepared.restart_transports) {
@@ -898,11 +1103,32 @@ void apply_prepared_restore(
         if (prepared.next_config.has_value()) {
             runtime_apply_attempted = true;
             const auto result =
-                ctx.enqueue_apply_validated_config(
+                apply_runtime_config(
                     *prepared.next_config,
-                    prepared.next_config_json);
+                    prepared.next_config_json,
+                    runtime_handoff_already_armed);
             if (!result.error.empty()) {
+                if (typed_runtime_owner) {
+                    if (!result.rolled_back &&
+                        !result.runtime_unchanged) {
+                        throw RuntimeApplyStateUnknown(result.error);
+                    }
+                    // The typed owner already proved either the old runtime
+                    // generation or an unchanged runtime. The outer file and
+                    // service transaction still rolls back, but must not send
+                    // the same runtime body a second time.
+                    runtime_apply_attempted = false;
+                }
                 throw ApiError("restore apply failed: " + result.error, 500);
+            }
+            if (typed_runtime_owner && !result.applied) {
+                if (!result.rolled_back &&
+                    !result.runtime_unchanged) {
+                    throw RuntimeApplyStateUnknown(
+                        "runtime apply was not verified");
+                }
+                runtime_apply_attempted = false;
+                throw ApiError("restore apply was not verified", 500);
             }
             if (hooks.after_forward_runtime_apply) {
                 hooks.after_forward_runtime_apply();
@@ -919,6 +1145,16 @@ void apply_prepared_restore(
             }
             wait_for_restore_service_ready(ctx, hooks, kNfqws);
         }
+    } catch (const RuntimeApplyStateUnknown& error) {
+        // A callback exception, lost physical lease, or unverified COMMIT is
+        // not equivalent to a clean pre-COMMIT rejection. Keep the candidate
+        // persistent generation aligned with either possible runtime outcome;
+        // the already-written rollback snapshot remains the operator's exact
+        // recovery point. Never resend the body or launch an automatic
+        // compensating apply from this ambiguous state.
+        throw ApiError(
+            std::string("restore runtime state is unknown: ") + error.what(),
+            500);
     } catch (...) {
         const auto original_error = std::current_exception();
         auto rollback_errors = file_transaction.rollback();
@@ -948,12 +1184,15 @@ void apply_prepared_restore(
         if (runtime_apply_attempted &&
             prepared.previous_config.has_value()) {
             try {
-                const auto result = ctx.enqueue_apply_validated_config(
+                const auto result = apply_runtime_config(
                     *prepared.previous_config,
-                    prepared.previous_config_json);
-                if (!result.error.empty()) {
+                    prepared.previous_config_json,
+                    false);
+                if (!result.error.empty() || !result.applied) {
                     rollback_errors.push_back(
-                        "runtime rollback failed: " + result.error);
+                        result.error.empty()
+                            ? "runtime rollback failed: apply was not verified"
+                            : "runtime rollback failed: " + result.error);
                 }
             } catch (const std::exception& error) {
                 rollback_errors.push_back(
@@ -1003,11 +1242,12 @@ void apply_prepared_restore(
 void restore_bundle(const ApiContext& ctx,
                     const nlohmann::json& backup,
                     const RestoreRoots& roots = {},
-                    const RestoreExecutionHooks& hooks = {}) {
+                    const RestoreExecutionHooks& hooks = {},
+                    BackupRuntimeMutationGuard* mutation = nullptr) {
     with_persistent_snapshot_errors([&] {
         const auto prepared =
             prepare_restore_bundle(ctx, backup, roots);
-        apply_prepared_restore(ctx, prepared, hooks);
+        apply_prepared_restore(ctx, prepared, hooks, mutation);
     });
 }
 
@@ -1038,20 +1278,39 @@ std::string create_full_rollback_backup_at(
 void restore_with_rollback(const ApiContext& ctx,
                            const nlohmann::json& backup,
                            const fs::path& rollback_path,
-                           const RestoreExecutionHooks& hooks = {}) {
+                           const RestoreExecutionHooks& hooks = {},
+                           BackupRuntimeMutationGuard* mutation = nullptr,
+                           const RestoreRoots& roots = {}) {
     with_persistent_snapshot_errors([&] {
         // Nothing below this line may discover a malformed archive. Preparing
         // the complete plan first keeps a previously known-good rollback intact
         // when the new import cannot be applied.
-        const RestoreRoots roots;
         const auto prepared =
             prepare_restore_bundle(ctx, backup, roots);
+        bool runtime_handoff_already_armed = false;
+        if (mutation != nullptr &&
+            mutation->uses_production_admission() &&
+            prepared.next_config.has_value()) {
+            if (!ctx.enqueue_apply_validated_config_with_lease_return_fn ||
+                !ctx.validate_runtime_mutation_lease_fn ||
+                !ctx.try_acquire_runtime_mutation_handoff_gate_fn ||
+                !mutation->arm_handoff_gate()) {
+                throw ApiError(
+                    "Backup runtime configuration owner is unavailable", 503);
+            }
+            runtime_handoff_already_armed = true;
+        }
         write_persistent_rollback_snapshot_at(
             persistent::make_operation_snapshot(
                 prepared.mutations),
             rollback_path,
             hooks);
-        apply_prepared_restore(ctx, prepared, hooks);
+        apply_prepared_restore(
+            ctx,
+            prepared,
+            hooks,
+            mutation,
+            runtime_handoff_already_armed);
     });
 }
 
@@ -1059,12 +1318,13 @@ void restore_persistent_rollback(
     const ApiContext& ctx,
     const nlohmann::json& rollback,
     const RestoreExecutionHooks& hooks = {},
-    const RestoreRoots& roots = {}) {
+    const RestoreRoots& roots = {},
+    BackupRuntimeMutationGuard* mutation = nullptr) {
     with_persistent_snapshot_errors([&] {
         const auto prepared =
             prepare_persistent_rollback_restore(
                 ctx, rollback, roots);
-        apply_prepared_restore(ctx, prepared, hooks);
+        apply_prepared_restore(ctx, prepared, hooks, mutation);
     });
 }
 
@@ -1231,6 +1491,23 @@ void restore_backup_with_rollback_for_test(
         ctx, backup, rollback_path, adapt_test_hooks(hooks));
 }
 
+void restore_backup_with_runtime_owner_for_test(
+    ApiContext& ctx,
+    const nlohmann::json& backup,
+    const std::string& rollback_path,
+    const BackupRestoreRootsForTest& roots,
+    const BackupRestoreHooksForTest& hooks) {
+    BackupRuntimeMutationGuard mutation(
+        ctx, "test-restore-backup-owner");
+    restore_with_rollback(
+        ctx,
+        backup,
+        rollback_path,
+        adapt_test_hooks(hooks),
+        &mutation,
+        restore_roots_for_test(roots));
+}
+
 void restore_persistent_rollback_for_test(
     const ApiContext& ctx,
     const std::string& rollback_path,
@@ -1305,9 +1582,10 @@ static void register_backup_handler_impl(
         nlohmann::json backup;
         try { backup = nlohmann::json::parse(body); }
         catch (...) { throw ApiError("invalid backup JSON", 400); }
-        ApiRuntimeMutationGuard mutation(
+        BackupRuntimeMutationGuard mutation(
             ctx, "restore-backup");
-        restore_with_rollback(ctx, backup, kRollbackPath);
+        restore_with_rollback(
+            ctx, backup, kRollbackPath, {}, &mutation);
         return R"({"ok":true})";
     });
     server.get("/api/backup/rollback", []() -> std::string {
@@ -1316,19 +1594,20 @@ static void register_backup_handler_impl(
         }.dump();
     });
     server.post("/api/backup/rollback", [&ctx]() -> std::string {
-        ApiRuntimeMutationGuard mutation(
+        BackupRuntimeMutationGuard mutation(
             ctx, "rollback-backup");
         const auto rollback =
             read_rollback_document_at(kRollbackPath);
         if (rollback.is_object() &&
             rollback.value("format", std::string{}) ==
                 kRollbackFormat) {
-            restore_persistent_rollback(ctx, rollback);
+            restore_persistent_rollback(
+                ctx, rollback, {}, {}, &mutation);
         } else {
             // One-release compatibility path for rollback artifacts
             // produced before the exact snapshot format existed.
             validate_bundle(rollback);
-            restore_bundle(ctx, rollback);
+            restore_bundle(ctx, rollback, {}, {}, &mutation);
         }
         return R"({"ok":true})";
     });

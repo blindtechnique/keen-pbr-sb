@@ -253,7 +253,343 @@ ApiContext make_backup_context(
     };
 }
 
+struct BackupRuntimeAdmissionProbe {
+    std::size_t acquire_calls{0};
+    std::size_t gate_calls{0};
+    std::size_t validate_calls{0};
+};
+
+void install_backup_runtime_admission(
+    ApiContext& context,
+    RuntimeMutationAdmission& admission,
+    BackupRuntimeAdmissionProbe& probe) {
+    context.acquire_runtime_mutation_fn =
+        [&admission, &probe](std::string label, bool, bool) {
+            ++probe.acquire_calls;
+            auto lease = admission.try_acquire(std::move(label));
+            if (!lease.has_value()) {
+                throw std::runtime_error(
+                    "injected backup runtime admission conflict");
+            }
+            return std::move(*lease);
+        };
+    context.validate_runtime_mutation_lease_fn =
+        [&admission, &probe](
+            const RuntimeMutationAdmission::Lease& lease) {
+            ++probe.validate_calls;
+            return admission.owns(lease);
+        };
+    context.try_acquire_runtime_mutation_handoff_gate_fn =
+        [&admission, &probe](
+            const RuntimeMutationAdmission::Lease& lease) noexcept {
+            ++probe.gate_calls;
+            return admission.try_acquire_handoff_gate(lease);
+        };
+}
+
+nlohmann::json make_general_restore_backup(
+    const std::string& listen) {
+    return nlohmann::json{
+        {"format", "keen-pbr-sb-backup"},
+        {"schema", 1},
+        {"data",
+         {{"general",
+           {{"api",
+             {{"enabled", true},
+              {"listen", listen}}}}}}},
+    };
+}
+
 } // namespace
+
+TEST_CASE(
+    "backup restore uses the typed owner and reclaims its exact lease") {
+    BackupTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    const auto rollback_path = directory.path / "rollback.json";
+    const auto nfqws_root = directory.path / "nfqws2";
+    const auto strategies_root = directory.path / "strategies";
+    std::filesystem::create_directories(nfqws_root);
+    std::filesystem::create_directories(strategies_root);
+
+    const Config original = make_valid_config("127.0.0.1:12121");
+    write_text(
+        config_path,
+        nlohmann::json(original).dump(1, '\t') + "\n");
+    SseBroadcaster broadcaster;
+    std::vector<Config> legacy_applied;
+    auto context = make_backup_context(
+        config_path.string(), broadcaster, original, legacy_applied);
+    RuntimeMutationAdmission admission;
+    BackupRuntimeAdmissionProbe probe;
+    install_backup_runtime_admission(context, admission, probe);
+
+    std::size_t owner_calls = 0;
+    std::uint64_t exact_token = 0;
+    context.enqueue_apply_validated_config_with_lease_return_fn =
+        [&](Config config,
+            std::string,
+            RuntimeMutationAdmission::Lease& request_lease) {
+            ++owner_calls;
+            REQUIRE(admission.owns(request_lease));
+            exact_token = request_lease.token();
+            CHECK(config.api->listen == "127.0.0.1:13131");
+            auto owner = std::move(request_lease);
+            CHECK_FALSE(static_cast<bool>(request_lease));
+            request_lease = std::move(owner);
+            ConfigApplyResult result;
+            result.applied = true;
+            return result;
+        };
+    BackupRestoreHooksForTest hooks;
+    hooks.atomic_write_fault =
+        [&](const std::string& path, AtomicFileWriteStage) {
+            if (path == rollback_path.string()) {
+                CHECK(probe.gate_calls == 1U);
+            }
+        };
+
+    REQUIRE_NOTHROW(
+        restore_backup_with_runtime_owner_for_test(
+            context,
+            make_general_restore_backup("127.0.0.1:13131"),
+            rollback_path.string(),
+            {nfqws_root.string(), strategies_root.string()},
+            hooks));
+
+    CHECK(owner_calls == 1U);
+    CHECK(exact_token != 0U);
+    CHECK(probe.acquire_calls == 1U);
+    CHECK(probe.gate_calls == 1U);
+    CHECK(probe.validate_calls == 1U);
+    CHECK(legacy_applied.empty());
+    CHECK_FALSE(admission.active().has_value());
+    CHECK(
+        parse_config(read_text(config_path)).api->listen ==
+        "127.0.0.1:13131");
+    CHECK(std::filesystem::exists(rollback_path));
+}
+
+TEST_CASE(
+    "backup typed precommit rejection rolls files back without resending runtime") {
+    BackupTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    const auto rollback_path = directory.path / "rollback.json";
+    const auto nfqws_root = directory.path / "nfqws2";
+    const auto strategies_root = directory.path / "strategies";
+    std::filesystem::create_directories(nfqws_root);
+    std::filesystem::create_directories(strategies_root);
+
+    const Config original = make_valid_config("127.0.0.1:12121");
+    const std::string original_json =
+        nlohmann::json(original).dump(1, '\t') + "\n";
+    write_text(config_path, original_json);
+    SseBroadcaster broadcaster;
+    std::vector<Config> legacy_applied;
+    auto context = make_backup_context(
+        config_path.string(), broadcaster, original, legacy_applied);
+    RuntimeMutationAdmission admission;
+    BackupRuntimeAdmissionProbe probe;
+    install_backup_runtime_admission(context, admission, probe);
+
+    std::size_t owner_calls = 0;
+    context.enqueue_apply_validated_config_with_lease_return_fn =
+        [&](Config,
+            std::string,
+            RuntimeMutationAdmission::Lease& request_lease) {
+            ++owner_calls;
+            REQUIRE(admission.owns(request_lease));
+            auto owner = std::move(request_lease);
+            request_lease = std::move(owner);
+            ConfigApplyResult result;
+            result.error = "injected clean precommit rejection";
+            result.runtime_unchanged = true;
+            return result;
+        };
+
+    CHECK_THROWS_AS(
+        restore_backup_with_runtime_owner_for_test(
+            context,
+            make_general_restore_backup("127.0.0.1:13132"),
+            rollback_path.string(),
+            {nfqws_root.string(), strategies_root.string()}),
+        ApiError);
+
+    CHECK(owner_calls == 1U);
+    CHECK(probe.acquire_calls == 1U);
+    CHECK(probe.gate_calls == 1U);
+    CHECK(probe.validate_calls == 1U);
+    CHECK(legacy_applied.empty());
+    CHECK(read_text(config_path) == original_json);
+    CHECK_FALSE(admission.active().has_value());
+}
+
+TEST_CASE(
+    "backup ambiguous typed commit is not resent or automatically rolled back") {
+    BackupTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    const auto rollback_path = directory.path / "rollback.json";
+    const auto nfqws_root = directory.path / "nfqws2";
+    const auto strategies_root = directory.path / "strategies";
+    std::filesystem::create_directories(nfqws_root);
+    std::filesystem::create_directories(strategies_root);
+
+    const Config original = make_valid_config("127.0.0.1:12121");
+    write_text(
+        config_path,
+        nlohmann::json(original).dump(1, '\t') + "\n");
+    SseBroadcaster broadcaster;
+    std::vector<Config> legacy_applied;
+    auto context = make_backup_context(
+        config_path.string(), broadcaster, original, legacy_applied);
+    RuntimeMutationAdmission admission;
+    BackupRuntimeAdmissionProbe probe;
+    install_backup_runtime_admission(context, admission, probe);
+
+    std::size_t owner_calls = 0;
+    context.enqueue_apply_validated_config_with_lease_return_fn =
+        [&](Config,
+            std::string,
+            RuntimeMutationAdmission::Lease& request_lease) {
+            ++owner_calls;
+            REQUIRE(admission.owns(request_lease));
+            auto owner = std::move(request_lease);
+            request_lease = std::move(owner);
+            ConfigApplyResult result;
+            result.error = "injected ambiguous commit";
+            return result;
+        };
+    std::size_t rollback_writes = 0;
+    BackupRestoreHooksForTest hooks;
+    hooks.before_rollback_write =
+        [&](std::size_t, const std::string&) {
+            ++rollback_writes;
+        };
+
+    try {
+        restore_backup_with_runtime_owner_for_test(
+            context,
+            make_general_restore_backup("127.0.0.1:13133"),
+            rollback_path.string(),
+            {nfqws_root.string(), strategies_root.string()},
+            hooks);
+        FAIL("ambiguous runtime commit must reject the restore");
+    } catch (const ApiError& error) {
+        CHECK(
+            std::string(error.what()).find(
+                "restore runtime state is unknown") !=
+            std::string::npos);
+    }
+
+    CHECK(owner_calls == 1U);
+    CHECK(probe.acquire_calls == 1U);
+    CHECK(probe.gate_calls == 1U);
+    CHECK(probe.validate_calls == 1U);
+    CHECK(rollback_writes == 0U);
+    CHECK(legacy_applied.empty());
+    CHECK(
+        parse_config(read_text(config_path)).api->listen ==
+        "127.0.0.1:13133");
+    CHECK(std::filesystem::exists(rollback_path));
+    CHECK_FALSE(admission.active().has_value());
+}
+
+TEST_CASE(
+    "backup late nfqws failure uses the same lease for typed rollback") {
+    BackupTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    const auto rollback_path = directory.path / "rollback.json";
+    const auto nfqws_root = directory.path / "nfqws2";
+    const auto strategies_root = directory.path / "strategies";
+    std::filesystem::create_directories(nfqws_root);
+    std::filesystem::create_directories(strategies_root);
+
+    const Config original = make_valid_config("127.0.0.1:12121");
+    const std::string original_json =
+        nlohmann::json(original).dump(1, '\t') + "\n";
+    write_text(config_path, original_json);
+    write_text(nfqws_root / "nfqws2.conf", "replacement-config\n");
+    const nlohmann::json nfqws_groups{
+        {"nfqws_config", true},
+        {"nfqws_lists", false},
+    };
+    const auto nfqws_files = create_nfqws_backup_section_for_test(
+        nfqws_groups,
+        nfqws_root.string(),
+        strategies_root.string());
+    write_text(nfqws_root / "nfqws2.conf", "original-config\n");
+
+    auto backup = make_general_restore_backup("127.0.0.1:13134");
+    backup["groups"] = nfqws_groups;
+    backup["data"]["nfqws"] = nfqws_files;
+
+    SseBroadcaster broadcaster;
+    std::vector<Config> legacy_applied;
+    auto context = make_backup_context(
+        config_path.string(), broadcaster, original, legacy_applied);
+    RuntimeMutationAdmission admission;
+    BackupRuntimeAdmissionProbe probe;
+    install_backup_runtime_admission(context, admission, probe);
+
+    std::size_t owner_calls = 0;
+    std::uint64_t exact_token = 0;
+    context.enqueue_apply_validated_config_with_lease_return_fn =
+        [&](Config config,
+            std::string,
+            RuntimeMutationAdmission::Lease& request_lease) {
+            ++owner_calls;
+            REQUIRE(admission.owns(request_lease));
+            if (owner_calls == 1U) {
+                exact_token = request_lease.token();
+                CHECK(config.api->listen == "127.0.0.1:13134");
+                CHECK(
+                    parse_config(read_text(config_path)).api->listen ==
+                    "127.0.0.1:13134");
+            } else {
+                CHECK(request_lease.token() == exact_token);
+                CHECK(config.api->listen == "127.0.0.1:12121");
+                CHECK(read_text(config_path) == original_json);
+            }
+            auto owner = std::move(request_lease);
+            request_lease = std::move(owner);
+            ConfigApplyResult result;
+            result.applied = true;
+            return result;
+        };
+    std::size_t restart_calls = 0;
+    context.restart_restore_service_fn =
+        [&](const std::string& service) {
+            CHECK(service == "/opt/etc/init.d/S51nfqws2");
+            return ++restart_calls == 1U ? 17 : 0;
+        };
+    BackupRestoreHooksForTest hooks;
+    hooks.probe_service_readiness =
+        [](const std::string&) {
+            return RestoreServiceReadinessForTest::ready;
+        };
+
+    CHECK_THROWS_AS(
+        restore_backup_with_runtime_owner_for_test(
+            context,
+            backup,
+            rollback_path.string(),
+            {nfqws_root.string(), strategies_root.string()},
+            hooks),
+        ApiError);
+
+    CHECK(owner_calls == 2U);
+    CHECK(exact_token != 0U);
+    CHECK(probe.acquire_calls == 1U);
+    CHECK(probe.gate_calls == 2U);
+    CHECK(probe.validate_calls == 2U);
+    CHECK(restart_calls == 2U);
+    CHECK(legacy_applied.empty());
+    CHECK(read_text(config_path) == original_json);
+    CHECK(
+        read_text(nfqws_root / "nfqws2.conf") ==
+        "original-config\n");
+    CHECK_FALSE(admission.active().has_value());
+}
 
 TEST_CASE("backup restore rolls every touched file back as one transaction") {
     BackupTempDir directory;
