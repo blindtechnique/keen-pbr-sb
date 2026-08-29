@@ -117,6 +117,39 @@
   переходят к свежему recovery только после возврата lease. Неизменившийся
   снимок не забирает lease у coordinator. Этот срез не меняет cold boot, STOP
   и cleanup tails.
+- Первичный cold boot больше не выполняет прямые route/firewall-записи,
+  ручную публикацию resolver или retry через `sleep_for` из `Daemon::run()`.
+  Новый типизированный lifecycle `cold_boot` передаёт закреплённые
+  list/native-VPN/DNS inputs и одну exact mutation lease единственному
+  `RuntimeFirewallOperationOwner`; route preimage снимается только после
+  получения lease. Resolver запускается лишь после точного route
+  worker/control checkpoint и однозначного firewall COMMIT. Реализованный
+  firewall core, native-VPN LKG, resolver generation/cursor, routing-active и
+  `running` публикуются одним обратимым no-throw checkpoint; ошибка resolver
+  или публикации восстанавливает прежние core/LKG/resolver metadata и оставляет
+  runtime остановленным. Точная route-мутация до COMMIT откатывается к preimage
+  тем же token, clean pre-COMMIT сохраняет прежнюю crash-surviving kernel
+  generation, а ambiguous исход не откатывается и не переигрывает тело.
+  Retained и fresh contexts делят один bounded budget не более чем на три
+  candidate body; свежий post-lease снимок разрешён только после возврата
+  прежней lease. Shutdown до или во время завершения не открывает API и фоновые
+  сервисы; исчерпание бюджета, потеря authority или отклонённый scheduler
+  оставляют доступными control/diagnostics в `degraded`, а не публикуют ложный
+  `running`. Финальные focused tests основной cold-boot цепочки прошли: policy
+  16/16 сценариев и 80/80 assertions, owner regression 93/93 и 1765/1765.
+  Найденный после первого target-gate разрыв очистки API закрыт strong exception
+  guarantee: неудачный `remove_fd` очищает и epoll, и локальную `fd_entries`, а
+  destruction освобождает server/context до epoll без двойного teardown.
+  Второй shutdown gate после `setup_api()` синхронно снимает только что
+  открытые server/context/conntrack, если admission закрылся во время запуска;
+  в сборке без API тот же gate просто не публикует открытие сервисов. Focused
+  API lifecycle прошёл 6/6 и 24/24. Production target `keen-pbr` после
+  исправления слинкован на host с exit 0. Авторитетный
+  `kpbr-keenetic-batch-gate` на live `/workspace-src` собрал target `keen-pbr`
+  с `-j2` реальным OpenWrt AArch64 GCC 8.4: 8/8 compile/link шагов, включая
+  `[8/8] Linking CXX executable keen-pbr`, exit 0. Немедленный повтор завершён
+  с `ninja: no work to do`; единственное сообщение — ожидаемый `STAGING_DIR`
+  warning.
 - Внутренние изменения runtime/firewall из восстановления правил, URLTest,
   Keenetic DNS, отложенного старта и автообновления списков проходят через
   единого владельца мутации. Занятый владелец сохраняет один ограниченный

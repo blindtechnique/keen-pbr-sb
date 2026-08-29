@@ -1,4 +1,5 @@
 #include "daemon.hpp"
+#include "api_runtime_lifecycle.hpp"
 
 #ifdef WITH_API
 
@@ -440,7 +441,12 @@ void Daemon::schedule_interface_traffic_sampling() {
 }
 
 void Daemon::setup_conntrack_events() {
-    conntrack_event_monitor_ = std::make_unique<ConntrackEventMonitor>();
+    replace_api_conntrack_monitor_for_retry(
+        [this]() { teardown_conntrack_events(); },
+        [this]() {
+            conntrack_event_monitor_ =
+                std::make_unique<ConntrackEventMonitor>();
+        });
 
     api::ConnectionEventState state;
     state.revision = static_cast<std::int64_t>(conntrack_revision_);
@@ -523,16 +529,39 @@ void Daemon::publish_conntrack_revision() {
     status_stream_->publish_connections(std::move(state));
 }
 
-void Daemon::teardown_conntrack_events() {
+void Daemon::teardown_conntrack_events() noexcept {
     if (conntrack_publish_task_id_ >= 0) {
-        scheduler_->cancel(conntrack_publish_task_id_);
+        const int task_id = conntrack_publish_task_id_;
         conntrack_publish_task_id_ = -1;
+        try {
+            scheduler_->cancel(task_id);
+        } catch (...) {
+        }
     }
     if (!conntrack_event_monitor_) return;
-    remove_fd(
-        conntrack_event_monitor_->fd(),
-        true,
-        "conntrack-events");
+    const int fd = conntrack_event_monitor_->fd();
+    try {
+        remove_fd(fd, true, "conntrack-events");
+    } catch (...) {
+        // Closing the socket below retires the kernel epoll registration. Also
+        // remove the callback record directly so a descriptor reuse cannot
+        // dispatch an already-returned event through stale conntrack state.
+        if (epoll_fd_ >= 0) {
+            (void)epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
+        }
+        try {
+            KPBR_LOCK_GUARD(fd_entries_mutex_);
+            fd_entries_.erase(
+                std::remove_if(
+                    fd_entries_.begin(),
+                    fd_entries_.end(),
+                    [fd](const FdEntry& entry) {
+                        return entry.fd == fd;
+                    }),
+                fd_entries_.end());
+        } catch (...) {
+        }
+    }
     conntrack_event_monitor_.reset();
 }
 
@@ -1612,7 +1641,16 @@ TestRoutingResult Daemon::run_api_routing_test(
 }
 
 void Daemon::setup_api() {
-    if (!config_.api || !config_.api->enabled.value_or(false) || opts_.no_api) return;
+    // A previous bounded attempt may have reached any point below. Always
+    // begin from an empty API ownership set; this is also a no-op on the first
+    // startup attempt.
+    if (!config_.api || !config_.api->enabled.value_or(false) || opts_.no_api) {
+        retire_api_runtime_resources();
+        return;
+    }
+
+    run_api_setup_with_strong_rollback(
+        [this]() {
 
     api_server_ = std::make_unique<ApiServer>(*config_.api);
 
@@ -2538,6 +2576,19 @@ void Daemon::setup_api() {
                                  e.what());
         throw;
     }
+        },
+        [this]() noexcept {
+            // Callers never observe a failed setup with a live listener,
+            // handler context, conntrack fd, or fd callback record.
+            retire_api_runtime_resources();
+        });
+}
+
+void Daemon::retire_api_runtime_resources() noexcept {
+    retire_api_runtime_in_dependency_order(
+        [this]() noexcept { api_server_.reset(); },
+        [this]() noexcept { api_ctx_.reset(); },
+        [this]() noexcept { teardown_conntrack_events(); });
 }
 
 namespace {

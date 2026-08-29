@@ -12,6 +12,7 @@ add_executable(keen-pbr-tests
   test_runtime_route_health_plan.cpp
   test_runtime_firewall_immediate_completion.cpp
   test_runtime_firewall_lifecycle_completion.cpp
+  test_runtime_cold_boot_terminal_policy.cpp
   test_ppe_deoffload.cpp
   test_system_auth_capability.cpp
   test_step_up.cpp
@@ -950,6 +951,64 @@ keen_pbr_apply_project_options(
 add_test(
   NAME keen-pbr-runtime-firewall-lifecycle-completion-tests
   COMMAND keen-pbr-runtime-firewall-lifecycle-completion-tests
+)
+
+# Keep cold-boot terminal planning independently buildable. The policy is a
+# production-header seam: no Daemon, API, netlink or firewall backend belongs
+# in this target.
+add_executable(keen-pbr-runtime-cold-boot-terminal-policy-tests
+  test_main.cpp
+  test_runtime_cold_boot_terminal_policy.cpp
+  ../src/daemon/runtime_firewall_lifecycle_completion.cpp
+)
+set_target_properties(
+  keen-pbr-runtime-cold-boot-terminal-policy-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_include_directories(
+  keen-pbr-runtime-cold-boot-terminal-policy-tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+)
+target_link_libraries(
+  keen-pbr-runtime-cold-boot-terminal-policy-tests PRIVATE
+  Threads::Threads
+)
+keen_pbr_apply_project_options(
+  keen-pbr-runtime-cold-boot-terminal-policy-tests)
+add_test(
+  NAME keen-pbr-runtime-cold-boot-terminal-policy-tests
+  COMMAND keen-pbr-runtime-cold-boot-terminal-policy-tests
+)
+
+# Keep API retry/destruction ordering independently buildable. This target
+# exercises the production header seam without starting HTTP, epoll or netlink.
+add_executable(keen-pbr-api-runtime-lifecycle-tests
+  test_main.cpp
+  test_api_runtime_lifecycle.cpp
+)
+set_target_properties(
+  keen-pbr-api-runtime-lifecycle-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_include_directories(
+  keen-pbr-api-runtime-lifecycle-tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+)
+target_link_libraries(
+  keen-pbr-api-runtime-lifecycle-tests PRIVATE
+  Threads::Threads
+)
+keen_pbr_apply_project_options(
+  keen-pbr-api-runtime-lifecycle-tests)
+add_test(
+  NAME keen-pbr-api-runtime-lifecycle-tests
+  COMMAND keen-pbr-api-runtime-lifecycle-tests
 )
 
 # Keep the delayed runtime-firewall transport owner independently buildable.

@@ -1,4 +1,5 @@
 #include "daemon.hpp"
+#include "api_runtime_lifecycle.hpp"
 #include "keenetic_dns_firewall_lifecycle_policy.hpp"
 
 #include "../keenetic/ndms_native_writer_lease.hpp"
@@ -67,6 +68,7 @@
 #include "../dns/dns_probe_server.hpp" // IWYU pragma: keep
 #include "runtime_firewall_generation_input.hpp"
 #include "runtime_firewall_operation_owner.hpp"
+#include "runtime_cold_boot_terminal_policy.hpp"
 #include "owned_conntrack_cleanup_operation.hpp"
 #include "runtime_route_health_plan.hpp"
 #include "runtime_urltest_terminal_orchestrator.hpp"
@@ -306,6 +308,28 @@ struct RuntimeFirewallStartRollbackResult;
 struct DaemonUrltestSelectionTransaction;
 struct DaemonKeeneticDnsRefreshTransaction;
 
+struct DaemonColdBootTransaction final {
+    PreparedNativeVpnCatalogPtr prepared_native_vpn_catalog;
+    std::shared_ptr<const ListCacheGenerationSnapshot>
+        list_cache_snapshot;
+    RuntimeRoutingInventorySnapshotPtr route_preimage;
+    InternalVpnRuntimeResolutionState interface_resolution_state{
+        InternalVpnRuntimeResolutionState::degraded};
+    InternalVpnRuntimeResolutionState service_resolution_state{
+        InternalVpnRuntimeResolutionState::degraded};
+    std::uint64_t runtime_generation{0U};
+    std::uint64_t mutation_lease_token{0U};
+    std::uint64_t active_attempt_identity{0U};
+    std::size_t completed_candidate_bodies{0U};
+    std::size_t dispatch_rejections{0U};
+    std::size_t rollback_handoff_rejections{0U};
+    std::size_t rollback_body_failures{0U};
+    std::size_t service_open_attempts{0U};
+    bool route_mutation_acknowledged{false};
+    bool exact_route_checkpoint_verified{false};
+    bool startup_services_opened{false};
+};
+
 struct DaemonRuntimeFirewallOperationState final
     : RuntimeFirewallOperationDomainState {
     enum class PreworkerFailureKind : std::uint8_t {
@@ -397,6 +421,8 @@ struct DaemonRuntimeFirewallOperationState final
         urltest_selection_transaction;
     std::shared_ptr<DaemonKeeneticDnsRefreshTransaction>
         keenetic_dns_refresh_transaction;
+    std::shared_ptr<DaemonColdBootTransaction> cold_boot_transaction;
+    std::uint64_t cold_boot_mutation_lease_token{0U};
     std::optional<ConfigTerminalOperationIdentity>
         config_operation_identity;
     std::shared_ptr<const ResolverGenerationSnapshot>
@@ -1000,6 +1026,9 @@ Daemon::~Daemon() {
     // shutdown that protect callbacks from observing partially destroyed
     // Daemon members.
 #ifdef WITH_API
+    cleanup_step("retire API runtime", [this] {
+        retire_api_runtime_resources();
+    });
     cleanup_step("cancel nfqws boot recovery", [this] {
         cancel_nfqws_boot_recovery();
         cancel_nfqws_retention_backfill();
@@ -4164,6 +4193,1034 @@ bool Daemon::runtime_firewall_lifecycle_generation_is_current(
                runtime_generation_.load(std::memory_order_acquire);
 }
 
+bool Daemon::begin_preowned_runtime_firewall_cold_boot(
+    const std::shared_ptr<DaemonColdBootTransaction>& transaction,
+    std::unique_ptr<RuntimeMutationAdmission::Lease>& lease,
+    PreparedNativeVpnCatalogPtr prepared_native_vpn_catalog,
+    std::shared_ptr<const ListCacheGenerationSnapshot>
+        startup_list_cache_snapshot,
+    RuntimeFirewallPreownedTerminalContinuation& continuation) noexcept {
+    if (!transaction || !lease || !static_cast<bool>(*lease) ||
+        lease->token() != transaction->mutation_lease_token ||
+        !runtime_mutation_admission_.owns(*lease) || !continuation ||
+        !startup_list_cache_snapshot ||
+        runtime_firewall_owner_->shutdown_requested() ||
+        runtime_firewall_owner_->active_context() ||
+        runtime_firewall_owner_->pending_successor()) {
+        return false;
+    }
+
+    bool runtime_active = true;
+    try {
+        runtime_active = routing_runtime_active();
+    } catch (...) {
+        return false;
+    }
+    if (runtime_active ||
+        runtime_state_machine_.state() != RuntimeState::starting) {
+        return false;
+    }
+
+    const auto generation =
+        runtime_generation_.load(std::memory_order_acquire);
+    if (prepared_native_vpn_catalog &&
+        prepared_native_vpn_catalog->runtime_generation != generation) {
+        return false;
+    }
+
+    try {
+        auto state =
+            std::make_shared<DaemonRuntimeFirewallOperationState>();
+        state->cold_boot_transaction = transaction;
+        state->cold_boot_mutation_lease_token = lease->token();
+        // The startup owner consumes one immutable list generation.  The
+        // dispatch path must not rebuild it after the lease hand-off.
+        state->list_cache_snapshot =
+            std::move(startup_list_cache_snapshot);
+        auto result = runtime_firewall_owner_->start_immediate_preowned(
+            transaction->completed_candidate_bodies,
+            generation,
+            {},
+            std::move(prepared_native_vpn_catalog),
+            /*schedule_catalog_refresh=*/false,
+            state,
+            runtime_mutation_admission_,
+            std::move(lease),
+            {},
+            RuntimeFirewallLifecycleKind::cold_boot,
+            std::move(continuation));
+        if (result.disposition ==
+            RuntimeFirewallImmediateDisposition::handed_off) {
+            return true;
+        }
+        lease = std::move(result.unaccepted_lease);
+        continuation = std::move(result.unaccepted_continuation);
+    } catch (...) {
+    }
+    return false;
+}
+
+void Daemon::start_runtime_cold_boot_attempt(
+    const std::shared_ptr<DaemonColdBootTransaction>& transaction)
+    noexcept {
+    if (!transaction || transaction->startup_services_opened ||
+        runtime_firewall_owner_->shutdown_requested()) {
+        return;
+    }
+    if (transaction->runtime_generation !=
+        runtime_generation_.load(std::memory_order_acquire)) {
+        try {
+            runtime_state_store_.set_routing_runtime_active(false);
+            if (runtime_state_machine_.state() == RuntimeState::running ||
+                runtime_state_machine_.state() == RuntimeState::starting) {
+                transition_runtime_or_throw(
+                    RuntimeState::broken,
+                    "cold-boot generation became stale before admission");
+            }
+            publish_runtime_state();
+        } catch (...) {
+        }
+        open_runtime_cold_boot_services(
+            transaction, /*runtime_ready=*/false);
+        return;
+    }
+    const auto consume_dispatch_budget = [transaction]() noexcept {
+        if (transaction->dispatch_rejections <
+            kRuntimeFirewallStartBoundedRetryCount) {
+            ++transaction->dispatch_rejections;
+        }
+    };
+    if (plan_runtime_cold_boot_candidate_budget(
+            transaction->completed_candidate_bodies,
+            kRuntimeFirewallStartBoundedRetryCount)
+            .dispatch ==
+        RuntimeColdBootCandidateBudgetDispatch::exhausted) {
+        schedule_runtime_cold_boot_recovery(
+            transaction, "cold-boot candidate budget is exhausted");
+        return;
+    }
+
+    std::unique_ptr<RuntimeMutationAdmission::Lease> lease;
+    try {
+        auto acquired = runtime_mutation_admission_.try_acquire(
+            "runtime-cold-boot");
+        if (acquired.has_value()) {
+            lease = std::make_unique<RuntimeMutationAdmission::Lease>(
+                std::move(*acquired));
+        }
+    } catch (...) {
+    }
+    if (!lease) {
+        consume_dispatch_budget();
+        schedule_runtime_cold_boot_recovery(
+            transaction, "cold-boot mutation admission is busy");
+        return;
+    }
+
+    RuntimeRoutingInventorySnapshotPtr route_preimage;
+    try {
+        route_preimage = routing_operation_owner_.snapshot();
+    } catch (...) {
+    }
+    if (classify_runtime_routing_inventory(route_preimage) !=
+        RuntimeRoutingInventoryAuthority::authoritative) {
+        lease.reset();
+        consume_dispatch_budget();
+        schedule_runtime_cold_boot_recovery(
+            transaction, "cold-boot routing preimage is not authoritative");
+        return;
+    }
+    transaction->route_preimage = std::move(route_preimage);
+    transaction->mutation_lease_token = lease->token();
+    transaction->route_mutation_acknowledged = false;
+    transaction->exact_route_checkpoint_verified = false;
+    ++transaction->active_attempt_identity;
+    if (transaction->active_attempt_identity == 0U) {
+        ++transaction->active_attempt_identity;
+    }
+    const auto attempt_identity = transaction->active_attempt_identity;
+    const auto candidate_attempt =
+        transaction->completed_candidate_bodies;
+
+    try {
+        runtime_state_store_.set_routing_runtime_active(false);
+        if (runtime_state_machine_.state() == RuntimeState::broken) {
+            transition_runtime_or_throw(
+                RuntimeState::starting,
+                "cold-boot recovery attempt admitted");
+        }
+        publish_runtime_state();
+    } catch (...) {
+        lease.reset();
+        consume_dispatch_budget();
+        schedule_runtime_cold_boot_recovery(
+            transaction, "cold-boot starting state could not be published");
+        return;
+    }
+
+    RuntimeFirewallPreownedTerminalContinuation continuation;
+    try {
+        continuation = RuntimeFirewallPreownedTerminalContinuation{
+            [this, transaction, attempt_identity, candidate_attempt](
+                RuntimeFirewallLifecycleTerminal terminal,
+                std::unique_ptr<RuntimeMutationAdmission::Lease> exact)
+                noexcept {
+                complete_runtime_cold_boot_attempt(
+                    transaction,
+                    attempt_identity,
+                    candidate_attempt,
+                    std::move(terminal),
+                    std::move(exact));
+            }};
+    } catch (...) {
+        lease.reset();
+        consume_dispatch_budget();
+        schedule_runtime_cold_boot_recovery(
+            transaction, "cold-boot terminal allocation failed");
+        return;
+    }
+
+    if (begin_preowned_runtime_firewall_cold_boot(
+            transaction,
+            lease,
+            transaction->prepared_native_vpn_catalog,
+            transaction->list_cache_snapshot,
+            continuation)) {
+        transaction->dispatch_rejections = 0U;
+        return;
+    }
+
+    // Handoff rejection did not mutate the candidate. Release the exact
+    // writer before scheduling a fresh admission attempt.
+    lease.reset();
+    continuation = {};
+    consume_dispatch_budget();
+    schedule_runtime_cold_boot_recovery(
+        transaction, "cold-boot firewall owner rejected the handoff");
+}
+
+void Daemon::complete_runtime_cold_boot_attempt(
+    const std::shared_ptr<DaemonColdBootTransaction>& transaction,
+    std::uint64_t attempt_identity,
+    std::size_t candidate_attempt,
+    RuntimeFirewallLifecycleTerminal terminal,
+    std::unique_ptr<RuntimeMutationAdmission::Lease> lease) noexcept {
+    if (!transaction) return;
+    if (transaction->completed_candidate_bodies <= candidate_attempt) {
+        if (transaction->dispatch_rejections <
+            kRuntimeFirewallStartBoundedRetryCount) {
+            ++transaction->dispatch_rejections;
+        }
+    } else {
+        transaction->dispatch_rejections = 0U;
+    }
+    const bool terminal_transient = terminal.transient;
+    const bool terminal_ambiguous = terminal.commit_ambiguous;
+    RuntimeColdBootCandidateAction action =
+        RuntimeColdBootCandidateAction::request_fresh_recovery;
+    try {
+        const bool exact_lease_owned =
+            lease && static_cast<bool>(*lease) &&
+            lease->token() == transaction->mutation_lease_token &&
+            attempt_identity == transaction->active_attempt_identity &&
+            runtime_mutation_admission_.owns(*lease);
+        const bool generation_current =
+            transaction->runtime_generation ==
+            runtime_generation_.load(std::memory_order_acquire);
+        const auto route_after = routing_operation_owner_.snapshot();
+        const bool authoritative_route_snapshots =
+            classify_runtime_routing_inventory(transaction->route_preimage) ==
+                RuntimeRoutingInventoryAuthority::authoritative &&
+            classify_runtime_routing_inventory(route_after) ==
+                RuntimeRoutingInventoryAuthority::authoritative;
+        const bool route_candidate_mutated =
+            authoritative_route_snapshots &&
+            route_after->revision != transaction->route_preimage->revision;
+        const bool exact_route_checkpoint_verified =
+            authoritative_route_snapshots &&
+            transaction->exact_route_checkpoint_verified;
+        bool running_publication_succeeded = false;
+        try {
+            running_publication_succeeded =
+                routing_runtime_active() &&
+                runtime_state_machine_.state() == RuntimeState::running;
+        } catch (...) {
+        }
+
+        RuntimeColdBootCandidateEvidence evidence;
+        evidence.exact_lease_owned = exact_lease_owned;
+        evidence.runtime_generation_current = generation_current;
+        evidence.exact_route_checkpoint_verified =
+            exact_route_checkpoint_verified;
+        evidence.route_candidate_mutated = route_candidate_mutated;
+        evidence.resolver_terminal_verified =
+            terminal.outcome ==
+                RuntimeFirewallLifecycleOutcome::verified_success &&
+            terminal.committed && !terminal.commit_ambiguous;
+        evidence.running_publication_succeeded =
+            running_publication_succeeded;
+        evidence.terminal = std::move(terminal);
+        action = plan_runtime_cold_boot_candidate_terminal(evidence);
+    } catch (...) {
+        // Without complete terminal evidence, a route/firewall mutation may
+        // already exist. Never turn that unknown state into a fresh rollback
+        // baseline merely because evidence preparation failed.
+        action = RuntimeColdBootCandidateAction::finish_available_degraded;
+    }
+
+    if (action == RuntimeColdBootCandidateAction::publish_running) {
+        lease.reset();
+        transaction->completed_candidate_bodies = 0U;
+        open_runtime_cold_boot_services(transaction, /*runtime_ready=*/true);
+        return;
+    }
+    if (action == RuntimeColdBootCandidateAction::
+                      retain_previous_and_finish_available) {
+        lease.reset();
+        if (terminal_transient) {
+            schedule_runtime_cold_boot_recovery(
+                transaction, "transient clean cold-boot failure");
+            return;
+        }
+        open_runtime_cold_boot_services(transaction, /*runtime_ready=*/false);
+        return;
+    }
+    if (action == RuntimeColdBootCandidateAction::finish_shutdown) {
+        lease.reset();
+        return;
+    }
+    if (action ==
+        RuntimeColdBootCandidateAction::finish_available_degraded) {
+        lease.reset();
+        try {
+            runtime_state_store_.set_routing_runtime_active(false);
+            if (runtime_state_machine_.state() == RuntimeState::running ||
+                runtime_state_machine_.state() == RuntimeState::starting) {
+                transition_runtime_or_throw(
+                    RuntimeState::broken,
+                    "cold-boot terminal lost exact mutation authority");
+            }
+            publish_runtime_state();
+        } catch (...) {
+        }
+        open_runtime_cold_boot_services(
+            transaction, /*runtime_ready=*/false);
+        return;
+    }
+    if (action == RuntimeColdBootCandidateAction::
+                      start_exact_route_rollback) {
+        start_runtime_cold_boot_rollback(
+            transaction,
+            RuntimeColdBootRollbackKind::route_preimage,
+            std::move(lease));
+        return;
+    }
+    if (action == RuntimeColdBootCandidateAction::start_full_rollback) {
+        start_runtime_cold_boot_rollback(
+            transaction,
+            RuntimeColdBootRollbackKind::stopped_runtime,
+            std::move(lease));
+        return;
+    }
+
+    // Ambiguous or stale terminals are not replay authority. Drop the exact
+    // lease first; the bounded timer below must acquire a new observation.
+    lease.reset();
+    schedule_runtime_cold_boot_recovery(
+        transaction,
+        terminal_ambiguous
+            ? "cold-boot firewall COMMIT is ambiguous"
+            : "cold-boot terminal requires a fresh observation");
+}
+
+void Daemon::start_runtime_cold_boot_rollback(
+    const std::shared_ptr<DaemonColdBootTransaction>& transaction,
+    RuntimeColdBootRollbackKind rollback_kind,
+    std::unique_ptr<RuntimeMutationAdmission::Lease> lease) noexcept {
+    const bool shutdown = runtime_firewall_owner_->shutdown_requested();
+    const bool generation_current = transaction &&
+        transaction->runtime_generation ==
+            runtime_generation_.load(std::memory_order_acquire);
+    const bool exact = transaction && lease && static_cast<bool>(*lease) &&
+        lease->token() == transaction->mutation_lease_token &&
+        runtime_mutation_admission_.owns(*lease) && generation_current;
+    if (!exact || shutdown) {
+        lease.reset();
+        if (shutdown) return;
+        try {
+            runtime_state_store_.set_routing_runtime_active(false);
+            if (runtime_state_machine_.state() == RuntimeState::running ||
+                runtime_state_machine_.state() == RuntimeState::starting) {
+                transition_runtime_or_throw(
+                    RuntimeState::broken,
+                    "cold-boot rollback lost exact authority");
+            }
+            publish_runtime_state();
+        } catch (...) {
+        }
+        open_runtime_cold_boot_services(
+            transaction, /*runtime_ready=*/false);
+        return;
+    }
+
+    struct RollbackResult final {
+        std::atomic<bool> body_finished{false};
+        std::atomic<bool> control_claimed{false};
+        bool verified{false};
+        std::string detail;
+        int completion_watchdog_task_id{-1};
+    };
+    std::shared_ptr<RollbackResult> result;
+    std::shared_ptr<
+        std::unique_ptr<RuntimeMutationAdmission::Lease>> lease_holder;
+    RuntimeRoutingInventorySnapshotPtr preimage;
+    try {
+        result = std::make_shared<RollbackResult>();
+        lease_holder = std::make_shared<
+            std::unique_ptr<RuntimeMutationAdmission::Lease>>();
+        preimage = transaction->route_preimage;
+        *lease_holder = std::move(lease);
+    } catch (...) {
+        lease.reset();
+        try {
+            runtime_state_store_.set_routing_runtime_active(false);
+            if (runtime_state_machine_.state() == RuntimeState::running ||
+                runtime_state_machine_.state() == RuntimeState::starting) {
+                transition_runtime_or_throw(
+                    RuntimeState::broken,
+                    "cold-boot rollback allocation failed");
+            }
+            publish_runtime_state();
+        } catch (...) {
+        }
+        open_runtime_cold_boot_services(
+            transaction, /*runtime_ready=*/false);
+        return;
+    }
+
+    // Arm the control-loop completion before the blocking body can run.  The
+    // worker therefore never has to transfer the exact lease through a
+    // fallible post_control_task() after mutating routes/firewall state.  A
+    // repeating timer is only a readiness watchdog; the body itself remains
+    // serialized on BlockingExecutor.
+    try {
+        const int completion_watchdog_task_id =
+            scheduler_->schedule_repeating(
+                kRuntimeFirewallStartRetryDelays.front(),
+                [this,
+                 transaction,
+                 rollback_kind,
+                 result,
+                 lease_holder]() noexcept {
+                    if (result->control_claimed.load(
+                            std::memory_order_acquire)) {
+                        try {
+                            if (result->completion_watchdog_task_id >= 0) {
+                                scheduler_->cancel(
+                                    result->completion_watchdog_task_id);
+                            }
+                        } catch (...) {
+                        }
+                        return;
+                    }
+                    if (!result->body_finished.load(
+                            std::memory_order_acquire) ||
+                        result->control_claimed.exchange(
+                            true, std::memory_order_acq_rel)) {
+                        return;
+                    }
+                    try {
+                        if (result->completion_watchdog_task_id >= 0) {
+                            scheduler_->cancel(
+                                result->completion_watchdog_task_id);
+                        }
+                    } catch (...) {
+                    }
+
+                    auto returned_lease = std::move(*lease_holder);
+                    const bool current = transaction &&
+                        transaction->runtime_generation ==
+                            runtime_generation_.load(
+                                std::memory_order_acquire) &&
+                        !runtime_firewall_owner_->shutdown_requested();
+                    const bool exact_returned = returned_lease &&
+                        static_cast<bool>(*returned_lease) &&
+                        returned_lease->token() ==
+                            transaction->mutation_lease_token &&
+                        runtime_mutation_admission_.owns(*returned_lease);
+                    if (!result->verified &&
+                        transaction->rollback_body_failures <
+                            kRuntimeFirewallStartRollbackHandoffRetryLimit) {
+                        ++transaction->rollback_body_failures;
+                    }
+                    const auto dispatch =
+                        plan_runtime_cold_boot_rollback_recovery(
+                            exact_returned,
+                            current,
+                            result->verified,
+                            transaction->rollback_body_failures,
+                            kRuntimeFirewallStartRollbackHandoffRetryLimit);
+
+                    if (dispatch ==
+                        RuntimeColdBootRollbackRecoveryDispatch::
+                            retry_same_authority) {
+                        *lease_holder = std::move(returned_lease);
+                        const auto delay =
+                            kRuntimeFirewallStartRetryDelays[
+                                std::min(
+                                    transaction->rollback_body_failures - 1U,
+                                    kRuntimeFirewallStartRetryDelays.size() -
+                                        1U)];
+                        try {
+                            const int task_id = scheduler_->schedule_oneshot(
+                                delay,
+                                [this,
+                                 transaction,
+                                 rollback_kind,
+                                 lease_holder]() noexcept {
+                                    auto exact_retry =
+                                        std::move(*lease_holder);
+                                    start_runtime_cold_boot_rollback(
+                                        transaction,
+                                        rollback_kind,
+                                        std::move(exact_retry));
+                                },
+                                "runtime-cold-boot-rollback-body-retry");
+                            if (!runtime_cold_boot_scheduler_task_accepted(
+                                    task_id)) {
+                                throw DaemonError(
+                                    "cold-boot rollback body retry was rejected");
+                            }
+                            return;
+                        } catch (...) {
+                            returned_lease = std::move(*lease_holder);
+                        }
+                    }
+
+                    returned_lease.reset();
+                    try {
+                        runtime_state_store_.set_routing_runtime_active(false);
+                        if (runtime_state_machine_.state() ==
+                                RuntimeState::running ||
+                            runtime_state_machine_.state() ==
+                                RuntimeState::starting) {
+                            transition_runtime_or_throw(
+                                RuntimeState::broken,
+                                dispatch ==
+                                        RuntimeColdBootRollbackRecoveryDispatch::
+                                            release_and_schedule_fresh
+                                    ? "cold-boot candidate rolled back"
+                                    : "cold-boot rollback could not be verified");
+                        }
+                        publish_runtime_state();
+                    } catch (...) {
+                    }
+
+                    if (dispatch ==
+                        RuntimeColdBootRollbackRecoveryDispatch::
+                            release_and_schedule_fresh) {
+                        transaction->rollback_body_failures = 0U;
+                        schedule_runtime_cold_boot_recovery(
+                            transaction,
+                            "cold-boot rollback verified; fresh observation required");
+                        return;
+                    }
+                    if (!runtime_firewall_owner_->shutdown_requested()) {
+                        open_runtime_cold_boot_services(
+                            transaction, /*runtime_ready=*/false);
+                    }
+                },
+                "runtime-cold-boot-rollback-completion-watchdog");
+        if (!runtime_cold_boot_scheduler_task_accepted(
+                completion_watchdog_task_id)) {
+            throw DaemonError(
+                "cold-boot rollback completion watchdog was rejected");
+        }
+        result->completion_watchdog_task_id =
+            completion_watchdog_task_id;
+    } catch (...) {
+        ++transaction->rollback_handoff_rejections;
+        const bool retry_current = transaction->runtime_generation ==
+                runtime_generation_.load(std::memory_order_acquire) &&
+            !runtime_firewall_owner_->shutdown_requested();
+        const bool retry_exact = *lease_holder &&
+            static_cast<bool>(**lease_holder) &&
+            (*lease_holder)->token() == transaction->mutation_lease_token &&
+            runtime_mutation_admission_.owns(**lease_holder);
+        const auto dispatch = plan_runtime_cold_boot_rollback_recovery(
+            retry_exact,
+            retry_current,
+            /*rollback_verified=*/false,
+            transaction->rollback_handoff_rejections,
+            kRuntimeFirewallStartRollbackHandoffRetryLimit);
+        if (dispatch ==
+            RuntimeColdBootRollbackRecoveryDispatch::retry_same_authority) {
+            auto exact_retry = std::move(*lease_holder);
+            start_runtime_cold_boot_rollback(
+                transaction, rollback_kind, std::move(exact_retry));
+            return;
+        }
+        auto returned_lease = std::move(*lease_holder);
+        returned_lease.reset();
+        try {
+            runtime_state_store_.set_routing_runtime_active(false);
+            if (runtime_state_machine_.state() == RuntimeState::running ||
+                runtime_state_machine_.state() == RuntimeState::starting) {
+                transition_runtime_or_throw(
+                    RuntimeState::broken,
+                    "cold-boot rollback watchdog could not be armed");
+            }
+            publish_runtime_state();
+        } catch (...) {
+        }
+        open_runtime_cold_boot_services(
+            transaction, /*runtime_ready=*/false);
+        return;
+    }
+
+    bool queued = false;
+    try {
+        queued = blocking_executor_.try_post(
+            rollback_kind == RuntimeColdBootRollbackKind::route_preimage
+                ? "runtime-cold-boot-route-rollback"
+                : "runtime-cold-boot-full-rollback",
+            [this,
+             transaction,
+             rollback_kind,
+             result,
+             lease_holder,
+             preimage]() noexcept {
+                const auto fail = [result](std::string_view detail) noexcept {
+                    try {
+                        result->detail.assign(detail.data(), detail.size());
+                    } catch (...) {
+                    }
+                };
+                try {
+                    if (rollback_kind ==
+                        RuntimeColdBootRollbackKind::route_preimage) {
+                        if (classify_runtime_routing_inventory(preimage) !=
+                            RuntimeRoutingInventoryAuthority::authoritative) {
+                            fail("cold-boot route preimage is not authoritative");
+                        } else {
+                            const auto restored = routing_operation_owner_
+                                .reconcile_compatibility_generation(
+                                    preimage->routes,
+                                    preimage->rules,
+                                    RouteReconcileMode::Strict,
+                                    [this, transaction]() {
+                                        return !runtime_firewall_owner_
+                                                    ->shutdown_requested() &&
+                                            transaction->runtime_generation ==
+                                                runtime_generation_.load(
+                                                    std::memory_order_acquire);
+                                    });
+                            result->verified =
+                                classify_runtime_routing_inventory(restored) ==
+                                    RuntimeRoutingInventoryAuthority::
+                                        authoritative &&
+                                restored->outcome ==
+                                    RuntimeRoutingOperationOutcome::
+                                        compatibility_converged;
+                            if (!result->verified) {
+                                fail("cold-boot route preimage restore was not verified");
+                            }
+                        }
+                    } else {
+                        const auto cleared = routing_operation_owner_.clear();
+                        const bool routing_cleared =
+                            classify_runtime_routing_inventory(cleared) ==
+                                RuntimeRoutingInventoryAuthority::
+                                    authoritative &&
+                            cleared->routes.empty() &&
+                            cleared->rules.empty() &&
+                            cleared->outcome ==
+                                RuntimeRoutingOperationOutcome::cleared;
+                        bool firewall_cleared = false;
+                        bool resolver_deactivated = false;
+                        {
+                            KPBR_LOCK_GUARD(
+                                udp_call_affinity_mutation_mutex_);
+                            firewall_->cleanup();
+                            firewall_cleared = true;
+                        }
+                        const auto deactivate_args =
+                            build_system_resolver_hook_args(
+                                config_, "deactivate");
+                        if (deactivate_args.empty()) {
+                            resolver_deactivated = true;
+                        } else {
+                            KPBR_LOCK_GUARD(system_resolver_hook_mutex_);
+                            resolver_deactivated =
+                                hook_command_executor_(deactivate_args) == 0;
+                        }
+                        result->verified = routing_cleared &&
+                            firewall_cleared && resolver_deactivated;
+                        if (!result->verified) {
+                            fail("cold-boot stopped-runtime rollback was not verified");
+                        }
+                    }
+                } catch (const std::exception& error) {
+                    fail(error.what());
+                } catch (...) {
+                    fail("cold-boot rollback failed with an unknown error");
+                }
+                result->body_finished.store(
+                    true, std::memory_order_release);
+            });
+    } catch (...) {
+        queued = false;
+    }
+    if (queued) {
+        transaction->rollback_handoff_rejections = 0U;
+        return;
+    }
+
+    try {
+        if (result->completion_watchdog_task_id >= 0) {
+            scheduler_->cancel(result->completion_watchdog_task_id);
+        }
+    } catch (...) {
+    }
+    result->control_claimed.store(true, std::memory_order_release);
+    ++transaction->rollback_handoff_rejections;
+    const bool retry_current = transaction->runtime_generation ==
+            runtime_generation_.load(std::memory_order_acquire) &&
+        !runtime_firewall_owner_->shutdown_requested();
+    const bool retry_exact = *lease_holder &&
+        static_cast<bool>(**lease_holder) &&
+        (*lease_holder)->token() == transaction->mutation_lease_token &&
+        runtime_mutation_admission_.owns(**lease_holder);
+    const auto handoff_dispatch = plan_runtime_cold_boot_rollback_recovery(
+        retry_exact,
+        retry_current,
+        /*rollback_verified=*/false,
+        transaction->rollback_handoff_rejections,
+        kRuntimeFirewallStartRollbackHandoffRetryLimit);
+    if (handoff_dispatch ==
+        RuntimeColdBootRollbackRecoveryDispatch::retry_same_authority) {
+        const auto delay = kRuntimeFirewallStartRetryDelays[
+            std::min(
+                transaction->rollback_handoff_rejections - 1U,
+                kRuntimeFirewallStartRetryDelays.size() - 1U)];
+        try {
+            const int task_id = scheduler_->schedule_oneshot(
+                delay,
+                [this,
+                 transaction,
+                 rollback_kind,
+                 lease_holder]() noexcept {
+                    auto exact = std::move(*lease_holder);
+                    start_runtime_cold_boot_rollback(
+                        transaction,
+                        rollback_kind,
+                        std::move(exact));
+                },
+                "runtime-cold-boot-rollback-handoff-retry");
+            if (!runtime_cold_boot_scheduler_task_accepted(task_id)) {
+                throw DaemonError(
+                    "cold-boot rollback handoff retry was rejected");
+            }
+            return;
+        } catch (...) {
+        }
+    }
+
+    // The exact rollback never ran. Releasing authority is unavoidable, but
+    // it is not permission to snapshot the mutated candidate as a new base.
+    auto returned_lease = std::move(*lease_holder);
+    returned_lease.reset();
+    try {
+        runtime_state_store_.set_routing_runtime_active(false);
+        if (runtime_state_machine_.state() == RuntimeState::running ||
+            runtime_state_machine_.state() == RuntimeState::starting) {
+            transition_runtime_or_throw(
+                RuntimeState::broken,
+                "cold-boot rollback handoff exhausted");
+        }
+        publish_runtime_state();
+    } catch (...) {
+    }
+    open_runtime_cold_boot_services(
+        transaction, /*runtime_ready=*/false);
+}
+
+void Daemon::schedule_runtime_cold_boot_recovery(
+    const std::shared_ptr<DaemonColdBootTransaction>& transaction,
+    const char* detail) noexcept {
+    if (!transaction || transaction->startup_services_opened ||
+        runtime_firewall_owner_->shutdown_requested()) {
+        return;
+    }
+    const auto budget = plan_runtime_cold_boot_candidate_budget(
+        transaction->completed_candidate_bodies,
+        kRuntimeFirewallStartBoundedRetryCount);
+    const bool dispatch_retry_available =
+        transaction->dispatch_rejections == 0U ||
+        runtime_firewall_preapply_preworker_retry_available(
+            transaction->dispatch_rejections);
+    const auto recovery_dispatch =
+        plan_runtime_cold_boot_fresh_recovery_dispatch(
+            /*recovery_required=*/true,
+            /*exact_lease_still_owned=*/false,
+            budget.dispatch !=
+                    RuntimeColdBootCandidateBudgetDispatch::exhausted &&
+                dispatch_retry_available);
+    if (recovery_dispatch ==
+        RuntimeColdBootRecoveryDispatch::finish_available_degraded) {
+        try {
+            runtime_state_store_.set_routing_runtime_active(false);
+            if (runtime_state_machine_.state() == RuntimeState::running ||
+                runtime_state_machine_.state() == RuntimeState::starting) {
+                transition_runtime_or_throw(
+                    RuntimeState::broken,
+                    "cold-boot recovery budget exhausted");
+            }
+            publish_runtime_state();
+            Logger::instance().error(
+                "Cold-boot recovery exhausted its bounded retry budget: {}",
+                detail ? detail : "unknown failure");
+        } catch (...) {
+        }
+        open_runtime_cold_boot_services(
+            transaction, /*runtime_ready=*/false);
+        return;
+    }
+    if (recovery_dispatch !=
+        RuntimeColdBootRecoveryDispatch::schedule_with_backoff) {
+        return;
+    }
+    const auto backoff_index = transaction->dispatch_rejections != 0U
+        ? std::min(
+              transaction->dispatch_rejections - 1U,
+              kRuntimeFirewallStartRetryDelays.size() - 1U)
+        : budget.backoff_index;
+    const auto delay =
+        kRuntimeFirewallStartRetryDelays[backoff_index];
+    try {
+        const int task_id = scheduler_->schedule_oneshot(
+            delay,
+            [this, transaction]() noexcept {
+                start_runtime_cold_boot_attempt(transaction);
+            },
+            "runtime-cold-boot-fresh-recovery");
+        if (!runtime_cold_boot_scheduler_task_accepted(task_id)) {
+            throw DaemonError(
+                "cold-boot fresh recovery timer was rejected");
+        }
+        Logger::instance().info(
+            "Cold-boot recovery will take a fresh observation in {}ms: {}",
+            delay.count(),
+            detail ? detail : "retry requested");
+    } catch (...) {
+        transaction->completed_candidate_bodies =
+            kRuntimeFirewallStartBoundedRetryCount;
+        schedule_runtime_cold_boot_recovery(
+            transaction, "cold-boot recovery timer could not be armed");
+    }
+}
+
+void Daemon::open_runtime_cold_boot_services(
+    const std::shared_ptr<DaemonColdBootTransaction>& transaction,
+    bool runtime_ready) noexcept {
+    if (!transaction ||
+        !runtime_cold_boot_services_may_open(
+            runtime_firewall_owner_->shutdown_requested(),
+            transaction->startup_services_opened)) {
+        return;
+    }
+
+#ifdef WITH_API
+    try {
+        setup_api();
+    } catch (const std::exception& error) {
+        try {
+            Logger::instance().error(
+                "Cold-boot diagnostics/API startup failed: {}",
+                error.what());
+        } catch (...) {
+        }
+        ++transaction->service_open_attempts;
+        if (!runtime_firewall_owner_->shutdown_requested() &&
+            transaction->service_open_attempts <
+                kRuntimeFirewallStartBoundedRetryCount) {
+            const auto delay = kRuntimeFirewallStartRetryDelays[
+                std::min(
+                    transaction->service_open_attempts - 1U,
+                    kRuntimeFirewallStartRetryDelays.size() - 1U)];
+            try {
+                const int task_id = scheduler_->schedule_oneshot(
+                    delay,
+                    [this, transaction, runtime_ready]() noexcept {
+                        open_runtime_cold_boot_services(
+                            transaction, runtime_ready);
+                    },
+                    "runtime-cold-boot-service-open-retry");
+                if (!runtime_cold_boot_scheduler_task_accepted(task_id)) {
+                    throw DaemonError(
+                        "cold-boot service retry was rejected");
+                }
+                return;
+            } catch (...) {
+            }
+        }
+        if (!runtime_ready) {
+            try {
+                runtime_state_store_.set_routing_runtime_active(false);
+                if (runtime_state_machine_.state() == RuntimeState::running ||
+                    runtime_state_machine_.state() ==
+                        RuntimeState::starting) {
+                    transition_runtime_or_throw(
+                        RuntimeState::broken,
+                        "cold-boot diagnostics/API startup failed");
+                }
+                publish_runtime_state();
+            } catch (...) {
+            }
+        }
+        return;
+    } catch (...) {
+        try {
+            Logger::instance().error(
+                "Cold-boot diagnostics/API startup failed with an unknown "
+                "error");
+        } catch (...) {
+        }
+        ++transaction->service_open_attempts;
+        if (!runtime_firewall_owner_->shutdown_requested() &&
+            transaction->service_open_attempts <
+                kRuntimeFirewallStartBoundedRetryCount) {
+            const auto delay = kRuntimeFirewallStartRetryDelays[
+                std::min(
+                    transaction->service_open_attempts - 1U,
+                    kRuntimeFirewallStartRetryDelays.size() - 1U)];
+            try {
+                const int task_id = scheduler_->schedule_oneshot(
+                    delay,
+                    [this, transaction, runtime_ready]() noexcept {
+                        open_runtime_cold_boot_services(
+                            transaction, runtime_ready);
+                    },
+                    "runtime-cold-boot-service-open-retry");
+                if (!runtime_cold_boot_scheduler_task_accepted(task_id)) {
+                    throw DaemonError(
+                        "cold-boot service retry was rejected");
+                }
+                return;
+            } catch (...) {
+            }
+        }
+        if (!runtime_ready) {
+            try {
+                runtime_state_store_.set_routing_runtime_active(false);
+                if (runtime_state_machine_.state() == RuntimeState::running ||
+                    runtime_state_machine_.state() ==
+                        RuntimeState::starting) {
+                    transition_runtime_or_throw(
+                        RuntimeState::broken,
+                        "cold-boot diagnostics/API startup failed");
+                }
+                publish_runtime_state();
+            } catch (...) {
+            }
+        }
+        return;
+    }
+#endif
+
+    const bool post_setup_service_gate_open =
+        runtime_cold_boot_services_may_open(
+            runtime_firewall_owner_->shutdown_requested(),
+            transaction->startup_services_opened);
+#ifdef WITH_API
+    if (!retain_api_runtime_after_setup_if_gate_open(
+            post_setup_service_gate_open,
+            [this]() noexcept { retire_api_runtime_resources(); })) {
+        return;
+    }
+#else
+    if (!post_setup_service_gate_open) {
+        return;
+    }
+#endif
+
+    // Only a successfully opened diagnostics/API boundary retires cold-boot
+    // service admission. A transient bind/allocation failure above remains a
+    // bounded, visible startup failure instead of a false one-shot success.
+    transaction->startup_services_opened = true;
+    transaction->service_open_attempts = 0U;
+
+    const auto step = [](const char* label, auto&& callback) noexcept {
+        try {
+            callback();
+        } catch (const std::exception& error) {
+            try {
+                Logger::instance().error(
+                    "Cold-boot service '{}' failed: {}", label, error.what());
+            } catch (...) {
+            }
+        } catch (...) {
+            try {
+                Logger::instance().error(
+                    "Cold-boot service '{}' failed", label);
+            } catch (...) {
+            }
+        }
+    };
+
+    step("DNS probe", [this] { setup_dns_probe(); });
+    step("interface monitor", [this] { register_interface_monitor_fd(); });
+#ifdef WITH_API
+    step("remote-access bridge", [this] {
+        setup_remote_access_retry_bridge();
+        schedule_remote_access_recovery_watchdog();
+        request_remote_access_reconcile_from_control("cold boot");
+        schedule_nfqws_boot_recovery(0);
+        schedule_nfqws_retention_backfill(0);
+    });
+#endif
+    step("list autoupdate", [this] { schedule_lists_autoupdate(); });
+    step("interface probes", [this] { schedule_interface_probe(); });
+    step("catalog refresh", [this] { schedule_catalog_refresh(); });
+
+    if (runtime_ready) {
+        step("runtime maintenance", [this, transaction] {
+            reset_idle_stall_observer(/*schedule_if_eligible=*/true);
+            schedule_owned_snat_health_check();
+            schedule_keenetic_dns_refresh();
+            if (internal_vpn_resolution_requires_catalog_refresh(
+                    config_, transaction->interface_resolution_state) ||
+                (config_requires_internal_vpn_service_inventory(config_) &&
+                 transaction->service_resolution_state !=
+                     InternalVpnRuntimeResolutionState::verified)) {
+                schedule_internal_vpn_catalog_refresh_if_needed(
+                    transaction->interface_resolution_state,
+                    transaction->service_resolution_state);
+            }
+            register_urltest_outbounds();
+            refresh_resolver_config_hash_actual_async();
+            probe_interfaces_now();
+        });
+    } else {
+        try {
+            (void)runtime_firewall_incidents_.record_failure(
+                "runtime-cold-boot",
+                /*notify_immediately=*/true);
+            publish_runtime_state();
+        } catch (...) {
+        }
+    }
+
+    try {
+        Logger::instance().info(
+            runtime_ready
+                ? "Daemon startup route/firewall/resolver generation is verified."
+                : "Daemon control and diagnostics are available; startup "
+                  "routing generation remains degraded.");
+    } catch (...) {
+    }
+}
+
 bool Daemon::begin_preowned_runtime_firewall_keenetic_dns_refresh(
     std::uint64_t generation,
     KeeneticDnsCacheView candidate_view,
@@ -7142,7 +8199,7 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
 
     try {
         const bool lifecycle_start =
-            runtime_firewall_lifecycle_is_start(
+            runtime_firewall_lifecycle_uses_start_pipeline(
                 context->lifecycle_kind);
         if (lifecycle_config_generation) {
             const auto& config_transaction =
@@ -7279,14 +8336,18 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                 !resolver_generation_snapshot_ ||
                 !resolver_generation_snapshot_->list_cache_snapshot;
         }
-        if (!lifecycle_preowned && lifecycle_start) {
+        if (lifecycle_start) {
             // START activates the already-pinned resolver/list generation.
             // Requiring activation is not authority to advance remote bodies.
-            state.list_cache_snapshot =
-                resolver_generation_snapshot_ &&
-                        resolver_generation_snapshot_->list_cache_snapshot
-                    ? resolver_generation_snapshot_->list_cache_snapshot
-                    : capture_relevant_list_cache_generation(config_);
+            if (!state.list_cache_snapshot) {
+                state.list_cache_snapshot =
+                    resolver_generation_snapshot_ &&
+                            resolver_generation_snapshot_
+                                ->list_cache_snapshot
+                        ? resolver_generation_snapshot_
+                              ->list_cache_snapshot
+                        : capture_relevant_list_cache_generation(config_);
+            }
         } else if (!lifecycle_preowned) {
             state.list_cache_snapshot = state.resolver_refresh_required
                 ? capture_relevant_list_cache_generation(config_)
@@ -7569,11 +8630,13 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                 .pre_mutation_owned_conntrack_cleanup_snapshot =
                 snapshot_owned_conntrack_marks();
         }
-        if (!lifecycle_preowned) {
-            generation_snapshot.cleanup.mode = lifecycle_start
-                ? RuntimeFirewallOwnedConntrackCleanupMode::
-                      committed_candidate
-                : RuntimeFirewallOwnedConntrackCleanupMode::none;
+        if (lifecycle_start) {
+            generation_snapshot.cleanup.mode =
+                RuntimeFirewallOwnedConntrackCleanupMode::
+                    committed_candidate;
+        } else if (!lifecycle_preowned) {
+            generation_snapshot.cleanup.mode =
+                RuntimeFirewallOwnedConntrackCleanupMode::none;
         }
 
         auto worker_input = make_runtime_firewall_worker_attempt_input(
@@ -8021,6 +9084,9 @@ bool Daemon::begin_runtime_firewall_lifecycle_resolver(
     const bool lifecycle_keenetic_dns_generation = context &&
         runtime_firewall_lifecycle_is_keenetic_dns_generation(
             context->lifecycle_kind);
+    const bool lifecycle_cold_boot = context &&
+        runtime_firewall_lifecycle_is_cold_boot(
+            context->lifecycle_kind);
     if (!context || !runtime_firewall_owner_->is_active(context) ||
         (!lifecycle_start && !lifecycle_restart &&
          !lifecycle_config_generation &&
@@ -8100,7 +9166,18 @@ bool Daemon::begin_runtime_firewall_lifecycle_resolver(
                      : "runtime restart resolver list generation is unavailable");
             return false;
         }
-        if (!lifecycle_config_generation &&
+        if (lifecycle_cold_boot &&
+            !state.private_resolver_generation) {
+            apply_started_ts_.store(
+                unix_timestamp_now_seconds(),
+                std::memory_order_release);
+            state.private_resolver_generation =
+                std::make_shared<const ResolverGenerationSnapshot>(
+                    make_resolver_generation_snapshot(
+                        state.list_cache_snapshot,
+                        state.lifecycle_trusted_dns_interfaces));
+            state.resolver_generation_published = true;
+        } else if (!lifecycle_config_generation &&
             !lifecycle_keenetic_dns_generation &&
             !state.resolver_generation_published) {
             apply_started_ts_.store(
@@ -8112,13 +9189,13 @@ bool Daemon::begin_runtime_firewall_lifecycle_resolver(
                     state.lifecycle_trusted_dns_interfaces));
             state.resolver_generation_published = true;
         }
-        if ((lifecycle_config_generation ||
+        if ((lifecycle_cold_boot || lifecycle_config_generation ||
              lifecycle_keenetic_dns_generation) &&
             !state.private_resolver_generation) {
             fail("private lifecycle resolver generation is unavailable");
             return false;
         }
-        if (!lifecycle_config_generation &&
+        if (!lifecycle_cold_boot && !lifecycle_config_generation &&
             !lifecycle_keenetic_dns_generation &&
             !resolver_generation_snapshot_) {
             fail("lifecycle resolver generation was not published");
@@ -8126,7 +9203,7 @@ bool Daemon::begin_runtime_firewall_lifecycle_resolver(
         }
 
         auto generation = std::make_shared<ResolverGenerationSnapshot>(
-            *((lifecycle_config_generation ||
+            *((lifecycle_cold_boot || lifecycle_config_generation ||
                lifecycle_keenetic_dns_generation)
                   ? state.private_resolver_generation
                   : resolver_generation_snapshot_));
@@ -8163,7 +9240,7 @@ bool Daemon::begin_runtime_firewall_lifecycle_resolver(
                     }
                 }
             });
-        if (!lifecycle_config_generation &&
+        if (!lifecycle_cold_boot && !lifecycle_config_generation &&
             !lifecycle_keenetic_dns_generation) {
             resolver_generation_snapshot_ = generation;
         } else {
@@ -8263,7 +9340,7 @@ bool Daemon::begin_runtime_firewall_lifecycle_resolver(
                     try {
                         completed_state.lifecycle_failure_detail =
                             result.error.empty()
-                                ? (runtime_firewall_lifecycle_is_start(
+                                ? (runtime_firewall_lifecycle_uses_start_pipeline(
                                        retained->lifecycle_kind)
                                        ? "resolver activation did not publish "
                                          "the expected configuration stream"
@@ -8508,6 +9585,9 @@ void Daemon::drain_runtime_firewall_terminal(
             context->lifecycle_kind);
     const bool lifecycle_preowned =
         runtime_firewall_lifecycle_uses_preowned_continuation(
+            context->lifecycle_kind);
+    const bool lifecycle_cold_boot =
+        runtime_firewall_lifecycle_is_cold_boot(
             context->lifecycle_kind);
 
     auto drain = context->terminal_owner->try_begin_drain();
@@ -9226,13 +10306,15 @@ void Daemon::drain_runtime_firewall_terminal(
             bool previous_generation_certainly_retained) {
             RuntimeFirewallLifecycleTerminal terminal;
             terminal.outcome = outcome;
-            terminal.committed = state.core_publication.committed;
+            terminal.committed = state.core_publication.committed ||
+                context->preapply_commit_observed;
             terminal.commit_ambiguous =
                 context->worker_commit_ambiguous;
             terminal.transient = state.worker_failure_transient;
             terminal.observed_config_identity =
                 state.config_operation_identity;
             terminal.previous_generation_certainly_retained =
+                !terminal.committed &&
                 previous_generation_certainly_retained;
             if (!state.lifecycle_failure_detail.empty()) {
                 terminal.detail = state.lifecycle_failure_detail;
@@ -9255,6 +10337,30 @@ void Daemon::drain_runtime_firewall_terminal(
                 context->worker_commit_ambiguous;
             terminal.transient = state.worker_failure_transient;
             terminal.previous_generation_certainly_retained =
+                previous_generation_certainly_retained;
+            if (!state.lifecycle_failure_detail.empty()) {
+                terminal.detail = state.lifecycle_failure_detail;
+            } else if (!state.worker_failure_detail.empty()) {
+                terminal.detail = state.worker_failure_detail;
+            } else {
+                terminal.detail = state.preworker_failure_detail;
+            }
+            return terminal;
+        };
+
+    const auto prepare_cold_boot_terminal =
+        [&context, &state](
+            RuntimeFirewallLifecycleOutcome outcome,
+            bool previous_generation_certainly_retained) {
+            RuntimeFirewallLifecycleTerminal terminal;
+            terminal.outcome = outcome;
+            terminal.committed = state.core_publication.committed ||
+                context->preapply_commit_observed;
+            terminal.commit_ambiguous =
+                context->worker_commit_ambiguous;
+            terminal.transient = state.worker_failure_transient;
+            terminal.previous_generation_certainly_retained =
+                !terminal.committed &&
                 previous_generation_certainly_retained;
             if (!state.lifecycle_failure_detail.empty()) {
                 terminal.detail = state.lifecycle_failure_detail;
@@ -9403,7 +10509,31 @@ void Daemon::drain_runtime_firewall_terminal(
                     ? RuntimeFirewallImmediateTerminalOutcome::shutdown
                     : RuntimeFirewallImmediateTerminalOutcome::
                           not_verified)) {
-                return;
+            return;
+        }
+        if (lifecycle_cold_boot) {
+            auto cold_boot_terminal = prepare_cold_boot_terminal(
+                shutdown
+                    ? RuntimeFirewallLifecycleOutcome::shutdown
+                    : RuntimeFirewallLifecycleOutcome::not_verified,
+                !shutdown);
+            auto permit = runtime_firewall_owner_->
+                prepare_preowned_continuation_finalization(context);
+            if (!permit.has_value()) return;
+            auto proof = drain->finish_coordinator_terminal();
+            if (!proof.has_value()) return;
+            if (!runtime_firewall_owner_->complete_preowned_continuation(
+                    std::move(*permit),
+                    std::move(*proof),
+                    std::move(cold_boot_terminal))) {
+                try {
+                    Logger::instance().error(
+                        "Cold-boot coordinator terminal violated its "
+                        "prepared finalization proof");
+                } catch (...) {
+                }
+            }
+            return;
         }
         if (lifecycle_config_generation) {
             auto config_terminal = prepare_config_generation_terminal(
@@ -9518,7 +10648,31 @@ void Daemon::drain_runtime_firewall_terminal(
                     ? RuntimeFirewallImmediateTerminalOutcome::shutdown
                     : RuntimeFirewallImmediateTerminalOutcome::
                           not_verified)) {
-                return;
+            return;
+        }
+        if (lifecycle_cold_boot) {
+            auto cold_boot_terminal = prepare_cold_boot_terminal(
+                shutdown
+                    ? RuntimeFirewallLifecycleOutcome::shutdown
+                    : RuntimeFirewallLifecycleOutcome::not_verified,
+                !shutdown);
+            auto permit = runtime_firewall_owner_->
+                prepare_preowned_continuation_finalization(context);
+            if (!permit.has_value()) return;
+            auto proof = drain->finish_worker_terminal();
+            if (!proof.has_value()) return;
+            if (!runtime_firewall_owner_->complete_preowned_continuation(
+                    std::move(*permit),
+                    std::move(*proof),
+                    std::move(cold_boot_terminal))) {
+                try {
+                    Logger::instance().error(
+                        "Cold-boot abandoned-worker terminal violated its "
+                        "prepared finalization proof");
+                } catch (...) {
+                }
+            }
+            return;
         }
         if (lifecycle_config_generation) {
             auto config_terminal = prepare_config_generation_terminal(
@@ -10099,8 +11253,21 @@ void Daemon::drain_runtime_firewall_terminal(
         }
 
         const bool lifecycle_start =
-            runtime_firewall_lifecycle_is_start(
+            runtime_firewall_lifecycle_uses_start_pipeline(
                 context->lifecycle_kind);
+        bool route_preimage_certainly_retained = false;
+        if (result_valid && worker_result) {
+            const auto& route = worker_result->route_preparation;
+            if (!route.required || !route.observation_succeeded) {
+                route_preimage_certainly_retained = true;
+            } else if (route.worker_mutation_ack.has_value()) {
+                route_preimage_certainly_retained =
+                    *route.worker_mutation_ack ==
+                        RuntimeRouteMutationAck::stale ||
+                    *route.worker_mutation_ack ==
+                        RuntimeRouteMutationAck::route_unavailable;
+            }
+        }
         const bool retryable_failure = lifecycle_start
             ? transient_failure
             : (transient_failure ||
@@ -10110,6 +11277,29 @@ void Daemon::drain_runtime_firewall_terminal(
                     context->worker_input->transaction.config)) ||
                urltest_after_firewall_gate_.waiting_for(
                    context->queued_claim.runtime_generation));
+        const bool retry_budget_available =
+            runtime_firewall_start_retry_available(
+                context->queued_claim.attempt);
+        const auto cold_budget_after_body =
+            plan_runtime_cold_boot_candidate_budget(
+                lifecycle_cold_boot && state.cold_boot_transaction
+                    ? std::max(
+                          state.cold_boot_transaction
+                              ->completed_candidate_bodies,
+                          context->queued_claim.attempt + 1U)
+                    : 0U,
+                kRuntimeFirewallStartBoundedRetryCount);
+        const bool cold_retry_budget_available =
+            cold_budget_after_body.dispatch !=
+            RuntimeColdBootCandidateBudgetDispatch::exhausted;
+        const bool cold_same_context_retry = lifecycle_cold_boot &&
+            runtime_cold_boot_same_context_retry_allowed(
+                transient_failure,
+                publication.committed ||
+                    context->preapply_commit_observed,
+                commit_ambiguous,
+                route_preimage_certainly_retained,
+                cold_retry_budget_available);
         const bool bounded_retry_required =
             !lifecycle_config_generation &&
             !lifecycle_urltest_generation &&
@@ -10117,9 +11307,9 @@ void Daemon::drain_runtime_firewall_terminal(
             !worker_succeeded &&
             !commit_ambiguous &&
             retryable_failure &&
-            (!lifecycle_start ||
-             runtime_firewall_start_retry_available(
-                 context->queued_claim.attempt));
+            (lifecycle_cold_boot
+                 ? cold_same_context_retry
+                 : (!lifecycle_start || retry_budget_available));
 
         // The target GCC 8 old-string ABI does not promise nothrow move
         // assignment. Commit that sole fallible context field while the
@@ -10132,6 +11322,15 @@ void Daemon::drain_runtime_firewall_terminal(
         // retry can never observe a partially committed core checkpoint.
         publication.prepared = true;
         state.core_publication = std::move(publication);
+        context->preapply_commit_observed =
+            context->preapply_commit_observed ||
+            state.core_publication.committed;
+        if (lifecycle_cold_boot && state.cold_boot_transaction) {
+            state.cold_boot_transaction->completed_candidate_bodies =
+                std::max(
+                    state.cold_boot_transaction->completed_candidate_bodies,
+                    context->queued_claim.attempt + 1U);
+        }
         state.candidate_meta_activation_plan =
             std::move(candidate_meta_plan);
         state.processed_snat_recovery =
@@ -10711,7 +11910,8 @@ void Daemon::drain_runtime_firewall_terminal(
     if (!drain->begin_worker_control(runtime_firewall_retry_)) return;
 
     const bool lifecycle_start =
-        runtime_firewall_lifecycle_is_start(context->lifecycle_kind);
+        runtime_firewall_lifecycle_uses_start_pipeline(
+            context->lifecycle_kind);
     const auto publish_core_candidate = [this, &state]() noexcept {
         if (state.core_published) return true;
         auto& publication = state.core_publication;
@@ -10734,12 +11934,43 @@ void Daemon::drain_runtime_firewall_terminal(
             publication.internal_vpn_service_targets);
         applied_native_vpn_direct_egress_snat_selectors_.swap(
             publication.native_vpn_direct_egress_snat_selectors);
-        committed_meta_udp443_fwmark_ =
-            publication.committed_meta_fwmark;
-        committed_meta_udp443_owned_mask_ =
-            publication.committed_meta_owned_mask;
+        committed_meta_udp443_fwmark_.swap(
+            publication.committed_meta_fwmark);
+        std::swap(
+            committed_meta_udp443_owned_mask_,
+            publication.committed_meta_owned_mask);
         state.core_published = true;
         return true;
+    };
+    const auto restore_core_candidate = [this, &state]() noexcept {
+        if (!state.core_published ||
+            !state.core_publication.committed) {
+            return;
+        }
+        auto& publication = state.core_publication;
+        firewall_state_.swap_rules(publication.rules);
+        applied_list_content_state_.static_destinations.swap(
+            publication.list_content_state.static_destinations);
+        applied_list_content_state_.domain_entry_lists.swap(
+            publication.list_content_state.domain_entry_lists);
+        applied_list_content_state_.truncated_static_destination_lists.swap(
+            publication.list_content_state
+                .truncated_static_destination_lists);
+        applied_list_usage_.swap(publication.list_usage);
+        applied_list_fingerprints_.swap(
+            publication.list_fingerprints);
+        resolved_internal_vpn_servers_.swap(
+            publication.internal_vpn_servers);
+        resolved_internal_vpn_service_targets_.swap(
+            publication.internal_vpn_service_targets);
+        applied_native_vpn_direct_egress_snat_selectors_.swap(
+            publication.native_vpn_direct_egress_snat_selectors);
+        committed_meta_udp443_fwmark_.swap(
+            publication.committed_meta_fwmark);
+        std::swap(
+            committed_meta_udp443_owned_mask_,
+            publication.committed_meta_owned_mask);
+        state.core_published = false;
     };
 
     if (!drain->publish_worker_control([
@@ -10864,7 +12095,45 @@ void Daemon::drain_runtime_firewall_terminal(
 
     if (!shutdown && lifecycle_start &&
         !state.resolver_tail_finished) {
-        if (!context->worker_succeeded) {
+        const bool cold_route_mutation_acknowledged =
+            lifecycle_cold_boot && context->worker_input && worker_result &&
+            worker_result->route_preparation.required &&
+            worker_result->route_preparation.worker_mutation_ack ==
+                std::optional<RuntimeRouteMutationAck>{
+                    RuntimeRouteMutationAck::applied};
+        const bool cold_route_checkpoint_proven = !lifecycle_cold_boot ||
+            (cold_route_mutation_acknowledged &&
+             context->worker_input->route_health_request.route_epoch != 0U &&
+             context->worker_input->route_health_request.route_epoch ==
+                 routing_observation_epoch_.load(
+                     std::memory_order_acquire) &&
+             context->queued_claim.runtime_generation ==
+                 runtime_generation_.load(std::memory_order_acquire) &&
+             worker_result->route_preparation.checkpoint_published &&
+             worker_result->route_preparation.mutation_ack ==
+                 std::optional<RuntimeRouteMutationAck>{
+                     RuntimeRouteMutationAck::applied});
+        if (lifecycle_cold_boot && state.cold_boot_transaction) {
+            state.cold_boot_transaction->route_mutation_acknowledged =
+                cold_route_mutation_acknowledged;
+            state.cold_boot_transaction->exact_route_checkpoint_verified =
+                cold_route_checkpoint_proven;
+        }
+        const bool cold_route_firewall_proven =
+            cold_route_checkpoint_proven &&
+            state.core_publication.committed &&
+            !context->worker_commit_ambiguous;
+        if (!context->worker_succeeded || !cold_route_firewall_proven) {
+            if (context->worker_succeeded &&
+                !cold_route_firewall_proven) {
+                context->worker_succeeded = false;
+                state.worker_failure_transient = false;
+                if (state.worker_failure_detail.empty()) {
+                    state.worker_failure_detail =
+                        "cold-boot route/firewall checkpoint was not exact "
+                        "before resolver activation";
+                }
+            }
             state.lifecycle_resolver_verified = false;
             state.resolver_tail_finished = true;
         } else {
@@ -10874,7 +12143,10 @@ void Daemon::drain_runtime_firewall_terminal(
             }
             state.resolver_tail_finished = true;
             if (state.lifecycle_resolver_verified) {
-                if (!publish_core_candidate()) return;
+                if (!lifecycle_cold_boot &&
+                    !publish_core_candidate()) {
+                    return;
+                }
                 state.lifecycle_start_candidate_published = true;
                 // Re-enter once so the ordinary internal-VPN and Meta tails
                 // observe only the now-verified published candidate.
@@ -10970,7 +12242,8 @@ void Daemon::drain_runtime_firewall_terminal(
         state.resolver_tail_finished = true;
     }
 
-    if (!shutdown && !state.conntrack_tail_finished) {
+    if (!shutdown && !lifecycle_cold_boot &&
+        !state.conntrack_tail_finished) {
         if (state.worker_result_valid && worker_result != nullptr &&
             worker_result->native_direct_egress_source_cleanup
                 .failure.failed()) {
@@ -11018,7 +12291,7 @@ void Daemon::drain_runtime_firewall_terminal(
                 // A changed topology after the worker route checkpoint is a
                 // non-ambiguous fresh-snapshot request, not a verified START.
                 context->worker_succeeded = false;
-                const bool retry_available =
+                const bool retry_available = !lifecycle_cold_boot &&
                     runtime_firewall_start_retry_available(
                         context->queued_claim.attempt);
                 context->successor_mode = retry_available
@@ -11036,31 +12309,231 @@ void Daemon::drain_runtime_firewall_terminal(
                 context->worker_succeeded &&
                 state.lifecycle_resolver_verified &&
                 state.lifecycle_start_candidate_published &&
-                state.core_published;
+                (lifecycle_cold_boot || state.core_published);
             if (verified_start) {
                 bool publication_failed = false;
                 if (!state.lifecycle_start_finalized) {
-                    try {
-                        runtime_state_store_.set_routing_runtime_active(true);
-                        if (runtime_state_machine_.state() !=
-                            RuntimeState::running) {
-                            transition_runtime_or_throw(
-                                RuntimeState::running,
-                                "runtime start complete");
-                        }
-                        publish_runtime_state();
-                        state.lifecycle_start_finalized = true;
-                    } catch (const std::exception& error) {
-                        publication_failed = true;
+                    if (lifecycle_cold_boot) {
+                        bool exact_admission = false;
                         try {
-                            state.lifecycle_failure_detail =
-                                std::string{
-                                    "runtime start state publication failed: "} +
-                                error.what();
+                            const auto active =
+                                runtime_mutation_admission_.active();
+                            exact_admission = active.has_value() &&
+                                active->token ==
+                                    state.cold_boot_mutation_lease_token;
                         } catch (...) {
                         }
-                    } catch (...) {
-                        publication_failed = true;
+
+                        std::shared_ptr<const ResolverGenerationSnapshot>
+                            previous_resolver_generation;
+                        ResolverSyncCheckpoint previous_resolver_sync;
+                        std::uint32_t previous_resolver_retry_attempt{0U};
+                        std::int64_t previous_apply_started_ts{0};
+                        std::vector<InternalVpnServer>
+                            staged_internal_vpn_lkg;
+                        std::vector<InternalVpnRuntimeTarget>
+                            staged_internal_vpn_service_lkg;
+                        bool lkg_swapped = false;
+                        bool rollback_cursor_ready = false;
+                        try {
+                            previous_resolver_generation =
+                                resolver_generation_snapshot_;
+                            previous_resolver_sync =
+                                resolver_sync_.checkpoint();
+                            previous_resolver_retry_attempt =
+                                resolver_config_hash_actual_retry_attempt_;
+                            previous_apply_started_ts =
+                                apply_started_ts_.load(
+                                    std::memory_order_acquire);
+                            {
+                                // LKG is recovery authority for later native
+                                // VPN mutations, not ancillary diagnostics.
+                                // Prepare both fallibly under one snapshot
+                                // lock; publication below is then two no-throw
+                                // swaps in the same running fence.
+                                KPBR_LOCK_GUARD(internal_vpn_lkg_mutex_);
+                                staged_internal_vpn_lkg =
+                                    internal_vpn_verified_includes_lkg_;
+                                staged_internal_vpn_service_lkg =
+                                    internal_vpn_service_verified_includes_lkg_;
+                                if (state.internal_vpn_resolution.state ==
+                                        InternalVpnRuntimeResolutionState::
+                                            verified ||
+                                    state.internal_vpn_resolution.state ==
+                                        InternalVpnRuntimeResolutionState::
+                                            authoritative_negative) {
+                                    staged_internal_vpn_lkg =
+                                        merge_internal_vpn_verified_includes_lkg(
+                                            staged_internal_vpn_lkg,
+                                            state.internal_vpn_resolution
+                                                .verified_includes_for_lkg,
+                                            state.internal_vpn_resolution
+                                                .retain_verified_include_ndms_ids);
+                                }
+                                if (state.internal_vpn_service_resolution.state ==
+                                        InternalVpnRuntimeResolutionState::
+                                            verified ||
+                                    state.internal_vpn_service_resolution.state ==
+                                        InternalVpnRuntimeResolutionState::
+                                            authoritative_negative) {
+                                    staged_internal_vpn_service_lkg =
+                                        merge_internal_vpn_service_verified_includes_lkg(
+                                            staged_internal_vpn_service_lkg,
+                                            state.internal_vpn_service_resolution
+                                                .verified_includes_for_lkg,
+                                            state.internal_vpn_service_resolution
+                                                .retain_verified_include_service_ids);
+                                }
+                            }
+                            rollback_cursor_ready = true;
+                        } catch (...) {
+                        }
+
+                        bool publication_committed = false;
+                        const bool publication_admitted =
+                            rollback_cursor_ready &&
+                            publish_runtime_cold_boot_if_current(
+                                [this,
+                                 &context,
+                                 &state,
+                                 current_generation,
+                                 route_epoch_current,
+                                 exact_admission]() noexcept {
+                                    return exact_admission &&
+                                        route_epoch_current &&
+                                        state.cold_boot_transaction &&
+                                        state.cold_boot_transaction
+                                            ->exact_route_checkpoint_verified &&
+                                        state.private_resolver_generation &&
+                                        state.core_publication.committed &&
+                                        !context->worker_commit_ambiguous &&
+                                        current_generation ==
+                                            context->queued_claim
+                                                .runtime_generation &&
+                                        current_generation ==
+                                            runtime_generation_.load(
+                                                std::memory_order_acquire);
+                                },
+                                [this,
+                                 &state,
+                                 &publish_core_candidate,
+                                 &restore_core_candidate,
+                                  &previous_resolver_generation,
+                                  &previous_resolver_sync,
+                                  &staged_internal_vpn_lkg,
+                                  &staged_internal_vpn_service_lkg,
+                                  &lkg_swapped,
+                                  previous_resolver_retry_attempt,
+                                 previous_apply_started_ts,
+                                 &publication_committed]() noexcept {
+                                    try {
+                                         if (!publish_core_candidate()) {
+                                             return;
+                                         }
+                                         {
+                                             KPBR_LOCK_GUARD(
+                                                 internal_vpn_lkg_mutex_);
+                                             internal_vpn_verified_includes_lkg_
+                                                 .swap(
+                                                     staged_internal_vpn_lkg);
+                                             internal_vpn_service_verified_includes_lkg_
+                                                 .swap(
+                                                     staged_internal_vpn_service_lkg);
+                                         }
+                                         lkg_swapped = true;
+                                         state.internal_vpn_lkg_published = true;
+                                         resolver_generation_snapshot_ =
+                                            state.private_resolver_generation;
+                                        resolver_config_hash_actual_retry_attempt_ =
+                                            0U;
+                                        resolver_sync_.expected_hash_updated(
+                                            resolver_generation_snapshot_
+                                                ->expected_hash);
+                                        const auto apply_started_ts =
+                                            apply_started_ts_.load(
+                                                std::memory_order_acquire);
+                                        if (apply_started_ts > 0) {
+                                            resolver_sync_.apply_started(
+                                                apply_started_ts,
+                                                resolver_generation_snapshot_
+                                                    ->expected_hash);
+                                        }
+                                        runtime_state_store_
+                                            .set_routing_runtime_active(true);
+                                        if (runtime_state_machine_.state() !=
+                                            RuntimeState::running) {
+                                            transition_runtime_or_throw(
+                                                RuntimeState::running,
+                                                "cold-boot publication complete");
+                                        }
+                                        publish_runtime_state();
+                                        state.lifecycle_start_finalized = true;
+                                        publication_committed = true;
+                                    } catch (...) {
+                                        try {
+                                            runtime_state_store_
+                                                .set_routing_runtime_active(
+                                                    false);
+                                            if (runtime_state_machine_.state() ==
+                                                RuntimeState::running) {
+                                                transition_runtime_or_throw(
+                                                    RuntimeState::broken,
+                                                    "cold-boot publication rollback");
+                                            }
+                                        } catch (...) {
+                                        }
+                                        resolver_generation_snapshot_ =
+                                            previous_resolver_generation;
+                                        resolver_config_hash_actual_retry_attempt_ =
+                                            previous_resolver_retry_attempt;
+                                        apply_started_ts_.store(
+                                            previous_apply_started_ts,
+                                            std::memory_order_release);
+                                         resolver_sync_.restore(
+                                             std::move(previous_resolver_sync));
+                                         if (lkg_swapped) {
+                                             try {
+                                                 KPBR_LOCK_GUARD(
+                                                     internal_vpn_lkg_mutex_);
+                                                 internal_vpn_verified_includes_lkg_
+                                                     .swap(
+                                                         staged_internal_vpn_lkg);
+                                                 internal_vpn_service_verified_includes_lkg_
+                                                     .swap(
+                                                         staged_internal_vpn_service_lkg);
+                                                 lkg_swapped = false;
+                                                 state.internal_vpn_lkg_published =
+                                                     false;
+                                             } catch (...) {
+                                             }
+                                         }
+                                         restore_core_candidate();
+                                        try {
+                                            publish_runtime_state();
+                                        } catch (...) {
+                                        }
+                                    }
+                                });
+                        publication_failed =
+                            !publication_admitted ||
+                            !publication_committed;
+                    } else {
+                        try {
+                            runtime_state_store_
+                                .set_routing_runtime_active(true);
+                            if (runtime_state_machine_.state() !=
+                                RuntimeState::running) {
+                                transition_runtime_or_throw(
+                                    RuntimeState::running,
+                                    "runtime start complete");
+                            }
+                            publish_runtime_state();
+                            state.lifecycle_start_finalized = true;
+                        } catch (...) {
+                            publication_failed = true;
+                        }
+                    }
+                    if (publication_failed) {
                         try {
                             state.lifecycle_failure_detail =
                                 "runtime start state publication failed";
@@ -11071,15 +12544,30 @@ void Daemon::drain_runtime_firewall_terminal(
 
                 if (publication_failed) {
                     context->worker_succeeded = false;
-                    if (begin_runtime_firewall_start_rollback(context)) {
-                        drain->park_until_wake();
-                        return;
+                    if (!lifecycle_cold_boot) {
+                        if (begin_runtime_firewall_start_rollback(context)) {
+                            drain->park_until_wake();
+                            return;
+                        }
+                        if (!finalize_start_broken(
+                                state.lifecycle_failure_detail)) {
+                            drain->park_until_wake();
+                            return;
+                        }
                     }
-                    if (!finalize_start_broken(
-                            state.lifecycle_failure_detail)) {
-                        drain->park_until_wake();
-                        return;
+                } else if (lifecycle_cold_boot) {
+                    if (state.core_published &&
+                        !state.internal_vpn_lkg_published) {
+                        try {
+                            update_internal_vpn_verified_includes_lkg(
+                                state.internal_vpn_resolution);
+                            update_internal_vpn_service_verified_includes_lkg(
+                                state.internal_vpn_service_resolution);
+                            state.internal_vpn_lkg_published = true;
+                        } catch (...) {
+                        }
                     }
+                    state.lifecycle_start_post_success_finished = true;
                 } else if (!state.lifecycle_start_post_success_finished) {
                     // All remaining work is ancillary. A scheduler, notifier
                     // or logger failure must not replay the already-published
@@ -11162,17 +12650,20 @@ void Daemon::drain_runtime_firewall_terminal(
                 } catch (...) {
                 }
             } else {
-                if (begin_runtime_firewall_start_rollback(context)) {
-                    drain->park_until_wake();
-                    return;
-                }
-                if (!finalize_start_broken(
-                        state.lifecycle_failure_detail.empty()
-                            ? std::string_view{state.worker_failure_detail}
-                            : std::string_view{
-                                  state.lifecycle_failure_detail})) {
-                    drain->park_until_wake();
-                    return;
+                if (!lifecycle_cold_boot) {
+                    if (begin_runtime_firewall_start_rollback(context)) {
+                        drain->park_until_wake();
+                        return;
+                    }
+                    if (!finalize_start_broken(
+                            state.lifecycle_failure_detail.empty()
+                                ? std::string_view{
+                                      state.worker_failure_detail}
+                                : std::string_view{
+                                      state.lifecycle_failure_detail})) {
+                        drain->park_until_wake();
+                        return;
+                    }
                 }
             }
         } else if (context->worker_succeeded) {
@@ -11265,6 +12756,35 @@ void Daemon::drain_runtime_firewall_terminal(
                              verified_success
                        : RuntimeFirewallImmediateTerminalOutcome::
                              not_verified))) {
+        return;
+    }
+    if (lifecycle_cold_boot) {
+        const bool previous_generation_certainly_retained =
+            worker_result != nullptr &&
+            worker_result->previous_generation_certainly_retained();
+        auto cold_boot_terminal = prepare_cold_boot_terminal(
+            shutdown
+                ? RuntimeFirewallLifecycleOutcome::shutdown
+                : (context->worker_succeeded && lifecycle_verified
+                       ? RuntimeFirewallLifecycleOutcome::verified_success
+                       : RuntimeFirewallLifecycleOutcome::not_verified),
+            previous_generation_certainly_retained);
+        auto permit = runtime_firewall_owner_->
+            prepare_preowned_continuation_finalization(context);
+        if (!permit.has_value()) return;
+        auto proof = drain->finish_worker_terminal();
+        if (!proof.has_value()) return;
+        if (!runtime_firewall_owner_->complete_preowned_continuation(
+                std::move(*permit),
+                std::move(*proof),
+                std::move(cold_boot_terminal))) {
+            try {
+                Logger::instance().error(
+                    "Cold-boot worker terminal violated its prepared "
+                    "finalization proof");
+            } catch (...) {
+            }
+        }
         return;
     }
     if (!drain->finish_worker_terminal()) return;
@@ -11777,19 +13297,6 @@ void Daemon::run() {
             snapshot_internal_vpn_service_verified_includes_lkg());
     const auto internal_vpn_service_resolution_state =
         internal_vpn_service_resolution.state;
-    std::optional<InternalVpnRuntimeGenerationTransaction>
-        internal_vpn_generation;
-    internal_vpn_generation.emplace(
-        resolved_internal_vpn_servers_,
-        internal_vpn_resolution.effective_servers);
-    std::optional<InternalVpnRuntimeTargetGenerationTransaction>
-        internal_vpn_service_generation;
-    internal_vpn_service_generation.emplace(
-        resolved_internal_vpn_service_targets_,
-        internal_vpn_service_resolution.effective_targets);
-    setup_static_routing();
-    log.info("Static routing tables and ip rules installed.");
-
     log.info("Startup lists: checking local cache; only missing remote lists will be downloaded.");
     const auto relevant_lists = collect_relevant_list_names(config_);
     const auto dns_relevant_lists = collect_dns_relevant_list_names(config_);
@@ -11825,184 +13332,80 @@ void Daemon::run() {
     auto startup_list_cache_snapshot =
         capture_relevant_list_cache_generation(config_);
 
-    // Applying rules must never abort startup. At boot the firmware holds the
-    // xtables lock while it brings interfaces up, so this can legitimately fail;
-    // coming up without rules and retrying beats leaving the router with no
-    // service at all, because a running daemon can still be reached and fixed.
-    bool startup_firewall_generation_committed = false;
-    bool startup_firewall_recovery_needed = false;
-    try {
-        retry_hot_apply_firewall(
-            [this, &startup_list_cache_snapshot]() {
-                // A previous daemon generation may still own working chains
-                // after a crash or package replacement. Keep them live until
-                // this generation reaches an atomic COMMIT.
-                apply_firewall(
-                    FirewallApplyMode::PreserveSets,
-                    startup_list_cache_snapshot);
-            },
-            [](std::chrono::milliseconds delay) {
-                std::this_thread::sleep_for(delay);
-            },
-            [](std::size_t retry,
-               std::chrono::milliseconds delay,
-               const TransientFirewallError& error) {
-                Logger::instance().info(
-                    "Initial firewall replacement deferred after a concurrent "
-                    "firmware change: {}. Retry {} in {}ms.",
-                    error.what(),
-                    retry,
-                    delay.count());
-            });
-        cleanup_owned_conntrack_marks(
-            "after initial firewall activation");
-        startup_firewall_generation_committed = true;
-        log.info("Firewall rules and routing applied.");
-    } catch (const TransientFirewallError& e) {
-        // The previous daemon's atomic firewall generation may still be the
-        // one forwarding. Do not let the new process describe its uncommitted
-        // candidate as active while the delayed retry is pending.
-        internal_vpn_generation.reset();
-        internal_vpn_service_generation.reset();
-        // This is expected while NDMS is still publishing its firewall after
-        // boot. The shared runtime owner retains the one bounded recovery
-        // operation until it reaches an exact terminal outcome.
-        log.info("Firewall rules are not ready at startup: {}. "
-                 "The service continues and will retry shortly.", e.what());
-        startup_firewall_recovery_needed = true;
-    } catch (const std::exception& e) {
-        internal_vpn_generation.reset();
-        internal_vpn_service_generation.reset();
-        // Invalid rules, missing helpers and other permanent faults will not
-        // normally improve by repeating the same transaction. A stable-ID
-        // candidate is the exception: until it commits, an older retained
-        // kernel generation may still be forwarding, so keep the existing
-        // bounded recovery rather than stranding the candidate indefinitely.
-        log.error("Firewall apply failed permanently at startup: {}", e.what());
-        if (config_has_native_vpn_catalog_policy(config_)) {
-            startup_firewall_recovery_needed = true;
-        }
-    }
+    auto cold_boot = std::make_shared<DaemonColdBootTransaction>();
+    cold_boot->runtime_generation =
+        runtime_generation_.load(std::memory_order_acquire);
+    cold_boot->list_cache_snapshot = startup_list_cache_snapshot;
+    cold_boot->interface_resolution_state =
+        internal_vpn_resolution_state;
+    cold_boot->service_resolution_state =
+        internal_vpn_service_resolution_state;
+    cold_boot->prepared_native_vpn_catalog =
+        std::make_shared<const PreparedNativeVpnCatalog>(
+            PreparedNativeVpnCatalog{
+                cold_boot->runtime_generation,
+                std::move(internal_vpn_resolution),
+                std::move(internal_vpn_service_resolution),
+                /*schedule_catalog_refresh=*/false});
 
-    if (startup_firewall_recovery_needed) {
-        try {
-            runtime_firewall_owner_->schedule(
-                /*attempt=*/0U,
-                runtime_generation_.load(std::memory_order_acquire),
-                /*snat_recovery=*/{},
-                /*prepared_catalog=*/{});
-        } catch (const std::exception& error) {
-            // Startup must remain available even if timer registration or an
-            // owner-side allocation fails. Periodic health reconciliation can
-            // still observe and repair the missing firewall generation.
-            try {
-                log.error(
-                    "Could not hand off startup firewall recovery: {}. "
-                    "The service continues without the delayed attempt.",
-                    error.what());
-            } catch (...) {
-            }
-        } catch (...) {
-            try {
-                log.error(
-                    "Could not hand off startup firewall recovery: unknown "
-                    "error. The service continues without the delayed "
-                    "attempt.");
-            } catch (...) {
-            }
-        }
-    }
-
-    schedule_lists_autoupdate();
-    schedule_interface_probe();
-    schedule_catalog_refresh();
-
-    if (refresh_result.any_dns_relevant_changed()) {
-        log.info("Startup lists: DNS-relevant list(s) changed ({}); reloading system resolver.",
-                 format_list_names(refresh_result.dns_relevant_changed_lists));
-    } else {
-        log.info(
-            "Startup resolver: reloading managed configuration after the control socket became available.");
-    }
-    // The Keenetic init script starts dnsmasq before the daemon so startup can
-    // still resolve remote list hosts. At that point the control socket is not
-    // available and dnsmasq intentionally loads the fallback configuration.
-    // Always reload once more from the live daemon; otherwise a cache-complete
-    // startup can remain on fallback DNS indefinitely.
-    apply_started_ts_.store(unix_timestamp_now_seconds(), std::memory_order_release);
-    commit_resolver_generation_snapshot(
-        make_resolver_generation_snapshot(
-            startup_list_cache_snapshot));
-    if (!run_system_resolver_hook_stream_prepared(
-            "reload", /*rebuild_snapshot=*/false)) {
-        throw DaemonError(
-            "system resolver reload did not complete its configuration stream");
-    }
-    // resolver_generation_snapshot_ now owns the active lease. Do not keep an
-    // extra startup reference alive for the complete daemon event loop.
-    startup_list_cache_snapshot.reset();
-    // Publish a verified include-only LKG only after the initial route and
-    // firewall transaction has actually committed. A transient startup
-    // firewall failure is recovered by refresh_iproute_and_firewall_runtime(),
-    // which performs the same commit after its successful retry.
-    if (startup_firewall_generation_committed) {
-        internal_vpn_generation->commit();
-        internal_vpn_service_generation->commit();
-        update_internal_vpn_verified_includes_lkg(
-            internal_vpn_resolution);
-        update_internal_vpn_service_verified_includes_lkg(
-            internal_vpn_service_resolution);
-        internal_vpn_generation.reset();
-        internal_vpn_service_generation.reset();
-    }
-    runtime_state_store_.set_routing_runtime_active(true);
-    reset_idle_stall_observer(/*schedule_if_eligible=*/true);
-    schedule_owned_snat_health_check();
-    schedule_keenetic_dns_refresh();
-    transition_runtime_or_throw(RuntimeState::running, "startup complete");
+    // The store default is true for compatibility with ordinary constructed
+    // snapshots. Cold boot must revoke that optimistic default before any
+    // route/firewall candidate is handed to the asynchronous owner.
+    runtime_state_store_.set_routing_runtime_active(false);
+    normalize_urltest_selections();
     publish_runtime_state();
 
-    setup_dns_probe();
-
-    register_interface_monitor_fd();
-
-#ifdef WITH_API
-    setup_api();
-#endif
-
-    // Async runtime probes commit through post_control_task(). Accept their
-    // results before starting any probe, but keep event_loop_active_ false
-    // until every fallible startup step has completed. This lets fast native
-    // URLTest children queue their first result without exposing a half-started
-    // daemon to synchronous control requests.
-    accept_posted_control_tasks_.store(true, std::memory_order_release);
-#ifdef WITH_API
-    // Retry hints can originate on API worker threads. Register the bridge
-    // only after posted control work is admitted, then create the startup
-    // desired-state generation through the same reconciler used everywhere.
-    setup_remote_access_retry_bridge();
-    schedule_remote_access_recovery_watchdog();
-    request_remote_access_reconcile_from_control("startup");
-    // An nfqws2 package transaction interrupted by the reboot is acted on
-    // once the event loop runs and S80 has let go of the maintenance lease.
-    schedule_nfqws_boot_recovery(0);
-    schedule_nfqws_retention_backfill(0);
-#endif
-    if (internal_vpn_resolution_requires_catalog_refresh(
-            config_, internal_vpn_resolution_state) ||
-        (config_requires_internal_vpn_service_inventory(config_) &&
-         internal_vpn_service_resolution_state !=
-             InternalVpnRuntimeResolutionState::verified)) {
-        // The initial bounded observation may fail transiently. Start the
-        // retrying worker only after posted control tasks are accepted, so a
-        // fast loopback response cannot be lost before the event loop starts.
-        schedule_internal_vpn_catalog_refresh_if_needed(
-            internal_vpn_resolution_state,
-            internal_vpn_service_resolution_state);
+    // Start the internal control loop before handing off the owner. Posted
+    // lifecycle completions are admitted, while API/user ingress remains
+    // uninitialized until the typed cold-boot terminal opens services.
+    {
+        KPBR_LOCK_GUARD(control_tasks_mutex_);
+        accept_posted_control_tasks_.store(
+            true, std::memory_order_release);
     }
-    register_urltest_outbounds();
-    refresh_resolver_config_hash_actual_async();
-    probe_interfaces_now();
+    running_.store(true, std::memory_order_release);
+    event_loop_thread_id_.store(
+        std::this_thread::get_id(), std::memory_order_relaxed);
+    event_loop_active_.store(true, std::memory_order_release);
+    // Arm the first owner admission through the event loop. A rejected timer
+    // has not transferred authority, so retry its registration with the
+    // existing bounded START delays. Exhaustion keeps the daemon alive and
+    // opens diagnostics without touching the observed kernel generation.
+    bool initial_cold_boot_handoff = false;
+    for (std::size_t attempt = 0U;
+         attempt < kRuntimeFirewallStartBoundedRetryCount &&
+         !initial_cold_boot_handoff;
+         ++attempt) {
+        try {
+            const int task_id = scheduler_->schedule_oneshot(
+                kRuntimeFirewallStartRetryDelays[attempt],
+                [this, cold_boot]() noexcept {
+                    start_runtime_cold_boot_attempt(cold_boot);
+                },
+                "runtime-cold-boot-start");
+            initial_cold_boot_handoff =
+                runtime_cold_boot_scheduler_task_accepted(task_id);
+        } catch (...) {
+        }
+    }
+    if (!initial_cold_boot_handoff) {
+        try {
+            runtime_state_store_.set_routing_runtime_active(false);
+            if (runtime_state_machine_.state() == RuntimeState::starting ||
+                runtime_state_machine_.state() == RuntimeState::running) {
+                transition_runtime_or_throw(
+                    RuntimeState::broken,
+                    "cold-boot event-loop handoff was rejected");
+            }
+            publish_runtime_state();
+        } catch (...) {
+        }
+        open_runtime_cold_boot_services(
+            cold_boot, /*runtime_ready=*/false);
+    }
+    log.info(
+        "Daemon control loop is available; startup route/firewall/resolver "
+        "publication is asynchronous.");
     } catch (...) {
         // Startup installs owned kernel state before dnsmasq proves that it
         // consumed the matching resolver generation. Any failure before the
@@ -12136,11 +13539,7 @@ void Daemon::run() {
         throw;
     }
 
-    log.info("Daemon running. PID: {}", getpid());
-
-    running_.store(true, std::memory_order_release);
-    event_loop_thread_id_.store(std::this_thread::get_id(), std::memory_order_relaxed);
-    event_loop_active_.store(true, std::memory_order_release);
+    log.info("Daemon event loop running. PID: {}", getpid());
 
     run_event_loop();
 

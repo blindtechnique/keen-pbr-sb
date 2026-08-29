@@ -63,6 +63,7 @@
 #include "list_service.hpp"
 #include "runtime_firewall_immediate_completion.hpp"
 #include "runtime_firewall_lifecycle_completion.hpp"
+#include "runtime_cold_boot_terminal_policy.hpp"
 #include "runtime_recovery_policy.hpp"
 #include "runtime_resolver_generation_snapshot.hpp"
 #include "targeted_probe_admission.hpp"
@@ -93,6 +94,7 @@ enum class RuntimeConfigGenerationPublicationMode : std::uint8_t {
 struct DaemonConfigGenerationTransaction;
 struct DaemonUrltestSelectionTransaction;
 struct DaemonKeeneticDnsRefreshTransaction;
+struct DaemonColdBootTransaction;
 struct PlannedRoutingState;
 struct NdmsCatalogSnapshot;
 struct NdmsVpnServerServiceSnapshot;
@@ -635,6 +637,32 @@ private:
     bool runtime_firewall_lifecycle_generation_is_current(
         RuntimeFirewallLifecycleKind lifecycle_kind,
         std::uint64_t expected_generation) const noexcept;
+    bool begin_preowned_runtime_firewall_cold_boot(
+        const std::shared_ptr<DaemonColdBootTransaction>& transaction,
+        std::unique_ptr<RuntimeMutationAdmission::Lease>& lease,
+        PreparedNativeVpnCatalogPtr prepared_native_vpn_catalog,
+        std::shared_ptr<const ListCacheGenerationSnapshot>
+            startup_list_cache_snapshot,
+        RuntimeFirewallPreownedTerminalContinuation& continuation) noexcept;
+    void start_runtime_cold_boot_attempt(
+        const std::shared_ptr<DaemonColdBootTransaction>& transaction)
+        noexcept;
+    void complete_runtime_cold_boot_attempt(
+        const std::shared_ptr<DaemonColdBootTransaction>& transaction,
+        std::uint64_t attempt_identity,
+        std::size_t candidate_attempt,
+        RuntimeFirewallLifecycleTerminal terminal,
+        std::unique_ptr<RuntimeMutationAdmission::Lease> lease) noexcept;
+    void start_runtime_cold_boot_rollback(
+        const std::shared_ptr<DaemonColdBootTransaction>& transaction,
+        RuntimeColdBootRollbackKind rollback_kind,
+        std::unique_ptr<RuntimeMutationAdmission::Lease> lease) noexcept;
+    void schedule_runtime_cold_boot_recovery(
+        const std::shared_ptr<DaemonColdBootTransaction>& transaction,
+        const char* detail) noexcept;
+    void open_runtime_cold_boot_services(
+        const std::shared_ptr<DaemonColdBootTransaction>& transaction,
+        bool runtime_ready) noexcept;
     void pump_runtime_route_health_checkpoint(
         const std::shared_ptr<RuntimeFirewallOperationContext>& context)
         noexcept;
@@ -1002,6 +1030,7 @@ private:
 #ifdef WITH_API
     // API integration
     void setup_api();
+    void retire_api_runtime_resources() noexcept;
     TestRoutingResult run_api_routing_test(
         const std::string& target);
     RuntimeMutationAdmission::Lease acquire_runtime_mutation_or_throw(
@@ -1104,7 +1133,7 @@ private:
     void setup_conntrack_events();
     void handle_conntrack_events(uint32_t events);
     void publish_conntrack_revision();
-    void teardown_conntrack_events();
+    void teardown_conntrack_events() noexcept;
     void schedule_interface_traffic_sampling();
     void sample_interface_traffic_now();
     // Builds the interface inventory and, on the way, folds the firmware's

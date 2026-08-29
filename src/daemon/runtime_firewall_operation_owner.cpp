@@ -19,13 +19,8 @@ constexpr std::array<std::chrono::seconds, 6> kRetryDelays{
     std::chrono::seconds{16},
     std::chrono::seconds{32},
 };
-constexpr std::array<std::chrono::milliseconds, 3> kStartRetryDelays{
-    std::chrono::milliseconds{100},
-    std::chrono::milliseconds{200},
-    std::chrono::milliseconds{400},
-};
 static_assert(
-    kStartRetryDelays.size() ==
+    kRuntimeFirewallStartRetryDelays.size() ==
         kRuntimeFirewallStartBoundedRetryCount,
     "START retry policy must match the lifecycle publication fence");
 constexpr auto kAdmissionRetryDelay = std::chrono::seconds{1};
@@ -36,7 +31,7 @@ constexpr std::size_t kForegroundTransportRetryLimit = 4U;
 std::size_t bounded_retry_count(
     RuntimeFirewallLifecycleKind lifecycle_kind) noexcept {
     return runtime_firewall_lifecycle_uses_hot_retry(lifecycle_kind)
-        ? kStartRetryDelays.size()
+        ? kRuntimeFirewallStartRetryDelays.size()
         : kRetryDelays.size();
 }
 
@@ -44,7 +39,7 @@ std::chrono::milliseconds bounded_retry_delay(
     RuntimeFirewallLifecycleKind lifecycle_kind,
     std::size_t attempt) noexcept {
     if (runtime_firewall_lifecycle_uses_hot_retry(lifecycle_kind)) {
-        return kStartRetryDelays[attempt];
+        return kRuntimeFirewallStartRetryDelays[attempt];
     }
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         kRetryDelays[attempt]);
@@ -1336,7 +1331,7 @@ RuntimeFirewallOperationOwner::pending_successor_state() const noexcept {
 std::optional<RuntimeFirewallOperationOwner::
     PreownedContinuationFinalizationPermit>
 RuntimeFirewallOperationOwner::prepare_preowned_continuation_finalization(
-    const ContextPtr& context) const noexcept {
+    const ContextPtr& context) noexcept {
     if (!is_active(context) || pending_successor_ ||
         launching_pending_successor_ ||
         !runtime_firewall_lifecycle_uses_preowned_continuation(
@@ -1345,6 +1340,34 @@ RuntimeFirewallOperationOwner::prepare_preowned_continuation_finalization(
         !context->preowned_terminal_continuation ||
         !context->retained_mutation_lease ||
         !context->terminal_owner) {
+        return std::nullopt;
+    }
+
+    // A DrainGuard still owns the stable terminal at this point. Retire any
+    // coordinator timer before that guard mints its sole FinalizationProof;
+    // if cancellation cannot prove the timer absent, returning null re-arms
+    // the same terminal and retains the exact continuation/lease for a later
+    // control pass. Doing this after finish_* would destroy the only proof on
+    // a false completion result and strand the preowned authority forever.
+    if (context->terminal_ready.load(std::memory_order_acquire) &&
+        coordinator_.retry_pending()) {
+        try {
+            coordinator_.cancel([this](int task_id) {
+                callbacks_.cancel_scheduled(task_id);
+            });
+        } catch (...) {
+        }
+        if (coordinator_.retry_pending()) {
+            return std::nullopt;
+        }
+    }
+
+    // cancel() is an external callback boundary. Recheck every permit
+    // invariant before authorizing the irreversible terminal close.
+    if (!is_active(context) || pending_successor_ ||
+        launching_pending_successor_ || context->lifecycle_completion ||
+        !context->preowned_terminal_continuation ||
+        !context->retained_mutation_lease || !context->terminal_owner) {
         return std::nullopt;
     }
     return PreownedContinuationFinalizationPermit{context};

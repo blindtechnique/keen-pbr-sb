@@ -1031,6 +1031,133 @@ TEST_CASE("runtime firewall config preapply cancels a retry before returning its
     CHECK_FALSE(admission.active().has_value());
 }
 
+TEST_CASE("cold boot finalization keeps its proof and lease behind a queued coordinator claim") {
+    OwnerHarness harness;
+    harness.create_owner();
+    RuntimeMutationAdmission admission;
+    auto lease = acquire_test_lease(
+        admission, "cold-boot-finalization-proof");
+    REQUIRE(lease);
+    auto* const exact_lease = lease.get();
+    const auto exact_token = lease->token();
+    std::size_t continuation_calls{0U};
+    std::optional<RuntimeFirewallLifecycleTerminal> returned_terminal;
+    RuntimeFirewallOperationOwner::MutationLeasePtr returned_lease;
+
+    RuntimeFirewallOperationOwner::PreownedTerminalContinuation
+        continuation{
+            [&](RuntimeFirewallLifecycleTerminal terminal,
+                RuntimeFirewallOperationOwner::MutationLeasePtr exact)
+                noexcept {
+                ++continuation_calls;
+                returned_terminal.emplace(std::move(terminal));
+                returned_lease = std::move(exact);
+            }};
+    auto start = harness.owner->start_immediate_preowned(
+        /*attempt=*/0U,
+        /*runtime_generation=*/77U,
+        {},
+        {},
+        /*schedule_catalog_refresh=*/false,
+        std::make_shared<TestDomainState>(),
+        admission,
+        std::move(lease),
+        {},
+        RuntimeFirewallLifecycleKind::cold_boot,
+        std::move(continuation));
+    REQUIRE(start.disposition ==
+            RuntimeFirewallImmediateDisposition::handed_off);
+    const auto context = harness.owner->active_context();
+    REQUIRE(context);
+
+    auto completion =
+        harness.coordinator.terminate_operation_for_resnapshot(
+            harness.dispatched_claim,
+            /*force_rerun=*/false);
+    REQUIRE(completion.owned);
+    harness.reject_control_post = true;
+    context->terminal_owner->coordinator_terminal_sink()(
+        std::move(completion));
+    harness.reject_control_post = false;
+
+    std::function<void()> foreign_retry_callback;
+    RuntimeFirewallOperationClaim foreign_claim;
+    const auto foreign = harness.coordinator
+        .schedule_operation_with_terminal(
+            /*attempt=*/0U,
+            /*runtime_generation=*/77U,
+            /*bounded_retry_count=*/3U,
+            {},
+            [&](const RuntimeFirewallRetryPlan&, auto callback) {
+                foreign_retry_callback = std::move(callback);
+                return 920;
+            },
+            [](std::uint64_t) { return true; },
+            [&](RuntimeFirewallOperationClaim claim,
+                OwnedSnatRecovery) noexcept {
+                foreign_claim = claim;
+            },
+            [](RuntimeFirewallOperationCompletion) noexcept {});
+    REQUIRE(foreign.schedule);
+    REQUIRE(foreign_retry_callback);
+    foreign_retry_callback();
+    REQUIRE(foreign_claim);
+    REQUIRE(harness.coordinator.retry_pending());
+
+    // Keep the synthetic harness from immediately draining the re-armed
+    // terminal through its simplified callback. Production re-enters the
+    // same typed drain only after the shared coordinator claim releases.
+    harness.reject_control_post = true;
+    {
+        auto blocked_drain =
+            context->terminal_owner->try_begin_drain();
+        REQUIRE(blocked_drain.has_value());
+        CHECK_FALSE(harness.owner->
+            prepare_preowned_continuation_finalization(context)
+                .has_value());
+    }
+    harness.reject_control_post = false;
+    CHECK(harness.owner->active_context() == context);
+    CHECK(continuation_calls == 0U);
+    REQUIRE(context->retained_mutation_lease);
+    CHECK(context->retained_mutation_lease.get() == exact_lease);
+    CHECK(context->retained_mutation_lease->token() == exact_token);
+    CHECK(admission.owns(*context->retained_mutation_lease));
+
+    const auto foreign_terminal =
+        harness.coordinator.terminate_operation_for_resnapshot(
+            foreign_claim,
+            /*force_rerun=*/false);
+    REQUIRE(foreign_terminal.owned);
+    CHECK_FALSE(harness.coordinator.retry_pending());
+
+    auto drain = context->terminal_owner->try_begin_drain();
+    REQUIRE(drain.has_value());
+    auto permit = harness.owner->
+        prepare_preowned_continuation_finalization(context);
+    REQUIRE(permit.has_value());
+    auto proof = drain->finish_coordinator_terminal();
+    REQUIRE(proof.has_value());
+    RuntimeFirewallLifecycleTerminal terminal;
+    terminal.outcome =
+        RuntimeFirewallLifecycleOutcome::verified_success;
+    terminal.committed = true;
+    terminal.commit_ambiguous = false;
+    REQUIRE(harness.owner->complete_preowned_continuation(
+        std::move(*permit),
+        std::move(*proof),
+        std::move(terminal)));
+
+    CHECK_FALSE(harness.owner->active_context());
+    REQUIRE(returned_terminal.has_value());
+    REQUIRE(returned_lease);
+    CHECK(returned_lease.get() == exact_lease);
+    CHECK(returned_lease->token() == exact_token);
+    CHECK(admission.owns(*returned_lease));
+    returned_lease.reset();
+    CHECK_FALSE(admission.active().has_value());
+}
+
 TEST_CASE("runtime firewall config preapply rejection returns its exact continuation") {
     OwnerHarness harness;
     harness.create_owner();
@@ -2771,6 +2898,19 @@ TEST_CASE("runtime firewall START route fence uses the bounded retry policy") {
     CHECK(runtime_firewall_start_retry_available(2U));
     CHECK_FALSE(runtime_firewall_start_retry_available(3U));
     CHECK_FALSE(runtime_firewall_start_retry_available(99U));
+}
+
+TEST_CASE("runtime firewall cold boot uses the typed START pipeline") {
+    constexpr auto cold_boot =
+        RuntimeFirewallLifecycleKind::cold_boot;
+    CHECK(runtime_firewall_lifecycle_is_foreground(cold_boot));
+    CHECK(runtime_firewall_lifecycle_is_cold_boot(cold_boot));
+    CHECK_FALSE(runtime_firewall_lifecycle_is_start(cold_boot));
+    CHECK(runtime_firewall_lifecycle_uses_start_pipeline(cold_boot));
+    CHECK(runtime_firewall_lifecycle_activates_stopped_runtime(cold_boot));
+    CHECK(runtime_firewall_lifecycle_uses_preowned_continuation(cold_boot));
+    CHECK(runtime_firewall_lifecycle_requires_resolver(cold_boot));
+    CHECK(runtime_firewall_lifecycle_uses_hot_retry(cold_boot));
 }
 
 TEST_CASE("runtime firewall config preapply uses bounded hot retry without resolver") {

@@ -5,6 +5,7 @@
 #include "runtime_firewall_worker_attempt.hpp"
 #include "runtime_firewall_lifecycle_completion.hpp"
 #include "runtime_recovery_policy.hpp"
+#include "runtime_firewall_start_retry_policy.hpp"
 
 #include "../runtime/runtime_mutation_admission.hpp"
 #include "../util/blocking_executor.hpp"
@@ -121,12 +122,17 @@ static_assert(
         RuntimeFirewallPreownedTerminalContinuation>);
 
 // Foreground lifecycle operations retain their exact request admission through
-// every successor. START/RESTART and config candidate/rollback additionally
-// require resolver publication; config pre-apply is a current-generation
-// firewall fence without that tail. A typed kind avoids invalid combinations
-// of independent lifecycle flags.
+// every successor. Cold boot and START/RESTART plus config
+// candidate/rollback additionally require resolver publication; config
+// pre-apply is a current-generation firewall fence without that tail. A typed
+// kind avoids invalid combinations of independent lifecycle flags.
 enum class RuntimeFirewallLifecycleKind : std::uint8_t {
     background,
+    // Process startup uses the same private route+firewall -> resolver
+    // pipeline as an API START, but returns its exact mutation lease through
+    // a typed continuation so startup-specific rollback/recovery policy can
+    // decide the terminal without borrowing the API START waiter contract.
+    cold_boot,
     start_from_stopped,
     restart_active,
     config_preapply,
@@ -159,6 +165,17 @@ constexpr bool runtime_firewall_lifecycle_is_start(
     return kind == RuntimeFirewallLifecycleKind::start_from_stopped;
 }
 
+constexpr bool runtime_firewall_lifecycle_is_cold_boot(
+    RuntimeFirewallLifecycleKind kind) noexcept {
+    return kind == RuntimeFirewallLifecycleKind::cold_boot;
+}
+
+constexpr bool runtime_firewall_lifecycle_uses_start_pipeline(
+    RuntimeFirewallLifecycleKind kind) noexcept {
+    return runtime_firewall_lifecycle_is_start(kind) ||
+           runtime_firewall_lifecycle_is_cold_boot(kind);
+}
+
 constexpr bool runtime_firewall_lifecycle_is_restart(
     RuntimeFirewallLifecycleKind kind) noexcept {
     return kind == RuntimeFirewallLifecycleKind::restart_active;
@@ -178,7 +195,7 @@ constexpr bool runtime_firewall_lifecycle_is_config_candidate(
 
 constexpr bool runtime_firewall_lifecycle_activates_stopped_runtime(
     RuntimeFirewallLifecycleKind kind) noexcept {
-    return runtime_firewall_lifecycle_is_start(kind) ||
+    return runtime_firewall_lifecycle_uses_start_pipeline(kind) ||
            kind ==
                RuntimeFirewallLifecycleKind::config_bootstrap_from_stopped;
 }
@@ -213,7 +230,8 @@ constexpr bool runtime_firewall_lifecycle_is_keenetic_dns_generation(
 
 constexpr bool runtime_firewall_lifecycle_uses_preowned_continuation(
     RuntimeFirewallLifecycleKind kind) noexcept {
-    return runtime_firewall_lifecycle_is_preapply(kind) ||
+    return runtime_firewall_lifecycle_is_cold_boot(kind) ||
+           runtime_firewall_lifecycle_is_preapply(kind) ||
            runtime_firewall_lifecycle_is_config_generation(kind) ||
            runtime_firewall_lifecycle_is_urltest_generation(kind) ||
            runtime_firewall_lifecycle_is_keenetic_dns_generation(kind);
@@ -221,7 +239,7 @@ constexpr bool runtime_firewall_lifecycle_uses_preowned_continuation(
 
 constexpr bool runtime_firewall_lifecycle_requires_resolver(
     RuntimeFirewallLifecycleKind kind) noexcept {
-    return runtime_firewall_lifecycle_is_start(kind) ||
+    return runtime_firewall_lifecycle_uses_start_pipeline(kind) ||
            runtime_firewall_lifecycle_is_restart(kind) ||
            runtime_firewall_lifecycle_is_config_generation(kind) ||
            runtime_firewall_lifecycle_is_keenetic_dns_generation(kind);
@@ -229,30 +247,8 @@ constexpr bool runtime_firewall_lifecycle_requires_resolver(
 
 constexpr bool runtime_firewall_lifecycle_uses_hot_retry(
     RuntimeFirewallLifecycleKind kind) noexcept {
-    return runtime_firewall_lifecycle_is_start(kind) ||
+    return runtime_firewall_lifecycle_uses_start_pipeline(kind) ||
            runtime_firewall_lifecycle_uses_preowned_continuation(kind);
-}
-
-constexpr std::size_t kRuntimeFirewallStartBoundedRetryCount = 3U;
-
-constexpr bool runtime_firewall_start_retry_available(
-    std::size_t completed_attempt) noexcept {
-    return completed_attempt <
-           kRuntimeFirewallStartBoundedRetryCount;
-}
-
-constexpr bool runtime_firewall_preapply_preworker_retry_available(
-    std::size_t completed_attempt) noexcept {
-    return runtime_firewall_start_retry_available(completed_attempt);
-}
-
-constexpr std::size_t
-    kRuntimeFirewallStartRollbackHandoffRetryLimit = 4U;
-
-constexpr bool runtime_firewall_start_rollback_handoff_retry_available(
-    std::size_t recorded_rejections) noexcept {
-    return recorded_rejections <
-           kRuntimeFirewallStartRollbackHandoffRetryLimit;
 }
 
 constexpr bool runtime_firewall_restart_resolver_initially_verified(
@@ -548,7 +544,7 @@ public:
     // the next phase without colliding with its own firewall owner context.
     std::optional<PreownedContinuationFinalizationPermit>
     prepare_preowned_continuation_finalization(
-        const ContextPtr& context) const noexcept;
+        const ContextPtr& context) noexcept;
     bool complete_preowned_continuation(
         PreownedContinuationFinalizationPermit&& permit,
         TerminalFinalizationProof&& finalization_proof,
