@@ -14087,7 +14087,6 @@ void Daemon::run() {
         cancel_remote_access_recovery_watchdog();
         reset_remote_access_retry_bridge();
 #endif
-        runtime_firewall_owner_->request_shutdown();
         runtime_mutation_admission_.shutdown();
         runtime_firewall_owner_->cancel_completion_watchdog();
         runtime_firewall_owner_->cancel_retry();
@@ -14113,11 +14112,28 @@ void Daemon::run() {
         // A queued SIGHUP preparation already owns its mutation lease. Drop
         // queued callbacks before waiting for that lease, while active workers
         // can still publish their ordinary completion through the control loop.
-        runtime_firewall_owner_->cancel_pending_work();
-        runtime_firewall_owner_->pump_terminal_for_shutdown();
+        // Keep the typed owner and its executor alive until the same exact
+        // STOP transaction used by normal process shutdown has proved every
+        // owned route/firewall/resolver artifact absent. Closing the owner
+        // first would force this startup exception path back to unowned
+        // direct kernel writes.
+        runtime_firewall_owner_->prepare_for_process_cleanup();
         blocking_executor_.cancel_pending();
         quiesce_resolver_stream_recovery();
         quiesce_runtime_mutations();
+        const bool startup_cleanup_verified =
+            run_process_shutdown_cleanup();
+        if (!startup_cleanup_verified) {
+            log.error(
+                "Startup rollback did not reach a verified typed cleanup "
+                "terminal; runtime remains broken.");
+        }
+        runtime_firewall_owner_->request_shutdown();
+        runtime_firewall_owner_->cancel_completion_watchdog();
+        runtime_firewall_owner_->cancel_retry();
+        scheduler_->cancel_all();
+        runtime_firewall_owner_->cancel_pending_work();
+        runtime_firewall_owner_->pump_terminal_for_shutdown();
         runtime_firewall_owner_->shutdown_executor();
         runtime_firewall_owner_->pump_terminal_for_shutdown();
         runtime_firewall_owner_->cancel_completion_watchdog();
@@ -14163,30 +14179,6 @@ void Daemon::run() {
             teardown_dns_probe();
         } catch (const std::exception& cleanup_error) {
             log.error("Startup rollback: DNS probe cleanup failed: {}",
-                      cleanup_error.what());
-        }
-        try {
-            (void)routing_operation_owner_.clear();
-        } catch (const std::exception& cleanup_error) {
-            log.error("Startup rollback: routing cleanup failed: {}",
-                      cleanup_error.what());
-        }
-        try {
-            KPBR_LOCK_GUARD(udp_call_affinity_mutation_mutex_);
-            firewall_->cleanup();
-            committed_meta_udp443_fwmark_.reset();
-            committed_meta_udp443_owned_mask_ = 0U;
-        } catch (const std::exception& cleanup_error) {
-            log.error("Startup rollback: firewall cleanup failed: {}",
-                      cleanup_error.what());
-        }
-        try {
-            if (!run_system_resolver_hook("deactivate")) {
-                log.error(
-                    "Startup rollback: resolver fallback activation failed.");
-            }
-        } catch (const std::exception& cleanup_error) {
-            log.error("Startup rollback: resolver fallback activation failed: {}",
                       cleanup_error.what());
         }
         runtime_state_store_.set_routing_runtime_active(false);
