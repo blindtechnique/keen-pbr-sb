@@ -1,5 +1,6 @@
 #pragma once
 
+#include "runtime_background_point_mutation.hpp"
 #include "runtime_firewall_backend_transaction.hpp"
 #include "runtime_route_health_plan.hpp"
 #include "runtime_recovery_policy.hpp"
@@ -34,6 +35,9 @@ enum class RuntimeFirewallWorkerOperationKind : std::uint8_t {
     // re-observed and either completed or compensated under the same retained
     // runtime-mutation lease; it never enters the generation-apply pipeline.
     exact_tcp_reset_point_mutation,
+    // One bounded tagged observer/maintenance mutation. Partial per-item
+    // outcomes are authoritative and return through the typed control terminal.
+    background_point_mutation,
     stop_cleanup,
 };
 
@@ -207,6 +211,8 @@ struct RuntimeFirewallWorkerAttemptInput {
         RuntimeFirewallOwnedConntrackCleanupMode::none};
     std::optional<RuntimeExactTcpResetPointMutationTarget>
         exact_tcp_reset_point_target;
+    std::optional<RuntimeBackgroundPointMutationTarget>
+        background_point_mutation_target;
 };
 
 struct RuntimeFirewallWorkerRoutePreparation {
@@ -333,6 +339,8 @@ struct RuntimeFirewallWorkerAttemptResult {
     std::shared_ptr<const RuntimeStopCleanupResult> stop_cleanup;
     std::shared_ptr<const RuntimeExactTcpResetPointMutationResult>
         exact_tcp_reset_point_mutation;
+    std::shared_ptr<const RuntimeBackgroundPointMutationResult>
+        background_point_mutation;
 
     // This proof is intentionally based only on whether COMMIT was entered.
     // A changed publication epoch strengthens ambiguity, but an unchanged one

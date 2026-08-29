@@ -63,6 +63,7 @@
 #include "list_service.hpp"
 #include "runtime_firewall_immediate_completion.hpp"
 #include "runtime_firewall_lifecycle_completion.hpp"
+#include "runtime_background_point_mutation.hpp"
 #include "runtime_cold_boot_terminal_policy.hpp"
 #include "runtime_recovery_policy.hpp"
 #include "runtime_resolver_generation_snapshot.hpp"
@@ -87,6 +88,9 @@ class RuntimeFirewallPreownedTerminalContinuation;
 struct RuntimeFirewallOperationContext;
 enum class RuntimeFirewallLifecycleKind : std::uint8_t;
 struct RuntimeExactTcpResetPointMutationTarget;
+struct RuntimeBackgroundPointMutationTarget;
+struct RuntimeBackgroundPointMutationResult;
+struct RuntimeBackgroundPointMutationTransaction;
 enum class RuntimeConfigGenerationPublicationMode : std::uint8_t {
     staged_save,
     staged_bootstrap_from_stopped,
@@ -644,6 +648,14 @@ private:
         std::unique_ptr<RuntimeMutationAdmission::Lease>& lease,
         RuntimeExactTcpResetPointMutationTarget target,
         RuntimeFirewallPreownedTerminalContinuation& continuation) noexcept;
+    bool begin_preowned_runtime_firewall_background_point_mutation(
+        std::unique_ptr<RuntimeMutationAdmission::Lease>& lease,
+        const std::shared_ptr<RuntimeBackgroundPointMutationTransaction>&
+            transaction,
+        RuntimeFirewallPreownedTerminalContinuation& continuation) noexcept;
+    void execute_runtime_background_point_mutation(
+        const RuntimeBackgroundPointMutationTarget& target,
+        RuntimeBackgroundPointMutationResult& result) noexcept;
     bool begin_preowned_runtime_firewall_cold_boot(
         const std::shared_ptr<DaemonColdBootTransaction>& transaction,
         std::unique_ptr<RuntimeMutationAdmission::Lease>& lease,
@@ -821,6 +833,14 @@ private:
         std::uint32_t owned_mask,
         IdleStallDeleteDecision decision,
         ConntrackExactForwardedFlow flow) noexcept;
+    bool begin_idle_stall_exact_cleanup_point(
+        std::uint64_t expected_runtime_generation,
+        std::uint64_t expected_coverage_generation,
+        std::uint32_t owned_mask,
+        std::vector<RuntimeIdleStallExactCleanupPointMutationWork> work,
+        std::vector<IdleStallDeleteDecision> all_decisions,
+        std::size_t media_protected,
+        std::size_t recovered_or_replaced) noexcept;
     void run_exact_tcp_reset_cleanup(
         std::uint64_t schedule_serial) noexcept;
     void forget_exact_tcp_reset_cleanup(
@@ -1313,14 +1333,13 @@ private:
     bool idle_stall_packaged_whatsapp_only_observation_{false};
     std::atomic<bool> idle_stall_observer_enabled_{false};
     std::atomic<bool> idle_stall_observer_inflight_{false};
-    // Pair publication and exact conntrack retirement execute on the bounded
-    // worker pool. Detector reservations remain control-loop owned while this
-    // single-flight mutation is outstanding.
-    std::atomic<bool> udp_call_affinity_mutation_inflight_{false};
     // Serializes the worker's live pair/conntrack mutation with every
     // firewall apply or cleanup lifecycle boundary. Generation fences decide
     // whether queued work is still eligible after acquiring this barrier.
     TracedMutex udp_call_affinity_mutation_mutex_;
+    // Every bounded observer/maintenance mutation receives one immutable
+    // identity before it enters the shared firewall owner.
+    std::uint64_t background_point_mutation_serial_{0U};
     std::atomic<std::uint64_t> idle_stall_coverage_generation_{1};
     // Every published exact reset owns a generation- and rule-fenced timer.
     // A transient removal failure is retried without allowing an older timer

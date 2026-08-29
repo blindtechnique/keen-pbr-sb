@@ -70,10 +70,11 @@ public:
     void create_udp_peer_set(const std::string& set_name,
                              int family,
                              uint32_t timeout) override;
-    bool add_udp_peer(const std::string& set_name,
-                      const std::string& source,
-                      std::uint16_t destination_port,
-                      const std::string& destination) override;
+    FirewallUdpPeerMutationResult add_udp_peer(
+        const std::string& set_name,
+        const std::string& source,
+        std::uint16_t destination_port,
+        const std::string& destination) override;
     FirewallExactTcpResetResult install_exact_tcp_reset(
         const FirewallExactTcpResetRule& rule) override;
     bool remove_exact_tcp_reset(

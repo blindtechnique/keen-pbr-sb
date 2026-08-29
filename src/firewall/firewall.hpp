@@ -356,6 +356,30 @@ enum class FirewallExactTcpResetResult : uint8_t {
     failed,
 };
 
+// Result of one exact runtime UDP-peer publication.  A failed command after
+// crossing the mutation boundary cannot be treated as a proved no-op: the
+// caller must retain its recovery authority unless either publication or the
+// compensating removal was verified.
+struct FirewallUdpPeerMutationResult final {
+    bool mutation_boundary_entered{false};
+    bool publication_verified{false};
+    bool removal_attempted{false};
+    bool removal_verified{false};
+
+    bool installed() const noexcept {
+        return mutation_boundary_entered && publication_verified;
+    }
+
+    bool ambiguous() const noexcept {
+        return mutation_boundary_entered && !publication_verified &&
+               !removal_verified;
+    }
+
+    // Preserve the existing bool call site while the typed runtime owner is
+    // introduced. New mutation code must consume the structured fields.
+    operator bool() const noexcept { return installed(); }
+};
+
 enum class FirewallOwnedCleanupState : std::uint8_t {
     verified_absent,
     owned_artifacts_present,
@@ -421,14 +445,16 @@ public:
 
     // Add one exact UDP peer tuple to a previously applied affinity set.
     // Implementations validate both addresses and the non-zero port, then
-    // return true only after the element update and a fresh read-only proof
+    // report success only after the element update and a fresh read-only proof
     // that the corresponding classifier rule is still published through the
     // active chain. A missing set, family mismatch, or out-of-band rule drift
-    // fails closed.
-    virtual bool add_udp_peer(const std::string& set_name,
-                              const std::string& source,
-                              std::uint16_t destination_port,
-                              const std::string& destination) = 0;
+    // fails closed. Once mutation_boundary_entered is true, an unverified
+    // publication is safe only when compensating removal was also verified.
+    virtual FirewallUdpPeerMutationResult add_udp_peer(
+        const std::string& set_name,
+        const std::string& source,
+        std::uint16_t destination_port,
+        const std::string& destination) = 0;
 
     // Arm one short-lived TCP reset window for an exact observed IPv4 flow.
     // Backends that cannot provide the complete match contract fail closed.

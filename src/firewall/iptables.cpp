@@ -318,25 +318,28 @@ void IptablesFirewall::create_udp_peer_set(const std::string& set_name,
     udp_peer_sets_[set_name] = {family, timeout};
 }
 
-bool IptablesFirewall::add_udp_peer(const std::string& set_name,
-                                    const std::string& source,
-                                    std::uint16_t destination_port,
-                                    const std::string& destination) {
+FirewallUdpPeerMutationResult IptablesFirewall::add_udp_peer(
+    const std::string& set_name,
+    const std::string& source,
+    std::uint16_t destination_port,
+    const std::string& destination) {
     std::lock_guard<std::mutex> lock(pair_state_mutex_);
+    FirewallUdpPeerMutationResult result;
     const auto set = published_udp_peer_classifiers_.find(set_name);
     if (set == published_udp_peer_classifiers_.end() ||
         !exact_udp_peer_matches_family(
             source, destination_port, destination, set->second.family)) {
-        return false;
+        return result;
     }
     // Refuse to grant even a short-lived tuple into already-drifted rules.
     // Re-check after the write as well, because KeeneticOS can replace its
     // firewall between these two operations.
     if (!udp_peer_classifier_is_published(set_name, set->second)) {
-        return false;
+        return result;
     }
     const std::string peer = source + ",udp:" +
         std::to_string(destination_port) + "," + destination;
+    result.mutation_boundary_entered = true;
     const bool inserted = safe_exec(
             {"ipset",
              "-exist",
@@ -347,18 +350,20 @@ bool IptablesFirewall::add_udp_peer(const std::string& set_name,
              std::to_string(set->second.timeout)},
             /*suppress_output=*/true) == 0;
     if (!inserted) {
-        return false;
+        return result;
     }
     if (udp_peer_classifier_is_published(set_name, set->second)) {
-        return true;
+        result.publication_verified = true;
+        return result;
     }
 
     // A successful element write without a live classifier must not remain
     // latent: firmware may restore an old chain after our proof failed.
-    (void)safe_exec(
+    result.removal_attempted = true;
+    result.removal_verified = safe_exec(
         {"ipset", "-exist", "del", set_name, peer},
-        /*suppress_output=*/true);
-    return false;
+        /*suppress_output=*/true) == 0;
+    return result;
 }
 
 void IptablesFirewall::append_rules_for_family(bool ipv6,

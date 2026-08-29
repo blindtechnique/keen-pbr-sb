@@ -501,16 +501,18 @@ void NftablesFirewall::create_udp_peer_set(const std::string& set_name,
     udp_peer_sets_[set_name] = {family, timeout};
 }
 
-bool NftablesFirewall::add_udp_peer(const std::string& set_name,
-                                    const std::string& source,
-                                    std::uint16_t destination_port,
-                                    const std::string& destination) {
+FirewallUdpPeerMutationResult NftablesFirewall::add_udp_peer(
+    const std::string& set_name,
+    const std::string& source,
+    std::uint16_t destination_port,
+    const std::string& destination) {
     std::lock_guard<std::mutex> lock(pair_state_mutex_);
+    FirewallUdpPeerMutationResult result;
     const auto set = published_udp_peer_classifiers_.find(set_name);
     if (set == published_udp_peer_classifiers_.end() ||
         !exact_udp_peer_matches_family(
             source, destination_port, destination, set->second.family)) {
-        return false;
+        return result;
     }
 
     const bool already_present = safe_exec(
@@ -529,6 +531,7 @@ bool NftablesFirewall::add_udp_peer(const std::string& set_name,
              "}"},
             /*suppress_output=*/true) == 0;
 
+    result.mutation_boundary_entered = true;
     const bool inserted = safe_exec_pipe_stdin(
             {"nft", "-j", "-f", "-"},
             build_udp_peer_update_document(
@@ -537,16 +540,18 @@ bool NftablesFirewall::add_udp_peer(const std::string& set_name,
             nullptr,
             SafeExecFailureLog::Suppressed) == 0;
     if (!inserted) {
-        return false;
+        return result;
     }
     if (udp_peer_classifier_is_published(set_name, set->second)) {
-        return true;
+        result.publication_verified = true;
+        return result;
     }
 
     // Do not leave an unproved element waiting for an out-of-band chain
     // restore. The daemon will keep the original conntrack flow when false is
     // returned, so this rollback is strictly fail-closed.
-    (void)safe_exec(
+    result.removal_attempted = true;
+    result.removal_verified = safe_exec(
         {"nft",
          "delete",
          "element",
@@ -560,8 +565,8 @@ bool NftablesFirewall::add_udp_peer(const std::string& set_name,
          ".",
          destination,
          "}"},
-        /*suppress_output=*/true);
-    return false;
+        /*suppress_output=*/true) == 0;
+    return result;
 }
 
 void NftablesFirewall::append_rules_for_family(int family,

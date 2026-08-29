@@ -248,11 +248,6 @@ struct IdleStallPendingDelete {
     ConntrackExactForwardedFlow flow;
 };
 
-struct UdpCallAffinityMutationWork {
-    UdpCallAffinityDecision decision;
-    std::string set_name;
-};
-
 enum class UdpCallAffinityRevalidationMode {
     BeforePublication,
     RefreshBeforePublication,
@@ -269,17 +264,6 @@ bool same_forwarded_five_tuple(
            left.source_port == right.source_port &&
            left.destination_port == right.destination_port;
 }
-
-struct UdpCallAffinityMutationOutcome {
-    UdpCallAffinityDecision decision;
-    std::vector<ConntrackExactForwardedFlow> revalidated_flows;
-    bool publication_attempted{false};
-    bool installed{false};
-    bool revalidation_failed{false};
-    bool deadline_expired{false};
-    std::size_t retired_flows{0U};
-    std::size_t failed_flows{0U};
-};
 
 class AtomicFlagResetGuard {
 public:
@@ -761,15 +745,11 @@ void Daemon::arm_owned_conntrack_cleanup_completion_watchdog(
 }
 
 void Daemon::run_owned_conntrack_cleanup_retry() {
-    if (active_owned_conntrack_cleanup_operation_) {
-        arm_owned_conntrack_cleanup_completion_watchdog(
-            active_owned_conntrack_cleanup_operation_);
-        return;
-    }
     if (!pending_owned_conntrack_cleanup_retry_.has_value()) {
         return;
     }
-    auto retry = std::move(*pending_owned_conntrack_cleanup_retry_);
+    auto retry = std::move(
+        *pending_owned_conntrack_cleanup_retry_);
     pending_owned_conntrack_cleanup_retry_.reset();
     if (!owned_conntrack_cleanup_retry_is_current(
             routing_runtime_active(),
@@ -777,154 +757,107 @@ void Daemon::run_owned_conntrack_cleanup_retry() {
             runtime_generation_.load(std::memory_order_acquire))) {
         return;
     }
-
-    auto operation =
-        std::make_shared<OwnedConntrackCleanupOperation>(std::move(retry));
-    active_owned_conntrack_cleanup_operation_ = operation;
     try {
-        arm_owned_conntrack_cleanup_completion_watchdog(operation);
-    } catch (...) {
-        operation->cancel();
-        active_owned_conntrack_cleanup_operation_.reset();
-        pending_owned_conntrack_cleanup_retry_ = operation->retry();
-        throw;
-    }
-
-    const auto trace_id = ensure_trace_id();
-    bool enqueued = false;
-    try {
-        enqueued = blocking_executor_.try_post(
-            "owned-conntrack-cleanup-retry",
-            [this, operation]() {
-                const auto post_completion = [this, operation]() noexcept {
-                    bool posted = false;
-                    try {
-                        posted = post_control_task(
-                            [this, operation]() {
-                                complete_owned_conntrack_cleanup_operation(
-                                    operation);
-                            },
-                            "owned-conntrack-cleanup-retry-complete");
-                    } catch (const std::exception& error) {
-                        try {
-                            Logger::instance().info(
-                                "Best-effort conntrack cleanup completion "
-                                "handoff failed: {}",
-                                error.what());
-                        } catch (...) {
-                        }
-                    } catch (...) {
-                        try {
-                            Logger::instance().info(
-                                "Best-effort conntrack cleanup completion "
-                                "handoff failed: unknown error");
-                        } catch (...) {
-                        }
-                    }
-                    if (!posted &&
-                        !accept_posted_control_tasks_.load(
-                            std::memory_order_acquire)) {
-                        operation->release_mutation_lease();
-                    }
-                };
-
-                if (operation->cancelled()) {
-                    return;
-                }
-
-                std::optional<RuntimeMutationAdmission::Lease> admitted;
+        RuntimeOwnedConntrackCleanupPointMutationTarget operation;
+        operation.retry = retry;
+        RuntimeBackgroundPointMutationTarget target;
+        target.kind =
+            RuntimeBackgroundPointMutationKind::
+                owned_conntrack_cleanup;
+        target.target_serial = ++background_point_mutation_serial_;
+        if (target.target_serial == 0U) {
+            target.target_serial = ++background_point_mutation_serial_;
+        }
+        target.payload = std::move(operation);
+        auto transaction = std::make_shared<
+            RuntimeBackgroundPointMutationTransaction>(
+            std::move(target));
+        if (!transaction->valid()) {
+            throw std::runtime_error(
+                "invalid owned conntrack cleanup target");
+        }
+        auto admitted = runtime_mutation_admission_.try_acquire(
+            "owned-conntrack-cleanup-point");
+        if (!admitted.has_value()) {
+            throw TransientFirewallError(
+                "runtime mutation owner is busy");
+        }
+        auto lease = std::make_unique<RuntimeMutationAdmission::Lease>(
+            std::move(*admitted));
+        const auto expected_lease_token = lease->token();
+        RuntimeFirewallPreownedTerminalContinuation continuation{
+            [this, transaction, expected_lease_token](
+                RuntimeFirewallLifecycleTerminal terminal,
+                std::unique_ptr<RuntimeMutationAdmission::Lease> exact)
+                noexcept {
+                const auto& operation = std::get<
+                    RuntimeOwnedConntrackCleanupPointMutationTarget>(
+                    transaction->target.payload);
+                const auto& retry = operation.retry;
+                const bool lease_returned =
+                    exact && static_cast<bool>(*exact) &&
+                    exact->token() == expected_lease_token &&
+                    runtime_mutation_admission_.owns(*exact);
+                bool current = false;
                 try {
-                    // Foreground API/SIGHUP work wins while this retry is
-                    // merely waiting behind unrelated blocking jobs. The
-                    // lease begins only when the worker is ready to touch
-                    // conntrack.
-                    admitted = runtime_mutation_admission_.try_acquire(
-                        "owned-conntrack-cleanup-retry");
-                } catch (...) {
-                    if (operation->finish(
-                            OwnedConntrackCleanupOperationStatus::busy)) {
-                        post_completion();
-                    }
-                    return;
-                }
-                if (!admitted.has_value()) {
-                    if (operation->finish(
-                            OwnedConntrackCleanupOperationStatus::busy)) {
-                        post_completion();
-                    }
-                    return;
-                }
-
-                auto mutation_lease =
-                    std::make_shared<RuntimeMutationAdmission::Lease>(
-                        std::move(*admitted));
-                if (operation->cancelled()) {
-                    mutation_lease->release();
-                    return;
-                }
-
-                const auto& worker_retry = operation->retry();
-                if (worker_retry.snapshot.runtime_generation !=
-                    runtime_generation_.load(std::memory_order_acquire)) {
-                    if (!operation->finish(
-                            OwnedConntrackCleanupOperationStatus::stale,
-                            {},
-                            mutation_lease)) {
-                        mutation_lease->release();
-                        return;
-                    }
-                    post_completion();
-                    return;
-                }
-
-                ConntrackCleanupSummary cleanup;
+                    current =
+                        terminal.outcome !=
+                            RuntimeFirewallLifecycleOutcome::shutdown &&
+                        owned_conntrack_cleanup_retry_is_current(
+                            routing_runtime_active(),
+                            retry,
+                            runtime_generation_.load(
+                                std::memory_order_acquire));
+                } catch (...) {}
+                const bool typed =
+                    lease_returned &&
+                    transaction->typed_identity_valid &&
+                    transaction->result &&
+                    transaction->result->control_publishable() &&
+                    transaction->result->target ==
+                        transaction->target &&
+                    std::holds_alternative<
+                        RuntimeOwnedConntrackCleanupPointMutationResult>(
+                        transaction->result->payload);
                 try {
-                    cleanup = conntrack_manager_.delete_marks_ordered(
-                        worker_retry.ordered_marks,
-                        worker_retry.snapshot.owned_mask,
-                        ConntrackCleanupOptions{
-                            worker_retry.snapshot.ipv6_enabled,
-                            OWNED_CONNTRACK_CLEANUP_RETRY_BUDGET,
-                            OWNED_CONNTRACK_CLEANUP_RETRY_BATCH_SIZE});
-                } catch (...) {
-                    cleanup.failed = worker_retry.ordered_marks.size();
-                    cleanup.remaining_marks = worker_retry.ordered_marks;
-                }
-                if (!operation->finish(
-                        OwnedConntrackCleanupOperationStatus::completed,
-                        std::move(cleanup),
-                        mutation_lease)) {
-                    mutation_lease->release();
-                    return;
-                }
-                post_completion();
-            },
-            trace_id);
-    } catch (const std::exception& error) {
-        Logger::instance().info(
-            "Best-effort conntrack cleanup dispatch failed: {}",
-            error.what());
-    } catch (...) {
-        Logger::instance().info(
-            "Best-effort conntrack cleanup dispatch failed: unknown error");
-    }
-    if (enqueued) {
-        return;
-    }
-
-    if (owned_conntrack_cleanup_retry_task_id_ >= 0) {
-        scheduler_->cancel(owned_conntrack_cleanup_retry_task_id_);
-        owned_conntrack_cleanup_retry_task_id_ = -1;
-    }
-    operation->cancel();
-    if (active_owned_conntrack_cleanup_operation_ == operation) {
-        active_owned_conntrack_cleanup_operation_.reset();
-    }
-    const auto rejected_retry = operation->retry();
+                    if (!typed) {
+                        if (current) {
+                            schedule_owned_conntrack_cleanup_retry(
+                                retry.snapshot,
+                                retry.ordered_marks,
+                                retry.no_progress_attempt);
+                        }
+                    } else if (current) {
+                        auto cleanup = std::get<
+                            RuntimeOwnedConntrackCleanupPointMutationResult>(
+                            transaction->result->payload).cleanup;
+                        if (cleanup.command_unavailable) {
+                            warn_conntrack_unavailable_once();
+                        } else if (!cleanup.remaining_marks.empty()) {
+                            const bool made_progress =
+                                cleanup.remaining_marks.size() <
+                                retry.ordered_marks.size();
+                            schedule_owned_conntrack_cleanup_retry(
+                                retry.snapshot,
+                                std::move(cleanup.remaining_marks),
+                                made_progress
+                                    ? 0U
+                                    : retry.no_progress_attempt + 1U);
+                        }
+                    }
+                    arm_owned_conntrack_cleanup_retry_timer();
+                } catch (...) {}
+            }};
+        if (begin_preowned_runtime_firewall_background_point_mutation(
+                lease, transaction, continuation)) {
+            return;
+        }
+        lease.reset();
+    } catch (...) {}
     schedule_owned_conntrack_cleanup_retry(
-        rejected_retry.snapshot,
-        rejected_retry.ordered_marks,
-        rejected_retry.no_progress_attempt);
+        retry.snapshot,
+        retry.ordered_marks,
+        retry.no_progress_attempt);
 }
 
 void Daemon::complete_owned_conntrack_cleanup_operation(
@@ -1382,17 +1315,12 @@ void Daemon::dispatch_meta_udp443_activation_cleanup(
     std::uint64_t cleanup_epoch,
     std::size_t attempt,
     std::uint64_t schedule_serial) noexcept {
-    const auto generation_is_current = [this,
-                                        expected_runtime_generation,
-                                        cleanup_epoch]() {
-        return meta_udp443_cleanup_authority_matches(
+    if (!meta_udp443_cleanup_authority_matches(
             expected_runtime_generation,
             runtime_generation_.load(std::memory_order_acquire),
             cleanup_epoch,
             meta_udp443_cleanup_epoch_.load(
-                std::memory_order_acquire));
-    };
-    if (!generation_is_current()) {
+                std::memory_order_acquire))) {
         if (pending_meta_udp443_cleanup_.has_value() &&
             pending_meta_udp443_cleanup_->schedule_serial ==
                 schedule_serial) {
@@ -1400,301 +1328,216 @@ void Daemon::dispatch_meta_udp443_activation_cleanup(
         }
         return;
     }
-    MetaUdp443ActivationPlan plan;
-    try {
-        if (!pending_meta_udp443_cleanup_.has_value() ||
-            pending_meta_udp443_cleanup_->schedule_serial !=
-                schedule_serial) {
-            return;
-        }
-        plan = pending_meta_udp443_cleanup_->plan;
-    } catch (...) {
-        // The durable event-loop-owned plan remains intact. A later periodic
-        // health tick can retry after transient allocation pressure clears.
-        report_meta_udp443_degraded(
-            "could not admit the bounded exact-cleanup plan to the worker");
-        if (pending_meta_udp443_cleanup_.has_value() &&
-            pending_meta_udp443_cleanup_->schedule_serial ==
-                schedule_serial) {
-            pending_meta_udp443_cleanup_->worker_inflight = false;
-        }
+    if (!pending_meta_udp443_cleanup_.has_value() ||
+        pending_meta_udp443_cleanup_->schedule_serial !=
+            schedule_serial) {
         return;
     }
-    bool queued = false;
     try {
-        queued = blocking_executor_.try_post(
-        "meta-udp443-exact-cleanup",
-        [this,
-         plan = std::move(plan),
-         expected_runtime_generation,
-         cleanup_epoch,
-         attempt,
-         schedule_serial]() mutable {
-            struct CompletionAdmissionFailureGuard {
-                std::atomic<std::uint64_t>& failed_serial;
-                std::uint64_t schedule_serial;
-                bool armed{true};
-
-                ~CompletionAdmissionFailureGuard() noexcept {
-                    if (armed) {
-                        publish_newest_meta_udp443_failed_completion_serial(
-                            failed_serial, schedule_serial);
-                    }
+        RuntimeMetaUdp443CleanupPointMutationTarget operation;
+        operation.runtime_generation = expected_runtime_generation;
+        operation.cleanup_epoch = cleanup_epoch;
+        operation.attempt = attempt;
+        operation.plan = pending_meta_udp443_cleanup_->plan;
+        RuntimeBackgroundPointMutationTarget target;
+        target.kind =
+            RuntimeBackgroundPointMutationKind::meta_udp443_cleanup;
+        target.target_serial = schedule_serial;
+        target.payload = std::move(operation);
+        auto transaction = std::make_shared<
+            RuntimeBackgroundPointMutationTransaction>(
+            std::move(target));
+        if (!transaction->valid()) {
+            throw std::runtime_error("invalid Meta cleanup target");
+        }
+        auto admitted = runtime_mutation_admission_.try_acquire(
+            "meta-udp443-cleanup-point");
+        if (!admitted.has_value()) {
+            throw TransientFirewallError(
+                "runtime mutation owner is busy");
+        }
+        auto lease = std::make_unique<RuntimeMutationAdmission::Lease>(
+            std::move(*admitted));
+        const auto expected_lease_token = lease->token();
+        RuntimeFirewallPreownedTerminalContinuation continuation{
+            [this, transaction, expected_runtime_generation,
+             cleanup_epoch, attempt, schedule_serial,
+             expected_lease_token](
+                RuntimeFirewallLifecycleTerminal terminal,
+                std::unique_ptr<RuntimeMutationAdmission::Lease> exact)
+                noexcept {
+                try {
+                if (!pending_meta_udp443_cleanup_.has_value() ||
+                    pending_meta_udp443_cleanup_->schedule_serial !=
+                        schedule_serial) {
+                    return;
                 }
-            } completion_admission_guard{
-                meta_udp443_cleanup_completion_admission_failed_serial_,
-                schedule_serial};
-            ConntrackExactFlowCleanupSummary cleanup;
-            OwnedForwardUdpRejectState before =
-                OwnedForwardUdpRejectState::unknown;
-            OwnedForwardUdpRejectState after =
-                OwnedForwardUdpRejectState::unknown;
-            bool fastnat_before = false;
-            bool fastnat_after = false;
-            std::string worker_failure;
-            const auto still_current = [this,
-                                        expected_runtime_generation,
-                                        cleanup_epoch]() {
-                return meta_udp443_cleanup_authority_matches(
-                    expected_runtime_generation,
-                    runtime_generation_.load(std::memory_order_acquire),
-                    cleanup_epoch,
-                    meta_udp443_cleanup_epoch_.load(
-                        std::memory_order_acquire));
-            };
-
-            try {
-                // Apply/stop cancels the epoch before taking this barrier.
-                // At most four exact commands can delay that lifecycle path,
-                // while no firewall fields race with an in-flight rebuild.
-                KPBR_LOCK_GUARD(udp_call_affinity_mutation_mutex_);
-                if (still_current()) {
-                    before = firewall_->inspect_forward_udp_reject_state();
-                    fastnat_before =
-                        fastnat_is_disabled_or_unavailable();
+                pending_meta_udp443_cleanup_->worker_inflight = false;
+                const bool lease_returned =
+                    exact && static_cast<bool>(*exact) &&
+                    exact->token() == expected_lease_token &&
+                    runtime_mutation_admission_.owns(*exact);
+                const bool typed =
+                    lease_returned &&
+                    transaction->typed_identity_valid &&
+                    transaction->result &&
+                    transaction->result->control_publishable() &&
+                    transaction->result->target ==
+                        transaction->target &&
+                    std::holds_alternative<
+                        RuntimeMetaUdp443CleanupPointMutationResult>(
+                        transaction->result->payload);
+                const auto& operation = std::get<
+                    RuntimeMetaUdp443CleanupPointMutationTarget>(
+                    transaction->target.payload);
+                auto plan = operation.plan;
+                if (!meta_udp443_cleanup_authority_matches(
+                        expected_runtime_generation,
+                        runtime_generation_.load(
+                            std::memory_order_acquire),
+                        cleanup_epoch,
+                        meta_udp443_cleanup_epoch_.load(
+                            std::memory_order_acquire))) {
+                    pending_meta_udp443_cleanup_.reset();
+                    return;
                 }
-                if (still_current() && fastnat_before &&
-                    before == OwnedForwardUdpRejectState::healthy) {
-                    const auto post_publication_local_addresses =
-                        local_interface_addresses_from(
-                            netlink_.dump_interfaces());
-                    const auto post_publication_observation =
-                        conntrack_manager_.observe_forwarded_destination_flows(
-                            plan.destination_selectors,
-                            post_publication_local_addresses,
-                            plan.owned_mask,
-                            meta_udp443_activation_observation_options(
-                                plan.ipv6_enabled),
-                            {},
-                            plan.destination_selectors,
-                            {});
-                    const auto post_publication_candidates =
-                        select_meta_udp_443_cleanup_candidates(
-                            post_publication_observation,
-                            plan.cleanup_owned_marks,
-                            plan.owned_mask,
-                            plan.allow_unmarked_cleanup);
-                    if (!post_publication_candidates.complete) {
-                        worker_failure =
-                            "post-publication exact UDP/443 snapshot is "
-                            "incomplete";
-                        cleanup.remaining_flows = plan.exact_flows;
-                    } else {
-                        // A complete fresh snapshot is authoritative for all
-                        // currently live exact candidates. Replacing the
-                        // retained plan prevents permanent delete failures
-                        // plus connection churn from growing it without
-                        // bound; the observer itself caps this set at 256.
-                        plan.exact_flows =
-                            post_publication_candidates.flows;
-                        cleanup = conntrack_manager_.
-                            delete_exact_forwarded_flows(
-                            plan.exact_flows,
-                            plan.owned_mask,
-                            plan.cleanup_owned_marks,
-                            ConntrackExactFlowCleanupOptions{
-                                META_UDP443_ACTIVATION_BATCH_BUDGET,
-                                META_UDP443_ACTIVATION_BATCH_SIZE},
-                            still_current);
-                    }
-                } else {
-                    cleanup.remaining_flows = plan.exact_flows;
-                    cleanup.generation_changed = !still_current();
-                }
-                if (still_current()) {
-                    after = firewall_->inspect_forward_udp_reject_state();
-                    fastnat_after =
-                        fastnat_is_disabled_or_unavailable();
-                }
-            } catch (const std::exception& error) {
-                worker_failure = error.what();
-                cleanup.remaining_flows = plan.exact_flows;
-            } catch (...) {
-                worker_failure = "unknown exact cleanup worker failure";
-                cleanup.remaining_flows = plan.exact_flows;
-            }
-
-            bool posted = false;
-            try {
-                posted = post_control_task(
-                [this,
-                 plan = std::move(plan),
-                 cleanup = std::move(cleanup),
-                 worker_failure = std::move(worker_failure),
-                 before,
-                 after,
-                 fastnat_before,
-                 fastnat_after,
-                 expected_runtime_generation,
-                 cleanup_epoch,
-                 attempt,
-                 schedule_serial]() mutable {
-                    if (!pending_meta_udp443_cleanup_.has_value() ||
-                        pending_meta_udp443_cleanup_->schedule_serial !=
-                            schedule_serial) {
-                        return;
-                    }
-                    pending_meta_udp443_cleanup_->worker_inflight = false;
-                    std::uint64_t failed_serial = schedule_serial;
-                    (void)meta_udp443_cleanup_completion_admission_failed_serial_
-                        .compare_exchange_strong(
-                            failed_serial,
-                            0U,
-                            std::memory_order_acq_rel,
-                            std::memory_order_acquire);
-                    if (!meta_udp443_cleanup_authority_matches(
-                            expected_runtime_generation,
-                            runtime_generation_.load(
-                                std::memory_order_acquire),
-                            cleanup_epoch,
-                            meta_udp443_cleanup_epoch_.load(
-                                std::memory_order_acquire)) ||
-                        cleanup.generation_changed) {
-                        pending_meta_udp443_cleanup_.reset();
-                        return;
-                    }
-                    if (!worker_failure.empty()) {
-                        report_meta_udp443_degraded(
-                            "exact activation cleanup failed: " +
-                            worker_failure);
-                        plan.exact_flows =
-                            std::move(cleanup.remaining_flows);
-                        schedule_meta_udp443_activation_cleanup_retry(
-                            std::move(plan),
-                            expected_runtime_generation,
-                            cleanup_epoch,
-                            attempt + 1U);
-                        return;
-                    }
-                    if (!fastnat_before || !fastnat_after ||
-                        before != OwnedForwardUdpRejectState::healthy ||
-                        after != OwnedForwardUdpRejectState::healthy) {
-                        report_meta_udp443_degraded(
-                            !fastnat_before || !fastnat_after
-                                ? "FastNAT is no longer verified disabled"
-                                : "the owned first FORWARD hook or exact rule "
-                                  "contract changed during activation");
-                        plan.exact_flows =
-                            std::move(cleanup.remaining_flows);
-                        if (!fastnat_before || !fastnat_after) {
-                            // A firewall rebuild cannot make FastNAT traverse
-                            // FORWARD and would cancel this durable exact plan.
-                            // Retain it until init/firmware restores FastNAT
-                            // off, then retry under the same generation fence.
-                            schedule_meta_udp443_activation_cleanup_retry(
-                                std::move(plan),
-                                expected_runtime_generation,
-                                cleanup_epoch,
-                                attempt + 1U);
-                        } else {
-                            schedule_meta_udp443_activation_cleanup_retry(
-                                std::move(plan),
-                                expected_runtime_generation,
-                                cleanup_epoch,
-                                attempt + 1U);
-                            schedule_netfilter_runtime_refresh_noexcept(
-                                NetfilterRefreshReason::full,
-                                "could not schedule repair of the owned "
-                                "Meta UDP/443 filter contract");
-                        }
-                        return;
-                    }
-                    if (cleanup.complete()) {
-                        pending_meta_udp443_cleanup_.reset();
-                        meta_udp443_incidents_.reset(
-                            "meta-udp443-activation");
-                        if (cleanup.attempted != 0U) {
-                            Logger::instance().info(
-                                "Meta/WhatsApp messages-first policy retired "
-                                "{} exact pre-existing UDP/443 flow(s)",
-                                cleanup.attempted);
-                        }
-                        return;
-                    }
-
-                    plan.exact_flows =
-                        std::move(cleanup.remaining_flows);
-                    const std::size_t unavailable_attempts =
-                        cleanup.command_unavailable ? 1U : 0U;
-                    const bool made_progress =
-                        cleanup.attempted >
-                        cleanup.failed + unavailable_attempts;
-                    const bool clean_batch_continuation =
-                        cleanup.batch_limit_reached &&
-                        cleanup.failed == 0U &&
-                        !cleanup.command_unavailable &&
-                        !cleanup.generation_changed && made_progress;
-                    if (!clean_batch_continuation) {
-                        report_meta_udp443_degraded(
-                            cleanup.command_unavailable
-                                ? "the conntrack utility became unavailable"
-                                : (cleanup.budget_exhausted
-                                       ? "the bounded exact cleanup time "
-                                         "budget was exhausted"
-                                       : "one or more exact UDP/443 tuples "
-                                         "could not be retired"));
-                    }
+                if (!typed ||
+                    terminal.outcome ==
+                        RuntimeFirewallLifecycleOutcome::shutdown) {
+                    report_meta_udp443_degraded(
+                        "exact cleanup returned no typed result");
                     schedule_meta_udp443_activation_cleanup_retry(
                         std::move(plan),
                         expected_runtime_generation,
                         cleanup_epoch,
-                        made_progress ? 0U : attempt + 1U);
-                },
-                    "meta-udp443-exact-cleanup-complete");
-            } catch (...) {
-                posted = false;
-            }
-            if (posted) {
-                completion_admission_guard.armed = false;
-            }
-            if (!posted) {
-                Logger::instance().info(
-                    "Meta UDP/443 cleanup completion was not admitted; the "
-                    "durable bounded plan remains pending for retry");
-            }
-        });
-    } catch (const std::exception& error) {
-        (void)error;
-        report_meta_udp443_degraded(
-            "could not queue exact cleanup");
+                        attempt + 1U);
+                    return;
+                }
+                const auto& output = std::get<
+                    RuntimeMetaUdp443CleanupPointMutationResult>(
+                    transaction->result->payload);
+                auto cleanup = output.cleanup;
+                if (cleanup.generation_changed) {
+                    pending_meta_udp443_cleanup_.reset();
+                    return;
+                }
+                if (!output.worker_failure.empty()) {
+                    report_meta_udp443_degraded(
+                        "exact activation cleanup failed: " +
+                        output.worker_failure);
+                    plan.exact_flows =
+                        std::move(cleanup.remaining_flows);
+                    schedule_meta_udp443_activation_cleanup_retry(
+                        std::move(plan),
+                        expected_runtime_generation,
+                        cleanup_epoch,
+                        attempt + 1U);
+                    return;
+                }
+                if (!output.fastnat_before ||
+                    !output.fastnat_after ||
+                    output.before !=
+                        OwnedForwardUdpRejectState::healthy ||
+                    output.after !=
+                        OwnedForwardUdpRejectState::healthy) {
+                    report_meta_udp443_degraded(
+                        !output.fastnat_before ||
+                                !output.fastnat_after
+                            ? "FastNAT is no longer verified disabled"
+                            : "the owned Meta UDP filter contract "
+                              "changed during cleanup");
+                    plan.exact_flows =
+                        std::move(cleanup.remaining_flows);
+                    schedule_meta_udp443_activation_cleanup_retry(
+                        std::move(plan),
+                        expected_runtime_generation,
+                        cleanup_epoch,
+                        attempt + 1U);
+                    if (output.fastnat_before &&
+                        output.fastnat_after) {
+                        schedule_netfilter_runtime_refresh_noexcept(
+                            NetfilterRefreshReason::full,
+                            "could not schedule repair of the owned "
+                            "Meta UDP/443 filter contract");
+                    }
+                    return;
+                }
+                if (cleanup.complete()) {
+                    pending_meta_udp443_cleanup_.reset();
+                    meta_udp443_incidents_.reset(
+                        "meta-udp443-activation");
+                    if (cleanup.attempted != 0U) {
+                        Logger::instance().info(
+                            "Meta/WhatsApp messages-first policy "
+                            "retired {} exact pre-existing UDP/443 "
+                            "flow(s)",
+                            cleanup.attempted);
+                    }
+                    return;
+                }
+                plan.exact_flows =
+                    std::move(cleanup.remaining_flows);
+                const std::size_t unavailable =
+                    cleanup.command_unavailable ? 1U : 0U;
+                const bool made_progress =
+                    cleanup.attempted >
+                    cleanup.failed + unavailable;
+                if (!made_progress) {
+                    report_meta_udp443_degraded(
+                        cleanup.command_unavailable
+                            ? "the conntrack utility became unavailable"
+                            : "one or more exact UDP/443 tuples "
+                              "could not be retired");
+                }
+                schedule_meta_udp443_activation_cleanup_retry(
+                    std::move(plan),
+                    expected_runtime_generation,
+                    cleanup_epoch,
+                    made_progress ? 0U : attempt + 1U);
+                } catch (...) {
+                    try {
+                        if (pending_meta_udp443_cleanup_.has_value() &&
+                            pending_meta_udp443_cleanup_->
+                                schedule_serial == schedule_serial) {
+                            pending_meta_udp443_cleanup_->
+                                worker_inflight = false;
+                            const auto pending =
+                                *pending_meta_udp443_cleanup_;
+                            schedule_meta_udp443_activation_cleanup_retry(
+                                pending.plan,
+                                expected_runtime_generation,
+                                cleanup_epoch,
+                                attempt + 1U);
+                        }
+                    } catch (...) {
+                        if (pending_meta_udp443_cleanup_.has_value() &&
+                            pending_meta_udp443_cleanup_->
+                                schedule_serial == schedule_serial) {
+                            pending_meta_udp443_cleanup_->
+                                worker_inflight = false;
+                        }
+                    }
+                }
+            }};
+        if (begin_preowned_runtime_firewall_background_point_mutation(
+                lease, transaction, continuation)) {
+            return;
+        }
+        lease.reset();
     } catch (...) {
         report_meta_udp443_degraded(
-            "could not queue exact cleanup");
+            "could not admit exact cleanup to the mutation owner");
     }
-    if (!queued) {
-        report_meta_udp443_degraded(
-            "the blocking executor queue is full");
-        if (pending_meta_udp443_cleanup_.has_value() &&
-            pending_meta_udp443_cleanup_->schedule_serial ==
-                schedule_serial) {
-            pending_meta_udp443_cleanup_->worker_inflight = false;
-            const auto& pending = *pending_meta_udp443_cleanup_;
-            schedule_meta_udp443_activation_cleanup_retry(
-                pending.plan,
-                expected_runtime_generation,
-                cleanup_epoch,
-                attempt + 1U);
-        }
+    if (pending_meta_udp443_cleanup_.has_value() &&
+        pending_meta_udp443_cleanup_->schedule_serial ==
+            schedule_serial) {
+        pending_meta_udp443_cleanup_->worker_inflight = false;
+        const auto pending = *pending_meta_udp443_cleanup_;
+        schedule_meta_udp443_activation_cleanup_retry(
+            pending.plan,
+            expected_runtime_generation,
+            cleanup_epoch,
+            attempt + 1U);
     }
 }
 
@@ -5566,6 +5409,157 @@ bool Daemon::begin_idle_stall_exact_tcp_reset_point(
     }
 }
 
+bool Daemon::begin_idle_stall_exact_cleanup_point(
+    std::uint64_t expected_runtime_generation,
+    std::uint64_t expected_coverage_generation,
+    std::uint32_t owned_mask,
+    std::vector<RuntimeIdleStallExactCleanupPointMutationWork> work,
+    std::vector<IdleStallDeleteDecision> all_decisions,
+    std::size_t media_protected,
+    std::size_t recovered_or_replaced) noexcept {
+    if (work.empty()) return false;
+    try {
+        RuntimeIdleStallExactCleanupPointMutationTarget operation;
+        operation.runtime_generation = expected_runtime_generation;
+        operation.coverage_generation = expected_coverage_generation;
+        operation.owned_mask = owned_mask;
+        operation.work = std::move(work);
+        RuntimeBackgroundPointMutationTarget target;
+        target.kind =
+            RuntimeBackgroundPointMutationKind::
+                idle_stall_exact_cleanup;
+        target.target_serial = ++background_point_mutation_serial_;
+        if (target.target_serial == 0U) {
+            target.target_serial = ++background_point_mutation_serial_;
+        }
+        target.payload = std::move(operation);
+        auto transaction = std::make_shared<
+            RuntimeBackgroundPointMutationTransaction>(
+            std::move(target));
+        if (!transaction->valid()) return false;
+        auto admitted = runtime_mutation_admission_.try_acquire(
+            "idle-stall-exact-cleanup-point");
+        if (!admitted.has_value()) return false;
+        auto lease = std::make_unique<RuntimeMutationAdmission::Lease>(
+            std::move(*admitted));
+        const auto expected_lease_token = lease->token();
+        RuntimeFirewallPreownedTerminalContinuation continuation{
+            [this, transaction, all_decisions = std::move(all_decisions),
+             expected_runtime_generation,
+             expected_coverage_generation,
+             media_protected, recovered_or_replaced,
+             expected_lease_token](
+                RuntimeFirewallLifecycleTerminal terminal,
+                std::unique_ptr<RuntimeMutationAdmission::Lease> exact)
+                noexcept {
+                const bool lease_returned =
+                    exact && static_cast<bool>(*exact) &&
+                    exact->token() == expected_lease_token &&
+                    runtime_mutation_admission_.owns(*exact);
+                bool current = false;
+                try {
+                    current =
+                        terminal.outcome !=
+                            RuntimeFirewallLifecycleOutcome::shutdown &&
+                        running_.load(std::memory_order_acquire) &&
+                        routing_runtime_active() &&
+                        idle_stall_observer_enabled_.load(
+                            std::memory_order_acquire) &&
+                        runtime_generation_.load(
+                            std::memory_order_acquire) ==
+                            expected_runtime_generation &&
+                        idle_stall_coverage_generation_.load(
+                            std::memory_order_acquire) ==
+                            expected_coverage_generation;
+                } catch (...) {}
+                const bool typed =
+                    lease_returned &&
+                    transaction->typed_identity_valid &&
+                    transaction->result &&
+                    transaction->result->control_publishable() &&
+                    transaction->result->target ==
+                        transaction->target &&
+                    std::holds_alternative<
+                        RuntimeIdleStallExactCleanupPointMutationResult>(
+                        transaction->result->payload);
+                std::size_t succeeded = 0U;
+                std::size_t failed = 0U;
+                bool command_unavailable = false;
+                std::set<std::uint64_t> acknowledged;
+                const auto acknowledge =
+                    [this, &acknowledged](
+                        const IdleStallDeleteDecision& decision,
+                        bool success) noexcept {
+                        try {
+                            idle_stall_detector_.acknowledge_delete_result(
+                                decision, success,
+                                IdleStallDetector::Clock::now());
+                            acknowledged.insert(decision.attempt_id);
+                        } catch (...) {}
+                    };
+                if (typed && current) {
+                    const auto& output = std::get<
+                        RuntimeIdleStallExactCleanupPointMutationResult>(
+                        transaction->result->payload);
+                    command_unavailable = output.command_unavailable;
+                    for (const auto& outcome : output.outcomes) {
+                        const bool success =
+                            outcome.attempted &&
+                            outcome.cleanup_result ==
+                                ConntrackCleanupResult::Succeeded;
+                        acknowledge(outcome.decision, success);
+                        success ? ++succeeded : ++failed;
+                    }
+                }
+                for (const auto& decision : all_decisions) {
+                    if (acknowledged.count(decision.attempt_id) == 0U) {
+                        acknowledge(decision, false);
+                    }
+                }
+                if (current) {
+                    try {
+                        if (succeeded != 0U) {
+                            Logger::instance().info(
+                                "Recovered {} exact idle forwarded flow(s) "
+                                "after their reply path stopped progressing",
+                                succeeded);
+                        } else if (command_unavailable) {
+                            Logger::instance().info(
+                                "Idle forwarded-flow recovery is unavailable "
+                                "because conntrack could not be run");
+                        } else if (failed != 0U) {
+                            Logger::instance().info(
+                                "Idle forwarded-flow recovery left {} exact "
+                                "flow deletion(s) incomplete",
+                                failed);
+                        } else if (media_protected != 0U ||
+                                   recovered_or_replaced != 0U) {
+                            Logger::instance().trace(
+                                "idle_stall_delete_skip",
+                                "generation={} protected={} recovered={}",
+                                expected_runtime_generation,
+                                media_protected,
+                                recovered_or_replaced);
+                        }
+                        const auto fast_followup =
+                            idle_stall_detector_.
+                                take_whatsapp_fast_followup_delay();
+                        schedule_idle_stall_observer_after(
+                            fast_followup.value_or(
+                                IDLE_STALL_ACTIVE_SCAN_INTERVAL));
+                    } catch (...) {}
+                }
+                exact.reset();
+            }};
+        if (begin_preowned_runtime_firewall_background_point_mutation(
+                lease, transaction, continuation)) {
+            return true;
+        }
+        lease.reset();
+    } catch (...) {}
+    return false;
+}
+
 bool Daemon::drain_exact_tcp_reset_cleanups_before_generation_change()
     noexcept {
     // This caller already owns the generation mutation lease. It must not
@@ -6135,6 +6129,585 @@ void Daemon::run_idle_stall_observer() noexcept {
     }
 }
 
+void Daemon::execute_runtime_background_point_mutation(
+    const RuntimeBackgroundPointMutationTarget& target,
+    RuntimeBackgroundPointMutationResult& result) noexcept {
+    if (!target.valid() ||
+        runtime_firewall_owner_->shutdown_requested()) {
+        return;
+    }
+
+    try {
+        switch (target.kind) {
+        case RuntimeBackgroundPointMutationKind::udp_call_affinity: {
+            const auto& operation =
+                std::get<RuntimeUdpCallAffinityPointMutationTarget>(
+                    target.payload);
+            RuntimeUdpCallAffinityPointMutationResult typed;
+            typed.outcomes.reserve(operation.work.size());
+            for (const auto& item : operation.work) {
+                RuntimeUdpCallAffinityPointMutationOutcome outcome;
+                outcome.decision = item.decision;
+                typed.outcomes.push_back(std::move(outcome));
+            }
+            result.payload = std::move(typed);
+            auto& output =
+                std::get<RuntimeUdpCallAffinityPointMutationResult>(
+                    result.payload);
+
+            const auto generation_is_current =
+                [this, &operation]() noexcept {
+                    return running_.load(std::memory_order_acquire) &&
+                           idle_stall_observer_enabled_.load(
+                               std::memory_order_acquire) &&
+                           runtime_generation_.load(
+                               std::memory_order_acquire) ==
+                               operation.runtime_generation &&
+                           idle_stall_coverage_generation_.load(
+                               std::memory_order_acquire) ==
+                               operation.coverage_generation;
+            };
+            KPBR_LOCK_GUARD(udp_call_affinity_mutation_mutex_);
+            if (!generation_is_current() || !firewall_) {
+                result.completed = true;
+                return;
+            }
+            result.generation_revalidated = true;
+
+            const auto revalidate_decision =
+                [this,
+                 &operation,
+                 &generation_is_current](
+                    const UdpCallAffinityDecision& decision,
+                    UdpCallAffinityRevalidationMode mode)
+                    -> std::optional<
+                        std::vector<ConntrackExactForwardedFlow>> {
+                if (!generation_is_current() ||
+                    UdpCallAffinityDetector::Clock::now() >=
+                        operation.decision_deadline) {
+                    return std::nullopt;
+                }
+                try {
+                    const auto local_addresses =
+                        local_interface_addresses_from(
+                            netlink_.dump_interfaces());
+                    if (local_addresses.empty()) {
+                        return std::nullopt;
+                    }
+                    const std::vector<std::string> destinations{
+                        decision.destination};
+                    const std::vector<std::string> sources{
+                        decision.source};
+                    const auto current = conntrack_manager_.
+                        observe_forwarded_destination_flows(
+                            destinations,
+                            local_addresses,
+                            operation.owned_mask,
+                            ConntrackFlowObservationOptions{
+                                operation.ipv6_enabled,
+                                IDLE_STALL_MAX_FLOWS,
+                                IDLE_STALL_MAX_DESTINATION_CIDRS,
+                                IDLE_STALL_MAX_SNAPSHOT_BYTES,
+                                IDLE_STALL_MAX_SNAPSHOT_LINES,
+                                /*allow_foreign_mark_bits_for_media=*/true},
+                            sources);
+                    if (!generation_is_current() ||
+                        UdpCallAffinityDetector::Clock::now() >=
+                            operation.decision_deadline ||
+                        current.snapshot_unavailable ||
+                        current.snapshot_truncated ||
+                        current.line_limit_reached ||
+                        current.flow_limit_reached ||
+                        current.local_address_scope_missing ||
+                        current.destination_input_truncated ||
+                        current.invalid_destination_selectors != 0U ||
+                        current.invalid_media_guard_sources != 0U ||
+                        current.invalid_owned_mask) {
+                        return std::nullopt;
+                    }
+
+                    if (mode ==
+                        UdpCallAffinityRevalidationMode::
+                            BeforePublication) {
+                        const bool peer_became_ambiguous = std::any_of(
+                            current.source_wide_udp_flows.begin(),
+                            current.source_wide_udp_flows.end(),
+                            [&decision, &operation](
+                                const auto& candidate) {
+                                if (candidate.family != decision.family ||
+                                    candidate.source != decision.source ||
+                                    candidate.destination_port !=
+                                        decision.destination_port ||
+                                    candidate.destination !=
+                                        decision.destination) {
+                                    return false;
+                                }
+                                return (candidate.mark &
+                                            operation.owned_mask) != 0U ||
+                                       candidate.assured ||
+                                       candidate.seen_reply ||
+                                       candidate.reply.packets != 0U ||
+                                       candidate.reply.bytes != 0U;
+                            });
+                        if (peer_became_ambiguous) {
+                            return std::vector<
+                                ConntrackExactForwardedFlow>{};
+                        }
+                    }
+
+                    std::vector<ConntrackExactForwardedFlow>
+                        revalidated_flows;
+                    revalidated_flows.reserve(
+                        decision.baseline_flows.size());
+                    for (const auto& baseline :
+                         decision.baseline_flows) {
+                        const auto live = std::find_if(
+                            current.source_wide_udp_flows.begin(),
+                            current.source_wide_udp_flows.end(),
+                            [&baseline,
+                             &decision,
+                             mode,
+                             &operation](const auto& candidate) {
+                                if (!same_forwarded_five_tuple(
+                                        candidate, baseline)) {
+                                    return false;
+                                }
+                                if (mode ==
+                                    UdpCallAffinityRevalidationMode::
+                                        BeforePublication) {
+                                    return candidate.mark ==
+                                           baseline.mark;
+                                }
+                                const auto owned_mark =
+                                    candidate.mark &
+                                    operation.owned_mask;
+                                return owned_mark == 0U ||
+                                       owned_mark == decision.fwmark;
+                            });
+                        const bool mark_is_allowed =
+                            live !=
+                                current.source_wide_udp_flows.end() &&
+                            ((mode ==
+                                  UdpCallAffinityRevalidationMode::
+                                      BeforePublication &&
+                              live->mark == baseline.mark) ||
+                             (mode !=
+                                  UdpCallAffinityRevalidationMode::
+                                      BeforePublication &&
+                              (((live->mark &
+                                  operation.owned_mask) == 0U) ||
+                               ((live->mark &
+                                 operation.owned_mask) ==
+                                decision.fwmark))));
+                        const bool refresh_still_active =
+                            live !=
+                                current.source_wide_udp_flows.end() &&
+                            live->protocol ==
+                                ConntrackFlowProtocol::Udp &&
+                            mark_is_allowed && live->assured &&
+                            live->seen_reply &&
+                            live->original.packets >=
+                                baseline.original.packets &&
+                            live->original.bytes >=
+                                baseline.original.bytes &&
+                            live->reply.packets >=
+                                baseline.reply.packets &&
+                            live->reply.bytes >=
+                                baseline.reply.bytes;
+                        const bool still_unanswered =
+                            live !=
+                                current.source_wide_udp_flows.end() &&
+                            live->protocol ==
+                                ConntrackFlowProtocol::Udp &&
+                            mark_is_allowed && !live->assured &&
+                            !live->seen_reply &&
+                            live->reply.packets == 0U &&
+                            live->reply.bytes == 0U &&
+                            live->original.packets >=
+                                baseline.original.packets &&
+                            live->original.bytes >=
+                                baseline.original.bytes;
+                        if ((mode ==
+                                 UdpCallAffinityRevalidationMode::
+                                     RefreshBeforePublication &&
+                             refresh_still_active) ||
+                            (mode !=
+                                 UdpCallAffinityRevalidationMode::
+                                     RefreshBeforePublication &&
+                             still_unanswered)) {
+                            revalidated_flows.push_back(*live);
+                        }
+                    }
+                    return revalidated_flows;
+                } catch (...) {
+                    return std::nullopt;
+                }
+            };
+
+            for (std::size_t index = 0U;
+                 index < output.outcomes.size();
+                 ++index) {
+                if (!generation_is_current()) break;
+                auto& outcome = output.outcomes[index];
+                if (UdpCallAffinityDetector::Clock::now() >=
+                    operation.decision_deadline) {
+                    outcome.deadline_expired = true;
+                    continue;
+                }
+                const auto before_publication = revalidate_decision(
+                    outcome.decision,
+                    outcome.decision.refresh_only
+                        ? UdpCallAffinityRevalidationMode::
+                              RefreshBeforePublication
+                        : UdpCallAffinityRevalidationMode::
+                              BeforePublication);
+                if (!before_publication.has_value()) {
+                    if (!generation_is_current()) break;
+                    if (UdpCallAffinityDetector::Clock::now() >=
+                        operation.decision_deadline) {
+                        outcome.deadline_expired = true;
+                    } else {
+                        outcome.revalidation_failed = true;
+                    }
+                    continue;
+                }
+                if (before_publication->empty()) continue;
+                if (!generation_is_current()) break;
+                if (UdpCallAffinityDetector::Clock::now() >=
+                    operation.decision_deadline) {
+                    outcome.deadline_expired = true;
+                    continue;
+                }
+
+                outcome.publication_attempted = true;
+                FirewallUdpPeerMutationResult publication;
+                try {
+                    publication = firewall_->add_udp_peer(
+                        operation.work[index].set_name,
+                        outcome.decision.source,
+                        outcome.decision.destination_port,
+                        outcome.decision.destination);
+                } catch (...) {
+                    // The backend may have crossed into ipset/nft before an
+                    // exception escaped. Without a typed proof, preserve
+                    // recovery authority instead of claiming a no-op.
+                    publication.mutation_boundary_entered = true;
+                }
+                result.mutation_boundary_entered =
+                    result.mutation_boundary_entered ||
+                    publication.mutation_boundary_entered;
+                outcome.installed = publication.publication_verified;
+                outcome.publication_ambiguous =
+                    publication.ambiguous();
+                if (!outcome.installed ||
+                    outcome.decision.refresh_only ||
+                    output.conntrack_unavailable) {
+                    continue;
+                }
+                if (!generation_is_current()) break;
+                if (UdpCallAffinityDetector::Clock::now() >=
+                    operation.decision_deadline) {
+                    outcome.deadline_expired = true;
+                    continue;
+                }
+
+                const auto after_publication = revalidate_decision(
+                    outcome.decision,
+                    UdpCallAffinityRevalidationMode::
+                        AfterPublication);
+                if (!after_publication.has_value()) {
+                    if (!generation_is_current()) break;
+                    if (UdpCallAffinityDetector::Clock::now() >=
+                        operation.decision_deadline) {
+                        outcome.deadline_expired = true;
+                    } else {
+                        outcome.revalidation_failed = true;
+                    }
+                    continue;
+                }
+                outcome.revalidated_flows = *after_publication;
+                for (const auto& flow :
+                     outcome.revalidated_flows) {
+                    if (!generation_is_current()) break;
+                    if (UdpCallAffinityDetector::Clock::now() >=
+                        operation.decision_deadline) {
+                        outcome.deadline_expired = true;
+                        break;
+                    }
+                    result.mutation_boundary_entered = true;
+                    ConntrackCleanupResult cleanup =
+                        ConntrackCleanupResult::Failed;
+                    try {
+                        cleanup = conntrack_manager_.
+                            delete_exact_forwarded_flow(
+                                flow,
+                                operation.owned_mask,
+                                outcome.decision.fwmark);
+                    } catch (...) {
+                        ++outcome.failed_flows;
+                        continue;
+                    }
+                    if (cleanup ==
+                        ConntrackCleanupResult::Succeeded) {
+                        ++outcome.retired_flows;
+                    } else if (
+                        cleanup ==
+                        ConntrackCleanupResult::
+                            CommandUnavailable) {
+                        output.conntrack_unavailable = true;
+                        ++outcome.failed_flows;
+                        break;
+                    } else {
+                        ++outcome.failed_flows;
+                    }
+                }
+            }
+            result.completed = true;
+            return;
+        }
+        case RuntimeBackgroundPointMutationKind::
+                idle_stall_exact_cleanup: {
+            const auto& operation = std::get<
+                RuntimeIdleStallExactCleanupPointMutationTarget>(
+                target.payload);
+            RuntimeIdleStallExactCleanupPointMutationResult typed;
+            typed.outcomes.reserve(operation.work.size());
+            for (const auto& item : operation.work) {
+                RuntimeIdleStallExactCleanupPointMutationOutcome outcome;
+                outcome.decision = item.decision;
+                outcome.flow = item.flow;
+                typed.outcomes.push_back(std::move(outcome));
+            }
+            result.payload = std::move(typed);
+            auto& output = std::get<
+                RuntimeIdleStallExactCleanupPointMutationResult>(
+                result.payload);
+            const auto generation_is_current =
+                [this, &operation]() noexcept {
+                    return running_.load(std::memory_order_acquire) &&
+                        idle_stall_observer_enabled_.load(
+                            std::memory_order_acquire) &&
+                        runtime_generation_.load(
+                            std::memory_order_acquire) ==
+                            operation.runtime_generation &&
+                        idle_stall_coverage_generation_.load(
+                            std::memory_order_acquire) ==
+                            operation.coverage_generation;
+                };
+            KPBR_LOCK_GUARD(udp_call_affinity_mutation_mutex_);
+            if (!generation_is_current()) {
+                result.completed = true;
+                return;
+            }
+            result.generation_revalidated = true;
+            for (std::size_t index = 0U;
+                 index < operation.work.size();
+                 ++index) {
+                if (!generation_is_current()) break;
+                const auto& item = operation.work[index];
+                auto& outcome = output.outcomes[index];
+                const auto observed =
+                    conntrack_manager_.observe_exact_forwarded_flow(
+                        item.flow, operation.owned_mask);
+                if (observed.status !=
+                        ConntrackExactFlowObservationStatus::Observed ||
+                    !observed.flow.has_value() ||
+                    !runtime_background_same_exact_flow_selector(
+                        *observed.flow, item.flow) ||
+                    observed.flow->original.packets <
+                        item.flow.original.packets ||
+                    observed.flow->original.bytes <
+                        item.flow.original.bytes ||
+                    observed.flow->reply.packets <
+                        item.flow.reply.packets ||
+                    observed.flow->reply.bytes <
+                        item.flow.reply.bytes ||
+                    observed.flow->reply.bytes -
+                            item.flow.reply.bytes >
+                        IDLE_STALL_APPLICATION_REPLY_BYTES) {
+                    continue;
+                }
+                const bool state_eligible =
+                    (observed.flow->protocol ==
+                         ConntrackFlowProtocol::Tcp &&
+                     observed.flow->tcp_state ==
+                         std::optional<ConntrackTcpState>{
+                             ConntrackTcpState::Established}) ||
+                    (observed.flow->protocol ==
+                         ConntrackFlowProtocol::Udp &&
+                     observed.flow->assured);
+                if (!state_eligible) continue;
+                outcome.attempted = true;
+                result.mutation_boundary_entered = true;
+                try {
+                    outcome.cleanup_result = conntrack_manager_.
+                        delete_exact_forwarded_flow(
+                            *observed.flow, operation.owned_mask);
+                } catch (...) {
+                    outcome.cleanup_result =
+                        ConntrackCleanupResult::Failed;
+                }
+                if (outcome.cleanup_result ==
+                    ConntrackCleanupResult::CommandUnavailable) {
+                    output.command_unavailable = true;
+                    break;
+                }
+            }
+            result.completed = true;
+            return;
+        }
+        case RuntimeBackgroundPointMutationKind::meta_udp443_cleanup: {
+            const auto& operation = std::get<
+                RuntimeMetaUdp443CleanupPointMutationTarget>(
+                target.payload);
+            result.payload =
+                RuntimeMetaUdp443CleanupPointMutationResult{};
+            auto& output = std::get<
+                RuntimeMetaUdp443CleanupPointMutationResult>(
+                result.payload);
+            auto plan = operation.plan;
+            const auto still_current =
+                [this, &operation]() noexcept {
+                    return meta_udp443_cleanup_authority_matches(
+                        operation.runtime_generation,
+                        runtime_generation_.load(
+                            std::memory_order_acquire),
+                        operation.cleanup_epoch,
+                        meta_udp443_cleanup_epoch_.load(
+                            std::memory_order_acquire));
+                };
+            try {
+                KPBR_LOCK_GUARD(udp_call_affinity_mutation_mutex_);
+                if (!still_current() || !firewall_) {
+                    output.cleanup.remaining_flows =
+                        plan.exact_flows;
+                    output.cleanup.generation_changed =
+                        !still_current();
+                    result.completed = true;
+                    return;
+                }
+                result.generation_revalidated = true;
+                output.before =
+                    firewall_->inspect_forward_udp_reject_state();
+                output.fastnat_before =
+                    fastnat_is_disabled_or_unavailable();
+                if (still_current() && output.fastnat_before &&
+                    output.before ==
+                        OwnedForwardUdpRejectState::healthy) {
+                    const auto local_addresses =
+                        local_interface_addresses_from(
+                            netlink_.dump_interfaces());
+                    const auto observation = conntrack_manager_.
+                        observe_forwarded_destination_flows(
+                            plan.destination_selectors,
+                            local_addresses,
+                            plan.owned_mask,
+                            meta_udp443_activation_observation_options(
+                                plan.ipv6_enabled),
+                            {},
+                            plan.destination_selectors,
+                            {});
+                    const auto candidates =
+                        select_meta_udp_443_cleanup_candidates(
+                            observation,
+                            plan.cleanup_owned_marks,
+                            plan.owned_mask,
+                            plan.allow_unmarked_cleanup);
+                    if (!candidates.complete) {
+                        output.worker_failure =
+                            "post-publication exact UDP/443 snapshot "
+                            "is incomplete";
+                        output.cleanup.remaining_flows =
+                            plan.exact_flows;
+                    } else {
+                        plan.exact_flows = candidates.flows;
+                        if (!plan.exact_flows.empty()) {
+                            result.mutation_boundary_entered = true;
+                        }
+                        output.cleanup = conntrack_manager_.
+                            delete_exact_forwarded_flows(
+                                plan.exact_flows,
+                                plan.owned_mask,
+                                plan.cleanup_owned_marks,
+                                ConntrackExactFlowCleanupOptions{
+                                    META_UDP443_ACTIVATION_BATCH_BUDGET,
+                                    META_UDP443_ACTIVATION_BATCH_SIZE},
+                                still_current);
+                    }
+                } else {
+                    output.cleanup.remaining_flows =
+                        plan.exact_flows;
+                    output.cleanup.generation_changed =
+                        !still_current();
+                }
+                if (still_current()) {
+                    output.after =
+                        firewall_->inspect_forward_udp_reject_state();
+                    output.fastnat_after =
+                        fastnat_is_disabled_or_unavailable();
+                }
+            } catch (const std::exception& error) {
+                try { output.worker_failure = error.what(); }
+                catch (...) {
+                    output.worker_failure =
+                        "exact cleanup worker failure";
+                }
+                output.cleanup.remaining_flows = plan.exact_flows;
+            } catch (...) {
+                output.worker_failure =
+                    "unknown exact cleanup worker failure";
+                output.cleanup.remaining_flows = plan.exact_flows;
+            }
+            result.completed = true;
+            return;
+        }
+        case RuntimeBackgroundPointMutationKind::
+                owned_conntrack_cleanup: {
+            const auto& operation = std::get<
+                RuntimeOwnedConntrackCleanupPointMutationTarget>(
+                target.payload);
+            result.payload =
+                RuntimeOwnedConntrackCleanupPointMutationResult{};
+            auto& output = std::get<
+                RuntimeOwnedConntrackCleanupPointMutationResult>(
+                result.payload);
+            KPBR_LOCK_GUARD(udp_call_affinity_mutation_mutex_);
+            bool active = false;
+            try { active = routing_runtime_active(); }
+            catch (...) {}
+            if (!active ||
+                runtime_generation_.load(std::memory_order_acquire) !=
+                    operation.retry.snapshot.runtime_generation) {
+                output.cleanup.remaining_marks =
+                    operation.retry.ordered_marks;
+                result.completed = true;
+                return;
+            }
+            result.generation_revalidated = true;
+            result.mutation_boundary_entered = true;
+            try {
+                output.cleanup =
+                    conntrack_manager_.delete_marks_ordered(
+                        operation.retry.ordered_marks,
+                        operation.retry.snapshot.owned_mask,
+                        ConntrackCleanupOptions{
+                            operation.retry.snapshot.ipv6_enabled,
+                            OWNED_CONNTRACK_CLEANUP_RETRY_BUDGET,
+                            OWNED_CONNTRACK_CLEANUP_RETRY_BATCH_SIZE});
+            } catch (...) {
+                output.cleanup.failed =
+                    operation.retry.ordered_marks.size();
+                output.cleanup.remaining_marks =
+                    operation.retry.ordered_marks;
+            }
+            result.completed = true;
+            return;
+        }
+        }
+    } catch (...) {
+    }
+}
+
 void Daemon::dispatch_udp_call_affinity_mutations(
     std::uint64_t expected_runtime_generation,
     std::uint64_t expected_coverage_generation,
@@ -6142,417 +6715,100 @@ void Daemon::dispatch_udp_call_affinity_mutations(
     bool ipv6_enabled,
     UdpCallAffinityDetector::TimePoint decision_deadline,
     std::vector<UdpCallAffinityDecision> decisions) {
-    if (decisions.empty()) {
-        return;
-    }
-
-    const auto release_decisions = [this, &decisions]() {
+    if (decisions.empty()) return;
+    const auto release_decisions = [this, &decisions]() noexcept {
         for (const auto& decision : decisions) {
-            udp_call_affinity_detector_.release_failed(decision);
+            try { udp_call_affinity_detector_.release_failed(decision); }
+            catch (...) {}
         }
     };
-    const auto generation_is_current = [this,
-                                        expected_runtime_generation,
-                                        expected_coverage_generation]() {
-        return running_.load(std::memory_order_acquire) &&
-               routing_runtime_active() &&
-               idle_stall_observer_enabled_.load(
-                   std::memory_order_acquire) &&
-               runtime_generation_.load(std::memory_order_acquire) ==
-                   expected_runtime_generation &&
-               idle_stall_coverage_generation_.load(
-                   std::memory_order_acquire) ==
-                   expected_coverage_generation;
-    };
+    const auto generation_is_current =
+        [this, expected_runtime_generation,
+         expected_coverage_generation]() noexcept {
+            try {
+                return running_.load(std::memory_order_acquire) &&
+                    routing_runtime_active() &&
+                    idle_stall_observer_enabled_.load(
+                        std::memory_order_acquire) &&
+                    runtime_generation_.load(std::memory_order_acquire) ==
+                        expected_runtime_generation &&
+                    idle_stall_coverage_generation_.load(
+                        std::memory_order_acquire) ==
+                        expected_coverage_generation;
+            } catch (...) { return false; }
+        };
     if (!generation_is_current() || !firewall_) {
         release_decisions();
         return;
     }
-
-    bool expected = false;
-    if (!udp_call_affinity_mutation_inflight_.compare_exchange_strong(
-            expected, true, std::memory_order_acq_rel)) {
-        // The earlier batch owns the exact pairs it reserved. Release this
-        // later observation so it may be reconsidered after that batch ends.
-        release_decisions();
-        return;
-    }
-    AtomicFlagResetGuard dispatch_guard(
-        udp_call_affinity_mutation_inflight_);
-
-    std::vector<UdpCallAffinityMutationWork> work;
-    work.reserve(decisions.size());
-    for (const auto& decision : decisions) {
-        const int family = decision.family == ConntrackFlowFamily::Ipv6
-            ? AF_INET6
-            : AF_INET;
-        const std::string set_name = firewall_->media_affinity_set_name(
-            decision.list_name, family);
-        work.push_back(UdpCallAffinityMutationWork{
-            decision,
-            set_name});
-    }
-
-    const TraceId trace_id = ensure_trace_id();
-    const bool enqueued = blocking_executor_.try_post(
-        "udp-call-affinity-mutation",
-        [this,
-         expected_runtime_generation,
-         expected_coverage_generation,
-         owned_mask,
-         ipv6_enabled,
-         decision_deadline,
-         work = std::move(work)]() mutable {
-            AtomicFlagResetGuard inflight_guard(
-                udp_call_affinity_mutation_inflight_);
-            const auto generation_is_current = [this,
-                                                 expected_runtime_generation,
-                                                 expected_coverage_generation]() {
-                // Worker code may consult only atomics. The control-owned
-                // routing_runtime_active() flag is checked before dispatch and
-                // again by the posted control-loop completion.
-                return running_.load(std::memory_order_acquire) &&
-                       idle_stall_observer_enabled_.load(
-                           std::memory_order_acquire) &&
-                       runtime_generation_.load(
-                           std::memory_order_acquire) ==
-                           expected_runtime_generation &&
-                       idle_stall_coverage_generation_.load(
-                           std::memory_order_acquire) ==
-                           expected_coverage_generation;
-            };
-
-            std::vector<UdpCallAffinityMutationOutcome> outcomes;
-            outcomes.reserve(work.size());
-            for (auto& item : work) {
-                outcomes.push_back(UdpCallAffinityMutationOutcome{
-                    std::move(item.decision)});
-            }
-
-            bool conntrack_unavailable = false;
-            {
-                // The lifecycle path cancels the observer epoch before taking
-                // this same barrier. Therefore queued work must re-check all
-                // atomic fences only after it has exclusive mutation access.
-                KPBR_LOCK_GUARD(udp_call_affinity_mutation_mutex_);
-
-                const auto revalidate_decision =
-                    [this,
-                     owned_mask,
-                     ipv6_enabled,
-                     decision_deadline,
-                     &generation_is_current](
-                        const UdpCallAffinityDecision& decision,
-                        UdpCallAffinityRevalidationMode mode)
-                        -> std::optional<
-                            std::vector<ConntrackExactForwardedFlow>> {
-                    if (!generation_is_current() ||
-                        UdpCallAffinityDetector::Clock::now() >=
-                            decision_deadline) {
-                        return std::nullopt;
-                    }
-                    try {
-                        const auto local_addresses =
-                            local_interface_addresses_from(
-                                netlink_.dump_interfaces());
-                        if (local_addresses.empty()) {
-                            return std::nullopt;
-                        }
-                        const std::vector<std::string> destinations{
-                            decision.destination};
-                        const std::vector<std::string> sources{
-                            decision.source};
-                        const auto current = conntrack_manager_.
-                            observe_forwarded_destination_flows(
-                                destinations,
-                                local_addresses,
-                                owned_mask,
-                                ConntrackFlowObservationOptions{
-                                    ipv6_enabled,
-                                    IDLE_STALL_MAX_FLOWS,
-                                    IDLE_STALL_MAX_DESTINATION_CIDRS,
-                                    IDLE_STALL_MAX_SNAPSHOT_BYTES,
-                                    IDLE_STALL_MAX_SNAPSHOT_LINES,
-                                    /*allow_foreign_mark_bits_for_media=*/true},
-                                sources);
-                        if (!generation_is_current() ||
-                            UdpCallAffinityDetector::Clock::now() >=
-                                decision_deadline ||
-                            current.snapshot_unavailable ||
-                            current.snapshot_truncated ||
-                            current.line_limit_reached ||
-                            current.flow_limit_reached ||
-                            current.local_address_scope_missing ||
-                            current.destination_input_truncated ||
-                            current.invalid_destination_selectors != 0U ||
-                            current.invalid_media_guard_sources != 0U ||
-                            current.invalid_owned_mask) {
-                            return std::nullopt;
-                        }
-
-                        if (mode == UdpCallAffinityRevalidationMode::
-                                BeforePublication) {
-                            const bool peer_became_ambiguous = std::any_of(
-                                current.source_wide_udp_flows.begin(),
-                                current.source_wide_udp_flows.end(),
-                                [&decision, owned_mask](const auto& candidate) {
-                                    if (candidate.family != decision.family ||
-                                        candidate.source != decision.source ||
-                                        candidate.destination_port !=
-                                            decision.destination_port ||
-                                        candidate.destination !=
-                                            decision.destination) {
-                                        return false;
-                                    }
-                                    return
-                                           (candidate.mark & owned_mask) != 0U ||
-                                           candidate.assured ||
-                                           candidate.seen_reply ||
-                                           candidate.reply.packets != 0U ||
-                                           candidate.reply.bytes != 0U;
-                                });
-                            if (peer_became_ambiguous) {
-                                return std::vector<
-                                    ConntrackExactForwardedFlow>{};
-                            }
-                        }
-
-                        std::vector<ConntrackExactForwardedFlow>
-                            revalidated_flows;
-                        revalidated_flows.reserve(
-                            decision.baseline_flows.size());
-                        for (const auto& baseline :
-                             decision.baseline_flows) {
-                            const auto live = std::find_if(
-                                current.source_wide_udp_flows.begin(),
-                                current.source_wide_udp_flows.end(),
-                                [&baseline,
-                                 &decision,
-                                 mode,
-                                 owned_mask](
-                                    const auto& candidate) {
-                                    if (!same_forwarded_five_tuple(
-                                            candidate, baseline)) {
-                                        return false;
-                                    }
-                                    if (mode ==
-                                        UdpCallAffinityRevalidationMode::
-                                            BeforePublication) {
-                                        return candidate.mark ==
-                                               baseline.mark;
-                                    }
-                                    if (mode ==
-                                        UdpCallAffinityRevalidationMode::
-                                            RefreshBeforePublication) {
-                                        const auto owned_mark =
-                                            candidate.mark & owned_mask;
-                                        return owned_mark == 0U ||
-                                               owned_mark == decision.fwmark;
-                                    }
-                                    const auto owned_mark =
-                                        candidate.mark & owned_mask;
-                                    return owned_mark == 0U ||
-                                           owned_mark == decision.fwmark;
-                                });
-                            const bool mark_is_allowed =
-                                live !=
-                                    current.source_wide_udp_flows.end() &&
-                                ((mode == UdpCallAffinityRevalidationMode::
-                                              BeforePublication &&
-                                  live->mark == baseline.mark) ||
-                                 (mode == UdpCallAffinityRevalidationMode::
-                                              AfterPublication &&
-                                  ((live->mark & owned_mask) == 0U ||
-                                   (live->mark & owned_mask) ==
-                                       decision.fwmark)) ||
-                                 (mode == UdpCallAffinityRevalidationMode::
-                                              RefreshBeforePublication &&
-                                  ((live->mark & owned_mask) == 0U ||
-                                   (live->mark & owned_mask) ==
-                                       decision.fwmark)));
-                            const bool refresh_still_active =
-                                live !=
-                                    current.source_wide_udp_flows.end() &&
-                                live->protocol ==
-                                    ConntrackFlowProtocol::Udp &&
-                                mark_is_allowed && live->assured &&
-                                live->seen_reply &&
-                                live->original.packets >=
-                                    baseline.original.packets &&
-                                live->original.bytes >=
-                                    baseline.original.bytes &&
-                                live->reply.packets >=
-                                    baseline.reply.packets &&
-                                live->reply.bytes >=
-                                    baseline.reply.bytes;
-                            const bool still_unanswered =
-                                live !=
-                                    current.source_wide_udp_flows.end() &&
-                                live->protocol ==
-                                    ConntrackFlowProtocol::Udp &&
-                                mark_is_allowed && !live->assured &&
-                                !live->seen_reply &&
-                                live->reply.packets == 0U &&
-                                live->reply.bytes == 0U &&
-                                live->original.packets >=
-                                    baseline.original.packets &&
-                                live->original.bytes >=
-                                    baseline.original.bytes;
-                            if ((mode == UdpCallAffinityRevalidationMode::
-                                             RefreshBeforePublication &&
-                                 refresh_still_active) ||
-                                (mode != UdpCallAffinityRevalidationMode::
-                                             RefreshBeforePublication &&
-                                 still_unanswered)) {
-                                revalidated_flows.push_back(*live);
-                            }
-                        }
-                        return revalidated_flows;
-                    } catch (...) {
-                        return std::nullopt;
+    try {
+        RuntimeUdpCallAffinityPointMutationTarget operation;
+        operation.runtime_generation = expected_runtime_generation;
+        operation.coverage_generation = expected_coverage_generation;
+        operation.owned_mask = owned_mask;
+        operation.ipv6_enabled = ipv6_enabled;
+        operation.decision_deadline = decision_deadline;
+        operation.work.reserve(decisions.size());
+        for (const auto& decision : decisions) {
+            const int family =
+                decision.family == ConntrackFlowFamily::Ipv6
+                ? AF_INET6 : AF_INET;
+            operation.work.push_back(
+                RuntimeUdpCallAffinityPointMutationWork{
+                    decision,
+                    firewall_->media_affinity_set_name(
+                        decision.list_name, family)});
+        }
+        RuntimeBackgroundPointMutationTarget target;
+        target.kind =
+            RuntimeBackgroundPointMutationKind::udp_call_affinity;
+        target.target_serial = ++background_point_mutation_serial_;
+        if (target.target_serial == 0U) {
+            target.target_serial = ++background_point_mutation_serial_;
+        }
+        target.payload = std::move(operation);
+        auto transaction = std::make_shared<
+            RuntimeBackgroundPointMutationTransaction>(
+            std::move(target));
+        if (!transaction->valid()) {
+            release_decisions();
+            return;
+        }
+        auto admitted = runtime_mutation_admission_.try_acquire(
+            "udp-call-affinity-point-mutation");
+        if (!admitted.has_value()) {
+            release_decisions();
+            return;
+        }
+        auto lease = std::make_unique<RuntimeMutationAdmission::Lease>(
+            std::move(*admitted));
+        const auto expected_lease_token = lease->token();
+        RuntimeFirewallPreownedTerminalContinuation continuation{
+            [this, transaction, expected_runtime_generation,
+             expected_coverage_generation, expected_lease_token](
+                RuntimeFirewallLifecycleTerminal terminal,
+                std::unique_ptr<RuntimeMutationAdmission::Lease> exact)
+                noexcept {
+                const auto& operation = std::get<
+                    RuntimeUdpCallAffinityPointMutationTarget>(
+                    transaction->target.payload);
+                const auto release_all = [this, &operation]() noexcept {
+                    for (const auto& item : operation.work) {
+                        try {
+                            udp_call_affinity_detector_.release_failed(
+                                item.decision);
+                        } catch (...) {}
                     }
                 };
-
-                for (std::size_t index = 0U;
-                     index < outcomes.size();
-                     ++index) {
-                    if (!generation_is_current()) {
-                        break;
-                    }
-                    auto& outcome = outcomes[index];
-                    if (UdpCallAffinityDetector::Clock::now() >=
-                        decision_deadline) {
-                        outcome.deadline_expired = true;
-                        continue;
-                    }
-
-                    {
-                        const auto before_publication = revalidate_decision(
-                            outcome.decision,
-                            outcome.decision.refresh_only
-                                ? UdpCallAffinityRevalidationMode::
-                                      RefreshBeforePublication
-                                : UdpCallAffinityRevalidationMode::
-                                      BeforePublication);
-                        if (!before_publication.has_value()) {
-                            if (!generation_is_current()) {
-                                break;
-                            }
-                            if (UdpCallAffinityDetector::Clock::now() >=
-                                decision_deadline) {
-                                outcome.deadline_expired = true;
-                            } else {
-                                outcome.revalidation_failed = true;
-                            }
-                            continue;
-                        }
-                        if (before_publication->empty()) {
-                            continue;
-                        }
-                    }
-
-                    if (!generation_is_current()) {
-                        break;
-                    }
-                    if (UdpCallAffinityDetector::Clock::now() >=
-                        decision_deadline) {
-                        outcome.deadline_expired = true;
-                        continue;
-                    }
-                    outcome.publication_attempted = true;
-                    try {
-                        outcome.installed = firewall_->add_udp_peer(
-                            work[index].set_name,
-                            outcome.decision.source,
-                            outcome.decision.destination_port,
-                            outcome.decision.destination);
-                    } catch (...) {
-                        outcome.installed = false;
-                    }
-                    if (!outcome.installed ||
-                        outcome.decision.refresh_only ||
-                        conntrack_unavailable) {
-                        continue;
-                    }
-                    if (!generation_is_current()) {
-                        break;
-                    }
-                    if (UdpCallAffinityDetector::Clock::now() >=
-                        decision_deadline) {
-                        outcome.deadline_expired = true;
-                        continue;
-                    }
-
-                    // Publishing the UDP peer tuple can immediately make a retried
-                    // tuple acquire the intended mark without replacing its
-                    // old direct-WAN NAT binding. Re-read the exact 5-tuple
-                    // without using mark as identity; only an empty or intended
-                    // owned mark, still unanswered and unassured, may be
-                    // retired with its current full-width exact mark selector.
-                    const auto after_publication =
-                        revalidate_decision(
-                            outcome.decision,
-                            UdpCallAffinityRevalidationMode::
-                                AfterPublication);
-                    if (!after_publication.has_value()) {
-                        if (!generation_is_current()) {
-                            break;
-                        }
-                        if (UdpCallAffinityDetector::Clock::now() >=
-                            decision_deadline) {
-                            outcome.deadline_expired = true;
-                        } else {
-                            outcome.revalidation_failed = true;
-                        }
-                        continue;
-                    }
-                    outcome.revalidated_flows = *after_publication;
-
-                    for (const auto& flow : outcome.revalidated_flows) {
-                        if (!generation_is_current()) {
-                            break;
-                        }
-                        if (UdpCallAffinityDetector::Clock::now() >=
-                            decision_deadline) {
-                            outcome.deadline_expired = true;
-                            break;
-                        }
-                        ConntrackCleanupResult result =
-                            ConntrackCleanupResult::Failed;
-                        try {
-                            result = conntrack_manager_.
-                                delete_exact_forwarded_flow(
-                                    flow,
-                                    owned_mask,
-                                    outcome.decision.fwmark);
-                        } catch (...) {
-                            ++outcome.failed_flows;
-                            continue;
-                        }
-                        if (result ==
-                            ConntrackCleanupResult::Succeeded) {
-                            ++outcome.retired_flows;
-                        } else if (result ==
-                                   ConntrackCleanupResult::CommandUnavailable) {
-                            conntrack_unavailable = true;
-                            ++outcome.failed_flows;
-                            break;
-                        } else {
-                            ++outcome.failed_flows;
-                        }
-                    }
-                }
-            }
-
-            const bool completion_posted = post_control_task(
-                [this,
-                 expected_runtime_generation,
-                 expected_coverage_generation,
-                 outcomes = std::move(outcomes),
-                 conntrack_unavailable]() mutable {
-                    udp_call_affinity_mutation_inflight_.store(
-                        false, std::memory_order_release);
-                    const bool generation_is_current =
+                const bool lease_returned =
+                    exact && static_cast<bool>(*exact) &&
+                    exact->token() == expected_lease_token &&
+                    runtime_mutation_admission_.owns(*exact);
+                bool current = false;
+                try {
+                    current =
+                        terminal.outcome !=
+                            RuntimeFirewallLifecycleOutcome::shutdown &&
                         running_.load(std::memory_order_acquire) &&
                         routing_runtime_active() &&
                         idle_stall_observer_enabled_.load(
@@ -6563,112 +6819,94 @@ void Daemon::dispatch_udp_call_affinity_mutations(
                         idle_stall_coverage_generation_.load(
                             std::memory_order_acquire) ==
                             expected_coverage_generation;
-                    if (!generation_is_current) {
-                        return;
-                    }
-
-                    std::size_t installed = 0U;
-                    std::size_t refreshed = 0U;
-                    std::size_t retired = 0U;
-                    std::size_t pair_failures = 0U;
-                    std::size_t flow_failures = 0U;
-                    std::size_t deadline_expirations = 0U;
-                    std::size_t revalidation_skips = 0U;
-                    const auto completed_at =
-                        UdpCallAffinityDetector::Clock::now();
-                    for (const auto& outcome : outcomes) {
-                        retired += outcome.retired_flows;
-                        flow_failures += outcome.failed_flows;
-                        deadline_expirations +=
-                            outcome.deadline_expired ? 1U : 0U;
-                        revalidation_skips +=
-                            outcome.revalidation_failed ? 1U : 0U;
-                        if (outcome.installed) {
-                            // The expiring kernel pair is authoritative once
-                            // published. A best-effort exact retirement
-                            // failure must not erase the detector lease and
-                            // cause duplicate promotion attempts.
-                            bool confirmation_accepted = false;
-                            try {
-                                confirmation_accepted =
-                                    udp_call_affinity_detector_.
-                                        confirm_installed(
-                                            outcome.decision,
-                                            completed_at);
-                            } catch (...) {
-                                // Kernel publication may have succeeded, but
-                                // an in-memory authority update that cannot be
-                                // represented safely must fail closed.
-                                udp_call_affinity_detector_.reset();
-                            }
-                            if (confirmation_accepted) {
-                                if (outcome.decision.refresh_only) {
-                                    ++refreshed;
-                                } else {
-                                    ++installed;
-                                }
-                            }
-                        } else {
+                } catch (...) {}
+                const bool typed =
+                    lease_returned &&
+                    transaction->typed_identity_valid &&
+                    transaction->result &&
+                    transaction->result->control_publishable() &&
+                    transaction->result->target ==
+                        transaction->target &&
+                    std::holds_alternative<
+                        RuntimeUdpCallAffinityPointMutationResult>(
+                        transaction->result->payload);
+                if (terminal.commit_ambiguous ||
+                    (transaction->result &&
+                     transaction->result->
+                         unsafe_publication_possible())) {
+                    schedule_netfilter_runtime_refresh_noexcept(
+                        NetfilterRefreshReason::full,
+                        "could not schedule recovery after an "
+                        "ambiguous UDP peer publication");
+                    release_all();
+                    exact.reset();
+                    return;
+                }
+                if (!typed || !current) {
+                    release_all();
+                    exact.reset();
+                    return;
+                }
+                const auto& output = std::get<
+                    RuntimeUdpCallAffinityPointMutationResult>(
+                    transaction->result->payload);
+                std::size_t installed = 0U;
+                std::size_t refreshed = 0U;
+                std::size_t retired = 0U;
+                std::size_t failures = 0U;
+                const auto completed_at =
+                    UdpCallAffinityDetector::Clock::now();
+                for (const auto& outcome : output.outcomes) {
+                    retired += outcome.retired_flows;
+                    failures += outcome.failed_flows;
+                    if (outcome.installed) {
+                        bool accepted = false;
+                        try {
+                            accepted = udp_call_affinity_detector_.
+                                confirm_installed(
+                                    outcome.decision, completed_at);
+                        } catch (...) {
+                            udp_call_affinity_detector_.reset();
+                        }
+                        if (accepted) {
+                            outcome.decision.refresh_only
+                                ? ++refreshed : ++installed;
+                        }
+                    } else {
+                        try {
                             udp_call_affinity_detector_.release_failed(
                                 outcome.decision);
-                            if (outcome.publication_attempted) {
-                                ++pair_failures;
-                            }
-                        }
+                        } catch (...) {}
                     }
-                    if (deadline_expirations != 0U ||
-                        revalidation_skips != 0U) {
-                        Logger::instance().trace(
-                            "udp_call_affinity_mutation_skip",
-                            "generation={} deadline_expired={} "
-                            "revalidation_failed={}",
-                            expected_runtime_generation,
-                            deadline_expirations,
-                            revalidation_skips);
-                    }
-
+                }
+                try {
                     if (installed != 0U) {
                         Logger::instance().info(
                             "Activated {} short-lived WhatsApp call peer "
-                            "pair(s) and retired {} revalidated direct-WAN "
-                            "flow(s)",
-                            installed,
-                            retired);
-                    } else if (pair_failures != 0U) {
-                        Logger::instance().info(
-                            "WhatsApp call peer affinity left {} pair "
-                            "publication(s) inactive; no unverified "
-                            "conntrack flow was removed",
-                            pair_failures);
+                            "pair(s) and retired {} exact stale flow(s)",
+                            installed, retired);
                     }
                     if (refreshed != 0U) {
                         Logger::instance().verbose(
                             "Refreshed {} active WhatsApp call peer lease(s)",
                             refreshed);
                     }
-                    if (conntrack_unavailable) {
-                        Logger::instance().info(
-                            "WhatsApp call peer rules were activated, but "
-                            "exact stale-flow retirement is unavailable "
-                            "because conntrack could not be run");
-                    } else if (flow_failures != 0U) {
+                    if (output.conntrack_unavailable || failures != 0U) {
                         Logger::instance().info(
                             "WhatsApp call peer affinity left {} exact "
-                            "stale-flow retirement(s) incomplete; no broad "
-                            "cleanup was attempted",
-                            flow_failures);
+                            "stale-flow retirement(s) incomplete",
+                            failures);
                     }
-                },
-                "udp-call-affinity-mutation-commit");
-            if (completion_posted) {
-                inflight_guard.release();
-            }
-        },
-        trace_id);
-
-    if (enqueued) {
-        dispatch_guard.release();
-    } else {
+                } catch (...) {}
+                exact.reset();
+            }};
+        if (begin_preowned_runtime_firewall_background_point_mutation(
+                lease, transaction, continuation)) {
+            return;
+        }
+        lease.reset();
+        release_decisions();
+    } catch (...) {
         release_decisions();
     }
 }
@@ -7207,39 +7445,24 @@ void Daemon::commit_idle_stall_observation(
                                 }),
                             pending_deletes.end());
 
-                        // Non-reset exact flow retirement keeps its existing
-                        // semantics. The firewall point writer above is now a
-                        // separate typed operation and cannot overlap it.
+                        std::vector<
+                            RuntimeIdleStallExactCleanupPointMutationWork>
+                            point_work;
+                        point_work.reserve(pending_deletes.size());
                         for (const auto& pending : pending_deletes) {
-                            if (!generation_is_current()) {
-                                live_scope_changed = true;
-                                break;
-                            }
-                            ConntrackCleanupResult result =
-                                ConntrackCleanupResult::Failed;
-                            try {
-                                result = conntrack_manager_.
-                                    delete_exact_forwarded_flow(
-                                        pending.flow, owned_mask);
-                            } catch (...) {
-                                ++failed;
-                                acknowledge(pending.decision, false);
-                                continue;
-                            }
-                            if (result ==
-                                ConntrackCleanupResult::Succeeded) {
-                                ++succeeded;
-                                acknowledge(pending.decision, true);
-                            } else if (result ==
-                                       ConntrackCleanupResult::
-                                           CommandUnavailable) {
-                                command_unavailable = true;
-                                acknowledge(pending.decision, false);
-                                break;
-                            } else {
-                                ++failed;
-                                acknowledge(pending.decision, false);
-                            }
+                            point_work.push_back({
+                                pending.decision, pending.flow});
+                        }
+                        if (!point_work.empty() &&
+                            begin_idle_stall_exact_cleanup_point(
+                                expected_runtime_generation,
+                                expected_coverage_generation,
+                                owned_mask,
+                                std::move(point_work),
+                                all_decisions,
+                                media_protected,
+                                recovered_or_replaced)) {
+                            return;
                         }
                     }
 

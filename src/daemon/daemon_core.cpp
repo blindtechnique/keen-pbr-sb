@@ -428,6 +428,9 @@ struct DaemonRuntimeFirewallOperationState final
     std::optional<RuntimeExactTcpResetPointMutationTarget>
         exact_tcp_reset_point_target;
     std::uint64_t exact_tcp_reset_point_mutation_lease_token{0U};
+    std::shared_ptr<RuntimeBackgroundPointMutationTransaction>
+        background_point_mutation_transaction;
+    std::uint64_t background_point_mutation_lease_token{0U};
     bool stop_cleanup_generation_advanced{false};
     std::optional<ConfigTerminalOperationIdentity>
         config_operation_identity;
@@ -4442,6 +4445,56 @@ bool Daemon::begin_preowned_runtime_firewall_exact_tcp_reset_point(
     return false;
 }
 
+bool Daemon::begin_preowned_runtime_firewall_background_point_mutation(
+    std::unique_ptr<RuntimeMutationAdmission::Lease>& lease,
+    const std::shared_ptr<RuntimeBackgroundPointMutationTransaction>&
+        transaction,
+    RuntimeFirewallPreownedTerminalContinuation& continuation) noexcept {
+    bool runtime_active = false;
+    try {
+        runtime_active = routing_runtime_active();
+    } catch (...) {
+        return false;
+    }
+    if (!lease || !static_cast<bool>(*lease) ||
+        !runtime_mutation_admission_.owns(*lease) || !continuation ||
+        !transaction || !transaction->valid() ||
+        transaction->target.runtime_generation() !=
+            runtime_generation_.load(std::memory_order_acquire) ||
+        !runtime_active || runtime_firewall_owner_->shutdown_requested() ||
+        runtime_firewall_owner_->active_context() ||
+        runtime_firewall_owner_->pending_successor()) {
+        return false;
+    }
+
+    try {
+        auto state =
+            std::make_shared<DaemonRuntimeFirewallOperationState>();
+        state->background_point_mutation_transaction = transaction;
+        state->background_point_mutation_lease_token = lease->token();
+        auto result = runtime_firewall_owner_->start_immediate_preowned(
+            0U,
+            transaction->target.runtime_generation(),
+            {},
+            {},
+            /*schedule_catalog_refresh=*/false,
+            state,
+            runtime_mutation_admission_,
+            std::move(lease),
+            {},
+            RuntimeFirewallLifecycleKind::background_point_mutation,
+            std::move(continuation));
+        if (result.disposition ==
+            RuntimeFirewallImmediateDisposition::handed_off) {
+            return true;
+        }
+        lease = std::move(result.unaccepted_lease);
+        continuation = std::move(result.unaccepted_continuation);
+    } catch (...) {
+    }
+    return false;
+}
+
 bool Daemon::begin_preowned_runtime_firewall_cold_boot(
     const std::shared_ptr<DaemonColdBootTransaction>& transaction,
     std::unique_ptr<RuntimeMutationAdmission::Lease>& lease,
@@ -8261,6 +8314,9 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
     const bool lifecycle_exact_tcp_reset_point =
         runtime_firewall_lifecycle_is_exact_tcp_reset_point(
             context->lifecycle_kind);
+    const bool lifecycle_background_point_mutation =
+        runtime_firewall_lifecycle_is_background_point_mutation(
+            context->lifecycle_kind);
     const bool lifecycle_preowned =
         runtime_firewall_lifecycle_uses_preowned_continuation(
             context->lifecycle_kind);
@@ -8377,6 +8433,123 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
         terminalize_before_worker(
             RuntimeFirewallOperationContext::SuccessorMode::none,
             /*force_rerun=*/false);
+        return;
+    }
+
+    if (lifecycle_background_point_mutation) {
+        context->successor_mode =
+            RuntimeFirewallOperationContext::SuccessorMode::none;
+        context->force_successor = false;
+        state.suppress_coordinator_rerun = true;
+        const auto transaction =
+            state.background_point_mutation_transaction;
+        if (!context->retained_mutation_lease || !transaction ||
+            !transaction->valid() ||
+            transaction->target.runtime_generation() !=
+                queued_claim.runtime_generation) {
+            state.preworker_failure_kind =
+                DaemonRuntimeFirewallOperationState::PreworkerFailureKind::
+                    preparation_failure;
+            state.preworker_failure_detail =
+                "background point mutation target is unavailable";
+            terminalize_before_worker(
+                RuntimeFirewallOperationContext::SuccessorMode::none,
+                /*force_rerun=*/false);
+            return;
+        }
+
+        try {
+            auto worker_input =
+                std::make_shared<RuntimeFirewallWorkerAttemptInput>();
+            worker_input->operation_kind =
+                RuntimeFirewallWorkerOperationKind::
+                    background_point_mutation;
+            worker_input->transaction.operation_serial = queued_claim.serial;
+            worker_input->transaction.runtime_generation =
+                queued_claim.runtime_generation;
+            const auto target = transaction->target;
+            worker_input->background_point_mutation_target = target;
+            state.preworker_failure_kind =
+                DaemonRuntimeFirewallOperationState::PreworkerFailureKind::
+                    transport_rejected;
+            state.preworker_failure_detail =
+                "background point mutation worker queue rejected the target";
+
+            RuntimeFirewallOperationOwner::WorkerRunner runner{
+                [this, target](
+                    const RuntimeFirewallWorkerAttemptInput& input,
+                    const RuntimeFirewallDelayedWorker::RunningClaim&
+                        running_claim)
+                    -> RuntimeFirewallWorkerAttemptResultPtr {
+                    auto result =
+                        std::make_shared<RuntimeFirewallWorkerAttemptResult>();
+                    auto point = std::make_shared<
+                        RuntimeBackgroundPointMutationResult>();
+                    result->operation_kind =
+                        RuntimeFirewallWorkerOperationKind::
+                            background_point_mutation;
+                    result->transaction.operation_serial =
+                        input.transaction.operation_serial;
+                    result->transaction.runtime_generation =
+                        input.transaction.runtime_generation;
+                    point->target = target;
+                    result->background_point_mutation = point;
+
+                    const auto& raw_claim = running_claim.raw_claim();
+                    if (raw_claim.serial !=
+                            input.transaction.operation_serial ||
+                        raw_claim.runtime_generation !=
+                            input.transaction.runtime_generation ||
+                        !input.background_point_mutation_target.has_value() ||
+                        *input.background_point_mutation_target != target) {
+                        return result;
+                    }
+                    point->worker_started = true;
+                    execute_runtime_background_point_mutation(target, *point);
+                    return result;
+                }};
+
+            const bool enqueued =
+                runtime_firewall_owner_->enqueue_worker_with_retained_lease(
+                    context,
+                    queued_claim,
+                    std::move(worker_input),
+                    std::move(runner));
+            if (enqueued) {
+                state.preworker_failure_kind =
+                    DaemonRuntimeFirewallOperationState::PreworkerFailureKind::
+                        none;
+                state.preworker_failure_detail.clear();
+            }
+        } catch (const std::exception& error) {
+            state.preworker_failure_kind =
+                DaemonRuntimeFirewallOperationState::PreworkerFailureKind::
+                    preparation_failure;
+            try {
+                state.preworker_failure_detail = error.what();
+            } catch (...) {
+            }
+            if (context->worker_operation) {
+                context->worker_operation.reset();
+            } else {
+                terminalize_before_worker(
+                    RuntimeFirewallOperationContext::SuccessorMode::none,
+                    /*force_rerun=*/false);
+            }
+        } catch (...) {
+            state.preworker_failure_kind =
+                DaemonRuntimeFirewallOperationState::PreworkerFailureKind::
+                    preparation_failure;
+            state.preworker_failure_detail =
+                "background point mutation worker preparation failed";
+            if (context->worker_operation) {
+                context->worker_operation.reset();
+            } else {
+                terminalize_before_worker(
+                    RuntimeFirewallOperationContext::SuccessorMode::none,
+                    /*force_rerun=*/false);
+            }
+        }
         return;
     }
 
@@ -10242,9 +10415,233 @@ void Daemon::drain_runtime_firewall_terminal(
     const bool lifecycle_exact_tcp_reset_point =
         runtime_firewall_lifecycle_is_exact_tcp_reset_point(
             context->lifecycle_kind);
+    const bool lifecycle_background_point_mutation =
+        runtime_firewall_lifecycle_is_background_point_mutation(
+            context->lifecycle_kind);
 
     auto drain = context->terminal_owner->try_begin_drain();
     if (!drain.has_value()) return;
+
+    if (lifecycle_background_point_mutation) {
+        const auto transaction =
+            state.background_point_mutation_transaction;
+        const auto return_retained_lease =
+            [this, &context, &drain, &state]() noexcept {
+                if (!context->retained_mutation_lease) {
+                    auto returned = drain->take_retained_mutation_lease();
+                    if (returned) {
+                        context->retained_mutation_lease =
+                            std::move(returned);
+                    }
+                }
+                return context->retained_mutation_lease &&
+                    static_cast<bool>(*context->retained_mutation_lease) &&
+                    state.background_point_mutation_lease_token != 0U &&
+                    context->retained_mutation_lease->token() ==
+                        state.background_point_mutation_lease_token &&
+                    runtime_mutation_admission_.owns(
+                        *context->retained_mutation_lease);
+        };
+        const auto make_terminal = [](
+            RuntimeFirewallLifecycleOutcome outcome,
+            bool committed,
+            bool ambiguous,
+            std::string detail) {
+            RuntimeFirewallLifecycleTerminal terminal;
+            terminal.outcome = outcome;
+            terminal.committed = committed;
+            terminal.commit_ambiguous = ambiguous;
+            terminal.transient = false;
+            terminal.previous_generation_certainly_retained =
+                !committed && !ambiguous;
+            terminal.detail = std::move(detail);
+            return terminal;
+        };
+        const auto finish_without_worker =
+            [this,
+             &context,
+             &drain,
+             &state,
+             &return_retained_lease,
+             &make_terminal,
+             shutdown](bool worker_queue_abandoned) {
+                const bool lease_returned = return_retained_lease();
+                auto lifecycle_terminal = make_terminal(
+                    lease_returned && shutdown
+                        ? RuntimeFirewallLifecycleOutcome::shutdown
+                        : RuntimeFirewallLifecycleOutcome::not_verified,
+                    /*committed=*/false,
+                    /*ambiguous=*/!lease_returned,
+                    !lease_returned
+                        ? "background point mutation did not return its "
+                          "physical mutation lease"
+                        : (state.preworker_failure_detail.empty()
+                               ? (worker_queue_abandoned
+                                      ? "background point mutation worker "
+                                        "queue was abandoned"
+                                      : "background point mutation ended "
+                                        "before worker handoff")
+                               : state.preworker_failure_detail));
+                auto permit = runtime_firewall_owner_->
+                    prepare_preowned_continuation_finalization(context);
+                if (!permit.has_value()) return false;
+                auto proof = worker_queue_abandoned
+                    ? drain->finish_worker_terminal()
+                    : drain->finish_coordinator_terminal();
+                if (!proof.has_value()) return false;
+                return runtime_firewall_owner_->
+                    complete_preowned_continuation(
+                        std::move(*permit),
+                        std::move(*proof),
+                        std::move(lifecycle_terminal));
+        };
+
+        if (drain->kind() ==
+            RuntimeFirewallDelayedTerminalOwner::DrainKind::coordinator) {
+            const auto* terminal = drain->coordinator_terminal();
+            if (!terminal || !terminal->owned) return;
+            (void)finish_without_worker(false);
+            return;
+        }
+
+        const auto* terminal = drain->worker_terminal();
+        if (!terminal) return;
+        if (terminal->status ==
+            RuntimeFirewallDelayedWorker::TerminalStatus::queued_abandoned) {
+            if (!terminal->coordinator_completion.has_value() ||
+                !terminal->coordinator_completion->owned) {
+                return;
+            }
+            (void)finish_without_worker(true);
+            return;
+        }
+        if (!terminal->running_claim.has_value() ||
+            !terminal->mutation_lease) {
+            return;
+        }
+
+        const RuntimeFirewallWorkerAttemptResult* worker_result =
+            terminal->result.get();
+        const auto point_result =
+            worker_result && worker_result->background_point_mutation
+            ? worker_result->background_point_mutation
+            : std::shared_ptr<const RuntimeBackgroundPointMutationResult>{};
+        const bool terminal_lease_identity_valid =
+            terminal->mutation_lease.lease &&
+            static_cast<bool>(*terminal->mutation_lease.lease) &&
+            state.background_point_mutation_lease_token != 0U &&
+            terminal->mutation_lease.lease->token() ==
+                state.background_point_mutation_lease_token &&
+            runtime_mutation_admission_.owns(
+                *terminal->mutation_lease.lease);
+        const bool typed_identity_valid =
+            terminal->status ==
+                RuntimeFirewallDelayedWorker::TerminalStatus::result &&
+            transaction && context->worker_input && worker_result &&
+            point_result &&
+            terminal->running_claim->raw_claim().serial ==
+                context->queued_claim.serial &&
+            terminal->running_claim->raw_claim().runtime_generation ==
+                context->queued_claim.runtime_generation &&
+            terminal->running_claim->raw_claim().attempt ==
+                context->queued_claim.attempt &&
+            context->worker_input->operation_kind ==
+                RuntimeFirewallWorkerOperationKind::
+                    background_point_mutation &&
+            worker_result->operation_kind ==
+                RuntimeFirewallWorkerOperationKind::
+                    background_point_mutation &&
+            context->worker_input->transaction.operation_serial ==
+                context->queued_claim.serial &&
+            context->worker_input->transaction.runtime_generation ==
+                context->queued_claim.runtime_generation &&
+            worker_result->transaction.operation_serial ==
+                context->queued_claim.serial &&
+            worker_result->transaction.runtime_generation ==
+                context->queued_claim.runtime_generation &&
+            context->worker_input->
+                background_point_mutation_target.has_value() &&
+            *context->worker_input->background_point_mutation_target ==
+                transaction->target &&
+            point_result->target == transaction->target;
+        const bool worker_control_verified =
+            typed_identity_valid && terminal_lease_identity_valid &&
+            point_result->control_publishable() &&
+            !point_result->unsafe_publication_possible();
+
+        if (!drain->begin_worker_control(runtime_firewall_retry_)) return;
+        if (!drain->publish_worker_control([]() noexcept { return true; })) {
+            return;
+        }
+        OwnedSnatRecovery no_point_recovery;
+        if (!drain->complete_worker_control(
+                runtime_firewall_retry_,
+                worker_control_verified,
+                std::move(no_point_recovery))) {
+            return;
+        }
+        const auto* completion = drain->worker_control_completion();
+        if (!completion || !completion->owned) return;
+        const bool lease_returned = return_retained_lease();
+        const bool identity_valid =
+            typed_identity_valid && terminal_lease_identity_valid &&
+            lease_returned;
+        if (transaction) {
+            transaction->result = point_result;
+            transaction->typed_identity_valid = identity_valid;
+        }
+        const bool publishable =
+            identity_valid && point_result->control_publishable() &&
+            !point_result->unsafe_publication_possible();
+        const bool ambiguous =
+            !identity_valid ||
+            (typed_identity_valid &&
+             point_result->unsafe_publication_possible()) ||
+            (typed_identity_valid &&
+             point_result->mutation_boundary_entered &&
+             !point_result->control_publishable());
+        const bool committed =
+            typed_identity_valid &&
+            point_result->mutation_boundary_entered;
+
+        context->worker_succeeded = publishable;
+        context->worker_commit_ambiguous = ambiguous;
+        auto lifecycle_terminal = make_terminal(
+            !lease_returned
+                ? RuntimeFirewallLifecycleOutcome::not_verified
+                : (shutdown
+                       ? RuntimeFirewallLifecycleOutcome::shutdown
+                       : (publishable
+                              ? RuntimeFirewallLifecycleOutcome::
+                                    verified_success
+                              : RuntimeFirewallLifecycleOutcome::
+                                    not_verified)),
+            committed,
+            ambiguous,
+            !lease_returned
+                ? "background point mutation did not return its physical "
+                  "mutation lease"
+                : (!typed_identity_valid
+                       ? "background point mutation worker returned no "
+                         "matching typed proof"
+                       : (point_result->unsafe_publication_possible()
+                              ? "background point mutation publication "
+                                "remains ambiguous"
+                       : (!point_result->control_publishable()
+                              ? "background point mutation result was not "
+                                "control-publishable"
+                              : std::string{}))));
+        auto permit = runtime_firewall_owner_->
+            prepare_preowned_continuation_finalization(context);
+        if (!permit.has_value()) return;
+        auto proof = drain->finish_worker_terminal();
+        if (!proof.has_value()) return;
+        (void)runtime_firewall_owner_->complete_preowned_continuation(
+            std::move(*permit),
+            std::move(*proof),
+            std::move(lifecycle_terminal));
+        return;
+    }
 
     if (lifecycle_exact_tcp_reset_point) {
         const auto return_exact_retained_lease =

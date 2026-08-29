@@ -51,12 +51,12 @@ public:
         const std::string&, int, uint32_t) override {
         events.push_back("affinity-set");
     }
-    bool add_udp_peer(
+    FirewallUdpPeerMutationResult add_udp_peer(
         const std::string&,
         const std::string&,
         std::uint16_t,
         const std::string&) override {
-        return true;
+        return {true, true, false, false};
     }
     void create_mark_rule(
         uint32_t, const FirewallRuleCriteria& criteria) override {

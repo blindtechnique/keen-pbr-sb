@@ -67,12 +67,12 @@ public:
     void create_ipset(const std::string&, int, std::uint32_t) override {}
     void create_udp_peer_set(
         const std::string&, int, std::uint32_t) override {}
-    bool add_udp_peer(
+    FirewallUdpPeerMutationResult add_udp_peer(
         const std::string&,
         const std::string&,
         std::uint16_t,
         const std::string&) override {
-        return true;
+        return {true, true, false, false};
     }
     void create_mark_rule(
         std::uint32_t, const FirewallRuleCriteria&) override {}
