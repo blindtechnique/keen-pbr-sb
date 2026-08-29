@@ -2375,6 +2375,7 @@ bool Daemon::handle_urltest_selection_change(
             return synchronized;
         }
 
+        auto rollback_selections = candidate_selections;
         candidate_selections[change.urltest_tag] = change.new_child_tag;
 
         std::optional<uint32_t> retired_mark;
@@ -2430,187 +2431,44 @@ bool Daemon::handle_urltest_selection_change(
 
         const auto list_cache_snapshot =
             capture_relevant_list_cache_generation(config_);
-        firewall_state_.swap_urltest_selections(candidate_selections);
-
-        const auto mark_permanent_rollback_failure =
-            [this](std::string_view) noexcept {
-                urltest_after_firewall_gate_.reset();
-                try {
-                    transition_runtime_or_throw(
-                        RuntimeState::broken,
-                        "urltest selection rollback failed");
-                    publish_runtime_state();
-                } catch (...) {
-                }
-            };
-
-        try {
-            reconcile_static_routing(RouteReconcileMode::Strict);
-            apply_firewall(
-                runtime_refresh_firewall_mode(),
-                list_cache_snapshot);
-        } catch (const TransientFirewallError& apply_error) {
-            // The candidate may have been partially published. Restore the
-            // authoritative in-memory cursor first; only the central full
-            // reconciler may now prove and release this generation.
-            firewall_state_.swap_urltest_selections(candidate_selections);
-            defer_urltest_switch_to_firewall_recovery(
+        auto mutation_lease =
+            std::make_unique<RuntimeMutationAdmission::Lease>(
+                std::move(*runtime_mutation));
+        const bool handed_off =
+            begin_preowned_runtime_firewall_urltest_selection(
+                mutation_lease,
                 change,
-                current_runtime_generation,
-                "candidate apply",
-                apply_error.what());
-            return false;
-        } catch (const std::exception& apply_error) {
-            // Restore the in-memory cursor before diagnostics or any other
-            // fallible work, then restore the corresponding kernel state.
-            firewall_state_.swap_urltest_selections(candidate_selections);
-            bool rollback_verified = false;
-            try {
-                reconcile_static_routing(RouteReconcileMode::Strict);
-                apply_firewall(
-                    runtime_refresh_firewall_mode(),
-                    list_cache_snapshot);
-                rollback_verified = true;
-            } catch (const TransientFirewallError& rollback_error) {
-                defer_urltest_switch_to_firewall_recovery(
-                    change,
-                    current_runtime_generation,
-                    "rollback",
-                    rollback_error.what());
-                return false;
-            } catch (const std::exception& rollback_error) {
-                mark_permanent_rollback_failure(rollback_error.what());
-            } catch (...) {
-                mark_permanent_rollback_failure("unknown error");
-            }
-
-            try {
-                const auto incident =
-                    urltest_apply_incidents_.record_failure(
-                        change.urltest_tag,
-                        /*notify_immediately=*/!rollback_verified);
-                log.info(
-                    "Routing/firewall did not accept urltest '{}' change to "
-                    "'{}': {}. Previous intent '{}' was {}",
-                    change.urltest_tag,
-                    change.new_child_tag,
-                    apply_error.what(),
-                    applied_previous,
-                    rollback_verified ? "restored" : "left in broken state");
-                if (incident.notify) {
-                    log.error(
-                        "Urltest '{}' could not converge after {} consecutive "
-                        "probe rounds; routing requires attention",
-                        change.urltest_tag,
-                        incident.consecutive_failures);
-                }
-            } catch (...) {
-            }
-            // The manager still owns this exact inflight generation and will
-            // restore previous_child_tag, clear it, and allow a later retry.
-            return false;
-        } catch (...) {
-            firewall_state_.swap_urltest_selections(candidate_selections);
-            bool rollback_verified = false;
-            std::string rollback_detail;
-            try {
-                reconcile_static_routing(RouteReconcileMode::Strict);
-                apply_firewall(
-                    runtime_refresh_firewall_mode(),
-                    list_cache_snapshot);
-                rollback_verified = true;
-            } catch (const TransientFirewallError& rollback_error) {
-                defer_urltest_switch_to_firewall_recovery(
-                    change,
-                    current_runtime_generation,
-                    "rollback after unknown candidate failure",
-                    rollback_error.what());
-                return false;
-            } catch (const std::exception& rollback_error) {
-                rollback_detail = rollback_error.what();
-                mark_permanent_rollback_failure(rollback_error.what());
-            } catch (...) {
-                rollback_detail = "unknown rollback error";
-                mark_permanent_rollback_failure("unknown error");
-            }
-            try {
-                const auto incident =
-                    urltest_apply_incidents_.record_failure(
-                        change.urltest_tag,
-                        /*notify_immediately=*/!rollback_verified);
-                if (incident.notify) {
-                    if (rollback_verified) {
-                        log.error(
-                            "Urltest '{}' candidate apply failed with an "
-                            "unknown error; the previous intent was restored",
-                            change.urltest_tag);
-                    } else {
-                        log.error(
-                            "Urltest '{}' candidate apply and rollback "
-                            "failed permanently: {}",
-                            change.urltest_tag,
-                            rollback_detail);
-                    }
-                } else {
-                    log.info(
-                        "Urltest '{}' candidate apply failed with an unknown "
-                        "error; the previous intent was {}",
-                        change.urltest_tag,
-                        rollback_verified ? "restored" : "left broken");
-                }
-            } catch (...) {
-            }
+                std::move(candidate_selections),
+                std::move(rollback_selections),
+                list_cache_snapshot,
+                retired_mark);
+        if (!handed_off) {
+            urltest_manager_->trigger_external_health_test(
+                change.urltest_tag);
+            log.verbose(
+                "Urltest '{}' typed firewall transition was not admitted; "
+                "the previous selection remains authoritative.",
+                change.urltest_tag);
             return false;
         }
 
-        // The candidate is now the verified kernel and in-memory cursor.
-        // Everything below is post-commit follow-up: failures must not make
-        // the manager roll back a successfully applied selection.
-        try {
-            urltest_apply_incidents_.reset(change.urltest_tag);
-        } catch (...) {
+        // on_change() is still inside the exact manager probe callback. The
+        // owner now holds the asynchronous transition; restore the callback's
+        // candidate cursor to the verified child before returning. Only the
+        // typed terminal may publish new_child_tag.
+        const bool old_cursor_retained =
+            urltest_manager_->synchronize_selected_if_generation(
+                change.urltest_tag,
+                change.probe_generation,
+                applied_previous);
+        if (!old_cursor_retained) {
+            log.info(
+                "Urltest '{}' probe generation changed while its typed "
+                "firewall candidate was admitted; the candidate will roll "
+                "back instead of publishing a stale selection.",
+                change.urltest_tag);
+            return false;
         }
-
-        if (retired_mark.has_value()) {
-            try {
-                const uint32_t owned_mask = fwmark_mask_value(
-                    config_.fwmark.value_or(FwmarkConfig{}));
-                const auto cleanup = conntrack_manager_.delete_mark(
-                    *retired_mark, owned_mask);
-                if (cleanup == ConntrackCleanupResult::CommandUnavailable) {
-                    warn_conntrack_unavailable_once();
-                } else if (cleanup == ConntrackCleanupResult::Failed) {
-                    log.info(
-                        "Failed to remove conntrack entries for retired "
-                        "urltest mark {:#x}/{:#x}; a bounded retry is "
-                        "scheduled",
-                        *retired_mark,
-                        owned_mask);
-                    // A one-shot failure here used to be final (upstream
-                    // f58e4b58 fixed the same hole with its own retry map).
-                    // The fork already owns a bounded, generation-fenced
-                    // retry for owned-mark cleanup; hand the mark to it
-                    // instead of growing a second retry mechanism. A runtime
-                    // generation change cancels the retry, which is correct:
-                    // the rebuild it implies re-runs cleanup from a fresh
-                    // snapshot anyway.
-                    OwnedConntrackCleanupSnapshot snapshot;
-                    snapshot.runtime_generation =
-                        runtime_generation_.load(std::memory_order_acquire);
-                    snapshot.owned_mask = owned_mask;
-                    snapshot.ipv6_enabled =
-                        resolve_ipv6_support(config_).enabled;
-                    snapshot.marks.insert(*retired_mark);
-                    // The retired child carried live forwarded traffic;
-                    // that is what the priority tier is for.
-                    snapshot.priority_marks.insert(*retired_mark);
-                    schedule_owned_conntrack_cleanup_retry(
-                        snapshot, {*retired_mark});
-                }
-            } catch (...) {
-            }
-        }
-
         return true;
     } catch (const std::exception& error) {
         try {

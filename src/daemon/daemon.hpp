@@ -91,6 +91,7 @@ enum class RuntimeConfigGenerationPublicationMode : std::uint8_t {
     active_runtime_reload,
 };
 struct DaemonConfigGenerationTransaction;
+struct DaemonUrltestSelectionTransaction;
 struct PlannedRoutingState;
 struct NdmsCatalogSnapshot;
 struct NdmsVpnServerServiceSnapshot;
@@ -708,6 +709,37 @@ private:
     bool handle_urltest_selection_change(
         const UrltestSelectionChange& change,
         std::uint64_t expected_runtime_generation);
+    bool begin_preowned_runtime_firewall_urltest_selection(
+        std::unique_ptr<RuntimeMutationAdmission::Lease>& lease,
+        const UrltestSelectionChange& change,
+        std::map<std::string, std::string> candidate_selections,
+        std::map<std::string, std::string> rollback_selections,
+        std::shared_ptr<const ListCacheGenerationSnapshot>
+            list_cache_snapshot,
+        std::optional<std::uint32_t> retired_mark) noexcept;
+    bool start_preowned_runtime_firewall_urltest_phase(
+        const std::shared_ptr<DaemonUrltestSelectionTransaction>& transaction,
+        RuntimeFirewallLifecycleKind lifecycle_kind,
+        std::unique_ptr<RuntimeMutationAdmission::Lease>& lease,
+        RuntimeFirewallPreownedTerminalContinuation& continuation) noexcept;
+    void complete_preowned_runtime_firewall_urltest_candidate(
+        const std::shared_ptr<DaemonUrltestSelectionTransaction>& transaction,
+        RuntimeFirewallLifecycleTerminal terminal,
+        std::unique_ptr<RuntimeMutationAdmission::Lease> lease) noexcept;
+    void complete_preowned_runtime_firewall_urltest_rollback(
+        const std::shared_ptr<DaemonUrltestSelectionTransaction>& transaction,
+        RuntimeFirewallLifecycleTerminal terminal,
+        std::unique_ptr<RuntimeMutationAdmission::Lease> lease) noexcept;
+    bool publish_prepared_runtime_firewall_urltest_candidate(
+        const std::shared_ptr<DaemonUrltestSelectionTransaction>& transaction)
+        noexcept;
+    bool publish_prepared_runtime_firewall_urltest_rollback(
+        const std::shared_ptr<DaemonUrltestSelectionTransaction>& transaction)
+        noexcept;
+    void finish_preowned_runtime_firewall_urltest_selection(
+        const std::shared_ptr<DaemonUrltestSelectionTransaction>& transaction,
+        RuntimeFirewallLifecycleTerminal terminal,
+        std::unique_ptr<RuntimeMutationAdmission::Lease> lease) noexcept;
     void defer_urltest_switch_to_firewall_recovery(
         const UrltestSelectionChange& change,
         std::uint64_t runtime_generation,

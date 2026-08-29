@@ -299,6 +299,8 @@ void cleanup_native_direct_egress_sources(
             RuntimeFirewallWorkerOperationKind::config_preapply ||
         runtime_firewall_worker_operation_is_config_generation(
             input.operation_kind) ||
+        runtime_firewall_worker_operation_is_urltest_generation(
+            input.operation_kind) ||
         !result.transaction.committed()) {
         // commit_entered without a returned committed candidate is ambiguous.
         // It must trigger a fresh resnapshot, never destructive cleanup under

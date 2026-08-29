@@ -2,6 +2,8 @@
 
 #include "daemon/runtime_config_terminal_policy.hpp"
 #include "daemon/runtime_firewall_lifecycle_completion.hpp"
+#include "daemon/runtime_urltest_terminal_orchestrator.hpp"
+#include "daemon/runtime_urltest_terminal_policy.hpp"
 
 #include <array>
 #include <atomic>
@@ -565,4 +567,406 @@ TEST_CASE("stopped config bootstrap publishes running only from exact candidate 
     shutdown.outcome = LifecycleOutcome::shutdown;
     CHECK(plan_config_bootstrap_terminal(false, shutdown) ==
           ConfigBootstrapTerminalAction::shutdown);
+}
+
+TEST_CASE("urltest candidate publishes only from the exact verified terminal") {
+    UrltestCandidateEvidence evidence;
+    evidence.exact_lease_owned = true;
+    evidence.runtime_generation_current = true;
+    evidence.manager_generation_current = true;
+    evidence.exact_rollback_available = true;
+    evidence.terminal = verified_terminal("urltest candidate");
+
+    CHECK(plan_urltest_candidate_terminal(evidence) ==
+          UrltestCandidateAction::publish_candidate);
+
+    // A newer probe may finish while the private worker is running. The
+    // verified kernel candidate must then roll back instead of publishing a
+    // stale manager cursor.
+    evidence.manager_generation_current = false;
+    CHECK(plan_urltest_candidate_terminal(evidence) ==
+          UrltestCandidateAction::begin_exact_rollback);
+
+    evidence.manager_generation_current = true;
+    evidence.runtime_generation_current = false;
+    CHECK(plan_urltest_candidate_terminal(evidence) ==
+          UrltestCandidateAction::recovery_required);
+}
+
+TEST_CASE("urltest candidate distinguishes clean pre-COMMIT rejection from rollback") {
+    UrltestCandidateEvidence evidence;
+    evidence.exact_lease_owned = true;
+    evidence.runtime_generation_current = true;
+    evidence.manager_generation_current = true;
+    evidence.exact_rollback_available = true;
+
+    evidence.terminal = unverified_terminal("stage rejected");
+    evidence.terminal.commit_ambiguous = false;
+    evidence.terminal.previous_generation_certainly_retained = true;
+    CHECK(plan_urltest_candidate_terminal(evidence) ==
+          UrltestCandidateAction::reject_runtime_unchanged);
+
+    // Route mutation may already have committed even when firewall COMMIT was
+    // never entered. The combined generation is then not the old generation.
+    evidence.terminal.previous_generation_certainly_retained = false;
+    CHECK(plan_urltest_candidate_terminal(evidence) ==
+          UrltestCandidateAction::begin_exact_rollback);
+
+    evidence.terminal.commit_ambiguous = true;
+    CHECK(plan_urltest_candidate_terminal(evidence) ==
+          UrltestCandidateAction::begin_exact_rollback);
+
+    evidence.exact_rollback_available = false;
+    CHECK(plan_urltest_candidate_terminal(evidence) ==
+          UrltestCandidateAction::recovery_required);
+}
+
+TEST_CASE("urltest rollback requires exact lease generation and COMMIT proof") {
+    UrltestRollbackEvidence evidence;
+    evidence.exact_lease_owned = true;
+    evidence.runtime_generation_current = true;
+    evidence.terminal = verified_terminal("urltest rollback");
+    CHECK(plan_urltest_rollback_terminal(evidence) ==
+          UrltestRollbackAction::accept_verified_rollback);
+
+    evidence.terminal.commit_ambiguous = true;
+    CHECK(plan_urltest_rollback_terminal(evidence) ==
+          UrltestRollbackAction::recovery_required);
+    evidence.terminal.commit_ambiguous = false;
+    evidence.runtime_generation_current = false;
+    CHECK(plan_urltest_rollback_terminal(evidence) ==
+          UrltestRollbackAction::recovery_required);
+    evidence.runtime_generation_current = true;
+    evidence.exact_lease_owned = false;
+    CHECK(plan_urltest_rollback_terminal(evidence) ==
+          UrltestRollbackAction::recovery_required);
+}
+
+TEST_CASE("urltest typed terminal keeps both public cursors private until verified commit") {
+    RuntimeUrltestTerminalOrchestrator orchestrator;
+    const RuntimeUrltestMetaFence fence{
+        73U,
+        /*delayed_cleanup_invalidated=*/true,
+        /*mutation_barrier_crossed=*/true};
+
+    const auto started = orchestrator.begin_candidate(fence);
+    CHECK(started.effect_count == 1U);
+    CHECK(started.effects[0] ==
+          RuntimeUrltestTerminalEffect::start_candidate);
+    CHECK(orchestrator.phase() ==
+          RuntimeUrltestTerminalPhase::candidate_in_flight);
+    CHECK(orchestrator.manager_cursor() ==
+          RuntimeUrltestPublishedCursor::previous);
+    CHECK(orchestrator.firewall_cursor() ==
+          RuntimeUrltestPublishedCursor::previous);
+    CHECK(orchestrator.exact_lease_owned());
+    CHECK(orchestrator.meta_fence().cleanup_epoch == 73U);
+
+    UrltestCandidateEvidence evidence;
+    evidence.exact_lease_owned = true;
+    evidence.runtime_generation_current = true;
+    evidence.manager_generation_current = true;
+    evidence.exact_rollback_available = true;
+    evidence.terminal = verified_terminal("route and firewall committed");
+    CHECK(orchestrator.candidate_publication_admitted(
+        evidence, /*exact_route_checkpoint_verified=*/true));
+    CHECK_FALSE(orchestrator.candidate_publication_admitted(
+        evidence, /*exact_route_checkpoint_verified=*/false));
+    const auto completed = orchestrator.complete_candidate(
+        evidence,
+        /*exact_route_checkpoint_verified=*/true);
+
+    REQUIRE(completed.effect_count == 3U);
+    CHECK(completed.effects[0] ==
+          RuntimeUrltestTerminalEffect::
+              publish_manager_and_firewall_candidate);
+    CHECK(completed.effects[1] ==
+          RuntimeUrltestTerminalEffect::finish_candidate_meta_tail);
+    CHECK(completed.effects[2] ==
+          RuntimeUrltestTerminalEffect::release_exact_lease);
+    CHECK(completed.meta_cleanup_epoch == 73U);
+    CHECK(orchestrator.manager_cursor() ==
+          RuntimeUrltestPublishedCursor::candidate);
+    CHECK(orchestrator.firewall_cursor() ==
+          RuntimeUrltestPublishedCursor::candidate);
+    CHECK_FALSE(orchestrator.exact_lease_owned());
+    CHECK_FALSE(orchestrator.recovery_requested());
+}
+
+TEST_CASE("urltest clean pre-COMMIT rejection leaves runtime old without rollback") {
+    RuntimeUrltestTerminalOrchestrator orchestrator;
+    REQUIRE(orchestrator.begin_candidate(
+                RuntimeUrltestMetaFence{91U, true, true})
+                .contains(RuntimeUrltestTerminalEffect::start_candidate));
+
+    UrltestCandidateEvidence evidence;
+    evidence.exact_lease_owned = true;
+    evidence.runtime_generation_current = true;
+    evidence.manager_generation_current = true;
+    evidence.exact_rollback_available = true;
+    evidence.terminal = unverified_terminal("rejected before COMMIT");
+    evidence.terminal.commit_ambiguous = false;
+    evidence.terminal.previous_generation_certainly_retained = true;
+    const auto completed = orchestrator.complete_candidate(
+        evidence,
+        /*exact_route_checkpoint_verified=*/false);
+
+    REQUIRE(completed.effect_count == 1U);
+    CHECK(completed.effects[0] ==
+          RuntimeUrltestTerminalEffect::release_exact_lease);
+    CHECK_FALSE(completed.contains(
+        RuntimeUrltestTerminalEffect::start_exact_rollback));
+    CHECK_FALSE(orchestrator.recovery_requested());
+    CHECK(orchestrator.manager_cursor() ==
+          RuntimeUrltestPublishedCursor::previous);
+    CHECK(orchestrator.firewall_cursor() ==
+          RuntimeUrltestPublishedCursor::previous);
+}
+
+TEST_CASE("urltest COMMIT proof without exact route checkpoint cannot publish") {
+    RuntimeUrltestTerminalOrchestrator orchestrator;
+    REQUIRE(orchestrator.begin_candidate(
+                RuntimeUrltestMetaFence{103U, true, true})
+                .contains(RuntimeUrltestTerminalEffect::start_candidate));
+
+    UrltestCandidateEvidence evidence;
+    evidence.exact_lease_owned = true;
+    evidence.runtime_generation_current = true;
+    evidence.manager_generation_current = true;
+    evidence.exact_rollback_available = true;
+    evidence.terminal = verified_terminal("firewall committed only");
+    const auto transition = orchestrator.complete_candidate(
+        evidence,
+        /*exact_route_checkpoint_verified=*/false);
+
+    REQUIRE(transition.effect_count == 1U);
+    CHECK(transition.effects[0] ==
+          RuntimeUrltestTerminalEffect::start_exact_rollback);
+    CHECK(orchestrator.manager_cursor() ==
+          RuntimeUrltestPublishedCursor::previous);
+    CHECK(orchestrator.firewall_cursor() ==
+          RuntimeUrltestPublishedCursor::previous);
+    CHECK(orchestrator.exact_lease_owned());
+}
+
+TEST_CASE("urltest mutated or ambiguous candidate retains lease for exact rollback") {
+    const auto check_rollback = [](
+        bool previous_generation_retained,
+        bool commit_ambiguous) {
+        RuntimeUrltestTerminalOrchestrator orchestrator;
+        REQUIRE(orchestrator.begin_candidate(
+                    RuntimeUrltestMetaFence{117U, true, true})
+                    .contains(
+                        RuntimeUrltestTerminalEffect::start_candidate));
+
+        UrltestCandidateEvidence evidence;
+        evidence.exact_lease_owned = true;
+        evidence.runtime_generation_current = true;
+        evidence.manager_generation_current = true;
+        evidence.exact_rollback_available = true;
+        evidence.terminal = unverified_terminal("candidate not verified");
+        evidence.terminal.commit_ambiguous = commit_ambiguous;
+        evidence.terminal.previous_generation_certainly_retained =
+            previous_generation_retained;
+        const auto transition =
+            orchestrator.complete_candidate(
+                evidence,
+                /*exact_route_checkpoint_verified=*/false);
+
+        REQUIRE(transition.effect_count == 1U);
+        CHECK(transition.effects[0] ==
+              RuntimeUrltestTerminalEffect::start_exact_rollback);
+        CHECK(transition.meta_cleanup_epoch == 117U);
+        CHECK(orchestrator.phase() ==
+              RuntimeUrltestTerminalPhase::rollback_in_flight);
+        CHECK(orchestrator.exact_lease_owned());
+        CHECK(orchestrator.meta_fence().cleanup_epoch == 117U);
+        CHECK(orchestrator.manager_cursor() ==
+              RuntimeUrltestPublishedCursor::previous);
+        CHECK(orchestrator.firewall_cursor() ==
+              RuntimeUrltestPublishedCursor::previous);
+    };
+
+    SUBCASE("route mutated before firewall COMMIT") {
+        check_rollback(
+            /*previous_generation_retained=*/false,
+            /*commit_ambiguous=*/false);
+    }
+    SUBCASE("firewall COMMIT outcome ambiguous") {
+        check_rollback(
+            /*previous_generation_retained=*/false,
+            /*commit_ambiguous=*/true);
+    }
+}
+
+TEST_CASE("urltest verified rollback publishes old cursors and fenced Meta tail") {
+    RuntimeUrltestTerminalOrchestrator orchestrator;
+    REQUIRE(orchestrator.begin_candidate(
+                RuntimeUrltestMetaFence{181U, true, true})
+                .contains(RuntimeUrltestTerminalEffect::start_candidate));
+
+    UrltestCandidateEvidence candidate;
+    candidate.exact_lease_owned = true;
+    candidate.runtime_generation_current = true;
+    candidate.manager_generation_current = true;
+    candidate.exact_rollback_available = true;
+    candidate.terminal = unverified_terminal("candidate mutated route");
+    candidate.terminal.commit_ambiguous = false;
+    candidate.terminal.previous_generation_certainly_retained = false;
+    REQUIRE(orchestrator.complete_candidate(
+                candidate,
+                /*exact_route_checkpoint_verified=*/false)
+                .contains(
+                    RuntimeUrltestTerminalEffect::start_exact_rollback));
+
+    UrltestRollbackEvidence rollback;
+    rollback.exact_lease_owned = true;
+    rollback.runtime_generation_current = true;
+    rollback.terminal = verified_terminal("rollback committed");
+    CHECK(orchestrator.rollback_publication_admitted(
+        rollback, /*exact_route_checkpoint_verified=*/true));
+    CHECK_FALSE(orchestrator.rollback_publication_admitted(
+        rollback, /*exact_route_checkpoint_verified=*/false));
+    const auto completed = orchestrator.complete_rollback(
+        rollback,
+        /*exact_route_checkpoint_verified=*/true);
+
+    REQUIRE(completed.effect_count == 3U);
+    CHECK(completed.effects[0] ==
+          RuntimeUrltestTerminalEffect::
+              publish_manager_and_firewall_rollback);
+    CHECK(completed.effects[1] ==
+          RuntimeUrltestTerminalEffect::finish_rollback_meta_tail);
+    CHECK(completed.effects[2] ==
+          RuntimeUrltestTerminalEffect::release_exact_lease);
+    CHECK(completed.meta_cleanup_epoch == 181U);
+    CHECK(orchestrator.manager_cursor() ==
+          RuntimeUrltestPublishedCursor::previous);
+    CHECK(orchestrator.firewall_cursor() ==
+          RuntimeUrltestPublishedCursor::previous);
+    CHECK_FALSE(orchestrator.exact_lease_owned());
+    CHECK_FALSE(orchestrator.recovery_requested());
+}
+
+TEST_CASE("urltest rollback manager mismatch blocks core publication and recovers") {
+    RuntimeUrltestTerminalOrchestrator orchestrator;
+    REQUIRE(orchestrator.begin_candidate(
+                RuntimeUrltestMetaFence{197U, true, true})
+                .contains(RuntimeUrltestTerminalEffect::start_candidate));
+
+    UrltestCandidateEvidence candidate;
+    candidate.exact_lease_owned = true;
+    candidate.runtime_generation_current = true;
+    candidate.manager_generation_current = true;
+    candidate.exact_rollback_available = true;
+    candidate.terminal = unverified_terminal("candidate ambiguous");
+    candidate.terminal.commit_ambiguous = true;
+    REQUIRE(orchestrator.complete_candidate(
+                candidate,
+                /*exact_route_checkpoint_verified=*/false)
+                .contains(
+                    RuntimeUrltestTerminalEffect::start_exact_rollback));
+
+    UrltestRollbackEvidence rollback;
+    rollback.exact_lease_owned = true;
+    rollback.runtime_generation_current = true;
+    rollback.terminal = verified_terminal("rollback committed");
+    REQUIRE(orchestrator.rollback_publication_admitted(
+        rollback, /*exact_route_checkpoint_verified=*/true));
+
+    std::size_t manager_sync_calls = 0U;
+    std::size_t core_publication_calls = 0U;
+    const bool combined_publication =
+        publish_runtime_urltest_cursor_pair(
+            [&manager_sync_calls]() {
+                ++manager_sync_calls;
+                return false;
+            },
+            [&core_publication_calls]() {
+                ++core_publication_calls;
+            });
+    CHECK_FALSE(combined_publication);
+    CHECK(manager_sync_calls == 1U);
+    CHECK(core_publication_calls == 0U);
+
+    const auto failed = orchestrator.complete_rollback(
+        rollback,
+        /*exact_route_checkpoint_verified=*/true,
+        combined_publication);
+    REQUIRE(failed.effect_count == 2U);
+    CHECK(failed.effects[0] ==
+          RuntimeUrltestTerminalEffect::release_exact_lease);
+    CHECK(failed.effects[1] ==
+          RuntimeUrltestTerminalEffect::request_recovery);
+    CHECK(orchestrator.manager_cursor() ==
+          RuntimeUrltestPublishedCursor::previous);
+    CHECK(orchestrator.firewall_cursor() ==
+          RuntimeUrltestPublishedCursor::previous);
+    CHECK_FALSE(orchestrator.exact_lease_owned());
+    CHECK(orchestrator.recovery_requested());
+}
+
+TEST_CASE("urltest rollback failure releases exact lease before recovery") {
+    RuntimeUrltestTerminalOrchestrator orchestrator;
+    REQUIRE(orchestrator.begin_candidate(
+                RuntimeUrltestMetaFence{211U, true, true})
+                .contains(RuntimeUrltestTerminalEffect::start_candidate));
+
+    UrltestCandidateEvidence candidate;
+    candidate.exact_lease_owned = true;
+    candidate.runtime_generation_current = true;
+    candidate.manager_generation_current = true;
+    candidate.exact_rollback_available = true;
+    candidate.terminal = unverified_terminal("candidate ambiguous");
+    candidate.terminal.commit_ambiguous = true;
+    REQUIRE(orchestrator.complete_candidate(
+                candidate,
+                /*exact_route_checkpoint_verified=*/false)
+                .contains(
+        RuntimeUrltestTerminalEffect::start_exact_rollback));
+
+    UrltestRollbackEvidence rollback;
+    rollback.exact_lease_owned = true;
+    rollback.runtime_generation_current = true;
+    rollback.terminal = unverified_terminal("rollback not verified");
+    const auto failed = orchestrator.complete_rollback(
+        rollback,
+        /*exact_route_checkpoint_verified=*/false);
+
+    REQUIRE(failed.effect_count == 2U);
+    CHECK(failed.effects[0] ==
+          RuntimeUrltestTerminalEffect::release_exact_lease);
+    CHECK(failed.effects[1] ==
+          RuntimeUrltestTerminalEffect::request_recovery);
+    CHECK(failed.position(
+              RuntimeUrltestTerminalEffect::release_exact_lease) <
+          failed.position(
+              RuntimeUrltestTerminalEffect::request_recovery));
+    CHECK_FALSE(orchestrator.exact_lease_owned());
+    CHECK(orchestrator.recovery_requested());
+    CHECK(orchestrator.manager_cursor() ==
+          RuntimeUrltestPublishedCursor::previous);
+    CHECK(orchestrator.firewall_cursor() ==
+          RuntimeUrltestPublishedCursor::previous);
+}
+
+TEST_CASE("urltest Meta cleanup fence is required before candidate worker") {
+    RuntimeUrltestTerminalOrchestrator orchestrator;
+    const auto rejected = orchestrator.begin_candidate(
+        RuntimeUrltestMetaFence{
+            313U,
+            /*delayed_cleanup_invalidated=*/true,
+            /*mutation_barrier_crossed=*/false});
+
+    REQUIRE(rejected.effect_count == 2U);
+    CHECK_FALSE(rejected.contains(
+        RuntimeUrltestTerminalEffect::start_candidate));
+    CHECK(rejected.effects[0] ==
+          RuntimeUrltestTerminalEffect::release_exact_lease);
+    CHECK(rejected.effects[1] ==
+          RuntimeUrltestTerminalEffect::request_recovery);
+    CHECK(orchestrator.phase() ==
+          RuntimeUrltestTerminalPhase::complete);
+    CHECK_FALSE(orchestrator.exact_lease_owned());
+    CHECK(orchestrator.recovery_requested());
 }

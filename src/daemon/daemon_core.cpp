@@ -58,6 +58,7 @@
 #include "../keenetic/ndms_vpn_server_service_cache.hpp"
 #include "../lists/list_streamer.hpp"
 #include "../log/logger.hpp"
+#include "../routing/urltest_manager.hpp"
 #include "../runtime/meta_udp_443_policy.hpp"
 #include "../util/daemon_signals.hpp"
 #include "../util/ipv6_support.hpp"
@@ -67,6 +68,7 @@
 #include "runtime_firewall_operation_owner.hpp"
 #include "owned_conntrack_cleanup_operation.hpp"
 #include "runtime_route_health_plan.hpp"
+#include "runtime_urltest_terminal_orchestrator.hpp"
 #include "scheduler.hpp"
 
 #ifdef WITH_API
@@ -300,6 +302,7 @@ nlohmann::json list_refresh_task_json(
 } // namespace
 
 struct RuntimeFirewallStartRollbackResult;
+struct DaemonUrltestSelectionTransaction;
 
 struct DaemonRuntimeFirewallOperationState final
     : RuntimeFirewallOperationDomainState {
@@ -388,6 +391,8 @@ struct DaemonRuntimeFirewallOperationState final
         route_mutation_checkpoint;
     std::shared_ptr<DaemonConfigGenerationTransaction>
         config_generation_transaction;
+    std::shared_ptr<DaemonUrltestSelectionTransaction>
+        urltest_selection_transaction;
     std::optional<ConfigTerminalOperationIdentity>
         config_operation_identity;
     std::shared_ptr<const ResolverGenerationSnapshot>
@@ -454,6 +459,40 @@ struct DaemonConfigGenerationTransaction final {
     bool post_terminal_refresh_required{false};
     bool post_terminal_full_refresh{false};
     bool candidate_resolver_may_have_changed{false};
+    bool candidate_published{false};
+    std::string candidate_failure_detail;
+};
+
+// One URLTEST selection owns this transaction from its exact probe callback
+// until either the private candidate is published or the old selection is
+// reverified by an exact rollback. The manager and FirewallState selection
+// cursors remain on rollback_selections throughout the worker phases.
+struct DaemonUrltestSelectionTransaction final {
+    UrltestSelectionChange change;
+    std::map<std::string, std::string> candidate_selections;
+    std::map<std::string, std::string> rollback_selections;
+    std::shared_ptr<const ListCacheGenerationSnapshot> list_cache_snapshot;
+    DaemonRuntimeFirewallOperationState::CorePublication
+        candidate_core_publication;
+    DaemonRuntimeFirewallOperationState::CorePublication
+        rollback_core_publication;
+    std::optional<MetaUdp443ActivationPlan> candidate_meta_activation_plan;
+    std::optional<MetaUdp443ActivationPlan> rollback_meta_activation_plan;
+    std::optional<std::uint32_t> retired_mark;
+    RuntimeUrltestTerminalOrchestrator terminal_orchestrator;
+    std::uint64_t runtime_generation{0U};
+    std::uint64_t mutation_lease_token{0U};
+    bool candidate_core_publication_ready{false};
+    bool rollback_core_publication_ready{false};
+    bool candidate_meta_filter_healthy{false};
+    bool candidate_meta_fastnat_healthy{false};
+    bool rollback_meta_filter_healthy{false};
+    bool rollback_meta_fastnat_healthy{false};
+    // The old delayed Meta cleanup epoch and idle/call-affinity observer are
+    // invalidated before the first private candidate is queued. A verified
+    // candidate/rollback installs replacement maintenance; a clean
+    // pre-COMMIT rejection requests one fresh published-state reconciliation.
+    bool maintenance_fence_invalidated{false};
     bool candidate_published{false};
     std::string candidate_failure_detail;
 };
@@ -4077,6 +4116,594 @@ bool Daemon::runtime_firewall_lifecycle_generation_is_current(
                runtime_generation_.load(std::memory_order_acquire);
 }
 
+bool Daemon::begin_preowned_runtime_firewall_urltest_selection(
+    std::unique_ptr<RuntimeMutationAdmission::Lease>& lease,
+    const UrltestSelectionChange& change,
+    std::map<std::string, std::string> candidate_selections,
+    std::map<std::string, std::string> rollback_selections,
+    std::shared_ptr<const ListCacheGenerationSnapshot> list_cache_snapshot,
+    std::optional<std::uint32_t> retired_mark) noexcept {
+    if (!lease || !static_cast<bool>(*lease) ||
+        !runtime_mutation_admission_.owns(*lease) ||
+        runtime_firewall_owner_->shutdown_requested()) {
+        return false;
+    }
+
+    std::shared_ptr<DaemonUrltestSelectionTransaction> transaction;
+    try {
+        transaction =
+            std::make_shared<DaemonUrltestSelectionTransaction>();
+        transaction->change = change;
+        transaction->candidate_selections =
+            std::move(candidate_selections);
+        transaction->rollback_selections =
+            std::move(rollback_selections);
+        transaction->list_cache_snapshot =
+            std::move(list_cache_snapshot);
+        transaction->retired_mark = retired_mark;
+        transaction->runtime_generation =
+            runtime_generation_.load(std::memory_order_acquire);
+        transaction->mutation_lease_token = lease->token();
+
+        RuntimeFirewallPreownedTerminalContinuation continuation{
+            [this, transaction](
+                RuntimeFirewallLifecycleTerminal terminal,
+                std::unique_ptr<RuntimeMutationAdmission::Lease> exact)
+                noexcept {
+                complete_preowned_runtime_firewall_urltest_candidate(
+                    transaction,
+                    std::move(terminal),
+                    std::move(exact));
+            }};
+
+        // Fence every delayed writer which can touch runtime-only Meta or
+        // call-affinity state before the first private URLTEST generation.
+        // Both cancel operations advance their epochs. Taking the shared
+        // mutation barrier afterwards waits out an already-running exact
+        // pair/cleanup worker, so candidate and rollback COMMIT have one
+        // exclusive writer boundary.
+        cancel_idle_stall_observer();
+        cancel_meta_udp443_activation_cleanup();
+        transaction->maintenance_fence_invalidated = true;
+        {
+            KPBR_LOCK_GUARD(udp_call_affinity_mutation_mutex_);
+        }
+        const auto terminal_start =
+            transaction->terminal_orchestrator.begin_candidate(
+                RuntimeUrltestMetaFence{
+                    meta_udp443_cleanup_epoch_.load(
+                        std::memory_order_acquire),
+                    /*delayed_cleanup_invalidated=*/true,
+                    /*mutation_barrier_crossed=*/true});
+        if (!terminal_start.contains(
+                RuntimeUrltestTerminalEffect::start_candidate)) {
+            throw DaemonError(
+                "URLTEST terminal owner rejected its maintenance fence");
+        }
+        const bool handed_off =
+            start_preowned_runtime_firewall_urltest_phase(
+            transaction,
+            RuntimeFirewallLifecycleKind::urltest_candidate,
+            lease,
+            continuation);
+        if (!handed_off) {
+            schedule_netfilter_runtime_refresh_noexcept(
+                NetfilterRefreshReason::full,
+                "URLTEST owner rejected after maintenance fence");
+        }
+        return handed_off;
+    } catch (...) {
+        // Cancellation is deliberately irreversible: once either epoch was
+        // advanced, only a fresh published-state generation may recreate the
+        // old maintenance. The caller still owns the exact lease here, so the
+        // request coalesces behind it and runs after return.
+        if (transaction && transaction->maintenance_fence_invalidated) {
+            schedule_netfilter_runtime_refresh_noexcept(
+                NetfilterRefreshReason::full,
+                "URLTEST candidate could not fence runtime maintenance");
+        }
+        return false;
+    }
+}
+
+bool Daemon::start_preowned_runtime_firewall_urltest_phase(
+    const std::shared_ptr<DaemonUrltestSelectionTransaction>& transaction,
+    RuntimeFirewallLifecycleKind lifecycle_kind,
+    std::unique_ptr<RuntimeMutationAdmission::Lease>& lease,
+    RuntimeFirewallPreownedTerminalContinuation& continuation) noexcept {
+    if (!transaction ||
+        !runtime_firewall_lifecycle_is_urltest_generation(lifecycle_kind) ||
+        !lease || !static_cast<bool>(*lease) ||
+        lease->token() != transaction->mutation_lease_token ||
+        !runtime_mutation_admission_.owns(*lease) ||
+        !runtime_firewall_lifecycle_generation_is_current(
+            lifecycle_kind, transaction->runtime_generation) ||
+        runtime_firewall_owner_->shutdown_requested()) {
+        return false;
+    }
+
+    try {
+        auto state =
+            std::make_shared<DaemonRuntimeFirewallOperationState>();
+        state->urltest_selection_transaction = transaction;
+        auto result = runtime_firewall_owner_->start_immediate_preowned(
+            0U,
+            transaction->runtime_generation,
+            {},
+            {},
+            /*schedule_catalog_refresh=*/false,
+            state,
+            runtime_mutation_admission_,
+            std::move(lease),
+            {},
+            lifecycle_kind,
+            std::move(continuation));
+        if (result.disposition ==
+            RuntimeFirewallImmediateDisposition::handed_off) {
+            return true;
+        }
+        lease = std::move(result.unaccepted_lease);
+        continuation = std::move(result.unaccepted_continuation);
+    } catch (...) {
+    }
+    return false;
+}
+
+void Daemon::complete_preowned_runtime_firewall_urltest_candidate(
+    const std::shared_ptr<DaemonUrltestSelectionTransaction>& transaction,
+    RuntimeFirewallLifecycleTerminal terminal,
+    std::unique_ptr<RuntimeMutationAdmission::Lease> lease) noexcept {
+    if (!transaction) return;
+
+    const bool exact_lease_owned = lease && static_cast<bool>(*lease) &&
+        lease->token() == transaction->mutation_lease_token &&
+        runtime_mutation_admission_.owns(*lease);
+    const bool runtime_generation_current =
+        runtime_generation_.load(std::memory_order_acquire) ==
+        transaction->runtime_generation;
+    bool manager_generation_current = false;
+    try {
+        const auto state = urltest_manager_
+            ? urltest_manager_->get_state(transaction->change.urltest_tag)
+            : std::nullopt;
+        manager_generation_current = state.has_value() &&
+            state->generation == transaction->change.probe_generation &&
+            state->selected_outbound ==
+                transaction->change.previous_child_tag;
+    } catch (...) {
+    }
+
+    if (!terminal.detail.empty()) {
+        try {
+            transaction->candidate_failure_detail = terminal.detail;
+        } catch (...) {
+        }
+    }
+
+    UrltestCandidateEvidence evidence;
+    evidence.exact_lease_owned = exact_lease_owned;
+    evidence.runtime_generation_current = runtime_generation_current;
+    evidence.manager_generation_current = manager_generation_current;
+    evidence.exact_rollback_available = exact_lease_owned &&
+        runtime_generation_current &&
+        !runtime_firewall_owner_->shutdown_requested();
+    evidence.terminal = std::move(terminal);
+
+    const auto policy_action = plan_urltest_candidate_terminal(evidence);
+    const bool exact_route_checkpoint_verified =
+        evidence.terminal.outcome ==
+            RuntimeFirewallLifecycleOutcome::verified_success &&
+        evidence.terminal.committed &&
+        !evidence.terminal.commit_ambiguous;
+    const bool combined_publication_succeeded =
+        transaction->terminal_orchestrator
+            .candidate_publication_admitted(
+                evidence, exact_route_checkpoint_verified) &&
+        publish_prepared_runtime_firewall_urltest_candidate(transaction);
+    const auto terminal_transition =
+        transaction->terminal_orchestrator.complete_candidate(
+            evidence,
+            exact_route_checkpoint_verified,
+            combined_publication_succeeded);
+
+    if (terminal_transition.contains(
+            RuntimeUrltestTerminalEffect::
+                publish_manager_and_firewall_candidate)) {
+        finish_preowned_runtime_firewall_urltest_selection(
+            transaction,
+            std::move(evidence.terminal),
+            std::move(lease));
+        return;
+    }
+    if (policy_action == UrltestCandidateAction::publish_candidate) {
+        try {
+            transaction->candidate_failure_detail =
+                "verified URLTEST candidate could not publish its exact cursor";
+        } catch (...) {
+        }
+    }
+
+    if (terminal_transition.contains(
+            RuntimeUrltestTerminalEffect::release_exact_lease)) {
+        if (terminal_transition.contains(
+                RuntimeUrltestTerminalEffect::request_recovery)) {
+            evidence.terminal.previous_generation_certainly_retained = false;
+        }
+        finish_preowned_runtime_firewall_urltest_selection(
+            transaction,
+            std::move(evidence.terminal),
+            std::move(lease));
+        return;
+    }
+
+    if (!terminal_transition.contains(
+            RuntimeUrltestTerminalEffect::start_exact_rollback)) {
+        evidence.terminal.outcome =
+            RuntimeFirewallLifecycleOutcome::not_verified;
+        evidence.terminal.previous_generation_certainly_retained = false;
+        finish_preowned_runtime_firewall_urltest_selection(
+            transaction,
+            std::move(evidence.terminal),
+            std::move(lease));
+        return;
+    }
+
+    RuntimeFirewallPreownedTerminalContinuation rollback_continuation;
+    try {
+        rollback_continuation =
+            RuntimeFirewallPreownedTerminalContinuation{
+                [this, transaction](
+                    RuntimeFirewallLifecycleTerminal rollback_terminal,
+                    std::unique_ptr<RuntimeMutationAdmission::Lease> exact)
+                    noexcept {
+                    complete_preowned_runtime_firewall_urltest_rollback(
+                        transaction,
+                        std::move(rollback_terminal),
+                        std::move(exact));
+                }};
+    } catch (...) {
+        evidence.terminal.outcome =
+            RuntimeFirewallLifecycleOutcome::not_verified;
+        evidence.terminal.previous_generation_certainly_retained = false;
+        finish_preowned_runtime_firewall_urltest_selection(
+            transaction,
+            std::move(evidence.terminal),
+            std::move(lease));
+        return;
+    }
+
+    if (!start_preowned_runtime_firewall_urltest_phase(
+            transaction,
+            RuntimeFirewallLifecycleKind::urltest_rollback,
+            lease,
+            rollback_continuation)) {
+        evidence.terminal.outcome =
+            RuntimeFirewallLifecycleOutcome::not_verified;
+        evidence.terminal.previous_generation_certainly_retained = false;
+        try {
+            evidence.terminal.detail =
+                "exact URLTEST rollback owner was not admitted";
+        } catch (...) {
+        }
+        finish_preowned_runtime_firewall_urltest_selection(
+            transaction,
+            std::move(evidence.terminal),
+            std::move(lease));
+    }
+}
+
+void Daemon::complete_preowned_runtime_firewall_urltest_rollback(
+    const std::shared_ptr<DaemonUrltestSelectionTransaction>& transaction,
+    RuntimeFirewallLifecycleTerminal terminal,
+    std::unique_ptr<RuntimeMutationAdmission::Lease> lease) noexcept {
+    if (!transaction) return;
+
+    UrltestRollbackEvidence evidence;
+    evidence.exact_lease_owned = lease && static_cast<bool>(*lease) &&
+        lease->token() == transaction->mutation_lease_token &&
+        runtime_mutation_admission_.owns(*lease);
+    evidence.runtime_generation_current =
+        runtime_generation_.load(std::memory_order_acquire) ==
+        transaction->runtime_generation;
+    evidence.terminal = std::move(terminal);
+
+    const bool exact_route_checkpoint_verified =
+        evidence.terminal.outcome ==
+            RuntimeFirewallLifecycleOutcome::verified_success &&
+        evidence.terminal.committed &&
+        !evidence.terminal.commit_ambiguous;
+    const bool combined_publication_succeeded =
+        transaction->terminal_orchestrator
+            .rollback_publication_admitted(
+                evidence, exact_route_checkpoint_verified) &&
+        publish_prepared_runtime_firewall_urltest_rollback(transaction);
+    const auto terminal_transition =
+        transaction->terminal_orchestrator.complete_rollback(
+            evidence,
+            exact_route_checkpoint_verified,
+            combined_publication_succeeded);
+    const bool verified = terminal_transition.contains(
+        RuntimeUrltestTerminalEffect::
+            publish_manager_and_firewall_rollback);
+    evidence.terminal.previous_generation_certainly_retained = verified;
+    if (verified) {
+        try {
+            evidence.terminal.detail =
+                transaction->candidate_failure_detail;
+        } catch (...) {
+        }
+    } else {
+        evidence.terminal.outcome =
+            RuntimeFirewallLifecycleOutcome::not_verified;
+        try {
+            const auto detail = evidence.terminal.detail;
+            evidence.terminal.detail = "URLTEST rollback was not verified";
+            if (!detail.empty()) {
+                evidence.terminal.detail += ": ";
+                evidence.terminal.detail += detail;
+            }
+        } catch (...) {
+        }
+    }
+    finish_preowned_runtime_firewall_urltest_selection(
+        transaction,
+        std::move(evidence.terminal),
+        std::move(lease));
+}
+
+bool Daemon::publish_prepared_runtime_firewall_urltest_candidate(
+    const std::shared_ptr<DaemonUrltestSelectionTransaction>& transaction)
+    noexcept {
+    if (!transaction || transaction->candidate_published ||
+        !transaction->candidate_core_publication_ready ||
+        runtime_generation_.load(std::memory_order_acquire) !=
+            transaction->runtime_generation ||
+        !urltest_manager_) {
+        return false;
+    }
+
+    try {
+        // The generation-fenced manager swap is the only fallible publication
+        // step. Every Daemon publication below is a no-throw swap/scalar
+        // commit, so the new selection cannot be left half-published.
+        if (!urltest_manager_->synchronize_selected_if_generation(
+                transaction->change.urltest_tag,
+                transaction->change.probe_generation,
+                transaction->change.new_child_tag)) {
+            return false;
+        }
+
+        auto& publication = transaction->candidate_core_publication;
+        firewall_state_.swap_rules(publication.rules);
+        firewall_state_.swap_urltest_selections(
+            transaction->candidate_selections);
+        applied_list_content_state_.static_destinations.swap(
+            publication.list_content_state.static_destinations);
+        applied_list_content_state_.domain_entry_lists.swap(
+            publication.list_content_state.domain_entry_lists);
+        applied_list_content_state_.truncated_static_destination_lists.swap(
+            publication.list_content_state
+                .truncated_static_destination_lists);
+        applied_list_usage_.swap(publication.list_usage);
+        applied_list_fingerprints_.swap(publication.list_fingerprints);
+        resolved_internal_vpn_servers_.swap(
+            publication.internal_vpn_servers);
+        resolved_internal_vpn_service_targets_.swap(
+            publication.internal_vpn_service_targets);
+        applied_native_vpn_direct_egress_snat_selectors_.swap(
+            publication.native_vpn_direct_egress_snat_selectors);
+        committed_meta_udp443_fwmark_ = publication.committed_meta_fwmark;
+        committed_meta_udp443_owned_mask_ =
+            publication.committed_meta_owned_mask;
+        transaction->candidate_published = true;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool Daemon::publish_prepared_runtime_firewall_urltest_rollback(
+    const std::shared_ptr<DaemonUrltestSelectionTransaction>& transaction)
+    noexcept {
+    if (!transaction || !transaction->rollback_core_publication_ready ||
+        runtime_generation_.load(std::memory_order_acquire) !=
+            transaction->runtime_generation ||
+        !urltest_manager_) {
+        return false;
+    }
+
+    auto& publication = transaction->rollback_core_publication;
+    return publish_runtime_urltest_cursor_pair(
+        [this, &transaction]() {
+            return urltest_manager_->synchronize_selected_if_generation(
+                transaction->change.urltest_tag,
+                transaction->change.probe_generation,
+                transaction->change.previous_child_tag);
+        },
+        [this, &transaction, &publication]() {
+            firewall_state_.swap_rules(publication.rules);
+            firewall_state_.swap_urltest_selections(
+                transaction->rollback_selections);
+            applied_list_content_state_.static_destinations.swap(
+                publication.list_content_state.static_destinations);
+            applied_list_content_state_.domain_entry_lists.swap(
+                publication.list_content_state.domain_entry_lists);
+            applied_list_content_state_
+                .truncated_static_destination_lists.swap(
+                    publication.list_content_state
+                        .truncated_static_destination_lists);
+            applied_list_usage_.swap(publication.list_usage);
+            applied_list_fingerprints_.swap(
+                publication.list_fingerprints);
+            resolved_internal_vpn_servers_.swap(
+                publication.internal_vpn_servers);
+            resolved_internal_vpn_service_targets_.swap(
+                publication.internal_vpn_service_targets);
+            applied_native_vpn_direct_egress_snat_selectors_.swap(
+                publication.native_vpn_direct_egress_snat_selectors);
+            committed_meta_udp443_fwmark_ =
+                publication.committed_meta_fwmark;
+            committed_meta_udp443_owned_mask_ =
+                publication.committed_meta_owned_mask;
+        });
+}
+
+void Daemon::finish_preowned_runtime_firewall_urltest_selection(
+    const std::shared_ptr<DaemonUrltestSelectionTransaction>& transaction,
+    RuntimeFirewallLifecycleTerminal terminal,
+    std::unique_ptr<RuntimeMutationAdmission::Lease> lease) noexcept {
+    if (!transaction) return;
+    const bool shutdown = terminal.outcome ==
+        RuntimeFirewallLifecycleOutcome::shutdown ||
+        runtime_firewall_owner_->shutdown_requested();
+    const bool candidate_published = transaction->candidate_published;
+    const bool previous_generation_verified = !candidate_published &&
+        terminal.previous_generation_certainly_retained;
+    const bool rollback_verified = previous_generation_verified &&
+        transaction->rollback_core_publication_ready;
+    const bool clean_candidate_rejection = previous_generation_verified &&
+        !transaction->rollback_core_publication_ready;
+    const bool recovery_required = !shutdown && !candidate_published &&
+        !previous_generation_verified;
+
+    const auto finish_meta_tail =
+        [this, transaction](
+            const std::optional<MetaUdp443ActivationPlan>& plan,
+            bool fastnat_healthy,
+            bool filter_healthy) noexcept {
+            try {
+                const auto cleanup_epoch = transaction
+                    ->terminal_orchestrator.meta_fence().cleanup_epoch;
+                if (plan.has_value()) {
+                    if (fastnat_healthy && filter_healthy) {
+                        meta_udp443_incidents_.reset(
+                            "meta-udp443-activation");
+                        schedule_meta_udp443_activation_cleanup_retry(
+                            *plan,
+                            transaction->runtime_generation,
+                            cleanup_epoch,
+                            /*attempt=*/0U);
+                    } else {
+                        report_meta_udp443_degraded(
+                            !fastnat_healthy
+                                ? "FastNAT was re-enabled during URLTEST "
+                                  "selection publication"
+                                : "the exact owned first FORWARD hook could "
+                                  "not be reverified after URLTEST selection");
+                        schedule_meta_udp443_activation_cleanup_retry(
+                            *plan,
+                            transaction->runtime_generation,
+                            cleanup_epoch,
+                            /*attempt=*/1U);
+                    }
+                } else if (filter_healthy) {
+                    meta_udp443_incidents_.reset(
+                        "meta-udp443-activation");
+                }
+            } catch (...) {
+            }
+        };
+
+    if (!shutdown && candidate_published) {
+        finish_meta_tail(
+            transaction->candidate_meta_activation_plan,
+            transaction->candidate_meta_fastnat_healthy,
+            transaction->candidate_meta_filter_healthy);
+        reset_idle_stall_observer(/*schedule_if_eligible=*/true);
+        if (transaction->retired_mark.has_value() &&
+            runtime_generation_.load(std::memory_order_acquire) ==
+                transaction->runtime_generation) {
+            try {
+                const auto owned_mask = fwmark_mask_value(
+                    config_.fwmark.value_or(FwmarkConfig{}));
+                const auto cleanup = conntrack_manager_.delete_mark(
+                    *transaction->retired_mark, owned_mask);
+                if (cleanup ==
+                    ConntrackCleanupResult::CommandUnavailable) {
+                    warn_conntrack_unavailable_once();
+                } else if (cleanup == ConntrackCleanupResult::Failed) {
+                    OwnedConntrackCleanupSnapshot snapshot;
+                    snapshot.runtime_generation =
+                        transaction->runtime_generation;
+                    snapshot.owned_mask = owned_mask;
+                    snapshot.ipv6_enabled =
+                        resolve_ipv6_support(config_).enabled;
+                    snapshot.marks.insert(*transaction->retired_mark);
+                    snapshot.priority_marks.insert(
+                        *transaction->retired_mark);
+                    schedule_owned_conntrack_cleanup_retry(
+                        snapshot, {*transaction->retired_mark});
+                }
+            } catch (...) {
+            }
+        }
+        try {
+            urltest_apply_incidents_.reset(
+                transaction->change.urltest_tag);
+        } catch (...) {
+        }
+    } else if (!shutdown && rollback_verified) {
+        finish_meta_tail(
+            transaction->rollback_meta_activation_plan,
+            transaction->rollback_meta_fastnat_healthy,
+            transaction->rollback_meta_filter_healthy);
+        reset_idle_stall_observer(/*schedule_if_eligible=*/true);
+    }
+
+    // This tail still belongs to the typed URLTEST operation. Return its exact
+    // admission before starting a fresh probe or central recovery owner.
+    lease.reset();
+
+    if (!shutdown && clean_candidate_rejection &&
+        transaction->maintenance_fence_invalidated) {
+        // Candidate was rejected before either route or firewall publication,
+        // but the old maintenance epochs were already invalidated. Recreate
+        // them from a fresh authoritative published-state snapshot; never
+        // replay the private URLTEST body.
+        schedule_netfilter_runtime_refresh_noexcept(
+            NetfilterRefreshReason::full,
+            "URLTEST clean rejection invalidated runtime maintenance");
+    }
+
+    if (!shutdown && !candidate_published) {
+        try {
+            const auto incident = urltest_apply_incidents_.record_failure(
+                transaction->change.urltest_tag,
+                /*notify_immediately=*/recovery_required);
+            if (incident.notify) {
+                Logger::instance().error(
+                    recovery_required
+                        ? "Urltest '{}' candidate and exact rollback were not "
+                          "verified: {}"
+                        : "Urltest '{}' candidate was rejected; the previous "
+                          "selection remains verified: {}",
+                    transaction->change.urltest_tag,
+                    terminal.detail);
+            }
+        } catch (...) {
+        }
+    }
+
+    try {
+        publish_runtime_state();
+    } catch (...) {
+    }
+
+    if (recovery_required) {
+        defer_urltest_switch_to_firewall_recovery(
+            transaction->change,
+            transaction->runtime_generation,
+            "typed candidate/rollback",
+            terminal.detail);
+    } else if (!shutdown && !candidate_published && urltest_manager_) {
+        try {
+            urltest_manager_->trigger_external_health_test(
+                transaction->change.urltest_tag);
+        } catch (...) {
+        }
+    }
+}
+
 #ifdef WITH_API
 void Daemon::begin_preowned_runtime_firewall_start(
     std::unique_ptr<RuntimeMutationAdmission::Lease> mutation_lease,
@@ -5711,6 +6338,9 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
     const bool lifecycle_config_generation =
         runtime_firewall_lifecycle_is_config_generation(
             context->lifecycle_kind);
+    const bool lifecycle_urltest_generation =
+        runtime_firewall_lifecycle_is_urltest_generation(
+            context->lifecycle_kind);
     const bool lifecycle_preowned =
         runtime_firewall_lifecycle_uses_preowned_continuation(
             context->lifecycle_kind);
@@ -5752,6 +6382,20 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
         } else {
             transaction->rollback_identity = identity;
         }
+    }
+    if (lifecycle_urltest_generation &&
+        !state.urltest_selection_transaction) {
+        state.preworker_failure_kind =
+            DaemonRuntimeFirewallOperationState::PreworkerFailureKind::
+                preparation_failure;
+        state.preworker_failure_detail =
+            "URLTEST selection transaction is unavailable";
+        runtime_firewall_owner_->terminate_before_worker(
+            context,
+            queued_claim,
+            RuntimeFirewallOperationContext::SuccessorMode::none,
+            /*force_rerun=*/false);
+        return;
     }
     context->submitted_snat_recovery = std::move(snat_recovery_input);
     auto& snat_recovery = context->submitted_snat_recovery;
@@ -5911,6 +6555,23 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                 config_transaction.candidate_resolver_may_have_changed;
             state.lifecycle_resolver_verified =
                 !state.resolver_refresh_required;
+        } else if (lifecycle_urltest_generation) {
+            // A selection change reuses the exact published config/catalog
+            // generation. Only its private selection map differs.
+            state.internal_vpn_resolution.effective_servers =
+                resolved_internal_vpn_servers_;
+            state.internal_vpn_service_resolution.effective_targets =
+                resolved_internal_vpn_service_targets_;
+            state.lifecycle_trusted_dns_interfaces =
+                resolver_generation_snapshot_
+                ? resolver_generation_snapshot_->trusted_dns_interfaces
+                : build_dnsmasq_trusted_interfaces(
+                      resolved_internal_vpn_servers_,
+                      resolved_internal_vpn_service_targets_);
+            state.resolver_refresh_required = false;
+            state.lifecycle_resolver_verified = true;
+            state.list_cache_snapshot =
+                state.urltest_selection_transaction->list_cache_snapshot;
         } else if (lifecycle_preapply) {
             // Fence exactly the published generation. A cache refresh here
             // would silently turn pre-apply into candidate generation.
@@ -5996,8 +6657,17 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                               RuntimeFirewallLifecycleKind::config_rollback
                           ? RuntimeFirewallWorkerOperationKind::
                                 config_rollback
-                          : RuntimeFirewallWorkerOperationKind::
-                                reconcile_generation));
+                          : (runtime_firewall_lifecycle_is_urltest_candidate(
+                                 context->lifecycle_kind)
+                                 ? RuntimeFirewallWorkerOperationKind::
+                                       urltest_candidate
+                                 : (context->lifecycle_kind ==
+                                            RuntimeFirewallLifecycleKind::
+                                                urltest_rollback
+                                        ? RuntimeFirewallWorkerOperationKind::
+                                              urltest_rollback
+                                        : RuntimeFirewallWorkerOperationKind::
+                                              reconcile_generation))));
         auto& transaction = generation_snapshot.transaction;
         transaction.operation_serial = queued_claim.serial;
         transaction.runtime_generation = queued_claim.runtime_generation;
@@ -6027,6 +6697,16 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                         "firewall terminal class");
                 }
             }
+        } else if (lifecycle_urltest_generation &&
+                   context->lifecycle_kind ==
+                       RuntimeFirewallLifecycleKind::urltest_rollback &&
+                   state.urltest_selection_transaction
+                       ->candidate_core_publication_ready &&
+                   state.urltest_selection_transaction
+                       ->candidate_core_publication.committed) {
+            config_generation_previous_publication =
+                &state.urltest_selection_transaction
+                     ->candidate_core_publication;
         }
         transaction.config = config_generation_target
             ? config_generation_target->config
@@ -6041,7 +6721,14 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                          ->candidate_urltest_selections
                    : state.config_generation_transaction
                          ->rollback_urltest_selections)
-            : firewall_state_.get_urltest_selections();
+            : (lifecycle_urltest_generation
+                   ? (runtime_firewall_lifecycle_is_urltest_candidate(
+                              context->lifecycle_kind)
+                          ? state.urltest_selection_transaction
+                                ->candidate_selections
+                          : state.urltest_selection_transaction
+                                ->rollback_selections)
+                   : firewall_state_.get_urltest_selections());
         transaction.effective_internal_vpn_servers =
             state.internal_vpn_resolution.effective_servers;
         transaction.effective_internal_vpn_targets =
@@ -6080,10 +6767,12 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                        RuntimeFirewallLifecycleKind::config_rollback
                    ? state.config_generation_transaction
                          ->rollback_firewall_policy.mode
-            : (runtime_firewall_lifecycle_is_foreground(
-                   context->lifecycle_kind)
-                   ? FirewallApplyMode::PreserveSets
-                   : runtime_refresh_firewall_mode()));
+            : (lifecycle_urltest_generation
+                   ? runtime_refresh_firewall_mode()
+                   : (runtime_firewall_lifecycle_is_foreground(
+                          context->lifecycle_kind)
+                          ? FirewallApplyMode::PreserveSets
+                          : runtime_refresh_firewall_mode())));
         transaction.force_clear_dynamic_sets =
             runtime_firewall_lifecycle_is_config_candidate(
                     context->lifecycle_kind)
@@ -7118,6 +7807,9 @@ void Daemon::drain_runtime_firewall_terminal(
     const bool lifecycle_config_generation =
         runtime_firewall_lifecycle_is_config_generation(
             context->lifecycle_kind);
+    const bool lifecycle_urltest_generation =
+        runtime_firewall_lifecycle_is_urltest_generation(
+            context->lifecycle_kind);
     const bool lifecycle_preowned =
         runtime_firewall_lifecycle_uses_preowned_continuation(
             context->lifecycle_kind);
@@ -7856,6 +8548,28 @@ void Daemon::drain_runtime_firewall_terminal(
             return terminal;
         };
 
+    const auto prepare_urltest_generation_terminal =
+        [&context, &state](
+            RuntimeFirewallLifecycleOutcome outcome,
+            bool previous_generation_certainly_retained) {
+            RuntimeFirewallLifecycleTerminal terminal;
+            terminal.outcome = outcome;
+            terminal.committed = state.core_publication.committed;
+            terminal.commit_ambiguous =
+                context->worker_commit_ambiguous;
+            terminal.transient = state.worker_failure_transient;
+            terminal.previous_generation_certainly_retained =
+                previous_generation_certainly_retained;
+            if (!state.lifecycle_failure_detail.empty()) {
+                terminal.detail = state.lifecycle_failure_detail;
+            } else if (!state.worker_failure_detail.empty()) {
+                terminal.detail = state.worker_failure_detail;
+            } else {
+                terminal.detail = state.preworker_failure_detail;
+            }
+            return terminal;
+        };
+
     const auto complete_finalized_preapply =
         [this, &context, &state, shutdown](
             RuntimeFirewallOperationOwner::
@@ -8012,6 +8726,23 @@ void Daemon::drain_runtime_firewall_terminal(
                 std::move(config_terminal));
             return;
         }
+        if (lifecycle_urltest_generation) {
+            auto urltest_terminal = prepare_urltest_generation_terminal(
+                shutdown
+                    ? RuntimeFirewallLifecycleOutcome::shutdown
+                    : RuntimeFirewallLifecycleOutcome::not_verified,
+                !shutdown);
+            auto permit = runtime_firewall_owner_->
+                prepare_preowned_continuation_finalization(context);
+            if (!permit.has_value()) return;
+            auto proof = drain->finish_coordinator_terminal();
+            if (!proof.has_value()) return;
+            (void)runtime_firewall_owner_->complete_preowned_continuation(
+                std::move(*permit),
+                std::move(*proof),
+                std::move(urltest_terminal));
+            return;
+        }
         std::optional<RuntimeFirewallLifecycleTerminal>
             preapply_terminal;
         std::optional<OwnedSnatRecovery>
@@ -8091,6 +8822,23 @@ void Daemon::drain_runtime_firewall_terminal(
                 std::move(*permit),
                 std::move(*proof),
                 std::move(config_terminal));
+            return;
+        }
+        if (lifecycle_urltest_generation) {
+            auto urltest_terminal = prepare_urltest_generation_terminal(
+                shutdown
+                    ? RuntimeFirewallLifecycleOutcome::shutdown
+                    : RuntimeFirewallLifecycleOutcome::not_verified,
+                !shutdown);
+            auto permit = runtime_firewall_owner_->
+                prepare_preowned_continuation_finalization(context);
+            if (!permit.has_value()) return;
+            auto proof = drain->finish_worker_terminal();
+            if (!proof.has_value()) return;
+            (void)runtime_firewall_owner_->complete_preowned_continuation(
+                std::move(*permit),
+                std::move(*proof),
+                std::move(urltest_terminal));
             return;
         }
         std::optional<RuntimeFirewallLifecycleTerminal>
@@ -8634,6 +9382,7 @@ void Daemon::drain_runtime_firewall_terminal(
                    context->queued_claim.runtime_generation));
         const bool bounded_retry_required =
             !lifecycle_config_generation &&
+            !lifecycle_urltest_generation &&
             !worker_succeeded &&
             !commit_ambiguous &&
             retryable_failure &&
@@ -8665,6 +9414,147 @@ void Daemon::drain_runtime_firewall_terminal(
             ? RuntimeFirewallOperationContext::SuccessorMode::
                   reschedule_retry
             : RuntimeFirewallOperationContext::SuccessorMode::none;
+    }
+
+    if (lifecycle_urltest_generation) {
+        if (!drain->begin_worker_control(runtime_firewall_retry_)) return;
+        // Route and firewall candidates stay private until the exact terminal
+        // continuation publishes both selection cursors together.
+        if (!drain->publish_worker_control(
+                []() noexcept { return true; })) {
+            return;
+        }
+
+        const bool exact_generation =
+            runtime_generation_.load(std::memory_order_acquire) ==
+                context->queued_claim.runtime_generation;
+        const bool exact_route_checkpoint =
+            context->worker_input && worker_result &&
+            context->worker_input->route_health_request.route_epoch != 0U &&
+            routing_observation_epoch_.load(std::memory_order_acquire) ==
+                context->worker_input->route_health_request.route_epoch &&
+            worker_result->route_preparation.required &&
+            worker_result->route_preparation.worker_mutation_ack ==
+                std::optional<RuntimeRouteMutationAck>{
+                    RuntimeRouteMutationAck::applied} &&
+            worker_result->route_preparation.checkpoint_published &&
+            worker_result->route_preparation.mutation_ack ==
+                std::optional<RuntimeRouteMutationAck>{
+                    RuntimeRouteMutationAck::applied};
+        const bool verified = !shutdown && exact_generation &&
+            exact_route_checkpoint && context->worker_succeeded;
+
+        bool route_preimage_certainly_retained = false;
+        if (state.worker_result_valid && worker_result) {
+            const auto& route = worker_result->route_preparation;
+            if (!route.required || !route.observation_succeeded) {
+                route_preimage_certainly_retained = true;
+            } else if (route.worker_mutation_ack.has_value()) {
+                route_preimage_certainly_retained =
+                    *route.worker_mutation_ack ==
+                        RuntimeRouteMutationAck::stale ||
+                    *route.worker_mutation_ack ==
+                        RuntimeRouteMutationAck::route_unavailable;
+            }
+        }
+        const bool previous_generation_certainly_retained =
+            state.worker_result_valid && worker_result &&
+            worker_result->previous_generation_certainly_retained() &&
+            route_preimage_certainly_retained;
+
+        auto transaction = state.urltest_selection_transaction;
+        if (transaction && state.core_publication.committed) {
+            const bool candidate_phase =
+                runtime_firewall_lifecycle_is_urltest_candidate(
+                    context->lifecycle_kind);
+            auto& retained_publication = candidate_phase
+                ? transaction->candidate_core_publication
+                : transaction->rollback_core_publication;
+            bool& retained_ready = candidate_phase
+                ? transaction->candidate_core_publication_ready
+                : transaction->rollback_core_publication_ready;
+            if (!retained_ready) {
+                retained_publication = std::move(state.core_publication);
+                // Preserve terminal evidence after moving the realized core.
+                state.core_publication.prepared = true;
+                state.core_publication.committed = true;
+                auto& retained_meta_plan = candidate_phase
+                    ? transaction->candidate_meta_activation_plan
+                    : transaction->rollback_meta_activation_plan;
+                retained_meta_plan =
+                    std::move(state.candidate_meta_activation_plan);
+                const bool filter_healthy = worker_result &&
+                    worker_result->forward_udp_reject_after_commit.state ==
+                        std::optional<OwnedForwardUdpRejectState>{
+                            OwnedForwardUdpRejectState::healthy} &&
+                    !worker_result->forward_udp_reject_after_commit
+                         .failure.failed();
+                const bool fastnat_healthy =
+                    !retained_meta_plan.has_value() ||
+                    (worker_result &&
+                     worker_result->fastnat_after_commit
+                             .disabled_or_unavailable ==
+                         std::optional<bool>{true} &&
+                     !worker_result->fastnat_after_commit.failure.failed());
+                if (candidate_phase) {
+                    transaction->candidate_meta_filter_healthy =
+                        filter_healthy;
+                    transaction->candidate_meta_fastnat_healthy =
+                        fastnat_healthy;
+                } else {
+                    transaction->rollback_meta_filter_healthy =
+                        filter_healthy;
+                    transaction->rollback_meta_fastnat_healthy =
+                        fastnat_healthy;
+                }
+                retained_ready = true;
+            }
+        }
+
+        context->successor_mode =
+            RuntimeFirewallOperationContext::SuccessorMode::none;
+        state.suppress_coordinator_rerun = true;
+        OwnedSnatRecovery no_urltest_cleanup;
+        if (!drain->complete_worker_control(
+                runtime_firewall_retry_, verified, no_urltest_cleanup)) {
+            return;
+        }
+        const auto* completion = drain->worker_control_completion();
+        if (!completion || !completion->owned) return;
+        capture_completion(*completion);
+        context->force_successor = false;
+        if (!retained_worker_lease ||
+            !absorb_retained_mutation_lease()) {
+            return;
+        }
+        if (!settle_immediate_completion(
+                shutdown
+                    ? RuntimeFirewallImmediateTerminalOutcome::shutdown
+                    : (verified
+                           ? RuntimeFirewallImmediateTerminalOutcome::
+                                 verified_success
+                           : RuntimeFirewallImmediateTerminalOutcome::
+                                 not_verified))) {
+            return;
+        }
+
+        auto urltest_terminal = prepare_urltest_generation_terminal(
+            shutdown
+                ? RuntimeFirewallLifecycleOutcome::shutdown
+                : (verified
+                       ? RuntimeFirewallLifecycleOutcome::verified_success
+                       : RuntimeFirewallLifecycleOutcome::not_verified),
+            previous_generation_certainly_retained);
+        auto permit = runtime_firewall_owner_->
+            prepare_preowned_continuation_finalization(context);
+        if (!permit.has_value()) return;
+        auto proof = drain->finish_worker_terminal();
+        if (!proof.has_value()) return;
+        (void)runtime_firewall_owner_->complete_preowned_continuation(
+            std::move(*permit),
+            std::move(*proof),
+            std::move(urltest_terminal));
+        return;
     }
 
     if (lifecycle_config_generation) {

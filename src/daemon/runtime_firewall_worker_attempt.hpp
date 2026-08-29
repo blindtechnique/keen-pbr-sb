@@ -25,12 +25,20 @@ enum class RuntimeFirewallWorkerOperationKind : std::uint8_t {
     // candidate is never replayed as a rollback or vice versa.
     config_candidate,
     config_rollback,
+    urltest_candidate,
+    urltest_rollback,
 };
 
 constexpr bool runtime_firewall_worker_operation_is_config_generation(
     RuntimeFirewallWorkerOperationKind kind) noexcept {
     return kind == RuntimeFirewallWorkerOperationKind::config_candidate ||
            kind == RuntimeFirewallWorkerOperationKind::config_rollback;
+}
+
+constexpr bool runtime_firewall_worker_operation_is_urltest_generation(
+    RuntimeFirewallWorkerOperationKind kind) noexcept {
+    return kind == RuntimeFirewallWorkerOperationKind::urltest_candidate ||
+           kind == RuntimeFirewallWorkerOperationKind::urltest_rollback;
 }
 
 enum class RuntimeFirewallOwnedConntrackCleanupMode : std::uint8_t {

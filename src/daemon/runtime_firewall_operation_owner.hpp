@@ -137,6 +137,11 @@ enum class RuntimeFirewallLifecycleKind : std::uint8_t {
     config_bootstrap_from_stopped,
     config_candidate,
     config_rollback,
+    // A URLTEST switch keeps both the manager cursor and Daemon publication
+    // on the old child until candidate route+firewall commit is verified.
+    // Candidate and rollback retain one exact pre-owned mutation lease.
+    urltest_candidate,
+    urltest_rollback,
 };
 
 constexpr bool runtime_firewall_lifecycle_is_foreground(
@@ -179,10 +184,22 @@ constexpr bool runtime_firewall_lifecycle_is_config_generation(
            kind == RuntimeFirewallLifecycleKind::config_rollback;
 }
 
+constexpr bool runtime_firewall_lifecycle_is_urltest_candidate(
+    RuntimeFirewallLifecycleKind kind) noexcept {
+    return kind == RuntimeFirewallLifecycleKind::urltest_candidate;
+}
+
+constexpr bool runtime_firewall_lifecycle_is_urltest_generation(
+    RuntimeFirewallLifecycleKind kind) noexcept {
+    return runtime_firewall_lifecycle_is_urltest_candidate(kind) ||
+           kind == RuntimeFirewallLifecycleKind::urltest_rollback;
+}
+
 constexpr bool runtime_firewall_lifecycle_uses_preowned_continuation(
     RuntimeFirewallLifecycleKind kind) noexcept {
     return runtime_firewall_lifecycle_is_preapply(kind) ||
-           runtime_firewall_lifecycle_is_config_generation(kind);
+           runtime_firewall_lifecycle_is_config_generation(kind) ||
+           runtime_firewall_lifecycle_is_urltest_generation(kind);
 }
 
 constexpr bool runtime_firewall_lifecycle_requires_resolver(

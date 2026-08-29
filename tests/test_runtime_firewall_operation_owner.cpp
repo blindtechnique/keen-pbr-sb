@@ -2816,6 +2816,22 @@ TEST_CASE("runtime firewall config preapply uses bounded hot retry without resol
         RuntimeFirewallLifecycleKind::restart_active));
     CHECK_FALSE(runtime_firewall_lifecycle_requires_resolver(
         RuntimeFirewallLifecycleKind::background));
+    for (const auto urltest_generation : {
+             RuntimeFirewallLifecycleKind::urltest_candidate,
+             RuntimeFirewallLifecycleKind::urltest_rollback}) {
+        CHECK(runtime_firewall_lifecycle_is_urltest_generation(
+            urltest_generation));
+        CHECK(runtime_firewall_lifecycle_uses_preowned_continuation(
+            urltest_generation));
+        CHECK(runtime_firewall_lifecycle_is_foreground(
+            urltest_generation));
+        CHECK_FALSE(runtime_firewall_lifecycle_requires_resolver(
+            urltest_generation));
+    }
+    CHECK(runtime_firewall_lifecycle_is_urltest_candidate(
+        RuntimeFirewallLifecycleKind::urltest_candidate));
+    CHECK_FALSE(runtime_firewall_lifecycle_is_urltest_candidate(
+        RuntimeFirewallLifecycleKind::urltest_rollback));
     CHECK(runtime_firewall_preapply_preworker_retry_available(0U));
     CHECK(runtime_firewall_preapply_preworker_retry_available(1U));
     CHECK(runtime_firewall_preapply_preworker_retry_available(2U));

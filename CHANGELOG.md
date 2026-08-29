@@ -192,6 +192,18 @@
   production-вызовов `apply_firewall()` уменьшено с 12 до 11. Узкий suite
   прошёл 43/43 сценария и 666/666 assertions; blockers-only review дал
   P0/P1 = 0.
+- Переключение выбранного child в URLTEST теперь передаёт candidate и точный
+  rollback единому `RuntimeFirewallOperationOwner` с одной generation-fenced
+  mutation lease. Выбор в URLTEST manager и соответствующий `FirewallState`
+  публикуются только после подтверждённых route mutation и firewall COMMIT;
+  чистый отказ до COMMIT не запускает лишний rollback, а уже изменённый route
+  или неоднозначный COMMIT восстанавливаются по точному preimage. Recovery
+  начинается только после возврата физической lease. Перед первым worker
+  Meta UDP/443 cleanup и idle observer останавливаются и перевооружаются через
+  точный epoch и barrier `udp_call_affinity_mutation_mutex_`; в обработчике
+  URLTEST больше нет прямых routing/firewall writers. Существующие семантики
+  priority quarantine `5/2` и direct-interface bind не изменены. Этот срез
+  явно не переносит Keenetic DNS, cold boot, STOP и оставшиеся cleanup tails.
 - Для следующего route-среза построение желаемого поколения выделено в чистые
   `PlannedRoutingState`/`plan_routing_state()`: planner принимает immutable
   reachability snapshot, не выполняет Netlink I/O и не изменяет входные данные.
