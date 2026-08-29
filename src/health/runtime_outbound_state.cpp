@@ -324,12 +324,33 @@ api::RuntimeOutboundStateElement build_interface_outbound_state(
             state.status = api::ResolverLiveStatus::HEALTHY;
             break;
         case runtime_outbound_detail::ProbeVerdict::Failed:
-            // The tunnel device can be UP with nothing behind it. A probe that
-            // was pinned to this device and failed outranks the installed
-            // route.
-            interface_state.status =
-                api::RuntimeInterfaceStatusEnum::UNAVAILABLE;
-            state.status = api::ResolverLiveStatus::UNAVAILABLE;
+            // The tunnel device can be UP with nothing behind it, and a probe
+            // pinned to this device still outranks the installed route - but
+            // only about what it measured. One endpoint did not answer once.
+            //
+            // While the interface is there and its route is installed, that is
+            // "recent checks failed", which is what the contract already calls
+            // degraded: openapi.yaml says "interface exists but recent checks
+            // failed". Reporting unavailable instead turns a single pinned
+            // gstatic timeout into a claim that this transport has no exit at
+            // all, and the dashboard then says so in the header.
+            //
+            // The urltest path has drawn this line for a while and is the model
+            // here: a reachable child whose last result failed is degraded, and
+            // unavailable is kept for one that is unreachable or whose breaker
+            // has opened - a confirmed combination rather than a single miss.
+            // Plain interfaces have no breaker yet, so the confirmed
+            // combination available here is the probe failing with no route to
+            // the device at all.
+            if (reachable || active) {
+                interface_state.status =
+                    api::RuntimeInterfaceStatusEnum::DEGRADED;
+                state.status = api::ResolverLiveStatus::DEGRADED;
+            } else {
+                interface_state.status =
+                    api::RuntimeInterfaceStatusEnum::UNAVAILABLE;
+                state.status = api::ResolverLiveStatus::UNAVAILABLE;
+            }
             break;
         case runtime_outbound_detail::ProbeVerdict::Unverifiable:
             // Nothing here is proof of carriage. Say so instead of showing a

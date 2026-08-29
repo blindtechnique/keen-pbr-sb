@@ -179,12 +179,46 @@ TEST_CASE(
     REQUIRE(response.outbounds.size() == 1);
     const auto& outbound = response.outbounds.front();
     CHECK(outbound.tag == "dead_tunnel");
+    // Degraded, not unavailable. The device is there and its route is
+    // installed; what happened is that one pinned check against one endpoint
+    // did not answer. That is what the contract already calls degraded -
+    // openapi.yaml: "interface exists but recent checks failed" - and calling
+    // it unavailable would say this transport has no exit at all on the
+    // strength of a single gstatic timeout.
+    CHECK(outbound.status == api::ResolverLiveStatus::DEGRADED);
+    REQUIRE(outbound.interfaces.size() == 1);
+    CHECK(outbound.interfaces.front().status ==
+          api::RuntimeInterfaceStatusEnum::DEGRADED);
+    // The defect this case was written for stays covered: it is still not
+    // healthy, and route shape alone no longer describes it as working.
+    CHECK(outbound.status != api::ResolverLiveStatus::HEALTHY);
+    // A failed transport must not publish a latency figure.
+    CHECK_FALSE(outbound.interfaces.front().latency_ms.has_value());
+}
+
+// The other half of the same rule. Unavailable is kept for a missing
+// interface or route, or for a confirmed combination of signals - here the
+// probe failed and there is no route to the device at all, which is two
+// independent signals agreeing rather than one endpoint timing out.
+TEST_CASE(
+    "interface outbound whose pinned probe failed with no route installed is "
+    "reported unavailable") {
+    const auto now = std::chrono::steady_clock::time_point{} +
+                     std::chrono::hours(9);
+    const auto config = config_with_single_interface_outbound("hy1");
+    ModelledRoutes routes({});
+
+    const auto response =
+        build_for(config, routes,
+                  probe_result(/*success=*/false, /*attributed=*/true, now),
+                  now);
+
+    REQUIRE(response.outbounds.size() == 1);
+    const auto& outbound = response.outbounds.front();
     CHECK(outbound.status == api::ResolverLiveStatus::UNAVAILABLE);
     REQUIRE(outbound.interfaces.size() == 1);
     CHECK(outbound.interfaces.front().status ==
           api::RuntimeInterfaceStatusEnum::UNAVAILABLE);
-    // A failed transport must not publish a latency figure.
-    CHECK_FALSE(outbound.interfaces.front().latency_ms.has_value());
 }
 
 // The non-strict outbound carries no companion blackhole rule, so when its
