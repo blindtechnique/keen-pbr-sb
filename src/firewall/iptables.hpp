@@ -147,6 +147,16 @@ private:
         FirewallApplyMode mode,
         const FirewallGlobalPrefilter& prefilter);
     void apply_nat_rules(bool effective_ipv6, FirewallApplyMode mode);
+    // One restore script that tears down every set we own, instead of a flush
+    // and a destroy exec each. Forty managed sets cost eighty fork/execs on the
+    // old path.
+    //
+    // Reads the output of `ipset save`, which cleanup already has in hand, so
+    // this adds no read of its own.
+    static std::string build_managed_set_teardown_script(
+        const std::string& ipset_save_output,
+        bool preserve_dynamic_sets);
+
     void cleanup_saved_sets(bool preserve_dynamic_sets);
     static void cleanup_legacy_generation_chains(const char* command);
 
@@ -198,6 +208,42 @@ private:
     // Build the 'create <name> hash:net family <f> [timeout <t>]' line.
     static std::string build_ipset_create_line(const PendingSet& ps);
     static bool is_dynamic_set_name(const std::string& set_name);
+
+    // Ceiling for one read of every set header. `-t` reports headers only, so
+    // the size follows the number of sets rather than the millions of members
+    // they may hold: a header is a few hundred bytes, and this leaves room for
+    // thousands of sets. Truncation stays a hard failure - a preflight that
+    // read part of the inventory would approve what it never saw.
+    static constexpr std::size_t kLiveSetSchemaReadLimit = 1024U * 1024U;
+
+    // One set's header as the kernel reports it.
+    struct LiveSetSchema {
+        std::string name;
+        std::string type;
+        std::string family;
+        uint32_t timeout{0};
+        uint32_t hashsize{0};
+        uint32_t maxelem{0};
+    };
+
+    // Parses `ipset list -t -o xml` for every set at once.
+    //
+    // Named without a set, that command reports all headers in one document,
+    // which is the difference between one fork/exec per apply and one per set.
+    // A preflight over twenty lists across two families was forty of them, and
+    // it runs twice.
+    //
+    // Fail-closed like the single-set path it replaces: anything unexpected in
+    // the document - a stray element, a repeated field, two sets with one name -
+    // returns nothing rather than a partial map. A preflight that silently sees
+    // fewer sets than the kernel has would approve a schema it never read.
+    static std::optional<std::map<std::string, LiveSetSchema>>
+    parse_live_set_schemas(const std::string& xml);
+
+    // The comparison itself, over an already-parsed header.
+    static bool live_set_schema_compatible(const LiveSetSchema& live,
+                                           const PendingSet& expected);
+
     static bool dynamic_set_schema_compatible(
         const std::string& xml,
         const PendingSet& expected);
