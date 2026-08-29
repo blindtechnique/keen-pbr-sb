@@ -1654,11 +1654,16 @@ void RuntimeFirewallOperationOwner::request_terminal_drain(
             [weak_self, weak_context]() {
                 const auto self = weak_self.lock();
                 const auto retained = weak_context.lock();
-                if (!self || !retained) return;
-                self->dispatch_terminal_drain(
-                    retained, self->shutdown_requested());
+                if (!retained) return;
+                // This callback has consumed the outstanding post. Release
+                // its gate before entering the drain: DrainGuard::retry()
+                // may synchronously publish the only wake for the required
+                // next pass.
                 retained->drain_post_inflight.store(
                     false, std::memory_order_release);
+                if (!self) return;
+                self->dispatch_terminal_drain(
+                    retained, self->shutdown_requested());
             },
             "runtime-firewall-terminal");
     } catch (...) {

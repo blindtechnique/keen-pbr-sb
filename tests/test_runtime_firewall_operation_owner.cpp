@@ -74,6 +74,7 @@ struct OwnerHarness final {
     bool promote_successor_during_drain{false};
     bool promotion_retained{false};
     bool promotion_eager_launch_result{true};
+    bool retry_first_terminal_drain{false};
     bool drained_transport_exhausted{false};
     bool settle_transport_exhaustion{false};
     bool detach_restart_transport_recovery{false};
@@ -199,6 +200,10 @@ struct OwnerHarness final {
                     context->foreground_transport_exhausted;
                 auto drain = context->terminal_owner->try_begin_drain();
                 if (!drain) return;
+                if (retry_first_terminal_drain && drain_calls == 1) {
+                    drain->retry();
+                    return;
+                }
                 if (finalize_stop_cleanup_on_drain &&
                     context->lifecycle_kind ==
                         RuntimeFirewallLifecycleKind::stop_cleanup) {
@@ -2774,6 +2779,25 @@ TEST_CASE("runtime firewall operation owner watchdog recovers rejected control w
     harness.owner->request_shutdown();
     harness.owner->request_shutdown();
     CHECK(harness.owner->shutdown_requested());
+}
+
+TEST_CASE("runtime firewall operation owner preserves a wake raised during control drain") {
+    OwnerHarness harness;
+    harness.retry_first_terminal_drain = true;
+    harness.create_owner();
+    harness.owner->schedule(0U, 77U, {}, {});
+    const auto context = harness.owner->active_context();
+    REQUIRE(context);
+
+    RuntimeFirewallOperationCompletion terminal;
+    terminal.owned = true;
+    context->terminal_owner->coordinator_terminal_sink()(
+        std::move(terminal));
+
+    CHECK(harness.control_posts == 2);
+    CHECK(harness.drain_calls == 2);
+    CHECK_FALSE(context->drain_post_inflight.load());
+    CHECK_FALSE(harness.owner->active_context());
 }
 
 TEST_CASE("runtime firewall watchdog does not launch a promoted successor twice in one tick") {
