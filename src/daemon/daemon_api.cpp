@@ -823,6 +823,8 @@ Daemon::apply_validated_config_via_control_task_with_lease_return(
     std::shared_ptr<PreapplyLeaseSlot> returned;
     RuntimeFirewallLifecycleCompletion::Pair completion;
     RuntimeFirewallPreownedTerminalContinuation continuation;
+    std::shared_ptr<RuntimeFirewallPreownedTerminalContinuation>
+        final_continuation_slot;
     std::unique_ptr<RuntimeMutationAdmission::Lease> lease_owner;
     bool refresh_remote_lists_after_apply = false;
     try {
@@ -956,6 +958,9 @@ Daemon::apply_validated_config_via_control_task_with_lease_return(
                     }
                 }
             }};
+        final_continuation_slot =
+            std::make_shared<RuntimeFirewallPreownedTerminalContinuation>(
+                std::move(final_continuation));
         continuation = RuntimeFirewallPreownedTerminalContinuation{
             [this,
              prepared,
@@ -963,7 +968,7 @@ Daemon::apply_validated_config_via_control_task_with_lease_return(
              saved_config,
              base_active_snapshot,
              expected_lease_token,
-             final_continuation = std::move(final_continuation)](
+             final_continuation_slot](
                 RuntimeFirewallLifecycleTerminal terminal,
                 std::unique_ptr<RuntimeMutationAdmission::Lease> exact) mutable
                 noexcept {
@@ -981,7 +986,7 @@ Daemon::apply_validated_config_via_control_task_with_lease_return(
                         std::move(*prepared),
                         std::move(*rollback_prepared),
                         std::move(*saved_config),
-                        std::move(final_continuation));
+                        std::move(*final_continuation_slot));
                     return;
                 }
                 if (!exact_lease_returned) {
@@ -995,7 +1000,7 @@ Daemon::apply_validated_config_via_control_task_with_lease_return(
                     } catch (...) {
                     }
                 }
-                final_continuation.invoke(
+                final_continuation_slot->invoke(
                     std::move(terminal), std::move(exact));
             }};
         lease_owner = std::make_unique<RuntimeMutationAdmission::Lease>(
@@ -1088,33 +1093,32 @@ Daemon::apply_validated_config_via_control_task_with_lease_return(
     }
 
     if (!disposition.has_value()) {
-        // A stopped runtime has no published generation to fence. Keep the
-        // established cold-start/synchronous path until that lifecycle is
-        // migrated separately.
+        // No active generation needs a pre-apply fence. Keep the same exact
+        // mutation lease and hand the staged candidate directly to the
+        // typed stopped-bootstrap owner; the HTTP worker still waits on the
+        // same one-shot terminal below.
         if (!lease_owner || !static_cast<bool>(*lease_owner)) {
             result->error =
                 "Configuration pre-apply lost its inactive-runtime lease";
             result->runtime_unchanged = false;
             return *result;
         }
-        owner = std::move(*lease_owner);
-        enqueue_control_task(
-            [this,
-             result,
-             prepared,
-             rollback_prepared,
-             saved_config,
-             refresh_remote_lists_after_apply]() mutable {
-                *result = apply_prepared_validated_config_on_control_loop(
-                    std::move(*prepared),
-                    std::move(*rollback_prepared),
-                    refresh_remote_lists_after_apply,
-                    std::move(*saved_config),
-                    ConfigGenerationFence::synchronous_legacy);
-            },
-            true,
-            "api-apply-config-stopped");
-        return *result;
+        if (!final_continuation_slot ||
+            !static_cast<bool>(*final_continuation_slot)) {
+            owner = std::move(*lease_owner);
+            result->error =
+                "Configuration bootstrap continuation is unavailable";
+            result->runtime_unchanged = true;
+            return *result;
+        }
+        begin_preowned_runtime_firewall_config_bootstrap(
+            std::move(lease_owner),
+            base_active_snapshot,
+            std::move(*prepared),
+            std::move(*rollback_prepared),
+            std::move(*saved_config),
+            std::move(*final_continuation_slot));
+        disposition = RuntimeFirewallImmediateDisposition::handed_off;
     }
 
     if (*disposition !=

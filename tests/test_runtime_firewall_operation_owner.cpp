@@ -2785,6 +2785,8 @@ TEST_CASE("runtime firewall config preapply uses bounded hot retry without resol
     CHECK(runtime_firewall_lifecycle_uses_hot_retry(preapply));
     CHECK_FALSE(runtime_firewall_lifecycle_requires_resolver(preapply));
     for (const auto config_generation : {
+             RuntimeFirewallLifecycleKind::
+                 config_bootstrap_from_stopped,
              RuntimeFirewallLifecycleKind::config_candidate,
              RuntimeFirewallLifecycleKind::config_rollback}) {
         CHECK(runtime_firewall_lifecycle_is_config_generation(
@@ -2796,6 +2798,14 @@ TEST_CASE("runtime firewall config preapply uses bounded hot retry without resol
         CHECK(runtime_firewall_lifecycle_requires_resolver(
             config_generation));
     }
+    constexpr auto bootstrap = RuntimeFirewallLifecycleKind::
+        config_bootstrap_from_stopped;
+    CHECK(runtime_firewall_lifecycle_is_config_candidate(bootstrap));
+    CHECK(runtime_firewall_lifecycle_activates_stopped_runtime(
+        bootstrap));
+    CHECK_FALSE(runtime_firewall_lifecycle_is_start(bootstrap));
+    CHECK_FALSE(runtime_firewall_lifecycle_is_config_candidate(
+        RuntimeFirewallLifecycleKind::config_rollback));
     CHECK_FALSE(runtime_firewall_lifecycle_uses_preowned_continuation(
         RuntimeFirewallLifecycleKind::start_from_stopped));
     CHECK_FALSE(runtime_firewall_lifecycle_uses_preowned_continuation(

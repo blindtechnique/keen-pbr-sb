@@ -4068,7 +4068,8 @@ bool Daemon::runtime_firewall_lifecycle_generation_is_current(
         return false;
     }
     const bool exact_start_in_progress =
-        runtime_firewall_lifecycle_is_start(lifecycle_kind) &&
+        runtime_firewall_lifecycle_activates_stopped_runtime(
+            lifecycle_kind) &&
         !active &&
         runtime_state_machine_.state() == RuntimeState::starting;
     return (active || exact_start_in_progress) &&
@@ -4514,6 +4515,25 @@ void Daemon::begin_preowned_runtime_firewall_config_apply(
         std::move(final_continuation));
 }
 
+void Daemon::begin_preowned_runtime_firewall_config_bootstrap(
+    std::unique_ptr<RuntimeMutationAdmission::Lease> lease,
+    ActiveConfigSnapshotHandle base_active_snapshot,
+    PreparedRuntimeInputs candidate,
+    PreparedRuntimeInputs rollback,
+    std::string saved_config_json,
+    RuntimeFirewallPreownedTerminalContinuation final_continuation)
+    noexcept {
+    begin_preowned_runtime_firewall_config_generation(
+        RuntimeConfigGenerationPublicationMode::
+            staged_bootstrap_from_stopped,
+        std::move(lease),
+        std::move(base_active_snapshot),
+        std::move(candidate),
+        std::move(rollback),
+        std::move(saved_config_json),
+        std::move(final_continuation));
+}
+
 void Daemon::begin_preowned_runtime_firewall_active_reload(
     std::unique_ptr<RuntimeMutationAdmission::Lease> lease,
     ActiveConfigSnapshotHandle base_active_snapshot,
@@ -4540,7 +4560,10 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
     std::string staged_serialized,
     RuntimeFirewallPreownedTerminalContinuation final_continuation)
     noexcept {
-    const auto reject = [this](
+    const bool bootstrap_from_stopped = publication_mode ==
+        RuntimeConfigGenerationPublicationMode::
+            staged_bootstrap_from_stopped;
+    const auto reject = [this, bootstrap_from_stopped](
         RuntimeFirewallPreownedTerminalContinuation continuation,
         std::unique_ptr<RuntimeMutationAdmission::Lease> exact,
         std::string_view detail,
@@ -4554,6 +4577,28 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
         try {
             terminal.detail.assign(detail.data(), detail.size());
         } catch (...) {
+        }
+        if (bootstrap_from_stopped) {
+            try {
+                if (!routing_runtime_active() &&
+                    runtime_state_machine_.state() ==
+                        RuntimeState::starting) {
+                    transition_runtime_or_throw(
+                        RuntimeState::stopped,
+                        "stopped configuration bootstrap rejected");
+                    publish_runtime_state();
+                }
+            } catch (...) {
+                terminal.previous_generation_certainly_retained = false;
+                try {
+                    transition_runtime_or_throw(
+                        RuntimeState::broken,
+                        "stopped configuration bootstrap rejection state "
+                        "could not be published");
+                    publish_runtime_state();
+                } catch (...) {
+                }
+            }
         }
         if (continuation) {
             continuation.invoke(
@@ -4571,11 +4616,14 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
             true);
         return;
     }
-    if (!routing_runtime_active() ||
+    const bool runtime_active = routing_runtime_active();
+    if ((bootstrap_from_stopped ? runtime_active : !runtime_active) ||
         runtime_firewall_owner_->shutdown_requested()) {
         reject(
             std::move(final_continuation), std::move(lease),
-            "configuration candidate requires an active runtime owner",
+            bootstrap_from_stopped
+                ? "configuration bootstrap requires a stopped runtime"
+                : "configuration candidate requires an active runtime owner",
             true);
         return;
     }
@@ -4598,7 +4646,10 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
             return;
         }
         if (publication_mode ==
-            RuntimeConfigGenerationPublicationMode::staged_save) {
+                RuntimeConfigGenerationPublicationMode::staged_save ||
+            publication_mode ==
+                RuntimeConfigGenerationPublicationMode::
+                    staged_bootstrap_from_stopped) {
             const auto staged = config_store_.staged_snapshot();
             if (!staged || staged->second != staged_serialized) {
                 reject(
@@ -4613,10 +4664,11 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
             runtime_generation_.load(std::memory_order_acquire);
         const auto committed_resolver_generation =
             resolver_generation_snapshot_;
-        if (!committed_resolver_generation ||
-            !committed_resolver_generation->list_cache_snapshot ||
-            committed_resolver_generation->generation !=
-                base_runtime_generation) {
+        if (!bootstrap_from_stopped &&
+            (!committed_resolver_generation ||
+             !committed_resolver_generation->list_cache_snapshot ||
+             committed_resolver_generation->generation !=
+                 base_runtime_generation)) {
             reject(
                 std::move(final_continuation), std::move(lease),
                 "active runtime has no exact committed resolver/list "
@@ -4645,14 +4697,16 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
                     snapshot_internal_vpn_service_verified_includes_lkg());
         }
 
-        rollback.config = config_;
-        rollback.outbound_marks = outbound_marks_;
-        rollback.keenetic_dns =
-            committed_resolver_generation->keenetic_dns;
-        rollback.internal_vpn_resolution.effective_servers =
-            resolved_internal_vpn_servers_;
-        rollback.internal_vpn_service_resolution.effective_targets =
-            resolved_internal_vpn_service_targets_;
+        if (!bootstrap_from_stopped) {
+            rollback.config = config_;
+            rollback.outbound_marks = outbound_marks_;
+            rollback.keenetic_dns =
+                committed_resolver_generation->keenetic_dns;
+            rollback.internal_vpn_resolution.effective_servers =
+                resolved_internal_vpn_servers_;
+            rollback.internal_vpn_service_resolution.effective_targets =
+                resolved_internal_vpn_service_targets_;
+        }
 
         transaction =
             std::make_shared<DaemonConfigGenerationTransaction>();
@@ -4690,8 +4744,10 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
             current_urltest_selections;
         transaction->candidate_list_cache_snapshot =
             capture_relevant_list_cache_generation(candidate.config);
-        transaction->rollback_list_cache_snapshot =
-            committed_resolver_generation->list_cache_snapshot;
+        if (!bootstrap_from_stopped) {
+            transaction->rollback_list_cache_snapshot =
+                committed_resolver_generation->list_cache_snapshot;
+        }
 
         const auto make_private_resolver_generation = [this](
             const PreparedRuntimeInputs& prepared,
@@ -4726,8 +4782,10 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
                     candidate.internal_vpn_service_resolution
                         .effective_targets),
                 transaction->candidate_runtime_generation);
-        transaction->rollback_resolver_generation =
-            committed_resolver_generation;
+        if (!bootstrap_from_stopped) {
+            transaction->rollback_resolver_generation =
+                committed_resolver_generation;
+        }
 
         transaction->candidate_resolver_sync =
             resolver_sync_.checkpoint();
@@ -4741,6 +4799,8 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
 
         switch (publication_mode) {
         case RuntimeConfigGenerationPublicationMode::staged_save:
+        case RuntimeConfigGenerationPublicationMode::
+                 staged_bootstrap_from_stopped:
             transaction->active_commit =
                 ConfigStore::prepare_active_commit(
                     std::move(base_active_snapshot),
@@ -4806,9 +4866,11 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
             KPBR_LOCK_GUARD(udp_call_affinity_mutation_mutex_);
         }
     } catch (...) {
-        schedule_netfilter_runtime_refresh_noexcept(
-            NetfilterRefreshReason::full,
-            "configuration candidate could not fence Meta cleanup");
+        if (!bootstrap_from_stopped) {
+            schedule_netfilter_runtime_refresh_noexcept(
+                NetfilterRefreshReason::full,
+                "configuration candidate could not fence Meta cleanup");
+        }
         reject(
             std::move(transaction->final_continuation),
             std::move(lease),
@@ -4816,15 +4878,50 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
             true);
         return;
     }
+    if (bootstrap_from_stopped) {
+        try {
+            runtime_firewall_owner_->cancel_retry();
+            if (runtime_firewall_owner_->active_context() ||
+                runtime_firewall_owner_->pending_successor()) {
+                reject(
+                    std::move(transaction->final_continuation),
+                    std::move(lease),
+                    "configuration bootstrap owner is busy",
+                    true);
+                return;
+            }
+            transition_runtime_or_throw(
+                RuntimeState::starting,
+                "stopped configuration bootstrap started");
+            publish_runtime_state();
+        } catch (const std::exception& error) {
+            reject(
+                std::move(transaction->final_continuation),
+                std::move(lease), error.what(), true);
+            return;
+        } catch (...) {
+            reject(
+                std::move(transaction->final_continuation),
+                std::move(lease),
+                "configuration bootstrap state could not be published",
+                true);
+            return;
+        }
+    }
+    const auto lifecycle_kind = bootstrap_from_stopped
+        ? RuntimeFirewallLifecycleKind::config_bootstrap_from_stopped
+        : RuntimeFirewallLifecycleKind::config_candidate;
     if (!start_preowned_runtime_firewall_config_phase(
             transaction,
-            RuntimeFirewallLifecycleKind::config_candidate,
+            lifecycle_kind,
             lease,
             continuation)) {
-        schedule_netfilter_runtime_refresh_noexcept(
-            NetfilterRefreshReason::full,
-            "configuration candidate owner rejected after Meta cleanup "
-            "invalidation");
+        if (!bootstrap_from_stopped) {
+            schedule_netfilter_runtime_refresh_noexcept(
+                NetfilterRefreshReason::full,
+                "configuration candidate owner rejected after Meta cleanup "
+                "invalidation");
+        }
         reject(
             std::move(transaction->final_continuation),
             std::move(lease),
@@ -4890,10 +4987,13 @@ void Daemon::complete_preowned_runtime_firewall_config_candidate(
         runtime_generation_.load(std::memory_order_acquire) ==
         transaction->base_runtime_generation;
     evidence.terminal = std::move(terminal);
-    evidence.exact_rollback_available = exact_lease_owned &&
+    const bool bootstrap_from_stopped = transaction->publication_mode ==
+        RuntimeConfigGenerationPublicationMode::
+            staged_bootstrap_from_stopped;
+    evidence.exact_rollback_available = !bootstrap_from_stopped &&
+        exact_lease_owned &&
         transaction->rollback_resolver_generation &&
         !runtime_firewall_owner_->shutdown_requested();
-    const auto action = plan_config_candidate_terminal(evidence);
 
     if (!evidence.terminal.detail.empty()) {
         try {
@@ -4902,6 +5002,31 @@ void Daemon::complete_preowned_runtime_firewall_config_candidate(
         } catch (...) {
         }
     }
+    if (bootstrap_from_stopped) {
+        auto completion = complete_config_bootstrap_publication(
+            std::move(evidence),
+            [this, transaction]() noexcept {
+                return publish_prepared_runtime_firewall_config_candidate(
+                    transaction);
+            });
+        if (completion.commit_attempted &&
+            !completion.candidate_published) {
+            try {
+                transaction->candidate_failure_detail =
+                    "candidate was verified in the router but its exact "
+                    "ConfigStore publication was rejected";
+                completion.terminal.detail =
+                    transaction->candidate_failure_detail;
+            } catch (...) {
+            }
+        }
+        finish_preowned_runtime_firewall_config_apply(
+            transaction,
+            std::move(completion.terminal),
+            std::move(lease));
+        return;
+    }
+    const auto action = plan_config_candidate_terminal(evidence);
     if (action == ConfigCandidateAction::publish_candidate) {
         if (publish_prepared_runtime_firewall_config_candidate(
                 transaction)) {
@@ -5159,6 +5284,9 @@ bool Daemon::publish_prepared_runtime_firewall_config_candidate(
             transaction->base_runtime_generation) {
         return false;
     }
+    const bool bootstrap_from_stopped = transaction->publication_mode ==
+        RuntimeConfigGenerationPublicationMode::
+            staged_bootstrap_from_stopped;
     const auto candidate_fwmark = fwmark_mask_value(
         transaction->candidate.config.fwmark.value_or(FwmarkConfig{}));
     try {
@@ -5246,6 +5374,8 @@ bool Daemon::publish_prepared_runtime_firewall_config_candidate(
         bool committed = false;
         switch (transaction->publication_mode) {
         case RuntimeConfigGenerationPublicationMode::staged_save:
+        case RuntimeConfigGenerationPublicationMode::
+                 staged_bootstrap_from_stopped:
             committed = config_store_.commit_prepared_active(
                 transaction->active_commit,
                 publish_candidate) ==
@@ -5263,6 +5393,24 @@ bool Daemon::publish_prepared_runtime_firewall_config_candidate(
             return false;
         }
         transaction->candidate_published = true;
+        if (bootstrap_from_stopped) {
+            try {
+                runtime_state_store_.set_routing_runtime_active(true);
+                transition_runtime_or_throw(
+                    RuntimeState::running,
+                    "stopped configuration bootstrap complete");
+            } catch (...) {
+                runtime_state_store_.set_routing_runtime_active(false);
+                try {
+                    transition_runtime_or_throw(
+                        RuntimeState::broken,
+                        "stopped configuration bootstrap publication failed");
+                    publish_runtime_state();
+                } catch (...) {
+                }
+                return false;
+            }
+        }
     } catch (...) {
         return false;
     }
@@ -5384,6 +5532,9 @@ bool Daemon::publish_prepared_runtime_firewall_config_candidate(
     try {
         schedule_keenetic_dns_refresh();
         schedule_lists_autoupdate();
+        if (bootstrap_from_stopped) {
+            schedule_owned_snat_health_check();
+        }
         schedule_internal_vpn_catalog_refresh_if_needed(
             transaction->candidate.internal_vpn_resolution.state,
             transaction->candidate.internal_vpn_service_resolution.state);
@@ -5418,14 +5569,49 @@ void Daemon::finish_preowned_runtime_firewall_config_apply(
     RuntimeFirewallLifecycleTerminal terminal,
     std::unique_ptr<RuntimeMutationAdmission::Lease> lease) noexcept {
     if (!transaction || !transaction->final_continuation) return;
+    const bool bootstrap_from_stopped = transaction->publication_mode ==
+        RuntimeConfigGenerationPublicationMode::
+            staged_bootstrap_from_stopped;
     const auto runtime_terminal_action =
         plan_config_runtime_terminal(
             transaction->candidate_published, terminal);
-    const bool runtime_terminal_safe =
-        runtime_terminal_action ==
-            ConfigRuntimeTerminalAction::keep_active;
-    if (runtime_terminal_action ==
-        ConfigRuntimeTerminalAction::fail_closed) {
+    const auto bootstrap_terminal_action =
+        plan_config_bootstrap_terminal(
+            transaction->candidate_published, terminal);
+    bool runtime_terminal_safe = bootstrap_from_stopped
+        ? bootstrap_terminal_action ==
+              ConfigBootstrapTerminalAction::keep_running
+        : runtime_terminal_action ==
+              ConfigRuntimeTerminalAction::keep_active;
+    bool fail_closed = bootstrap_from_stopped
+        ? bootstrap_terminal_action ==
+              ConfigBootstrapTerminalAction::fail_closed
+        : runtime_terminal_action ==
+              ConfigRuntimeTerminalAction::fail_closed;
+    if (bootstrap_from_stopped &&
+        bootstrap_terminal_action ==
+            ConfigBootstrapTerminalAction::restore_stopped) {
+        try {
+            runtime_state_store_.set_routing_runtime_active(false);
+            if (runtime_state_machine_.state() != RuntimeState::stopped) {
+                transition_runtime_or_throw(
+                    RuntimeState::stopped,
+                    "stopped configuration bootstrap retained its base");
+            }
+            publish_runtime_state();
+        } catch (...) {
+            fail_closed = true;
+            runtime_terminal_safe = false;
+            terminal.previous_generation_certainly_retained = false;
+            try {
+                terminal.detail =
+                    "stopped configuration bootstrap could not restore "
+                    "its stopped publication";
+            } catch (...) {
+            }
+        }
+    }
+    if (fail_closed) {
         // An unknown candidate/rollback terminal is not a healthy base
         // generation. Fail closed before returning the mutation lease so no
         // later writer or health reader can trust the old running label.
@@ -5547,8 +5733,8 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
             return;
         }
         ConfigTerminalOperationIdentity identity;
-        identity.kind = context->lifecycle_kind ==
-                RuntimeFirewallLifecycleKind::config_candidate
+        identity.kind = runtime_firewall_lifecycle_is_config_candidate(
+                context->lifecycle_kind)
             ? ConfigTerminalOperationKind::candidate
             : ConfigTerminalOperationKind::rollback;
         identity.operation_serial = queued_claim.serial;
@@ -5698,8 +5884,9 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
         if (lifecycle_config_generation) {
             const auto& config_transaction =
                 *state.config_generation_transaction;
-            const bool candidate_phase = context->lifecycle_kind ==
-                RuntimeFirewallLifecycleKind::config_candidate;
+            const bool candidate_phase =
+                runtime_firewall_lifecycle_is_config_candidate(
+                    context->lifecycle_kind);
             const auto& prepared = candidate_phase
                 ? config_transaction.candidate
                 : config_transaction.rollback;
@@ -5802,8 +5989,8 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
         RuntimeFirewallGenerationSnapshot generation_snapshot;
         generation_snapshot.operation_kind = lifecycle_preapply
             ? RuntimeFirewallWorkerOperationKind::config_preapply
-            : (context->lifecycle_kind ==
-                       RuntimeFirewallLifecycleKind::config_candidate
+            : (runtime_firewall_lifecycle_is_config_candidate(
+                       context->lifecycle_kind)
                    ? RuntimeFirewallWorkerOperationKind::config_candidate
                    : (context->lifecycle_kind ==
                               RuntimeFirewallLifecycleKind::config_rollback
@@ -5818,8 +6005,9 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
         const DaemonRuntimeFirewallOperationState::CorePublication*
             config_generation_previous_publication = nullptr;
         if (lifecycle_config_generation) {
-            const bool candidate_phase = context->lifecycle_kind ==
-                RuntimeFirewallLifecycleKind::config_candidate;
+            const bool candidate_phase =
+                runtime_firewall_lifecycle_is_config_candidate(
+                    context->lifecycle_kind);
             config_generation_target = candidate_phase
                 ? &state.config_generation_transaction->candidate
                 : &state.config_generation_transaction->rollback;
@@ -5847,8 +6035,8 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
             ? config_generation_target->outbound_marks
             : outbound_marks_;
         transaction.urltest_selections = lifecycle_config_generation
-            ? (context->lifecycle_kind ==
-                       RuntimeFirewallLifecycleKind::config_candidate
+            ? (runtime_firewall_lifecycle_is_config_candidate(
+                       context->lifecycle_kind)
                    ? state.config_generation_transaction
                          ->candidate_urltest_selections
                    : state.config_generation_transaction
@@ -5884,8 +6072,8 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
             ? state.list_cache_snapshot->fingerprints()
             : std::map<std::string, std::string>{};
         transaction.requested_mode =
-            context->lifecycle_kind ==
-                    RuntimeFirewallLifecycleKind::config_candidate
+            runtime_firewall_lifecycle_is_config_candidate(
+                    context->lifecycle_kind)
             ? state.config_generation_transaction
                   ->candidate_firewall_policy.mode
             : (context->lifecycle_kind ==
@@ -5897,8 +6085,8 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                    ? FirewallApplyMode::PreserveSets
                    : runtime_refresh_firewall_mode()));
         transaction.force_clear_dynamic_sets =
-            context->lifecycle_kind ==
-                    RuntimeFirewallLifecycleKind::config_candidate
+            runtime_firewall_lifecycle_is_config_candidate(
+                    context->lifecycle_kind)
             ? state.config_generation_transaction
                   ->candidate_firewall_policy.force_clear_dynamic_sets
             : (context->lifecycle_kind ==
@@ -5941,8 +6129,8 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
         generation_snapshot.route.route_epoch =
             routing_observation_epoch_.load(std::memory_order_acquire);
         if (lifecycle_config_generation) {
-            if (context->lifecycle_kind ==
-                RuntimeFirewallLifecycleKind::config_candidate) {
+            if (runtime_firewall_lifecycle_is_config_candidate(
+                    context->lifecycle_kind)) {
                 state.config_generation_transaction
                     ->candidate_route_epoch =
                         generation_snapshot.route.route_epoch;
@@ -6462,7 +6650,8 @@ bool Daemon::begin_runtime_firewall_lifecycle_resolver(
     const std::shared_ptr<RuntimeFirewallOperationContext>& context)
     noexcept {
     const bool lifecycle_start = context &&
-        runtime_firewall_lifecycle_is_start(context->lifecycle_kind);
+        runtime_firewall_lifecycle_activates_stopped_runtime(
+            context->lifecycle_kind);
     const bool lifecycle_restart = context &&
         runtime_firewall_lifecycle_is_restart(context->lifecycle_kind);
     const bool lifecycle_config_generation = context &&
@@ -6609,8 +6798,8 @@ bool Daemon::begin_runtime_firewall_lifecycle_resolver(
         } else {
             state.private_resolver_generation = generation;
             if (state.config_generation_transaction) {
-                if (context->lifecycle_kind ==
-                    RuntimeFirewallLifecycleKind::config_candidate) {
+                if (runtime_firewall_lifecycle_is_config_candidate(
+                        context->lifecycle_kind)) {
                     state.config_generation_transaction
                         ->candidate_resolver_generation = generation;
                 } else {
@@ -6713,8 +6902,8 @@ bool Daemon::begin_runtime_firewall_lifecycle_resolver(
         if (requested ==
             ResolverStreamCoordinator::RequestResult::started) {
             if (lifecycle_config_generation &&
-                context->lifecycle_kind ==
-                    RuntimeFirewallLifecycleKind::config_candidate &&
+                runtime_firewall_lifecycle_is_config_candidate(
+                    context->lifecycle_kind) &&
                 state.config_generation_transaction) {
                 state.config_generation_transaction
                     ->candidate_resolver_may_have_changed = true;
@@ -8546,16 +8735,16 @@ void Daemon::drain_runtime_firewall_terminal(
             RuntimeFirewallOperationContext::SuccessorMode::none;
         state.suppress_coordinator_rerun = true;
 
-        if (context->lifecycle_kind ==
-                RuntimeFirewallLifecycleKind::config_candidate &&
+        if (runtime_firewall_lifecycle_is_config_candidate(
+                context->lifecycle_kind) &&
             state.config_generation_transaction) {
             state.config_generation_transaction
                 ->candidate_firewall_preimage_is_base =
                     !state.core_publication.committed &&
                     !context->worker_commit_ambiguous;
         }
-        if (context->lifecycle_kind ==
-                RuntimeFirewallLifecycleKind::config_candidate &&
+        if (runtime_firewall_lifecycle_is_config_candidate(
+                context->lifecycle_kind) &&
             state.config_generation_transaction &&
             state.core_publication.committed &&
             !state.config_generation_transaction
@@ -8667,13 +8856,19 @@ void Daemon::drain_runtime_firewall_terminal(
             return;
         }
 
+        const bool stopped_base_certainly_retained =
+            context->lifecycle_kind ==
+                RuntimeFirewallLifecycleKind::
+                    config_bootstrap_from_stopped &&
+            worker_result &&
+            worker_result->previous_generation_certainly_retained();
         auto config_terminal = prepare_config_generation_terminal(
             shutdown
                 ? RuntimeFirewallLifecycleOutcome::shutdown
                 : (verified
                        ? RuntimeFirewallLifecycleOutcome::verified_success
                        : RuntimeFirewallLifecycleOutcome::not_verified),
-            /*previous_generation_certainly_retained=*/false);
+            stopped_base_certainly_retained);
         if (verified) {
             config_terminal.committed = true;
             config_terminal.commit_ambiguous = false;

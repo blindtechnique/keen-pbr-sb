@@ -85,6 +85,17 @@
   rollback-success. Для Entware/Keenetic GCC 8 old ABI точная публикация
   Config использует доказуемый no-throw relocation-swap через move construction
   вместо недоказуемого для старого `std::string` aggregate swap.
+- Сохранение конфигурации при остановленном runtime теперь удерживает тот же
+  exact mutation lease и проходит типизированный
+  `RuntimeFirewallOperationOwner` как отдельный bootstrap lifecycle. Кандидат
+  остаётся приватным до подтверждённых worker/firewall и resolver-фаз, после
+  чего публикуется точным `ConfigStore` CAS и переводит runtime в `running`.
+  Чистый отказ до COMMIT возвращает runtime в `stopped` и сохраняет draft;
+  неоднозначный post-COMMIT terminal или отказ exact CAS после подтверждённого
+  кандидата fail closed. Legacy pre-generation путь больше не выполняет прямой
+  missing-SNAT firewall repair перед переиспользованием marks. Это не завершает
+  перенос всех config writers: forward/rollback восстановления резервной копии
+  пока остаются на отдельном синхронном apply-пути.
 - Внутренние изменения runtime/firewall из восстановления правил, URLTest,
   Keenetic DNS, отложенного старта и автообновления списков проходят через
   единого владельца мутации. Занятый владелец сохраняет один ограниченный

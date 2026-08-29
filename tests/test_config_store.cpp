@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include "../src/daemon/config_store.hpp"
+#include "../src/daemon/runtime_config_terminal_policy.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -49,6 +50,37 @@ struct NoexceptPublication {
 struct ThrowingPublication {
     void operator()() {}
 };
+
+constexpr ConfigTerminalOperationIdentity bootstrap_candidate_identity()
+    noexcept {
+    return {
+        ConfigTerminalOperationKind::candidate,
+        71U,
+        41U,
+        42U};
+}
+
+ConfigCandidateEvidence bootstrap_candidate_evidence(
+    RuntimeFirewallLifecycleTerminal terminal) {
+    ConfigCandidateEvidence evidence;
+    evidence.expected_identity = bootstrap_candidate_identity();
+    evidence.exact_lease_owned = true;
+    evidence.published_generation_current = true;
+    evidence.terminal = std::move(terminal);
+    evidence.exact_rollback_available = false;
+    return evidence;
+}
+
+RuntimeFirewallLifecycleTerminal verified_bootstrap_candidate() {
+    RuntimeFirewallLifecycleTerminal terminal;
+    terminal.outcome =
+        RuntimeFirewallLifecycleOutcome::verified_success;
+    terminal.committed = true;
+    terminal.commit_ambiguous = false;
+    terminal.observed_config_identity =
+        bootstrap_candidate_identity();
+    return terminal;
+}
 
 template <typename Publication, typename = void>
 struct CanCommitPreparedActive : std::false_type {};
@@ -140,6 +172,121 @@ TEST_CASE(
         committed->config.outbounds->front().interface ==
         std::optional<std::string>{"nwg-new"});
     CHECK(committed->outbound_marks.at("reused-interface") == new_mark);
+}
+
+TEST_CASE(
+    "stopped bootstrap orders worker proof before exact ConfigStore publication") {
+    const auto active = config_named("bootstrap-active");
+    const auto candidate = config_named("bootstrap-candidate");
+    const auto serialized = staged_json(candidate);
+
+    SUBCASE("pre-COMMIT rejection retains stopped base and draft") {
+        ConfigStore store(active);
+        store.stage_config(candidate, serialized);
+        const auto base = store.pin_active_snapshot();
+        const auto prepared = ConfigStore::prepare_active_commit(
+            base, candidate, OutboundMarkMap{}, serialized);
+        RuntimeFirewallLifecycleTerminal terminal;
+        terminal.outcome =
+            RuntimeFirewallLifecycleOutcome::not_verified;
+        terminal.committed = false;
+        terminal.commit_ambiguous = false;
+        terminal.previous_generation_certainly_retained = true;
+        terminal.observed_config_identity =
+            bootstrap_candidate_identity();
+        bool commit_attempted = false;
+        bool publication_called = false;
+
+        const auto completion =
+            complete_config_bootstrap_publication(
+                bootstrap_candidate_evidence(std::move(terminal)),
+                [&]() noexcept {
+                    commit_attempted = true;
+                    return store.commit_prepared_active(
+                               prepared,
+                               NoexceptPublication{&publication_called}) ==
+                        PreparedActiveConfigCommitResult::committed;
+                });
+
+        CHECK_FALSE(commit_attempted);
+        CHECK_FALSE(completion.commit_attempted);
+        CHECK_FALSE(publication_called);
+        CHECK_FALSE(completion.candidate_published);
+        CHECK(completion.terminal_action ==
+              ConfigBootstrapTerminalAction::restore_stopped);
+        CHECK(store.pin_active_snapshot() == base);
+        CHECK(store.staged_snapshot().has_value());
+    }
+
+    SUBCASE("verified candidate plus rejected CAS fails closed") {
+        const auto replacement = config_named("bootstrap-replacement");
+        ConfigStore store(active);
+        store.stage_config(candidate, serialized);
+        const auto base = store.pin_active_snapshot();
+        const auto prepared = ConfigStore::prepare_active_commit(
+            base, candidate, OutboundMarkMap{}, serialized);
+        store.stage_config(replacement, staged_json(replacement));
+        bool publication_called = false;
+        auto cas_result =
+            PreparedActiveConfigCommitResult::committed;
+
+        const auto completion =
+            complete_config_bootstrap_publication(
+                bootstrap_candidate_evidence(
+                    verified_bootstrap_candidate()),
+                [&]() noexcept {
+                    cas_result = store.commit_prepared_active(
+                        prepared,
+                        NoexceptPublication{&publication_called});
+                    return cas_result ==
+                        PreparedActiveConfigCommitResult::committed;
+                });
+
+        CHECK(completion.commit_attempted);
+        CHECK(cas_result ==
+              PreparedActiveConfigCommitResult::staged_mismatch);
+        CHECK_FALSE(publication_called);
+        CHECK_FALSE(completion.candidate_published);
+        CHECK(completion.terminal.outcome ==
+              RuntimeFirewallLifecycleOutcome::not_verified);
+        CHECK_FALSE(
+            completion.terminal.previous_generation_certainly_retained);
+        CHECK(completion.terminal_action ==
+              ConfigBootstrapTerminalAction::fail_closed);
+        CHECK(store.pin_active_snapshot() == base);
+        const auto staged = store.staged_snapshot();
+        REQUIRE(staged.has_value());
+        CHECK(staged->first.daemon->cache_dir ==
+              "/tmp/bootstrap-replacement");
+    }
+
+    SUBCASE("verified candidate publishes candidate before running terminal") {
+        ConfigStore store(active);
+        store.stage_config(candidate, serialized);
+        const auto base = store.pin_active_snapshot();
+        const auto prepared = ConfigStore::prepare_active_commit(
+            base, candidate, OutboundMarkMap{}, serialized);
+        bool publication_called = false;
+
+        const auto completion =
+            complete_config_bootstrap_publication(
+                bootstrap_candidate_evidence(
+                    verified_bootstrap_candidate()),
+                [&]() noexcept {
+                    return store.commit_prepared_active(
+                               prepared,
+                               NoexceptPublication{&publication_called}) ==
+                        PreparedActiveConfigCommitResult::committed;
+                });
+
+        CHECK(completion.commit_attempted);
+        CHECK(publication_called);
+        CHECK(completion.candidate_published);
+        CHECK(completion.terminal_action ==
+              ConfigBootstrapTerminalAction::keep_running);
+        CHECK(store.pin_active_snapshot() == prepared.candidate);
+        CHECK_FALSE(store.staged_snapshot().has_value());
+    }
 }
 
 TEST_CASE("prepared active commit rejects exact base drift before publication") {

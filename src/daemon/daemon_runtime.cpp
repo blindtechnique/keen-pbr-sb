@@ -1086,36 +1086,14 @@ void Daemon::complete_pending_snat_recovery_before_generation_change() {
             "generation change");
     }
     if (before == OwnedSnatState::missing) {
-        const auto list_cache_snapshot =
-            resolver_generation_snapshot_ &&
-                    resolver_generation_snapshot_->list_cache_snapshot
-                ? resolver_generation_snapshot_->list_cache_snapshot
-                : capture_relevant_list_cache_generation(config_);
-        retry_hot_apply_firewall(
-            [this, &list_cache_snapshot]() {
-                apply_firewall(
-                    FirewallApplyMode::PreserveSets,
-                    list_cache_snapshot);
-            },
-            [](std::chrono::milliseconds delay) {
-                std::this_thread::sleep_for(delay);
-            },
-            [](std::size_t retry,
-               std::chrono::milliseconds delay,
-               const TransientFirewallError& error) {
-                Logger::instance().info(
-                    "Pre-apply SNAT repair deferred after a concurrent "
-                    "firmware change: {}. Retry {} in {}ms.",
-                    error.what(),
-                    retry,
-                    delay.count());
-            });
-        if (firewall_->inspect_owned_snat_state() !=
-            OwnedSnatState::healthy) {
-            throw TransientFirewallError(
-                "tunnel SNAT could not be verified before configuration "
-                "generation change");
-        }
+        // The production save path reaches this barrier only through
+        // RuntimeFirewallOperationOwner::config_preapply, whose worker owns
+        // inspection, repair and exact conntrack retirement. Never recreate
+        // that mutation synchronously: a caller which still selects the
+        // legacy fence must fail before reusing numerical marks.
+        throw TransientFirewallError(
+            "tunnel SNAT repair requires the typed configuration pre-apply "
+            "owner");
     }
 
     // This is the only synchronous hot cleanup path. It is a strict barrier

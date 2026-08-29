@@ -87,6 +87,7 @@ struct RuntimeFirewallOperationContext;
 enum class RuntimeFirewallLifecycleKind : std::uint8_t;
 enum class RuntimeConfigGenerationPublicationMode : std::uint8_t {
     staged_save,
+    staged_bootstrap_from_stopped,
     active_runtime_reload,
 };
 struct DaemonConfigGenerationTransaction;
@@ -978,6 +979,14 @@ private:
     // post-mutation failure starts the separately prepared rollback target
     // under the same lease before the API/WAL waiter is released.
     void begin_preowned_runtime_firewall_config_apply(
+        std::unique_ptr<RuntimeMutationAdmission::Lease> lease,
+        ActiveConfigSnapshotHandle base_active_snapshot,
+        PreparedRuntimeInputs candidate,
+        PreparedRuntimeInputs rollback,
+        std::string saved_config_json,
+        RuntimeFirewallPreownedTerminalContinuation final_continuation)
+        noexcept;
+    void begin_preowned_runtime_firewall_config_bootstrap(
         std::unique_ptr<RuntimeMutationAdmission::Lease> lease,
         ActiveConfigSnapshotHandle base_active_snapshot,
         PreparedRuntimeInputs candidate,

@@ -513,3 +513,56 @@ TEST_CASE("config runtime terminal policy fails closed on unknown state") {
     CHECK(plan_config_runtime_terminal(false, shutdown) ==
           ConfigRuntimeTerminalAction::shutdown);
 }
+
+TEST_CASE("stopped config bootstrap publishes running only from exact candidate proof") {
+    auto candidate = verified_terminal("bootstrap candidate");
+    candidate.observed_config_identity = candidate_identity();
+    CHECK(plan_config_bootstrap_terminal(
+              /*candidate_published=*/true, candidate) ==
+          ConfigBootstrapTerminalAction::keep_running);
+
+    auto candidate_noop = candidate;
+    candidate_noop.committed = false;
+    candidate_noop.candidate_noop_verified = true;
+    CHECK(plan_config_bootstrap_terminal(true, candidate_noop) ==
+          ConfigBootstrapTerminalAction::keep_running);
+
+    // The router candidate may be exact while the staged ConfigStore CAS is
+    // rejected. There is no active-runtime rollback generation for a stopped
+    // bootstrap, so this is recovery-required rather than stopped.
+    CHECK(plan_config_bootstrap_terminal(false, candidate) ==
+          ConfigBootstrapTerminalAction::fail_closed);
+
+    LifecycleTerminal unchanged;
+    unchanged.outcome = LifecycleOutcome::not_verified;
+    unchanged.committed = false;
+    unchanged.commit_ambiguous = false;
+    unchanged.previous_generation_certainly_retained = true;
+    unchanged.observed_config_identity = candidate_identity();
+    CHECK(plan_config_bootstrap_terminal(false, unchanged) ==
+          ConfigBootstrapTerminalAction::restore_stopped);
+
+    CHECK(plan_config_bootstrap_terminal(true, unchanged) ==
+          ConfigBootstrapTerminalAction::fail_closed);
+
+    auto ambiguous = candidate;
+    ambiguous.commit_ambiguous = true;
+    CHECK(plan_config_bootstrap_terminal(false, ambiguous) ==
+          ConfigBootstrapTerminalAction::fail_closed);
+
+    auto committed_unverified = candidate;
+    committed_unverified.outcome = LifecycleOutcome::not_verified;
+    CHECK(plan_config_bootstrap_terminal(
+              false, committed_unverified) ==
+          ConfigBootstrapTerminalAction::fail_closed);
+
+    auto wrong_identity = candidate;
+    wrong_identity.observed_config_identity = rollback_identity();
+    CHECK(plan_config_bootstrap_terminal(true, wrong_identity) ==
+          ConfigBootstrapTerminalAction::fail_closed);
+
+    LifecycleTerminal shutdown;
+    shutdown.outcome = LifecycleOutcome::shutdown;
+    CHECK(plan_config_bootstrap_terminal(false, shutdown) ==
+          ConfigBootstrapTerminalAction::shutdown);
+}

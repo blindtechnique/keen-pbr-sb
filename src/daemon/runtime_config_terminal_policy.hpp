@@ -4,6 +4,8 @@
 #include "runtime_firewall_lifecycle_completion.hpp"
 
 #include <cstdint>
+#include <type_traits>
+#include <utility>
 
 namespace keen_pbr3 {
 
@@ -101,6 +103,99 @@ enum class ConfigRuntimeTerminalAction : std::uint8_t {
     fail_closed,
     shutdown,
 };
+
+enum class ConfigBootstrapTerminalAction : std::uint8_t {
+    keep_running,
+    restore_stopped,
+    fail_closed,
+    shutdown,
+};
+
+// A stopped-runtime save preserves the established API contract: a verified
+// candidate becomes the running generation. Before-COMMIT rejection retains
+// the stopped base and its draft. Once COMMIT might have been entered, a
+// missing exact candidate publication is recovery-required; replaying the
+// request or pretending that the stopped kernel state survived would be
+// unsafe.
+inline ConfigBootstrapTerminalAction plan_config_bootstrap_terminal(
+    bool candidate_published,
+    const RuntimeFirewallLifecycleTerminal& terminal) noexcept {
+    if (terminal.outcome == RuntimeFirewallLifecycleOutcome::shutdown) {
+        return ConfigBootstrapTerminalAction::shutdown;
+    }
+    const bool exact_candidate_published =
+        candidate_published && terminal.observed_config_identity &&
+        terminal.observed_config_identity->kind ==
+            ConfigTerminalOperationKind::candidate &&
+        terminal.outcome ==
+            RuntimeFirewallLifecycleOutcome::verified_success &&
+        (terminal.committed || terminal.candidate_noop_verified) &&
+        !terminal.commit_ambiguous;
+    if (exact_candidate_published) {
+        return ConfigBootstrapTerminalAction::keep_running;
+    }
+    const bool exact_stopped_base_retained =
+        !candidate_published &&
+        terminal.outcome == RuntimeFirewallLifecycleOutcome::not_verified &&
+        terminal.previous_generation_certainly_retained &&
+        !terminal.committed && !terminal.commit_ambiguous;
+    return exact_stopped_base_retained
+        ? ConfigBootstrapTerminalAction::restore_stopped
+        : ConfigBootstrapTerminalAction::fail_closed;
+}
+
+// This seam keeps the stopped-bootstrap ordering executable and testable:
+// exact worker evidence is checked first, the caller's exact ConfigStore CAS
+// is invoked only for a verified candidate, and the resulting runtime action
+// is derived only after that publication attempt. A rejected CAS is not the
+// same as a clean pre-COMMIT rejection because the router candidate may
+// already have committed.
+struct ConfigBootstrapPublicationCompletion final {
+    ConfigCandidateAction candidate_action{
+        ConfigCandidateAction::recovery_required};
+    bool commit_attempted{false};
+    bool candidate_published{false};
+    ConfigBootstrapTerminalAction terminal_action{
+        ConfigBootstrapTerminalAction::fail_closed};
+    RuntimeFirewallLifecycleTerminal terminal;
+};
+
+template <
+    typename PublishCandidate,
+    std::enable_if_t<
+        std::is_nothrow_invocable_r_v<bool, PublishCandidate&>,
+        int> = 0>
+ConfigBootstrapPublicationCompletion complete_config_bootstrap_publication(
+    ConfigCandidateEvidence evidence,
+    PublishCandidate&& publish_candidate) noexcept {
+    ConfigBootstrapPublicationCompletion completion;
+    completion.candidate_action =
+        plan_config_candidate_terminal(evidence);
+    completion.terminal = std::move(evidence.terminal);
+
+    if (completion.candidate_action ==
+        ConfigCandidateAction::publish_candidate) {
+        completion.commit_attempted = true;
+        completion.candidate_published =
+            std::forward<PublishCandidate>(publish_candidate)();
+        if (!completion.candidate_published) {
+            completion.terminal.outcome =
+                RuntimeFirewallLifecycleOutcome::not_verified;
+            completion.terminal.previous_generation_certainly_retained =
+                false;
+        }
+    } else if (
+        completion.candidate_action !=
+        ConfigCandidateAction::reject_runtime_unchanged) {
+        completion.terminal.outcome =
+            RuntimeFirewallLifecycleOutcome::not_verified;
+        completion.terminal.previous_generation_certainly_retained = false;
+    }
+
+    completion.terminal_action = plan_config_bootstrap_terminal(
+        completion.candidate_published, completion.terminal);
+    return completion;
+}
 
 // The user-visible/runtime-active cursor may remain healthy only after one of
 // three exact proofs: the candidate was published, rollback was verified, or

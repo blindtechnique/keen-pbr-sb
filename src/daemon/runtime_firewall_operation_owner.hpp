@@ -130,6 +130,11 @@ enum class RuntimeFirewallLifecycleKind : std::uint8_t {
     start_from_stopped,
     restart_active,
     config_preapply,
+    // A staged save while routing is stopped is both a configuration
+    // candidate and an inactive resolver activation. It keeps the
+    // config-generation terminal contract instead of borrowing START's
+    // separate rollback owner.
+    config_bootstrap_from_stopped,
     config_candidate,
     config_rollback,
 };
@@ -154,9 +159,23 @@ constexpr bool runtime_firewall_lifecycle_is_preapply(
     return kind == RuntimeFirewallLifecycleKind::config_preapply;
 }
 
+constexpr bool runtime_firewall_lifecycle_is_config_candidate(
+    RuntimeFirewallLifecycleKind kind) noexcept {
+    return kind ==
+               RuntimeFirewallLifecycleKind::config_bootstrap_from_stopped ||
+           kind == RuntimeFirewallLifecycleKind::config_candidate;
+}
+
+constexpr bool runtime_firewall_lifecycle_activates_stopped_runtime(
+    RuntimeFirewallLifecycleKind kind) noexcept {
+    return runtime_firewall_lifecycle_is_start(kind) ||
+           kind ==
+               RuntimeFirewallLifecycleKind::config_bootstrap_from_stopped;
+}
+
 constexpr bool runtime_firewall_lifecycle_is_config_generation(
     RuntimeFirewallLifecycleKind kind) noexcept {
-    return kind == RuntimeFirewallLifecycleKind::config_candidate ||
+    return runtime_firewall_lifecycle_is_config_candidate(kind) ||
            kind == RuntimeFirewallLifecycleKind::config_rollback;
 }
 
