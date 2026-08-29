@@ -128,6 +128,12 @@ describe("outbound editor persisted normalization", () => {
   })
 
   test("keeps established flows by default and persists targeted reconnect mode", () => {
+    const automatic = normalizeOutboundDraftForPersistence({
+      ...baselineDraft,
+      type: "urltest",
+      outboundGroups: [{ outbounds: ["primary"], weight: "" }],
+      conntrackOnSwitch: "default",
+    })
     const preserve = normalizeOutboundDraftForPersistence({
       ...baselineDraft,
       type: "urltest",
@@ -148,7 +154,8 @@ describe("outbound editor persisted normalization", () => {
       conntrackOnSwitch: "delete_on_failure",
     })
 
-    expect(preserve.conntrack_on_switch).toBeUndefined()
+    expect(automatic.conntrack_on_switch).toBeUndefined()
+    expect(preserve.conntrack_on_switch).toBe("preserve")
     expect(reconnect.conntrack_on_switch).toBe("delete")
     expect(reconnectOnlyOnFailure.conntrack_on_switch).toBe(
       "delete_on_failure"

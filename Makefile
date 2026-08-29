@@ -146,6 +146,9 @@ NARROW_TEST_TARGETS := \
 	keen-pbr-runtime-firewall-lifecycle-completion-tests \
 	keen-pbr-runtime-firewall-owner-tests \
 	keen-pbr-runtime-resolver-generation-tests \
+	keen-pbr-runtime-cold-boot-terminal-policy-tests \
+	keen-pbr-api-runtime-lifecycle-tests \
+	keen-pbr-firewall-cleanup-absence-tests \
 	test_config_store
 
 test: ## Build and run unit tests (doctest)
