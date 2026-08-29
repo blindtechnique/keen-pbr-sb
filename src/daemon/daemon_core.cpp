@@ -5023,6 +5023,8 @@ void Daemon::start_runtime_cold_boot_rollback(
                                     authoritative &&
                             cleared->routes.empty() &&
                             cleared->rules.empty() &&
+                            cleared->phase ==
+                                RuntimeRoutingMutationPhase::cleared &&
                             cleared->outcome ==
                                 RuntimeRoutingOperationOutcome::cleared;
                         bool firewall_cleared = false;
@@ -5030,8 +5032,9 @@ void Daemon::start_runtime_cold_boot_rollback(
                         {
                             KPBR_LOCK_GUARD(
                                 udp_call_affinity_mutation_mutex_);
-                            firewall_->cleanup();
-                            firewall_cleared = true;
+                            firewall_cleared =
+                                firewall_->cleanup_and_inspect_owned()
+                                    .verified_absent();
                         }
                         const auto deactivate_args =
                             build_system_resolver_hook_args(
@@ -9849,6 +9852,8 @@ bool Daemon::begin_runtime_firewall_start_rollback(
                             RuntimeRoutingInventoryAuthority::authoritative &&
                         inventory->routes.empty() &&
                         inventory->rules.empty() &&
+                        inventory->phase ==
+                            RuntimeRoutingMutationPhase::cleared &&
                         inventory->outcome ==
                             RuntimeRoutingOperationOutcome::cleared;
                     if (!result->routing_cleared) {
@@ -9866,8 +9871,14 @@ bool Daemon::begin_runtime_firewall_start_rollback(
                 try {
                     KPBR_LOCK_GUARD(
                         udp_call_affinity_mutation_mutex_);
-                    firewall_->cleanup();
-                    result->firewall_cleared = true;
+                    result->firewall_cleared =
+                        firewall_->cleanup_and_inspect_owned()
+                            .verified_absent();
+                    if (!result->firewall_cleared) {
+                        append_failure(
+                            "firewall cleanup",
+                            "kernel removal was not authoritatively verified");
+                    }
                 } catch (const std::exception& error) {
                     append_failure("firewall cleanup", error.what());
                 } catch (...) {
