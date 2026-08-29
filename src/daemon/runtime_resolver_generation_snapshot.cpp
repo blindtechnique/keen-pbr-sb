@@ -97,11 +97,13 @@ bool runtime_resolver_stream_selection_available(
                runtime_state != RuntimeState::shutting_down;
     }
 
-    const bool exact_committed_activation =
-        selection.correlated_attempt && committed_generation &&
-        selection.generation == committed_generation &&
+    // Cold boot and stopped-runtime config bootstrap intentionally keep this
+    // generation private until the exact stream succeeds. The correlated
+    // attempt plus this lifecycle pointer is the admission authority.
+    const bool exact_inactive_activation =
+        selection.correlated_attempt && inactive_activation_generation &&
         selection.generation == inactive_activation_generation;
-    return exact_committed_activation &&
+    return exact_inactive_activation &&
            (runtime_state == RuntimeState::starting ||
             runtime_state == RuntimeState::applying);
 }

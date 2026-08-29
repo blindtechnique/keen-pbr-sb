@@ -157,7 +157,7 @@ TEST_CASE("active routing admits only an exact complete private resolver selecti
         nullptr));
 }
 
-TEST_CASE("resolver availability preserves committed inactive activation boundary") {
+TEST_CASE("resolver availability preserves exact inactive activation boundary") {
     const auto committed = stream_generation(70U, 40U);
     const auto private_candidate = stream_generation(71U, 41U);
     const std::string exact_attempt(32U, '3');
@@ -223,12 +223,44 @@ TEST_CASE("resolver availability preserves committed inactive activation boundar
             nullptr,
             private_candidate);
     REQUIRE(private_activation);
-    CHECK_FALSE(runtime_resolver_stream_selection_available(
+    CHECK(runtime_resolver_stream_selection_available(
         RuntimeState::starting,
         /*routing_runtime_active=*/false,
         private_activation,
         nullptr,
         private_candidate));
+    CHECK(runtime_resolver_stream_selection_available(
+        RuntimeState::applying,
+        /*routing_runtime_active=*/false,
+        private_activation,
+        nullptr,
+        private_candidate));
+    CHECK_FALSE(runtime_resolver_stream_selection_available(
+        RuntimeState::stopped,
+        /*routing_runtime_active=*/false,
+        private_activation,
+        nullptr,
+        private_candidate));
+    CHECK_FALSE(runtime_resolver_stream_selection_available(
+        RuntimeState::shutting_down,
+        /*routing_runtime_active=*/false,
+        private_activation,
+        nullptr,
+        private_candidate));
+    CHECK_FALSE(runtime_resolver_stream_selection_available(
+        RuntimeState::starting,
+        /*routing_runtime_active=*/false,
+        private_activation,
+        nullptr,
+        nullptr));
+
+    const auto mismatched_inactive = stream_generation(72U, 42U);
+    CHECK_FALSE(runtime_resolver_stream_selection_available(
+        RuntimeState::starting,
+        /*routing_runtime_active=*/false,
+        private_activation,
+        nullptr,
+        mismatched_inactive));
 }
 
 TEST_CASE("runtime resolver completion stays bound to attempt pointer and stream epoch") {

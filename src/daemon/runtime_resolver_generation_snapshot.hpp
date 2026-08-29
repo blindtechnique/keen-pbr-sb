@@ -71,7 +71,7 @@ std::string_view runtime_resolver_stream_selection_error_code(
 // while the old runtime is routing, even when no committed pointer exists.
 // An uncorrelated request is always pointer-bound to the committed generation.
 // With routing inactive, retain the narrower lifecycle-start exception: only
-// the exact committed activation pointer may stream during starting/applying.
+// the exact inactive activation pointer may stream during starting/applying.
 bool runtime_resolver_stream_selection_available(
     RuntimeState runtime_state,
     bool routing_runtime_active,
