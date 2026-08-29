@@ -1043,6 +1043,32 @@ void RuntimeFirewallOperationOwner::cancel_retry() noexcept {
     }
 }
 
+void RuntimeFirewallOperationOwner::prepare_for_process_cleanup() noexcept {
+    // First retire a detached successor and every not-yet-running executor
+    // envelope. Their exact preowned continuations remain live and receive
+    // the typed shutdown terminal from cancel_pending_work().
+    cancel_pending_work();
+
+    const auto context = active_context_;
+    cancel_completion_watchdog();
+    if (!context) return;
+
+    // Unlike ordinary background cancel_retry(), process teardown is allowed
+    // to cancel a foreground retry timer. Do not set shutdown_requested_: the
+    // final STOP must still enter this same owner/executor after the exact
+    // terminal returns its lease.
+    auto terminal = coordinator_.cancel_timer_for_terminal(
+        [this](int task_id) { callbacks_.cancel_scheduled(task_id); });
+    if (terminal.owned && context->terminal_owner) {
+        context->terminal_owner->coordinator_terminal_sink()(
+            std::move(terminal));
+        request_terminal_drain(context);
+    }
+    // Queued cancellation or a running body publishes through its durable
+    // mailbox. The caller pumps with shutdown=true until both owner slots and
+    // mutation admission are observably idle.
+}
+
 bool RuntimeFirewallOperationOwner::foreground_lifecycle_pending()
     const noexcept {
     return (active_context_ &&

@@ -10,6 +10,7 @@
 #include <cerrno>
 #include <ctime>
 #include <cstring>
+#include <exception>
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
@@ -423,6 +424,8 @@ struct DaemonRuntimeFirewallOperationState final
         keenetic_dns_refresh_transaction;
     std::shared_ptr<DaemonColdBootTransaction> cold_boot_transaction;
     std::uint64_t cold_boot_mutation_lease_token{0U};
+    std::optional<RuntimeStopCleanupTarget> stop_cleanup_target;
+    bool stop_cleanup_generation_advanced{false};
     std::optional<ConfigTerminalOperationIdentity>
         config_operation_identity;
     std::shared_ptr<const ResolverGenerationSnapshot>
@@ -2704,6 +2707,144 @@ void Daemon::setup_signals() {
     }
 }
 
+bool Daemon::run_process_shutdown_cleanup() noexcept {
+    bool stop_callbacks_fenced = false;
+    try {
+        // Admission idleness alone is insufficient: a background owner can
+        // be parked before acquiring its lease. Retire those envelopes first
+        // and prove both owner slots empty before consuming the one-shot
+        // internal cleanup admission.
+        runtime_firewall_owner_->prepare_for_process_cleanup();
+        bool owner_ready = false;
+        for (std::size_t attempt = 0U;
+             attempt < 250U && !owner_ready;
+             ++attempt) {
+            runtime_firewall_owner_->pump_terminal_for_shutdown();
+            const bool admission_idle =
+                runtime_mutation_admission_.wait_for_idle_for(
+                    std::chrono::milliseconds{0});
+            owner_ready = runtime_shutdown_cleanup_owner_ready(
+                admission_idle,
+                static_cast<bool>(
+                    runtime_firewall_owner_->active_context()),
+                runtime_firewall_owner_->pending_successor());
+            if (!owner_ready) {
+                try {
+                    if (ipc_control_fd_ >= 0) handle_ipc_control_socket();
+                    if (control_fd_ >= 0) handle_control_commands();
+                } catch (...) {
+                }
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds{10});
+            }
+        }
+        if (!runtime_shutdown_cleanup_owner_ready(
+                owner_ready,
+                static_cast<bool>(runtime_firewall_owner_->active_context()),
+                runtime_firewall_owner_->pending_successor())) {
+            Logger::instance().error(
+                "Process STOP cleanup could not obtain an idle typed owner");
+            return false;
+        }
+
+        auto admitted =
+            runtime_mutation_admission_.try_acquire_shutdown_cleanup(
+                "process-shutdown-stop-cleanup");
+        if (!admitted.has_value()) {
+            Logger::instance().error(
+                "Process STOP cleanup one-shot admission was rejected");
+            return false;
+        }
+        auto lease = std::make_unique<RuntimeMutationAdmission::Lease>(
+            std::move(*admitted));
+        const auto expected_token = lease->token();
+        auto completion = RuntimeFirewallLifecycleCompletion::create();
+        auto completion_source = std::move(completion.source);
+        RuntimeFirewallPreownedTerminalContinuation continuation{
+            [this,
+             expected_token,
+             completion_source = std::move(completion_source)](
+                RuntimeFirewallLifecycleTerminal terminal,
+                std::unique_ptr<RuntimeMutationAdmission::Lease> exact)
+                mutable noexcept {
+                // Shutdown quiescence waits for the admission to become idle;
+                // release only after TerminalOwner supplied its exact proof.
+                if (!runtime_stop_cleanup_exact_lease_returned(
+                        runtime_mutation_admission_,
+                        expected_token,
+                        exact)) {
+                    terminal.outcome =
+                        RuntimeFirewallLifecycleOutcome::not_verified;
+                    terminal.commit_ambiguous = true;
+                    try {
+                        terminal.detail =
+                            "process STOP owner did not return its exact lease";
+                    } catch (...) {
+                    }
+                }
+                exact.reset();
+                (void)completion_source.settle(std::move(terminal));
+            }};
+
+        RuntimeStopCleanupTarget target;
+        target.intent = RuntimeStopCleanupIntent::process_shutdown;
+        target.runtime_generation =
+            runtime_generation_.load(std::memory_order_acquire);
+        target.cleanup_conntrack = false;
+        target.deactivate_resolver = true;
+        target.maximum_attempts = 3U;
+        fence_exact_tcp_reset_cleanups_for_stop();
+        stop_callbacks_fenced = true;
+        if (!begin_preowned_runtime_firewall_stop_cleanup(
+                lease, std::move(target), continuation)) {
+            resume_exact_tcp_reset_cleanups();
+            stop_callbacks_fenced = false;
+            lease.reset();
+            Logger::instance().error(
+                "Process STOP cleanup owner handoff was rejected");
+            return false;
+        }
+        stop_callbacks_fenced = false;
+
+        // This control/event-loop thread pumps typed worker terminals and the
+        // resolver IPC rendezvous; it never waits on its own queue.
+        quiesce_runtime_mutations();
+        const auto terminal = completion.wait.try_get();
+        if (!terminal.has_value() || terminal->outcome !=
+                RuntimeFirewallLifecycleOutcome::verified_success) {
+            Logger::instance().error(
+                "Process STOP cleanup did not reach a verified terminal{}{}",
+                terminal.has_value() && !terminal->detail.empty()
+                    ? ": "
+                    : "",
+                terminal.has_value() ? terminal->detail : "missing result");
+            return false;
+        }
+        return true;
+    } catch (const std::exception& error) {
+        if (stop_callbacks_fenced) {
+            resume_exact_tcp_reset_cleanups();
+            stop_callbacks_fenced = false;
+        }
+        try {
+            Logger::instance().error(
+                "Process STOP cleanup failed: {}", error.what());
+        } catch (...) {
+        }
+    } catch (...) {
+        if (stop_callbacks_fenced) {
+            resume_exact_tcp_reset_cleanups();
+            stop_callbacks_fenced = false;
+        }
+        try {
+            Logger::instance().error(
+                "Process STOP cleanup failed with an unknown error");
+        } catch (...) {
+        }
+    }
+    return false;
+}
+
 void Daemon::handle_signal() {
     bool terminate_requested = false;
     bool full_refresh_requested = false;
@@ -2748,10 +2889,7 @@ void Daemon::handle_signal() {
         // Close writer admission at the terminal signal boundary, not later
         // in the shutdown tail. Events already returned in this epoll batch
         // must not begin a new config or routing-test operation.
-        runtime_firewall_owner_->request_shutdown();
         runtime_mutation_admission_.shutdown();
-        runtime_firewall_owner_->cancel_completion_watchdog();
-        runtime_firewall_owner_->cancel_retry();
         routing_test_admission_.shutdown();
         running_.store(false, std::memory_order_release);
         return;
@@ -4183,6 +4321,15 @@ bool Daemon::runtime_firewall_lifecycle_generation_is_current(
         // generation is current.
         return false;
     }
+    if (runtime_firewall_lifecycle_is_stop_cleanup(lifecycle_kind)) {
+        // STOP owns the exact admission lease and may be used by process
+        // shutdown even when the public runtime is already inactive. Its
+        // immutable cleanup target always names the currently published
+        // generation; stale owned kernel artifacts still have to be proven
+        // absent before shutdown can retire the owner/executor.
+        return expected_generation ==
+            runtime_generation_.load(std::memory_order_acquire);
+    }
     const bool exact_start_in_progress =
         runtime_firewall_lifecycle_activates_stopped_runtime(
             lifecycle_kind) &&
@@ -4191,6 +4338,48 @@ bool Daemon::runtime_firewall_lifecycle_generation_is_current(
     return (active || exact_start_in_progress) &&
            expected_generation ==
                runtime_generation_.load(std::memory_order_acquire);
+}
+
+bool Daemon::begin_preowned_runtime_firewall_stop_cleanup(
+    std::unique_ptr<RuntimeMutationAdmission::Lease>& lease,
+    RuntimeStopCleanupTarget target,
+    RuntimeFirewallPreownedTerminalContinuation& continuation) noexcept {
+    if (!lease || !static_cast<bool>(*lease) ||
+        !runtime_mutation_admission_.owns(*lease) || !continuation ||
+        target.runtime_generation == 0U ||
+        target.runtime_generation !=
+            runtime_generation_.load(std::memory_order_acquire) ||
+        runtime_firewall_owner_->shutdown_requested() ||
+        runtime_firewall_owner_->active_context() ||
+        runtime_firewall_owner_->pending_successor()) {
+        return false;
+    }
+
+    try {
+        auto state =
+            std::make_shared<DaemonRuntimeFirewallOperationState>();
+        state->stop_cleanup_target = std::move(target);
+        auto result = runtime_firewall_owner_->start_immediate_preowned(
+            0U,
+            state->stop_cleanup_target->runtime_generation,
+            {},
+            {},
+            /*schedule_catalog_refresh=*/false,
+            state,
+            runtime_mutation_admission_,
+            std::move(lease),
+            {},
+            RuntimeFirewallLifecycleKind::stop_cleanup,
+            std::move(continuation));
+        if (result.disposition ==
+            RuntimeFirewallImmediateDisposition::handed_off) {
+            return true;
+        }
+        lease = std::move(result.unaccepted_lease);
+        continuation = std::move(result.unaccepted_continuation);
+    } catch (...) {
+    }
+    return false;
 }
 
 bool Daemon::begin_preowned_runtime_firewall_cold_boot(
@@ -8003,6 +8192,9 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
     const bool lifecycle_keenetic_dns_generation =
         runtime_firewall_lifecycle_is_keenetic_dns_generation(
             context->lifecycle_kind);
+    const bool lifecycle_stop_cleanup =
+        runtime_firewall_lifecycle_is_stop_cleanup(
+            context->lifecycle_kind);
     const bool lifecycle_preowned =
         runtime_firewall_lifecycle_uses_preowned_continuation(
             context->lifecycle_kind);
@@ -8119,6 +8311,173 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
         terminalize_before_worker(
             RuntimeFirewallOperationContext::SuccessorMode::none,
             /*force_rerun=*/false);
+        return;
+    }
+
+    if (lifecycle_stop_cleanup) {
+        // STOP owns a deliberately small worker body. It must never enter the
+        // normal apply/input-building path, resnapshot configuration, or
+        // inherit an additive firewall successor.
+        context->successor_mode =
+            RuntimeFirewallOperationContext::SuccessorMode::none;
+        context->force_successor = false;
+        state.suppress_coordinator_rerun = true;
+        if (!context->retained_mutation_lease ||
+            !state.stop_cleanup_target.has_value() ||
+            state.stop_cleanup_target->runtime_generation !=
+                queued_claim.runtime_generation ||
+            (state.stop_cleanup_target->cleanup_conntrack &&
+             !state.stop_cleanup_target->conntrack_snapshot.valid())) {
+            state.preworker_failure_kind =
+                DaemonRuntimeFirewallOperationState::PreworkerFailureKind::
+                    preparation_failure;
+            state.preworker_failure_detail =
+                "runtime STOP immutable cleanup authority is unavailable";
+            terminalize_before_worker(
+                RuntimeFirewallOperationContext::SuccessorMode::none,
+                /*force_rerun=*/false);
+            return;
+        }
+
+        // The exact owner is now accepted, so callback fencing cannot create
+        // a clean-rejection cursor loss. Preserve the Meta plan explicitly;
+        // the terminal branch restores it if no worker body starts.
+        state.previous_meta_cleanup = pending_meta_udp443_cleanup_;
+        cancel_idle_stall_observer();
+        cancel_meta_udp443_activation_cleanup();
+        state.preworker_side_effects_armed = true;
+
+        try {
+            auto worker_input =
+                std::make_shared<RuntimeFirewallWorkerAttemptInput>();
+            worker_input->operation_kind =
+                RuntimeFirewallWorkerOperationKind::stop_cleanup;
+            worker_input->transaction.operation_serial =
+                queued_claim.serial;
+            worker_input->transaction.runtime_generation =
+                queued_claim.runtime_generation;
+            const auto target = *state.stop_cleanup_target;
+            state.preworker_failure_kind =
+                DaemonRuntimeFirewallOperationState::PreworkerFailureKind::
+                    transport_rejected;
+            state.preworker_failure_detail =
+                "runtime STOP worker queue rejected the exact cleanup";
+
+            RuntimeFirewallOperationOwner::WorkerRunner runner{
+                [this, target](
+                    const RuntimeFirewallWorkerAttemptInput& input,
+                    const RuntimeFirewallDelayedWorker::RunningClaim&)
+                    -> RuntimeFirewallWorkerAttemptResultPtr {
+                    // Allocate both durable mailboxes before the first
+                    // destructive command. After mutation begins, publishing
+                    // the typed proof is move-only and cannot fail allocation.
+                    auto result =
+                        std::make_shared<RuntimeFirewallWorkerAttemptResult>();
+                    auto stop_result =
+                        std::make_shared<RuntimeStopCleanupResult>();
+                    result->operation_kind =
+                        RuntimeFirewallWorkerOperationKind::stop_cleanup;
+                    result->transaction.operation_serial =
+                        input.transaction.operation_serial;
+                    result->transaction.runtime_generation =
+                        input.transaction.runtime_generation;
+
+                    RuntimeStopCleanupServices services;
+                    services.cleanup_conntrack =
+                        [this](const OwnedConntrackCleanupSnapshot& snapshot) {
+                            if (!snapshot.valid()) return false;
+                            KPBR_UNIQUE_LOCK(
+                                affinity_mutation_lock,
+                                udp_call_affinity_mutation_mutex_);
+                            const auto summary =
+                                conntrack_manager_.delete_marks_ordered(
+                                    ordered_owned_conntrack_marks(snapshot),
+                                    snapshot.owned_mask,
+                                    ConntrackCleanupOptions{
+                                        snapshot.ipv6_enabled,
+                                        std::chrono::seconds{4}});
+                            return !summary.command_unavailable &&
+                                summary.failed == 0U &&
+                                summary.skipped == 0U &&
+                                summary.remaining_marks.empty();
+                        };
+                    services.clear_routing = [this]() {
+                        const auto inventory =
+                            routing_operation_owner_.clear();
+                        return inventory &&
+                            classify_runtime_routing_inventory(inventory) ==
+                                RuntimeRoutingInventoryAuthority::
+                                    authoritative &&
+                            inventory->phase ==
+                                RuntimeRoutingMutationPhase::cleared &&
+                            inventory->outcome ==
+                                RuntimeRoutingOperationOutcome::cleared &&
+                            inventory->routes.empty() &&
+                            inventory->rules.empty();
+                    };
+                    services.cleanup_firewall = [this]() {
+                        KPBR_UNIQUE_LOCK(
+                            affinity_mutation_lock,
+                            udp_call_affinity_mutation_mutex_);
+                        return firewall_->cleanup_and_inspect_owned()
+                            .verified_absent();
+                    };
+                    services.deactivate_resolver = [this]() {
+                        return run_system_resolver_hook("deactivate");
+                    };
+                    services.backoff = [](std::chrono::milliseconds delay) {
+                        std::this_thread::sleep_for(delay);
+                    };
+
+                    execute_runtime_stop_cleanup_transaction_into(
+                        *stop_result, target, services);
+                    result->stop_cleanup = std::move(stop_result);
+                    return result;
+                }};
+
+            const bool enqueued =
+                runtime_firewall_owner_->enqueue_worker_with_retained_lease(
+                    context,
+                    queued_claim,
+                    std::move(worker_input),
+                    std::move(runner));
+            if (enqueued) {
+                state.preworker_failure_kind =
+                    DaemonRuntimeFirewallOperationState::PreworkerFailureKind::
+                        none;
+                state.preworker_failure_detail.clear();
+            }
+            // Executor rejection is terminalized by the queue envelope which
+            // already owns the exact claim and lease.
+        } catch (const std::exception& error) {
+            state.preworker_failure_kind =
+                DaemonRuntimeFirewallOperationState::PreworkerFailureKind::
+                    preparation_failure;
+            try {
+                state.preworker_failure_detail = error.what();
+            } catch (...) {
+            }
+            if (context->worker_operation) {
+                context->worker_operation.reset();
+            } else {
+                terminalize_before_worker(
+                    RuntimeFirewallOperationContext::SuccessorMode::none,
+                    /*force_rerun=*/false);
+            }
+        } catch (...) {
+            state.preworker_failure_kind =
+                DaemonRuntimeFirewallOperationState::PreworkerFailureKind::
+                    preparation_failure;
+            state.preworker_failure_detail =
+                "runtime STOP worker preparation failed";
+            if (context->worker_operation) {
+                context->worker_operation.reset();
+            } else {
+                terminalize_before_worker(
+                    RuntimeFirewallOperationContext::SuccessorMode::none,
+                    /*force_rerun=*/false);
+            }
+        }
         return;
     }
 
@@ -9589,9 +9948,308 @@ void Daemon::drain_runtime_firewall_terminal(
     const bool lifecycle_cold_boot =
         runtime_firewall_lifecycle_is_cold_boot(
             context->lifecycle_kind);
+    const bool lifecycle_stop_cleanup =
+        runtime_firewall_lifecycle_is_stop_cleanup(
+            context->lifecycle_kind);
 
     auto drain = context->terminal_owner->try_begin_drain();
     if (!drain.has_value()) return;
+
+    if (lifecycle_stop_cleanup) {
+        const auto return_retained_lease = [&context, &drain]() noexcept {
+            if (context->retained_mutation_lease) return true;
+            auto returned = drain->take_retained_mutation_lease();
+            if (returned) {
+                context->retained_mutation_lease = std::move(returned);
+            }
+            return static_cast<bool>(context->retained_mutation_lease);
+        };
+        const auto restore_after_clean_rejection =
+            [this, &state]() noexcept {
+                if (!state.stop_cleanup_target.has_value() ||
+                    state.stop_cleanup_target->intent !=
+                        RuntimeStopCleanupIntent::runtime_stop) {
+                    return;
+                }
+                try {
+                    resume_exact_tcp_reset_cleanups();
+                } catch (...) {
+                }
+                try {
+                    reset_idle_stall_observer(
+                        /*schedule_if_eligible=*/true);
+                } catch (...) {
+                }
+                try {
+                    const auto current_generation =
+                        runtime_generation_.load(std::memory_order_acquire);
+                    if (state.previous_meta_cleanup.has_value() &&
+                        state.previous_meta_cleanup->runtime_generation ==
+                            current_generation) {
+                        schedule_meta_udp443_activation_cleanup_retry(
+                            state.previous_meta_cleanup->plan,
+                            current_generation,
+                            meta_udp443_cleanup_epoch_.load(
+                                std::memory_order_acquire),
+                            state.previous_meta_cleanup->attempt);
+                    }
+                } catch (...) {
+                }
+                state.preworker_side_effects_armed = false;
+                schedule_netfilter_runtime_refresh_noexcept(
+                    NetfilterRefreshReason::full,
+                    "runtime STOP rejected before cleanup worker handoff");
+            };
+        const auto make_terminal =
+            [&state](
+                RuntimeFirewallLifecycleOutcome outcome,
+                bool committed,
+                bool ambiguous,
+                std::string detail) {
+                RuntimeFirewallLifecycleTerminal terminal;
+                terminal.outcome = outcome;
+                terminal.committed = committed;
+                terminal.commit_ambiguous = ambiguous;
+                terminal.transient = false;
+                terminal.previous_generation_certainly_retained =
+                    !committed && !ambiguous;
+                terminal.detail = std::move(detail);
+                return terminal;
+            };
+
+        if (drain->kind() ==
+            RuntimeFirewallDelayedTerminalOwner::DrainKind::coordinator) {
+            const auto* terminal = drain->coordinator_terminal();
+            if (!terminal || !terminal->owned ||
+                !return_retained_lease()) {
+                return;
+            }
+            restore_after_clean_rejection();
+            auto lifecycle_terminal = make_terminal(
+                RuntimeFirewallLifecycleOutcome::not_verified,
+                /*committed=*/false,
+                /*ambiguous=*/false,
+                state.preworker_failure_detail.empty()
+                    ? "runtime STOP ended before worker handoff"
+                    : state.preworker_failure_detail);
+            auto permit = runtime_firewall_owner_->
+                prepare_preowned_continuation_finalization(context);
+            if (!permit.has_value()) return;
+            auto proof = drain->finish_coordinator_terminal();
+            if (!proof.has_value()) return;
+            (void)runtime_firewall_owner_->complete_preowned_continuation(
+                std::move(*permit),
+                std::move(*proof),
+                std::move(lifecycle_terminal));
+            return;
+        }
+
+        const auto* terminal = drain->worker_terminal();
+        if (!terminal) return;
+        if (terminal->status ==
+            RuntimeFirewallDelayedWorker::TerminalStatus::queued_abandoned) {
+            if (!terminal->coordinator_completion.has_value() ||
+                !terminal->coordinator_completion->owned ||
+                !return_retained_lease()) {
+                return;
+            }
+            restore_after_clean_rejection();
+            auto lifecycle_terminal = make_terminal(
+                RuntimeFirewallLifecycleOutcome::not_verified,
+                /*committed=*/false,
+                /*ambiguous=*/false,
+                state.preworker_failure_detail.empty()
+                    ? "runtime STOP worker queue was abandoned"
+                    : state.preworker_failure_detail);
+            auto permit = runtime_firewall_owner_->
+                prepare_preowned_continuation_finalization(context);
+            if (!permit.has_value()) return;
+            auto proof = drain->finish_worker_terminal();
+            if (!proof.has_value()) return;
+            (void)runtime_firewall_owner_->complete_preowned_continuation(
+                std::move(*permit),
+                std::move(*proof),
+                std::move(lifecycle_terminal));
+            return;
+        }
+        if (!terminal->running_claim.has_value() ||
+            !terminal->mutation_lease) {
+            return;
+        }
+
+        const RuntimeFirewallWorkerAttemptResult* worker_result =
+            terminal->result.get();
+        const RuntimeStopCleanupResult* stop_result =
+            worker_result && worker_result->stop_cleanup
+            ? worker_result->stop_cleanup.get()
+            : nullptr;
+        const bool identity_valid =
+            terminal->status ==
+                RuntimeFirewallDelayedWorker::TerminalStatus::result &&
+            context->worker_input && worker_result && stop_result &&
+            state.stop_cleanup_target.has_value() &&
+            context->worker_input->operation_kind ==
+                RuntimeFirewallWorkerOperationKind::stop_cleanup &&
+            worker_result->operation_kind ==
+                RuntimeFirewallWorkerOperationKind::stop_cleanup &&
+            context->worker_input->transaction.operation_serial ==
+                context->queued_claim.serial &&
+            context->worker_input->transaction.runtime_generation ==
+                context->queued_claim.runtime_generation &&
+            worker_result->transaction.operation_serial ==
+                context->queued_claim.serial &&
+            worker_result->transaction.runtime_generation ==
+                context->queued_claim.runtime_generation &&
+            stop_result->target.runtime_generation ==
+                state.stop_cleanup_target->runtime_generation &&
+            stop_result->target.intent ==
+                state.stop_cleanup_target->intent &&
+            stop_result->target.cleanup_conntrack ==
+                state.stop_cleanup_target->cleanup_conntrack &&
+            stop_result->target.deactivate_resolver ==
+                state.stop_cleanup_target->deactivate_resolver &&
+            stop_result->target.maximum_attempts ==
+                state.stop_cleanup_target->maximum_attempts &&
+            (!stop_result->target.cleanup_conntrack ||
+             owned_conntrack_cleanup_snapshot_equal(
+                 stop_result->target.conntrack_snapshot,
+                 state.stop_cleanup_target->conntrack_snapshot));
+        const bool kernel_verified =
+            identity_valid && stop_result->kernel_cleanup_verified();
+        const bool fully_verified =
+            identity_valid && stop_result->fully_verified();
+
+        std::string detail;
+        if (!identity_valid) {
+            detail =
+                "runtime STOP worker returned no exact typed cleanup proof";
+        } else if (stop_result->has_failures()) {
+            detail = std::string{"runtime STOP "} +
+                runtime_stop_cleanup_failure_name(
+                    stop_result->last_failure_stage) +
+                " stage was not verified";
+        } else if (!fully_verified) {
+            detail = kernel_verified
+                ? "runtime STOP resolver deactivation was not verified"
+                : "runtime STOP owned kernel cleanup was not verified";
+        }
+
+        if (!drain->begin_worker_control(runtime_firewall_retry_)) return;
+        if (!drain->publish_worker_control(
+                [this,
+                 &state,
+                 identity_valid,
+                 kernel_verified,
+                 fully_verified]() noexcept {
+                    try {
+                        if (!state.stop_cleanup_generation_advanced) {
+                            runtime_generation_.fetch_add(
+                                1U, std::memory_order_acq_rel);
+                            state.stop_cleanup_generation_advanced = true;
+                        }
+                        runtime_state_store_.set_routing_runtime_active(false);
+                        committed_meta_udp443_fwmark_.reset();
+                        committed_meta_udp443_owned_mask_ = 0U;
+                        cancel_owned_snat_health_check();
+                        cancel_resolver_reload_retry();
+                        cancel_internal_vpn_catalog_refresh_retry();
+                        urltest_after_firewall_gate_.reset();
+                        resolver_after_firewall_gate_.reset();
+                        if (urltest_manager_) {
+                            urltest_manager_->clear();
+                        }
+                        urltest_apply_incidents_.clear();
+                        if (lists_runtime_mutation_retry_task_id_ >= 0) {
+                            scheduler_->cancel(
+                                lists_runtime_mutation_retry_task_id_);
+                            lists_runtime_mutation_retry_task_id_ = -1;
+                        }
+                        lists_runtime_mutation_retry_force_reconcile_ = false;
+                        if (keenetic_dns_refresh_task_id_ >= 0) {
+                            scheduler_->cancel(keenetic_dns_refresh_task_id_);
+                            keenetic_dns_refresh_task_id_ = -1;
+                        }
+                        if (keenetic_dns_refresh_admission_retry_task_id_ >=
+                            0) {
+                            scheduler_->cancel(
+                                keenetic_dns_refresh_admission_retry_task_id_);
+                            keenetic_dns_refresh_admission_retry_task_id_ =
+                                -1;
+                        }
+                        if (kernel_verified) {
+                            clear_exact_tcp_reset_cleanup_ownership();
+                            cancel_owned_conntrack_cleanup_retry();
+                            runtime_firewall_retry_
+                                .clear_owned_snat_recovery();
+                        }
+                        state.preworker_side_effects_armed = false;
+                        const auto target_state =
+                            identity_valid && fully_verified
+                            ? RuntimeState::stopped
+                            : RuntimeState::broken;
+                        if (runtime_state_machine_.state() != target_state) {
+                            transition_runtime_or_throw(
+                                target_state,
+                                target_state == RuntimeState::stopped
+                                    ? "runtime STOP cleanup verified"
+                                    : "runtime STOP cleanup is incomplete");
+                        }
+                        publish_runtime_state();
+                        return true;
+                    } catch (const std::exception& error) {
+                        try {
+                            Logger::instance().error(
+                                "Could not publish runtime STOP terminal: {}",
+                                error.what());
+                        } catch (...) {
+                        }
+                        return false;
+                    } catch (...) {
+                        return false;
+                    }
+                })) {
+            return;
+        }
+        OwnedSnatRecovery no_stop_recovery;
+        if (!drain->complete_worker_control(
+                runtime_firewall_retry_,
+                fully_verified,
+                std::move(no_stop_recovery))) {
+            return;
+        }
+        const auto* completion = drain->worker_control_completion();
+        if (!completion || !completion->owned ||
+            !return_retained_lease()) {
+            return;
+        }
+
+        context->worker_succeeded = fully_verified;
+        context->worker_commit_ambiguous = !identity_valid;
+        auto lifecycle_terminal = make_terminal(
+            fully_verified
+                ? RuntimeFirewallLifecycleOutcome::verified_success
+                : RuntimeFirewallLifecycleOutcome::not_verified,
+            identity_valid && stop_result->mutation_boundary_entered,
+            !identity_valid,
+            std::move(detail));
+        auto permit = runtime_firewall_owner_->
+            prepare_preowned_continuation_finalization(context);
+        if (!permit.has_value()) return;
+        auto proof = drain->finish_worker_terminal();
+        if (!proof.has_value()) return;
+        const bool completed =
+            runtime_firewall_owner_->complete_preowned_continuation(
+                std::move(*permit),
+                std::move(*proof),
+                std::move(lifecycle_terminal));
+        if (completed) {
+            try {
+                refresh_resolver_config_hash_actual_async();
+            } catch (...) {
+            }
+        }
+        return;
+    }
 
     const auto retain_config_post_terminal_intent =
         [&context, &state, lifecycle_config_generation]() {
@@ -13541,7 +14199,19 @@ void Daemon::run() {
 
     log.info("Daemon event loop running. PID: {}", getpid());
 
-    run_event_loop();
+    std::exception_ptr event_loop_failure;
+    try {
+        run_event_loop();
+    } catch (...) {
+        event_loop_failure = std::current_exception();
+        running_.store(false, std::memory_order_release);
+        try {
+            log.error(
+                "Daemon event loop failed; running the typed final cleanup "
+                "before propagating the error.");
+        } catch (...) {
+        }
+    }
 
 #ifdef WITH_API
     // Fence retry callbacks while posted-control admission and Scheduler are
@@ -13557,32 +14227,35 @@ void Daemon::run() {
     // late exact delete from racing normal shutdown.
     cancel_idle_stall_observer();
     cancel_meta_udp443_activation_cleanup();
-    runtime_firewall_owner_->request_shutdown();
     runtime_mutation_admission_.shutdown();
-    runtime_firewall_owner_->cancel_completion_watchdog();
-    runtime_firewall_owner_->cancel_retry();
     routing_test_admission_.shutdown();
     sighup_reload_coordinator_.stop();
     cancel_resolver_reload_retry();
     resolver_stream_coordinator_.request_stop();
     keenetic_dns_refresh_coordinator_.stop();
     list_refresh_tasks_.request_cancel_active();
-    // Invalidate timer/probe generations before coordinator quiescence. A
-    // queued SIGHUP preparation can already own the mutation lease, so discard
-    // unclaimed blocking work before waiting for that lease to return.
-    if (urltest_manager_) {
-        urltest_manager_->clear();
-    }
-    cancel_owned_conntrack_cleanup_retry();
-    scheduler_->cancel_all();
-    runtime_firewall_owner_->cancel_pending_work();
-    runtime_firewall_owner_->pump_terminal_for_shutdown();
+    // A queued SIGHUP preparation can already own the mutation lease. Discard
+    // unclaimed blocking work, then drain every admitted/background owner
+    // while its executor, watchdog scheduler and resolver IPC remain alive.
+    runtime_firewall_owner_->prepare_for_process_cleanup();
     blocking_executor_.cancel_pending();
     // Admission is closed before quiescence, so new HTTP/SIGHUP writers are
     // rejected. Existing owners keep their token and may finish through the
     // control queue while this thread still owns the event-loop state.
     quiesce_resolver_stream_recovery();
     quiesce_runtime_mutations();
+    const bool process_cleanup_verified =
+        run_process_shutdown_cleanup();
+
+    // Only the exact STOP terminal may close the owner/executor. Doing this
+    // earlier can abandon a retained lease while routes/firewall remain.
+    runtime_firewall_owner_->request_shutdown();
+    runtime_firewall_owner_->cancel_completion_watchdog();
+    runtime_firewall_owner_->cancel_retry();
+    cancel_owned_conntrack_cleanup_retry();
+    scheduler_->cancel_all();
+    runtime_firewall_owner_->cancel_pending_work();
+    runtime_firewall_owner_->pump_terminal_for_shutdown();
     runtime_firewall_owner_->shutdown_executor();
     runtime_firewall_owner_->pump_terminal_for_shutdown();
     runtime_firewall_owner_->cancel_completion_watchdog();
@@ -13627,18 +14300,24 @@ void Daemon::run() {
 
     teardown_dns_probe();
 
-    (void)routing_operation_owner_.clear();
-    firewall_->cleanup();
-    committed_meta_udp443_fwmark_.reset();
-    committed_meta_udp443_owned_mask_ = 0U;
-    runtime_state_store_.set_routing_runtime_active(false);
-    transition_runtime_or_throw(RuntimeState::stopped, "daemon shutdown complete");
+    if (process_cleanup_verified) {
+        runtime_state_store_.set_routing_runtime_active(false);
+        transition_runtime_or_throw(
+            RuntimeState::stopped, "daemon shutdown cleanup verified");
+        publish_runtime_state();
+    } else {
+        log.error(
+            "Daemon shutdown completed without verified owned route/firewall/"
+            "resolver cleanup; stopped state was not published.");
+    }
     remove_pid_file();
+    if (event_loop_failure) {
+        std::rethrow_exception(event_loop_failure);
+    }
 }
 
 void Daemon::stop() {
     list_refresh_tasks_.request_cancel_active();
-    runtime_firewall_owner_->request_shutdown();
     runtime_mutation_admission_.shutdown();
     routing_test_admission_.shutdown();
     sighup_reload_coordinator_.stop();

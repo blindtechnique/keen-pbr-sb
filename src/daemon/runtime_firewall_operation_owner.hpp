@@ -135,6 +135,9 @@ enum class RuntimeFirewallLifecycleKind : std::uint8_t {
     cold_boot,
     start_from_stopped,
     restart_active,
+    // STOP owns one immutable deletion target and returns the caller's exact
+    // mutation lease only after route/firewall/resolver publication.
+    stop_cleanup,
     config_preapply,
     // A staged save while routing is stopped is both a configuration
     // candidate and an inactive resolver activation. It keeps the
@@ -179,6 +182,11 @@ constexpr bool runtime_firewall_lifecycle_uses_start_pipeline(
 constexpr bool runtime_firewall_lifecycle_is_restart(
     RuntimeFirewallLifecycleKind kind) noexcept {
     return kind == RuntimeFirewallLifecycleKind::restart_active;
+}
+
+constexpr bool runtime_firewall_lifecycle_is_stop_cleanup(
+    RuntimeFirewallLifecycleKind kind) noexcept {
+    return kind == RuntimeFirewallLifecycleKind::stop_cleanup;
 }
 
 constexpr bool runtime_firewall_lifecycle_is_preapply(
@@ -231,6 +239,7 @@ constexpr bool runtime_firewall_lifecycle_is_keenetic_dns_generation(
 constexpr bool runtime_firewall_lifecycle_uses_preowned_continuation(
     RuntimeFirewallLifecycleKind kind) noexcept {
     return runtime_firewall_lifecycle_is_cold_boot(kind) ||
+           runtime_firewall_lifecycle_is_stop_cleanup(kind) ||
            runtime_firewall_lifecycle_is_preapply(kind) ||
            runtime_firewall_lifecycle_is_config_generation(kind) ||
            runtime_firewall_lifecycle_is_urltest_generation(kind) ||
@@ -248,7 +257,8 @@ constexpr bool runtime_firewall_lifecycle_requires_resolver(
 constexpr bool runtime_firewall_lifecycle_uses_hot_retry(
     RuntimeFirewallLifecycleKind kind) noexcept {
     return runtime_firewall_lifecycle_uses_start_pipeline(kind) ||
-           runtime_firewall_lifecycle_uses_preowned_continuation(kind);
+           (runtime_firewall_lifecycle_uses_preowned_continuation(kind) &&
+            !runtime_firewall_lifecycle_is_stop_cleanup(kind));
 }
 
 constexpr bool runtime_firewall_restart_resolver_initially_verified(
@@ -521,6 +531,11 @@ public:
                bool schedule_catalog_refresh,
                OwnedSnatRecovery snat_recovery);
     void cancel_retry() noexcept;
+    // Retire any timer/queued envelope before the final process STOP without
+    // setting the owner's permanent shutdown bit. A foreground timer is
+    // converted into its exact coordinator terminal so its preowned lease is
+    // returned by the ordinary typed drain; a running worker is left intact.
+    void prepare_for_process_cleanup() noexcept;
     bool foreground_lifecycle_pending() const noexcept;
     bool note_foreground_transport_rejection(
         const ContextPtr& context) noexcept;

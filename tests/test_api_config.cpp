@@ -2980,8 +2980,20 @@ TEST_CASE(
         &handoff_gate_calls);
     std::size_t quiesce_calls = 0;
     context.emergency_quiesce_runtime_fn = [&] {
-        ++quiesce_calls;
-        maintenance->events.push_back("runtime-quiesced");
+        FAIL("legacy emergency quiesce must not run");
+    };
+    context.emergency_quiesce_runtime_with_lease_return_fn =
+        [&](RuntimeMutationAdmission::Lease& request_lease) {
+            ++quiesce_calls;
+            CHECK(admission.owns(request_lease));
+            maintenance->events.push_back(
+                "runtime-quiesce-lease-received");
+            auto owner_lease = std::move(request_lease);
+            CHECK_FALSE(static_cast<bool>(request_lease));
+            request_lease = std::move(owner_lease);
+            CHECK(admission.owns(request_lease));
+            maintenance->events.push_back(
+                "runtime-quiesce-lease-returned");
     };
     std::size_t owner_apply_calls = 0;
     context.enqueue_apply_validated_config_with_lease_return_fn =
@@ -3034,13 +3046,22 @@ TEST_CASE(
 
     CHECK(owner_apply_calls == 1U);
     CHECK(legacy_apply_calls == 0U);
-    CHECK(handoff_gate_calls == 1U);
+    CHECK(handoff_gate_calls == 2U);
     CHECK(quiesce_calls == 1U);
     CHECK(
         event_index(
             maintenance->events,
             "runtime-lease-restored") <
-        event_index(maintenance->events, "runtime-quiesced"));
+        event_index(
+            maintenance->events,
+            "runtime-quiesce-lease-received"));
+    CHECK(
+        event_index(
+            maintenance->events,
+            "runtime-quiesce-lease-received") <
+        event_index(
+            maintenance->events,
+            "runtime-quiesce-lease-returned"));
     CHECK(read_text(config_path) == staged_json);
     RestoreJournal journal(config_save_journal_path(directory));
     const auto active = journal.read_active();
@@ -3051,6 +3072,115 @@ TEST_CASE(
     CHECK_FALSE(admission.active().has_value());
     auto subsequent = admission.try_acquire(
         "after-owner-throws-exact-return");
+    REQUIRE(subsequent.has_value());
+    subsequent->release();
+}
+
+TEST_CASE(
+    "emergency quiesce fails closed when its exact lease is not returned") {
+    ConfigApiTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    const Config original =
+        make_valid_config("127.0.0.1:18332");
+    const Config staged =
+        make_valid_config("127.0.0.1:18333");
+    const std::string staged_json =
+        nlohmann::json(staged).dump(1, '\t') + "\n";
+    write_text(
+        config_path,
+        nlohmann::json(original).dump(1, '\t') + "\n");
+
+    SseBroadcaster broadcaster;
+    std::size_t begin_calls = 0;
+    std::size_t finish_calls = 0;
+    std::size_t legacy_apply_calls = 0;
+    auto context = make_config_context(
+        config_path.string(),
+        broadcaster,
+        staged,
+        staged_json,
+        begin_calls,
+        finish_calls,
+        legacy_apply_calls);
+    const auto maintenance =
+        std::make_shared<FakeMaintenanceState>();
+    install_fake_maintenance(context, maintenance);
+
+    RuntimeMutationAdmission admission;
+    std::size_t handoff_gate_calls = 0;
+    install_runtime_mutation_admission(
+        context,
+        admission,
+        nullptr,
+        &handoff_gate_calls);
+    std::optional<RuntimeMutationAdmission::Lease>
+        retained_exact_lease;
+    std::size_t legacy_quiesce_calls = 0;
+    std::size_t exact_quiesce_calls = 0;
+    context.emergency_quiesce_runtime_fn =
+        [&] { ++legacy_quiesce_calls; };
+    context.emergency_quiesce_runtime_with_lease_return_fn =
+        [&](RuntimeMutationAdmission::Lease& request_lease) {
+            ++exact_quiesce_calls;
+            CHECK(admission.owns(request_lease));
+            retained_exact_lease.emplace(
+                std::move(request_lease));
+            CHECK_FALSE(static_cast<bool>(request_lease));
+        };
+    context.enqueue_apply_validated_config_with_lease_return_fn =
+        [&](Config,
+            std::string,
+            RuntimeMutationAdmission::Lease& request_lease)
+            -> ConfigApplyResult {
+            CHECK(admission.owns(request_lease));
+            auto owner_lease = std::move(request_lease);
+            request_lease = std::move(owner_lease);
+            throw std::runtime_error(
+                "injected apply failure before emergency quiesce");
+        };
+
+    try {
+        (void)commit_prepared_config_for_test(
+            context,
+            "emergency-quiesce-invalid-return",
+            [&] {
+                PreparedConfigCommit prepared;
+                prepared.config = staged;
+                prepared.serialized = staged_json;
+                return prepared;
+            },
+            [](const std::string& path,
+               const std::string& body) {
+                write_config_atomically(path, body);
+            });
+        FAIL("missing emergency lease return must require recovery");
+    } catch (const ApiError& error) {
+        CHECK(error.status() == 503);
+        REQUIRE(error.body().has_value());
+        const auto payload =
+            nlohmann::json::parse(*error.body());
+        CHECK(payload.at("recovery_required") == true);
+        CHECK(payload.at("runtime_quiesced") == false);
+        CHECK(payload.at("applied") == false);
+        CHECK(payload.at("rolled_back") == false);
+    }
+
+    CHECK(legacy_apply_calls == 0U);
+    CHECK(legacy_quiesce_calls == 0U);
+    CHECK(exact_quiesce_calls == 1U);
+    CHECK(handoff_gate_calls == 2U);
+    REQUIRE(retained_exact_lease.has_value());
+    CHECK(static_cast<bool>(*retained_exact_lease));
+    CHECK(admission.active().has_value());
+    CHECK_FALSE(
+        admission.try_acquire(
+            "before-emergency-exact-release")
+            .has_value());
+
+    retained_exact_lease.reset();
+    CHECK_FALSE(admission.active().has_value());
+    auto subsequent = admission.try_acquire(
+        "after-emergency-exact-release");
     REQUIRE(subsequent.has_value());
     subsequent->release();
 }

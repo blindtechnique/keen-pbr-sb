@@ -99,7 +99,14 @@ void register_reload_handler(ApiServer& server, ApiContext& ctx) {
             ctx, LifecycleOperationType::Stop,
             {{"stop_routing", "Stop routing and firewall"}},
             "stop_routing",
-            [&ctx](ApiRuntimeMutationGuard&) { ctx.stop_runtime(); },
+            [&ctx](ApiRuntimeMutationGuard& mutation) {
+                if (ctx.can_stop_runtime_with_lease()) {
+                    ctx.stop_runtime_with_lease(
+                        take_lifecycle_lease(mutation));
+                    return;
+                }
+                ctx.stop_runtime();
+            },
             "Routing runtime stopped", "stop-runtime", true, false);
     });
 

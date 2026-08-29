@@ -1,4 +1,5 @@
 #include "iptables.hpp"
+#include "firewall_cleanup_absence.hpp"
 #include "firewall_runtime.hpp"
 #include "ipset_restore_pipe.hpp"
 #include "port_spec_util.hpp"
@@ -6567,6 +6568,50 @@ void IptablesFirewall::cleanup_rules_impl(bool sweep_live_state) {
     // observed. This also sweeps verified crash residue after daemon restart.
     remove_ppe_deoffload_strict();
 
+    if (sweep_live_state) {
+        // The legacy no---test PPE preflight uses a unique, unhooked KpPpeV*
+        // chain. A crash between validation and its RAII cleanup can strand
+        // it. Delete only exact reserved names with no live jump/goto
+        // references; a referenced or excessive residue remains visible to
+        // the final inventory and fails STOP closed.
+        const auto inventory = run_iptables_control(
+            {"iptables", "-t", "mangle", "-S"});
+        if (classify_iptables_command(inventory) ==
+            IptablesCommandOutcome::Success) {
+            std::istringstream lines{inventory.stdout_output};
+            std::string line;
+            std::size_t removed = 0U;
+            constexpr std::size_t kMaximumValidationSweep = 8U;
+            constexpr std::string_view prefix{"-N KpPpeV"};
+            while (removed < kMaximumValidationSweep &&
+                   std::getline(lines, line)) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (line.rfind(prefix, 0U) != 0U) continue;
+                const std::string chain = line.substr(3U);
+                constexpr std::string_view chain_prefix{"KpPpeV"};
+                const auto suffix = std::string_view{chain}.substr(
+                    chain_prefix.size());
+                if (suffix.empty() ||
+                    !std::all_of(
+                        suffix.begin(), suffix.end(),
+                        [](unsigned char ch) {
+                            return std::isxdigit(ch) != 0;
+                        }) ||
+                    jump_reference_count(
+                        inventory.stdout_output, chain) != 0U ||
+                    inventory.stdout_output.find("-g " + chain) !=
+                        std::string::npos) {
+                    continue;
+                }
+                (void)run_iptables_control(
+                    {"iptables", "-t", "mangle", "-F", chain});
+                (void)run_iptables_control(
+                    {"iptables", "-t", "mangle", "-X", chain});
+                ++removed;
+            }
+        }
+    }
+
     auto remove_chain = [](const char* command,
                            const char* table,
                            const char* builtin,
@@ -6714,6 +6759,27 @@ void IptablesFirewall::cleanup_nat_rules_impl(bool sweep_live_state) {
         return;
     }
 
+    // A legacy restore without --test validates in deterministic, unhooked
+    // owned chains. A crash can strand those chains, so the strict live sweep
+    // removes them independently of the process-local NAT ownership flags.
+    const auto remove_validation_chains = [](const char* command) {
+        for (const auto* chain : {DNS_NAT_VALIDATION_CHAIN_NAME,
+                                  SNAT_VALIDATION_CHAIN_NAME}) {
+            (void)safe_exec(
+                {command, "-t", "nat", "-F", chain},
+                /*suppress_output=*/true);
+            (void)safe_exec(
+                {command, "-t", "nat", "-X", chain},
+                /*suppress_output=*/true);
+        }
+    };
+    remove_validation_chains("iptables");
+    const bool ipv6_nat_backend_available =
+        ipv6_nat_table_available();
+    if (ipv6_nat_backend_available) {
+        remove_validation_chains("ip6tables");
+    }
+
     // DNS redirect and tunnel masquerade NAT chains.
     if (dns_nat_v4_created_) {
         // Ownership is cleared only after hooks and chains are observed gone.
@@ -6731,8 +6797,6 @@ void IptablesFirewall::cleanup_nat_rules_impl(bool sweep_live_state) {
         safe_exec({"iptables", "-t", "nat", "-X", SNAT_CHAIN_NAME}, /*suppress_output=*/true);
         dns_nat_v4_created_ = false;
     }
-    const bool ipv6_nat_backend_available =
-        ipv6_nat_table_available();
     if (!ipv6_nat_backend_available) {
         dns_nat_v6_created_ = false;
     } else if (dns_nat_v6_created_) {
@@ -6816,6 +6880,189 @@ void IptablesFirewall::cleanup_saved_sets(bool preserve_dynamic_sets) {
     }
 }
 
+FirewallOwnedCleanupInspection
+IptablesFirewall::cleanup_saved_sets_strict() {
+    const auto inspect_names = [] {
+        return safe_exec_capture(
+            {"ipset", "list", "-name"},
+            /*suppress_stderr=*/false,
+            /*max_bytes=*/256U * 1024U,
+            /*capture_stderr=*/true,
+            /*drain_after_limit=*/true,
+            SafeExecFailureLog::DiagnosticOnly,
+            SafeExecTimeouts{
+                std::chrono::seconds{4},
+                std::chrono::milliseconds{500}});
+    };
+    const auto complete = [](const ExecCaptureResult& result) noexcept {
+        return result.exit_code == 0 && !result.timed_out &&
+            !result.truncated && !result.termination_uncertain;
+    };
+
+    const auto before = inspect_names();
+    if (!complete(before)) {
+        return {
+            FirewallOwnedCleanupState::observation_failed,
+            "could not inspect managed ipsets before strict cleanup",
+        };
+    }
+    for (const auto& name :
+         firewall_owned_ipset_names(before.stdout_output)) {
+        const SafeExecTimeouts mutation_timeouts{
+            std::chrono::seconds{4},
+            std::chrono::milliseconds{500}};
+        (void)safe_exec_with_timeouts(
+            {"ipset", "flush", name},
+            /*suppress_output=*/true,
+            mutation_timeouts,
+            {},
+            SafeExecFailureLog::DiagnosticOnly);
+        (void)safe_exec_with_timeouts(
+            {"ipset", "destroy", name},
+            /*suppress_output=*/true,
+            mutation_timeouts,
+            {},
+            SafeExecFailureLog::DiagnosticOnly);
+    }
+
+    const auto after = inspect_names();
+    return inspect_iptables_owned_cleanup_absence(
+        {},
+        {"ipset list -name", complete(after), after.stdout_output},
+        FirewallOwnedMarkerObservation::absent);
+}
+
+FirewallOwnedCleanupInspection
+IptablesFirewall::inspect_owned_cleanup_absence() const {
+    struct TableProbe final {
+        const char* source;
+        const char* command;
+        const char* table;
+        ExecCaptureResult result;
+    };
+    std::array<TableProbe, 8U> tables{{
+        {"iptables raw", "iptables", "raw", {}},
+        {"iptables mangle", "iptables", "mangle", {}},
+        {"iptables filter", "iptables", "filter", {}},
+        {"iptables nat", "iptables", "nat", {}},
+        {"ip6tables raw", "ip6tables", "raw", {}},
+        {"ip6tables mangle", "ip6tables", "mangle", {}},
+        {"ip6tables filter", "ip6tables", "filter", {}},
+        {"ip6tables nat", "ip6tables", "nat", {}},
+    }};
+    std::vector<FirewallOwnedCleanupProbeView> table_views;
+    table_views.reserve(tables.size());
+    for (auto& table : tables) {
+        table.result = run_iptables_control(
+            {table.command, "-t", table.table, "-S"});
+        const bool table_unavailable =
+            table.result.exit_code != 127 &&
+            command_reports_table_unavailable(table.result);
+        const bool complete = iptables_owned_table_probe_complete(
+            table.result.exit_code,
+            table.result.timed_out,
+            table.result.truncated,
+            table.result.termination_uncertain,
+            table_unavailable);
+        const std::string_view observed =
+            table.result.exit_code == 0
+            ? std::string_view{table.result.stdout_output}
+            : std::string_view{};
+        table_views.push_back(
+            {table.source, complete, observed});
+    }
+
+    const auto ipsets = safe_exec_capture(
+        {"ipset", "list", "-name"},
+        /*suppress_stderr=*/false,
+        /*max_bytes=*/256U * 1024U,
+        /*capture_stderr=*/true,
+        /*drain_after_limit=*/true,
+        SafeExecFailureLog::DiagnosticOnly,
+        SafeExecTimeouts{
+            std::chrono::seconds{4},
+            std::chrono::milliseconds{500}});
+    const bool ipsets_complete =
+        ipsets.exit_code == 0 && !ipsets.timed_out &&
+        !ipsets.truncated && !ipsets.termination_uncertain;
+
+    FirewallOwnedMarkerObservation marker =
+        FirewallOwnedMarkerObservation::invalid;
+    switch (inspect_ppe_owner_marker()) {
+        case PpeOwnerMarkerState::absent:
+            marker = FirewallOwnedMarkerObservation::absent;
+            break;
+        case PpeOwnerMarkerState::valid:
+            marker = FirewallOwnedMarkerObservation::present;
+            break;
+        case PpeOwnerMarkerState::invalid:
+            marker = FirewallOwnedMarkerObservation::invalid;
+            break;
+    }
+
+    return inspect_iptables_owned_cleanup_absence(
+        table_views,
+        {"ipset list -name", ipsets_complete, ipsets.stdout_output},
+        marker);
+}
+
+void IptablesFirewall::clear_cleanup_state_after_verified_absence() {
+    last_applied_snat_v4_expected_ = false;
+    last_applied_snat_v6_expected_ = false;
+    last_applied_snat_v6_managed_ = false;
+    last_applied_snat_interfaces_.clear();
+    last_applied_source_egress_snat_selectors_v4_.clear();
+    last_applied_source_egress_snat_selectors_v6_.clear();
+    last_applied_snat_fwmark_mask_ = 0xFFFFFFFFu;
+    created_sets_.clear();
+    udp_peer_sets_.clear();
+    published_udp_peer_classifiers_.clear();
+    pending_sets_.clear();
+    pending_elements_.clear();
+    pending_rules_.clear();
+    pending_forward_udp_rejects_.clear();
+    source_egress_snat_selectors_.clear();
+    chain_v4_created_ = false;
+    chain_v6_created_ = false;
+    forward_reject_v4_created_ = false;
+    forward_reject_v6_created_ = false;
+    last_applied_forward_reject_v4_expected_ = false;
+    last_applied_forward_reject_v6_expected_ = false;
+    last_applied_forward_reject_v6_managed_ = false;
+    target_v4_generation_ = FirewallSetGeneration::A;
+    target_v6_generation_ = FirewallSetGeneration::A;
+    target_forward_reject_v4_generation_ = FirewallSetGeneration::A;
+    target_forward_reject_v6_generation_ = FirewallSetGeneration::A;
+    target_static_v4_generation_ = FirewallSetGeneration::A;
+    target_static_v6_generation_ = FirewallSetGeneration::A;
+    last_applied_forward_reject_v4_generation_ =
+        FirewallSetGeneration::A;
+    last_applied_forward_reject_v6_generation_ =
+        FirewallSetGeneration::A;
+    last_applied_forward_udp_rejects_.clear();
+    exact_tcp_reset_chain_created_ = false;
+    exact_tcp_reset_publication_uncertain_ = false;
+    installed_exact_tcp_resets_.clear();
+    dns_nat_v4_created_ = false;
+    dns_nat_v6_created_ = false;
+    dns_redirect_requested_ = false;
+    router_origin_snat_requested_ = false;
+    snat_interfaces_.clear();
+    apply_prepared_ = false;
+    prepared_mode_ = FirewallApplyMode::Destructive;
+    {
+        std::lock_guard<std::mutex> lock(ttl_bypass_mutex_);
+        ttl_bypass_state_ = TtlBypassState::chain_absent;
+        ttl_bypass_detail_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(ppe_deoffload_mutex_);
+        ppe_deoffload_snapshot_ = PpeDeoffloadSnapshot{};
+        published_ppe_deoffload_spec_.reset();
+    }
+    strict_cleanup_pending_ = false;
+}
+
 void IptablesFirewall::cleanup_live_impl(bool preserve_dynamic_sets,
                                          bool sweep_live_state) {
     auto& log = Logger::instance();
@@ -6861,6 +7108,65 @@ void IptablesFirewall::cleanup_impl() {
 void IptablesFirewall::cleanup() {
     std::lock_guard<std::mutex> lock(pair_state_mutex_);
     cleanup_impl();
+}
+
+FirewallOwnedCleanupInspection
+IptablesFirewall::cleanup_and_inspect_owned() {
+    std::lock_guard<std::mutex> lock(pair_state_mutex_);
+    strict_cleanup_pending_ = true;
+
+    std::string cleanup_error;
+    try {
+        cleanup_live_impl(
+            /*preserve_dynamic_sets=*/false,
+            /*sweep_live_state=*/true);
+    } catch (const std::exception& error) {
+        cleanup_error = error.what();
+    } catch (...) {
+        cleanup_error = "strict iptables cleanup failed";
+    }
+
+    FirewallOwnedCleanupInspection set_cleanup;
+    try {
+        set_cleanup = cleanup_saved_sets_strict();
+    } catch (const std::exception& error) {
+        set_cleanup = {
+            FirewallOwnedCleanupState::observation_failed,
+            error.what(),
+        };
+    } catch (...) {
+        set_cleanup = {
+            FirewallOwnedCleanupState::observation_failed,
+            "strict ipset cleanup failed",
+        };
+    }
+
+    FirewallOwnedCleanupInspection inspection;
+    try {
+        inspection = inspect_owned_cleanup_absence();
+    } catch (const std::exception& error) {
+        inspection = {
+            FirewallOwnedCleanupState::observation_failed,
+            error.what(),
+        };
+    } catch (...) {
+        inspection = {
+            FirewallOwnedCleanupState::observation_failed,
+            "strict iptables post-cleanup inspection failed",
+        };
+    }
+
+    if (inspection.verified_absent()) {
+        clear_cleanup_state_after_verified_absence();
+        return inspection;
+    }
+    strict_cleanup_pending_ = true;
+    if (inspection.detail.empty()) {
+        inspection.detail = !set_cleanup.detail.empty()
+            ? set_cleanup.detail
+            : cleanup_error;
+    }
+    return inspection;
 }
 
 FirewallBackend IptablesFirewall::backend() const {

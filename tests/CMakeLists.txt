@@ -2,6 +2,7 @@ add_executable(keen-pbr-tests
   test_main.cpp
   test_firewall_verifier.cpp
   test_firewall_runtime.cpp
+  test_firewall_cleanup_absence.cpp
   test_meta_udp_443_activation_contract.cpp
   test_runtime_firewall_backend_transaction.cpp
   test_runtime_firewall_worker_operation.cpp
@@ -13,6 +14,7 @@ add_executable(keen-pbr-tests
   test_runtime_firewall_immediate_completion.cpp
   test_runtime_firewall_lifecycle_completion.cpp
   test_runtime_cold_boot_terminal_policy.cpp
+  test_runtime_stop_cleanup_transaction.cpp
   test_ppe_deoffload.cpp
   test_system_auth_capability.cpp
   test_step_up.cpp
@@ -1021,6 +1023,7 @@ add_executable(keen-pbr-runtime-firewall-owner-tests
   test_runtime_firewall_operation_owner.cpp
   test_runtime_firewall_terminal_owner.cpp
   test_runtime_firewall_worker_operation.cpp
+  test_runtime_stop_cleanup_transaction.cpp
   ../src/daemon/runtime_firewall_operation_owner.cpp
   ../src/daemon/runtime_firewall_immediate_completion.cpp
   ../src/daemon/runtime_firewall_lifecycle_completion.cpp
@@ -1051,6 +1054,35 @@ keen_pbr_apply_project_options(keen-pbr-runtime-firewall-owner-tests)
 add_test(
   NAME keen-pbr-runtime-firewall-owner-tests
   COMMAND keen-pbr-runtime-firewall-owner-tests
+)
+
+# Keep strict STOP absence classification independently buildable. The
+# production backend/link gate still exercises the command and inventory
+# plumbing; this focused target locks the fail-closed pure classifier.
+add_executable(keen-pbr-firewall-cleanup-absence-tests
+  test_main.cpp
+  test_firewall_cleanup_absence.cpp
+)
+set_target_properties(
+  keen-pbr-firewall-cleanup-absence-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_include_directories(
+  keen-pbr-firewall-cleanup-absence-tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+)
+target_link_libraries(
+  keen-pbr-firewall-cleanup-absence-tests PRIVATE
+  Threads::Threads
+)
+keen_pbr_apply_project_options(
+  keen-pbr-firewall-cleanup-absence-tests)
+add_test(
+  NAME keen-pbr-firewall-cleanup-absence-tests
+  COMMAND keen-pbr-firewall-cleanup-absence-tests
 )
 
 add_test(

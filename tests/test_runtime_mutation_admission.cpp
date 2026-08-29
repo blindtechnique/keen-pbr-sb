@@ -169,6 +169,60 @@ TEST_CASE("runtime mutation admission shutdown is terminal") {
     CHECK_FALSE(admission.try_acquire("after-release").has_value());
 }
 
+TEST_CASE("runtime mutation admission grants one cleanup after shutdown idle") {
+    RuntimeMutationAdmission admission;
+    CHECK_FALSE(admission.try_acquire_shutdown_cleanup("too-early").has_value());
+
+    auto foreground = admission.try_acquire("foreground-runtime-owner");
+    REQUIRE(foreground.has_value());
+    const auto foreground_token = foreground->token();
+    admission.shutdown();
+
+    CHECK(admission.owns(*foreground));
+    CHECK_FALSE(admission.try_acquire_shutdown_cleanup(
+        "shutdown-runtime-cleanup").has_value());
+    foreground->release();
+
+    auto cleanup = admission.try_acquire_shutdown_cleanup(
+        "shutdown-runtime-cleanup");
+    REQUIRE(cleanup.has_value());
+    CHECK(admission.owns(*cleanup));
+    CHECK(cleanup->token() != foreground_token);
+    const auto active = admission.active();
+    REQUIRE(active.has_value());
+    CHECK(active->token == cleanup->token());
+    CHECK(active->label == "shutdown-runtime-cleanup");
+    CHECK_FALSE(admission.try_acquire("ordinary-after-shutdown").has_value());
+    CHECK_FALSE(admission.try_acquire_shutdown_cleanup(
+        "duplicate-shutdown-cleanup").has_value());
+    CHECK_FALSE(admission.wait_for_idle_for(std::chrono::milliseconds{0}));
+
+    cleanup->release();
+    CHECK(admission.wait_for_idle_for(std::chrono::milliseconds{10}));
+    CHECK_FALSE(admission.active().has_value());
+    CHECK_FALSE(admission.try_acquire_shutdown_cleanup(
+        "cleanup-after-release").has_value());
+}
+
+TEST_CASE("shutdown cleanup waits for every exact handoff gate") {
+    RuntimeMutationAdmission admission;
+    auto foreground = admission.try_acquire("foreground-runtime-owner");
+    REQUIRE(foreground.has_value());
+    auto handoff = admission.try_acquire_handoff_gate(*foreground);
+    REQUIRE(handoff.has_value());
+
+    admission.shutdown();
+    foreground->release();
+    CHECK_FALSE(admission.try_acquire_shutdown_cleanup(
+        "shutdown-runtime-cleanup").has_value());
+
+    handoff->release();
+    auto cleanup = admission.try_acquire_shutdown_cleanup(
+        "shutdown-runtime-cleanup");
+    REQUIRE(cleanup.has_value());
+    CHECK(admission.owns(*cleanup));
+}
+
 TEST_CASE("runtime mutation admission wakes deferred writer after release") {
     RuntimeMutationAdmission admission;
     auto blocker = admission.try_acquire("api-save");

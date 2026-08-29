@@ -71,10 +71,13 @@ public:
     void apply(FirewallApplyMode mode) override;
     // Delete the inet KeenPbrTable table, removing all sets and rules within it.
     void cleanup() override;
+    FirewallOwnedCleanupInspection cleanup_and_inspect_owned() override;
     // Returns FirewallBackend::nftables.
     FirewallBackend backend() const override;
 
 private:
+    void clear_cleanup_state_after_verified_absence();
+
     enum class MarkMergeMode : uint8_t {
         LegacyConstant,
         RegisterMerge,
@@ -295,6 +298,9 @@ private:
 
     // True once the inet KeenPbrTable table has been created via apply().
     bool table_created_ = false;
+    // A failed strict STOP retains broad recovery ownership even when the
+    // table disappeared between mutation and its final cross-backend proof.
+    bool strict_cleanup_pending_ = false;
 
     // Client DNS enforcement requested for the next apply().
     bool dns_redirect_requested_ = false;

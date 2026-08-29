@@ -3,6 +3,7 @@
 #include "runtime_firewall_backend_transaction.hpp"
 #include "runtime_route_health_plan.hpp"
 #include "runtime_recovery_policy.hpp"
+#include "runtime_stop_cleanup_transaction.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -29,6 +30,7 @@ enum class RuntimeFirewallWorkerOperationKind : std::uint8_t {
     urltest_rollback,
     keenetic_dns_candidate,
     keenetic_dns_rollback,
+    stop_cleanup,
 };
 
 constexpr bool runtime_firewall_worker_operation_is_config_generation(
@@ -228,6 +230,9 @@ struct RuntimeFirewallWorkerAttemptResult {
         native_direct_egress_source_cleanup;
     RuntimeFirewallWorkerOwnedConntrackCleanup
         post_commit_owned_conntrack_cleanup;
+    // STOP uses the same durable worker mailbox/lease as apply operations,
+    // but its monotonic owned-state deletion has a distinct typed result.
+    std::shared_ptr<const RuntimeStopCleanupResult> stop_cleanup;
 
     // This proof is intentionally based only on whether COMMIT was entered.
     // A changed publication epoch strengthens ambiguity, but an unchanged one

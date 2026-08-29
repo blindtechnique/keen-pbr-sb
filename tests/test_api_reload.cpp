@@ -354,7 +354,7 @@ TEST_CASE("API mutation guard rejects restore after finish") {
 }
 
 TEST_CASE(
-    "API mutation guard permits only one restore and one lease handoff") {
+    "API mutation guard permits sequential exact lease handoffs") {
     RuntimeMutationAdmission admission;
     SseBroadcaster broadcaster;
     auto context = test_support::make_minimal_api_context(
@@ -371,9 +371,11 @@ TEST_CASE(
         CHECK_FALSE(static_cast<bool>(returned));
 
         CHECK_FALSE(mutation.restore_lease(returned));
-        CHECK_THROWS_AS(
-            mutation.take_lease(),
-            std::logic_error);
+        REQUIRE(mutation.arm_handoff_gate());
+        auto returned_again = mutation.take_lease();
+        REQUIRE(static_cast<bool>(returned_again));
+        CHECK(mutation.restore_lease(returned_again));
+        CHECK_FALSE(static_cast<bool>(returned_again));
         CHECK(admission.active().has_value());
     }
 
@@ -405,6 +407,37 @@ TEST_CASE("restart endpoint hands the exact production lease to its tail callbac
     const auto active = admission.active();
     REQUIRE(active.has_value());
     CHECK(active->label == "restart-runtime");
+    CHECK(transferred->token() == active->token);
+
+    transferred->release();
+    CHECK_FALSE(admission.active().has_value());
+}
+
+TEST_CASE("stop endpoint hands the exact production lease to its tail callback") {
+    RuntimeMutationAdmission admission;
+    ReloadApiFixture fixture(test_support::isolated_api_port(8));
+    wire_runtime_mutation_admission(fixture.context, admission);
+
+    std::optional<RuntimeMutationAdmission::Lease> transferred;
+    std::size_t legacy_stop_calls = 0U;
+    fixture.context.stop_runtime_fn = [&] {
+        ++legacy_stop_calls;
+    };
+    fixture.context.stop_runtime_with_lease_fn =
+        [&](RuntimeMutationAdmission::Lease lease) {
+            transferred.emplace(std::move(lease));
+        };
+
+    const auto response = fixture.client->Post(
+        "/api/service/stop", "", "application/json");
+    REQUIRE(response != nullptr);
+    CHECK(response->status == 200);
+    CHECK(legacy_stop_calls == 0U);
+    REQUIRE(transferred.has_value());
+    CHECK(static_cast<bool>(*transferred));
+    const auto active = admission.active();
+    REQUIRE(active.has_value());
+    CHECK(active->label == "stop-runtime");
     CHECK(transferred->token() == active->token);
 
     transferred->release();
@@ -480,6 +513,29 @@ TEST_CASE("start endpoint releases its exact lease when tail handoff throws") {
     REQUIRE(lifecycle.has_value());
     CHECK(lifecycle->result == LifecycleOperationResult::Failed);
     CHECK(lifecycle->error == "typed start handoff failed");
+}
+
+TEST_CASE("stop endpoint releases its exact lease when tail handoff throws") {
+    RuntimeMutationAdmission admission;
+    ReloadApiFixture fixture(test_support::isolated_api_port(9));
+    wire_runtime_mutation_admission(fixture.context, admission);
+    fixture.context.stop_runtime_with_lease_fn =
+        [](RuntimeMutationAdmission::Lease lease) {
+            CHECK(static_cast<bool>(lease));
+            throw std::runtime_error("typed stop handoff failed");
+        };
+
+    const auto response = fixture.client->Post(
+        "/api/service/stop", "", "application/json");
+    REQUIRE(response != nullptr);
+    CHECK(response->status == 500);
+    CHECK(response->body.find("typed stop handoff failed") !=
+          std::string::npos);
+    CHECK_FALSE(admission.active().has_value());
+    const auto lifecycle = fixture.store.snapshot();
+    REQUIRE(lifecycle.has_value());
+    CHECK(lifecycle->result == LifecycleOperationResult::Failed);
+    CHECK(lifecycle->error == "typed stop handoff failed");
 }
 
 } // namespace keen_pbr3

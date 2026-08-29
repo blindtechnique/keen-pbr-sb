@@ -95,6 +95,7 @@ struct DaemonConfigGenerationTransaction;
 struct DaemonUrltestSelectionTransaction;
 struct DaemonKeeneticDnsRefreshTransaction;
 struct DaemonColdBootTransaction;
+struct RuntimeStopCleanupTarget;
 struct PlannedRoutingState;
 struct NdmsCatalogSnapshot;
 struct NdmsVpnServerServiceSnapshot;
@@ -810,6 +811,7 @@ private:
     void forget_exact_tcp_reset_cleanup(
         const FirewallExactTcpResetRule& rule) noexcept;
     void resume_exact_tcp_reset_cleanups() noexcept;
+    void fence_exact_tcp_reset_cleanups_for_stop() noexcept;
     bool drain_exact_tcp_reset_cleanups_before_generation_change() noexcept;
     void clear_exact_tcp_reset_cleanup_ownership() noexcept;
     void run_idle_stall_observer() noexcept;
@@ -882,7 +884,6 @@ private:
     void schedule_internal_vpn_catalog_refresh_retry(
         std::uint64_t runtime_generation);
     void cancel_internal_vpn_catalog_refresh_retry();
-    void stop_routing_runtime();
     bool routing_runtime_active() const;
     OwnedConntrackCleanupSnapshot
     snapshot_owned_conntrack_marks() const;
@@ -1065,6 +1066,15 @@ private:
     void begin_preowned_runtime_firewall_restart(
         std::unique_ptr<RuntimeMutationAdmission::Lease> lease,
         RuntimeFirewallLifecycleCompletion::Source completion);
+    void stop_routing_runtime_with_lease(
+        RuntimeMutationAdmission::Lease lease);
+    void stop_routing_runtime_with_lease_return(
+        RuntimeMutationAdmission::Lease& lease);
+    bool begin_preowned_runtime_firewall_stop_cleanup(
+        std::unique_ptr<RuntimeMutationAdmission::Lease>& lease,
+        RuntimeStopCleanupTarget target,
+        RuntimeFirewallPreownedTerminalContinuation& continuation) noexcept;
+    bool run_process_shutdown_cleanup() noexcept;
     std::optional<RuntimeFirewallImmediateDisposition>
     begin_preowned_runtime_firewall_config_preapply(
         std::unique_ptr<RuntimeMutationAdmission::Lease>& lease,

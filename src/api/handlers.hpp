@@ -385,6 +385,19 @@ struct ApiContext {
         stop_runtime_fn();
     }
 
+    bool can_stop_runtime_with_lease() const noexcept {
+        return static_cast<bool>(stop_runtime_with_lease_fn);
+    }
+
+    void stop_runtime_with_lease(
+        RuntimeMutationAdmission::Lease lease) const {
+        if (!stop_runtime_with_lease_fn) {
+            throw std::logic_error(
+                "Runtime stop lease handoff is unavailable");
+        }
+        stop_runtime_with_lease_fn(std::move(lease));
+    }
+
     void emergency_quiesce_runtime() const {
         if (emergency_quiesce_runtime_fn) {
             emergency_quiesce_runtime_fn();
@@ -394,6 +407,20 @@ struct ApiContext {
         // behavior, provided their stop callback does not re-enter the config
         // operation state machine.
         stop_runtime_fn();
+    }
+
+    bool can_emergency_quiesce_runtime_with_lease_return() const noexcept {
+        return static_cast<bool>(
+            emergency_quiesce_runtime_with_lease_return_fn);
+    }
+
+    void emergency_quiesce_runtime_with_lease_return(
+        RuntimeMutationAdmission::Lease& lease) const {
+        if (!emergency_quiesce_runtime_with_lease_return_fn) {
+            throw std::logic_error(
+                "Emergency runtime quiesce lease return is unavailable");
+        }
+        emergency_quiesce_runtime_with_lease_return_fn(lease);
     }
 
     void restart_runtime() const {
@@ -481,6 +508,14 @@ struct ApiContext {
     std::function<std::optional<RuntimeMutationAdmission::HandoffGate>(
         const RuntimeMutationAdmission::Lease&)>
         try_acquire_runtime_mutation_handoff_gate_fn;
+    // Public STOP transfers the request's exact lease into the production
+    // runtime owner, just like START and RESTART. Emergency quiesce instead
+    // returns that same physical lease so config recovery can continue under
+    // one uninterrupted mutation admission.
+    std::function<void(RuntimeMutationAdmission::Lease)>
+        stop_runtime_with_lease_fn;
+    std::function<void(RuntimeMutationAdmission::Lease&)>
+        emergency_quiesce_runtime_with_lease_return_fn;
 };
 
 // Request-scoped compatibility wrapper.  Production owns an unforgeable
@@ -540,6 +575,15 @@ public:
     }
 
     bool arm_handoff_gate() noexcept {
+        if (production_state_ == ProductionState::production_owned &&
+            !production_handoff_taken_ &&
+            handoff_gate_.has_value() &&
+            static_cast<bool>(*handoff_gate_) &&
+            lease_.has_value() &&
+            static_cast<bool>(*lease_) &&
+            !legacy_active_) {
+            return true;
+        }
         if (production_state_ != ProductionState::production_owned ||
             production_handoff_taken_ ||
             handoff_gate_.has_value() ||
@@ -624,6 +668,7 @@ public:
         }
         lease_.emplace(std::move(returned_lease));
         production_state_ = ProductionState::production_owned;
+        production_handoff_taken_ = false;
         handoff_gate_.reset();
         return true;
     }

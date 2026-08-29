@@ -1,4 +1,5 @@
 #include "nftables.hpp"
+#include "firewall_cleanup_absence.hpp"
 #include "iptables.hpp"
 #include "nft_batch_pipe.hpp"
 #include "port_spec_util.hpp"
@@ -2920,15 +2921,12 @@ void NftablesFirewall::cleanup_live_impl(bool verification_required) {
                 owned_snat_inspect_kill_grace()});
     };
     const auto proves_absence = [](const ExecCaptureResult& result) {
-        if (result.exit_code == 0 || result.timed_out || result.truncated) {
-            return false;
-        }
-        return result.stdout_output.find("No such file or directory") !=
-                   std::string::npos ||
-               result.stdout_output.find("does not exist") !=
-                   std::string::npos ||
-               result.stdout_output.find("not found") !=
-                   std::string::npos;
+        return nft_owned_table_absence_proven(
+            result.exit_code,
+            result.timed_out,
+            result.truncated,
+            result.termination_uncertain,
+            result.stdout_output);
     };
 
     const auto before = inspect_table();
@@ -2936,7 +2934,8 @@ void NftablesFirewall::cleanup_live_impl(bool verification_required) {
         table_created_ = false;
         return;
     }
-    if (before.exit_code != 0 || before.timed_out || before.truncated) {
+    if (before.exit_code != 0 || before.timed_out || before.truncated ||
+        before.termination_uncertain) {
         if (!verification_required && !table_created_) {
             return;
         }
@@ -2968,9 +2967,8 @@ void NftablesFirewall::cleanup_live_impl(bool verification_required) {
     table_created_ = false;
 }
 
-void NftablesFirewall::cleanup_impl(bool verification_required) {
-    cleanup_live_impl(verification_required);
-
+void NftablesFirewall::clear_cleanup_state_after_verified_absence() {
+    table_created_ = false;
     last_applied_snat_expected_ = false;
     last_applied_snat_interfaces_.clear();
     last_applied_source_egress_snat_selectors_.clear();
@@ -2983,13 +2981,110 @@ void NftablesFirewall::cleanup_impl(bool verification_required) {
     pending_elements_.clear();
     pending_rules_.clear();
     pending_forward_udp_rejects_.clear();
+    dns_redirect_requested_ = false;
+    router_origin_snat_requested_ = false;
+    snat_interfaces_.clear();
     source_egress_snat_selectors_.clear();
+    strict_cleanup_pending_ = false;
+}
+
+void NftablesFirewall::cleanup_impl(bool verification_required) {
+    cleanup_live_impl(verification_required);
+    clear_cleanup_state_after_verified_absence();
 }
 
 void NftablesFirewall::cleanup() {
     std::lock_guard<std::mutex> lock(pair_state_mutex_);
     cleanup_stale_iptables_ppe_deoffload_strict();
     cleanup_impl(/*verification_required=*/true);
+}
+
+FirewallOwnedCleanupInspection
+NftablesFirewall::cleanup_and_inspect_owned() {
+    std::lock_guard<std::mutex> lock(pair_state_mutex_);
+    strict_cleanup_pending_ = true;
+
+    // A previous backend generation may have left xtables chains or ipsets.
+    // STOP owns both namespaces and cannot publish success from nft table
+    // absence alone.
+    FirewallOwnedCleanupInspection legacy_iptables;
+    try {
+        IptablesFirewall cleanup_only;
+        legacy_iptables = cleanup_only.cleanup_and_inspect_owned();
+    } catch (const std::exception& error) {
+        legacy_iptables = {
+            FirewallOwnedCleanupState::observation_failed,
+            error.what(),
+        };
+    } catch (...) {
+        legacy_iptables = {
+            FirewallOwnedCleanupState::observation_failed,
+            "legacy iptables cleanup failed",
+        };
+    }
+
+    std::string nft_cleanup_error;
+    try {
+        cleanup_live_impl(/*verification_required=*/true);
+    } catch (const std::exception& error) {
+        nft_cleanup_error = error.what();
+    } catch (...) {
+        nft_cleanup_error = "nft cleanup failed";
+    }
+
+    const auto after = safe_exec_capture(
+        {"nft", "-j", "-t", "list", "table", "inet",
+         std::string(TABLE_NAME)},
+        /*suppress_stderr=*/false,
+        /*max_bytes=*/256U * 1024U,
+        /*capture_stderr=*/true,
+        /*drain_after_limit=*/true,
+        SafeExecFailureLog::DiagnosticOnly,
+        SafeExecTimeouts{
+            owned_snat_inspect_timeout(),
+            owned_snat_inspect_kill_grace()});
+
+    FirewallOwnedCleanupInspection nft_inspection;
+    if (nft_owned_table_absence_proven(
+            after.exit_code,
+            after.timed_out,
+            after.truncated,
+            after.termination_uncertain,
+            after.stdout_output)) {
+        nft_inspection = {
+            FirewallOwnedCleanupState::verified_absent,
+            {},
+        };
+    } else if (after.exit_code == 0 && !after.timed_out &&
+               !after.termination_uncertain) {
+        nft_inspection = {
+            FirewallOwnedCleanupState::owned_artifacts_present,
+            "owned nft table remains after cleanup",
+        };
+    } else {
+        nft_inspection = {
+            FirewallOwnedCleanupState::observation_failed,
+            nft_cleanup_error.empty()
+                ? "could not verify owned nft table absence"
+                : nft_cleanup_error,
+        };
+    }
+
+    if (legacy_iptables.verified_absent() &&
+        nft_inspection.verified_absent()) {
+        clear_cleanup_state_after_verified_absence();
+        return nft_inspection;
+    }
+    strict_cleanup_pending_ = true;
+    if (!legacy_iptables.verified_absent()) {
+        return {
+            legacy_iptables.state,
+            legacy_iptables.detail.empty()
+                ? "legacy iptables cleanup was not verified"
+                : "legacy iptables cleanup: " + legacy_iptables.detail,
+        };
+    }
+    return nft_inspection;
 }
 
 FirewallBackend NftablesFirewall::backend() const {

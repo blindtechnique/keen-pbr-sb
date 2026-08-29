@@ -1122,79 +1122,6 @@ void Daemon::complete_pending_snat_recovery_before_generation_change() {
     runtime_firewall_owner_->cancel_retry();
 }
 
-void Daemon::stop_routing_runtime() {
-    auto& log = Logger::instance();
-    // Do not cross the generation boundary until short-lived exact reset
-    // policy is verified absent; a failed drain retains its maintenance timer.
-    if (!drain_exact_tcp_reset_cleanups_before_generation_change()) {
-        resume_exact_tcp_reset_cleanups();
-        throw TransientFirewallError(
-            "exact TCP reset cleanup is incomplete before runtime stop");
-    }
-    cancel_idle_stall_observer();
-    cancel_meta_udp443_activation_cleanup();
-    cancel_owned_snat_health_check();
-    cancel_owned_conntrack_cleanup_retry();
-    runtime_firewall_owner_->cancel_retry();
-    runtime_firewall_retry_.clear_owned_snat_recovery();
-    urltest_after_firewall_gate_.reset();
-    cancel_resolver_reload_retry();
-    cancel_internal_vpn_catalog_refresh_retry();
-    if (lists_runtime_mutation_retry_task_id_ >= 0) {
-        scheduler_->cancel(lists_runtime_mutation_retry_task_id_);
-        lists_runtime_mutation_retry_task_id_ = -1;
-    }
-    lists_runtime_mutation_retry_force_reconcile_ = false;
-    if (!routing_runtime_active()) {
-        if (runtime_state_machine_.state() != RuntimeState::stopped) {
-            transition_runtime_or_throw(RuntimeState::stopped, "inactive runtime stopped");
-            publish_runtime_state();
-        }
-        return;
-    }
-
-    runtime_generation_.fetch_add(1, std::memory_order_acq_rel);
-
-    {
-        KPBR_LOCK_GUARD(udp_call_affinity_mutation_mutex_);
-        if (urltest_manager_) {
-            urltest_manager_->clear();
-        }
-        urltest_apply_incidents_.clear();
-        cleanup_owned_conntrack_marks("while stopping routing");
-        cancel_owned_conntrack_cleanup_retry();
-        (void)routing_operation_owner_.clear();
-        firewall_->cleanup();
-        clear_exact_tcp_reset_cleanup_ownership();
-        committed_meta_udp443_fwmark_.reset();
-        committed_meta_udp443_owned_mask_ = 0U;
-    }
-    if (keenetic_dns_refresh_task_id_ >= 0) {
-        scheduler_->cancel(keenetic_dns_refresh_task_id_);
-        keenetic_dns_refresh_task_id_ = -1;
-    }
-    if (keenetic_dns_refresh_admission_retry_task_id_ >= 0) {
-        scheduler_->cancel(keenetic_dns_refresh_admission_retry_task_id_);
-        keenetic_dns_refresh_admission_retry_task_id_ = -1;
-    }
-
-    const bool resolver_deactivated =
-        run_system_resolver_hook("deactivate");
-
-    // Routing and firewall teardown has already happened. Publish the real
-    // state even when dnsmasq fallback activation fails; reporting "running"
-    // here would leave restart callers and the UI with a false liveness state.
-    runtime_state_store_.set_routing_runtime_active(false);
-    transition_runtime_or_throw(RuntimeState::stopped, "runtime stopped");
-    refresh_resolver_config_hash_actual_async();
-    publish_runtime_state();
-    log.info("Routing runtime stopped.");
-
-    if (!resolver_deactivated) {
-        throw DaemonError("System resolver deactivate hook failed");
-    }
-}
-
 void Daemon::setup_static_routing() {
     const Ipv6SupportDecision ipv6_decision = resolve_ipv6_support(config_);
     log_ipv6_support_decision_once(ipv6_decision);
@@ -5402,6 +5329,22 @@ void Daemon::resume_exact_tcp_reset_cleanups() noexcept {
                 pending.rule, pending.runtime_generation, attempt);
         }
     } catch (...) {
+    }
+}
+
+void Daemon::fence_exact_tcp_reset_cleanups_for_stop() noexcept {
+    for (auto& pending : pending_exact_tcp_reset_cleanups_) {
+        const int task_id = std::exchange(pending.task_id, -1);
+        // Invalidate a callback which the scheduler may already have moved
+        // out of its timer queue. The immutable rule record remains owned
+        // until the typed STOP worker proves the whole backend chain absent.
+        pending.schedule_serial = ++exact_tcp_reset_cleanup_schedule_serial_;
+        if (task_id >= 0 && scheduler_) {
+            try {
+                scheduler_->cancel(task_id);
+            } catch (...) {
+            }
+        }
     }
 }
 

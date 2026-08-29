@@ -235,8 +235,40 @@ void mark_config_save_unknown_best_effort(
 }
 
 
-bool stop_routing_best_effort(ApiContext& ctx) noexcept {
+bool stop_routing_best_effort(
+    ApiContext& ctx,
+    ApiRuntimeMutationGuard& config_operation) noexcept {
     try {
+        if (config_operation.uses_production_admission() &&
+            ctx.can_emergency_quiesce_runtime_with_lease_return()) {
+            if (!config_operation.arm_handoff_gate()) {
+                Logger::instance().error(
+                    "Cannot quiesce routing after unsafe config save: "
+                    "runtime mutation handoff gate is unavailable");
+                return false;
+            }
+            auto returned_lease = config_operation.take_lease();
+            std::exception_ptr quiesce_failure;
+            try {
+                ctx.emergency_quiesce_runtime_with_lease_return(
+                    returned_lease);
+            } catch (...) {
+                quiesce_failure = std::current_exception();
+            }
+
+            // Reclaim the exact request lease before interpreting either a
+            // successful terminal or an exception from the runtime owner.
+            if (!config_operation.restore_lease(returned_lease)) {
+                Logger::instance().error(
+                    "Cannot quiesce routing after unsafe config save: "
+                    "runtime owner did not return the exact mutation lease");
+                return false;
+            }
+            if (quiesce_failure) {
+                std::rethrow_exception(quiesce_failure);
+            }
+            return true;
+        }
         ctx.emergency_quiesce_runtime();
         return true;
     } catch (const std::exception& error) {
@@ -252,12 +284,13 @@ bool stop_routing_best_effort(ApiContext& ctx) noexcept {
 
 [[noreturn]] void throw_recovery_required(
     ApiContext& ctx,
+    ApiRuntimeMutationGuard& config_operation,
     const std::string& reason,
     bool applied,
     bool rolled_back,
     const std::string& recovery_error = {}) {
     const bool runtime_quiesced =
-        stop_routing_best_effort(ctx);
+        stop_routing_best_effort(ctx, config_operation);
     nlohmann::json payload = {
         {"error", reason},
         {"saved", false},
@@ -626,6 +659,7 @@ std::string commit_prepared_config_impl(
                 "journal");
             throw_recovery_required(
                 ctx,
+                config_operation,
                 std::string(
                     "Cannot start the durable "
                     "configuration recovery journal: ") +
@@ -640,6 +674,7 @@ std::string commit_prepared_config_impl(
                 "journal");
             throw_recovery_required(
                 ctx,
+                config_operation,
                 "Cannot start the durable configuration "
                 "recovery journal",
                 false,
@@ -745,6 +780,7 @@ std::string commit_prepared_config_impl(
                     "configuration recovery journal");
                 throw_recovery_required(
                     ctx,
+                    config_operation,
                     std::string(
                         "Transport configuration changed "
                         "before this operation mutated "
@@ -763,6 +799,7 @@ std::string commit_prepared_config_impl(
                     "configuration recovery journal");
                 throw_recovery_required(
                     ctx,
+                    config_operation,
                     "Transport configuration changed "
                     "before this operation mutated state, "
                     "but its recovery journal could not "
@@ -804,6 +841,7 @@ std::string commit_prepared_config_impl(
                     "Configuration file recovery failed");
                 throw_recovery_required(
                     ctx,
+                    config_operation,
                     "Configuration write failed and exact "
                     "recovery could not be proven",
                     false,
@@ -844,6 +882,7 @@ std::string commit_prepared_config_impl(
                     "mutation lease");
                 throw_recovery_required(
                     ctx,
+                    config_operation,
                     "Configuration runtime apply did not return the "
                     "exact mutation lease; runtime state is unknown",
                     false,
@@ -884,6 +923,7 @@ std::string commit_prepared_config_impl(
                     "interrupted");
                 throw_recovery_required(
                     ctx,
+                    config_operation,
                     "Configuration runtime apply was "
                     "interrupted; runtime state is unknown",
                     false,
@@ -896,6 +936,7 @@ std::string commit_prepared_config_impl(
                     "interrupted");
                 throw_recovery_required(
                     ctx,
+                    config_operation,
                     std::string(
                         "Configuration runtime apply was "
                         "interrupted: ") +
@@ -910,6 +951,7 @@ std::string commit_prepared_config_impl(
                     "interrupted");
                 throw_recovery_required(
                     ctx,
+                    config_operation,
                     "Configuration runtime apply was "
                     "interrupted; runtime state is unknown",
                     false,
@@ -928,6 +970,7 @@ std::string commit_prepared_config_impl(
                     "not proven");
                 throw_recovery_required(
                     ctx,
+                    config_operation,
                     apply_result.error.empty()
                         ? "Configuration was not applied "
                           "and runtime rollback was not "
@@ -965,6 +1008,7 @@ std::string commit_prepared_config_impl(
                     "Configuration file recovery failed");
                 throw_recovery_required(
                     ctx,
+                    config_operation,
                     "Runtime rolled back, but exact "
                     "persistent recovery could not be "
                     "proven",
@@ -1013,6 +1057,7 @@ std::string commit_prepared_config_impl(
                 "failed");
             throw_recovery_required(
                 ctx,
+                config_operation,
                 std::string(
                     "Configuration applied, but its "
                     "recovery journal could not be "
@@ -1028,6 +1073,7 @@ std::string commit_prepared_config_impl(
                 "failed");
             throw_recovery_required(
                 ctx,
+                config_operation,
                 "Configuration applied, but its recovery "
                 "journal could not be committed",
                 true,

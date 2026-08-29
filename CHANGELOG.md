@@ -44,6 +44,16 @@
 - IPv4/IPv6 firewall использует общий RAW PREROUTING-контур, а обычный runtime
   refresh переиспользует подтверждённые live sets, когда поколение содержимого
   не изменилось. Полное стриминговое применение остаётся проверяемым fallback.
+- Остановка runtime из API и финальное завершение демона теперь передают ту же
+  exact mutation lease единственному `RuntimeFirewallOperationOwner`. Маршруты,
+  owned conntrack state, firewall и системный resolver очищаются одной
+  ограниченной транзакцией до остановки owner/executor; тот же путь выполняется
+  после ошибки event loop. `stopped` публикуется только после авторитетно
+  пустого routing inventory, деактивации resolver и свежего доказательства
+  отсутствия owned iptables/nftables state. Строгий backend sweep охватывает
+  обе семьи и таблицы, NAT/validation chains, managed ipsets, TTL/PPE hooks,
+  exact TCP reset и crash-residue прежнего backend; неполная очистка оставляет
+  runtime неактивным в `broken`, а не выдаёт ложный успешный STOP.
 - Единственный ответ на вопрос, активна ли маршрутизация, теперь принадлежит
   `RuntimeStateStore`; отдельное изменяемое поле `Daemon` удалено, а API/SSE
   строят проекцию из того же состояния.

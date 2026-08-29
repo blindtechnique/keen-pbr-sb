@@ -26,6 +26,10 @@ private:
         std::string active_label;
         std::uint64_t handoff_count{0};
         bool accepting{true};
+        // Process shutdown may need one final typed cleanup after ordinary
+        // writers have quiesced. This latch prevents that private authority
+        // from becoming a second post-shutdown admission channel.
+        bool shutdown_cleanup_claimed{false};
         std::condition_variable idle_cv;
     };
 
@@ -172,6 +176,30 @@ public:
         state_->active_token = state_->next_token;
         state_->active_label = std::move(label);
         return Lease{state_, state_->active_token};
+    }
+
+    // Admit exactly one internal cleanup only after shutdown() has closed
+    // ordinary writers and every previously accepted lease/handoff has
+    // quiesced. The returned object is the same exact RAII Lease used by
+    // normal runtime mutations; releasing it wakes wait_for_idle_for().
+    // A failed probe does not consume the one-shot authority.
+    std::optional<Lease> try_acquire_shutdown_cleanup(std::string label) {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        if (state_->accepting || state_->active_token != 0 ||
+            state_->handoff_count != 0 ||
+            state_->shutdown_cleanup_claimed) {
+            return std::nullopt;
+        }
+
+        auto next_token = state_->next_token + 1U;
+        if (next_token == 0U) {
+            next_token = 1U;
+        }
+        state_->active_label = std::move(label);
+        state_->next_token = next_token;
+        state_->active_token = next_token;
+        state_->shutdown_cleanup_claimed = true;
+        return Lease{state_, next_token};
     }
 
     std::optional<HandoffGate> try_acquire_handoff_gate(

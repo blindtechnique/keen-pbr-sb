@@ -356,6 +356,22 @@ enum class FirewallExactTcpResetResult : uint8_t {
     failed,
 };
 
+enum class FirewallOwnedCleanupState : std::uint8_t {
+    verified_absent,
+    owned_artifacts_present,
+    observation_failed,
+};
+
+struct FirewallOwnedCleanupInspection final {
+    FirewallOwnedCleanupState state{
+        FirewallOwnedCleanupState::observation_failed};
+    std::string detail;
+
+    bool verified_absent() const noexcept {
+        return state == FirewallOwnedCleanupState::verified_absent;
+    }
+};
+
 // Abstract firewall interface for managing IP sets and packet marking rules.
 // Both iptables and nftables backends implement this interface.
 //
@@ -585,6 +601,17 @@ public:
     // Remove all firewall rules and IP sets created by this instance.
     // Should be called on daemon shutdown.
     virtual void cleanup() = 0;
+    // Destructive cleanup followed by a fresh read-only proof that every
+    // keen-pbr-owned artifact is absent. The compatibility fallback is
+    // deliberately never a proof: STOP publication requires a backend
+    // override which can classify incomplete observations fail-closed.
+    virtual FirewallOwnedCleanupInspection cleanup_and_inspect_owned() {
+        cleanup();
+        return {
+            FirewallOwnedCleanupState::observation_failed,
+            "firewall backend does not implement verified cleanup",
+        };
+    }
 
     // Return the backend type for this firewall instance.
     virtual FirewallBackend backend() const = 0;

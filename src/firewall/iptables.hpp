@@ -117,6 +117,7 @@ public:
     // Destroy all buffered ipsets (ipset destroy) and flush/delete the
     // KeenPbrTable chain from both iptables and ip6tables mangle tables.
     void cleanup() override;
+    FirewallOwnedCleanupInspection cleanup_and_inspect_owned() override;
     // Returns FirewallBackend::iptables.
     FirewallBackend backend() const override;
     RawPreroutingMode raw_prerouting_mode() const override {
@@ -145,6 +146,9 @@ private:
     void cleanup_live_impl(bool preserve_dynamic_sets = false,
                            bool sweep_live_state = false);
     void cleanup_impl();
+    void clear_cleanup_state_after_verified_absence();
+    FirewallOwnedCleanupInspection inspect_owned_cleanup_absence() const;
+    FirewallOwnedCleanupInspection cleanup_saved_sets_strict();
     void cleanup_rules_impl(bool sweep_live_state = false);
     void cleanup_nat_rules_impl(bool sweep_live_state = false);
     void apply_nat_rules(
@@ -487,6 +491,9 @@ private:
     std::map<std::string, PublishedUdpPeerClassifier>
         published_udp_peer_classifiers_;
     mutable std::mutex pair_state_mutex_;
+    // A failed strict STOP attempt retains broad recovery ownership even if
+    // granular legacy helpers already cleared their optimistic flags.
+    bool strict_cleanup_pending_{false};
 
     // Track whether chain + jump rule exist for each protocol
     bool chain_v4_created_ = false;

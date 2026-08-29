@@ -44,6 +44,7 @@
 #include "../util/system_info.hpp"
 #include "../util/time_utils.hpp"
 #include "scheduler.hpp"
+#include "owned_conntrack_cleanup_operation.hpp"
 #include "runtime_firewall_operation_owner.hpp"
 
 #ifndef KEEN_PBR_FRONTEND_ROOT
@@ -710,6 +711,164 @@ void Daemon::restart_routing_runtime_with_lease(
     } else {
         message = "Runtime restart did not reach a verified result";
     }
+    if (!terminal.detail.empty()) {
+        message += ": " + terminal.detail;
+    }
+    throw DaemonError(std::move(message));
+}
+
+void Daemon::stop_routing_runtime_with_lease(
+    RuntimeMutationAdmission::Lease lease) {
+    stop_routing_runtime_with_lease_return(lease);
+    // Public STOP consumes the request-scoped admission after the exact
+    // owner terminal. Config-save emergency quiesce calls the returning form
+    // directly and continues under the same physical lease.
+}
+
+void Daemon::stop_routing_runtime_with_lease_return(
+    RuntimeMutationAdmission::Lease& lease) {
+    if (is_event_loop_thread()) {
+        throw DaemonError(
+            "Runtime STOP completion cannot wait on the control loop");
+    }
+    if (!lease || !runtime_mutation_admission_.owns(lease)) {
+        throw DaemonError(
+            "Runtime STOP did not receive its exact mutation lease");
+    }
+
+    struct ReturnedLease final {
+        std::unique_ptr<RuntimeMutationAdmission::Lease> lease;
+    };
+    const auto expected_token = lease.token();
+    auto returned = std::make_shared<ReturnedLease>();
+    auto completion = RuntimeFirewallLifecycleCompletion::create();
+    auto completion_source = std::move(completion.source);
+    auto lease_owner =
+        std::make_unique<RuntimeMutationAdmission::Lease>(std::move(lease));
+    bool stop_callbacks_fenced = false;
+    RuntimeFirewallPreownedTerminalContinuation continuation{
+        [this,
+         returned,
+         expected_token,
+         completion_source = std::move(completion_source)](
+            RuntimeFirewallLifecycleTerminal terminal,
+            std::unique_ptr<RuntimeMutationAdmission::Lease> exact) mutable
+            noexcept {
+            const bool exact_returned = exact &&
+                static_cast<bool>(*exact) &&
+                exact->token() == expected_token &&
+                runtime_mutation_admission_.owns(*exact);
+            if (exact_returned) {
+                returned->lease = std::move(exact);
+            } else {
+                exact.reset();
+                terminal.outcome =
+                    RuntimeFirewallLifecycleOutcome::not_verified;
+                terminal.commit_ambiguous = true;
+                try {
+                    terminal.detail =
+                        "runtime STOP owner did not return its exact lease";
+                } catch (...) {
+                }
+            }
+            (void)completion_source.settle(std::move(terminal));
+        }};
+
+    try {
+        enqueue_control_task(
+            [this,
+             &lease_owner,
+             &continuation,
+             &stop_callbacks_fenced]() mutable {
+                RuntimeStopCleanupTarget target;
+                target.intent = RuntimeStopCleanupIntent::runtime_stop;
+                target.runtime_generation = runtime_generation_.load(
+                    std::memory_order_acquire);
+                target.conntrack_snapshot =
+                    snapshot_owned_conntrack_marks();
+                const auto merge_pending_cleanup = [&target](
+                    const OwnedConntrackCleanupRetry& retry) {
+                    if (!retry.valid() ||
+                        retry.snapshot.runtime_generation !=
+                            target.runtime_generation) {
+                        return;
+                    }
+                    auto exact = owned_conntrack_cleanup_retry_remainder(
+                        retry);
+                    target.conntrack_snapshot =
+                        target.conntrack_snapshot.valid()
+                        ? merge_owned_conntrack_cleanup_snapshot(
+                              std::move(target.conntrack_snapshot),
+                              std::move(exact))
+                        : std::move(exact);
+                };
+                if (active_owned_conntrack_cleanup_operation_) {
+                    merge_pending_cleanup(
+                        active_owned_conntrack_cleanup_operation_->retry());
+                }
+                if (pending_owned_conntrack_cleanup_retry_.has_value()) {
+                    merge_pending_cleanup(
+                        *pending_owned_conntrack_cleanup_retry_);
+                }
+                target.cleanup_conntrack =
+                    target.conntrack_snapshot.valid();
+                target.deactivate_resolver = true;
+                target.maximum_attempts = 3U;
+
+                // Fallible immutable snapshot preparation is complete. Fence
+                // callbacks only at the exact owner-handoff boundary.
+                fence_exact_tcp_reset_cleanups_for_stop();
+                stop_callbacks_fenced = true;
+                if (!begin_preowned_runtime_firewall_stop_cleanup(
+                        lease_owner,
+                        std::move(target),
+                        continuation)) {
+                    resume_exact_tcp_reset_cleanups();
+                    stop_callbacks_fenced = false;
+                    reset_idle_stall_observer(
+                        /*schedule_if_eligible=*/true);
+                    schedule_netfilter_runtime_refresh_noexcept(
+                        NetfilterRefreshReason::full,
+                        "runtime STOP owner handoff was rejected");
+                    throw DaemonError(
+                        "Runtime STOP was not admitted by the firewall owner");
+                }
+                stop_callbacks_fenced = false;
+            },
+            true,
+            "api-stop-runtime-owner",
+            true);
+    } catch (...) {
+        if (stop_callbacks_fenced) {
+            resume_exact_tcp_reset_cleanups();
+            stop_callbacks_fenced = false;
+        }
+        if (lease_owner && static_cast<bool>(*lease_owner) &&
+            lease_owner->token() == expected_token &&
+            runtime_mutation_admission_.owns(*lease_owner)) {
+            lease = std::move(*lease_owner);
+        }
+        throw;
+    }
+
+    const auto terminal = completion.wait.wait();
+    if (!returned->lease || !static_cast<bool>(*returned->lease) ||
+        returned->lease->token() != expected_token ||
+        !runtime_mutation_admission_.owns(*returned->lease)) {
+        returned->lease.reset();
+        throw DaemonError(
+            "Runtime STOP lost its exact mutation lease at terminal");
+    }
+    lease = std::move(*returned->lease);
+    returned->lease.reset();
+
+    if (terminal.outcome ==
+        RuntimeFirewallLifecycleOutcome::verified_success) {
+        return;
+    }
+    std::string message = terminal.commit_ambiguous
+        ? "Runtime STOP cleanup result is ambiguous"
+        : "Runtime STOP did not reach a fully verified terminal";
     if (!terminal.detail.empty()) {
         message += ": " + terminal.detail;
     }
@@ -1848,10 +2007,9 @@ void Daemon::setup_api() {
             throw std::logic_error(
                 "Production runtime start requires exact lease handoff");
         },
-        [this]() {
-            run_runtime_control_operation_or_throw("api-stop-runtime",
-                                                   "Stop routing runtime",
-                                                   [this]() { stop_routing_runtime(); });
+        []() {
+            throw std::logic_error(
+                "Production runtime STOP requires exact lease handoff");
         },
         []() {
             throw std::logic_error(
@@ -1897,6 +2055,10 @@ void Daemon::setup_api() {
         [this](RuntimeMutationAdmission::Lease lease) {
             start_routing_runtime_with_lease(std::move(lease));
         };
+    api_ctx_->stop_runtime_with_lease_fn =
+        [this](RuntimeMutationAdmission::Lease lease) {
+            stop_routing_runtime_with_lease(std::move(lease));
+        };
     api_ctx_->restart_runtime_with_lease_fn =
         [this](RuntimeMutationAdmission::Lease lease) {
             restart_routing_runtime_with_lease(std::move(lease));
@@ -1905,16 +2067,13 @@ void Daemon::setup_api() {
         return build_runtime_inventory(*api_ctx_);
     });
     api_ctx_->status_stream = status_stream_.get();
-    api_ctx_->emergency_quiesce_runtime_fn =
-        [this]() {
-            // The config-save handler already owns the runtime mutation lease.
-            // Do not call the public stop callback here: it would try to
-            // acquire a second lease and reject the fail-closed stop as
-            // self-conflicting.
-            enqueue_control_task(
-                [this]() { stop_routing_runtime(); },
-                true,
-                "config-save-emergency-quiesce");
+    api_ctx_->emergency_quiesce_runtime_fn = []() {
+        throw std::logic_error(
+            "Production emergency STOP requires exact lease return");
+    };
+    api_ctx_->emergency_quiesce_runtime_with_lease_return_fn =
+        [this](RuntimeMutationAdmission::Lease& lease) {
+            stop_routing_runtime_with_lease_return(lease);
         };
     api_ctx_->get_visible_config_snapshot_fn =
         [this]() {

@@ -79,6 +79,9 @@ struct OwnerHarness final {
     bool detach_restart_transport_recovery{false};
     bool detached_restart_recovery{false};
     bool detached_restart_launch_result{false};
+    bool finalize_stop_cleanup_on_drain{false};
+    bool stop_cleanup_drained_with_shutdown{false};
+    bool stop_cleanup_result_verified{false};
     bool runtime_current{true};
     int control_posts{0};
     int oneshot_schedule_calls{0};
@@ -189,13 +192,65 @@ struct OwnerHarness final {
             };
         callbacks.drain_terminal =
             [this](RuntimeFirewallOperationOwner::ContextPtr context,
-                   bool) {
+                   bool shutdown) {
                 ++drain_calls;
                 drained_transport_exhausted =
                     drained_transport_exhausted ||
                     context->foreground_transport_exhausted;
                 auto drain = context->terminal_owner->try_begin_drain();
                 if (!drain) return;
+                if (finalize_stop_cleanup_on_drain &&
+                    context->lifecycle_kind ==
+                        RuntimeFirewallLifecycleKind::stop_cleanup) {
+                    stop_cleanup_drained_with_shutdown = shutdown;
+                    if (drain->kind() !=
+                        RuntimeFirewallDelayedTerminalOwner::DrainKind::
+                            worker) {
+                        return;
+                    }
+                    const auto* worker = drain->worker_terminal();
+                    if (!worker || !worker->result ||
+                        !worker->result->stop_cleanup ||
+                        !worker->running_claim.has_value() ||
+                        !worker->mutation_lease ||
+                        !worker->result->stop_cleanup->fully_verified()) {
+                        return;
+                    }
+                    stop_cleanup_result_verified = true;
+                    if (!drain->begin_worker_control(coordinator)) return;
+                    if (!drain->publish_worker_control(
+                            []() noexcept { return true; })) {
+                        return;
+                    }
+                    if (!drain->complete_worker_control(
+                            coordinator,
+                            /*succeeded=*/true,
+                            {})) {
+                        return;
+                    }
+                    const auto* completion =
+                        drain->worker_control_completion();
+                    if (!completion || !completion->owned) return;
+                    auto exact = drain->take_retained_mutation_lease();
+                    if (!exact) return;
+                    context->retained_mutation_lease = std::move(exact);
+                    auto permit = owner->
+                        prepare_preowned_continuation_finalization(context);
+                    if (!permit.has_value()) return;
+                    auto proof = drain->finish_worker_terminal();
+                    if (!proof.has_value()) return;
+                    RuntimeFirewallLifecycleTerminal terminal;
+                    terminal.outcome =
+                        RuntimeFirewallLifecycleOutcome::verified_success;
+                    terminal.committed = true;
+                    terminal.commit_ambiguous = false;
+                    terminal.previous_generation_certainly_retained = false;
+                    (void)owner->complete_preowned_continuation(
+                        std::move(*permit),
+                        std::move(*proof),
+                        std::move(terminal));
+                    return;
+                }
                 bool detached_restart_this_drain = false;
                 if (capture_retained_mutation_lease) {
                     auto returned =
@@ -1922,6 +1977,101 @@ TEST_CASE("runtime firewall background cancel cannot cancel a foreground lifecyc
     REQUIRE(lifecycle.wait.try_get().has_value());
 }
 
+TEST_CASE("process cleanup converts a foreground timer into one exact preowned terminal") {
+    OwnerHarness harness;
+    harness.create_owner();
+    RuntimeMutationAdmission admission;
+    auto lease = acquire_test_lease(
+        admission, "process-cleanup-foreground-timer");
+    REQUIRE(lease);
+    auto* const exact_lease = lease.get();
+    const auto exact_token = lease->token();
+    RuntimeFirewallOperationOwner::MutationLeasePtr returned_lease;
+    std::optional<RuntimeFirewallLifecycleTerminal> returned_terminal;
+    RuntimeFirewallOperationOwner::PreownedTerminalContinuation
+        continuation{
+            [&](RuntimeFirewallLifecycleTerminal terminal,
+                RuntimeFirewallOperationOwner::MutationLeasePtr exact)
+                noexcept {
+                returned_terminal.emplace(std::move(terminal));
+                returned_lease = std::move(exact);
+            }};
+
+    auto start = harness.owner->start_immediate_preowned(
+        /*attempt=*/0U,
+        /*runtime_generation=*/77U,
+        {},
+        {},
+        /*schedule_catalog_refresh=*/false,
+        std::make_shared<TestDomainState>(),
+        admission,
+        std::move(lease),
+        {},
+        RuntimeFirewallLifecycleKind::config_preapply,
+        std::move(continuation));
+    REQUIRE(start.disposition ==
+            RuntimeFirewallImmediateDisposition::handed_off);
+    const auto completed = harness.owner->active_context();
+    REQUIRE(completed);
+    auto completion =
+        harness.coordinator.terminate_operation_for_resnapshot(
+            harness.dispatched_claim,
+            /*force_rerun=*/true);
+    REQUIRE(completion.owned);
+    REQUIRE(harness.owner->retain_pending_successor(
+        completed,
+        RuntimeFirewallOperationContext::SuccessorMode::defer_same_attempt,
+        /*attempt=*/0U,
+        /*runtime_generation=*/77U,
+        std::move(completion.snat_recovery),
+        std::move(completion.next_prepared_catalog),
+        /*schedule_catalog_refresh=*/false));
+    harness.owner->cancel_completion_watchdog();
+    harness.owner->reset_if_active(completed);
+    REQUIRE(harness.owner->launch_pending_successor());
+    const auto timer_context = harness.owner->active_context();
+    REQUIRE(timer_context);
+    REQUIRE(harness.coordinator.retry_pending());
+    auto& timer = harness.timer_with_label(
+        "runtime-firewall-admission-retry");
+
+    harness.reject_control_post = true;
+    harness.owner->prepare_for_process_cleanup();
+
+    CHECK_FALSE(harness.coordinator.retry_pending());
+    CHECK(timer.cancelled);
+    CHECK(harness.owner->active_context() == timer_context);
+    REQUIRE(timer_context->retained_mutation_lease);
+    CHECK(timer_context->retained_mutation_lease.get() == exact_lease);
+    CHECK(admission.owns(*timer_context->retained_mutation_lease));
+    auto drain = timer_context->terminal_owner->try_begin_drain();
+    REQUIRE(drain.has_value());
+    CHECK(drain->kind() ==
+          RuntimeFirewallDelayedTerminalOwner::DrainKind::coordinator);
+    auto permit = harness.owner->
+        prepare_preowned_continuation_finalization(timer_context);
+    REQUIRE(permit.has_value());
+    auto proof = drain->finish_coordinator_terminal();
+    REQUIRE(proof.has_value());
+    RuntimeFirewallLifecycleTerminal terminal;
+    terminal.outcome = RuntimeFirewallLifecycleOutcome::shutdown;
+    REQUIRE(harness.owner->complete_preowned_continuation(
+        std::move(*permit),
+        std::move(*proof),
+        std::move(terminal)));
+
+    CHECK_FALSE(harness.owner->active_context());
+    REQUIRE(returned_terminal.has_value());
+    CHECK(returned_terminal->outcome ==
+          RuntimeFirewallLifecycleOutcome::shutdown);
+    REQUIRE(returned_lease);
+    CHECK(returned_lease.get() == exact_lease);
+    CHECK(returned_lease->token() == exact_token);
+    CHECK(admission.owns(*returned_lease));
+    returned_lease.reset();
+    CHECK_FALSE(admission.active().has_value());
+}
+
 TEST_CASE("runtime firewall operation owner keeps an accepted inline terminal authoritative") {
     OwnerHarness harness;
     harness.run_oneshot_inline = true;
@@ -2847,6 +2997,110 @@ TEST_CASE("runtime firewall operation owner cancels a worker checkpoint from con
     CHECK(checkpoint_cancels == 1);
 }
 
+TEST_CASE("process STOP cleanup keeps its exact proof and lease through the shutdown pump") {
+    OwnerHarness harness;
+    harness.finalize_stop_cleanup_on_drain = true;
+    // Suppress the normal worker wake so only the explicit shutdown pump can
+    // consume the terminal, matching process cleanup after the event loop.
+    harness.reject_control_post = true;
+    harness.create_owner();
+    RuntimeMutationAdmission admission;
+    auto lease = acquire_test_lease(admission, "process-stop-cleanup");
+    REQUIRE(lease);
+    auto* const exact_lease = lease.get();
+    const auto exact_token = lease->token();
+    std::optional<RuntimeFirewallLifecycleTerminal> returned_terminal;
+    RuntimeFirewallOperationOwner::MutationLeasePtr returned_lease;
+
+    RuntimeFirewallOperationOwner::PreownedTerminalContinuation
+        continuation{
+            [&](RuntimeFirewallLifecycleTerminal terminal,
+                RuntimeFirewallOperationOwner::MutationLeasePtr exact)
+                noexcept {
+                returned_terminal.emplace(std::move(terminal));
+                returned_lease = std::move(exact);
+            }};
+    auto start = harness.owner->start_immediate_preowned(
+        /*attempt=*/0U,
+        /*runtime_generation=*/77U,
+        {},
+        {},
+        /*schedule_catalog_refresh=*/false,
+        std::make_shared<TestDomainState>(),
+        admission,
+        std::move(lease),
+        {},
+        RuntimeFirewallLifecycleKind::stop_cleanup,
+        std::move(continuation));
+    REQUIRE(start.disposition ==
+            RuntimeFirewallImmediateDisposition::handed_off);
+    const auto context = harness.owner->active_context();
+    REQUIRE(context);
+
+    auto input = std::make_shared<RuntimeFirewallWorkerAttemptInput>();
+    input->operation_kind =
+        RuntimeFirewallWorkerOperationKind::stop_cleanup;
+    input->transaction.operation_serial =
+        harness.dispatched_claim.serial;
+    input->transaction.runtime_generation = 77U;
+    REQUIRE(harness.owner->enqueue_worker_with_retained_lease(
+        context,
+        harness.dispatched_claim,
+        std::move(input),
+        [](const RuntimeFirewallWorkerAttemptInput& input,
+           const RuntimeFirewallDelayedWorker::RunningClaim&)
+            -> RuntimeFirewallWorkerAttemptResultPtr {
+            auto result =
+                std::make_shared<RuntimeFirewallWorkerAttemptResult>();
+            auto stop = std::make_shared<RuntimeStopCleanupResult>();
+            stop->target.intent =
+                RuntimeStopCleanupIntent::process_shutdown;
+            stop->target.runtime_generation =
+                input.transaction.runtime_generation;
+            stop->target.cleanup_conntrack = false;
+            stop->target.deactivate_resolver = true;
+            stop->target.maximum_attempts = 3U;
+            stop->attempts = 1U;
+            stop->mutation_boundary_entered = true;
+            stop->conntrack_cleanup_verified = true;
+            stop->routing_cleanup_verified = true;
+            stop->firewall_absence_verified = true;
+            stop->resolver_deactivation_verified = true;
+            result->operation_kind =
+                RuntimeFirewallWorkerOperationKind::stop_cleanup;
+            result->transaction.operation_serial =
+                input.transaction.operation_serial;
+            result->transaction.runtime_generation =
+                input.transaction.runtime_generation;
+            result->stop_cleanup = std::move(stop);
+            return result;
+        }));
+
+    for (std::size_t attempt = 0U;
+         attempt < 500U && !returned_terminal.has_value();
+         ++attempt) {
+        harness.owner->pump_terminal_for_shutdown();
+        if (!returned_terminal.has_value()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+    }
+
+    REQUIRE(returned_terminal.has_value());
+    CHECK(returned_terminal->outcome ==
+          RuntimeFirewallLifecycleOutcome::verified_success);
+    CHECK(returned_terminal->committed);
+    CHECK_FALSE(returned_terminal->commit_ambiguous);
+    CHECK(harness.stop_cleanup_drained_with_shutdown);
+    CHECK(harness.stop_cleanup_result_verified);
+    CHECK_FALSE(harness.owner->active_context());
+    REQUIRE(returned_lease);
+    CHECK(returned_lease.get() == exact_lease);
+    CHECK(returned_lease->token() == exact_token);
+    CHECK(admission.owns(*returned_lease));
+    returned_lease.reset();
+    CHECK_FALSE(admission.active().has_value());
+}
+
 TEST_CASE("runtime firewall late intent survives an already captured completion") {
     RuntimeFirewallOperationCompletion completion;
     completion.owned = true;
@@ -2911,6 +3165,18 @@ TEST_CASE("runtime firewall cold boot uses the typed START pipeline") {
     CHECK(runtime_firewall_lifecycle_uses_preowned_continuation(cold_boot));
     CHECK(runtime_firewall_lifecycle_requires_resolver(cold_boot));
     CHECK(runtime_firewall_lifecycle_uses_hot_retry(cold_boot));
+}
+
+TEST_CASE("runtime firewall STOP owns a preowned non-replaying lifecycle") {
+    constexpr auto stop =
+        RuntimeFirewallLifecycleKind::stop_cleanup;
+    CHECK(runtime_firewall_lifecycle_is_foreground(stop));
+    CHECK(runtime_firewall_lifecycle_is_stop_cleanup(stop));
+    CHECK(runtime_firewall_lifecycle_uses_preowned_continuation(stop));
+    CHECK_FALSE(runtime_firewall_lifecycle_uses_start_pipeline(stop));
+    CHECK_FALSE(runtime_firewall_lifecycle_activates_stopped_runtime(stop));
+    CHECK_FALSE(runtime_firewall_lifecycle_requires_resolver(stop));
+    CHECK_FALSE(runtime_firewall_lifecycle_uses_hot_retry(stop));
 }
 
 TEST_CASE("runtime firewall config preapply uses bounded hot retry without resolver") {
