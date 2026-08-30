@@ -14,6 +14,7 @@ import { usePostConfigMutation } from "@/api/mutations"
 import { queryKeys } from "@/api/query-keys"
 import {
   useGetConfig,
+  useGetTunnelProbeState,
   useGetNdmsInterfaceInventory,
   useGetNdmsVpnServerServices,
   useGetRuntimeInterfaces,
@@ -225,6 +226,55 @@ const INITIAL_DEFERRED_SETTINGS_STATE: Record<
   auth: CLEAN_SETTINGS_SECTION_STATE,
   remoteAccess: CLEAN_SETTINGS_SECTION_STATE,
   logging: CLEAN_SETTINGS_SECTION_STATE,
+}
+
+// Что автоматика сделала в последний раз.
+//
+// Она пишет это и в лог, но роутер живёт на уровне `warn`, где обычный проход
+// не виден вовсе. Показывать стоит две вещи: что было уведено в туннель — это
+// изменение маршрута и на практике необратимое, — и кого придержал реестр:
+// именно про них человек может захотеть решить сам.
+function TunnelProbeLastPass() {
+  const { t } = useTranslation()
+  const query = useGetTunnelProbeState()
+  const state = query.data?.status === 200 ? query.data.data : undefined
+
+  if (!state) return null
+
+  const routed = state.routed ?? []
+  const heldBack = state.held_back ?? []
+
+  return (
+    <div className="space-y-1 text-[13px] text-muted-foreground">
+      {state.refusal ? (
+        <p>
+          {t("pages.settings.general.tunnelProbeRefused", {
+            reason: state.refusal,
+          })}
+        </p>
+      ) : state.ever_ran ? (
+        <p>{state.summary}</p>
+      ) : (
+        <p>{t("pages.settings.general.tunnelProbeNoPassYet")}</p>
+      )}
+
+      {routed.length > 0 ? (
+        <p className="text-foreground">
+          {t("pages.settings.general.tunnelProbeRouted", {
+            hosts: routed.join(", "),
+          })}
+        </p>
+      ) : null}
+
+      {heldBack.length > 0 ? (
+        <p>
+          {t("pages.settings.general.tunnelProbeHeldBack", {
+            hosts: heldBack.join(", "),
+          })}
+        </p>
+      ) : null}
+    </div>
+  )
 }
 
 export function GeneralConfigPage() {
@@ -943,6 +993,18 @@ function LoadedGeneralConfigPage({
                   )
                 }}
               </form.Field>
+
+              <Field
+                width="short"
+                className={activeTab === "general" ? undefined : "hidden"}
+              >
+                <FieldLabel>
+                  {t("pages.settings.general.tunnelProbeLastPass")}
+                </FieldLabel>
+                <FieldContent>
+                  <TunnelProbeLastPass />
+                </FieldContent>
+              </Field>
 
               <FieldSeparator
                 className={activeTab === "general" ? undefined : "hidden"}

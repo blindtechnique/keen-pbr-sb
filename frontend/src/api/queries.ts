@@ -4,6 +4,7 @@ import {
   getHealthService,
   getRuntimeInterfaces,
   getRuntimeOutbounds,
+  getTunnelProbeState,
   getRoutingRegistryConsent,
   useGetNdmsInterfaceInventory as useGeneratedNdmsInterfaceInventory,
   useGetNdmsVpnServerServices as useGeneratedNdmsVpnServerServices,
@@ -11,6 +12,7 @@ import {
   useGetRuntimeInterfaces as useGeneratedRuntimeInterfaces,
   useGetRuntimeOutbounds as useGeneratedRuntimeOutbounds,
   useGetRoutingRegistryConsent as useGeneratedRoutingRegistryConsent,
+  useGetTunnelProbeState as useGeneratedTunnelProbeState,
 } from "@/api/generated/keen-api"
 
 export {
@@ -108,6 +110,22 @@ export function useGetRuntimeOutbounds() {
       refetchOnReconnect: false,
       refetchOnWindowFocus: false,
       staleTime: Number.POSITIVE_INFINITY,
+    },
+  })
+}
+
+// Опрашивается, а не кэшируется навсегда: проход автоматики случается сам по
+// себе, раз в минуту, и смысл этих данных в том, что они свежие. Минута — тот
+// же такт, с которым работает сама автоматика.
+export function useGetTunnelProbeState() {
+  return useGeneratedTunnelProbeState<
+    Awaited<ReturnType<typeof getTunnelProbeState>>
+  >({
+    query: {
+      refetchOnReconnect: false,
+      refetchOnWindowFocus: false,
+      refetchInterval: 60_000,
+      staleTime: 30_000,
     },
   })
 }

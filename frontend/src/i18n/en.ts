@@ -2310,6 +2310,7 @@ export const enTranslation = {
         media: "Media",
         developer: "Development",
         cloud: "Cloud",
+        cdn: "CDN",
         gaming: "Gaming",
         block: "Blocking",
       },
@@ -2544,6 +2545,12 @@ export const enTranslation = {
         tunnelProbeOutboundAuto: "Choose automatically",
         tunnelProbeOutboundHint:
           "Leave unchosen to use the first tunnel that has an interface. Only those are listed: each probe is pinned to a device, and an outbound with only a mark cannot carry one. Confirmed hosts are routed through the tunnel you pick - sending them through a different one would mean the measurement justified nothing.",
+        tunnelProbeLastPass: "Last check",
+        tunnelProbeNoPassYet: "No check has run yet.",
+        tunnelProbeRefused: "Not running: {{reason}}.",
+        tunnelProbeRouted: "Routed through the tunnel: {{hosts}}",
+        tunnelProbeHeldBack:
+          "A tunnel would help, but the registry did not confirm: {{hosts}}",
         tunnelProbeListLabel: "List that receives confirmed hosts",
         tunnelProbeListHint:
           "Leave empty and the list, its file and a routing rule are created when you save. Name an existing list and it is given a file if it has none, keeping everything it already holds - every source of a list is read together.",

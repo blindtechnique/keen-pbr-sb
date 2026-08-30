@@ -359,6 +359,7 @@ add_executable(keen-pbr-tests
   ../src/health/nfqws_scan_source.cpp
   ../src/health/tunnel_probe_automation.cpp
   ../src/health/tunnel_probe_task.cpp
+  ../src/health/tunnel_probe_report.cpp
   ../src/health/tunnel_candidate_scan.cpp
   ../src/cmd/scan_tunnel_candidates.cpp
   ../src/firewall/firewall_contract.cpp

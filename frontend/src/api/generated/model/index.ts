@@ -346,6 +346,7 @@ export * from './transportStatus';
 export * from './transportStatusSecurity';
 export * from './transportStatusState';
 export * from './tunnelProbeConfig';
+export * from './tunnelProbeStateResponse';
 export * from './uiPreferencesConfig';
 export * from './updateStartedResponse';
 export * from './validationError';

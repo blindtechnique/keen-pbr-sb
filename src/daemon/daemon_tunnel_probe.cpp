@@ -13,6 +13,7 @@
 
 #include "../health/differential_probe.hpp"
 #include "../health/nfqws_scan_source.hpp"
+#include "../health/tunnel_probe_report.hpp"
 #include "../http/http_transport.hpp"
 #include "../log/logger.hpp"
 
@@ -132,6 +133,26 @@ void Daemon::run_tunnel_probe_pass(const Config& config) noexcept {
         }
 
         const auto outcome = tunnel_probe_task_->run(config);
+
+        // Published before anything is logged, so a panel can show the pass
+        // whatever the log level is - and a router's log level is `warn`,
+        // where an ordinary pass says nothing at all.
+        TunnelProbeReport report;
+        report.ever_ran = outcome.ran;
+        if (outcome.refusal != TunnelProbeRefusal::none) {
+            report.refusal = describe_tunnel_probe_refusal(outcome.refusal);
+        }
+        report.summary = TunnelProbeTask::describe(outcome);
+        report.probed = outcome.probed;
+        report.remaining = outcome.remaining;
+        report.routed = outcome.appended;
+        report.held_back = outcome.unconfirmed;
+        report.finished_at_unix_ms = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count());
+        publish_tunnel_probe_report(std::move(report));
+
         // A pass that refused because the automation is off is the ordinary
         // case and says nothing worth a line; everything else does.
         if (outcome.refusal == TunnelProbeRefusal::disabled) {

@@ -9,6 +9,7 @@
 #include "handler_health_routing.hpp"
 #include "handler_runtime_interfaces.hpp"
 #include "handler_runtime_outbounds.hpp"
+#include "handler_tunnel_probe.hpp"
 #include "handler_runtime_inventory.hpp"
 #include "handler_diagnostic_tasks.hpp"
 #include "handler_registry_check.hpp"
@@ -50,6 +51,7 @@ void register_api_handlers(ApiServer& server, ApiContext& ctx) {
     register_health_routing_handler(server, ctx);
     register_runtime_interfaces_handler(server, ctx);
     register_runtime_outbounds_handler(server, ctx);
+    register_tunnel_probe_handler(server);
     register_runtime_inventory_handler(server, ctx);
     register_diagnostic_tasks_handler(server, ctx);
     register_test_routing_handler(server, ctx);

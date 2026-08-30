@@ -512,6 +512,7 @@ set(SOURCES
   src/health/nfqws_scan_source.cpp
   src/health/tunnel_probe_automation.cpp
   src/health/tunnel_probe_task.cpp
+  src/health/tunnel_probe_report.cpp
   src/health/tunnel_candidate_scan.cpp
   src/routing/target.cpp
   src/routing/netlink.cpp
@@ -607,6 +608,7 @@ if(WITH_API)
     src/api/handler_health_routing.cpp
     src/api/handler_runtime_interfaces.cpp
     src/api/handler_runtime_outbounds.cpp
+    src/api/handler_tunnel_probe.cpp
     src/api/handler_runtime_inventory.cpp
     src/api/handler_diagnostic_tasks.cpp
     src/api/handler_transports.cpp

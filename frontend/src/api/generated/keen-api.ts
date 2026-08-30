@@ -114,6 +114,7 @@ import type {
   TransportSpec,
   TransportStatus,
   TransportsEnvironment,
+  TunnelProbeStateResponse,
   UpdateStartedResponse
 } from './model';
 
@@ -1922,6 +1923,123 @@ export function useGetRuntimeOutbounds<TData = Awaited<ReturnType<typeof getRunt
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getGetRuntimeOutboundsQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * Returns the outcome of the most recent pass of the automation that routes hosts nfqws2 could not fix through a tunnel.
+
+This exists because the pass is otherwise only visible in the daemon log, and routers run at `warn` where its ordinary lines do not appear. Two things in particular are worth showing: the hosts it routed, which is a change to where traffic goes and is not reversible in practice, and the hosts the registry check held back, which are the ones a person may want to decide about by hand.
+
+`ever_ran` is false before the first pass of this daemon run - including while the automation is switched off, which `refusal` then explains.
+
+ * @summary What the nfqws2-to-tunnel automation last did
+ */
+export type getTunnelProbeStateResponse200 = {
+  data: TunnelProbeStateResponse
+  status: 200
+}
+
+export type getTunnelProbeStateResponseSuccess = (getTunnelProbeStateResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getTunnelProbeStateResponse = (getTunnelProbeStateResponseSuccess)
+
+export const getGetTunnelProbeStateUrl = () => {
+
+
+
+
+  return `/api/tunnel-probe`
+}
+
+export const getTunnelProbeState = async ( options?: RequestInit): Promise<getTunnelProbeStateResponse> => {
+
+  return apiFetch<getTunnelProbeStateResponse>(getGetTunnelProbeStateUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetTunnelProbeStateQueryKey = () => {
+    return [
+    `/api/tunnel-probe`
+    ] as const;
+    }
+
+
+export const getGetTunnelProbeStateQueryOptions = <TData = Awaited<ReturnType<typeof getTunnelProbeState>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTunnelProbeState>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetTunnelProbeStateQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getTunnelProbeState>>> = ({ signal }) => getTunnelProbeState({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getTunnelProbeState>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetTunnelProbeStateQueryResult = NonNullable<Awaited<ReturnType<typeof getTunnelProbeState>>>
+export type GetTunnelProbeStateQueryError = unknown
+
+
+export function useGetTunnelProbeState<TData = Awaited<ReturnType<typeof getTunnelProbeState>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTunnelProbeState>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getTunnelProbeState>>,
+          TError,
+          Awaited<ReturnType<typeof getTunnelProbeState>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetTunnelProbeState<TData = Awaited<ReturnType<typeof getTunnelProbeState>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTunnelProbeState>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getTunnelProbeState>>,
+          TError,
+          Awaited<ReturnType<typeof getTunnelProbeState>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetTunnelProbeState<TData = Awaited<ReturnType<typeof getTunnelProbeState>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTunnelProbeState>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary What the nfqws2-to-tunnel automation last did
+ */
+
+export function useGetTunnelProbeState<TData = Awaited<ReturnType<typeof getTunnelProbeState>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTunnelProbeState>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetTunnelProbeStateQueryOptions(options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 

@@ -521,6 +521,33 @@ paths:
               schema:
                 $ref: "#/components/schemas/RuntimeOutboundsResponse"
 
+  /api/tunnel-probe:
+    get:
+      summary: What the nfqws2-to-tunnel automation last did
+      description: >
+        Returns the outcome of the most recent pass of the automation that
+        routes hosts nfqws2 could not fix through a tunnel.
+
+
+        This exists because the pass is otherwise only visible in the daemon
+        log, and routers run at `warn` where its ordinary lines do not appear.
+        Two things in particular are worth showing: the hosts it routed, which
+        is a change to where traffic goes and is not reversible in practice,
+        and the hosts the registry check held back, which are the ones a person
+        may want to decide about by hand.
+
+
+        `ever_ran` is false before the first pass of this daemon run - including
+        while the automation is switched off, which `refusal` then explains.
+      operationId: getTunnelProbeState
+      responses:
+        "200":
+          description: The most recent pass, or the reason there was none
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TunnelProbeStateResponse"
+
   /api/runtime/interfaces:
     get:
       summary: Live system interface inventory
@@ -6208,6 +6235,64 @@ components:
           description: User-defined plain IPv4 DNS templates.
           items:
             $ref: "#/components/schemas/PlainDnsTemplate"
+
+    TunnelProbeStateResponse:
+      type: object
+      additionalProperties: false
+      required: [ever_ran]
+      description: >
+        The most recent pass of the nfqws2-to-tunnel automation.
+      properties:
+        ever_ran:
+          type: boolean
+          description: >
+            Whether a pass has completed since this daemon started. False also
+            covers the ordinary case of the automation being switched off, and
+            `refusal` then says so.
+        refusal:
+          type: string
+          description: >
+            Why the last attempt did nothing, in one sentence. Absent when the
+            pass ran.
+        summary:
+          type: string
+          description: >
+            The same sentence the daemon logs: what was read, probed, routed
+            and held back.
+        probed:
+          type: integer
+          minimum: 0
+          description: Hosts measured in that pass. Two requests each.
+        remaining:
+          type: integer
+          minimum: 0
+          description: >
+            Hosts left in the queue for the next pass. Zero means the automation
+            has worked through everything nfqws2 has complained about so far.
+        routed:
+          type: array
+          items:
+            type: string
+          description: >
+            Hosts that pass added to the list, and so moved into the tunnel.
+            Not reversible in practice: nfqws2's rules are bound to the
+            provider interface, so a routed host stops producing the evidence
+            that put it there.
+        held_back:
+          type: array
+          items:
+            type: string
+          description: >
+            Hosts a tunnel would fix that the registry check did not confirm.
+            The probe proves the connection failed here and worked through the
+            tunnel; it cannot tell deliberate blocking from a host that refuses
+            this network for its own reasons. These are the ones worth a person
+            deciding about.
+        finished_at_unix_ms:
+          type: integer
+          format: int64
+          minimum: 0
+          description: When that pass finished, in milliseconds since the epoch.
 
     TunnelProbeConfig:
       type: object

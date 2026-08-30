@@ -1961,6 +1961,17 @@ namespace api {
         int64_t transport_api_version = 0;
     };
 
+    struct TunnelProbeStateResponse {
+        bool ever_ran = false;
+        std::optional<int64_t> finished_at_unix_ms;
+        std::optional<std::vector<std::string>> held_back;
+        std::optional<int64_t> probed;
+        std::optional<std::string> refusal;
+        std::optional<int64_t> remaining;
+        std::optional<std::vector<std::string>> routed;
+        std::optional<std::string> summary;
+    };
+
     struct UpdateStartedResponse {
         bool ok = false;
         bool started = false;
@@ -2208,6 +2219,7 @@ namespace api {
         std::optional<Transport> transport_spec;
         std::optional<TransportStatus> transport_status;
         std::optional<TunnelProbe> tunnel_probe_config;
+        std::optional<TunnelProbeStateResponse> tunnel_probe_state_response;
         std::optional<UiPreferences> ui_preferences_config;
         std::optional<UpdateStartedResponse> update_started_response;
         std::optional<ValidationErrorElement> validation_error;
@@ -2778,6 +2790,9 @@ void to_json(json & j, const TransportStatus & x);
 
 void from_json(const json & j, TransportsEnvironment & x);
 void to_json(json & j, const TransportsEnvironment & x);
+
+void from_json(const json & j, TunnelProbeStateResponse & x);
+void to_json(json & j, const TunnelProbeStateResponse & x);
 
 void from_json(const json & j, UpdateStartedResponse & x);
 void to_json(json & j, const UpdateStartedResponse & x);
@@ -6588,6 +6603,29 @@ namespace api {
         j["transport_api_version"] = x.transport_api_version;
     }
 
+    inline void from_json(const json & j, TunnelProbeStateResponse& x) {
+        x.ever_ran = j.at("ever_ran").get<bool>();
+        x.finished_at_unix_ms = get_stack_optional<int64_t>(j, "finished_at_unix_ms");
+        x.held_back = get_stack_optional<std::vector<std::string>>(j, "held_back");
+        x.probed = get_stack_optional<int64_t>(j, "probed");
+        x.refusal = get_stack_optional<std::string>(j, "refusal");
+        x.remaining = get_stack_optional<int64_t>(j, "remaining");
+        x.routed = get_stack_optional<std::vector<std::string>>(j, "routed");
+        x.summary = get_stack_optional<std::string>(j, "summary");
+    }
+
+    inline void to_json(json & j, const TunnelProbeStateResponse & x) {
+        j = json::object();
+        j["ever_ran"] = x.ever_ran;
+        j["finished_at_unix_ms"] = x.finished_at_unix_ms;
+        j["held_back"] = x.held_back;
+        j["probed"] = x.probed;
+        j["refusal"] = x.refusal;
+        j["remaining"] = x.remaining;
+        j["routed"] = x.routed;
+        j["summary"] = x.summary;
+    }
+
     inline void from_json(const json & j, UpdateStartedResponse& x) {
         x.ok = j.at("ok").get<bool>();
         x.started = j.at("started").get<bool>();
@@ -6841,6 +6879,7 @@ namespace api {
         x.transport_spec = get_stack_optional<Transport>(j, "TransportSpec");
         x.transport_status = get_stack_optional<TransportStatus>(j, "TransportStatus");
         x.tunnel_probe_config = get_stack_optional<TunnelProbe>(j, "TunnelProbeConfig");
+        x.tunnel_probe_state_response = get_stack_optional<TunnelProbeStateResponse>(j, "TunnelProbeStateResponse");
         x.ui_preferences_config = get_stack_optional<UiPreferences>(j, "UiPreferencesConfig");
         x.update_started_response = get_stack_optional<UpdateStartedResponse>(j, "UpdateStartedResponse");
         x.validation_error = get_stack_optional<ValidationErrorElement>(j, "ValidationError");
@@ -7090,6 +7129,7 @@ namespace api {
         j["TransportSpec"] = x.transport_spec;
         j["TransportStatus"] = x.transport_status;
         j["TunnelProbeConfig"] = x.tunnel_probe_config;
+        j["TunnelProbeStateResponse"] = x.tunnel_probe_state_response;
         j["UiPreferencesConfig"] = x.ui_preferences_config;
         j["UpdateStartedResponse"] = x.update_started_response;
         j["ValidationError"] = x.validation_error;
