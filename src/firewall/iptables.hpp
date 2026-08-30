@@ -233,11 +233,23 @@ private:
     // A preflight over twenty lists across two families was forty of them, and
     // it runs twice.
     //
-    // Fail-closed like the single-set path it replaces: anything unexpected in
-    // the document - a stray element, a repeated field, two sets with one name -
-    // returns nothing rather than a partial map. A preflight that silently sees
-    // fewer sets than the kernel has would approve a schema it never read.
-    static std::optional<std::map<std::string, LiveSetSchema>>
+    // Strict about the document, tolerant about its contents - and the
+    // difference between those two cost a router its routing.
+    //
+    // A malformed document returns nothing: a stray element where a set should
+    // be, or two sets under one name, means this is not the report we asked
+    // for, and a preflight that saw fewer sets than the kernel has would
+    // approve a schema it never read.
+    //
+    // A set whose header this cannot read maps to nullopt instead of failing
+    // the whole document. This command reports EVERY set on the box, most of
+    // which are not ours: the firmware's `_NDM_HTSP_MAC_BLOCK` is `hash:mac`
+    // and carries no `<family>` at all, because MAC sets have none. Refusing
+    // the document over it made every apply fail with an ambiguous firewall
+    // COMMIT. Whether an unreadable set matters is the caller's decision -
+    // for ours it is still an error, for somebody else's it is not our
+    // business.
+    static std::optional<std::map<std::string, std::optional<LiveSetSchema>>>
     parse_live_set_schemas(const std::string& xml);
 
     // The comparison itself, over an already-parsed header.

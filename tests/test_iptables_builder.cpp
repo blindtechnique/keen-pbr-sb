@@ -309,7 +309,7 @@ public:
     return IptablesFirewall::is_dynamic_set_name(name);
   }
 
-  static std::optional<std::map<std::string, IptablesFirewall::LiveSetSchema>>
+  static std::optional<std::map<std::string, std::optional<IptablesFirewall::LiveSetSchema>>>
   parse_live_set_schemas(const std::string& xml) {
     return IptablesFirewall::parse_live_set_schemas(xml);
   }
@@ -2989,19 +2989,19 @@ TEST_CASE("ipset inventory: every header arrives in one read") {
 
   REQUIRE(schemas.has_value());
   REQUIRE(schemas->size() == 3);
-  CHECK(schemas->at("kpbr4d_domains").family == "inet");
-  CHECK(schemas->at("kpbr4d_domains").timeout == 300);
-  CHECK(schemas->at("kpbr6d_domains").hashsize == 2048);
-  CHECK(schemas->at("kpbr6d_domains").timeout == 0);
+  CHECK(schemas->at("kpbr4d_domains")->family == "inet");
+  CHECK(schemas->at("kpbr4d_domains")->timeout == 300);
+  CHECK(schemas->at("kpbr6d_domains")->hashsize == 2048);
+  CHECK(schemas->at("kpbr6d_domains")->timeout == 0);
   // Somebody else's set is read and kept: the preflight looks its own names up
   // by key rather than assuming everything present belongs to us.
-  CHECK(schemas->at("foreign_set").type == "hash:ip");
+  CHECK(schemas->at("foreign_set")->type == "hash:ip");
 
-  CHECK(T::live_set_schema_compatible(schemas->at("kpbr4d_domains"),
+  CHECK(T::live_set_schema_compatible(*schemas->at("kpbr4d_domains"),
                                       "kpbr4d_domains", "inet", 300));
-  CHECK(T::live_set_schema_compatible(schemas->at("kpbr6d_domains"),
+  CHECK(T::live_set_schema_compatible(*schemas->at("kpbr6d_domains"),
                                       "kpbr6d_domains", "inet6", 0));
-  CHECK_FALSE(T::live_set_schema_compatible(schemas->at("kpbr4d_domains"),
+  CHECK_FALSE(T::live_set_schema_compatible(*schemas->at("kpbr4d_domains"),
                                             "kpbr4d_domains", "inet6", 300));
 }
 
@@ -3047,6 +3047,48 @@ TEST_CASE("ipset teardown: nothing of ours means no script and no exec") {
   CHECK(T::build_managed_set_teardown_script("", false).empty());
 }
 
+TEST_CASE("ipset inventory: a firmware set we cannot read is not our problem") {
+  // Copied from the owner's router, where this exact document broke an apply.
+  // `ipset list -t -o xml` reports every set on the box - 163 of them there,
+  // and the firmware's hash:mac set carries no <family>, because MAC sets have
+  // none. Refusing the whole document over it made both preflights throw,
+  // which failed the cold-boot firewall COMMIT and left routing inactive.
+  //
+  // Somebody else's unreadable set is recorded as unreadable and skipped; ours
+  // is still an error, which the caller decides.
+  const auto schemas = T::parse_live_set_schemas(
+      R"(<ipsets>
+<ipset name="_NDM_HTSP_MAC_BLOCK">
+<type>hash:mac</type>
+<revision>0</revision>
+<header><hashsize>512</hashsize><maxelem>512</maxelem>
+<memsize>160</memsize>
+<references>2</references>
+</header>
+</ipset>
+<ipset name="kpbr4s_meta_whatsapp_ip">
+<type>hash:net</type>
+<revision>6</revision>
+<header><family>inet</family><hashsize>1024</hashsize><maxelem>65536</maxelem>
+<memsize>2208</memsize>
+<references>4</references>
+</header>
+</ipset>
+</ipsets>)");
+
+  REQUIRE(schemas.has_value());
+  REQUIRE(schemas->size() == 2);
+  // Present, and honestly marked as something we could not read.
+  REQUIRE(schemas->count("_NDM_HTSP_MAC_BLOCK") == 1);
+  CHECK_FALSE(schemas->at("_NDM_HTSP_MAC_BLOCK").has_value());
+  // Ours parsed, next to it, in the same pass.
+  REQUIRE(schemas->at("kpbr4s_meta_whatsapp_ip").has_value());
+  CHECK(schemas->at("kpbr4s_meta_whatsapp_ip")->family == "inet");
+  CHECK(schemas->at("kpbr4s_meta_whatsapp_ip")->hashsize == 1024);
+  CHECK(T::live_set_schema_compatible(*schemas->at("kpbr4s_meta_whatsapp_ip"),
+                                      "kpbr4s_meta_whatsapp_ip", "inet", 0));
+}
+
 TEST_CASE("ipset inventory: a router with no sets is not a failure") {
   const auto schemas = T::parse_live_set_schemas("<ipsets></ipsets>");
 
@@ -3075,22 +3117,35 @@ TEST_CASE("ipset inventory: anything unexpected refuses the whole document") {
      </ipsets>)")
                   .has_value());
 
-  // A number that is not one.
-  CHECK_FALSE(T::parse_live_set_schemas(
-                  R"(<ipsets><ipset name="a"><type>hash:net</type><header>
-       <family>inet</family><hashsize>10x24</hashsize><maxelem>65536</maxelem>
-       </header></ipset></ipsets>)")
-                  .has_value());
-
-  // Missing capacity fields: the comparison below would otherwise read zero
-  // and refuse every set for the wrong reason.
-  CHECK_FALSE(T::parse_live_set_schemas(
-                  R"(<ipsets><ipset name="a"><type>hash:net</type><header>
-       <family>inet</family></header></ipset></ipsets>)")
-                  .has_value());
-
   CHECK_FALSE(T::parse_live_set_schemas("").has_value());
   CHECK_FALSE(T::parse_live_set_schemas("<ipsets>").has_value());
+}
+
+TEST_CASE("ipset inventory: an unreadable set costs that set, not the report") {
+  // The line this file learned the hard way. These are set-level problems, and
+  // the sets they belong to are usually not ours: refusing the whole document
+  // over one made every apply fail. The entry is kept and marked unreadable, so
+  // a caller that cares about that name still refuses it.
+  const auto bad_number = T::parse_live_set_schemas(
+      R"(<ipsets><ipset name="a"><type>hash:net</type><header>
+       <family>inet</family><hashsize>10x24</hashsize><maxelem>65536</maxelem>
+       </header></ipset></ipsets>)");
+  REQUIRE(bad_number.has_value());
+  REQUIRE(bad_number->count("a") == 1);
+  CHECK_FALSE(bad_number->at("a").has_value());
+
+  const auto no_capacity = T::parse_live_set_schemas(
+      R"(<ipsets><ipset name="a"><type>hash:net</type><header>
+       <family>inet</family></header></ipset></ipsets>)");
+  REQUIRE(no_capacity.has_value());
+  CHECK_FALSE(no_capacity->at("a").has_value());
+
+  // And the caller still refuses it, which is what keeps the old contract:
+  // an unreadable set of ours is not quietly accepted.
+  CHECK_FALSE(T::dynamic_set_schema_compatible(
+      R"(<ipsets><ipset name="a"><type>hash:net</type><header>
+       <family>inet</family></header></ipset></ipsets>)",
+      "a", "inet", 0));
 }
 
 TEST_CASE("ipset inventory: the single-set form stays as strict as it was") {
