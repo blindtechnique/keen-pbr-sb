@@ -144,19 +144,42 @@ TEST_CASE("scan coverage: what nfqws2 handles is not coverage") {
 TEST_CASE("scan coverage: routing lists carry their domains and addresses") {
     Config config;
     ListConfig routed;
-    routed.domains = std::vector<std::string>{"Example.COM", "*.example.org"};
+    routed.domains =
+        std::vector<std::string>{"Example.COM", "*.example.org", "trailing.net."};
     routed.ip_cidrs = std::vector<std::string>{"10.0.0.0/8"};
     config.lists = std::map<std::string, ListConfig>{{"routed", routed}};
 
-    NfqwsScanSource source;
-    const auto coverage = build_scan_coverage(config, source);
+    const auto coverage = build_scan_coverage(config, NfqwsScanSource{});
 
     REQUIRE(coverage.routing_lists.size() == 1);
     CHECK(coverage.routing_lists[0].name == "routed");
     CHECK(coverage.routing_lists[0].addresses.size() == 1);
-    // Normalised on the way in, so a comparison later is not case-sensitive.
-    REQUIRE_FALSE(coverage.routing_lists[0].domains.empty());
-    CHECK(coverage.routing_lists[0].domains[0] == "example.com");
+    REQUIRE(coverage.routing_lists[0].domains.size() == 3);
+    // Case is kept as written. It looked like a normalisation worth asserting
+    // and is not one: `ListParser::normalize_domain` validates the labels and
+    // strips a `*.` prefix and a trailing dot, and lowercases nothing. That is
+    // harmless because `match_hostlist` lowercases both sides when it
+    // compares, so coverage is case-insensitive where it matters.
+    CHECK(coverage.routing_lists[0].domains[0] == "Example.COM");
+    // These two are real normalisations, and worth pinning down.
+    CHECK(coverage.routing_lists[0].domains[1] == "example.org");
+    CHECK(coverage.routing_lists[0].domains[2] == "trailing.net");
+}
+
+TEST_CASE("scan coverage: an unusable domain is dropped, not carried through") {
+    // normalize_domain returns nothing for a label it cannot accept. Carrying
+    // the raw string would put an entry in coverage that can never match, and
+    // coverage that silently never matches is worse than none.
+    Config config;
+    ListConfig routed;
+    routed.domains = std::vector<std::string>{"good.example", "-bad.example", ""};
+    config.lists = std::map<std::string, ListConfig>{{"routed", routed}};
+
+    const auto coverage = build_scan_coverage(config, NfqwsScanSource{});
+
+    REQUIRE(coverage.routing_lists.size() == 1);
+    REQUIRE(coverage.routing_lists[0].domains.size() == 1);
+    CHECK(coverage.routing_lists[0].domains[0] == "good.example");
 }
 
 TEST_CASE("scan coverage: a cache-backed list is still a list") {

@@ -205,6 +205,7 @@ add_executable(keen-pbr-tests
   ../src/daemon/config_store.cpp
   ../src/daemon/daemon_core.cpp
   ../src/daemon/daemon_runtime.cpp
+  ../src/daemon/daemon_tunnel_probe.cpp
   ../src/daemon/daemon_resolver.cpp
   ../src/daemon/keenetic_dns_refresh_coordinator.cpp
   ../src/daemon/resolver_stream_coordinator.cpp
