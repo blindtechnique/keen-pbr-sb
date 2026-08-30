@@ -96,6 +96,12 @@ public:
     // how often they failed, then by name so the order is stable to look at.
     std::vector<ProbeCandidate> ranked() const;
 
+    // Drops a host that has been answered, so it stops holding a place ahead of
+    // hosts nobody has looked at yet. Not the same as recovery: this says "we
+    // have a verdict", not "it started working". If nfqws2 goes on failing over
+    // it, the next line about it puts it back with fresh evidence.
+    void forget(const std::string& host);
+
     std::size_t size() const noexcept { return candidates_.size(); }
 
 private:

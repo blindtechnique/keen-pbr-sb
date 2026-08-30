@@ -165,6 +165,15 @@ void ProbeCandidateQueue::observe(const NfqwsLogEvent& event) {
     if (event.evidence == NfqwsEvidence::redirect) existing->dpi_specific = true;
 }
 
+void ProbeCandidateQueue::forget(const std::string& host) {
+    const auto it = std::remove_if(
+        candidates_.begin(), candidates_.end(),
+        [&host](const ProbeCandidate& candidate) {
+            return candidate.host == host;
+        });
+    candidates_.erase(it, candidates_.end());
+}
+
 std::vector<ProbeCandidate> ProbeCandidateQueue::ranked() const {
     auto ordered = candidates_;
     std::sort(ordered.begin(), ordered.end(),

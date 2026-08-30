@@ -175,6 +175,7 @@ add_executable(keen-pbr-tests
   test_host_coverage.cpp
   test_entry_review.cpp
   test_log_follower.cpp
+  test_tunnel_candidate_scan.cpp
   test_firewall_contract.cpp
   test_nfqws_config.cpp
   test_nfqws_file_writer.cpp
@@ -350,6 +351,7 @@ add_executable(keen-pbr-tests
   ../src/health/host_coverage.cpp
   ../src/health/entry_review.cpp
   ../src/health/log_follower.cpp
+  ../src/health/tunnel_candidate_scan.cpp
   ../src/firewall/firewall_contract.cpp
   ../src/api/handler_transport_exit_check.cpp
   ../src/health/routing_health_checker.cpp
