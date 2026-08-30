@@ -177,6 +177,9 @@ add_executable(keen-pbr-tests
   test_log_follower.cpp
   test_tunnel_candidate_scan.cpp
   test_scan_tunnel_candidates.cpp
+  test_nfqws_scan_source.cpp
+  test_tunnel_probe_automation.cpp
+  test_tunnel_probe_task.cpp
   test_firewall_contract.cpp
   test_nfqws_config.cpp
   test_nfqws_file_writer.cpp
@@ -352,6 +355,9 @@ add_executable(keen-pbr-tests
   ../src/health/host_coverage.cpp
   ../src/health/entry_review.cpp
   ../src/health/log_follower.cpp
+  ../src/health/nfqws_scan_source.cpp
+  ../src/health/tunnel_probe_automation.cpp
+  ../src/health/tunnel_probe_task.cpp
   ../src/health/tunnel_candidate_scan.cpp
   ../src/cmd/scan_tunnel_candidates.cpp
   ../src/firewall/firewall_contract.cpp

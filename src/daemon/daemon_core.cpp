@@ -4469,6 +4469,7 @@ void Daemon::run() {
     schedule_lists_autoupdate();
     schedule_interface_probe();
     schedule_catalog_refresh();
+    schedule_tunnel_probe();
 
     if (refresh_result.any_dns_relevant_changed()) {
         log.info("Startup lists: DNS-relevant list(s) changed ({}); reloading system resolver.",

@@ -513,6 +513,15 @@ namespace api {
         std::optional<std::vector<RouteRuleElement>> rules;
     };
 
+    struct TunnelProbe {
+        std::optional<bool> enabled;
+        std::optional<int64_t> interval_ms;
+        std::optional<std::string> list;
+        std::optional<int64_t> max_probes_per_pass;
+        std::optional<std::string> outbound;
+        std::optional<bool> require_registry_confirmation;
+    };
+
     struct PlainDnsTemplateElement {
         std::string name;
         std::string primary_ipv4;
@@ -535,6 +544,7 @@ namespace api {
         std::optional<ListsAutoupdate> lists_autoupdate;
         std::optional<std::vector<OutboundElement>> outbounds;
         std::optional<Route> route;
+        std::optional<TunnelProbe> tunnel_probe;
         std::optional<UiPreferences> ui_preferences;
     };
 
@@ -2197,6 +2207,7 @@ namespace api {
         std::optional<TransportsEnvironment> transports_environment;
         std::optional<Transport> transport_spec;
         std::optional<TransportStatus> transport_status;
+        std::optional<TunnelProbe> tunnel_probe_config;
         std::optional<UiPreferences> ui_preferences_config;
         std::optional<UpdateStartedResponse> update_started_response;
         std::optional<ValidationErrorElement> validation_error;
@@ -2353,6 +2364,9 @@ void to_json(json & j, const RouteRuleElement & x);
 
 void from_json(const json & j, Route & x);
 void to_json(json & j, const Route & x);
+
+void from_json(const json & j, TunnelProbe & x);
+void to_json(json & j, const TunnelProbe & x);
 
 void from_json(const json & j, PlainDnsTemplateElement & x);
 void to_json(json & j, const PlainDnsTemplateElement & x);
@@ -3992,6 +4006,25 @@ namespace api {
         j["rules"] = x.rules;
     }
 
+    inline void from_json(const json & j, TunnelProbe& x) {
+        x.enabled = get_stack_optional<bool>(j, "enabled");
+        x.interval_ms = get_stack_optional<int64_t>(j, "interval_ms");
+        x.list = get_stack_optional<std::string>(j, "list");
+        x.max_probes_per_pass = get_stack_optional<int64_t>(j, "max_probes_per_pass");
+        x.outbound = get_stack_optional<std::string>(j, "outbound");
+        x.require_registry_confirmation = get_stack_optional<bool>(j, "require_registry_confirmation");
+    }
+
+    inline void to_json(json & j, const TunnelProbe & x) {
+        j = json::object();
+        j["enabled"] = x.enabled;
+        j["interval_ms"] = x.interval_ms;
+        j["list"] = x.list;
+        j["max_probes_per_pass"] = x.max_probes_per_pass;
+        j["outbound"] = x.outbound;
+        j["require_registry_confirmation"] = x.require_registry_confirmation;
+    }
+
     inline void from_json(const json & j, PlainDnsTemplateElement& x) {
         x.name = j.at("name").get<std::string>();
         x.primary_ipv4 = j.at("primary_ipv4").get<std::string>();
@@ -4027,6 +4060,7 @@ namespace api {
         x.lists_autoupdate = get_stack_optional<ListsAutoupdate>(j, "lists_autoupdate");
         x.outbounds = get_stack_optional<std::vector<OutboundElement>>(j, "outbounds");
         x.route = get_stack_optional<Route>(j, "route");
+        x.tunnel_probe = get_stack_optional<TunnelProbe>(j, "tunnel_probe");
         x.ui_preferences = get_stack_optional<UiPreferences>(j, "ui_preferences");
     }
 
@@ -4042,6 +4076,7 @@ namespace api {
         j["lists_autoupdate"] = x.lists_autoupdate;
         j["outbounds"] = x.outbounds;
         j["route"] = x.route;
+        j["tunnel_probe"] = x.tunnel_probe;
         j["ui_preferences"] = x.ui_preferences;
     }
 
@@ -6805,6 +6840,7 @@ namespace api {
         x.transports_environment = get_stack_optional<TransportsEnvironment>(j, "TransportsEnvironment");
         x.transport_spec = get_stack_optional<Transport>(j, "TransportSpec");
         x.transport_status = get_stack_optional<TransportStatus>(j, "TransportStatus");
+        x.tunnel_probe_config = get_stack_optional<TunnelProbe>(j, "TunnelProbeConfig");
         x.ui_preferences_config = get_stack_optional<UiPreferences>(j, "UiPreferencesConfig");
         x.update_started_response = get_stack_optional<UpdateStartedResponse>(j, "UpdateStartedResponse");
         x.validation_error = get_stack_optional<ValidationErrorElement>(j, "ValidationError");
@@ -7053,6 +7089,7 @@ namespace api {
         j["TransportsEnvironment"] = x.transports_environment;
         j["TransportSpec"] = x.transport_spec;
         j["TransportStatus"] = x.transport_status;
+        j["TunnelProbeConfig"] = x.tunnel_probe_config;
         j["UiPreferencesConfig"] = x.ui_preferences_config;
         j["UpdateStartedResponse"] = x.update_started_response;
         j["ValidationError"] = x.validation_error;

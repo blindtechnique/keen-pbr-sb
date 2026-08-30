@@ -49,6 +49,7 @@ using OutboundGroup        = api::OutboundGroupElement;
 using RetryConfig          = api::Retry;
 using CircuitBreakerConfig = api::CircuitBreakerConfig;
 using ListConfig           = api::ListConfigValue;
+using TunnelProbeConfig    = api::TunnelProbe;
 using DnsServer            = api::DnsServerElement;
 using DnsTestServer        = api::DnsTestServer;
 using DnsRule              = api::DnsRuleElement;
