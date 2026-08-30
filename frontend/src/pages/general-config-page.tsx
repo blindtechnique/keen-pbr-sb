@@ -106,6 +106,7 @@ import {
   type MetaUdp443Policy,
   withMetaUdp443Policy,
 } from "@/lib/meta-udp-443-policy"
+import { provisionTunnelProbe } from "@/lib/tunnel-probe-provisioning"
 
 type StrictEnforcementOption = "automatic" | "enabled" | "disabled"
 
@@ -2313,15 +2314,6 @@ function buildUpdatedConfig(
       enabled: draft.listsAutoupdateEnabled,
       cron: draft.cron.trim(),
     },
-    tunnel_probe: {
-      ...config.tunnel_probe,
-      enabled: draft.tunnelProbeEnabled,
-      // Empty means "not named". Sending "" would be a name that matches
-      // nothing, and the daemon would refuse it as a missing outbound rather
-      // than as an unset one.
-      outbound: draft.tunnelProbeOutbound.trim() || undefined,
-      list: draft.tunnelProbeList.trim() || undefined,
-    },
   }
 
   if (listRefreshRoute.detour) {
@@ -2333,7 +2325,29 @@ function buildUpdatedConfig(
     delete updatedConfig.list_refresh
   }
 
-  return updatedConfig
+  // Switching the automation on has to be one click, so the three things it
+  // needs - a list, a file for that list to read, and a rule sending that list
+  // through the tunnel the probe measures against - are staged here rather
+  // than left to the operator. The daemon never edits the configuration, which
+  // is why this belongs to the panel.
+  const provisioned = provisionTunnelProbe(updatedConfig, {
+    enabled: draft.tunnelProbeEnabled,
+    outbound: draft.tunnelProbeOutbound,
+    list: draft.tunnelProbeList,
+  })
+
+  return {
+    ...provisioned.config,
+    tunnel_probe: {
+      ...config.tunnel_probe,
+      enabled: draft.tunnelProbeEnabled,
+      // Empty means "not named". Sending "" would be a name that matches
+      // nothing, and the daemon would refuse it as a missing outbound rather
+      // than as an unset one.
+      outbound: provisioned.resolved.outbound || undefined,
+      list: provisioned.resolved.list || undefined,
+    },
+  }
 }
 
 function toHex32(value: string | undefined, fallback: string) {

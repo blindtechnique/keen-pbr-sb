@@ -2542,10 +2542,10 @@ export const enTranslation = {
           "This moves traffic on its own, and the move is not reversible in practice: nfqws2's rules are bound to the provider interface, so a host routed through a tunnel disappears from its view and stops producing the evidence that put it there. Confirmed hosts are appended to the list's own file; your configuration is never rewritten. A host is only acted on when the probe says it is blocked here and Russia's blocking registry names it - on real traffic that second question is what separates a censored site from an advertising endpoint failing for its own reasons.",
         tunnelProbeOutboundLabel: "Tunnel to measure against",
         tunnelProbeOutboundHint:
-          "The tag of an outbound that has an interface. Each probe is pinned to a device, so an outbound with only a mark cannot be used.",
+          "Leave empty to use the first outbound that has an interface. Name one that has an interface: each probe is pinned to a device, and an outbound with only a mark cannot carry one. Confirmed hosts are routed through this same tunnel - sending them through a different one would mean the measurement justified nothing.",
         tunnelProbeListLabel: "List that receives confirmed hosts",
         tunnelProbeListHint:
-          "The name of a list that has a file. That file is what gets appended to, which is why a list holding its hosts only inline cannot be used here. Create the file before naming it: a list whose file does not exist makes list streaming throw inside the firewall apply, so routing stops being applied at all. An empty file is enough, and the list may keep its inline domains - every source is read together.",
+          "Leave empty and the list, its file and a routing rule are created when you save. Name an existing list and it is given a file if it has none, keeping everything it already holds - every source of a list is read together.",
         inboundInterfacesLabel: "Inbound interfaces",
         inboundInterfacesHint:
           "Only packets arriving on the selected interfaces will be processed by policy routing. Leave this empty to match traffic from any interface.",
