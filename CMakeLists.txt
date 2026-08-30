@@ -504,6 +504,11 @@ set(SOURCES
   src/cmd/recover_persistent_state.cpp
   src/cmd/status.cpp
   src/cmd/test_routing.cpp
+  src/cmd/scan_tunnel_candidates.cpp
+  src/health/differential_probe.cpp
+  src/health/probe_candidates.cpp
+  src/health/host_coverage.cpp
+  src/health/tunnel_candidate_scan.cpp
   src/routing/target.cpp
   src/routing/netlink.cpp
   src/routing/interface_monitor.cpp
