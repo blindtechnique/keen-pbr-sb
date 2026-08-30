@@ -2541,8 +2541,9 @@ export const enTranslation = {
         tunnelProbeHelp:
           "This moves traffic on its own, and the move is not reversible in practice: nfqws2's rules are bound to the provider interface, so a host routed through a tunnel disappears from its view and stops producing the evidence that put it there. Confirmed hosts are appended to the list's own file; your configuration is never rewritten. A host is only acted on when the probe says it is blocked here and Russia's blocking registry names it - on real traffic that second question is what separates a censored site from an advertising endpoint failing for its own reasons.",
         tunnelProbeOutboundLabel: "Tunnel to measure against",
+        tunnelProbeOutboundAuto: "Choose automatically",
         tunnelProbeOutboundHint:
-          "Leave empty to use the first outbound that has an interface. Name one that has an interface: each probe is pinned to a device, and an outbound with only a mark cannot carry one. Confirmed hosts are routed through this same tunnel - sending them through a different one would mean the measurement justified nothing.",
+          "Leave unchosen to use the first tunnel that has an interface. Only those are listed: each probe is pinned to a device, and an outbound with only a mark cannot carry one. Confirmed hosts are routed through the tunnel you pick - sending them through a different one would mean the measurement justified nothing.",
         tunnelProbeListLabel: "List that receives confirmed hosts",
         tunnelProbeListHint:
           "Leave empty and the list, its file and a routing rule are created when you save. Name an existing list and it is given a file if it has none, keeping everything it already holds - every source of a list is read together.",
@@ -2788,7 +2789,7 @@ export const enTranslation = {
         metaUdp443AndroidBackgroundTitle:
           "Messages arrive only after opening WhatsApp?",
         metaUdp443AndroidBackgroundDescription:
-          "On Samsung/Android, set WhatsApp battery use to Unrestricted, allow background data (including while Data Saver is on), and remove it from Sleeping and Deep sleeping apps. Keep Balanced selected: router transport settings cannot wake an app suspended by Android.",
+          "In Android settings, set WhatsApp battery use to Unrestricted, allow background data (including while Data Saver is on), and remove it from any sleeping-apps list. The exact wording differs between manufacturers. Keep Balanced selected: router transport settings cannot wake an app suspended by Android.",
         metaUdp443PolicyOptions: {
           balanced: "Balanced (recommended)",
           messagesFirst: "Messages first (TCP)",

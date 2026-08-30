@@ -32,6 +32,7 @@ import { BottomActionBar } from "@/components/shared/bottom-action-bar"
 import { HelpHint } from "@/components/shared/help-hint"
 import { ListRefreshRouteFields } from "@/components/lists/list-refresh-route-fields"
 import { InterfaceMultiSelectList } from "@/components/shared/interface-picker"
+import { OutboundSelect } from "@/components/shared/outbound-select"
 import { ListIdentityLabel } from "@/components/shared/list-identity-label"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { MultiSelectList } from "@/components/shared/multi-select-list"
@@ -266,6 +267,17 @@ function LoadedGeneralConfigPage({
 }: LoadedGeneralConfigPageProps) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
+  // Туннели, против которых можно измерять: только те, у кого есть интерфейс.
+  // Каждая нога пробы привязывается к устройству, и исходящее с одной лишь
+  // меткой измеряло бы то, что выберет маршрутизация, — то есть ничего.
+  const tunnelProbeOutbounds = useMemo(
+    () =>
+      (loadedConfig.outbounds ?? []).filter(
+        (outbound) =>
+          typeof outbound.interface === "string" && outbound.interface !== ""
+      ),
+    [loadedConfig.outbounds]
+  )
   const ndmsInventoryQuery = useGetNdmsInterfaceInventory()
   const ndmsVpnServicesQuery = useGetNdmsVpnServerServices()
   const runtimeInterfacesQuery = useGetRuntimeInterfaces()
@@ -866,17 +878,23 @@ function LoadedGeneralConfigPage({
                       invalid={Boolean(error)}
                       className={activeTab === "general" ? undefined : "hidden"}
                     >
-                      <FieldLabel htmlFor="tunnel-probe-outbound">
+                      <FieldLabel>
                         {t("pages.settings.general.tunnelProbeOutboundLabel")}
                       </FieldLabel>
                       <FieldContent>
-                        <Input
-                          aria-invalid={Boolean(error)}
-                          id="tunnel-probe-outbound"
-                          onBlur={field.handleBlur}
-                          onChange={(event) =>
-                            field.handleChange(event.target.value)
-                          }
+                        {/* Выбор, а не ввод технического тега: у туннелей есть
+                            псевдонимы, и человек знает их по ним. Показываются
+                            только исходящие с интерфейсом — нога пробы
+                            привязывается к устройству, и исходящее с одной
+                            лишь меткой её не понесёт. */}
+                        <OutboundSelect
+                          allowEmpty
+                          ariaInvalid={Boolean(error)}
+                          emptyLabel={t(
+                            "pages.settings.general.tunnelProbeOutboundAuto"
+                          )}
+                          onValueChange={(value) => field.handleChange(value)}
+                          outbounds={tunnelProbeOutbounds}
                           value={field.state.value}
                         />
                         <FieldHint
