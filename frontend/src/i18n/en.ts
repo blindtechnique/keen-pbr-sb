@@ -2534,6 +2534,18 @@ export const enTranslation = {
         clientDnsEnforcementLabel: "Force clients to use router DNS",
         clientDnsEnforcementHint:
           "Transparently redirect plain DNS (port 53) from LAN clients to the router's resolver and block DNS-over-TLS (port 853), so browser Secure DNS cannot bypass domain-based routing. DNS-over-HTTPS on port 443 cannot be blocked this way; disable Secure DNS in browsers for full coverage.",
+        tunnelProbeEnabledLabel:
+          "Route hosts nfqws2 cannot fix through a tunnel",
+        tunnelProbeEnabledHint:
+          "Reads what nfqws2 recorded as failing, measures each host twice - once over your provider's own interface and once over the tunnel below - and adds only the ones that answered through the tunnel and not directly.",
+        tunnelProbeHelp:
+          "This moves traffic on its own, and the move is not reversible in practice: nfqws2's rules are bound to the provider interface, so a host routed through a tunnel disappears from its view and stops producing the evidence that put it there. Confirmed hosts are appended to the list's own file; your configuration is never rewritten. A host is only acted on when the probe says it is blocked here and Russia's blocking registry names it - on real traffic that second question is what separates a censored site from an advertising endpoint failing for its own reasons.",
+        tunnelProbeOutboundLabel: "Tunnel to measure against",
+        tunnelProbeOutboundHint:
+          "The tag of an outbound that has an interface. Each probe is pinned to a device, so an outbound with only a mark cannot be used.",
+        tunnelProbeListLabel: "List that receives confirmed hosts",
+        tunnelProbeListHint:
+          "The name of a list that has a file. That file is what gets appended to, which is why a list holding its hosts inline cannot be used here.",
         inboundInterfacesLabel: "Inbound interfaces",
         inboundInterfacesHint:
           "Only packets arriving on the selected interfaces will be processed by policy routing. Leave this empty to match traffic from any interface.",

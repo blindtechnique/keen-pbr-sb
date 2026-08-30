@@ -136,6 +136,9 @@ type SettingsDraft = {
   fwmarkStart: string
   fwmarkMask: string
   tableStart: string
+  tunnelProbeEnabled: boolean
+  tunnelProbeOutbound: string
+  tunnelProbeList: string
 }
 
 const fallbackDraft: SettingsDraft = {
@@ -160,6 +163,11 @@ const fallbackDraft: SettingsDraft = {
   fwmarkStart: "0x00010000",
   fwmarkMask: "0xffff0000",
   tableStart: "150",
+  // Off, and naming nothing. Switching this on moves traffic on the strength
+  // of a measurement, and the move is not reversible in practice.
+  tunnelProbeEnabled: false,
+  tunnelProbeOutbound: "",
+  tunnelProbeList: "",
 }
 
 const SETTINGS_FIELD_NAMES = {
@@ -188,6 +196,9 @@ const SETTINGS_FIELD_NAMES = {
   fwmarkStart: "fwmarkStart",
   fwmarkMask: "fwmarkMask",
   tableStart: "tableStart",
+  tunnelProbeEnabled: "tunnelProbeEnabled",
+  tunnelProbeOutbound: "tunnelProbeOutbound",
+  tunnelProbeList: "tunnelProbeList",
 } as const
 
 type SettingsFieldName =
@@ -802,6 +813,121 @@ function LoadedGeneralConfigPage({
                   </Field>
                 )}
               </form.Field>
+
+              {/* Автоматика «nfqws2 не справился — уводим в туннель».
+                  Выключена по умолчанию, и это не осторожность ради
+                  осторожности: правила nfqws2 привязаны к провайдерскому
+                  интерфейсу, поэтому уведённый хост исчезает из его поля
+                  зрения и перестаёт давать то свидетельство, по которому его
+                  туда отправили. Обратной дороги на практике нет. */}
+              <form.Field name={SETTINGS_FIELD_NAMES.tunnelProbeEnabled}>
+                {(field) => (
+                  <Field
+                    width="short"
+                    className={activeTab === "general" ? undefined : "hidden"}
+                  >
+                    <FieldContent>
+                      <div className="flex items-center space-x-3">
+                        <Checkbox
+                          checked={field.state.value}
+                          id="tunnel-probe-enabled"
+                          onCheckedChange={(checked) =>
+                            field.handleChange(checked === true)
+                          }
+                        />
+                        <FieldLabel
+                          className="cursor-pointer flex-col items-start gap-0"
+                          htmlFor="tunnel-probe-enabled"
+                        >
+                          {t("pages.settings.general.tunnelProbeEnabledLabel")}
+                        </FieldLabel>
+                        <HelpHint
+                          text={t("pages.settings.general.tunnelProbeHelp")}
+                        />
+                      </div>
+                      <FieldHint
+                        description={t(
+                          "pages.settings.general.tunnelProbeEnabledHint"
+                        )}
+                      />
+                    </FieldContent>
+                  </Field>
+                )}
+              </form.Field>
+
+              <form.Field name={SETTINGS_FIELD_NAMES.tunnelProbeOutbound}>
+                {(field) => {
+                  const error = getFirstFieldError(field.state.meta.errors)
+
+                  return (
+                    <Field
+                      width="short"
+                      invalid={Boolean(error)}
+                      className={activeTab === "general" ? undefined : "hidden"}
+                    >
+                      <FieldLabel htmlFor="tunnel-probe-outbound">
+                        {t("pages.settings.general.tunnelProbeOutboundLabel")}
+                      </FieldLabel>
+                      <FieldContent>
+                        <Input
+                          aria-invalid={Boolean(error)}
+                          id="tunnel-probe-outbound"
+                          onBlur={field.handleBlur}
+                          onChange={(event) =>
+                            field.handleChange(event.target.value)
+                          }
+                          value={field.state.value}
+                        />
+                        <FieldHint
+                          description={t(
+                            "pages.settings.general.tunnelProbeOutboundHint"
+                          )}
+                          error={error ?? null}
+                        />
+                      </FieldContent>
+                    </Field>
+                  )
+                }}
+              </form.Field>
+
+              <form.Field name={SETTINGS_FIELD_NAMES.tunnelProbeList}>
+                {(field) => {
+                  const error = getFirstFieldError(field.state.meta.errors)
+
+                  return (
+                    <Field
+                      width="short"
+                      invalid={Boolean(error)}
+                      className={activeTab === "general" ? undefined : "hidden"}
+                    >
+                      <FieldLabel htmlFor="tunnel-probe-list">
+                        {t("pages.settings.general.tunnelProbeListLabel")}
+                      </FieldLabel>
+                      <FieldContent>
+                        <Input
+                          aria-invalid={Boolean(error)}
+                          id="tunnel-probe-list"
+                          onBlur={field.handleBlur}
+                          onChange={(event) =>
+                            field.handleChange(event.target.value)
+                          }
+                          value={field.state.value}
+                        />
+                        <FieldHint
+                          description={t(
+                            "pages.settings.general.tunnelProbeListHint"
+                          )}
+                          error={error ?? null}
+                        />
+                      </FieldContent>
+                    </Field>
+                  )
+                }}
+              </form.Field>
+
+              <FieldSeparator
+                className={activeTab === "general" ? undefined : "hidden"}
+              />
 
               <form.Field name={SETTINGS_FIELD_NAMES.inboundInterfaces}>
                 {(field) => {
@@ -2115,6 +2241,11 @@ function getDraftFromConfig(config: ConfigObject): SettingsDraft {
       config.iproute?.table_start,
       fallbackDraft.tableStart
     ),
+    tunnelProbeEnabled:
+      config.tunnel_probe?.enabled ?? fallbackDraft.tunnelProbeEnabled,
+    tunnelProbeOutbound:
+      config.tunnel_probe?.outbound ?? fallbackDraft.tunnelProbeOutbound,
+    tunnelProbeList: config.tunnel_probe?.list ?? fallbackDraft.tunnelProbeList,
   }
 }
 
@@ -2181,6 +2312,15 @@ function buildUpdatedConfig(
       ...config.lists_autoupdate,
       enabled: draft.listsAutoupdateEnabled,
       cron: draft.cron.trim(),
+    },
+    tunnel_probe: {
+      ...config.tunnel_probe,
+      enabled: draft.tunnelProbeEnabled,
+      // Empty means "not named". Sending "" would be a name that matches
+      // nothing, and the daemon would refuse it as a missing outbound rather
+      // than as an unset one.
+      outbound: draft.tunnelProbeOutbound.trim() || undefined,
+      list: draft.tunnelProbeList.trim() || undefined,
     },
   }
 
@@ -2316,6 +2456,12 @@ function resolveSettingsFieldPath(path: string): SettingsFieldName | undefined {
       return SETTINGS_FIELD_NAMES.fwmarkMask
     case "iproute.table_start":
       return SETTINGS_FIELD_NAMES.tableStart
+    case "tunnel_probe.enabled":
+      return SETTINGS_FIELD_NAMES.tunnelProbeEnabled
+    case "tunnel_probe.outbound":
+      return SETTINGS_FIELD_NAMES.tunnelProbeOutbound
+    case "tunnel_probe.list":
+      return SETTINGS_FIELD_NAMES.tunnelProbeList
     default:
       return undefined
   }
