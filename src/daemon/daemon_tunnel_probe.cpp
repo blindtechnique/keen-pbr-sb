@@ -7,6 +7,10 @@
 
 #include "daemon.hpp"
 
+// daemon.hpp only forward-declares the scheduler; arming a repeating task
+// needs the definition.
+#include "scheduler.hpp"
+
 #include "../health/differential_probe.hpp"
 #include "../health/nfqws_scan_source.hpp"
 #include "../http/http_transport.hpp"
