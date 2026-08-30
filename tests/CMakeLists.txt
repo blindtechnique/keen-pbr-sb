@@ -1064,6 +1064,7 @@ if(WITH_API)
     ../src/api/handler_runtime_interfaces.cpp
     ../src/api/handler_runtime_inventory.cpp
     ../src/api/handler_runtime_outbounds.cpp
+    ../src/api/handler_tunnel_probe.cpp
     ../src/api/handler_diagnostic_tasks.cpp
     ../src/api/handler_dependency_analysis.cpp
     ../src/api/handler_transports.cpp
