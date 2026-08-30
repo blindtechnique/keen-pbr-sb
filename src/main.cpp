@@ -131,6 +131,22 @@ struct CliOptions {
     bool recovery_incompatible_option{false};
     bool show_help{false};
     bool show_version{false};
+
+    // Every command flag has to be named here or the binary prints its usage
+    // and exits instead of running the command it just parsed. That failure
+    // looks exactly like a typo at the prompt, so it survives a green suite,
+    // a passing build and an install, and shows itself only when somebody
+    // tries the new command on a router - which is where it was found.
+    //
+    // Kept next to the flags rather than beside the check for that reason: it
+    // is the declaration that has to be updated, and this is where a new one
+    // gets added.
+    bool any_command_selected() const {
+        return download_lists || generate_resolver_config ||
+               resolver_config_hash || run_service || run_status ||
+               run_test_routing || run_scan_tunnel_candidates ||
+               recover_persistent_state;
+    }
 };
 
 void print_usage(const char* argv0) {
@@ -355,10 +371,7 @@ int main(int argc, char* argv[]) {
             return keen_pbr3::run_recover_persistent_state_command();
         }
 
-        if (!opts.download_lists && !opts.generate_resolver_config &&
-            !opts.resolver_config_hash && !opts.run_service && !opts.run_status &&
-            !opts.run_test_routing &&
-            !opts.recover_persistent_state) {
+        if (!opts.any_command_selected()) {
             print_usage(argv[0]);
             return 0;
         }
