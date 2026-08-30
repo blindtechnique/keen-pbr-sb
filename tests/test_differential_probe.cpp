@@ -319,4 +319,47 @@ TEST_CASE("differential: every verdict has a name to show") {
           "inconclusive");
 }
 
+
+TEST_CASE("shape: a name that is filtered while its address carries traffic") {
+    // nfqws2's ground. Answering to a substituted name, or over plain HTTP,
+    // proves the packets reach the address - so what is being filtered is what
+    // is written on them, and desync has something to disguise.
+    CHECK(classify_block_shape_from_legs(kUnreachable, kReachable, kUnreachable) ==
+          BlockShape::name_based);
+    CHECK(classify_block_shape_from_legs(kUnreachable, kUnreachable, kReachable) ==
+          BlockShape::name_based);
+}
+
+TEST_CASE("shape: an address that dies whatever name is presented") {
+    // Measured by hand on the owner's router: thumbnails.libretro.com failed
+    // over TLS with its real name and with example.com substituted, while
+    // plain HTTP to the same address answered in 0.13s. That mixture is
+    // name_based by the rule above - the interesting case is when HTTP dies
+    // too, and then no desync can help.
+    CHECK(classify_block_shape_from_legs(kUnreachable, kUnreachable,
+                                         kUnreachable) ==
+          BlockShape::address_based);
+}
+
+TEST_CASE("shape: a direct leg that answered has nothing to classify") {
+    CHECK(classify_block_shape_from_legs(kReachable, kUnreachable, kUnreachable) ==
+          BlockShape::unknown);
+}
+
+TEST_CASE("shape: a leg that could not prove its path names nothing") {
+    CHECK(classify_block_shape_from_legs(kUnattributed, kReachable, kReachable) ==
+          BlockShape::unknown);
+    // Both substitutes unprovable: the direct leg failed, but nothing says why.
+    CHECK(classify_block_shape_from_legs(kUnreachable, kUnattributed,
+                                         kUnattributed) == BlockShape::unknown);
+}
+
+TEST_CASE("shape: every shape has a name to show") {
+    CHECK(std::string{block_shape_name(BlockShape::name_based)} == "name_based");
+    CHECK(std::string{block_shape_name(BlockShape::address_based)} ==
+          "address_based");
+    CHECK(std::string{block_shape_name(BlockShape::unreachable)} == "unreachable");
+    CHECK(std::string{block_shape_name(BlockShape::unknown)} == "unknown");
+}
+
 }  // namespace keen_pbr3

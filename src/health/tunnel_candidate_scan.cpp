@@ -17,6 +17,16 @@ TunnelCandidateScan::TunnelCandidateScan(CoverageIndex coverage,
              },
              config.queue_cap) {}
 
+bool proposal_confirmed_by_registry(
+    const TunnelCandidateProposal& proposal) noexcept {
+    return proposal.verdict == DifferentialVerdict::blocked_here &&
+           proposal.registry_blocked.has_value() && *proposal.registry_blocked;
+}
+
+void TunnelCandidateScan::set_registry_lookup(RegistryFn lookup) {
+    registry_lookup_ = std::move(lookup);
+}
+
 void TunnelCandidateScan::observe(const std::vector<std::string>& log_lines) {
     for (const auto& line : log_lines) {
         NfqwsLogEvent event;
@@ -61,6 +71,11 @@ TunnelScanReport TunnelCandidateScan::run_pass(const ProbeFn& probe) {
                     nfqws_was_asked_about(coverage_, candidate.host);
                 proposal.direct_detail = answer.direct.detail;
                 proposal.tunnel_detail = answer.tunnel.detail;
+                // Asked only here, about a host a tunnel would fix, so the
+                // lookups cost one per proposal rather than one per candidate.
+                if (registry_lookup_) {
+                    proposal.registry_blocked = registry_lookup_(candidate.host);
+                }
                 report.proposals.push_back(std::move(proposal));
                 break;
             }

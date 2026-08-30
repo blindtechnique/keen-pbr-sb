@@ -162,6 +162,89 @@ DifferentialLeg probe_one_path(HttpTransport& transport,
     }
 }
 
+const char* block_shape_name(const BlockShape shape) noexcept {
+    switch (shape) {
+        case BlockShape::name_based:
+            return "name_based";
+        case BlockShape::address_based:
+            return "address_based";
+        case BlockShape::unreachable:
+            return "unreachable";
+        case BlockShape::unknown:
+            break;
+    }
+    return "unknown";
+}
+
+BlockShape classify_block_shape_from_legs(
+    const PathOutcome direct_tls,
+    const PathOutcome foreign_name_tls,
+    const PathOutcome plain_http) noexcept {
+    // A leg that could not prove its path says nothing, and three legs where
+    // the deciding one is unattributed name nothing either.
+    if (direct_tls == PathOutcome::unattributed) return BlockShape::unknown;
+
+    // The whole point of the call: the direct path is supposed to be failing.
+    // If it answers, there is nothing here to classify.
+    if (direct_tls == PathOutcome::reachable) return BlockShape::unknown;
+
+    // Either substitute answers: the address carries traffic, so what is being
+    // filtered is the name. nfqws2's ground.
+    if (foreign_name_tls == PathOutcome::reachable ||
+        plain_http == PathOutcome::reachable) {
+        return BlockShape::name_based;
+    }
+
+    // Both substitutes silent, and at least one of them was actually taken:
+    // the address is what dies, whatever is written on the packet.
+    if (foreign_name_tls == PathOutcome::unreachable ||
+        plain_http == PathOutcome::unreachable) {
+        return BlockShape::address_based;
+    }
+
+    return BlockShape::unknown;
+}
+
+BlockShapeProbe classify_block_shape(HttpTransport& transport,
+                                     const std::string& host,
+                                     const DifferentialPath& direct,
+                                     const std::string& foreign_name,
+                                     const std::uint32_t timeout_ms) {
+    BlockShapeProbe probe;
+    probe.direct_tls =
+        probe_one_path(transport, "https://" + host + "/", direct, timeout_ms);
+    // A name the target does not serve. What matters is only that it is a
+    // different name on the same address, so the certificate will not match -
+    // which is why the leg counts an answer of any kind, including a refusal.
+    probe.foreign_name_tls = probe_one_path(
+        transport, "https://" + foreign_name + "/", direct, timeout_ms);
+    probe.plain_http =
+        probe_one_path(transport, "http://" + host + "/", direct, timeout_ms);
+
+    probe.shape = classify_block_shape_from_legs(probe.direct_tls.outcome,
+                                                 probe.foreign_name_tls.outcome,
+                                                 probe.plain_http.outcome);
+    switch (probe.shape) {
+        case BlockShape::name_based:
+            probe.detail =
+                "the address carries traffic and the name does not - nfqws2 is "
+                "the cheaper remedy than a tunnel";
+            break;
+        case BlockShape::address_based:
+            probe.detail =
+                "TLS to this address dies whatever name is presented, so there "
+                "is nothing for desync to disguise";
+            break;
+        case BlockShape::unreachable:
+            probe.detail = "nothing answered on any leg";
+            break;
+        case BlockShape::unknown:
+            probe.detail = "the legs do not name a shape";
+            break;
+    }
+    return probe;
+}
+
 DifferentialProbeReport run_differential_probe(
     HttpTransport& transport, const DifferentialProbeRequest& request) {
     DifferentialProbeReport report;

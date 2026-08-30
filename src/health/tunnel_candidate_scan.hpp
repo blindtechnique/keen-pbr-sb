@@ -46,7 +46,31 @@ struct TunnelCandidateProposal {
     bool nfqws_was_asked{false};
     std::string direct_detail;
     std::string tunnel_detail;
+
+    // Whether Russia's blocking registry names this target, when a lookup was
+    // made and answered. Empty means nobody asked or nobody answered - never
+    // "no", because an unreachable registry must not read as a clean bill.
+    //
+    // This is a second question, not a better version of the first. The probe
+    // asks whether a tunnel would fix the host; the registry asks whether the
+    // block is state censorship. Measured on the owner's router, the two
+    // together are what separates a censored site from an advertising endpoint
+    // that fails for its own reasons: of the hosts a probe alone would have
+    // routed, thumbnails.libretro.com, i.ibb.co and the.al are in the registry
+    // while image2.pubmatic.com, adservice.google.com and
+    // pagead2.googlesyndication.com are not.
+    //
+    // It is not a filter for what the operator wants. tsyndicate.com is an ad
+    // network and is in the registry; 17.hls.gd is a video host and is not.
+    std::optional<bool> registry_blocked;
 };
+
+// The only combination this code will say is safe to act on without a human:
+// a tunnel demonstrably fixes it, and the registry says the block is
+// censorship. Anything less is a proposal to look at.
+//
+// Even this is not "you want it": see tsyndicate.com above.
+bool proposal_confirmed_by_registry(const TunnelCandidateProposal& proposal) noexcept;
 
 struct TunnelScanReport {
     std::vector<TunnelCandidateProposal> proposals;
@@ -74,6 +98,16 @@ public:
     // and so the caller decides which tunnel a candidate is measured against.
     using ProbeFn = std::function<DifferentialProbeReport(const std::string&)>;
 
+    // Asked only about hosts a tunnel would fix, so a pass costs at most one
+    // lookup per proposal rather than one per candidate. Returning nothing is
+    // the honest answer when the service could not be reached.
+    using RegistryFn = std::function<std::optional<bool>(const std::string&)>;
+
+    // Off by default: the lookup leaves the router and names a host the
+    // operator is interested in, which is not something to start doing on its
+    // own.
+    void set_registry_lookup(RegistryFn lookup);
+
     TunnelCandidateScan(CoverageIndex coverage, TunnelScanConfig config = {});
 
     // Feeds lines from the --hostlist-auto-debug file, as LogFollower delivers
@@ -97,6 +131,7 @@ private:
     CoverageIndex coverage_;
     TunnelScanConfig config_;
     ProbeCandidateQueue queue_;
+    RegistryFn registry_lookup_;
 };
 
 }  // namespace keen_pbr3

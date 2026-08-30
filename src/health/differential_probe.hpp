@@ -105,6 +105,58 @@ struct DifferentialProbeReport {
     DifferentialVerdict verdict{DifferentialVerdict::inconclusive};
 };
 
+// What the block is keyed on, which decides which remedy can work at all.
+//
+// The idea is borrowed from avatarDD/zapret-gui's BlockCheck - not its code,
+// which classifies into sixteen states most of which its own probe cannot
+// produce, but the one question worth asking. It was settled by hand on the
+// owner's router: thumbnails.libretro.com failed over TLS with its real name,
+// with no name, and with example.com substituted, while plain HTTP to the same
+// address answered in 0.13s. Nothing about the name mattered, which is why
+// nfqws2 could not fix it - sixteen attempts, a full rotation of eight
+// strategies, nothing through - and why a tunnel was the only remedy left.
+enum class BlockShape {
+    // The name decides: the target answers when a different name is presented,
+    // or over plain HTTP. This is what nfqws2 exists to defeat, so a tunnel is
+    // the expensive answer to a question that has a cheaper one.
+    name_based,
+    // The address decides: TLS to it dies whatever name is offered. Desync has
+    // nothing to disguise, and only a different path helps.
+    address_based,
+    // Nothing answered on any leg. Not a routing problem.
+    unreachable,
+    // Not asked, or the legs disagreed in a way that names neither.
+    unknown,
+};
+
+struct BlockShapeProbe {
+    BlockShape shape{BlockShape::unknown};
+    // Each leg as it answered, for an operator who wants to see the working.
+    DifferentialLeg direct_tls;
+    DifferentialLeg foreign_name_tls;
+    DifferentialLeg plain_http;
+    std::string detail;
+};
+
+const char* block_shape_name(BlockShape shape) noexcept;
+
+// Three more legs over the provider's own device, run only when it is already
+// known that the direct path fails and the tunnel works - there is nothing to
+// classify otherwise.
+//
+// `foreign_name` is a name the target does not serve; presenting it separates
+// "this name is filtered" from "this address is filtered".
+BlockShapeProbe classify_block_shape(HttpTransport& transport,
+                                     const std::string& host,
+                                     const DifferentialPath& direct,
+                                     const std::string& foreign_name,
+                                     std::uint32_t timeout_ms);
+
+// The rule on its own, so it can be read and tested without a network.
+BlockShape classify_block_shape_from_legs(PathOutcome direct_tls,
+                                          PathOutcome foreign_name_tls,
+                                          PathOutcome plain_http) noexcept;
+
 // One leg.
 //
 // Reachability is not success. A 403 or a 404 proves the packets arrived and
