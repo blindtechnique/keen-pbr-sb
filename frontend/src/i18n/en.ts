@@ -2545,7 +2545,7 @@ export const enTranslation = {
           "The tag of an outbound that has an interface. Each probe is pinned to a device, so an outbound with only a mark cannot be used.",
         tunnelProbeListLabel: "List that receives confirmed hosts",
         tunnelProbeListHint:
-          "The name of a list that has a file. That file is what gets appended to, which is why a list holding its hosts inline cannot be used here.",
+          "The name of a list that has a file. That file is what gets appended to, which is why a list holding its hosts only inline cannot be used here. Create the file before naming it: a list whose file does not exist makes list streaming throw inside the firewall apply, so routing stops being applied at all. An empty file is enough, and the list may keep its inline domains - every source is read together.",
         inboundInterfacesLabel: "Inbound interfaces",
         inboundInterfacesHint:
           "Only packets arriving on the selected interfaces will be processed by policy routing. Leave this empty to match traffic from any interface.",

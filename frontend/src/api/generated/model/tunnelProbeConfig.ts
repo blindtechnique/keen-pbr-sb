@@ -28,6 +28,8 @@ export interface TunnelProbeConfig {
   /**
      * The list that receives confirmed hosts. It must be a list with a `file`, because that file is what this automation appends to. A list without one is refused rather than silently ignored.
 
+  Create the file before naming it in the list. A list whose `file` does not exist makes list streaming throw, and that surfaces inside the firewall apply - so a missing file does not disable one list, it stops routing from being applied at all. An empty file is enough; a list may carry `file` and inline `domains` at the same time, and all of its sources are read together.
+
      * @minLength 1
      * @maxLength 128
      */
