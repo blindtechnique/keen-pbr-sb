@@ -97,14 +97,6 @@ CoverageIndex build_coverage(const Config& config,
     return index;
 }
 
-const Outbound* find_outbound(const Config& config, const std::string& tag) {
-    const auto& outbounds = config.outbounds.value_or(std::vector<Outbound>{});
-    const auto it = std::find_if(
-        outbounds.begin(), outbounds.end(),
-        [&tag](const Outbound& outbound) { return outbound.tag == tag; });
-    return it == outbounds.end() ? nullptr : &*it;
-}
-
 void print_report(const TunnelScanReport& report,
                   const std::string& outbound_tag) {
     std::cout << "\nProbed " << report.probed << " host(s) against "
@@ -138,11 +130,32 @@ void print_report(const TunnelScanReport& report,
 }
 
 }  // namespace
+// Returns a copy rather than a pointer, and the reason is a crash on the
+// router.
+//
+// The first version bound `config.outbounds.value_or({})` to a const reference
+// and returned `&*it` into it. value_or hands back a temporary by value; the
+// reference extends its life to the end of the function and not one statement
+// further, so the caller dereferenced freed memory and the process took
+// SIGSEGV at an address that was plainly ASCII from a log line.
+//
+// It survived the whole suite because nothing exercises this file - the
+// crash needs a config that actually names the outbound.
+std::optional<Outbound> find_scan_outbound(const std::vector<Outbound>& outbounds,
+                                           const std::string& tag) {
+    const auto it = std::find_if(
+        outbounds.begin(), outbounds.end(),
+        [&tag](const Outbound& outbound) { return outbound.tag == tag; });
+    if (it == outbounds.end()) return std::nullopt;
+    return *it;
+}
+
 
 int run_scan_tunnel_candidates(const Config& config,
                                const ScanTunnelCandidatesOptions& options) {
-    const auto* outbound = find_outbound(config, options.outbound_tag);
-    if (outbound == nullptr) {
+    const auto outbound = find_scan_outbound(
+        config.outbounds.value_or(std::vector<Outbound>{}), options.outbound_tag);
+    if (!outbound.has_value()) {
         std::cerr << "Unknown outbound: " << options.outbound_tag << "\n";
         return 1;
     }
