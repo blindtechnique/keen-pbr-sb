@@ -508,6 +508,7 @@ set(SOURCES
   src/health/differential_probe.cpp
   src/health/probe_candidates.cpp
   src/health/host_coverage.cpp
+  src/health/log_follower.cpp
   src/health/nfqws_scan_source.cpp
   src/health/tunnel_probe_automation.cpp
   src/health/tunnel_probe_task.cpp

@@ -50,7 +50,7 @@ struct TunnelProbeSetup {
     std::string list_name;
     std::string list_file;
     std::size_t max_probes_per_pass{8};
-    std::uint64_t interval_ms{3600000};
+    std::uint64_t interval_ms{60000};
     bool require_registry_confirmation{true};
 };
 

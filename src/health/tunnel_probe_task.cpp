@@ -17,6 +17,11 @@ TunnelProbeTask::PassOutcome TunnelProbeTask::run(const Config& config) {
     }
     const auto& setup = *setup_result.setup;
 
+    // Before anything else that can fail: the file this automation owns must
+    // exist, or the next firewall apply throws while streaming the list that
+    // names it.
+    if (io_.ensure_file) io_.ensure_file(setup.list_file);
+
     const auto source_result =
         read_nfqws_scan_source(kNfqwsConfigPath, io_.read_file);
     if (!source_result.source.has_value()) {
@@ -25,8 +30,13 @@ TunnelProbeTask::PassOutcome TunnelProbeTask::run(const Config& config) {
     }
     const auto& source = *source_result.source;
 
-    const auto log = io_.read_file(source.log_path);
-    if (log.empty()) {
+    std::uint64_t log_size = 0;
+    std::string fingerprint;
+    if (!io_.stat_log || !io_.stat_log(source.log_path, log_size, fingerprint)) {
+        outcome.log_empty = true;
+        return outcome;
+    }
+    if (log_size == 0) {
         outcome.log_empty = true;
         return outcome;
     }
@@ -55,11 +65,28 @@ TunnelProbeTask::PassOutcome TunnelProbeTask::run(const Config& config) {
         scan_key_ = key;
     }
 
-    std::vector<std::string> lines;
-    std::istringstream log_lines(log);
-    std::string line;
-    while (std::getline(log_lines, line)) lines.push_back(line);
-    scan_->observe(lines);
+    // Only what is new. Re-reading the whole file would put every host back
+    // into the queue, including the ones the last pass just answered, and the
+    // queue would never get past its own head.
+    const auto decision = decide_follow(log_position_, log_size, fingerprint);
+    if (decision == FollowDecision::restart) {
+        log_position_ = LogPosition{};
+        outcome.log_restarted = true;
+    }
+    if (decision != FollowDecision::nothing_new) {
+        const auto chunk = io_.read_log_from(source.log_path,
+                                             log_position_.offset,
+                                             kLogReadBudget);
+        auto followed =
+            split_followed_lines(log_position_, chunk, kLogReadBudget);
+        log_position_ = std::move(followed.position);
+        // The fingerprint is taken from the file, not from the chunk: a resume
+        // reads from the middle and would otherwise forget what the file
+        // begins with.
+        log_position_.fingerprint = fingerprint;
+        outcome.new_log_lines = followed.lines.size();
+        scan_->observe(followed.lines);
+    }
 
     // Both legs pinned to a device. A mark alone would let routing decide, and
     // the comparison between "over the provider" and "over the tunnel" would
@@ -114,7 +141,9 @@ std::string TunnelProbeTask::describe(const PassOutcome& outcome) {
     }
 
     std::ostringstream out;
-    out << "probed " << outcome.probed << ", " << outcome.remaining
+    out << "read " << outcome.new_log_lines << " new log line(s)";
+    if (outcome.log_restarted) out << " (log was rotated, re-read from the start)";
+    out << "; probed " << outcome.probed << ", " << outcome.remaining
         << " left for the next pass";
     if (!outcome.appended.empty()) {
         out << "; routed " << outcome.appended.size() << " host(s):";

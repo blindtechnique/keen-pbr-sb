@@ -6268,11 +6268,19 @@ components:
           type: integer
           minimum: 60000
           maximum: 86400000
-          default: 3600000
+          default: 60000
           description: >
-            How often a pass runs. Passes are deliberately infrequent: the
-            evidence accumulates in nfqws2's log over hours, and probing the
-            same host repeatedly proves nothing new.
+            How often to look. The trigger is nfqws2 itself: a host enters the
+            queue when nfqws2 records that it failed on it, so a minute is the
+            longest anything waits.
+
+
+            Looking is cheap. A pass reads only what was appended to nfqws2's
+            log since the last one, and when nothing was appended and the queue
+            is empty it ends there, having probed nothing. What a pass costs is
+            bounded by `max_probes_per_pass`, and only while there is a backlog
+            to work through; once the queue is drained the cost falls to
+            reading a few small files.
         max_probes_per_pass:
           type: integer
           minimum: 1

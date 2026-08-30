@@ -40,6 +40,7 @@ std::string host_of(const std::string& url) {
 // modelled answers for every host it probes.
 struct World {
     std::vector<DifferentialProbeRequest> requests;
+    std::vector<std::string> ensured;
     std::map<std::string, std::string> files;
     std::map<std::string, std::string> written;
     std::map<std::string, DifferentialVerdict> verdicts;
@@ -60,6 +61,28 @@ struct World {
             written[path] = contents;
             files[path] = contents;
             return true;
+        };
+        io.stat_log = [this](const std::string& path,
+                             std::uint64_t& size,
+                             std::string& fingerprint) {
+            const auto it = files.find(path);
+            if (it == files.end()) return false;
+            size = it->second.size();
+            fingerprint = it->second.substr(
+                0, std::min<std::size_t>(kLogFingerprintBytes,
+                                         it->second.size()));
+            return true;
+        };
+        io.read_log_from = [this](const std::string& path,
+                                  std::uint64_t offset,
+                                  std::size_t budget) -> std::string {
+            const auto it = files.find(path);
+            if (it == files.end() || offset >= it->second.size()) return {};
+            return it->second.substr(static_cast<std::size_t>(offset), budget);
+        };
+        io.ensure_file = [this](const std::string& path) {
+            ensured.push_back(path);
+            files.emplace(path, std::string{});
         };
         io.run_probe = [this](const DifferentialProbeRequest& request) {
             // The request carries the pinning the task chose; checking it here
@@ -256,6 +279,111 @@ TEST_CASE("pass: a verdict other than blocked_here moves nothing") {
     CHECK(outcome.probed == 1);
     CHECK(outcome.appended.empty());
     CHECK(world.written.empty());
+}
+
+TEST_CASE("pass: the queue advances instead of re-probing its own head") {
+    // The defect this was written for, seen on the router: every pass fed the
+    // whole log back in, so hosts that had just been answered were queued
+    // again by the very lines that named them. Eight probed, "120 left for the
+    // next pass", pass after pass, the same eight - and nothing behind them
+    // ever reached.
+    World world;
+    world.with_nfqws_config();
+    std::string log;
+    for (int i = 0; i < 6; ++i) {
+        const auto host = "host" + std::to_string(i) + ".example";
+        log += log_for(host);
+        world.verdicts[host] = DifferentialVerdict::down_everywhere;
+    }
+    world.files[kLogFile] = log;
+
+    auto config = enabled_config();
+    config.tunnel_probe->max_probes_per_pass = 2;
+
+    TunnelProbeTask task(world.io());
+
+    const auto first = task.run(config);
+    REQUIRE(first.ran);
+    CHECK(first.probed == 2);
+    const auto after_first = world.probed;
+    REQUIRE(after_first.size() == 2);
+
+    const auto second = task.run(config);
+    REQUIRE(second.ran);
+    // Nothing was appended to the log between the two passes.
+    CHECK(second.new_log_lines == 0);
+    CHECK(second.probed == 2);
+    REQUIRE(world.probed.size() == 4);
+
+    // The decisive part: the second pass measured different hosts.
+    for (const auto& host : after_first) {
+        CHECK(world.probed[2] != host);
+        CHECK(world.probed[3] != host);
+    }
+    CHECK(second.remaining < first.remaining);
+}
+
+TEST_CASE("pass: new lines are read, old ones are not read twice") {
+    World world;
+    world.with_nfqws_config();
+    world.files[kLogFile] = log_for("first.example");
+    world.verdicts["first.example"] = DifferentialVerdict::down_everywhere;
+    world.verdicts["second.example"] = DifferentialVerdict::down_everywhere;
+
+    TunnelProbeTask task(world.io());
+    const auto first = task.run(enabled_config());
+    CHECK(first.new_log_lines == 3);
+
+    world.files[kLogFile] += log_for("second.example");
+    const auto second = task.run(enabled_config());
+
+    // Only the three lines that were added, not the six that are there.
+    CHECK(second.new_log_lines == 3);
+    CHECK_FALSE(second.log_restarted);
+}
+
+TEST_CASE("pass: a rotated log is re-read from the beginning") {
+    World world;
+    world.with_nfqws_config();
+    world.files[kLogFile] = log_for("before.example");
+    world.verdicts["before.example"] = DifferentialVerdict::down_everywhere;
+    world.verdicts["after.example"] = DifferentialVerdict::down_everywhere;
+
+    TunnelProbeTask task(world.io());
+    task.run(enabled_config());
+
+    // nfqws2 rotated its log: same path, different content, and shorter.
+    world.files[kLogFile] = log_for("after.example");
+    const auto second = task.run(enabled_config());
+
+    CHECK(second.log_restarted);
+    CHECK(second.new_log_lines == 3);
+}
+
+TEST_CASE("pass: the list file is created before anything can read it") {
+    // A list whose file does not exist makes list streaming throw, and that
+    // throw lands inside the firewall apply - so a missing file does not
+    // disable one list, it stops routing being applied at all. The automation
+    // owns the file, so it creates it.
+    World world;
+    world.with_nfqws_config();
+    world.files[kLogFile] = log_for("any.example");
+    world.verdicts["any.example"] = DifferentialVerdict::down_everywhere;
+
+    TunnelProbeTask task(world.io());
+    task.run(enabled_config());
+
+    REQUIRE(world.ensured.size() == 1);
+    CHECK(world.ensured[0] == kListFile);
+}
+
+TEST_CASE("pass: switched off creates nothing at all") {
+    World world;
+    TunnelProbeTask task(world.io());
+
+    task.run(Config{});
+
+    CHECK(world.ensured.empty());
 }
 
 TEST_CASE("describe: every early exit says which one it was") {

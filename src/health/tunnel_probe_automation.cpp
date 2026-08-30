@@ -90,10 +90,10 @@ TunnelProbeSetupResult resolve_tunnel_probe_setup(const Config& config) {
     setup.max_probes_per_pass =
         max_probes >= 1 && max_probes <= 64 ? static_cast<std::size_t>(max_probes)
                                             : 8U;
-    const auto interval = configured->interval_ms.value_or(3600000);
+    const auto interval = configured->interval_ms.value_or(60000);
     setup.interval_ms = interval >= 60000 && interval <= 86400000
                             ? static_cast<std::uint64_t>(interval)
-                            : 3600000U;
+                            : 60000U;
     setup.require_registry_confirmation =
         configured->require_registry_confirmation.value_or(true);
 

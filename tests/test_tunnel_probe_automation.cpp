@@ -80,7 +80,7 @@ TEST_CASE("setup: a complete configuration resolves to what a pass needs") {
     CHECK(result.setup->list_file == "/opt/etc/keen-pbr/found.lst");
     // The schema's defaults, applied where the operator said nothing.
     CHECK(result.setup->max_probes_per_pass == 8);
-    CHECK(result.setup->interval_ms == 3600000);
+    CHECK(result.setup->interval_ms == 60000);
     CHECK(result.setup->require_registry_confirmation);
 }
 
@@ -141,7 +141,7 @@ TEST_CASE("setup: values outside the schema's range fall back to the default") {
     const auto result = resolve_tunnel_probe_setup(config);
 
     REQUIRE(result.setup.has_value());
-    CHECK(result.setup->interval_ms == 3600000);
+    CHECK(result.setup->interval_ms == 60000);
     CHECK(result.setup->max_probes_per_pass == 8);
 }
 

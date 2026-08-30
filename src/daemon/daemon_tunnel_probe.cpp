@@ -66,6 +66,44 @@ void Daemon::run_tunnel_probe_pass(const Config& config) noexcept {
             io.read_file = [](const std::string& path) {
                 return read_whole_file(path);
             };
+            io.stat_log = [](const std::string& path,
+                             std::uint64_t& size,
+                             std::string& fingerprint) {
+                std::ifstream file(path, std::ios::binary);
+                if (!file.is_open()) return false;
+                file.seekg(0, std::ios::end);
+                const auto end = file.tellg();
+                if (end < 0) return false;
+                size = static_cast<std::uint64_t>(end);
+                file.seekg(0, std::ios::beg);
+                std::string head(kLogFingerprintBytes, '\0');
+                file.read(head.data(),
+                          static_cast<std::streamsize>(head.size()));
+                head.resize(static_cast<std::size_t>(file.gcount()));
+                fingerprint = std::move(head);
+                return true;
+            };
+            io.read_log_from = [](const std::string& path,
+                                  std::uint64_t offset,
+                                  std::size_t budget) -> std::string {
+                std::ifstream file(path, std::ios::binary);
+                if (!file.is_open()) return {};
+                file.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+                if (!file) return {};
+                std::string chunk(budget, '\0');
+                file.read(chunk.data(),
+                          static_cast<std::streamsize>(chunk.size()));
+                chunk.resize(static_cast<std::size_t>(file.gcount()));
+                return chunk;
+            };
+            io.ensure_file = [](const std::string& path) {
+                std::ifstream existing(path, std::ios::binary);
+                if (existing.is_open()) return;
+                // Opened for append rather than truncation, so that if two
+                // passes ever raced here neither could empty what the other
+                // had just written.
+                std::ofstream created(path, std::ios::binary | std::ios::app);
+            };
             io.write_file = [](const std::string& path,
                                const std::string& contents) {
                 std::ofstream out(path, std::ios::binary | std::ios::trunc);
