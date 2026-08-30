@@ -1,4 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query"
+
+import type { ApiError } from "@/api/client"
 import { BanIcon, RotateCcwIcon, XIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
@@ -57,7 +59,7 @@ export function TunnelProbeHosts() {
       // местах — правило маршрутизации и сам список живут в конфигурации.
       await queryClient.invalidateQueries()
     } catch (error) {
-      toast.error(getApiErrorMessage(error), { richColors: true })
+      toast.error(getApiErrorMessage(error as ApiError), { richColors: true })
     }
   }
 
