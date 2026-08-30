@@ -247,6 +247,24 @@ TEST_CASE("pass: a host already in the list file is not probed again") {
     CHECK(world.written.empty());
 }
 
+TEST_CASE("pass: a host on the never-list is not even probed") {
+    // Refusing it only at the moment of writing would still cost two requests
+    // a pass, forever, to re-answer a question a person already settled.
+    World world;
+    world.with_nfqws_config();
+    world.files[kLogFile] = log_for("banned.example");
+    world.files[std::string(kListFile) + ".excluded"] = "banned.example\n";
+    world.verdicts["banned.example"] = DifferentialVerdict::blocked_here;
+    world.registry["banned.example"] = true;
+
+    TunnelProbeTask task(world.io());
+    const auto outcome = task.run(enabled_config());
+
+    CHECK(world.probed.empty());
+    CHECK(outcome.appended.empty());
+    CHECK(world.written.empty());
+}
+
 TEST_CASE("pass: a failed write is not reported as success") {
     World world;
     world.with_nfqws_config();

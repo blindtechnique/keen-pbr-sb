@@ -14,6 +14,7 @@
 // (the API), one mutex, and no coupling to the daemon's wiring.
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -39,5 +40,17 @@ void publish_tunnel_probe_report(TunnelProbeReport report);
 
 // A copy of the last report, or a default one before the first pass.
 TunnelProbeReport last_tunnel_probe_report();
+
+// How something outside the daemon asks for the list to take effect.
+//
+// Editing the list file changes nothing until the firewall is applied, because
+// that is when a list is read. The daemon installs a hook here at startup; the
+// API calls it after an edit. Without this, removing a host from the panel
+// would leave its traffic in the tunnel until the next unrelated apply - which
+// is the opposite of what "never route this again" is for.
+void set_tunnel_probe_refresh_hook(std::function<void()> hook);
+
+// Runs the hook if one was installed. Safe to call when none was.
+void request_tunnel_probe_refresh();
 
 }  // namespace keen_pbr3

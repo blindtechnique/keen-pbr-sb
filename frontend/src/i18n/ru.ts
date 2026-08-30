@@ -2328,6 +2328,7 @@ export const ruTranslation = {
         developer: "Разработка",
         cloud: "Облака",
         cdn: "CDN",
+        hosting: "Хостинги",
         gaming: "Игры",
         block: "Блокировка",
       },
@@ -2564,6 +2565,19 @@ export const ruTranslation = {
         tunnelProbeOutboundAuto: "Выбрать автоматически",
         tunnelProbeOutboundHint:
           "Можно не выбирать — тогда возьмётся первый туннель с интерфейсом. В списке только такие: каждая проба привязывается к устройству, и исходящее с одной лишь меткой пробу не понесёт. Через выбранный туннель пойдёт и найденное — маршрутизировать хост через другой означало бы, что измерение ничего не обосновало.",
+        tunnelProbeHostsLabel: "Уведённые адреса",
+        tunnelProbeHostsHint:
+          "«Убрать» вынимает адрес из списка — автоматика сможет найти его снова. «Никогда» вносит его в отдельный список, который проверяется раньше пробы и раньше реестра: такой адрес больше не проверяется и не уводится, что бы ни показали новые измерения.",
+        tunnelProbeHostsEmpty: "Пока пусто.",
+        tunnelProbeHostsRouted: "Идут через туннель:",
+        tunnelProbeHostsExcluded: "Никогда не уводить:",
+        tunnelProbeHostRemove: "Убрать",
+        tunnelProbeHostRemoveHint: "Убрать из списка; может найтись снова",
+        tunnelProbeHostExclude: "Никогда",
+        tunnelProbeHostExcludeHint: "Убрать и больше никогда не уводить",
+        tunnelProbeHostRestore: "Вернуть",
+        tunnelProbeHostRestoreHint:
+          "Снять запрет; адрес снова может быть найден",
         tunnelProbeLastPass: "Последняя проверка",
         tunnelProbeNoPassYet: "Проверок ещё не было.",
         tunnelProbeRefused: "Не выполняется: {{reason}}.",

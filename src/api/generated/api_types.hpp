@@ -1961,6 +1961,22 @@ namespace api {
         int64_t transport_api_version = 0;
     };
 
+    enum class TunnelProbeHostRequestAction : int { EXCLUDE, REMOVE, RESTORE };
+
+    struct TunnelProbeHostRequest {
+        TunnelProbeHostRequestAction action;
+        std::string host;
+    };
+
+    struct TunnelProbeHostsResponse {
+        bool available = false;
+        std::optional<std::string> exclude_file;
+        std::vector<std::string> excluded;
+        std::optional<std::string> list_file;
+        std::optional<std::string> list_name;
+        std::vector<std::string> routed;
+    };
+
     struct TunnelProbeStateResponse {
         bool ever_ran = false;
         std::optional<int64_t> finished_at_unix_ms;
@@ -2219,6 +2235,8 @@ namespace api {
         std::optional<Transport> transport_spec;
         std::optional<TransportStatus> transport_status;
         std::optional<TunnelProbe> tunnel_probe_config;
+        std::optional<TunnelProbeHostRequest> tunnel_probe_host_request;
+        std::optional<TunnelProbeHostsResponse> tunnel_probe_hosts_response;
         std::optional<TunnelProbeStateResponse> tunnel_probe_state_response;
         std::optional<UiPreferences> ui_preferences_config;
         std::optional<UpdateStartedResponse> update_started_response;
@@ -2791,6 +2809,12 @@ void to_json(json & j, const TransportStatus & x);
 void from_json(const json & j, TransportsEnvironment & x);
 void to_json(json & j, const TransportsEnvironment & x);
 
+void from_json(const json & j, TunnelProbeHostRequest & x);
+void to_json(json & j, const TunnelProbeHostRequest & x);
+
+void from_json(const json & j, TunnelProbeHostsResponse & x);
+void to_json(json & j, const TunnelProbeHostsResponse & x);
+
 void from_json(const json & j, TunnelProbeStateResponse & x);
 void to_json(json & j, const TunnelProbeStateResponse & x);
 
@@ -3177,6 +3201,9 @@ void to_json(json & j, const Security & x);
 
 void from_json(const json & j, State & x);
 void to_json(json & j, const State & x);
+
+void from_json(const json & j, TunnelProbeHostRequestAction & x);
+void to_json(json & j, const TunnelProbeHostRequestAction & x);
 }
 }
 namespace nlohmann {
@@ -6603,6 +6630,36 @@ namespace api {
         j["transport_api_version"] = x.transport_api_version;
     }
 
+    inline void from_json(const json & j, TunnelProbeHostRequest& x) {
+        x.action = j.at("action").get<TunnelProbeHostRequestAction>();
+        x.host = j.at("host").get<std::string>();
+    }
+
+    inline void to_json(json & j, const TunnelProbeHostRequest & x) {
+        j = json::object();
+        j["action"] = x.action;
+        j["host"] = x.host;
+    }
+
+    inline void from_json(const json & j, TunnelProbeHostsResponse& x) {
+        x.available = j.at("available").get<bool>();
+        x.exclude_file = get_stack_optional<std::string>(j, "exclude_file");
+        x.excluded = j.at("excluded").get<std::vector<std::string>>();
+        x.list_file = get_stack_optional<std::string>(j, "list_file");
+        x.list_name = get_stack_optional<std::string>(j, "list_name");
+        x.routed = j.at("routed").get<std::vector<std::string>>();
+    }
+
+    inline void to_json(json & j, const TunnelProbeHostsResponse & x) {
+        j = json::object();
+        j["available"] = x.available;
+        j["exclude_file"] = x.exclude_file;
+        j["excluded"] = x.excluded;
+        j["list_file"] = x.list_file;
+        j["list_name"] = x.list_name;
+        j["routed"] = x.routed;
+    }
+
     inline void from_json(const json & j, TunnelProbeStateResponse& x) {
         x.ever_ran = j.at("ever_ran").get<bool>();
         x.finished_at_unix_ms = get_stack_optional<int64_t>(j, "finished_at_unix_ms");
@@ -6879,6 +6936,8 @@ namespace api {
         x.transport_spec = get_stack_optional<Transport>(j, "TransportSpec");
         x.transport_status = get_stack_optional<TransportStatus>(j, "TransportStatus");
         x.tunnel_probe_config = get_stack_optional<TunnelProbe>(j, "TunnelProbeConfig");
+        x.tunnel_probe_host_request = get_stack_optional<TunnelProbeHostRequest>(j, "TunnelProbeHostRequest");
+        x.tunnel_probe_hosts_response = get_stack_optional<TunnelProbeHostsResponse>(j, "TunnelProbeHostsResponse");
         x.tunnel_probe_state_response = get_stack_optional<TunnelProbeStateResponse>(j, "TunnelProbeStateResponse");
         x.ui_preferences_config = get_stack_optional<UiPreferences>(j, "UiPreferencesConfig");
         x.update_started_response = get_stack_optional<UpdateStartedResponse>(j, "UpdateStartedResponse");
@@ -7129,6 +7188,8 @@ namespace api {
         j["TransportSpec"] = x.transport_spec;
         j["TransportStatus"] = x.transport_status;
         j["TunnelProbeConfig"] = x.tunnel_probe_config;
+        j["TunnelProbeHostRequest"] = x.tunnel_probe_host_request;
+        j["TunnelProbeHostsResponse"] = x.tunnel_probe_hosts_response;
         j["TunnelProbeStateResponse"] = x.tunnel_probe_state_response;
         j["UiPreferencesConfig"] = x.ui_preferences_config;
         j["UpdateStartedResponse"] = x.update_started_response;
@@ -9701,6 +9762,22 @@ namespace api {
             case State::STARTING: j = "starting"; break;
             case State::UP: j = "up"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"State\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, TunnelProbeHostRequestAction & x) {
+        if (j == "exclude") x = TunnelProbeHostRequestAction::EXCLUDE;
+        else if (j == "remove") x = TunnelProbeHostRequestAction::REMOVE;
+        else if (j == "restore") x = TunnelProbeHostRequestAction::RESTORE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"TunnelProbeHostRequestAction\""); }
+    }
+
+    inline void to_json(json & j, const TunnelProbeHostRequestAction & x) {
+        switch (x) {
+            case TunnelProbeHostRequestAction::EXCLUDE: j = "exclude"; break;
+            case TunnelProbeHostRequestAction::REMOVE: j = "remove"; break;
+            case TunnelProbeHostRequestAction::RESTORE: j = "restore"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"TunnelProbeHostRequestAction\": " + std::to_string(static_cast<int>(x)));
         }
     }
 }

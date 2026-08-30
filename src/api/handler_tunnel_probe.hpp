@@ -12,7 +12,7 @@ namespace keen_pbr3 {
 // a worker thread and has nothing else to ask the daemon for, and threading one
 // more function through the context would couple this to wiring it does not
 // need.
-void register_tunnel_probe_handler(ApiServer& server);
+void register_tunnel_probe_handler(ApiServer& server, ApiContext& ctx);
 
 }  // namespace keen_pbr3
 

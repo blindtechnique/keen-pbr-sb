@@ -43,12 +43,24 @@ enum class TunnelProbeRefusal {
 // A sentence explaining the refusal, for a log line.
 const char* describe_tunnel_probe_refusal(TunnelProbeRefusal refusal) noexcept;
 
+// Where the "never route this host" list lives, given the list file the
+// automation appends to.
+//
+// Derived rather than configured: it belongs to the automation exactly as the
+// list file does, and one more path in the schema would be one more thing to
+// get wrong for no decision gained.
+std::string tunnel_probe_exclude_file(const std::string& list_file);
+
 // A validated pass: everything resolved, nothing left to look up.
 struct TunnelProbeSetup {
     std::string outbound_tag;
     std::string interface;
     std::string list_name;
     std::string list_file;
+    // Hosts here are never probed and never routed, whatever the evidence.
+    // This is the undo for a host that should not have been moved: the probe
+    // cannot argue with it, and neither can the registry.
+    std::string exclude_file;
     std::size_t max_probes_per_pass{8};
     std::uint64_t interval_ms{60000};
     bool require_registry_confirmation{true};
@@ -65,6 +77,10 @@ TunnelProbeSetupResult resolve_tunnel_probe_setup(const Config& config);
 // What a pass would add to the list file, and what it held back.
 struct HostAppendPlan {
     std::vector<std::string> to_append;
+    // Refused because the operator put them on the never-list. Kept apart from
+    // every other reason: this one is a decision a person made, and no amount
+    // of fresh evidence is allowed to overturn it.
+    std::vector<std::string> excluded;
     // Confirmed, but the file already names it. Expected while a routing
     // change has not taken effect yet: nfqws2 goes on failing on the host, so
     // the scan goes on proposing it.
@@ -82,8 +98,18 @@ struct HostAppendPlan {
 // that fails for its own reasons.
 HostAppendPlan plan_host_append(
     const std::string& existing_file_contents,
+    const std::string& excluded_file_contents,
     const std::vector<TunnelCandidateProposal>& proposals,
     bool require_registry_confirmation);
+
+// The text to write back with `host` gone. Comments and blank lines are kept,
+// so a file somebody annotated by hand survives an edit made from the panel.
+std::string render_list_without(const std::string& contents,
+                                const std::string& host);
+
+// The text to write back with `host` added, if it is not already there.
+std::string render_list_with(const std::string& contents,
+                             const std::string& host);
 
 // The hosts a list file already names, one per line, ignoring blanks and
 // `#` comments.

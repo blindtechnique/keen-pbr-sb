@@ -81,6 +81,7 @@ TunnelProbeSetupResult resolve_tunnel_probe_setup(const Config& config) {
     setup.interface = *outbound_it->interface;
     setup.list_name = list_name;
     setup.list_file = *list_it->second.file;
+    setup.exclude_file = tunnel_probe_exclude_file(setup.list_file);
 
     // The generated type carries every field as optional because the schema
     // gives them defaults rather than requiring them. A value below the
@@ -118,17 +119,64 @@ std::vector<std::string> parse_host_list_file(const std::string& contents) {
     return hosts;
 }
 
+std::string tunnel_probe_exclude_file(const std::string& list_file) {
+    return list_file + ".excluded";
+}
+
+std::string render_list_without(const std::string& contents,
+                                const std::string& host) {
+    if (host.empty()) return contents;
+
+    std::string out;
+    std::istringstream lines(contents);
+    std::string line;
+    while (std::getline(lines, line)) {
+        auto trimmed = line;
+        if (!trimmed.empty() && trimmed.back() == '\r') trimmed.pop_back();
+        const auto first = trimmed.find_first_not_of(" \t");
+        if (first != std::string::npos && trimmed[first] != '#') {
+            const auto last = trimmed.find_last_not_of(" \t");
+            if (trimmed.substr(first, last - first + 1) == host) continue;
+        }
+        // Everything else is kept exactly as written, comments included: a
+        // file somebody annotated by hand must survive an edit from a panel.
+        out += line;
+        out.push_back('\n');
+    }
+    return out;
+}
+
+std::string render_list_with(const std::string& contents,
+                             const std::string& host) {
+    if (host.empty()) return contents;
+    const auto hosts = parse_host_list_file(contents);
+    for (const auto& existing : hosts) {
+        if (existing == host) return contents;
+    }
+    return render_appended_list(contents, {host});
+}
+
 HostAppendPlan plan_host_append(
     const std::string& existing_file_contents,
+    const std::string& excluded_file_contents,
     const std::vector<TunnelCandidateProposal>& proposals,
     bool require_registry_confirmation) {
     HostAppendPlan plan;
 
     const auto existing_hosts = parse_host_list_file(existing_file_contents);
     std::set<std::string> seen(existing_hosts.begin(), existing_hosts.end());
+    const auto excluded_hosts = parse_host_list_file(excluded_file_contents);
+    const std::set<std::string> never(excluded_hosts.begin(),
+                                      excluded_hosts.end());
 
     for (const auto& proposal : proposals) {
         if (proposal.host.empty()) continue;
+        // Checked before the registry and before the file: this is a decision
+        // a person made, and no evidence is allowed to overturn it.
+        if (never.count(proposal.host) != 0) {
+            plan.excluded.push_back(proposal.host);
+            continue;
+        }
         if (require_registry_confirmation &&
             !proposal_confirmed_by_registry(proposal)) {
             plan.unconfirmed.push_back(proposal.host);

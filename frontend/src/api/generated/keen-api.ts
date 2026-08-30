@@ -114,6 +114,8 @@ import type {
   TransportSpec,
   TransportStatus,
   TransportsEnvironment,
+  TunnelProbeHostRequest,
+  TunnelProbeHostsResponse,
   TunnelProbeStateResponse,
   UpdateStartedResponse
 } from './model';
@@ -2049,6 +2051,219 @@ export function useGetTunnelProbeState<TData = Awaited<ReturnType<typeof getTunn
 
 
 
+
+/**
+ * Returns the contents of the two files the nfqws2-to-tunnel automation owns: the list it appends confirmed hosts to, and the never-list of hosts it must leave alone whatever the evidence says.
+
+The point of showing them is control. A host is moved on the strength of a measurement, and a measurement can be right about the network and wrong about what the operator wants; this is where that is seen and undone.
+
+ * @summary Hosts the automation routed, and hosts it may never route
+ */
+export type getTunnelProbeHostsResponse200 = {
+  data: TunnelProbeHostsResponse
+  status: 200
+}
+
+export type getTunnelProbeHostsResponseSuccess = (getTunnelProbeHostsResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getTunnelProbeHostsResponse = (getTunnelProbeHostsResponseSuccess)
+
+export const getGetTunnelProbeHostsUrl = () => {
+
+
+
+
+  return `/api/tunnel-probe/hosts`
+}
+
+export const getTunnelProbeHosts = async ( options?: RequestInit): Promise<getTunnelProbeHostsResponse> => {
+
+  return apiFetch<getTunnelProbeHostsResponse>(getGetTunnelProbeHostsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetTunnelProbeHostsQueryKey = () => {
+    return [
+    `/api/tunnel-probe/hosts`
+    ] as const;
+    }
+
+
+export const getGetTunnelProbeHostsQueryOptions = <TData = Awaited<ReturnType<typeof getTunnelProbeHosts>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTunnelProbeHosts>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetTunnelProbeHostsQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getTunnelProbeHosts>>> = ({ signal }) => getTunnelProbeHosts({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getTunnelProbeHosts>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetTunnelProbeHostsQueryResult = NonNullable<Awaited<ReturnType<typeof getTunnelProbeHosts>>>
+export type GetTunnelProbeHostsQueryError = unknown
+
+
+export function useGetTunnelProbeHosts<TData = Awaited<ReturnType<typeof getTunnelProbeHosts>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTunnelProbeHosts>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getTunnelProbeHosts>>,
+          TError,
+          Awaited<ReturnType<typeof getTunnelProbeHosts>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetTunnelProbeHosts<TData = Awaited<ReturnType<typeof getTunnelProbeHosts>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTunnelProbeHosts>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getTunnelProbeHosts>>,
+          TError,
+          Awaited<ReturnType<typeof getTunnelProbeHosts>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetTunnelProbeHosts<TData = Awaited<ReturnType<typeof getTunnelProbeHosts>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTunnelProbeHosts>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Hosts the automation routed, and hosts it may never route
+ */
+
+export function useGetTunnelProbeHosts<TData = Awaited<ReturnType<typeof getTunnelProbeHosts>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTunnelProbeHosts>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetTunnelProbeHostsQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * `remove` takes the host out of the routed list. The automation may find it again later, which is right when it was routed for a reason that has since changed.
+
+`exclude` takes it out and writes it to the never-list: it will not be probed and will not be routed again, whatever a later probe or the registry says. This is the undo for a host that should not have been moved, and it is meant to be one click.
+
+`restore` takes a host off the never-list, making it an ordinary candidate again.
+
+Every action re-applies the firewall, because a list only takes effect when it is read.
+
+ * @summary Remove a host from the automation's list, or bar it for good
+ */
+export type updateTunnelProbeHostResponse200 = {
+  data: TunnelProbeHostsResponse
+  status: 200
+}
+
+export type updateTunnelProbeHostResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type updateTunnelProbeHostResponseSuccess = (updateTunnelProbeHostResponse200) & {
+  headers: Headers;
+};
+export type updateTunnelProbeHostResponseError = (updateTunnelProbeHostResponse400) & {
+  headers: Headers;
+};
+
+export type updateTunnelProbeHostResponse = (updateTunnelProbeHostResponseSuccess | updateTunnelProbeHostResponseError)
+
+export const getUpdateTunnelProbeHostUrl = () => {
+
+
+
+
+  return `/api/tunnel-probe/hosts`
+}
+
+export const updateTunnelProbeHost = async (tunnelProbeHostRequest: TunnelProbeHostRequest, options?: RequestInit): Promise<updateTunnelProbeHostResponse> => {
+
+  return apiFetch<updateTunnelProbeHostResponse>(getUpdateTunnelProbeHostUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      tunnelProbeHostRequest,)
+  }
+);}
+
+
+
+
+export const getUpdateTunnelProbeHostMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateTunnelProbeHost>>, TError,{data: TunnelProbeHostRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof updateTunnelProbeHost>>, TError,{data: TunnelProbeHostRequest}, TContext> => {
+
+const mutationKey = ['updateTunnelProbeHost'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof updateTunnelProbeHost>>, {data: TunnelProbeHostRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  updateTunnelProbeHost(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type UpdateTunnelProbeHostMutationResult = NonNullable<Awaited<ReturnType<typeof updateTunnelProbeHost>>>
+    export type UpdateTunnelProbeHostMutationBody = TunnelProbeHostRequest
+    export type UpdateTunnelProbeHostMutationError = ErrorResponse
+
+    /**
+ * @summary Remove a host from the automation's list, or bar it for good
+ */
+export const useUpdateTunnelProbeHost = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateTunnelProbeHost>>, TError,{data: TunnelProbeHostRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof updateTunnelProbeHost>>,
+        TError,
+        {data: TunnelProbeHostRequest},
+        TContext
+      > => {
+      return useMutation(getUpdateTunnelProbeHostMutationOptions(options), queryClient);
+    }
 
 /**
  * Returns the daemon's current system interface inventory derived from live netlink link and address state. This endpoint is interface-centric and is intended for UI selectors and diagnostics rather than outbound health. It includes all detected system interfaces, optional live detail such as carrier and operstate, and best-effort IPv4/IPv6 addresses.

@@ -46,6 +46,10 @@ TunnelProbeTask::PassOutcome TunnelProbeTask::run(const Config& config) {
     // restart would re-probe every host it moved last week, and each of those
     // probes costs two requests to a host that is no longer even failing.
     const auto existing = io_.read_file(setup.list_file);
+    // The never-list. Read every pass rather than once, so a host excluded
+    // from the panel stops being a candidate immediately instead of at the
+    // next restart.
+    const auto excluded = io_.read_file(setup.exclude_file);
 
     const std::string key = setup.outbound_tag + '\n' + setup.list_name;
     if (!scan_ || scan_key_ != key) {
@@ -54,6 +58,14 @@ TunnelProbeTask::PassOutcome TunnelProbeTask::run(const Config& config) {
         routed.name = setup.list_name;
         routed.domains = parse_host_list_file(existing);
         coverage.routing_lists.push_back(std::move(routed));
+
+        // Excluded hosts count as covered, so they are never even probed.
+        // Refusing them only at the moment of writing would still cost two
+        // requests each, every pass, to ask a question already answered.
+        CoverageIndex::RoutingList never;
+        never.name = setup.list_name + " (excluded)";
+        never.domains = parse_host_list_file(excluded);
+        coverage.routing_lists.push_back(std::move(never));
 
         TunnelScanConfig scan_config;
         scan_config.max_probes_per_pass = setup.max_probes_per_pass;
@@ -104,7 +116,7 @@ TunnelProbeTask::PassOutcome TunnelProbeTask::run(const Config& config) {
     outcome.probed = report.probed;
     outcome.remaining = report.remaining;
 
-    auto plan = plan_host_append(existing, report.proposals,
+    auto plan = plan_host_append(existing, excluded, report.proposals,
                                  setup.require_registry_confirmation);
     outcome.unconfirmed = std::move(plan.unconfirmed);
     outcome.already_present = std::move(plan.already_present);

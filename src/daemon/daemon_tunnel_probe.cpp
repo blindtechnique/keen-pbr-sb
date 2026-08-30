@@ -32,6 +32,18 @@ void Daemon::schedule_tunnel_probe() {
     // without a restart.
     constexpr auto kTick = std::chrono::minutes(1);
 
+    // The API edits the automation's lists - removing a host, or barring it for
+    // good - and a list only takes effect when the firewall reads it. This is
+    // how a handler asks for that without being wired into the daemon.
+    set_tunnel_probe_refresh_hook([this]() {
+        post_control_task(
+            [this]() {
+                schedule_netfilter_runtime_refresh(
+                    NetfilterRefreshReason::full);
+            },
+            "tunnel-probe-hosts-edited");
+    });
+
     scheduler_->schedule_repeating(
         kTick,
         [this]() {

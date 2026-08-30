@@ -153,7 +153,7 @@ TEST_CASE("append: the registry gate holds back what it cannot confirm") {
         proposal("unknown.example", std::nullopt),
     };
 
-    const auto plan = plan_host_append("", proposals,
+    const auto plan = plan_host_append("", "", proposals,
                                        /*require_registry_confirmation=*/true);
 
     REQUIRE(plan.to_append.size() == 1);
@@ -169,7 +169,7 @@ TEST_CASE("append: without the gate every proposal is acted on") {
         proposal("unknown.example", std::nullopt),
     };
 
-    const auto plan = plan_host_append("", proposals,
+    const auto plan = plan_host_append("", "", proposals,
                                        /*require_registry_confirmation=*/false);
 
     CHECK(plan.to_append.size() == 3);
@@ -182,7 +182,7 @@ TEST_CASE("append: a host the file already names is not written twice") {
     const std::string existing = "blocked.example\nother.example\n";
 
     const auto plan = plan_host_append(
-        existing, {proposal("blocked.example", true), proposal("new.example", true)},
+        existing, "", {proposal("blocked.example", true), proposal("new.example", true)},
         true);
 
     REQUIRE(plan.to_append.size() == 1);
@@ -193,11 +193,79 @@ TEST_CASE("append: a host the file already names is not written twice") {
 
 TEST_CASE("append: one pass proposing a host twice still writes it once") {
     const auto plan = plan_host_append(
-        "", {proposal("same.example", true), proposal("same.example", true)},
+        "", "", {proposal("same.example", true), proposal("same.example", true)},
         true);
 
     CHECK(plan.to_append.size() == 1);
     CHECK(plan.already_present.size() == 1);
+}
+
+TEST_CASE("append: the never-list beats the probe and the registry both") {
+    // The undo for a host that should not have been moved. A person put it
+    // there, so no amount of fresh evidence may overturn it - not a probe that
+    // says a tunnel fixes it, and not a registry that names it.
+    const auto plan = plan_host_append(
+        "", "banned.example\n",
+        {proposal("banned.example", true), proposal("allowed.example", true)},
+        /*require_registry_confirmation=*/true);
+
+    REQUIRE(plan.to_append.size() == 1);
+    CHECK(plan.to_append[0] == "allowed.example");
+    REQUIRE(plan.excluded.size() == 1);
+    CHECK(plan.excluded[0] == "banned.example");
+    CHECK(plan.unconfirmed.empty());
+}
+
+TEST_CASE("append: the never-list holds even with the registry gate off") {
+    const auto plan = plan_host_append("", "banned.example\n",
+                                       {proposal("banned.example", true)},
+                                       /*require_registry_confirmation=*/false);
+
+    CHECK(plan.to_append.empty());
+    CHECK(plan.excluded.size() == 1);
+}
+
+TEST_CASE("never-list: its file sits beside the list it undoes") {
+    // Derived rather than configured. One more path in the schema would be one
+    // more thing to get wrong, and there is no decision here to be made.
+    CHECK(tunnel_probe_exclude_file("/opt/etc/keen-pbr/found.lst") ==
+          "/opt/etc/keen-pbr/found.lst.excluded");
+
+    const auto result = resolve_tunnel_probe_setup(workable_config());
+    REQUIRE(result.setup.has_value());
+    CHECK(result.setup->exclude_file ==
+          tunnel_probe_exclude_file(result.setup->list_file));
+}
+
+TEST_CASE("editing: removing a host keeps everything else, comments included") {
+    const std::string before =
+        "# добавлено вручную\n"
+        "keep.example\n"
+        "drop.example\n"
+        "\n"
+        "also-keep.example\n";
+
+    const auto after = render_list_without(before, "drop.example");
+
+    CHECK(after.find("drop.example") == std::string::npos);
+    CHECK(after.find("# добавлено вручную") != std::string::npos);
+    CHECK(after.find("keep.example") != std::string::npos);
+    CHECK(after.find("also-keep.example") != std::string::npos);
+}
+
+TEST_CASE("editing: removing a host that is not there changes nothing") {
+    const std::string before = "one.example\ntwo.example\n";
+
+    CHECK(render_list_without(before, "absent.example") == before);
+    CHECK(render_list_without(before, "").empty() == false);
+}
+
+TEST_CASE("editing: a host is added to the never-list once, not twice") {
+    const auto once = render_list_with("", "banned.example");
+    CHECK(once == "banned.example\n");
+
+    // Excluding the same host twice is an ordinary thing for a person to do.
+    CHECK(render_list_with(once, "banned.example") == once);
 }
 
 TEST_CASE("host list file: blanks, comments and stray carriage returns") {

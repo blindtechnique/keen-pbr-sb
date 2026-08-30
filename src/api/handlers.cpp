@@ -51,7 +51,7 @@ void register_api_handlers(ApiServer& server, ApiContext& ctx) {
     register_health_routing_handler(server, ctx);
     register_runtime_interfaces_handler(server, ctx);
     register_runtime_outbounds_handler(server, ctx);
-    register_tunnel_probe_handler(server);
+    register_tunnel_probe_handler(server, ctx);
     register_runtime_inventory_handler(server, ctx);
     register_diagnostic_tasks_handler(server, ctx);
     register_test_routing_handler(server, ctx);

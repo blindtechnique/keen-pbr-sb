@@ -34,6 +34,7 @@ import { HelpHint } from "@/components/shared/help-hint"
 import { ListRefreshRouteFields } from "@/components/lists/list-refresh-route-fields"
 import { InterfaceMultiSelectList } from "@/components/shared/interface-picker"
 import { OutboundSelect } from "@/components/shared/outbound-select"
+import { TunnelProbeHosts } from "@/components/shared/tunnel-probe-hosts"
 import { ListIdentityLabel } from "@/components/shared/list-identity-label"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { MultiSelectList } from "@/components/shared/multi-select-list"
@@ -1003,6 +1004,23 @@ function LoadedGeneralConfigPage({
                 </FieldLabel>
                 <FieldContent>
                   <TunnelProbeLastPass />
+                </FieldContent>
+              </Field>
+
+              <Field
+                width="short"
+                className={activeTab === "general" ? undefined : "hidden"}
+              >
+                <FieldLabel>
+                  {t("pages.settings.general.tunnelProbeHostsLabel")}
+                </FieldLabel>
+                <FieldContent>
+                  <TunnelProbeHosts />
+                  <FieldHint
+                    description={t(
+                      "pages.settings.general.tunnelProbeHostsHint"
+                    )}
+                  />
                 </FieldContent>
               </Field>
 

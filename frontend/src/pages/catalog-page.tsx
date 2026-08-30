@@ -102,6 +102,7 @@ const CATEGORY_ORDER = [
   "developer",
   "cloud",
   "cdn",
+  "hosting",
   "gaming",
   "block",
 ]
