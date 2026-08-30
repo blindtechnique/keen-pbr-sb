@@ -228,7 +228,12 @@ fi
 # only detected here, where the signature is unambiguous: a rule marked into a
 # urltest group whose own mark is not one of its children.
 KEEN_PBR_BIN="/opt/usr/bin/keen-pbr"
-if [ -x "$KEEN_PBR_BIN" ]; then
+if [ "${KEEN_PBR_INSTALLER_RESTARTS:-0}" = "1" ]; then
+    # install.sh --update restarts the service itself as soon as opkg returns,
+    # which cures the same state. Doing it here too would restart twice in a
+    # row and add this wait to every update for nothing.
+    :
+elif [ -x "$KEEN_PBR_BIN" ]; then
     # One initial probe round has to finish first. A child that is down costs
     # three attempts of five seconds plus their gaps, so allow a little more.
     sleep 20
