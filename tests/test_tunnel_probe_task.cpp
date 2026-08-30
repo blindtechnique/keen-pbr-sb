@@ -406,4 +406,34 @@ TEST_CASE("describe: every early exit says which one it was") {
     CHECK(said.find("a.example") != std::string::npos);
 }
 
+TEST_CASE("describe: hosts the registry held back are named, not counted") {
+    // These are the ones worth a person deciding about: a tunnel fixes them
+    // and the registry does not name them. "2 held back" tells that person
+    // nothing at all.
+    TunnelProbeTask::PassOutcome held;
+    held.ran = true;
+    held.unconfirmed = {"one.example", "two.example"};
+
+    const auto said = TunnelProbeTask::describe(held);
+
+    CHECK(said.find("one.example") != std::string::npos);
+    CHECK(said.find("two.example") != std::string::npos);
+}
+
+TEST_CASE("describe: a long list of held-back hosts is cut, and says so") {
+    // A pass can hold back more hosts than belong in one log line.
+    TunnelProbeTask::PassOutcome held;
+    held.ran = true;
+    for (int i = 0; i < 12; ++i) {
+        held.unconfirmed.push_back("host" + std::to_string(i) + ".example");
+    }
+
+    const auto said = TunnelProbeTask::describe(held);
+
+    CHECK(said.find("host0.example") != std::string::npos);
+    CHECK(said.find("host7.example") != std::string::npos);
+    CHECK(said.find("host8.example") == std::string::npos);
+    CHECK(said.find("and 4 more") != std::string::npos);
+}
+
 }  // namespace keen_pbr3

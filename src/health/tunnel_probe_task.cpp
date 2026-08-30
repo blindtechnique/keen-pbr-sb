@@ -154,8 +154,21 @@ std::string TunnelProbeTask::describe(const PassOutcome& outcome) {
         out << "; nothing to route";
     }
     if (!outcome.unconfirmed.empty()) {
-        out << "; " << outcome.unconfirmed.size()
-            << " held back by the registry check";
+        // Named, not counted. These are the hosts a tunnel would fix and the
+        // registry does not name - the ones worth a human deciding about, and
+        // "2 held back" tells that human nothing.
+        out << "; held back by the registry check:";
+        constexpr std::size_t kMaxNamed = 8U;
+        std::size_t named = 0;
+        for (const auto& host : outcome.unconfirmed) {
+            if (named == kMaxNamed) {
+                out << " and " << (outcome.unconfirmed.size() - named)
+                    << " more";
+                break;
+            }
+            out << ' ' << host;
+            ++named;
+        }
     }
     if (!outcome.already_present.empty()) {
         out << "; " << outcome.already_present.size() << " already listed";

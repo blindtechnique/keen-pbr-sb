@@ -134,7 +134,20 @@ void Daemon::run_tunnel_probe_pass(const Config& config) noexcept {
         const auto outcome = tunnel_probe_task_->run(config);
         // A pass that refused because the automation is off is the ordinary
         // case and says nothing worth a line; everything else does.
-        if (outcome.refusal != TunnelProbeRefusal::disabled) {
+        if (outcome.refusal == TunnelProbeRefusal::disabled) {
+            // nothing to say
+        } else if (!outcome.appended.empty()) {
+            // The one thing an operator must not miss. Routers run at `warn`,
+            // where an info line is invisible - and this feature moved their
+            // traffic. It is also not reversible in practice: a routed host
+            // stops producing the evidence that put it there.
+            log.warn("Tunnel probe routed {} host(s) through '{}': {}",
+                     outcome.appended.size(),
+                     config.tunnel_probe.has_value()
+                         ? config.tunnel_probe->outbound.value_or(std::string{})
+                         : std::string{},
+                     TunnelProbeTask::describe(outcome));
+        } else {
             log.info("Tunnel probe: {}", TunnelProbeTask::describe(outcome));
         }
     } catch (const std::exception& error) {
