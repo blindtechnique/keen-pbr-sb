@@ -2,6 +2,7 @@
 #include "../config/config_writer.hpp"
 #include "../config/list_parser.hpp"
 #include "../crypto/sha256.hpp"
+#include "../lists/list_shrink_guard.hpp"
 #include "../lists/srs_decoder.hpp"
 
 #include <algorithm>
@@ -1004,8 +1005,53 @@ CacheDownloadResult CacheManager::download(const std::string& name,
         return download_cancelled();
     }
 
+    // What this body will actually contribute, counted the way the streamer
+    // will later read it. Recorded whatever the verdict below: a count is a
+    // fact about the body, and the next download needs it to have anything to
+    // compare against.
+    ListEntryCounts candidate_counts;
+    {
+        std::ifstream body_for_counting(
+            cache_dir_ / generation.filename, std::ios::binary);
+        if (body_for_counting.is_open()) {
+            candidate_counts = count_list_entries(body_for_counting);
+        }
+    }
+
+    // A source that came back with most of its contents gone is far more
+    // likely to have broken than to have changed. Publishing it would unroute
+    // everything it carried, and the download itself succeeded, so nothing
+    // else would say a word.
+    //
+    // Only compared against the same URL: counts from a different source
+    // answer a different question.
+    if (same_source) {
+        ListEntryCounts previous_counts;
+        previous_counts.domains = existing.domains.value_or(0);
+        previous_counts.cidrs = existing.cidrs.value_or(0);
+        previous_counts.ips = existing.ips.value_or(0);
+
+        const auto shrink =
+            decide_list_shrink(previous_counts, candidate_counts);
+        if (shrink.verdict == ListShrinkVerdict::refuse) {
+            // The body is dropped and the metadata is left untouched, which
+            // matters more than it looks: keeping the old ETag is what makes
+            // the next refresh fetch the source again instead of being told
+            // it is already up to date.
+            std::error_code remove_error;
+            std::filesystem::remove(
+                cache_dir_ / generation.filename, remove_error);
+            garbage_collect_generations(
+                cache_dir_, name, generation_pin_state_);
+            return failed_attempt(shrink.reason);
+        }
+    }
+
     const std::string successful_at = current_time_iso();
     CacheMetadata meta;
+    meta.domains = candidate_counts.domains;
+    meta.cidrs = candidate_counts.cidrs;
+    meta.ips = candidate_counts.ips;
     meta.etag = result.etag;
     meta.last_modified = result.last_modified;
     meta.url = url;

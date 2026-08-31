@@ -89,7 +89,11 @@ import {
   type InternalVpnServerRuntimeState,
 } from "@/lib/internal-vpn-server-policy"
 import { reconcileInternalVpnServiceOverrides } from "@/lib/internal-vpn-service-policy"
-import { getListSearchText, sortListIdsByDisplayName } from "@/lib/list-display"
+import {
+  getListDisplayName,
+  getListSearchText,
+  sortListIdsByDisplayName,
+} from "@/lib/list-display"
 import {
   getGlobalListRefreshRouteChain,
   getListRefreshDetourMode,
@@ -207,6 +211,10 @@ const SETTINGS_FIELD_NAMES = {
 
 type SettingsFieldName =
   (typeof SETTINGS_FIELD_NAMES)[keyof typeof SETTINGS_FIELD_NAMES]
+
+// Radix Select не принимает пустое значение, а «завести новый список» это
+// именно пустое поле в конфигурации. Отсюда метка-заполнитель.
+const TUNNEL_PROBE_LIST_AUTO = "__auto__"
 
 const SETTINGS_TAB_VALUES = [
   "general",
@@ -329,6 +337,21 @@ function LoadedGeneralConfigPage({
       ),
     [loadedConfig.outbounds]
   )
+  // Списки, куда автоматика может складывать найденное, по псевдонимам.
+  // Первым идёт «завести новый» — обычный случай при включении.
+  const tunnelProbeListItems = useMemo(() => {
+    const lists = loadedConfig.lists ?? {}
+    return [
+      {
+        value: TUNNEL_PROBE_LIST_AUTO,
+        label: t("pages.settings.general.tunnelProbeListAuto"),
+      },
+      ...sortListIdsByDisplayName(Object.keys(lists), lists).map((id) => ({
+        value: id,
+        label: getListDisplayName(id, lists),
+      })),
+    ]
+  }, [loadedConfig.lists, t])
   const ndmsInventoryQuery = useGetNdmsInterfaceInventory()
   const ndmsVpnServicesQuery = useGetNdmsVpnServerServices()
   const runtimeInterfacesQuery = useGetRuntimeInterfaces()
@@ -974,15 +997,30 @@ function LoadedGeneralConfigPage({
                         {t("pages.settings.general.tunnelProbeListLabel")}
                       </FieldLabel>
                       <FieldContent>
-                        <Input
-                          aria-invalid={Boolean(error)}
-                          id="tunnel-probe-list"
-                          onBlur={field.handleBlur}
-                          onChange={(event) =>
-                            field.handleChange(event.target.value)
+                        {/* Выбор, а не ввод технического ключа: у списков есть
+                            псевдонимы, и человек знает их по ним. Пустое
+                            значение означает «завести новый», и это обычный
+                            случай, поэтому оно первое. */}
+                        <Select
+                          items={tunnelProbeListItems}
+                          onValueChange={(value) =>
+                            field.handleChange(value === TUNNEL_PROBE_LIST_AUTO ? "" : value)
                           }
-                          value={field.state.value}
-                        />
+                          value={field.state.value || TUNNEL_PROBE_LIST_AUTO}
+                        >
+                          <SelectTrigger aria-invalid={Boolean(error)}>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectGroup>
+                              {tunnelProbeListItems.map((item) => (
+                                <SelectItem key={item.value} value={item.value}>
+                                  {item.label}
+                                </SelectItem>
+                              ))}
+                            </SelectGroup>
+                          </SelectContent>
+                        </Select>
                         <FieldHint
                           description={t(
                             "pages.settings.general.tunnelProbeListHint"

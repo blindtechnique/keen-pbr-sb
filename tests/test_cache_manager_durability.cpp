@@ -422,3 +422,93 @@ TEST_CASE("cache metadata write failure is never silent") {
     metadata.url = kUrl;
     CHECK_THROWS(cache.save_metadata("remote", metadata));
 }
+
+namespace {
+
+// A body with `count` distinct hosts, so a test can shrink a list on purpose.
+std::string host_list(std::size_t count) {
+    std::string body;
+    for (std::size_t index = 0; index < count; ++index) {
+        body += "host" + std::to_string(index) + ".example\n";
+    }
+    return body;
+}
+
+} // namespace
+
+TEST_CASE("a list that loses most of its entries is refused, and the cache keeps the old one") {
+    // The case this guards: the source moved, a CDN served a stub, a generator
+    // upstream broke. The download succeeds and the body parses, so nothing
+    // else objects - and publishing it would unroute everything the list
+    // carried without a word.
+    TemporaryDirectory temporary;
+    auto transport = std::make_shared<SequenceHttpTransport>();
+    CacheManager cache(temporary.path() / "cache", kDefaultMaxFileSizeBytes,
+                       transport);
+    cache.ensure_dir();
+
+    const auto full = host_list(200);
+    transport->enqueue(full, "full");
+    REQUIRE(cache.download("remote", kUrl).updated());
+
+    const auto after_first = cache.load_metadata("remote");
+    // The counts are recorded, which is what makes the next comparison
+    // possible at all.
+    REQUIRE(after_first.domains.has_value());
+    CHECK(*after_first.domains == 200);
+
+    transport->enqueue(host_list(3), "stub");
+    const auto refused = cache.download("remote", kUrl);
+
+    CHECK(refused.failed());
+    CHECK(refused.error_message.find("keeping the cached list") !=
+          std::string::npos);
+    // The body the readers see is still the good one.
+    CHECK(read_file(cache.cache_path("remote")) == full);
+
+    const auto after_refusal = cache.load_metadata("remote");
+    // And the ETag was not advanced. That is the part that matters most: a
+    // stored ETag from a refused body would make the next refresh be told it
+    // is already up to date, and the bad update would win by waiting.
+    REQUIRE(after_refusal.etag.has_value());
+    CHECK(*after_refusal.etag == "full");
+    CHECK(*after_refusal.domains == 200);
+}
+
+TEST_CASE("an ordinary update is published and its counts are recorded") {
+    TemporaryDirectory temporary;
+    auto transport = std::make_shared<SequenceHttpTransport>();
+    CacheManager cache(temporary.path() / "cache", kDefaultMaxFileSizeBytes,
+                       transport);
+    cache.ensure_dir();
+
+    transport->enqueue(host_list(200), "first");
+    REQUIRE(cache.download("remote", kUrl).updated());
+
+    // Losing a tenth is ordinary list maintenance, not a broken source.
+    const auto trimmed = host_list(180);
+    transport->enqueue(trimmed, "second");
+    REQUIRE(cache.download("remote", kUrl).updated());
+
+    CHECK(read_file(cache.cache_path("remote")) == trimmed);
+    const auto meta = cache.load_metadata("remote");
+    CHECK(*meta.domains == 180);
+    CHECK(*meta.etag == "second");
+}
+
+TEST_CASE("a small list may shrink freely") {
+    // Three entries becoming one is an edit. Relative change says almost
+    // nothing in the small, and a guard that argued here would be a nuisance
+    // rather than a protection.
+    TemporaryDirectory temporary;
+    auto transport = std::make_shared<SequenceHttpTransport>();
+    CacheManager cache(temporary.path() / "cache", kDefaultMaxFileSizeBytes,
+                       transport);
+    cache.ensure_dir();
+
+    transport->enqueue(host_list(3), "first");
+    REQUIRE(cache.download("remote", kUrl).updated());
+
+    transport->enqueue(host_list(1), "second");
+    CHECK(cache.download("remote", kUrl).updated());
+}

@@ -2564,6 +2564,7 @@ export const enTranslation = {
         tunnelProbeRouted: "Routed through the tunnel: {{hosts}}",
         tunnelProbeHeldBack:
           "A tunnel would help, but the registry did not confirm: {{hosts}}",
+        tunnelProbeListAuto: "Create a new list",
         tunnelProbeListLabel: "List that receives confirmed hosts",
         tunnelProbeListHint:
           "Leave empty and the list, its file and a routing rule are created when you save. Name an existing list and it is given a file if it has none, keeping everything it already holds - every source of a list is read together.",
