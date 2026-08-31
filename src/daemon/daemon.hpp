@@ -26,6 +26,7 @@
 #include "config_store.hpp"
 #include "config_reload_coordinator.hpp"
 #include "internal_vpn_runtime_resolution.hpp"
+#include "runtime_internal_vpn_lkg_store.hpp"
 #include "keenetic_dns_refresh_coordinator.hpp"
 #include "../health/interface_probe.hpp"
 #include "../health/tunnel_probe_task.hpp"
@@ -86,6 +87,9 @@ class ConntrackEventMonitor;
 class OwnedConntrackCleanupOperation;
 class RuntimeFirewallOperationOwner;
 class RuntimeFirewallPreownedTerminalContinuation;
+struct RuntimeFirewallCorePublication;
+enum class RuntimeFirewallCoreMetaPublication : std::uint8_t;
+enum class RuntimeResolverGenerationPublication : std::uint8_t;
 struct RuntimeFirewallOperationContext;
 enum class RuntimeFirewallLifecycleKind : std::uint8_t;
 struct RuntimeExactTcpResetPointMutationTarget;
@@ -695,6 +699,16 @@ private:
     void drain_runtime_firewall_terminal(
         const std::shared_ptr<RuntimeFirewallOperationContext>& context,
         bool shutdown);
+    void publish_runtime_firewall_core_checkpoint(
+        RuntimeFirewallCorePublication& publication,
+        RuntimeFirewallCoreMetaPublication meta_publication) noexcept;
+    void publish_runtime_resolver_checkpoint(
+        std::shared_ptr<const ResolverGenerationSnapshot>& generation,
+        ResolverSyncCheckpoint& sync,
+        std::uint32_t retry_attempt,
+        std::int64_t apply_started_ts,
+        RuntimeResolverGenerationPublication generation_publication)
+        noexcept;
     void trigger_broad_urltest_probe_noexcept() noexcept;
     void schedule_resolver_reload_retry(std::size_t attempt,
                                         std::uint64_t runtime_generation);
@@ -1489,10 +1503,7 @@ private:
     // API preparation runs outside the control loop. It may reuse only a
     // thread-safe, previously verified, include-only stable binding. Exclusion
     // bypasses and degraded/legacy observations are never stored here.
-    mutable TracedMutex internal_vpn_lkg_mutex_;
-    std::vector<InternalVpnServer>
-        internal_vpn_verified_includes_lkg_
-            GUARDED_BY(internal_vpn_lkg_mutex_);
+    RuntimeInternalVpnLkgStore internal_vpn_lkg_store_;
     std::vector<InternalVpnRuntimeTarget>
         resolved_internal_vpn_service_targets_;
     // Last source-scoped native VPN SNAT contract committed to the firewall.
@@ -1500,9 +1511,6 @@ private:
     // old un-NATed conntrack entries cannot mask a successful repair.
     std::vector<FirewallSourceEgressSnatSelector>
         applied_native_vpn_direct_egress_snat_selectors_;
-    std::vector<InternalVpnRuntimeTarget>
-        internal_vpn_service_verified_includes_lkg_
-            GUARDED_BY(internal_vpn_lkg_mutex_);
     // Registered before scheduler/executor members so their reverse-order
     // destruction completes before this pull-only metrics registry is freed.
     PeriodicTaskMetricsRegistry periodic_task_metrics_{

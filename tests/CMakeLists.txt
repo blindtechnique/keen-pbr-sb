@@ -9,6 +9,11 @@ add_executable(keen-pbr-tests
   test_runtime_firewall_terminal_owner.cpp
   test_runtime_firewall_operation_owner.cpp
   test_runtime_firewall_generation_input.cpp
+  test_runtime_firewall_core_publication.cpp
+  test_runtime_firewall_conntrack_tail_plan.cpp
+  test_runtime_firewall_publication_tail_progress.cpp
+  test_runtime_resolver_publication.cpp
+  test_runtime_internal_vpn_lkg_store.cpp
   test_runtime_firewall_worker_attempt.cpp
   test_runtime_route_health_plan.cpp
   test_runtime_firewall_immediate_completion.cpp
@@ -234,6 +239,10 @@ add_executable(keen-pbr-tests
   ../src/daemon/runtime_firewall_immediate_completion.cpp
   ../src/daemon/runtime_firewall_lifecycle_completion.cpp
   ../src/daemon/runtime_firewall_generation_input.cpp
+  ../src/daemon/runtime_firewall_core_publication.cpp
+  ../src/daemon/runtime_firewall_conntrack_tail_plan.cpp
+  ../src/daemon/runtime_resolver_publication.cpp
+  ../src/daemon/runtime_internal_vpn_lkg_store.cpp
   ../src/daemon/runtime_firewall_operation_owner.cpp
   ../src/daemon/runtime_firewall_worker_attempt.cpp
   ../src/daemon/runtime_route_health_plan.cpp
@@ -953,6 +962,95 @@ target_link_options(test_config_store PRIVATE
 )
 keen_pbr_apply_project_options(test_config_store)
 add_test(NAME test_config_store COMMAND test_config_store)
+
+# Keep the allocation-free runtime firewall core publication checkpoint
+# independently buildable. No Daemon, backend, Netlink or scheduler belongs
+# in this target.
+add_executable(keen-pbr-runtime-firewall-publication-tests
+  test_main.cpp
+  test_runtime_firewall_core_publication.cpp
+  test_runtime_firewall_conntrack_tail_plan.cpp
+  test_runtime_firewall_publication_tail_progress.cpp
+  test_runtime_resolver_publication.cpp
+  ../src/daemon/runtime_firewall_core_publication.cpp
+  ../src/daemon/runtime_firewall_conntrack_tail_plan.cpp
+  ../src/daemon/runtime_resolver_publication.cpp
+  ../src/daemon/resolver_sync_state_machine.cpp
+  ../src/routing/firewall_state.cpp
+)
+set_target_properties(
+  keen-pbr-runtime-firewall-publication-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_include_directories(
+  keen-pbr-runtime-firewall-publication-tests PRIVATE
+  ${KEEN_PBR_GENERATED_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+)
+target_link_libraries(
+  keen-pbr-runtime-firewall-publication-tests PRIVATE
+  nlohmann_json::nlohmann_json
+  Threads::Threads
+)
+keen_pbr_apply_project_options(
+  keen-pbr-runtime-firewall-publication-tests)
+add_test(
+  NAME keen-pbr-runtime-firewall-publication-tests
+  COMMAND keen-pbr-runtime-firewall-publication-tests
+)
+
+# Keep native-VPN verified include-only LKG ownership independently buildable.
+# This store has no Daemon, backend, admission or recovery dependency.
+add_executable(keen-pbr-runtime-internal-vpn-lkg-tests
+  test_main.cpp
+  test_runtime_internal_vpn_lkg_store.cpp
+  ../src/daemon/runtime_internal_vpn_lkg_store.cpp
+  ../src/keenetic/internal_vpn_server_resolver.cpp
+  ../src/keenetic/internal_vpn_service_resolver.cpp
+  ../src/keenetic/ndms_interface_inventory.cpp
+  ../src/keenetic/ndms_wireguard_identity.cpp
+  ../src/util/traced_mutex.cpp
+  ../src/log/logger.cpp
+  ../src/log/trace.cpp
+)
+set_target_properties(
+  keen-pbr-runtime-internal-vpn-lkg-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_include_directories(
+  keen-pbr-runtime-internal-vpn-lkg-tests PRIVATE
+  ${KEEN_PBR_GENERATED_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+)
+target_link_libraries(
+  keen-pbr-runtime-internal-vpn-lkg-tests PRIVATE
+  nlohmann_json::nlohmann_json
+  fmt::fmt-header-only
+  Threads::Threads
+)
+target_compile_options(
+  keen-pbr-runtime-internal-vpn-lkg-tests PRIVATE
+  -ffunction-sections
+  -fdata-sections
+)
+target_link_options(
+  keen-pbr-runtime-internal-vpn-lkg-tests PRIVATE
+  -Wl,--gc-sections
+)
+keen_pbr_apply_project_options(
+  keen-pbr-runtime-internal-vpn-lkg-tests)
+add_test(
+  NAME keen-pbr-runtime-internal-vpn-lkg-tests
+  COMMAND keen-pbr-runtime-internal-vpn-lkg-tests
+)
 
 # Keep the lifecycle completion bridge independently buildable. It is the
 # allocation-safe hand-off between asynchronous firewall publication and a

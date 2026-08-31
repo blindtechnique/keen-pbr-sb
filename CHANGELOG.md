@@ -98,6 +98,19 @@
 - `ConfigStore` публикует конфигурацию и соответствующие ей outbound marks как
   одно неизменяемое поколение. Длительные читатели закрепляют shared snapshot и
   не смешивают данные двух последовательных apply.
+- Продолжено P0-1 отделение publication tail от `Daemon` без нового admission,
+  recovery-журнала или пользовательских блокировок. Семь разрозненных
+  публикаций rules/list/native-VPN/SNAT/Meta сведены в один небросающий core
+  checkpoint с сохранением прежней семантики точного preimage для
+  START/cold-boot и отдельных rollback-кандидатов для config, DNS и URLTEST.
+  DNS/config теперь используют единый checkpoint для согласованного resolver
+  generation/sync/retry/timestamp; десять флагов выполнения хвоста вынесены в
+  отдельный value-only DAG progress. Mutex и оба verified include-only LKG
+  native VPN больше не принадлежат `Daemon`: ими владеет самостоятельный
+  `RuntimeInternalVpnLkgStore`, включая обратимый cold-boot exchange. Решение о
+  post-SNAT conntrack retry вынесено в чистый план, а существующий scheduler
+  остаётся единственным исполнителем. Существующие lifecycle/CAS admission
+  callbacks и generation/lease fences сохранены.
 - API-операции runtime и SIGHUP rollback удерживают точное активное поколение
   конфигурации до завершения, а отложенный list/firewall staging использует
   закреплённый снимок кэша без ссылки на изменяемого владельца `CacheManager`.

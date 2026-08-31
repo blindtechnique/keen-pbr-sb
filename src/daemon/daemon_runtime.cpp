@@ -4080,25 +4080,13 @@ Daemon::resolve_internal_vpn_servers_for_runtime(
 
 std::vector<InternalVpnServer>
 Daemon::snapshot_internal_vpn_verified_includes_lkg() const {
-    KPBR_LOCK_GUARD(internal_vpn_lkg_mutex_);
-    return internal_vpn_verified_includes_lkg_;
+    return internal_vpn_lkg_store_.snapshot_servers();
 }
 
 void Daemon::update_internal_vpn_verified_includes_lkg(
     const InternalVpnRuntimeResolution& resolution) noexcept {
     try {
-        if (resolution.state !=
-                InternalVpnRuntimeResolutionState::verified &&
-            resolution.state !=
-                InternalVpnRuntimeResolutionState::authoritative_negative) {
-            return;
-        }
-        KPBR_LOCK_GUARD(internal_vpn_lkg_mutex_);
-        internal_vpn_verified_includes_lkg_ =
-            merge_internal_vpn_verified_includes_lkg(
-                internal_vpn_verified_includes_lkg_,
-                resolution.verified_includes_for_lkg,
-                resolution.retain_verified_include_ndms_ids);
+        internal_vpn_lkg_store_.update_servers(resolution);
     } catch (const std::exception& error) {
         try {
             Logger::instance().warn(
@@ -4231,25 +4219,13 @@ Daemon::resolve_internal_vpn_services_for_runtime(
 
 std::vector<InternalVpnRuntimeTarget>
 Daemon::snapshot_internal_vpn_service_verified_includes_lkg() const {
-    KPBR_LOCK_GUARD(internal_vpn_lkg_mutex_);
-    return internal_vpn_service_verified_includes_lkg_;
+    return internal_vpn_lkg_store_.snapshot_service_targets();
 }
 
 void Daemon::update_internal_vpn_service_verified_includes_lkg(
     const InternalVpnServiceRuntimeResolution& resolution) noexcept {
     try {
-        if (resolution.state !=
-                InternalVpnRuntimeResolutionState::verified &&
-            resolution.state !=
-                InternalVpnRuntimeResolutionState::authoritative_negative) {
-            return;
-        }
-        KPBR_LOCK_GUARD(internal_vpn_lkg_mutex_);
-        internal_vpn_service_verified_includes_lkg_ =
-            merge_internal_vpn_service_verified_includes_lkg(
-                internal_vpn_service_verified_includes_lkg_,
-                resolution.verified_includes_for_lkg,
-                resolution.retain_verified_include_service_ids);
+        internal_vpn_lkg_store_.update_service_targets(resolution);
     } catch (const std::exception& error) {
         try {
             Logger::instance().warn(
