@@ -438,6 +438,20 @@ bool expected_inventory_exact(
         return false;
     }
 
+    const bool has_unexpected_generated_route = std::any_of(
+        live_routes.begin(), live_routes.end(),
+        [&](const DumpedRoute& live) {
+            if (!route_table_detail::is_generated_route_candidate(live)) {
+                return false;
+            }
+            return std::none_of(
+                expected_routes.begin(), expected_routes.end(),
+                [&](const RouteSpec& expected) {
+                    return exact_route_matches_live(expected, live);
+                });
+        });
+    if (has_unexpected_generated_route) return false;
+
     const auto concrete = concrete_rules(expected_rules);
     return std::all_of(
         concrete.begin(), concrete.end(), [&](const RuleSpec& rule) {

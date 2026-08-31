@@ -507,6 +507,47 @@ TEST_CASE("exact routing owner invalidates a drifted base at raw preflight") {
     CHECK(netlink.events.empty());
 }
 
+TEST_CASE("exact routing owner rejects an extra generated route after rollback") {
+    ExactOwnerNetlink netlink;
+    RuntimeRoutingOperationOwner owner(netlink, netlink);
+    const auto first = exact_owner_request(1U, 101U, 1U, 11U, 151U);
+    const auto committed = run_exact(owner, first, 0U);
+    REQUIRE(
+        committed.outcome ==
+        RuntimeRoutingOperationOutcome::exact_candidate_committed);
+
+    const auto extra_spec = exact_owner_route(199U);
+    DumpedRoute extra;
+    extra.destination = extra_spec.destination;
+    extra.table = extra_spec.table;
+    extra.interface = extra_spec.interface;
+    extra.gateway = extra_spec.gateway;
+    extra.blackhole = extra_spec.blackhole;
+    extra.unreachable = extra_spec.unreachable;
+    extra.family = extra_spec.family;
+    extra.metric = extra_spec.metric;
+    extra.protocol = KEEN_PBR_GENERATED_ROUTE_PROTOCOL;
+    extra.exact_identity_representable = true;
+    netlink.routes.push_back(std::move(extra));
+    netlink.events.clear();
+    netlink.fail_rule_add_before_effect = true;
+    const auto second = exact_owner_request(
+        2U, 102U, committed.inventory->revision, 12U, 152U);
+
+    const auto result = run_exact(owner, second, 1U);
+
+    CHECK(
+        result.outcome ==
+        RuntimeRoutingOperationOutcome::exact_partial_unknown);
+    REQUIRE(static_cast<bool>(result.inventory));
+    CHECK(
+        classify_runtime_routing_inventory(result.inventory) !=
+        RuntimeRoutingInventoryAuthority::authoritative);
+    CHECK(std::any_of(
+        netlink.routes.begin(), netlink.routes.end(),
+        [](const DumpedRoute& route) { return route.table == 199U; }));
+}
+
 TEST_CASE("exact routing owner makes an ambiguous effect non-authoritative") {
     ExactOwnerNetlink netlink;
     netlink.fail_route_add_after_effect = true;
