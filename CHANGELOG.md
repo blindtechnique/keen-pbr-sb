@@ -111,6 +111,15 @@
   post-SNAT conntrack retry вынесено в чистый план, а существующий scheduler
   остаётся единственным исполнителем. Существующие lifecycle/CAS admission
   callbacks и generation/lease fences сохранены.
+- Следующий слой P0-1 убирает из `Daemon` policy-ветвление оставшегося
+  publication tail: Meta candidate/failure matrix, START/cold-boot resolver
+  proof, non-START resolver action, последний route-epoch fence и классификация
+  START/background terminal теперь вычисляются отдельными value-only
+  `noexcept` plans. Cold-boot core/LKG/resolver/runtime commit и обратный
+  rollback выполняются одной тестируемой транзакцией; post-success conntrack
+  использует точный borrowed plan. Существующие resolver stream, scheduler,
+  incident, admission и bounded retry остаются единственными исполнителями —
+  новый защитный или recovery-контур не создавался.
 - API-операции runtime и SIGHUP rollback удерживают точное активное поколение
   конфигурации до завершения, а отложенный list/firewall staging использует
   закреплённый снимок кэша без ссылки на изменяемого владельца `CacheManager`.

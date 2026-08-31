@@ -11,8 +11,12 @@ add_executable(keen-pbr-tests
   test_runtime_firewall_generation_input.cpp
   test_runtime_firewall_core_publication.cpp
   test_runtime_firewall_conntrack_tail_plan.cpp
+  test_runtime_firewall_meta_tail_plan.cpp
   test_runtime_firewall_publication_tail_progress.cpp
+  test_runtime_firewall_resolver_tail_plan.cpp
+  test_runtime_firewall_terminal_tail_plan.cpp
   test_runtime_resolver_publication.cpp
+  test_runtime_cold_boot_publication.cpp
   test_runtime_internal_vpn_lkg_store.cpp
   test_runtime_firewall_worker_attempt.cpp
   test_runtime_route_health_plan.cpp
@@ -241,7 +245,11 @@ add_executable(keen-pbr-tests
   ../src/daemon/runtime_firewall_generation_input.cpp
   ../src/daemon/runtime_firewall_core_publication.cpp
   ../src/daemon/runtime_firewall_conntrack_tail_plan.cpp
+  ../src/daemon/runtime_firewall_meta_tail_plan.cpp
+  ../src/daemon/runtime_firewall_resolver_tail_plan.cpp
+  ../src/daemon/runtime_firewall_terminal_tail_plan.cpp
   ../src/daemon/runtime_resolver_publication.cpp
+  ../src/daemon/runtime_cold_boot_publication.cpp
   ../src/daemon/runtime_internal_vpn_lkg_store.cpp
   ../src/daemon/runtime_firewall_operation_owner.cpp
   ../src/daemon/runtime_firewall_worker_attempt.cpp
@@ -970,10 +978,16 @@ add_executable(keen-pbr-runtime-firewall-publication-tests
   test_main.cpp
   test_runtime_firewall_core_publication.cpp
   test_runtime_firewall_conntrack_tail_plan.cpp
+  test_runtime_firewall_meta_tail_plan.cpp
   test_runtime_firewall_publication_tail_progress.cpp
+  test_runtime_firewall_resolver_tail_plan.cpp
+  test_runtime_firewall_terminal_tail_plan.cpp
   test_runtime_resolver_publication.cpp
   ../src/daemon/runtime_firewall_core_publication.cpp
   ../src/daemon/runtime_firewall_conntrack_tail_plan.cpp
+  ../src/daemon/runtime_firewall_meta_tail_plan.cpp
+  ../src/daemon/runtime_firewall_resolver_tail_plan.cpp
+  ../src/daemon/runtime_firewall_terminal_tail_plan.cpp
   ../src/daemon/runtime_resolver_publication.cpp
   ../src/daemon/resolver_sync_state_machine.cpp
   ../src/routing/firewall_state.cpp
@@ -1008,6 +1022,11 @@ add_test(
 add_executable(keen-pbr-runtime-internal-vpn-lkg-tests
   test_main.cpp
   test_runtime_internal_vpn_lkg_store.cpp
+  test_runtime_cold_boot_publication.cpp
+  ../src/daemon/runtime_cold_boot_publication.cpp
+  ../src/daemon/runtime_firewall_core_publication.cpp
+  ../src/daemon/runtime_resolver_publication.cpp
+  ../src/daemon/resolver_sync_state_machine.cpp
   ../src/daemon/runtime_internal_vpn_lkg_store.cpp
   ../src/keenetic/internal_vpn_server_resolver.cpp
   ../src/keenetic/internal_vpn_service_resolver.cpp
@@ -1016,6 +1035,7 @@ add_executable(keen-pbr-runtime-internal-vpn-lkg-tests
   ../src/util/traced_mutex.cpp
   ../src/log/logger.cpp
   ../src/log/trace.cpp
+  ../src/routing/firewall_state.cpp
 )
 set_target_properties(
   keen-pbr-runtime-internal-vpn-lkg-tests PROPERTIES

@@ -1161,7 +1161,7 @@ Daemon::prepare_meta_udp443_activation_or_throw(
 }
 
 void Daemon::report_meta_udp443_degraded(
-    const std::string& detail) noexcept {
+    std::string_view detail) noexcept {
     try {
         const auto incident = meta_udp443_incidents_.record_failure(
             "meta-udp443-activation", /*notify_immediately=*/true);

@@ -34,4 +34,31 @@ RuntimeFirewallConntrackTailPlan plan_runtime_firewall_conntrack_tail(
     return plan;
 }
 
+RuntimeFirewallPostSuccessConntrackPlan
+plan_runtime_firewall_post_success_conntrack(
+    const RuntimeFirewallPostSuccessConntrackFacts& facts) noexcept {
+    RuntimeFirewallPostSuccessConntrackPlan plan;
+    if (!facts.attempted || facts.snapshot == nullptr) {
+        return plan;
+    }
+
+    if (facts.command_unavailable) {
+        plan.warn_command_unavailable = true;
+        return plan;
+    }
+
+    if (facts.remaining_marks != nullptr &&
+        !facts.remaining_marks->empty()) {
+        plan.retry_snapshot = facts.snapshot;
+        plan.reported_remaining_marks = facts.remaining_marks;
+        plan.retry_marks =
+            RuntimeFirewallPostSuccessConntrackMarks::reported_remaining;
+    } else if (facts.cleanup_failed) {
+        plan.retry_snapshot = facts.snapshot;
+        plan.retry_marks =
+            RuntimeFirewallPostSuccessConntrackMarks::ordered_snapshot;
+    }
+    return plan;
+}
+
 } // namespace keen_pbr3

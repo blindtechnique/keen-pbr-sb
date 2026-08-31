@@ -70,9 +70,13 @@
 #include "runtime_firewall_generation_input.hpp"
 #include "runtime_firewall_core_publication.hpp"
 #include "runtime_firewall_conntrack_tail_plan.hpp"
+#include "runtime_firewall_meta_tail_plan.hpp"
 #include "runtime_firewall_operation_owner.hpp"
 #include "runtime_firewall_publication_tail_progress.hpp"
+#include "runtime_firewall_resolver_tail_plan.hpp"
+#include "runtime_firewall_terminal_tail_plan.hpp"
 #include "runtime_resolver_publication.hpp"
+#include "runtime_cold_boot_publication.hpp"
 #include "runtime_cold_boot_terminal_policy.hpp"
 #include "owned_conntrack_cleanup_operation.hpp"
 #include "runtime_route_health_plan.hpp"
@@ -377,7 +381,6 @@ struct DaemonRuntimeFirewallOperationState final
     bool preworker_side_effects_armed{false};
     std::optional<PendingMetaUdp443ActivationCleanup>
         previous_meta_cleanup;
-    std::uint64_t meta_cleanup_epoch{0U};
 
     CorePublication core_publication;
     std::optional<MetaUdp443ActivationPlan>
@@ -9401,9 +9404,6 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
             cancel_meta_udp443_activation_cleanup();
             state.preworker_side_effects_armed = true;
         }
-        state.meta_cleanup_epoch = meta_udp443_cleanup_epoch_.load(
-            std::memory_order_acquire);
-
         auto worker_input_snapshot =
             std::make_shared<const RuntimeFirewallWorkerAttemptInput>(
                 std::move(worker_input));
@@ -13444,18 +13444,6 @@ void Daemon::drain_runtime_firewall_terminal(
         state.publication_tail.mark_core_published();
         return true;
     };
-    const auto restore_core_candidate = [this, &state]() noexcept {
-        if (!state.publication_tail.core_published() ||
-            !state.core_publication.committed) {
-            return;
-        }
-        auto& publication = state.core_publication;
-        publish_runtime_firewall_core_checkpoint(
-            publication,
-            RuntimeFirewallCoreMetaPublication::exchange_preimage);
-        state.publication_tail.mark_core_restored();
-    };
-
     if (!drain->publish_worker_control([
             lifecycle_start,
             &publish_core_candidate]() noexcept {
@@ -13479,98 +13467,78 @@ void Daemon::drain_runtime_firewall_terminal(
         !state.publication_tail.start_candidate_published()) {
         // START keeps its candidate private until resolver activate publishes
         // the exact expected stream. Meta/idle work is likewise deferred.
-    } else if (!shutdown && state.publication_tail.core_published() &&
-        !state.publication_tail.meta_tail_finished()) {
+    } else if (!shutdown &&
+               !state.publication_tail.meta_tail_finished()) {
         reset_idle_stall_observer(/*schedule_if_eligible=*/true);
         const auto current_generation =
             runtime_generation_.load(std::memory_order_acquire);
-        const auto cleanup_epoch =
-            meta_udp443_cleanup_epoch_.load(std::memory_order_acquire);
-        const bool filter_healthy =
+        const auto candidate_cleanup_epoch =
+            state.publication_tail.core_published()
+            ? meta_udp443_cleanup_epoch_.load(
+                  std::memory_order_acquire)
+            : 0U;
+        RuntimeFirewallMetaTailFacts facts;
+        facts.core_published =
+            state.publication_tail.core_published();
+        facts.candidate_plan =
+            state.candidate_meta_activation_plan.has_value()
+            ? &*state.candidate_meta_activation_plan
+            : nullptr;
+        facts.filter_healthy =
             worker_result != nullptr &&
             worker_result->forward_udp_reject_after_commit.state ==
                 std::optional<OwnedForwardUdpRejectState>{
                     OwnedForwardUdpRejectState::healthy} &&
             !worker_result->forward_udp_reject_after_commit.failure.failed();
-        const bool fastnat_healthy =
+        facts.fastnat_healthy =
             !state.candidate_meta_activation_plan.has_value() ||
             (worker_result != nullptr &&
              worker_result->fastnat_after_commit
                      .disabled_or_unavailable ==
                  std::optional<bool>{true} &&
              !worker_result->fastnat_after_commit.failure.failed());
+        facts.worker_commit_ambiguous =
+            context->worker_commit_ambiguous;
+        facts.publication_epoch_changed =
+            worker_result != nullptr &&
+            meta_udp443_publication_may_have_changed(
+                worker_result->meta_publication_epoch_before,
+                worker_result->meta_publication_epoch_after);
+        facts.previous_plan = state.previous_meta_cleanup.has_value()
+            ? &state.previous_meta_cleanup->plan
+            : nullptr;
+        facts.previous_runtime_generation =
+            state.previous_meta_cleanup.has_value()
+            ? state.previous_meta_cleanup->runtime_generation
+            : 0U;
+        facts.current_runtime_generation = current_generation;
+        facts.previous_attempt = state.previous_meta_cleanup.has_value()
+            ? state.previous_meta_cleanup->attempt
+            : 0U;
 
-        if (state.candidate_meta_activation_plan.has_value() &&
-            fastnat_healthy && filter_healthy) {
+        const auto meta_tail =
+            plan_runtime_firewall_meta_tail(facts);
+        if (meta_tail.incident_action ==
+            RuntimeFirewallMetaIncidentAction::reset) {
             meta_udp443_incidents_.reset("meta-udp443-activation");
-            schedule_meta_udp443_activation_cleanup_retry(
-                *state.candidate_meta_activation_plan,
-                current_generation,
-                cleanup_epoch,
-                /*attempt=*/0U);
-        } else if (
-            state.candidate_meta_activation_plan.has_value()) {
-            report_meta_udp443_degraded(
-                !fastnat_healthy
-                    ? "FastNAT was re-enabled during delayed firewall "
-                      "publication"
-                    : "the exact owned first FORWARD hook could not be "
-                      "reverified after delayed publication");
-            schedule_meta_udp443_activation_cleanup_retry(
-                *state.candidate_meta_activation_plan,
-                current_generation,
-                cleanup_epoch,
-                /*attempt=*/1U);
-            if (fastnat_healthy) {
-                schedule_netfilter_runtime_refresh_noexcept(
-                    NetfilterRefreshReason::full,
-                    "could not repair delayed Meta UDP/443 publication");
-            }
-        } else if (filter_healthy) {
-            meta_udp443_incidents_.reset("meta-udp443-activation");
-        } else {
-            report_meta_udp443_degraded(
-                "balanced mode could not verify absence of owned UDP/443 "
-                "artifacts after delayed publication");
-            schedule_netfilter_runtime_refresh_noexcept(
-                NetfilterRefreshReason::full,
-                "could not clean stale balanced-mode Meta UDP/443 "
-                "artifacts");
+        } else if (meta_tail.report_degraded()) {
+            report_meta_udp443_degraded(meta_tail.incident_detail);
         }
-        state.publication_tail.mark_meta_tail_finished();
-        state.preworker_side_effects_armed = false;
-    } else if (!shutdown && !state.publication_tail.core_published() &&
-               !state.publication_tail.meta_tail_finished()) {
-        reset_idle_stall_observer(/*schedule_if_eligible=*/true);
-        const auto current_generation =
-            runtime_generation_.load(std::memory_order_acquire);
-        const bool publication_may_have_changed =
-            context->worker_commit_ambiguous ||
-            (worker_result != nullptr &&
-             meta_udp443_publication_may_have_changed(
-                 worker_result->meta_publication_epoch_before,
-                 worker_result->meta_publication_epoch_after));
-        if (should_restore_pending_meta_udp443_cleanup_after_apply_failure(
-                state.previous_meta_cleanup.has_value(),
-                state.previous_meta_cleanup.has_value()
-                    ? state.previous_meta_cleanup->runtime_generation
-                    : 0U,
-                current_generation,
-                publication_may_have_changed)) {
+        if (meta_tail.schedule_cleanup()) {
             schedule_meta_udp443_activation_cleanup_retry(
-                state.previous_meta_cleanup->plan,
+                *meta_tail.cleanup_plan,
                 current_generation,
-                meta_udp443_cleanup_epoch_.load(
-                    std::memory_order_acquire),
-                state.previous_meta_cleanup->attempt);
-        } else if (publication_may_have_changed) {
-            report_meta_udp443_degraded(
-                "delayed firewall COMMIT outcome is ambiguous; exact Meta "
-                "cleanup authority was discarded");
+                meta_tail.cleanup_source ==
+                        RuntimeFirewallMetaCleanupSource::candidate
+                    ? candidate_cleanup_epoch
+                    : meta_udp443_cleanup_epoch_.load(
+                          std::memory_order_acquire),
+                meta_tail.cleanup_attempt);
+        }
+        if (meta_tail.full_refresh) {
             schedule_netfilter_runtime_refresh_noexcept(
                 NetfilterRefreshReason::full,
-                "could not resnapshot Meta UDP/443 after an ambiguous "
-                "delayed COMMIT");
+                meta_tail.refresh_detail.data());
         }
         state.publication_tail.mark_meta_tail_finished();
         state.preworker_side_effects_armed = false;
@@ -13578,37 +13546,50 @@ void Daemon::drain_runtime_firewall_terminal(
 
     if (!shutdown && lifecycle_start &&
         !state.publication_tail.resolver_tail_finished()) {
-        const bool cold_route_mutation_acknowledged =
-            lifecycle_cold_boot && context->worker_input && worker_result &&
-            worker_result->route_preparation.required &&
+        RuntimeFirewallStartResolverTailFacts resolver_facts;
+        resolver_facts.cold_boot = lifecycle_cold_boot;
+        resolver_facts.worker_succeeded = context->worker_succeeded;
+        resolver_facts.worker_input_available =
+            context->worker_input != nullptr;
+        resolver_facts.worker_result_available = worker_result != nullptr;
+        resolver_facts.route_preparation_required = worker_result &&
+            worker_result->route_preparation.required;
+        resolver_facts.worker_route_mutation_applied = worker_result &&
             worker_result->route_preparation.worker_mutation_ack ==
                 std::optional<RuntimeRouteMutationAck>{
                     RuntimeRouteMutationAck::applied};
-        const bool cold_route_checkpoint_proven = !lifecycle_cold_boot ||
-            (cold_route_mutation_acknowledged &&
-             context->worker_input->route_health_request.route_epoch != 0U &&
-             context->worker_input->route_health_request.route_epoch ==
-                 routing_observation_epoch_.load(
-                     std::memory_order_acquire) &&
-             context->queued_claim.runtime_generation ==
-                 runtime_generation_.load(std::memory_order_acquire) &&
-             worker_result->route_preparation.checkpoint_published &&
-             worker_result->route_preparation.mutation_ack ==
-                 std::optional<RuntimeRouteMutationAck>{
-                     RuntimeRouteMutationAck::applied});
+        resolver_facts.requested_route_epoch = context->worker_input
+            ? context->worker_input->route_health_request.route_epoch
+            : 0U;
+        resolver_facts.current_route_epoch = lifecycle_cold_boot
+            ? routing_observation_epoch_.load(
+                  std::memory_order_acquire)
+            : 0U;
+        resolver_facts.operation_runtime_generation =
+            context->queued_claim.runtime_generation;
+        resolver_facts.current_runtime_generation = lifecycle_cold_boot
+            ? runtime_generation_.load(std::memory_order_acquire)
+            : 0U;
+        resolver_facts.route_checkpoint_published = worker_result &&
+            worker_result->route_preparation.checkpoint_published;
+        resolver_facts.route_checkpoint_mutation_applied = worker_result &&
+            worker_result->route_preparation.mutation_ack ==
+                std::optional<RuntimeRouteMutationAck>{
+                    RuntimeRouteMutationAck::applied};
+        resolver_facts.core_committed =
+            state.core_publication.committed;
+        resolver_facts.commit_ambiguous =
+            context->worker_commit_ambiguous;
+        const auto resolver_tail =
+            plan_runtime_firewall_start_resolver_tail(resolver_facts);
         if (lifecycle_cold_boot && state.cold_boot_transaction) {
             state.cold_boot_transaction->route_mutation_acknowledged =
-                cold_route_mutation_acknowledged;
+                resolver_tail.route_mutation_acknowledged;
             state.cold_boot_transaction->exact_route_checkpoint_verified =
-                cold_route_checkpoint_proven;
+                resolver_tail.exact_route_checkpoint_verified;
         }
-        const bool cold_route_firewall_proven =
-            cold_route_checkpoint_proven &&
-            state.core_publication.committed &&
-            !context->worker_commit_ambiguous;
-        if (!context->worker_succeeded || !cold_route_firewall_proven) {
-            if (context->worker_succeeded &&
-                !cold_route_firewall_proven) {
+        if (!resolver_tail.begin_lifecycle_resolver) {
+            if (resolver_tail.downgrade_nominal_worker_success) {
                 context->worker_succeeded = false;
                 state.worker_failure_transient = false;
                 if (state.worker_failure_detail.empty()) {
@@ -13647,13 +13628,28 @@ void Daemon::drain_runtime_firewall_terminal(
         const bool foreground_lifecycle =
             runtime_firewall_lifecycle_is_foreground(
                 context->lifecycle_kind);
+        RuntimeFirewallNonStartResolverTailFacts resolver_facts;
+        resolver_facts.foreground_lifecycle = foreground_lifecycle;
+        resolver_facts.restart_lifecycle =
+            runtime_firewall_lifecycle_is_restart(
+                context->lifecycle_kind);
+        resolver_facts.resolver_refresh_required =
+            state.resolver_refresh_required;
+        resolver_facts.resolver_waits_for_firewall =
+            resolver_waits_for_firewall;
+        resolver_facts.resolver_generation_published =
+            state.publication_tail.resolver_generation_published();
+        resolver_facts.resolver_stream_in_flight =
+            state.resolver_refresh_required &&
+            !resolver_waits_for_firewall &&
+            !foreground_lifecycle &&
+            resolver_stream_coordinator_.in_flight();
+        const auto resolver_tail =
+            plan_runtime_firewall_non_start_resolver_tail(
+                resolver_facts);
         bool lifecycle_resolver_verified =
-            runtime_firewall_restart_resolver_initially_verified(
-                context->lifecycle_kind,
-                state.resolver_refresh_required,
-                resolver_waits_for_firewall);
-        if (state.resolver_refresh_required &&
-            !state.publication_tail.resolver_generation_published()) {
+            resolver_tail.initially_verified;
+        if (resolver_tail.publish_resolver_generation) {
             apply_started_ts_.store(
                 unix_timestamp_now_seconds(),
                 std::memory_order_release);
@@ -13662,17 +13658,40 @@ void Daemon::drain_runtime_firewall_terminal(
                     state.list_cache_snapshot));
             state.publication_tail.mark_resolver_generation_published();
         }
-        if (state.resolver_refresh_required &&
-            !resolver_waits_for_firewall) {
+        if (resolver_tail.cancel_existing_reload_retry) {
             cancel_resolver_reload_retry();
-            if (foreground_lifecycle) {
-                if (begin_runtime_firewall_lifecycle_resolver(context)) {
-                    drain->park_until_wake();
-                    return;
+        }
+        if (resolver_tail.action ==
+            RuntimeFirewallResolverTailAction::
+                foreground_lifecycle_stream) {
+            if (begin_runtime_firewall_lifecycle_resolver(context)) {
+                drain->park_until_wake();
+                return;
+            }
+            lifecycle_resolver_verified =
+                state.lifecycle_resolver_verified;
+            if (lifecycle_resolver_verified) {
+                if (acknowledge_verified_resolver_reload(
+                        current_generation)) {
+                    publish_runtime_state();
                 }
-                lifecycle_resolver_verified =
-                    state.lifecycle_resolver_verified;
-                if (lifecycle_resolver_verified) {
+                refresh_resolver_config_hash_actual_async();
+            } else {
+                schedule_resolver_reload_retry(
+                    0, current_generation);
+            }
+        } else if (resolver_tail.action ==
+                   RuntimeFirewallResolverTailAction::
+                       background_existing_stream_retry) {
+            schedule_resolver_reload_retry(
+                0, current_generation);
+        } else if (resolver_tail.action ==
+                   RuntimeFirewallResolverTailAction::
+                       background_direct_stream) {
+            try {
+                if (run_system_resolver_hook_stream_prepared(
+                        "reload", /*rebuild_snapshot=*/false)) {
+                    lifecycle_resolver_verified = true;
                     if (acknowledge_verified_resolver_reload(
                             current_generation)) {
                         publish_runtime_state();
@@ -13682,39 +13701,22 @@ void Daemon::drain_runtime_firewall_terminal(
                     schedule_resolver_reload_retry(
                         0, current_generation);
                 }
-            } else if (resolver_stream_coordinator_.in_flight()) {
+            } catch (const std::exception& error) {
+                lifecycle_resolver_verified = false;
+                Logger::instance().info(
+                    "Native VPN DNS access policy refresh was deferred: "
+                    "{}",
+                    error.what());
                 schedule_resolver_reload_retry(
                     0, current_generation);
-            } else {
-                try {
-                    if (run_system_resolver_hook_stream_prepared(
-                            "reload", /*rebuild_snapshot=*/false)) {
-                        lifecycle_resolver_verified = true;
-                        if (acknowledge_verified_resolver_reload(
-                                current_generation)) {
-                            publish_runtime_state();
-                        }
-                        refresh_resolver_config_hash_actual_async();
-                    } else {
-                        schedule_resolver_reload_retry(
-                            0, current_generation);
-                    }
-                } catch (const std::exception& error) {
-                    lifecycle_resolver_verified = false;
-                    Logger::instance().info(
-                        "Native VPN DNS access policy refresh was deferred: "
-                        "{}",
-                        error.what());
-                    schedule_resolver_reload_retry(
-                        0, current_generation);
-                } catch (...) {
-                    lifecycle_resolver_verified = false;
-                    schedule_resolver_reload_retry(
-                        0, current_generation);
-                }
+            } catch (...) {
+                lifecycle_resolver_verified = false;
+                schedule_resolver_reload_retry(
+                    0, current_generation);
             }
-        } else if (foreground_lifecycle &&
-                   resolver_waits_for_firewall) {
+        } else if (resolver_tail.action ==
+                   RuntimeFirewallResolverTailAction::
+                       foreground_gated_failure) {
             state.lifecycle_failure_detail =
                 "resolver reload remains gated behind firewall recovery";
         }
@@ -13763,44 +13765,59 @@ void Daemon::drain_runtime_firewall_terminal(
         !state.publication_tail.runtime_incident_tail_finished()) {
         const auto current_generation =
             runtime_generation_.load(std::memory_order_acquire);
-        if (lifecycle_start) {
-            bool successor_pending =
-                context->successor_mode !=
+        const bool route_epoch_current = !lifecycle_start ||
+            (context->worker_input &&
+             context->worker_input->route_health_request.route_epoch != 0U &&
+             context->worker_input->route_health_request.route_epoch ==
+                 routing_observation_epoch_.load(
+                     std::memory_order_acquire));
+        RuntimeFirewallTerminalTailFacts terminal_facts;
+        terminal_facts.lifecycle_start = lifecycle_start;
+        terminal_facts.lifecycle_cold_boot = lifecycle_cold_boot;
+        terminal_facts.worker_succeeded = context->worker_succeeded;
+        terminal_facts.worker_commit_ambiguous =
+            context->worker_commit_ambiguous;
+        terminal_facts.route_epoch_current = route_epoch_current;
+        terminal_facts.ordinary_start_retry_available =
+            runtime_firewall_start_retry_available(
+                context->queued_claim.attempt);
+        terminal_facts.successor_pending =
+            context->successor_mode !=
                 RuntimeFirewallOperationContext::SuccessorMode::none;
-            const bool route_epoch_current =
-                context->worker_input &&
-                context->worker_input->route_health_request.route_epoch !=
-                    0U &&
-                context->worker_input->route_health_request.route_epoch ==
-                    routing_observation_epoch_.load(
-                        std::memory_order_acquire);
-            if (context->worker_succeeded && !route_epoch_current) {
-                // Interface events are serialized on this control loop, so
-                // this is the last exact fence before publishing running.
-                // A changed topology after the worker route checkpoint is a
-                // non-ambiguous fresh-snapshot request, not a verified START.
-                context->worker_succeeded = false;
-                const bool retry_available = !lifecycle_cold_boot &&
-                    runtime_firewall_start_retry_available(
-                        context->queued_claim.attempt);
-                context->successor_mode = retry_available
-                    ? RuntimeFirewallOperationContext::SuccessorMode::
-                          reschedule_retry
-                    : RuntimeFirewallOperationContext::SuccessorMode::none;
-                context->force_successor = retry_available;
-                successor_pending = retry_available;
-                state.worker_failure_transient = retry_available;
-                state.worker_failure_detail =
-                    "runtime route observation changed before START "
-                    "publication";
+        terminal_facts.lifecycle_resolver_verified =
+            state.lifecycle_resolver_verified;
+        terminal_facts.start_candidate_published =
+            state.publication_tail.start_candidate_published();
+        terminal_facts.core_published =
+            state.publication_tail.core_published();
+        const auto terminal_tail =
+            plan_runtime_firewall_terminal_tail(terminal_facts);
+
+        if (terminal_tail.downgrade_stale_start_success) {
+            // Interface events are serialized on this control loop, so this
+            // remains the final exact fence before publishing running.
+            context->worker_succeeded =
+                terminal_tail.worker_succeeded_after_route_fence;
+            if (terminal_tail.successor ==
+                RuntimeFirewallTerminalTailSuccessor::reschedule_retry) {
+                context->successor_mode =
+                    RuntimeFirewallOperationContext::SuccessorMode::
+                        reschedule_retry;
+            } else if (terminal_tail.successor ==
+                       RuntimeFirewallTerminalTailSuccessor::clear) {
+                context->successor_mode =
+                    RuntimeFirewallOperationContext::SuccessorMode::none;
             }
-            const bool verified_start =
-                context->worker_succeeded &&
-                state.lifecycle_resolver_verified &&
-                state.publication_tail.start_candidate_published() &&
-                (lifecycle_cold_boot ||
-                 state.publication_tail.core_published());
-            if (verified_start) {
+            context->force_successor = terminal_tail.force_successor;
+            state.worker_failure_transient =
+                terminal_tail.worker_failure_transient;
+            state.worker_failure_detail.assign(
+                terminal_tail.worker_failure_detail.data(),
+                terminal_tail.worker_failure_detail.size());
+        }
+        if (lifecycle_start) {
+            if (terminal_tail.dispatch ==
+                RuntimeFirewallTerminalTailDispatch::start_verified) {
                 bool publication_failed = false;
                 if (!state.publication_tail.start_finalized()) {
                     if (lifecycle_cold_boot) {
@@ -13814,39 +13831,27 @@ void Daemon::drain_runtime_firewall_terminal(
                         } catch (...) {
                         }
 
-                        std::shared_ptr<const ResolverGenerationSnapshot>
-                            previous_resolver_generation;
-                        ResolverSyncCheckpoint previous_resolver_sync;
-                        std::uint32_t previous_resolver_retry_attempt{0U};
-                        std::int64_t previous_apply_started_ts{0};
-                        RuntimeInternalVpnLkgPublication staged_lkg;
-                        bool lkg_swapped = false;
-                        bool rollback_cursor_ready = false;
+                        std::optional<
+                            RuntimeColdBootPublicationCheckpoint>
+                            prepared_publication;
                         try {
-                            previous_resolver_generation =
-                                resolver_generation_snapshot_;
-                            previous_resolver_sync =
-                                resolver_sync_.checkpoint();
-                            previous_resolver_retry_attempt =
-                                resolver_config_hash_actual_retry_attempt_;
-                            previous_apply_started_ts =
-                                apply_started_ts_.load(
-                                    std::memory_order_acquire);
-                            // LKG is recovery authority for later native VPN
-                            // mutations, not ancillary diagnostics. Prepare
-                            // the exact pair fallibly under the store's one
-                            // snapshot lock before the running publication.
-                            staged_lkg =
-                                internal_vpn_lkg_store_.prepare_publication(
+                            prepared_publication.emplace(
+                                prepare_runtime_cold_boot_publication_checkpoint(
+                                    RuntimeResolverPublicationTarget{
+                                        resolver_generation_snapshot_,
+                                        resolver_sync_,
+                                        resolver_config_hash_actual_retry_attempt_,
+                                        apply_started_ts_},
+                                    state.private_resolver_generation,
+                                    internal_vpn_lkg_store_,
                                     state.internal_vpn_resolution,
-                                    state.internal_vpn_service_resolution);
-                            rollback_cursor_ready = true;
+                                    state.internal_vpn_service_resolution));
                         } catch (...) {
                         }
 
                         bool publication_committed = false;
                         const bool publication_admitted =
-                            rollback_cursor_ready &&
+                            prepared_publication.has_value() &&
                             publish_runtime_cold_boot_if_current(
                                 [this,
                                  &context,
@@ -13871,90 +13876,55 @@ void Daemon::drain_runtime_firewall_terminal(
                                 },
                                 [this,
                                  &state,
-                                 &publish_core_candidate,
-                                 &restore_core_candidate,
-                                  &previous_resolver_generation,
-                                  &previous_resolver_sync,
-                                  &staged_lkg,
-                                  &lkg_swapped,
-                                  previous_resolver_retry_attempt,
-                                 previous_apply_started_ts,
+                                 &prepared_publication,
                                  &publication_committed]() noexcept {
-                                    try {
-                                         if (!publish_core_candidate()) {
-                                             return;
-                                         }
-                                         internal_vpn_lkg_store_.exchange(
-                                             staged_lkg);
-                                         lkg_swapped = true;
-                                         state.publication_tail
-                                             .mark_internal_vpn_lkg_published();
-                                         resolver_generation_snapshot_ =
-                                            state.private_resolver_generation;
-                                        resolver_config_hash_actual_retry_attempt_ =
-                                            0U;
-                                        resolver_sync_.expected_hash_updated(
-                                            resolver_generation_snapshot_
-                                                ->expected_hash);
-                                        const auto apply_started_ts =
-                                            apply_started_ts_.load(
-                                                std::memory_order_acquire);
-                                        if (apply_started_ts > 0) {
-                                            resolver_sync_.apply_started(
-                                                apply_started_ts,
-                                                resolver_generation_snapshot_
-                                                    ->expected_hash);
-                                        }
-                                        runtime_state_store_
-                                            .set_routing_runtime_active(true);
-                                        if (runtime_state_machine_.state() !=
-                                            RuntimeState::running) {
-                                            transition_runtime_or_throw(
-                                                RuntimeState::running,
-                                                "cold-boot publication complete");
-                                        }
-                                        publish_runtime_state();
-                                        state.publication_tail
-                                            .set_start_finalized(true);
-                                        publication_committed = true;
-                                    } catch (...) {
-                                        try {
-                                            runtime_state_store_
-                                                .set_routing_runtime_active(
-                                                    false);
-                                            if (runtime_state_machine_.state() ==
-                                                RuntimeState::running) {
-                                                transition_runtime_or_throw(
-                                                    RuntimeState::broken,
-                                                    "cold-boot publication rollback");
-                                            }
-                                        } catch (...) {
-                                        }
-                                        resolver_generation_snapshot_ =
-                                            previous_resolver_generation;
-                                        resolver_config_hash_actual_retry_attempt_ =
-                                            previous_resolver_retry_attempt;
-                                        apply_started_ts_.store(
-                                            previous_apply_started_ts,
-                                            std::memory_order_release);
-                                         resolver_sync_.restore(
-                                             std::move(previous_resolver_sync));
-                                         if (lkg_swapped) {
-                                             try {
-                                                 internal_vpn_lkg_store_.exchange(
-                                                     staged_lkg);
-                                                 lkg_swapped = false;
-                                                 state.publication_tail
-                                                     .mark_internal_vpn_lkg_restored();
-                                             } catch (...) {
-                                             }
-                                         }
-                                         restore_core_candidate();
-                                        try {
-                                            publish_runtime_state();
-                                        } catch (...) {
-                                        }
-                                    }
+                                    publication_committed =
+                                        publish_runtime_cold_boot_checkpoint(
+                                            RuntimeColdBootPublicationTarget{
+                                                RuntimeFirewallCorePublicationTarget{
+                                                    firewall_state_,
+                                                    applied_list_content_state_,
+                                                    applied_list_usage_,
+                                                    applied_list_fingerprints_,
+                                                    resolved_internal_vpn_servers_,
+                                                    resolved_internal_vpn_service_targets_,
+                                                    applied_native_vpn_direct_egress_snat_selectors_,
+                                                    committed_meta_udp443_fwmark_,
+                                                    committed_meta_udp443_owned_mask_},
+                                                state.core_publication,
+                                                RuntimeResolverPublicationTarget{
+                                                    resolver_generation_snapshot_,
+                                                    resolver_sync_,
+                                                    resolver_config_hash_actual_retry_attempt_,
+                                                    apply_started_ts_},
+                                                internal_vpn_lkg_store_,
+                                                state.publication_tail},
+                                            *prepared_publication,
+                                            [this]() {
+                                                runtime_state_store_
+                                                    .set_routing_runtime_active(
+                                                        true);
+                                                if (runtime_state_machine_.state() !=
+                                                    RuntimeState::running) {
+                                                    transition_runtime_or_throw(
+                                                        RuntimeState::running,
+                                                        "cold-boot publication complete");
+                                                }
+                                            },
+                                            [this]() {
+                                                runtime_state_store_
+                                                    .set_routing_runtime_active(
+                                                        false);
+                                                if (runtime_state_machine_.state() ==
+                                                    RuntimeState::running) {
+                                                    transition_runtime_or_throw(
+                                                        RuntimeState::broken,
+                                                        "cold-boot publication rollback");
+                                                }
+                                            },
+                                            [this]() {
+                                                publish_runtime_state();
+                                            });
                                 });
                         publication_failed =
                             !publication_admitted ||
@@ -14063,23 +14033,33 @@ void Daemon::drain_runtime_firewall_terminal(
                             const auto& cleanup =
                                 worker_result
                                     ->post_commit_owned_conntrack_cleanup;
-                            if (cleanup.attempted &&
-                                cleanup.snapshot.has_value()) {
-                                if (cleanup.summary.command_unavailable) {
-                                    warn_conntrack_unavailable_once();
-                                }
-                                auto remaining =
-                                    cleanup.summary.remaining_marks;
-                                if (cleanup.failure.failed() &&
-                                    remaining.empty()) {
-                                    remaining =
-                                        ordered_owned_conntrack_marks(
-                                            *cleanup.snapshot);
-                                }
-                                if (!cleanup.summary.command_unavailable &&
-                                    !remaining.empty()) {
+                            RuntimeFirewallPostSuccessConntrackFacts facts;
+                            facts.attempted = cleanup.attempted;
+                            facts.snapshot = cleanup.snapshot.has_value()
+                                ? &*cleanup.snapshot
+                                : nullptr;
+                            facts.command_unavailable =
+                                cleanup.summary.command_unavailable;
+                            facts.cleanup_failed = cleanup.failure.failed();
+                            facts.remaining_marks =
+                                &cleanup.summary.remaining_marks;
+                            const auto cleanup_tail =
+                                plan_runtime_firewall_post_success_conntrack(
+                                    facts);
+                            if (cleanup_tail
+                                    .should_warn_command_unavailable()) {
+                                warn_conntrack_unavailable_once();
+                            }
+                            if (cleanup_tail.should_prepare_retry()) {
+                                auto remaining = cleanup_tail.retry_marks ==
+                                        RuntimeFirewallPostSuccessConntrackMarks::
+                                            reported_remaining
+                                    ? *cleanup_tail.reported_remaining_marks
+                                    : ordered_owned_conntrack_marks(
+                                          *cleanup_tail.retry_snapshot);
+                                if (!remaining.empty()) {
                                     schedule_owned_conntrack_cleanup_retry(
-                                        *cleanup.snapshot,
+                                        *cleanup_tail.retry_snapshot,
                                         std::move(remaining));
                                 }
                             }
@@ -14089,8 +14069,8 @@ void Daemon::drain_runtime_firewall_terminal(
                     state.publication_tail
                         .mark_start_post_success_finished();
                 }
-            } else if (successor_pending &&
-                       !context->worker_commit_ambiguous) {
+            } else if (terminal_tail.dispatch ==
+                       RuntimeFirewallTerminalTailDispatch::start_pending) {
                 try {
                     Logger::instance().info(
                         "Runtime start firewall attempt remains pending: {}",
@@ -14114,7 +14094,9 @@ void Daemon::drain_runtime_firewall_terminal(
                     }
                 }
             }
-        } else if (context->worker_succeeded) {
+        } else if (terminal_tail.dispatch ==
+                   RuntimeFirewallTerminalTailDispatch::
+                       background_success) {
             release_urltest_firewall_recovery(current_generation);
             if (resolver_after_firewall_gate_.release(
                     current_generation)) {

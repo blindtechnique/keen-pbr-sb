@@ -766,7 +766,7 @@ private:
         std::uint64_t expected_runtime_generation,
         std::uint64_t cleanup_epoch,
         std::size_t attempt) noexcept;
-    void report_meta_udp443_degraded(const std::string& detail) noexcept;
+    void report_meta_udp443_degraded(std::string_view detail) noexcept;
     void normalize_urltest_selections();
     void register_urltest_outbounds();
     bool handle_urltest_selection_change(
