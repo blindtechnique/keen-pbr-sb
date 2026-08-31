@@ -492,7 +492,7 @@ set(SOURCES
   src/lists/ipset.cpp
   src/lists/kernel_set_tester.cpp
   src/lists/list_shrink_guard.cpp
-&
+  src/lists/list_streamer.cpp
   src/lists/list_set_usage.cpp
   src/lists/srs_decoder.cpp
   src/cache/cache_manager.cpp

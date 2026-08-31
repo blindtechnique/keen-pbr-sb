@@ -174,7 +174,7 @@ add_executable(keen-pbr-tests
   test_probe_candidates.cpp
   test_host_coverage.cpp
   test_entry_review.cpp
-&
+  test_log_follower.cpp
   test_list_shrink_guard.cpp
   test_tunnel_candidate_scan.cpp
   test_scan_tunnel_candidates.cpp
@@ -276,7 +276,7 @@ add_executable(keen-pbr-tests
   ../src/lists/ipset.cpp
   ../src/lists/kernel_set_tester.cpp
   ../src/lists/list_shrink_guard.cpp
-&
+  ../src/lists/list_streamer.cpp
   ../src/lists/list_set_usage.cpp
   ../src/lists/srs_decoder.cpp
   ../src/config/list_parser.cpp
@@ -407,7 +407,7 @@ add_executable(keen-pbr-cache-generation-tests
   ../src/http/http_transport.cpp
   ../src/http/curl_runtime.cpp
   ../src/lists/list_shrink_guard.cpp
-&
+  ../src/lists/list_streamer.cpp
   ../src/lists/srs_decoder.cpp
   ../src/log/logger.cpp
   ../src/log/trace.cpp
@@ -1133,7 +1133,7 @@ add_executable(keen-pbr-firewall-it
   ../src/lists/kernel_set_tester.cpp
   ../src/lists/list_set_usage.cpp
   ../src/lists/list_shrink_guard.cpp
-&
+  ../src/lists/list_streamer.cpp
   ../src/lists/srs_decoder.cpp
   ../src/log/logger.cpp
   ../src/log/trace.cpp
