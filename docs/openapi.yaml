@@ -521,6 +521,95 @@ paths:
               schema:
                 $ref: "#/components/schemas/RuntimeOutboundsResponse"
 
+  /api/tunnel-probe:
+    get:
+      summary: What the nfqws2-to-tunnel automation last did
+      description: >
+        Returns the outcome of the most recent pass of the automation that
+        routes hosts nfqws2 could not fix through a tunnel.
+
+
+        This exists because the pass is otherwise only visible in the daemon
+        log, and routers run at `warn` where its ordinary lines do not appear.
+        Two things in particular are worth showing: the hosts it routed, which
+        is a change to where traffic goes and is not reversible in practice,
+        and the hosts the registry check held back, which are the ones a person
+        may want to decide about by hand.
+
+
+        `ever_ran` is false before the first pass of this daemon run - including
+        while the automation is switched off, which `refusal` then explains.
+      operationId: getTunnelProbeState
+      responses:
+        "200":
+          description: The most recent pass, or the reason there was none
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TunnelProbeStateResponse"
+
+  /api/tunnel-probe/hosts:
+    get:
+      summary: Hosts the automation routed, and hosts it may never route
+      description: >
+        Returns the contents of the two files the nfqws2-to-tunnel automation
+        owns: the list it appends confirmed hosts to, and the never-list of
+        hosts it must leave alone whatever the evidence says.
+
+
+        The point of showing them is control. A host is moved on the strength
+        of a measurement, and a measurement can be right about the network and
+        wrong about what the operator wants; this is where that is seen and
+        undone.
+      operationId: getTunnelProbeHosts
+      responses:
+        "200":
+          description: The routed and never-routed hosts
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TunnelProbeHostsResponse"
+    post:
+      summary: Remove a host from the automation's list, or bar it for good
+      description: >
+        `remove` takes the host out of the routed list. The automation may find
+        it again later, which is right when it was routed for a reason that has
+        since changed.
+
+
+        `exclude` takes it out and writes it to the never-list: it will not be
+        probed and will not be routed again, whatever a later probe or the
+        registry says. This is the undo for a host that should not have been
+        moved, and it is meant to be one click.
+
+
+        `restore` takes a host off the never-list, making it an ordinary
+        candidate again.
+
+
+        Every action re-applies the firewall, because a list only takes effect
+        when it is read.
+      operationId: updateTunnelProbeHost
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TunnelProbeHostRequest"
+      responses:
+        "200":
+          description: The lists as they are after the change
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TunnelProbeHostsResponse"
+        "400":
+          description: The host or action was not usable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/runtime/interfaces:
     get:
       summary: Live system interface inventory
@@ -6211,6 +6300,211 @@ components:
           items:
             $ref: "#/components/schemas/PlainDnsTemplate"
 
+    TunnelProbeHostsResponse:
+      type: object
+      additionalProperties: false
+      required: [available, routed, excluded]
+      description: >
+        The two files the nfqws2-to-tunnel automation owns.
+      properties:
+        available:
+          type: boolean
+          description: >
+            False when the automation is not configured well enough to have
+            files at all - switched off, or naming a list without a `file`.
+            The lists are then empty because there is nowhere to read them
+            from, which is not the same as their being empty.
+        routed:
+          type: array
+          items:
+            type: string
+          description: Hosts the automation has moved into the tunnel.
+        excluded:
+          type: array
+          items:
+            type: string
+          description: >
+            Hosts it may never route. Checked before the probe and before the
+            registry: this is a decision a person made, and no later evidence
+            overturns it.
+        list_name:
+          type: string
+          description: The list that carries the routed hosts.
+        list_file:
+          type: string
+          description: The file the routed hosts are appended to.
+        exclude_file:
+          type: string
+          description: The file the never-list is kept in.
+
+    TunnelProbeHostRequest:
+      type: object
+      additionalProperties: false
+      required: [host, action]
+      properties:
+        host:
+          type: string
+          minLength: 1
+          maxLength: 253
+          description: The host to act on, exactly as it appears in the list.
+        action:
+          type: string
+          enum: [remove, exclude, restore]
+          description: >
+            `remove` drops it from the routed list and allows it to be found
+            again; `exclude` also writes it to the never-list; `restore` takes
+            it off the never-list.
+
+    TunnelProbeStateResponse:
+      type: object
+      additionalProperties: false
+      required: [ever_ran]
+      description: >
+        The most recent pass of the nfqws2-to-tunnel automation.
+      properties:
+        ever_ran:
+          type: boolean
+          description: >
+            Whether a pass has completed since this daemon started. False also
+            covers the ordinary case of the automation being switched off, and
+            `refusal` then says so.
+        refusal:
+          type: string
+          description: >
+            Why the last attempt did nothing, in one sentence. Absent when the
+            pass ran.
+        summary:
+          type: string
+          description: >
+            The same sentence the daemon logs: what was read, probed, routed
+            and held back.
+        probed:
+          type: integer
+          minimum: 0
+          description: Hosts measured in that pass. Two requests each.
+        remaining:
+          type: integer
+          minimum: 0
+          description: >
+            Hosts left in the queue for the next pass. Zero means the automation
+            has worked through everything nfqws2 has complained about so far.
+        routed:
+          type: array
+          items:
+            type: string
+          description: >
+            Hosts that pass added to the list, and so moved into the tunnel.
+            Not reversible in practice: nfqws2's rules are bound to the
+            provider interface, so a routed host stops producing the evidence
+            that put it there.
+        held_back:
+          type: array
+          items:
+            type: string
+          description: >
+            Hosts a tunnel would fix that the registry check did not confirm.
+            The probe proves the connection failed here and worked through the
+            tunnel; it cannot tell deliberate blocking from a host that refuses
+            this network for its own reasons. These are the ones worth a person
+            deciding about.
+        finished_at_unix_ms:
+          type: integer
+          format: int64
+          minimum: 0
+          description: When that pass finished, in milliseconds since the epoch.
+
+    TunnelProbeConfig:
+      type: object
+      additionalProperties: false
+      description: >
+        The automation that finds hosts nfqws2 keeps failing on and routes them
+        through a tunnel instead.
+
+
+        Each pass reads what nfqws2 recorded in its auto-hostlist debug log,
+        picks hosts that are not already covered, and measures each one twice:
+        once pinned to the provider's own device and once pinned to the
+        tunnel's. Only a host that answers through the tunnel and not directly
+        is a candidate; every other verdict leaves traffic exactly where it is.
+
+
+        Moving a host is not reversible in practice. nfqws2's rules are bound
+        to the provider interface, so once a host is routed through a tunnel it
+        disappears from nfqws2's view and stops producing the evidence that put
+        it there. That is why this is off by default, why the registry check is
+        on by default, and why confirmed hosts are appended to a file this
+        automation owns rather than written into the operator's configuration.
+      properties:
+        enabled:
+          type: boolean
+          default: false
+          description: >
+            Whether the periodic pass runs. Off by default: a pass sends real
+            requests to real hosts and can change what a list routes.
+        outbound:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: >
+            The tunnel to measure against, and the one confirmed hosts end up
+            using. It must name an outbound that has an interface: each probe
+            leg is pinned to a device, and a mark alone would measure whatever
+            routing happened to pick.
+          example: "tr_9786265a"
+        list:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: >
+            The list that receives confirmed hosts. It must be a list with a
+            `file`, because that file is what this automation appends to. A
+            list without one is refused rather than silently ignored.
+
+
+            Create the file before naming it in the list. A list whose `file`
+            does not exist makes list streaming throw, and that surfaces inside
+            the firewall apply - so a missing file does not disable one list,
+            it stops routing from being applied at all. An empty file is
+            enough; a list may carry `file` and inline `domains` at the same
+            time, and all of its sources are read together.
+          example: "found_blocked"
+        interval_ms:
+          type: integer
+          minimum: 60000
+          maximum: 86400000
+          default: 60000
+          description: >
+            How often to look. The trigger is nfqws2 itself: a host enters the
+            queue when nfqws2 records that it failed on it, so a minute is the
+            longest anything waits.
+
+
+            Looking is cheap. A pass reads only what was appended to nfqws2's
+            log since the last one, and when nothing was appended and the queue
+            is empty it ends there, having probed nothing. What a pass costs is
+            bounded by `max_probes_per_pass`, and only while there is a backlog
+            to work through; once the queue is drained the cost falls to
+            reading a few small files.
+        max_probes_per_pass:
+          type: integer
+          minimum: 1
+          maximum: 64
+          default: 8
+          description: >
+            How many hosts one pass measures. Two requests each, so this bounds
+            the traffic a pass generates; the rest of the queue waits for the
+            next one.
+        require_registry_confirmation:
+          type: boolean
+          default: true
+          description: >
+            Whether a host must also be listed as blocked by the registry
+            check before it is acted on. A differential probe proves that this
+            connection failed here and worked through the tunnel; it cannot
+            tell deliberate blocking from a host that simply refuses this
+            network. On real traffic this gate is what keeps advertising
+            endpoints out of the result.
+
     ConfigObject:
       type: object
       description: keen-pbr configuration file.
@@ -6242,6 +6536,8 @@ components:
           $ref: "#/components/schemas/ListRefreshConfig"
         ui_preferences:
           $ref: "#/components/schemas/UiPreferencesConfig"
+        tunnel_probe:
+          $ref: "#/components/schemas/TunnelProbeConfig"
       example:
         daemon:
           pid_file: "/var/run/keen-pbr.pid"

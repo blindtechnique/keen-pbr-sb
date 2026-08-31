@@ -1956,11 +1956,10 @@ std::string IptablesFirewall::build_ipset_create_line(const PendingSet& ps) {
     return line + " -exist\n";
 }
 
-bool IptablesFirewall::dynamic_set_schema_compatible(
-    const std::string& xml,
-    const PendingSet& expected) {
+std::optional<std::map<std::string, std::optional<IptablesFirewall::LiveSetSchema>>>
+IptablesFirewall::parse_live_set_schemas(const std::string& xml) {
     if (xml.empty() || xml.find('\0') != std::string::npos) {
-        return false;
+        return std::nullopt;
     }
 
     std::vector<char> buffer(xml.begin(), xml.end());
@@ -1971,92 +1970,127 @@ bool IptablesFirewall::dynamic_set_schema_compatible(
             rapidxml::parse_trim_whitespace |
             rapidxml::parse_validate_closing_tags>(buffer.data());
     } catch (const rapidxml::parse_error&) {
-        return false;
+        return std::nullopt;
     }
 
     auto* root = document.first_node("ipsets");
     if (root == nullptr || document.first_node() != root ||
         root->next_sibling() != nullptr) {
-        return false;
+        return std::nullopt;
     }
-    auto* set = root->first_node("ipset");
-    if (set == nullptr || set->next_sibling("ipset") != nullptr) {
-        return false;
-    }
+
+    const auto read_u32 = [](const rapidxml::xml_node<>* node,
+                             uint32_t& out) -> bool {
+        const char* begin = node->value();
+        const char* end = begin + node->value_size();
+        const auto parsed = std::from_chars(begin, end, out);
+        return parsed.ec == std::errc{} && parsed.ptr == end;
+    };
+
+    std::map<std::string, std::optional<LiveSetSchema>> schemas;
     for (auto* child = root->first_node(); child != nullptr;
          child = child->next_sibling()) {
-        if (child->type() == rapidxml::node_element && child != set) {
-            return false;
+        if (child->type() != rapidxml::node_element) {
+            continue;
+        }
+        // Anything that is not a set makes this a document we do not
+        // recognise. This one is still fatal: it is about the shape of the
+        // report, not about one set in it.
+        if (std::string_view(child->name(), child->name_size()) != "ipset") {
+            return std::nullopt;
+        }
+
+        // Without a name there is nothing to file the entry under, so this
+        // stays fatal too.
+        auto* name = child->first_attribute("name");
+        if (name == nullptr || child->last_attribute("name") != name) {
+            return std::nullopt;
+        }
+        std::string set_name(name->value(), name->value_size());
+
+        // From here on, an unreadable set is recorded as unreadable rather
+        // than fatal. Every set on the box is in this report and most are not
+        // ours: hash:mac sets carry no <family>, and refusing the document
+        // over one of the firmware's cost an apply its firewall COMMIT.
+        const auto unreadable = [&]() -> bool {
+            return !schemas.emplace(set_name, std::nullopt).second;
+        };
+
+        auto* type = child->first_node("type");
+        auto* header = child->first_node("header");
+        if (type == nullptr || header == nullptr ||
+            child->last_node("type") != type ||
+            child->last_node("header") != header) {
+            if (unreadable()) return std::nullopt;
+            continue;
+        }
+
+        auto* family = header->first_node("family");
+        auto* timeout_node = header->first_node("timeout");
+        auto* hashsize_node = header->first_node("hashsize");
+        auto* maxelem_node = header->first_node("maxelem");
+        if (family == nullptr || header->last_node("family") != family ||
+            hashsize_node == nullptr ||
+            hashsize_node->next_sibling("hashsize") != nullptr ||
+            maxelem_node == nullptr ||
+            maxelem_node->next_sibling("maxelem") != nullptr ||
+            (timeout_node != nullptr &&
+             header->last_node("timeout") != timeout_node)) {
+            if (unreadable()) return std::nullopt;
+            continue;
+        }
+
+        LiveSetSchema schema;
+        schema.name = set_name;
+        schema.type.assign(type->value(), type->value_size());
+        schema.family.assign(family->value(), family->value_size());
+        if ((timeout_node != nullptr && !read_u32(timeout_node, schema.timeout)) ||
+            !read_u32(hashsize_node, schema.hashsize) ||
+            !read_u32(maxelem_node, schema.maxelem)) {
+            if (unreadable()) return std::nullopt;
+            continue;
+        }
+
+        // Two sets under one name is not something the kernel produces, so it
+        // is something else - and picking either one would be a guess.
+        if (!schemas.emplace(set_name, std::move(schema)).second) {
+            return std::nullopt;
         }
     }
 
-    auto* name = set->first_attribute("name");
-    auto* type = set->first_node("type");
-    auto* header = set->first_node("header");
-    if (name == nullptr || type == nullptr || header == nullptr ||
-        set->last_attribute("name") != name ||
-        set->last_node("type") != type ||
-        set->last_node("header") != header) {
-        return false;
-    }
-    auto* family = header->first_node("family");
-    auto* timeout_node = header->first_node("timeout");
-    auto* hashsize_node = header->first_node("hashsize");
-    auto* maxelem_node = header->first_node("maxelem");
-    if (family == nullptr || header->last_node("family") != family ||
-        hashsize_node == nullptr ||
-        hashsize_node->next_sibling("hashsize") != nullptr ||
-        maxelem_node == nullptr ||
-        maxelem_node->next_sibling("maxelem") != nullptr ||
-        (timeout_node != nullptr &&
-         header->last_node("timeout") != timeout_node)) {
-        return false;
-    }
+    return schemas;
+}
 
-    const std::string_view live_name(name->value(), name->value_size());
-    const std::string_view live_type(type->value(), type->value_size());
-    const std::string_view live_family(
-        family->value(), family->value_size());
-    uint32_t live_timeout = 0;
-    if (timeout_node != nullptr) {
-        const char* begin = timeout_node->value();
-        const char* end = begin + timeout_node->value_size();
-        const auto parsed = std::from_chars(begin, end, live_timeout);
-        if (parsed.ec != std::errc{} || parsed.ptr != end) {
-            return false;
-        }
-    }
-    uint32_t live_hashsize = 0;
-    {
-        const char* begin = hashsize_node->value();
-        const char* end = begin + hashsize_node->value_size();
-        const auto parsed = std::from_chars(begin, end, live_hashsize);
-        if (parsed.ec != std::errc{} || parsed.ptr != end) {
-            return false;
-        }
-    }
-    uint32_t live_maxelem = 0;
-    {
-        const char* begin = maxelem_node->value();
-        const char* end = begin + maxelem_node->value_size();
-        const auto parsed = std::from_chars(begin, end, live_maxelem);
-        if (parsed.ec != std::errc{} || parsed.ptr != end) {
-            return false;
-        }
-    }
+bool IptablesFirewall::live_set_schema_compatible(const LiveSetSchema& live,
+                                                  const PendingSet& expected) {
     const auto requested_hashsize =
         normalize_ipset_hashsize(expected.hashsize.value_or(1024));
     if (!requested_hashsize.has_value() ||
-        live_hashsize < *requested_hashsize ||
-        live_maxelem != expected.maxelem.value_or(65536)) {
+        live.hashsize < *requested_hashsize ||
+        live.maxelem != expected.maxelem.value_or(65536)) {
         return false;
     }
-    return live_name == expected.name &&
-           live_type == (expected.source_udp_peer
-                             ? "hash:ip,port,ip"
-                             : "hash:net") &&
-           live_family == expected.family_str &&
-           live_timeout == expected.timeout;
+    return live.name == expected.name &&
+           live.type == (expected.source_udp_peer ? "hash:ip,port,ip"
+                                                  : "hash:net") &&
+           live.family == expected.family_str &&
+           live.timeout == expected.timeout;
+}
+
+bool IptablesFirewall::dynamic_set_schema_compatible(
+    const std::string& xml,
+    const PendingSet& expected) {
+    const auto schemas = parse_live_set_schemas(xml);
+    // The single-set form kept as it was: a document describing anything other
+    // than exactly this one set was never trusted here, and still is not.
+    if (!schemas.has_value() || schemas->size() != 1U) {
+        return false;
+    }
+    const auto found = schemas->find(expected.name);
+    if (found == schemas->end() || !found->second.has_value()) {
+        return false;
+    }
+    return live_set_schema_compatible(*found->second, expected);
 }
 
 void IptablesFirewall::preflight_dynamic_set_schemas(
@@ -2072,38 +2106,38 @@ void IptablesFirewall::preflight_dynamic_set_schemas(
         return;
     }
 
-    const auto names = safe_exec_capture(
-        {"ipset", "list", "-n"},
+    // One read of every header, rather than a name listing and then one
+    // `ipset list -t <name>` per set. Headers only, so the size follows the
+    // number of sets and not the millions of members they may hold.
+    const auto live = safe_exec_capture(
+        {"ipset", "list", "-t", "-o", "xml"},
         /*suppress_stderr=*/true,
-        /*max_bytes=*/256U * 1024U);
-    if (names.exit_code != 0 || names.truncated || names.timed_out) {
+        /*max_bytes=*/kLiveSetSchemaReadLimit);
+    if (live.exit_code != 0 || live.truncated || live.timed_out) {
         throw FirewallError("failed to inspect dynamic ipset schemas");
     }
-
-    std::set<std::string> live_names;
-    std::istringstream name_lines(names.stdout_output);
-    std::string live_name;
-    while (std::getline(name_lines, live_name)) {
-        if (!live_name.empty()) {
-            live_names.insert(live_name);
-        }
+    const auto schemas = parse_live_set_schemas(live.stdout_output);
+    if (!schemas.has_value()) {
+        throw FirewallError("failed to inspect dynamic ipset schemas");
     }
 
     for (const auto& set : pending_sets_) {
         if (!is_dynamic_set_name(set.name) ||
-            (set.family_str == "inet6" && !effective_ipv6) ||
-            live_names.find(set.name) == live_names.end()) {
+            (set.family_str == "inet6" && !effective_ipv6)) {
             continue;
         }
-        const auto schema = safe_exec_capture(
-            {"ipset", "list", "-t", set.name, "-o", "xml"},
-            /*suppress_stderr=*/true,
-            /*max_bytes=*/256U * 1024U);
-        if (schema.exit_code != 0 || schema.truncated || schema.timed_out) {
-            throw FirewallError(
-                "failed to inspect dynamic ipset schema for " + set.name);
+        const auto found = schemas->find(set.name);
+        // A set that is not live is not a conflict here: this preflight only
+        // refuses to reuse an incompatible one, and creating the missing set is
+        // the apply's job.
+        if (found == schemas->end()) {
+            continue;
         }
-        if (!dynamic_set_schema_compatible(schema.stdout_output, set)) {
+        // Present but unreadable is the old behaviour of a set whose schema
+        // would not parse: refuse it. Tolerance is for somebody else's sets,
+        // not for ours.
+        if (!found->second.has_value() ||
+            !live_set_schema_compatible(*found->second, set)) {
             throw FirewallError(
                 "incompatible existing dynamic ipset schema for " + set.name);
         }
@@ -2112,22 +2146,20 @@ void IptablesFirewall::preflight_dynamic_set_schemas(
 
 void IptablesFirewall::preflight_reused_set_schemas(
     bool effective_ipv6) const {
-    const auto names = safe_exec_capture(
-        {"ipset", "list", "-n"},
+    // Same single read as the dynamic preflight above: names and headers
+    // arrive together, so nothing here needs a second exec per set.
+    const auto live = safe_exec_capture(
+        {"ipset", "list", "-t", "-o", "xml"},
         /*suppress_stderr=*/true,
-        /*max_bytes=*/256U * 1024U);
-    if (names.exit_code != 0 || names.truncated || names.timed_out) {
+        /*max_bytes=*/kLiveSetSchemaReadLimit);
+    if (live.exit_code != 0 || live.truncated || live.timed_out) {
         throw FirewallRulesOnlyError(
             "failed to inspect the live ipset names RulesOnly would reuse");
     }
-
-    std::set<std::string> live_names;
-    std::istringstream name_lines(names.stdout_output);
-    std::string live_name;
-    while (std::getline(name_lines, live_name)) {
-        if (!live_name.empty()) {
-            live_names.insert(live_name);
-        }
+    const auto schemas = parse_live_set_schemas(live.stdout_output);
+    if (!schemas.has_value()) {
+        throw FirewallRulesOnlyError(
+            "failed to inspect the live ipset names RulesOnly would reuse");
     }
 
     // Every rule that names a set must have a matching declaration for its
@@ -2155,20 +2187,13 @@ void IptablesFirewall::preflight_reused_set_schemas(
         if (set.family_str == "inet6" && !effective_ipv6) {
             continue;
         }
-        if (live_names.find(set.name) == live_names.end()) {
+        const auto found = schemas->find(set.name);
+        if (found == schemas->end()) {
             throw FirewallRulesOnlyError(
                 "required reused ipset " + set.name + " is missing");
         }
-        const auto schema = safe_exec_capture(
-            {"ipset", "list", "-t", set.name, "-o", "xml"},
-            /*suppress_stderr=*/true,
-            /*max_bytes=*/256U * 1024U);
-        if (schema.exit_code != 0 || schema.truncated || schema.timed_out) {
-            throw FirewallRulesOnlyError(
-                "failed to inspect the live schema of reused ipset " +
-                set.name);
-        }
-        if (!dynamic_set_schema_compatible(schema.stdout_output, set)) {
+        if (!found->second.has_value() ||
+            !live_set_schema_compatible(*found->second, set)) {
             throw FirewallRulesOnlyError(
                 "required reused ipset " + set.name +
                 " has an incompatible family, type or timeout");
@@ -6853,12 +6878,62 @@ bool IptablesFirewall::is_dynamic_set_name(const std::string& set_name) {
            set_name.rfind("kpbr6d_", 0) == 0;
 }
 
+std::string IptablesFirewall::build_managed_set_teardown_script(
+    const std::string& ipset_save_output,
+    const bool preserve_dynamic_sets) {
+    std::istringstream input(ipset_save_output);
+    std::string verb;
+    std::string name;
+    std::string rest;
+    std::string script;
+    while (input >> verb >> name) {
+        std::getline(input, rest);
+        if (verb != "create") {
+            continue;
+        }
+        const bool managed =
+            name.rfind("kpbr4_", 0) == 0 || name.rfind("kpbr6_", 0) == 0 ||
+            name.rfind("kpbr4s_", 0) == 0 || name.rfind("kpbr6s_", 0) == 0 ||
+            name.rfind("kpbr4S_", 0) == 0 || name.rfind("kpbr6S_", 0) == 0 ||
+            name.rfind("kpbr4d_", 0) == 0 || name.rfind("kpbr6d_", 0) == 0 ||
+            name.rfind("kpbr4m_", 0) == 0 || name.rfind("kpbr6m_", 0) == 0;
+        if (!managed) {
+            continue;
+        }
+        if (preserve_dynamic_sets && is_dynamic_set_name(name)) {
+            continue;
+        }
+        // Flush before destroy for the same reason the per-set path does it:
+        // a set the kernel still holds references to refuses to be destroyed,
+        // and an emptied one leaves nothing behind if the destroy is refused.
+        script += "flush " + name + "\n";
+        script += "destroy " + name + "\n";
+    }
+    return script;
+}
+
 void IptablesFirewall::cleanup_saved_sets(bool preserve_dynamic_sets) {
     const auto result = safe_exec_capture({"ipset", "save"}, /*suppress_stderr=*/true);
     if (result.exit_code != 0) {
         return;
     }
 
+    const auto script =
+        build_managed_set_teardown_script(result.stdout_output,
+                                          preserve_dynamic_sets);
+    if (script.empty()) {
+        return;
+    }
+    if (safe_exec_pipe_stdin({"ipset", "restore", "-exist"}, script, nullptr,
+                             SafeExecFailureLog::Suppressed) == 0) {
+        return;
+    }
+
+    // The batch stops at the first line the kernel refuses, and one refusal is
+    // ordinary here: a set still referenced by a rule somebody else installed
+    // cannot be destroyed yet. The old path issued each command on its own and
+    // ignored every failure, so falling back to it preserves exactly that
+    // tolerance - at the cost of one wasted exec on the uncommon path.
     std::istringstream input(result.stdout_output);
     std::string verb;
     std::string name;

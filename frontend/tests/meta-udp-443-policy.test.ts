@@ -83,7 +83,12 @@ describe("Meta UDP/443 policy", () => {
     expect(
       enTranslation.pages.settings.advanced
         .metaUdp443AndroidBackgroundDescription
-    ).toContain("Sleeping")
+      // Lower case on purpose. The hint used to name Samsung's own menu
+      // items - "Sleeping and Deep sleeping apps" - which is the wording of
+      // one manufacturer, not of Android. It still has to tell the reader
+      // about sleeping-app lists; it no longer has to spell them the way one
+      // vendor does.
+    ).toContain("sleeping")
     expect(
       enTranslation.pages.settings.advanced
         .metaUdp443AndroidBackgroundDescription

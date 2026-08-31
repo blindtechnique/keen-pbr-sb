@@ -28,6 +28,7 @@
 #include "internal_vpn_runtime_resolution.hpp"
 #include "keenetic_dns_refresh_coordinator.hpp"
 #include "../health/interface_probe.hpp"
+#include "../health/tunnel_probe_task.hpp"
 #include "pid_file.hpp"
 #include "../health/url_tester.hpp"
 #include "../keenetic/internal_vpn_ingress_resolver.hpp"
@@ -963,6 +964,14 @@ private:
     void schedule_interface_probe();
     // Weekly refresh of the ready-made list catalogue.
     void schedule_catalog_refresh();
+    // Periodic pass of the "nfqws2 could not fix it, a tunnel can" automation.
+    // Does nothing unless the operator switched it on; the interval and every
+    // other decision belong to the task itself.
+    void schedule_tunnel_probe();
+    // The pass itself, on a worker thread: it is minutes of real requests.
+    // Takes its own copy of the configuration rather than reading one the
+    // event loop may replace underneath it.
+    void run_tunnel_probe_pass(const Config& config) noexcept;
     // Runs a probe round immediately, for the manual refresh button.
     void probe_interfaces_now() noexcept;
     // Starts an already-admitted single-flight round. Completion either
@@ -1504,6 +1513,15 @@ private:
         }};
     std::unique_ptr<Scheduler> scheduler_;
     std::unique_ptr<UrltestManager> urltest_manager_;
+    // Built on the first pass and kept afterwards, so the queue remembers
+    // which hosts it has already answered for.
+    std::unique_ptr<TunnelProbeTask> tunnel_probe_task_;
+    // Guards against a second pass starting while one is still probing: a
+    // pass is minutes of requests, and the timer does not wait for it.
+    std::atomic<bool> tunnel_probe_running_{false};
+    // When the last pass started. Empty until the first one, so switching the
+    // automation on does not mean waiting a full interval to see it work.
+    std::optional<std::chrono::steady_clock::time_point> tunnel_probe_last_pass_;
     RuntimeIncidentLatch urltest_apply_incidents_{3};
     // Event-loop-owned notification latches. Recovery itself is controlled by
     // the existing generation-fenced retry state machines; these latches only

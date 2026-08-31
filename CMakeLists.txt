@@ -491,6 +491,7 @@ set(SOURCES
   src/nfqws/list_match.cpp
   src/lists/ipset.cpp
   src/lists/kernel_set_tester.cpp
+  src/lists/list_shrink_guard.cpp
   src/lists/list_streamer.cpp
   src/lists/list_set_usage.cpp
   src/lists/srs_decoder.cpp
@@ -504,6 +505,16 @@ set(SOURCES
   src/cmd/recover_persistent_state.cpp
   src/cmd/status.cpp
   src/cmd/test_routing.cpp
+  src/cmd/scan_tunnel_candidates.cpp
+  src/health/differential_probe.cpp
+  src/health/probe_candidates.cpp
+  src/health/host_coverage.cpp
+  src/health/log_follower.cpp
+  src/health/nfqws_scan_source.cpp
+  src/health/tunnel_probe_automation.cpp
+  src/health/tunnel_probe_task.cpp
+  src/health/tunnel_probe_report.cpp
+  src/health/tunnel_candidate_scan.cpp
   src/routing/target.cpp
   src/routing/netlink.cpp
   src/routing/interface_monitor.cpp
@@ -544,6 +555,7 @@ set(SOURCES
   src/daemon/pid_file.cpp
   src/daemon/daemon_core.cpp
   src/daemon/daemon_runtime.cpp
+  src/daemon/daemon_tunnel_probe.cpp
   src/daemon/daemon_resolver.cpp
   src/daemon/runtime_resolver_generation_snapshot.cpp
   src/daemon/keenetic_dns_refresh_coordinator.cpp
@@ -608,6 +620,7 @@ if(WITH_API)
     src/api/handler_health_routing.cpp
     src/api/handler_runtime_interfaces.cpp
     src/api/handler_runtime_outbounds.cpp
+    src/api/handler_tunnel_probe.cpp
     src/api/handler_runtime_inventory.cpp
     src/api/handler_diagnostic_tasks.cpp
     src/api/handler_transports.cpp

@@ -101,6 +101,8 @@ const CATEGORY_ORDER = [
   "media",
   "developer",
   "cloud",
+  "cdn",
+  "hosting",
   "gaming",
   "block",
 ]
@@ -537,7 +539,11 @@ export function CatalogPage() {
           {catalogSourceUrl
             ? `${t("pages.catalog.source")} ${catalogSourceUrl}`
             : t("pages.catalog.packagedSource")}
-          {catalogUpdatedAt
+          {/* Только когда каталог действительно откуда-то забирается. У
+              каталога из пакета эта дата — время сборки пакета, а не признак
+              свежести списков: она не отвечает ни на один вопрос, который
+              читатель мог бы задать, и лишь предлагает считать её ответом. */}
+          {catalogUpdatedAt && catalogSourceUrl
             ? ` · ${t("pages.catalog.updatedAt", {
                 date: catalogUpdatedAt,
               })}`

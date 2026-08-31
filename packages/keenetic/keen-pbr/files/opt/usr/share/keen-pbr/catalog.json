@@ -539,7 +539,7 @@
     "id": "akamai",
     "name": "Akamai",
     "iconSlug": "akamai",
-    "category": "cloud",
+    "category": "cdn",
     "origin": "",
     "engines": {
       "dns": {
@@ -660,7 +660,7 @@
     "id": "aws",
     "name": "Amazon AWS",
     "iconSlug": "amazonwebservices",
-    "category": "cloud",
+    "category": "hosting",
     "origin": "",
     "engines": {
       "dns": {
@@ -816,7 +816,7 @@
     "id": "cloudflare",
     "name": "Cloudflare",
     "iconSlug": "cloudflare",
-    "category": "cloud",
+    "category": "cdn",
     "notice": "Список покрывает сайты и сервисы на инфраструктуре Cloudflare (CDN, reverse proxy, Workers). Выбирая его, вы буквально заворачиваете в правило огромную часть интернета — используйте осознанно.",
     "warnings": [
       {
@@ -919,7 +919,7 @@
     "id": "cloudflare-ips",
     "name": "Cloudflare IPs",
     "iconSlug": "cloudflare",
-    "category": "cloud",
+    "category": "cdn",
     "warnings": [
       {
         "code": "broad_traffic_scope",
@@ -953,6 +953,211 @@
           "2a06:98c0::/29",
           "2c0f:f248::/32"
         ]
+      }
+    }
+  },
+  {
+    "id": "fastly",
+    "name": "Fastly",
+    "iconSlug": "fastly",
+    "category": "cdn",
+    "notice": "Fastly раздаёт сайты, API и медиа множества сервисов. Как и у любого CDN, за одним именем стоит большая часть чужого трафика — включайте осознанно.",
+    "origin": "",
+    "engines": {
+      "singbox": {
+        "ruleSets": [
+          {
+            "tag": "geosite-fastly",
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-fastly.srs"
+          }
+        ],
+        "action": "tunnel"
+      }
+    }
+  },
+  {
+    "id": "jsdelivr",
+    "name": "jsDelivr",
+    "iconSlug": "jsdelivr",
+    "category": "cdn",
+    "notice": "Открытый CDN для библиотек и пакетов: сайты подтягивают с него скрипты и стили. Без него страницы часто выглядят сломанными.",
+    "origin": "",
+    "engines": {
+      "singbox": {
+        "ruleSets": [
+          {
+            "tag": "geosite-jsdelivr",
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-jsdelivr.srs"
+          }
+        ],
+        "action": "tunnel"
+      }
+    }
+  },
+  {
+    "id": "cdn77",
+    "name": "CDN77",
+    "iconSlug": "lucide-globe",
+    "category": "cdn",
+    "origin": "",
+    "engines": {
+      "singbox": {
+        "ruleSets": [
+          {
+            "tag": "geosite-cdn77",
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cdn77.srs"
+          }
+        ],
+        "action": "tunnel"
+      }
+    }
+  },
+  {
+    "id": "stackpath",
+    "name": "StackPath",
+    "iconSlug": "lucide-globe",
+    "category": "cdn",
+    "origin": "",
+    "engines": {
+      "singbox": {
+        "ruleSets": [
+          {
+            "tag": "geosite-stackpath",
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-stackpath.srs"
+          }
+        ],
+        "action": "tunnel"
+      }
+    }
+  },
+  {
+    "id": "limelight",
+    "name": "Limelight / Edgio",
+    "iconSlug": "lucide-globe",
+    "category": "cdn",
+    "origin": "",
+    "engines": {
+      "singbox": {
+        "ruleSets": [
+          {
+            "tag": "geosite-limelight",
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-limelight.srs"
+          }
+        ],
+        "action": "tunnel"
+      }
+    }
+  },
+  {
+    "id": "pagecdn",
+    "name": "PageCDN",
+    "iconSlug": "lucide-globe",
+    "category": "cdn",
+    "origin": "",
+    "engines": {
+      "singbox": {
+        "ruleSets": [
+          {
+            "tag": "geosite-pagecdn",
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-pagecdn.srs"
+          }
+        ],
+        "action": "tunnel"
+      }
+    }
+  },
+  {
+    "id": "hetzner",
+    "name": "Hetzner",
+    "iconSlug": "lucide-server",
+    "category": "hosting",
+    "notice": "Сети хостинга, где стоят чужие серверы: сайты, API, панели, self-hosted сервисы. Блокируют такие сети целиком, поэтому список широкий — включайте осознанно.",
+    "origin": "",
+    "engines": {
+      "singbox": {
+        "ruleSets": [
+          {
+            "tag": "geosite-hetzner",
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-hetzner.srs"
+          }
+        ],
+        "action": "tunnel"
+      }
+    }
+  },
+  {
+    "id": "digitalocean",
+    "name": "DigitalOcean",
+    "iconSlug": "digitalocean",
+    "category": "hosting",
+    "notice": "Сети хостинга, где стоят чужие серверы. Список широкий: за одним именем стоит множество не связанных между собой сайтов.",
+    "origin": "",
+    "engines": {
+      "singbox": {
+        "ruleSets": [
+          {
+            "tag": "geosite-digitalocean",
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-digitalocean.srs"
+          }
+        ],
+        "action": "tunnel"
+      }
+    }
+  },
+  {
+    "id": "vultr",
+    "name": "Vultr",
+    "iconSlug": "vultr",
+    "category": "hosting",
+    "notice": "Сети хостинга, где стоят чужие серверы. Список широкий: за одним именем стоит множество не связанных между собой сайтов.",
+    "origin": "",
+    "engines": {
+      "singbox": {
+        "ruleSets": [
+          {
+            "tag": "geosite-vultr",
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-vultr.srs"
+          }
+        ],
+        "action": "tunnel"
+      }
+    }
+  },
+  {
+    "id": "oracle",
+    "name": "Oracle Cloud",
+    "iconSlug": "oracle",
+    "category": "hosting",
+    "notice": "Облако Oracle, включая бесплатные виртуальные машины, на которых часто держат личные сервисы.",
+    "origin": "",
+    "engines": {
+      "singbox": {
+        "ruleSets": [
+          {
+            "tag": "geosite-oracle",
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-oracle.srs"
+          }
+        ],
+        "action": "tunnel"
+      }
+    }
+  },
+  {
+    "id": "azure",
+    "name": "Microsoft Azure",
+    "iconSlug": "microsoftazure",
+    "category": "hosting",
+    "notice": "Облако Microsoft. Отдельно от списка «Microsoft»: тот про сервисы компании, этот — про чужие приложения, размещённые в Azure.",
+    "origin": "",
+    "engines": {
+      "singbox": {
+        "ruleSets": [
+          {
+            "tag": "geosite-azure",
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-azure.srs"
+          }
+        ],
+        "action": "tunnel"
       }
     }
   },

@@ -20,6 +20,7 @@
 
 #include "cmd/recover_persistent_state.hpp"
 #include "cmd/status.hpp"
+#include "cmd/scan_tunnel_candidates.hpp"
 #include "cmd/test_routing.hpp"
 #include "crash/crash_diagnostics.hpp"
 #include "log/file_sink.hpp"
@@ -122,12 +123,30 @@ struct CliOptions {
     bool download_reload{false};
     bool resolver_config_hash{false};
     bool run_status{false};
+    bool run_scan_tunnel_candidates{false};
+    std::string scan_tunnel_outbound;
     bool run_test_routing{false};
     std::string test_routing_target;
     bool recover_persistent_state{false};
     bool recovery_incompatible_option{false};
     bool show_help{false};
     bool show_version{false};
+
+    // Every command flag has to be named here or the binary prints its usage
+    // and exits instead of running the command it just parsed. That failure
+    // looks exactly like a typo at the prompt, so it survives a green suite,
+    // a passing build and an install, and shows itself only when somebody
+    // tries the new command on a router - which is where it was found.
+    //
+    // Kept next to the flags rather than beside the check for that reason: it
+    // is the declaration that has to be updated, and this is where a new one
+    // gets added.
+    bool any_command_selected() const {
+        return download_lists || generate_resolver_config ||
+               resolver_config_hash || run_service || run_status ||
+               run_test_routing || run_scan_tunnel_candidates ||
+               recover_persistent_state;
+    }
 };
 
 void print_usage(const char* argv0) {
@@ -154,7 +173,8 @@ void print_usage(const char* argv0) {
               << "                                     Resolvers: dnsmasq (auto), dnsmasq-ipset, dnsmasq-nftset\n"
               << "  resolver-config-hash               Print MD5 hash of domain-to-ipset mapping and exit\n"
               << "  recover-persistent-state           Recover an interrupted persistent transaction and exit\n"
-              << "  test-routing <ip-or-domain>        Test expected vs actual routing for an IP or domain\n";
+              << "  test-routing <ip-or-domain>        Test expected vs actual routing for an IP or domain\n"
+              << "  scan-tunnel-candidates <outbound>  Probe what nfqws2 failed on; report what this tunnel would fix\n";
 }
 
 CliOptions parse_args(int argc, char* argv[]) {
@@ -228,6 +248,14 @@ CliOptions parse_args(int argc, char* argv[]) {
             opts.resolver_config_hash = true;
         } else if (std::strcmp(argv[i], "recover-persistent-state") == 0) {
             opts.recover_persistent_state = true;
+        } else if (std::strcmp(argv[i], "scan-tunnel-candidates") == 0) {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: scan-tunnel-candidates requires an outbound tag\n";
+                print_usage(argv[0]);
+                std::exit(1);
+            }
+            opts.scan_tunnel_outbound = argv[++i];
+            opts.run_scan_tunnel_candidates = true;
         } else if (std::strcmp(argv[i], "test-routing") == 0) {
             if (i + 1 >= argc) {
                 std::cerr << "Error: test-routing requires an IP address or domain argument\n";
@@ -343,10 +371,7 @@ int main(int argc, char* argv[]) {
             return keen_pbr3::run_recover_persistent_state_command();
         }
 
-        if (!opts.download_lists && !opts.generate_resolver_config &&
-            !opts.resolver_config_hash && !opts.run_service && !opts.run_status &&
-            !opts.run_test_routing &&
-            !opts.recover_persistent_state) {
+        if (!opts.any_command_selected()) {
             print_usage(argv[0]);
             return 0;
         }
@@ -510,6 +535,14 @@ int main(int argc, char* argv[]) {
         std::string json_str = read_file(opts.config_path);
         keen_pbr3::Config config = keen_pbr3::parse_config(json_str);
         keen_pbr3::validate_config(config);
+        // Reads the configuration and probes; it asks the daemon for nothing
+        // and changes nothing, so it works whether or not the service is up.
+        if (opts.run_scan_tunnel_candidates) {
+            keen_pbr3::ScanTunnelCandidatesOptions scan_opts;
+            scan_opts.outbound_tag = opts.scan_tunnel_outbound;
+            return keen_pbr3::run_scan_tunnel_candidates(config, scan_opts);
+        }
+
         if (opts.run_service && opts.has_pid_file_override) {
             if (!config.daemon.has_value()) {
                 config.daemon = keen_pbr3::DaemonConfig{};

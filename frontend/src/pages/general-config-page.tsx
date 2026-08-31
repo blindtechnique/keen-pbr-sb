@@ -14,6 +14,7 @@ import { usePostConfigMutation } from "@/api/mutations"
 import { queryKeys } from "@/api/query-keys"
 import {
   useGetConfig,
+  useGetTunnelProbeState,
   useGetNdmsInterfaceInventory,
   useGetNdmsVpnServerServices,
   useGetRuntimeInterfaces,
@@ -32,6 +33,8 @@ import { BottomActionBar } from "@/components/shared/bottom-action-bar"
 import { HelpHint } from "@/components/shared/help-hint"
 import { ListRefreshRouteFields } from "@/components/lists/list-refresh-route-fields"
 import { InterfaceMultiSelectList } from "@/components/shared/interface-picker"
+import { OutboundSelect } from "@/components/shared/outbound-select"
+import { TunnelProbeHosts } from "@/components/shared/tunnel-probe-hosts"
 import { ListIdentityLabel } from "@/components/shared/list-identity-label"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { MultiSelectList } from "@/components/shared/multi-select-list"
@@ -86,7 +89,11 @@ import {
   type InternalVpnServerRuntimeState,
 } from "@/lib/internal-vpn-server-policy"
 import { reconcileInternalVpnServiceOverrides } from "@/lib/internal-vpn-service-policy"
-import { getListSearchText, sortListIdsByDisplayName } from "@/lib/list-display"
+import {
+  getListDisplayName,
+  getListSearchText,
+  sortListIdsByDisplayName,
+} from "@/lib/list-display"
 import {
   getGlobalListRefreshRouteChain,
   getListRefreshDetourMode,
@@ -106,6 +113,7 @@ import {
   type MetaUdp443Policy,
   withMetaUdp443Policy,
 } from "@/lib/meta-udp-443-policy"
+import { provisionTunnelProbe } from "@/lib/tunnel-probe-provisioning"
 
 type StrictEnforcementOption = "automatic" | "enabled" | "disabled"
 
@@ -136,6 +144,9 @@ type SettingsDraft = {
   fwmarkStart: string
   fwmarkMask: string
   tableStart: string
+  tunnelProbeEnabled: boolean
+  tunnelProbeOutbound: string
+  tunnelProbeList: string
 }
 
 const fallbackDraft: SettingsDraft = {
@@ -160,6 +171,11 @@ const fallbackDraft: SettingsDraft = {
   fwmarkStart: "0x00010000",
   fwmarkMask: "0xffff0000",
   tableStart: "150",
+  // Off, and naming nothing. Switching this on moves traffic on the strength
+  // of a measurement, and the move is not reversible in practice.
+  tunnelProbeEnabled: false,
+  tunnelProbeOutbound: "",
+  tunnelProbeList: "",
 }
 
 const SETTINGS_FIELD_NAMES = {
@@ -188,10 +204,17 @@ const SETTINGS_FIELD_NAMES = {
   fwmarkStart: "fwmarkStart",
   fwmarkMask: "fwmarkMask",
   tableStart: "tableStart",
+  tunnelProbeEnabled: "tunnelProbeEnabled",
+  tunnelProbeOutbound: "tunnelProbeOutbound",
+  tunnelProbeList: "tunnelProbeList",
 } as const
 
 type SettingsFieldName =
   (typeof SETTINGS_FIELD_NAMES)[keyof typeof SETTINGS_FIELD_NAMES]
+
+// Radix Select не принимает пустое значение, а «завести новый список» это
+// именно пустое поле в конфигурации. Отсюда метка-заполнитель.
+const TUNNEL_PROBE_LIST_AUTO = "__auto__"
 
 const SETTINGS_TAB_VALUES = [
   "general",
@@ -212,6 +235,55 @@ const INITIAL_DEFERRED_SETTINGS_STATE: Record<
   auth: CLEAN_SETTINGS_SECTION_STATE,
   remoteAccess: CLEAN_SETTINGS_SECTION_STATE,
   logging: CLEAN_SETTINGS_SECTION_STATE,
+}
+
+// Что автоматика сделала в последний раз.
+//
+// Она пишет это и в лог, но роутер живёт на уровне `warn`, где обычный проход
+// не виден вовсе. Показывать стоит две вещи: что было уведено в туннель — это
+// изменение маршрута и на практике необратимое, — и кого придержал реестр:
+// именно про них человек может захотеть решить сам.
+function TunnelProbeLastPass() {
+  const { t } = useTranslation()
+  const query = useGetTunnelProbeState()
+  const state = query.data?.status === 200 ? query.data.data : undefined
+
+  if (!state) return null
+
+  const routed = state.routed ?? []
+  const heldBack = state.held_back ?? []
+
+  return (
+    <div className="space-y-1 text-[13px] text-muted-foreground">
+      {state.refusal ? (
+        <p>
+          {t("pages.settings.general.tunnelProbeRefused", {
+            reason: state.refusal,
+          })}
+        </p>
+      ) : state.ever_ran ? (
+        <p>{state.summary}</p>
+      ) : (
+        <p>{t("pages.settings.general.tunnelProbeNoPassYet")}</p>
+      )}
+
+      {routed.length > 0 ? (
+        <p className="text-foreground">
+          {t("pages.settings.general.tunnelProbeRouted", {
+            hosts: routed.join(", "),
+          })}
+        </p>
+      ) : null}
+
+      {heldBack.length > 0 ? (
+        <p>
+          {t("pages.settings.general.tunnelProbeHeldBack", {
+            hosts: heldBack.join(", "),
+          })}
+        </p>
+      ) : null}
+    </div>
+  )
 }
 
 export function GeneralConfigPage() {
@@ -254,6 +326,32 @@ function LoadedGeneralConfigPage({
 }: LoadedGeneralConfigPageProps) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
+  // Туннели, против которых можно измерять: только те, у кого есть интерфейс.
+  // Каждая нога пробы привязывается к устройству, и исходящее с одной лишь
+  // меткой измеряло бы то, что выберет маршрутизация, — то есть ничего.
+  const tunnelProbeOutbounds = useMemo(
+    () =>
+      (loadedConfig.outbounds ?? []).filter(
+        (outbound) =>
+          typeof outbound.interface === "string" && outbound.interface !== ""
+      ),
+    [loadedConfig.outbounds]
+  )
+  // Списки, куда автоматика может складывать найденное, по псевдонимам.
+  // Первым идёт «завести новый» — обычный случай при включении.
+  const tunnelProbeListItems = useMemo(() => {
+    const lists = loadedConfig.lists ?? {}
+    return [
+      {
+        value: TUNNEL_PROBE_LIST_AUTO,
+        label: t("pages.settings.general.tunnelProbeListAuto"),
+      },
+      ...sortListIdsByDisplayName(Object.keys(lists), lists).map((id) => ({
+        value: id,
+        label: getListDisplayName(id, lists),
+      })),
+    ]
+  }, [loadedConfig.lists, t])
   const ndmsInventoryQuery = useGetNdmsInterfaceInventory()
   const ndmsVpnServicesQuery = useGetNdmsVpnServerServices()
   const runtimeInterfacesQuery = useGetRuntimeInterfaces()
@@ -802,6 +900,175 @@ function LoadedGeneralConfigPage({
                   </Field>
                 )}
               </form.Field>
+
+              {/* Автоматика «nfqws2 не справился — уводим в туннель».
+                  Выключена по умолчанию, и это не осторожность ради
+                  осторожности: правила nfqws2 привязаны к провайдерскому
+                  интерфейсу, поэтому уведённый хост исчезает из его поля
+                  зрения и перестаёт давать то свидетельство, по которому его
+                  туда отправили. Обратной дороги на практике нет. */}
+              <form.Field name={SETTINGS_FIELD_NAMES.tunnelProbeEnabled}>
+                {(field) => (
+                  <Field
+                    width="short"
+                    className={activeTab === "general" ? undefined : "hidden"}
+                  >
+                    <FieldContent>
+                      <div className="flex items-center space-x-3">
+                        <Checkbox
+                          checked={field.state.value}
+                          id="tunnel-probe-enabled"
+                          onCheckedChange={(checked) =>
+                            field.handleChange(checked === true)
+                          }
+                        />
+                        <FieldLabel
+                          className="cursor-pointer flex-col items-start gap-0"
+                          htmlFor="tunnel-probe-enabled"
+                        >
+                          {t("pages.settings.general.tunnelProbeEnabledLabel")}
+                        </FieldLabel>
+                        <HelpHint
+                          text={t("pages.settings.general.tunnelProbeHelp")}
+                        />
+                      </div>
+                      <FieldHint
+                        description={t(
+                          "pages.settings.general.tunnelProbeEnabledHint"
+                        )}
+                      />
+                    </FieldContent>
+                  </Field>
+                )}
+              </form.Field>
+
+              <form.Field name={SETTINGS_FIELD_NAMES.tunnelProbeOutbound}>
+                {(field) => {
+                  const error = getFirstFieldError(field.state.meta.errors)
+
+                  return (
+                    <Field
+                      width="short"
+                      invalid={Boolean(error)}
+                      className={activeTab === "general" ? undefined : "hidden"}
+                    >
+                      <FieldLabel>
+                        {t("pages.settings.general.tunnelProbeOutboundLabel")}
+                      </FieldLabel>
+                      <FieldContent>
+                        {/* Выбор, а не ввод технического тега: у туннелей есть
+                            псевдонимы, и человек знает их по ним. Показываются
+                            только исходящие с интерфейсом — нога пробы
+                            привязывается к устройству, и исходящее с одной
+                            лишь меткой её не понесёт. */}
+                        <OutboundSelect
+                          allowEmpty
+                          ariaInvalid={Boolean(error)}
+                          emptyLabel={t(
+                            "pages.settings.general.tunnelProbeOutboundAuto"
+                          )}
+                          onValueChange={(value) => field.handleChange(value)}
+                          outbounds={tunnelProbeOutbounds}
+                          value={field.state.value}
+                        />
+                        <FieldHint
+                          description={t(
+                            "pages.settings.general.tunnelProbeOutboundHint"
+                          )}
+                          error={error ?? null}
+                        />
+                      </FieldContent>
+                    </Field>
+                  )
+                }}
+              </form.Field>
+
+              <form.Field name={SETTINGS_FIELD_NAMES.tunnelProbeList}>
+                {(field) => {
+                  const error = getFirstFieldError(field.state.meta.errors)
+
+                  return (
+                    <Field
+                      width="short"
+                      invalid={Boolean(error)}
+                      className={activeTab === "general" ? undefined : "hidden"}
+                    >
+                      <FieldLabel htmlFor="tunnel-probe-list">
+                        {t("pages.settings.general.tunnelProbeListLabel")}
+                      </FieldLabel>
+                      <FieldContent>
+                        {/* Выбор, а не ввод технического ключа: у списков есть
+                            псевдонимы, и человек знает их по ним. Пустое
+                            значение означает «завести новый», и это обычный
+                            случай, поэтому оно первое. */}
+                        <Select
+                          items={tunnelProbeListItems}
+                          onValueChange={(value) =>
+                            field.handleChange(
+                              !value || value === TUNNEL_PROBE_LIST_AUTO
+                                ? ""
+                                : value
+                            )
+                          }
+                          value={field.state.value || TUNNEL_PROBE_LIST_AUTO}
+                        >
+                          <SelectTrigger aria-invalid={Boolean(error)}>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectGroup>
+                              {tunnelProbeListItems.map((item) => (
+                                <SelectItem key={item.value} value={item.value}>
+                                  {item.label}
+                                </SelectItem>
+                              ))}
+                            </SelectGroup>
+                          </SelectContent>
+                        </Select>
+                        <FieldHint
+                          description={t(
+                            "pages.settings.general.tunnelProbeListHint"
+                          )}
+                          error={error ?? null}
+                        />
+                      </FieldContent>
+                    </Field>
+                  )
+                }}
+              </form.Field>
+
+              <Field
+                width="short"
+                className={activeTab === "general" ? undefined : "hidden"}
+              >
+                <FieldLabel>
+                  {t("pages.settings.general.tunnelProbeLastPass")}
+                </FieldLabel>
+                <FieldContent>
+                  <TunnelProbeLastPass />
+                </FieldContent>
+              </Field>
+
+              <Field
+                width="short"
+                className={activeTab === "general" ? undefined : "hidden"}
+              >
+                <FieldLabel>
+                  {t("pages.settings.general.tunnelProbeHostsLabel")}
+                </FieldLabel>
+                <FieldContent>
+                  <TunnelProbeHosts />
+                  <FieldHint
+                    description={t(
+                      "pages.settings.general.tunnelProbeHostsHint"
+                    )}
+                  />
+                </FieldContent>
+              </Field>
+
+              <FieldSeparator
+                className={activeTab === "general" ? undefined : "hidden"}
+              />
 
               <form.Field name={SETTINGS_FIELD_NAMES.inboundInterfaces}>
                 {(field) => {
@@ -2115,6 +2382,11 @@ function getDraftFromConfig(config: ConfigObject): SettingsDraft {
       config.iproute?.table_start,
       fallbackDraft.tableStart
     ),
+    tunnelProbeEnabled:
+      config.tunnel_probe?.enabled ?? fallbackDraft.tunnelProbeEnabled,
+    tunnelProbeOutbound:
+      config.tunnel_probe?.outbound ?? fallbackDraft.tunnelProbeOutbound,
+    tunnelProbeList: config.tunnel_probe?.list ?? fallbackDraft.tunnelProbeList,
   }
 }
 
@@ -2193,7 +2465,29 @@ function buildUpdatedConfig(
     delete updatedConfig.list_refresh
   }
 
-  return updatedConfig
+  // Switching the automation on has to be one click, so the three things it
+  // needs - a list, a file for that list to read, and a rule sending that list
+  // through the tunnel the probe measures against - are staged here rather
+  // than left to the operator. The daemon never edits the configuration, which
+  // is why this belongs to the panel.
+  const provisioned = provisionTunnelProbe(updatedConfig, {
+    enabled: draft.tunnelProbeEnabled,
+    outbound: draft.tunnelProbeOutbound,
+    list: draft.tunnelProbeList,
+  })
+
+  return {
+    ...provisioned.config,
+    tunnel_probe: {
+      ...config.tunnel_probe,
+      enabled: draft.tunnelProbeEnabled,
+      // Empty means "not named". Sending "" would be a name that matches
+      // nothing, and the daemon would refuse it as a missing outbound rather
+      // than as an unset one.
+      outbound: provisioned.resolved.outbound || undefined,
+      list: provisioned.resolved.list || undefined,
+    },
+  }
 }
 
 function toHex32(value: string | undefined, fallback: string) {
@@ -2316,6 +2610,12 @@ function resolveSettingsFieldPath(path: string): SettingsFieldName | undefined {
       return SETTINGS_FIELD_NAMES.fwmarkMask
     case "iproute.table_start":
       return SETTINGS_FIELD_NAMES.tableStart
+    case "tunnel_probe.enabled":
+      return SETTINGS_FIELD_NAMES.tunnelProbeEnabled
+    case "tunnel_probe.outbound":
+      return SETTINGS_FIELD_NAMES.tunnelProbeOutbound
+    case "tunnel_probe.list":
+      return SETTINGS_FIELD_NAMES.tunnelProbeList
     default:
       return undefined
   }

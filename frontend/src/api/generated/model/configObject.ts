@@ -15,6 +15,7 @@ import type { ListRefreshConfig } from './listRefreshConfig';
 import type { ListsAutoupdateConfig } from './listsAutoupdateConfig';
 import type { Outbound } from './outbound';
 import type { RouteConfig } from './routeConfig';
+import type { TunnelProbeConfig } from './tunnelProbeConfig';
 import type { UiPreferencesConfig } from './uiPreferencesConfig';
 
 /**
@@ -33,4 +34,5 @@ export interface ConfigObject {
   lists_autoupdate?: ListsAutoupdateConfig;
   list_refresh?: ListRefreshConfig;
   ui_preferences?: UiPreferencesConfig;
+  tunnel_probe?: TunnelProbeConfig;
 }

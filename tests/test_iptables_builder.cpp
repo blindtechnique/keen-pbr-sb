@@ -309,6 +309,33 @@ public:
     return IptablesFirewall::is_dynamic_set_name(name);
   }
 
+  static std::optional<std::map<std::string, std::optional<IptablesFirewall::LiveSetSchema>>>
+  parse_live_set_schemas(const std::string& xml) {
+    return IptablesFirewall::parse_live_set_schemas(xml);
+  }
+
+  static std::string build_managed_set_teardown_script(
+      const std::string& ipset_save_output, bool preserve_dynamic_sets) {
+    return IptablesFirewall::build_managed_set_teardown_script(
+        ipset_save_output, preserve_dynamic_sets);
+  }
+
+  static bool live_set_schema_compatible(
+      const IptablesFirewall::LiveSetSchema& live,
+      const std::string& name,
+      const std::string& family,
+      uint32_t timeout,
+      std::optional<uint32_t> hashsize = std::nullopt,
+      std::optional<uint32_t> maxelem = std::nullopt) {
+    IptablesFirewall::PendingSet expected;
+    expected.name = name;
+    expected.family_str = family;
+    expected.timeout = timeout;
+    expected.hashsize = hashsize;
+    expected.maxelem = maxelem;
+    return IptablesFirewall::live_set_schema_compatible(live, expected);
+  }
+
   static bool dynamic_set_schema_compatible(
       const std::string& xml,
       const std::string& name,
@@ -3321,6 +3348,201 @@ TEST_CASE("ipset reconcile: dynamic schema accepts terse ipset XML") {
   CHECK(T::dynamic_set_schema_compatible(
       R"(<ipsets><ipset name="kpbr6d_domains"><type>hash:net</type><header><family>inet6</family><hashsize>1024</hashsize><maxelem>65536</maxelem></header></ipset></ipsets>)",
       "kpbr6d_domains", "inet6", 0));
+}
+
+TEST_CASE("ipset inventory: every header arrives in one read") {
+  // The point of the whole change. `ipset list -t -o xml` without a set name
+  // reports them all, so a preflight over twenty lists across two families
+  // costs one fork/exec instead of forty - and it runs twice per apply.
+  const auto schemas = T::parse_live_set_schemas(
+      R"(<ipsets>
+  <ipset name="kpbr4d_domains"><type>hash:net</type><header>
+    <family>inet</family><hashsize>1024</hashsize><maxelem>65536</maxelem>
+    <timeout>300</timeout></header></ipset>
+  <ipset name="kpbr6d_domains"><type>hash:net</type><header>
+    <family>inet6</family><hashsize>2048</hashsize><maxelem>65536</maxelem>
+    </header></ipset>
+  <ipset name="foreign_set"><type>hash:ip</type><header>
+    <family>inet</family><hashsize>64</hashsize><maxelem>1024</maxelem>
+    </header></ipset>
+</ipsets>)");
+
+  REQUIRE(schemas.has_value());
+  REQUIRE(schemas->size() == 3);
+  CHECK(schemas->at("kpbr4d_domains")->family == "inet");
+  CHECK(schemas->at("kpbr4d_domains")->timeout == 300);
+  CHECK(schemas->at("kpbr6d_domains")->hashsize == 2048);
+  CHECK(schemas->at("kpbr6d_domains")->timeout == 0);
+  // Somebody else's set is read and kept: the preflight looks its own names up
+  // by key rather than assuming everything present belongs to us.
+  CHECK(schemas->at("foreign_set")->type == "hash:ip");
+
+  CHECK(T::live_set_schema_compatible(*schemas->at("kpbr4d_domains"),
+                                      "kpbr4d_domains", "inet", 300));
+  CHECK(T::live_set_schema_compatible(*schemas->at("kpbr6d_domains"),
+                                      "kpbr6d_domains", "inet6", 0));
+  CHECK_FALSE(T::live_set_schema_compatible(*schemas->at("kpbr4d_domains"),
+                                            "kpbr4d_domains", "inet6", 300));
+}
+
+TEST_CASE("ipset teardown: one script for every set we own") {
+  // The other half: forty managed sets cost eighty fork/execs when each flush
+  // and destroy went on its own.
+  const std::string save =
+      "create kpbr4_static hash:net family inet\n"
+      "add kpbr4_static 10.0.0.0/8\n"
+      "create kpbr6d_domains hash:net family inet6 timeout 300\n"
+      "create foreign_set hash:ip family inet\n"
+      "add foreign_set 1.2.3.4\n"
+      "create kpbr4m_media hash:net family inet\n";
+
+  const auto script =
+      T::build_managed_set_teardown_script(save, /*preserve_dynamic_sets=*/false);
+
+  CHECK(script ==
+        "flush kpbr4_static\ndestroy kpbr4_static\n"
+        "flush kpbr6d_domains\ndestroy kpbr6d_domains\n"
+        "flush kpbr4m_media\ndestroy kpbr4m_media\n");
+  // Somebody else's set is never named in it.
+  CHECK(script.find("foreign_set") == std::string::npos);
+}
+
+TEST_CASE("ipset teardown: preserved dynamic sets stay out of the script") {
+  const std::string save =
+      "create kpbr4_static hash:net family inet\n"
+      "create kpbr4d_domains hash:net family inet timeout 300\n"
+      "create kpbr6d_domains hash:net family inet6 timeout 300\n";
+
+  const auto script =
+      T::build_managed_set_teardown_script(save, /*preserve_dynamic_sets=*/true);
+
+  CHECK(script == "flush kpbr4_static\ndestroy kpbr4_static\n");
+}
+
+TEST_CASE("ipset teardown: nothing of ours means no script and no exec") {
+  CHECK(T::build_managed_set_teardown_script(
+            "create foreign_set hash:ip family inet\nadd foreign_set 1.2.3.4\n",
+            false)
+            .empty());
+  CHECK(T::build_managed_set_teardown_script("", false).empty());
+}
+
+TEST_CASE("ipset inventory: a firmware set we cannot read is not our problem") {
+  // Copied from the owner's router, where this exact document broke an apply.
+  // `ipset list -t -o xml` reports every set on the box - 163 of them there,
+  // and the firmware's hash:mac set carries no <family>, because MAC sets have
+  // none. Refusing the whole document over it made both preflights throw,
+  // which failed the cold-boot firewall COMMIT and left routing inactive.
+  //
+  // Somebody else's unreadable set is recorded as unreadable and skipped; ours
+  // is still an error, which the caller decides.
+  const auto schemas = T::parse_live_set_schemas(
+      R"(<ipsets>
+<ipset name="_NDM_HTSP_MAC_BLOCK">
+<type>hash:mac</type>
+<revision>0</revision>
+<header><hashsize>512</hashsize><maxelem>512</maxelem>
+<memsize>160</memsize>
+<references>2</references>
+</header>
+</ipset>
+<ipset name="kpbr4s_meta_whatsapp_ip">
+<type>hash:net</type>
+<revision>6</revision>
+<header><family>inet</family><hashsize>1024</hashsize><maxelem>65536</maxelem>
+<memsize>2208</memsize>
+<references>4</references>
+</header>
+</ipset>
+</ipsets>)");
+
+  REQUIRE(schemas.has_value());
+  REQUIRE(schemas->size() == 2);
+  // Present, and honestly marked as something we could not read.
+  REQUIRE(schemas->count("_NDM_HTSP_MAC_BLOCK") == 1);
+  CHECK_FALSE(schemas->at("_NDM_HTSP_MAC_BLOCK").has_value());
+  // Ours parsed, next to it, in the same pass.
+  REQUIRE(schemas->at("kpbr4s_meta_whatsapp_ip").has_value());
+  CHECK(schemas->at("kpbr4s_meta_whatsapp_ip")->family == "inet");
+  CHECK(schemas->at("kpbr4s_meta_whatsapp_ip")->hashsize == 1024);
+  CHECK(T::live_set_schema_compatible(*schemas->at("kpbr4s_meta_whatsapp_ip"),
+                                      "kpbr4s_meta_whatsapp_ip", "inet", 0));
+}
+
+TEST_CASE("ipset inventory: a router with no sets is not a failure") {
+  const auto schemas = T::parse_live_set_schemas("<ipsets></ipsets>");
+
+  REQUIRE(schemas.has_value());
+  CHECK(schemas->empty());
+}
+
+TEST_CASE("ipset inventory: anything unexpected refuses the whole document") {
+  // Fail-closed, and for a specific reason: a preflight that silently saw
+  // fewer sets than the kernel has would approve a schema it never read. A
+  // partial map is worse than none.
+  CHECK_FALSE(T::parse_live_set_schemas(
+                  R"(<ipsets><ipset name="a"><type>hash:net</type><header>
+       <family>inet</family><hashsize>1024</hashsize><maxelem>65536</maxelem>
+       </header></ipset><stray/></ipsets>)")
+                  .has_value());
+
+  // Two sets under one name is not something the kernel produces, so it is
+  // something else - and picking either would be a guess.
+  CHECK_FALSE(T::parse_live_set_schemas(
+                  R"(<ipsets>
+       <ipset name="dup"><type>hash:net</type><header><family>inet</family>
+         <hashsize>1024</hashsize><maxelem>65536</maxelem></header></ipset>
+       <ipset name="dup"><type>hash:net</type><header><family>inet6</family>
+         <hashsize>1024</hashsize><maxelem>65536</maxelem></header></ipset>
+     </ipsets>)")
+                  .has_value());
+
+  CHECK_FALSE(T::parse_live_set_schemas("").has_value());
+  CHECK_FALSE(T::parse_live_set_schemas("<ipsets>").has_value());
+}
+
+TEST_CASE("ipset inventory: an unreadable set costs that set, not the report") {
+  // The line this file learned the hard way. These are set-level problems, and
+  // the sets they belong to are usually not ours: refusing the whole document
+  // over one made every apply fail. The entry is kept and marked unreadable, so
+  // a caller that cares about that name still refuses it.
+  const auto bad_number = T::parse_live_set_schemas(
+      R"(<ipsets><ipset name="a"><type>hash:net</type><header>
+       <family>inet</family><hashsize>10x24</hashsize><maxelem>65536</maxelem>
+       </header></ipset></ipsets>)");
+  REQUIRE(bad_number.has_value());
+  REQUIRE(bad_number->count("a") == 1);
+  CHECK_FALSE(bad_number->at("a").has_value());
+
+  const auto no_capacity = T::parse_live_set_schemas(
+      R"(<ipsets><ipset name="a"><type>hash:net</type><header>
+       <family>inet</family></header></ipset></ipsets>)");
+  REQUIRE(no_capacity.has_value());
+  CHECK_FALSE(no_capacity->at("a").has_value());
+
+  // And the caller still refuses it, which is what keeps the old contract:
+  // an unreadable set of ours is not quietly accepted.
+  CHECK_FALSE(T::dynamic_set_schema_compatible(
+      R"(<ipsets><ipset name="a"><type>hash:net</type><header>
+       <family>inet</family></header></ipset></ipsets>)",
+      "a", "inet", 0));
+}
+
+TEST_CASE("ipset inventory: the single-set form stays as strict as it was") {
+  // dynamic_set_schema_compatible now goes through the same parser, and must
+  // keep refusing a document that describes anything other than this one set.
+  const std::string two_sets =
+      R"(<ipsets>
+       <ipset name="kpbr4d_domains"><type>hash:net</type><header>
+         <family>inet</family><hashsize>1024</hashsize><maxelem>65536</maxelem>
+         </header></ipset>
+       <ipset name="other"><type>hash:net</type><header>
+         <family>inet</family><hashsize>1024</hashsize><maxelem>65536</maxelem>
+         </header></ipset>
+     </ipsets>)";
+
+  CHECK_FALSE(T::dynamic_set_schema_compatible(two_sets, "kpbr4d_domains",
+                                               "inet", 0));
 }
 
 TEST_CASE("ipset schema validates configured capacity") {

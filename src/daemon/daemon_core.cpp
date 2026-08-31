@@ -5487,6 +5487,7 @@ void Daemon::open_runtime_cold_boot_services(
     step("list autoupdate", [this] { schedule_lists_autoupdate(); });
     step("interface probes", [this] { schedule_interface_probe(); });
     step("catalog refresh", [this] { schedule_catalog_refresh(); });
+    step("tunnel probe", [this] { schedule_tunnel_probe(); });
 
     if (runtime_ready) {
         step("runtime maintenance", [this, transaction] {

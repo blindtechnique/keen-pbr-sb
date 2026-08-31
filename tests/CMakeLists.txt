@@ -186,6 +186,19 @@ add_executable(keen-pbr-tests
   test_system_info.cpp
   test_network_routes.cpp
   test_netlink_errors.cpp
+  test_fib_lookup.cpp
+  test_differential_probe.cpp
+  test_probe_candidates.cpp
+  test_host_coverage.cpp
+  test_entry_review.cpp
+  test_log_follower.cpp
+  test_list_shrink_guard.cpp
+  test_tunnel_candidate_scan.cpp
+  test_scan_tunnel_candidates.cpp
+  test_nfqws_scan_source.cpp
+  test_tunnel_probe_automation.cpp
+  test_tunnel_probe_task.cpp
+  test_firewall_contract.cpp
   test_nfqws_config.cpp
   test_nfqws_file_writer.cpp
   test_nfqws_rotator_state.cpp
@@ -212,6 +225,7 @@ add_executable(keen-pbr-tests
   ../src/api/router_info_cache.cpp
   ../src/daemon/daemon_core.cpp
   ../src/daemon/daemon_runtime.cpp
+  ../src/daemon/daemon_tunnel_probe.cpp
   ../src/daemon/daemon_resolver.cpp
   ../src/daemon/runtime_resolver_generation_snapshot.cpp
   ../src/daemon/keenetic_dns_refresh_coordinator.cpp
@@ -288,6 +302,7 @@ add_executable(keen-pbr-tests
   ../src/runtime/periodic_task_metrics.cpp
   ../src/lists/ipset.cpp
   ../src/lists/kernel_set_tester.cpp
+  ../src/lists/list_shrink_guard.cpp
   ../src/lists/list_streamer.cpp
   ../src/lists/list_set_usage.cpp
   ../src/lists/srs_decoder.cpp
@@ -365,11 +380,24 @@ add_executable(keen-pbr-tests
   ../src/health/circuit_breaker.cpp
   ../src/health/interface_probe.cpp
   ../src/health/exit_address_check.cpp
+  ../src/health/differential_probe.cpp
+  ../src/health/probe_candidates.cpp
+  ../src/health/host_coverage.cpp
+  ../src/health/entry_review.cpp
+  ../src/health/log_follower.cpp
+  ../src/health/nfqws_scan_source.cpp
+  ../src/health/tunnel_probe_automation.cpp
+  ../src/health/tunnel_probe_task.cpp
+  ../src/health/tunnel_probe_report.cpp
+  ../src/health/tunnel_candidate_scan.cpp
+  ../src/cmd/scan_tunnel_candidates.cpp
+  ../src/firewall/firewall_contract.cpp
   ../src/api/handler_transport_exit_check.cpp
   ../src/health/routing_health_checker.cpp
   ../src/routing/firewall_state.cpp
   ../src/routing/urltest_manager.cpp
   ../src/routing/netlink.cpp
+  ../src/routing/fib_lookup.cpp
   ../src/routing/interface_monitor.cpp
   ../src/util/blocking_executor.cpp
   ../src/util/base64.cpp
@@ -408,6 +436,7 @@ add_executable(keen-pbr-cache-generation-tests
   ../src/http/http_client.cpp
   ../src/http/http_transport.cpp
   ../src/http/curl_runtime.cpp
+  ../src/lists/list_shrink_guard.cpp
   ../src/lists/list_streamer.cpp
   ../src/lists/srs_decoder.cpp
   ../src/log/logger.cpp
@@ -1369,6 +1398,7 @@ if(WITH_API)
     ../src/api/handler_runtime_interfaces.cpp
     ../src/api/handler_runtime_inventory.cpp
     ../src/api/handler_runtime_outbounds.cpp
+    ../src/api/handler_tunnel_probe.cpp
     ../src/api/handler_diagnostic_tasks.cpp
     ../src/api/handler_dependency_analysis.cpp
     ../src/api/handler_transports.cpp
@@ -1433,6 +1463,7 @@ add_executable(keen-pbr-firewall-it
   ../src/http/curl_runtime.cpp
   ../src/lists/kernel_set_tester.cpp
   ../src/lists/list_set_usage.cpp
+  ../src/lists/list_shrink_guard.cpp
   ../src/lists/list_streamer.cpp
   ../src/lists/srs_decoder.cpp
   ../src/log/logger.cpp

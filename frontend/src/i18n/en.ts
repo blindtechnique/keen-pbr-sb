@@ -2330,6 +2330,8 @@ export const enTranslation = {
         media: "Media",
         developer: "Development",
         cloud: "Cloud",
+        cdn: "CDN",
+        hosting: "Hosting",
         gaming: "Gaming",
         block: "Blocking",
       },
@@ -2554,6 +2556,38 @@ export const enTranslation = {
         clientDnsEnforcementLabel: "Force clients to use router DNS",
         clientDnsEnforcementHint:
           "Transparently redirect plain DNS (port 53) from LAN clients to the router's resolver and block DNS-over-TLS (port 853), so browser Secure DNS cannot bypass domain-based routing. DNS-over-HTTPS on port 443 cannot be blocked this way; disable Secure DNS in browsers for full coverage.",
+        tunnelProbeEnabledLabel:
+          "Route hosts nfqws2 cannot fix through a tunnel",
+        tunnelProbeEnabledHint:
+          "Reads what nfqws2 recorded as failing, measures each host twice - once over your provider's own interface and once over the tunnel below - and adds only the ones that answered through the tunnel and not directly.",
+        tunnelProbeHelp:
+          "This moves traffic on its own, and the move is not reversible in practice: nfqws2's rules are bound to the provider interface, so a host routed through a tunnel disappears from its view and stops producing the evidence that put it there. Confirmed hosts are appended to the list's own file; your configuration is never rewritten. A host is only acted on when the probe says it is blocked here and Russia's blocking registry names it - on real traffic that second question is what separates a censored site from an advertising endpoint failing for its own reasons.",
+        tunnelProbeOutboundLabel: "Tunnel to measure against",
+        tunnelProbeOutboundAuto: "Choose automatically",
+        tunnelProbeOutboundHint:
+          "Leave unchosen to use the first tunnel that has an interface. Only those are listed: each probe is pinned to a device, and an outbound with only a mark cannot carry one. Confirmed hosts are routed through the tunnel you pick - sending them through a different one would mean the measurement justified nothing.",
+        tunnelProbeHostsLabel: "Hosts that were moved",
+        tunnelProbeHostsHint:
+          "Remove takes a host out of the list; the automation may find it again. Never puts it on a separate list that is checked before the probe and before the registry: it is not measured and not moved again, whatever a later measurement says.",
+        tunnelProbeHostsEmpty: "Nothing here yet.",
+        tunnelProbeHostsRouted: "Going through the tunnel:",
+        tunnelProbeHostsExcluded: "Never route:",
+        tunnelProbeHostRemove: "Remove",
+        tunnelProbeHostRemoveHint: "Take out of the list; may be found again",
+        tunnelProbeHostExclude: "Never",
+        tunnelProbeHostExcludeHint: "Take out and never route again",
+        tunnelProbeHostRestore: "Restore",
+        tunnelProbeHostRestoreHint: "Lift the bar; it may be found again",
+        tunnelProbeLastPass: "Last check",
+        tunnelProbeNoPassYet: "No check has run yet.",
+        tunnelProbeRefused: "Not running: {{reason}}.",
+        tunnelProbeRouted: "Routed through the tunnel: {{hosts}}",
+        tunnelProbeHeldBack:
+          "A tunnel would help, but the registry did not confirm: {{hosts}}",
+        tunnelProbeListAuto: "Create a new list",
+        tunnelProbeListLabel: "List that receives confirmed hosts",
+        tunnelProbeListHint:
+          "Leave empty and the list, its file and a routing rule are created when you save. Name an existing list and it is given a file if it has none, keeping everything it already holds - every source of a list is read together.",
         inboundInterfacesLabel: "Inbound interfaces",
         inboundInterfacesHint:
           "Only packets arriving on the selected interfaces will be processed by policy routing. Leave this empty to match traffic from any interface.",
@@ -2796,7 +2830,7 @@ export const enTranslation = {
         metaUdp443AndroidBackgroundTitle:
           "Messages arrive only after opening WhatsApp?",
         metaUdp443AndroidBackgroundDescription:
-          "On Samsung/Android, set WhatsApp battery use to Unrestricted, allow background data (including while Data Saver is on), and remove it from Sleeping and Deep sleeping apps. Keep Balanced selected: router transport settings cannot wake an app suspended by Android.",
+          "In Android settings, set WhatsApp battery use to Unrestricted, allow background data (including while Data Saver is on), and remove it from any sleeping-apps list. The exact wording differs between manufacturers. Keep Balanced selected: router transport settings cannot wake an app suspended by Android.",
         metaUdp443PolicyOptions: {
           balanced: "Balanced (recommended)",
           messagesFirst: "Messages first (TCP)",
