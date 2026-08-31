@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include "../src/daemon/runtime_recovery_policy.hpp"
 #include "../src/daemon/scheduler.hpp"
 #include "../src/health/url_tester.hpp"
 #include "../src/routing/urltest_manager.hpp"
@@ -12,6 +13,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -1270,17 +1272,17 @@ TEST_CASE("resolved cursor mismatch launches one durable convergence probe") {
     CHECK(commits.size() == 0);
 }
 
-TEST_CASE("selection admission busy queues one trailing probe without recursion") {
+TEST_CASE("selection admission waits for firewall recovery before one trailing probe") {
     auto transport = std::make_shared<UrltestTransport>();
     URLTester tester(transport);
     const auto marks = make_marks();
     FakeRepeatingScheduler scheduler;
     BlockingExecutor executor(2, 8);
     CommitQueue commits;
+    UrltestAfterFirewallRecoveryGate recovery_gate;
     UrltestManager* manager_ptr = nullptr;
-    int callback_depth = 0;
-    int maximum_callback_depth = 0;
     int transition_count = 0;
+    constexpr std::uint64_t runtime_generation = 77U;
 
     UrltestManager manager(
         tester,
@@ -1289,20 +1291,21 @@ TEST_CASE("selection admission busy queues one trailing probe without recursion"
         executor,
         [&](const UrltestSelectionChange& change) {
             REQUIRE(manager_ptr != nullptr);
-            ++callback_depth;
-            maximum_callback_depth =
-                std::max(maximum_callback_depth, callback_depth);
             ++transition_count;
             if (transition_count == 1) {
-                // This is the daemon's admission-busy path. The request is
-                // made from inside the selection callback while the exact
-                // probe generation is still inflight.
-                manager_ptr->trigger_external_health_test(
-                    change.urltest_tag);
-                --callback_depth;
-                return false;
+                // Model the daemon's admission-busy path: resolve the
+                // manager's private candidate to the still-live kernel
+                // cursor, then let the existing firewall recovery gate own
+                // the next probe. This callback is resolved, not rejected;
+                // no manager retry loop should start while startup is busy.
+                REQUIRE(manager_ptr->synchronize_selected_if_generation(
+                    change.urltest_tag,
+                    change.probe_generation,
+                    change.previous_child_tag));
+                recovery_gate.wait_for(
+                    runtime_generation, change.urltest_tag);
+                return true;
             }
-            --callback_depth;
             return true;
         },
         [&commits](const std::string& tag,
@@ -1316,20 +1319,29 @@ TEST_CASE("selection admission busy queues one trailing probe without recursion"
 
     manager.register_urltest(make_priority_urltest_outbound());
     auto initial = commits.pop();
-    CHECK_FALSE(manager.commit_probe_results(
-        initial.tag, initial.generation, std::move(initial.results)));
-    CHECK(maximum_callback_depth == 1);
-    CHECK(transition_count == 1);
-
-    auto trailing = commits.pop();
     CHECK(manager.commit_probe_results(
-        trailing.tag, trailing.generation, std::move(trailing.results)));
-    CHECK(maximum_callback_depth == 1);
-    CHECK(transition_count == 2);
-    CHECK(manager.get_selected("automatic") == "primary");
+        initial.tag, initial.generation, std::move(initial.results)));
+    CHECK(transition_count == 1);
+    CHECK(manager.get_selected("automatic").empty());
 
     constexpr const char* retry_label =
         "urltest-external-health-retry:automatic";
+    CHECK(scheduler.count_label(retry_label) == 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    CHECK(commits.size() == 0);
+
+    const auto released = recovery_gate.release(runtime_generation);
+    REQUIRE(released == std::set<std::string>{"automatic"});
+    for (const auto& tag : released) {
+        manager.trigger_external_health_test(tag);
+    }
+    auto trailing = commits.pop();
+    CHECK(manager.commit_probe_results(
+        trailing.tag, trailing.generation, std::move(trailing.results)));
+    CHECK(transition_count == 2);
+    CHECK(manager.get_selected("automatic") == "primary");
+    CHECK(recovery_gate.release(runtime_generation).empty());
+
     const auto state = manager.get_state("automatic");
     REQUIRE(state.has_value());
     CHECK(state->external_health_completed_serial ==

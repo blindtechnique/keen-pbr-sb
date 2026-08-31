@@ -794,6 +794,8 @@ private:
         std::uint64_t runtime_generation,
         std::string_view phase,
         std::string_view detail) noexcept;
+    void resume_urltest_firewall_recovery(
+        std::uint64_t runtime_generation) noexcept;
     void release_urltest_firewall_recovery(
         std::uint64_t runtime_generation) noexcept;
     bool commit_urltest_probe_results(const std::string& urltest_tag,

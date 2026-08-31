@@ -207,43 +207,6 @@ if ! KEEN_PBR_PACKAGE_POSTINST=1 \
     echo "Failed to start keen-pbr service" >&2
     exit 1
 fi
-
-# A daemon started from inside postinst can come up unable to apply any urltest
-# selection, and it does not recover on its own.
-#
-# Measured on a live router 30.08.2026, build 20260830153713: after an opkg
-# install every urltest table kept only its unreachable kill-switch, so the
-# firewall rules that mark traffic into those groups sent it nowhere - fourteen
-# lists black-holed. The daemon was not idle: 29 urltest commits in about three
-# minutes, every one of them admitted=false (12 deferred behind a runtime
-# mutation, 17 refused as "typed firewall transition was not admitted"), each
-# refusal immediately requesting another probe round. It never converged.
-#
-# Restarting the service afterwards converged within ~30s on every attempt, and
-# stopping and starting both services outside opkg converged too - so the
-# trigger belongs to the install path, not to starting the two services at once.
-# Waiting for the tunnels before starting keen-pbr would therefore not help.
-#
-# This is a workaround. The defect is in the transition admission path; it is
-# only detected here, where the signature is unambiguous: a rule marked into a
-# urltest group whose own mark is not one of its children.
-KEEN_PBR_BIN="/opt/usr/bin/keen-pbr"
-if [ "${KEEN_PBR_INSTALLER_RESTARTS:-0}" = "1" ]; then
-    # install.sh --update restarts the service itself as soon as opkg returns,
-    # which cures the same state. Doing it here too would restart twice in a
-    # row and add this wait to every update for nothing.
-    :
-elif [ -x "$KEEN_PBR_BIN" ]; then
-    # One initial probe round has to finish first. A child that is down costs
-    # three attempts of five seconds plus their gaps, so allow a little more.
-    sleep 20
-    if "$KEEN_PBR_BIN" status 2>/dev/null \
-        | grep -q "is not a child of urltest outbound"; then
-        echo "Routing did not settle after install; restarting keen-pbr..."
-        KEEN_PBR_PACKAGE_POSTINST=1 \
-            /opt/etc/init.d/S80keen-pbr restart >/dev/null 2>&1 || true
-    fi
-fi
 echo ""
 
 echo "Installation complete!"

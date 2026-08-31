@@ -6047,9 +6047,11 @@ void Daemon::finish_preowned_runtime_firewall_keenetic_dns_refresh(
             .fresh_recovery_dispatch_allowed(
             recovery_required,
             lease && static_cast<bool>(*lease));
+    const bool maintenance_refresh_required =
+        !shutdown && clean_candidate_rejection &&
+        transaction->maintenance_fence_invalidated;
 
-    if (!shutdown && clean_candidate_rejection &&
-        transaction->maintenance_fence_invalidated) {
+    if (maintenance_refresh_required) {
         schedule_netfilter_runtime_refresh_noexcept(
             NetfilterRefreshReason::full,
             "Keenetic DNS clean rejection invalidated runtime maintenance");
@@ -6066,6 +6068,11 @@ void Daemon::finish_preowned_runtime_firewall_keenetic_dns_refresh(
         }
         schedule_resolver_reload_retry(
             0U, transaction->runtime_generation);
+    }
+    if (!shutdown && !recovery_dispatch_allowed &&
+        !maintenance_refresh_required) {
+        resume_urltest_firewall_recovery(
+            transaction->runtime_generation);
     }
     if (!shutdown &&
         (candidate_published || rollback_verified ||
@@ -6618,9 +6625,11 @@ void Daemon::finish_preowned_runtime_firewall_urltest_selection(
     // This tail still belongs to the typed URLTEST operation. Return its exact
     // admission before starting a fresh probe or central recovery owner.
     lease.reset();
+    const bool maintenance_refresh_required =
+        !shutdown && clean_candidate_rejection &&
+        transaction->maintenance_fence_invalidated;
 
-    if (!shutdown && clean_candidate_rejection &&
-        transaction->maintenance_fence_invalidated) {
+    if (maintenance_refresh_required) {
         // Candidate was rejected before either route or firewall publication,
         // but the old maintenance epochs were already invalidated. Recreate
         // them from a fresh authoritative published-state snapshot; never
@@ -6666,6 +6675,11 @@ void Daemon::finish_preowned_runtime_firewall_urltest_selection(
                 transaction->change.urltest_tag);
         } catch (...) {
         }
+    }
+    if (!shutdown && !recovery_required &&
+        !maintenance_refresh_required) {
+        resume_urltest_firewall_recovery(
+            transaction->runtime_generation);
     }
 }
 
@@ -11784,6 +11798,12 @@ void Daemon::drain_runtime_firewall_terminal(
             runtime_firewall_owner_->cancel_completion_watchdog();
             runtime_firewall_owner_->reset_if_active(context);
             context->retained_mutation_lease.reset();
+            if (lifecycle_verified_success &&
+                runtime_firewall_lifecycle_is_start(
+                    context->lifecycle_kind)) {
+                resume_urltest_firewall_recovery(
+                    context->queued_claim.runtime_generation);
+            }
             settle_lifecycle_completion(
                 lifecycle_verified_success
                     ? RuntimeFirewallLifecycleOutcome::verified_success

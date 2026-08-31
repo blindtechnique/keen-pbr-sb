@@ -84,6 +84,7 @@ struct OwnerHarness final {
     bool stop_cleanup_drained_with_shutdown{false};
     bool stop_cleanup_result_verified{false};
     bool runtime_current{true};
+    bool urltest_recovery_waiting{false};
     int control_posts{0};
     int oneshot_schedule_calls{0};
     int drain_calls{0};
@@ -172,8 +173,9 @@ struct OwnerHarness final {
             RuntimeFirewallLifecycleKind) {
             return runtime_current && generation == 77U;
         };
-        callbacks.urltest_waiting =
-            [](std::uint64_t) { return false; };
+        callbacks.urltest_waiting = [this](std::uint64_t generation) {
+            return urltest_recovery_waiting && generation == 77U;
+        };
         callbacks.dispatch_attempt =
             [this](RuntimeFirewallOperationOwner::ContextPtr context,
                    RuntimeFirewallOperationClaim claim,
@@ -634,6 +636,98 @@ void check_config_generation_retry_keeps_exact_authority(
     CHECK(admission.owns(*returned_lease));
     returned_lease.reset();
     CHECK_FALSE(admission.active().has_value());
+}
+
+TEST_CASE("preowned point mutation wakes one waiting urltest recovery after lease release") {
+    OwnerHarness harness;
+    harness.urltest_recovery_waiting = true;
+    harness.create_owner();
+    RuntimeMutationAdmission admission;
+    auto lease = acquire_test_lease(
+        admission, "background-point-mutation");
+    REQUIRE(lease);
+    bool continuation_called{false};
+    bool lease_released_before_recovery{false};
+
+    RuntimeFirewallOperationOwner::PreownedTerminalContinuation
+        continuation{
+            [&](RuntimeFirewallLifecycleTerminal,
+                RuntimeFirewallOperationOwner::MutationLeasePtr exact)
+                noexcept {
+                continuation_called = true;
+                exact.reset();
+                lease_released_before_recovery =
+                    !admission.active().has_value();
+            }};
+    auto start = harness.owner->start_immediate_preowned(
+        /*attempt=*/0U,
+        /*runtime_generation=*/77U,
+        {},
+        {},
+        /*schedule_catalog_refresh=*/false,
+        std::make_shared<TestDomainState>(),
+        admission,
+        std::move(lease),
+        {},
+        RuntimeFirewallLifecycleKind::background_point_mutation,
+        std::move(continuation));
+    REQUIRE(start.disposition ==
+            RuntimeFirewallImmediateDisposition::handed_off);
+    const auto point_context = harness.owner->active_context();
+    REQUIRE(point_context);
+    harness.owner->schedule(
+        /*attempt=*/0U,
+        /*runtime_generation=*/77U,
+        {},
+        {});
+    CHECK(point_context->force_successor);
+    for (const auto& timer : harness.timers) {
+        CHECK(timer.label != "runtime-firewall-retry");
+    }
+
+    auto completion =
+        harness.coordinator.terminate_operation_for_resnapshot(
+            harness.dispatched_claim,
+            /*force_rerun=*/false);
+    REQUIRE(completion.owned);
+    harness.reject_control_post = true;
+    point_context->terminal_owner->coordinator_terminal_sink()(
+        std::move(completion));
+    harness.reject_control_post = false;
+    auto drain = point_context->terminal_owner->try_begin_drain();
+    REQUIRE(drain.has_value());
+    auto permit = harness.owner->
+        prepare_preowned_continuation_finalization(point_context);
+    REQUIRE(permit.has_value());
+    auto proof = drain->finish_coordinator_terminal();
+    REQUIRE(proof.has_value());
+
+    RuntimeFirewallLifecycleTerminal terminal;
+    terminal.outcome =
+        RuntimeFirewallLifecycleOutcome::verified_success;
+    terminal.committed = true;
+    terminal.commit_ambiguous = false;
+    REQUIRE(harness.owner->complete_preowned_continuation(
+        std::move(*permit),
+        std::move(*proof),
+        std::move(terminal)));
+
+    CHECK(continuation_called);
+    CHECK(lease_released_before_recovery);
+    CHECK_FALSE(admission.active().has_value());
+    const auto recovery_context = harness.owner->active_context();
+    REQUIRE(recovery_context);
+    CHECK(recovery_context->lifecycle_kind ==
+          RuntimeFirewallLifecycleKind::background);
+    CHECK(harness.coordinator.retry_pending());
+    std::size_t active_retry_timers{0U};
+    for (const auto& timer : harness.timers) {
+        if (!timer.cancelled &&
+            timer.label == "runtime-firewall-retry") {
+            ++active_retry_timers;
+        }
+    }
+    CHECK(active_retry_timers == 1U);
 }
 
 TEST_CASE("owned conntrack cleanup remainder cannot expand exact authority") {

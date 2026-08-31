@@ -2001,6 +2001,32 @@ void Daemon::defer_urltest_switch_to_firewall_recovery(
     }
 }
 
+void Daemon::resume_urltest_firewall_recovery(
+    std::uint64_t runtime_generation) noexcept {
+    try {
+        if (!routing_runtime_active() ||
+            runtime_firewall_owner_->shutdown_requested() ||
+            runtime_generation !=
+                runtime_generation_.load(std::memory_order_acquire) ||
+            !urltest_after_firewall_gate_.waiting_for(
+                runtime_generation)) {
+            return;
+        }
+
+        // The gate already owns the exact selector set. This is only a wake
+        // for the existing central reconciler after a foreground or typed
+        // owner returned its physical lease; it creates no second retry
+        // policy and never replays a URLTEST candidate.
+        (void)refresh_iproute_and_firewall_runtime(
+            0,
+            {},
+            /*schedule_catalog_refresh=*/false);
+    } catch (...) {
+        // Periodic runtime health observes the same generation gate and is
+        // the existing fallback if this immediate owner admission fails.
+    }
+}
+
 void Daemon::release_urltest_firewall_recovery(
     std::uint64_t runtime_generation) noexcept {
     auto urltest_tags =
@@ -2182,12 +2208,6 @@ bool Daemon::handle_urltest_selection_change(
         auto runtime_mutation = runtime_mutation_admission_.try_acquire(
             "urltest-selection-change");
         if (!runtime_mutation.has_value()) {
-            // The manager's external-health latch is the existing exact
-            // single-flight owner for this selector. Returning false restores
-            // its previous cursor; this request supplies one trailing probe
-            // after the current inflight generation retires.
-            urltest_manager_->trigger_external_health_test(
-                change.urltest_tag);
             const auto active = runtime_mutation_admission_.active();
             log.verbose(
                 "Urltest '{}' transition deferred behind runtime mutation "
@@ -2196,7 +2216,29 @@ bool Daemon::handle_urltest_selection_change(
                 active.has_value()
                     ? active->label
                     : std::string{"unknown"});
-            return false;
+
+            // The kernel cursor never moved. Resolve the manager's private
+            // probe candidate back to that cursor and let the already
+            // existing firewall recovery gate own one trailing pass after
+            // the current writer finishes. A fresh external-health request
+            // here would reset its retry budget on every rejection and turn
+            // a long startup mutation into an endless probe loop.
+            const bool old_cursor_retained =
+                urltest_manager_->synchronize_selected_if_generation(
+                    change.urltest_tag,
+                    change.probe_generation,
+                    applied_previous);
+            if (!old_cursor_retained) {
+                return false;
+            }
+            defer_urltest_switch_to_firewall_recovery(
+                change,
+                current_runtime_generation,
+                "writer admission",
+                active.has_value()
+                    ? std::string_view{active->label}
+                    : std::string_view{"unknown runtime mutation"});
+            return true;
         }
 
         const auto list_cache_snapshot =
@@ -2213,13 +2255,29 @@ bool Daemon::handle_urltest_selection_change(
                 list_cache_snapshot,
                 retired_mark);
         if (!handed_off) {
-            urltest_manager_->trigger_external_health_test(
-                change.urltest_tag);
             log.verbose(
                 "Urltest '{}' typed firewall transition was not admitted; "
                 "the previous selection remains authoritative.",
                 change.urltest_tag);
-            return false;
+
+            // start_immediate_preowned() returned the exact lease. Release it
+            // before asking the central owner for a fresh background pass;
+            // otherwise recovery would be queued behind our own token.
+            mutation_lease.reset();
+            const bool old_cursor_retained =
+                urltest_manager_->synchronize_selected_if_generation(
+                    change.urltest_tag,
+                    change.probe_generation,
+                    applied_previous);
+            if (!old_cursor_retained) {
+                return false;
+            }
+            defer_urltest_switch_to_firewall_recovery(
+                change,
+                current_runtime_generation,
+                "typed owner admission",
+                "the runtime firewall owner rejected the candidate handoff");
+            return true;
         }
 
         // on_change() is still inside the exact manager probe callback. The

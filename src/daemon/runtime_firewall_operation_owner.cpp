@@ -1431,6 +1431,12 @@ bool RuntimeFirewallOperationOwner::complete_preowned_continuation(
     }
     permit.context_.reset();
 
+    const auto retired_lifecycle_kind = context->lifecycle_kind;
+    const auto retired_runtime_generation =
+        context->successor_runtime_generation != 0U
+        ? context->successor_runtime_generation
+        : context->queued_claim.runtime_generation;
+
     auto continuation =
         std::move(context->preowned_terminal_continuation);
     auto mutation_lease = std::move(context->retained_mutation_lease);
@@ -1440,6 +1446,29 @@ bool RuntimeFirewallOperationOwner::complete_preowned_continuation(
         std::move(continuation),
         std::move(mutation_lease),
         std::move(terminal));
+
+    // Point mutations do not carry a generation successor through their
+    // arbitrary continuation. If a URLTEST selection was gated behind one,
+    // wake the existing central owner only after that continuation returned
+    // the exact physical lease. A continuation which started another point
+    // phase is handled by schedule()'s normal coalescing path.
+    if (runtime_firewall_lifecycle_is_point_mutation(
+            retired_lifecycle_kind) &&
+        retired_runtime_generation != 0U) {
+        try {
+            if (callbacks_.urltest_waiting(
+                    retired_runtime_generation)) {
+                schedule(
+                    0U,
+                    retired_runtime_generation,
+                    OwnedSnatRecovery{},
+                    {});
+            }
+        } catch (...) {
+            // The persistent URLTEST gate remains visible to periodic
+            // runtime health if immediate scheduling is unavailable.
+        }
+    }
     return true;
 }
 
