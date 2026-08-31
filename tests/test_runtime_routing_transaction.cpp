@@ -52,12 +52,19 @@ class ScriptedRoutingNetlink final
     : public RouteNetlinkOperations,
       public RuleNetlinkOperations {
 public:
+    class Lease final : public ExactRoutingTransactionLease {};
+
     bool supports_exact_route_transaction() const noexcept override {
         return exact_route_capability;
     }
 
     bool supports_exact_rule_transaction() const noexcept override {
         return exact_rule_capability;
+    }
+
+    std::unique_ptr<ExactRoutingTransactionLease>
+    acquire_exact_transaction_lease() override {
+        return std::make_unique<Lease>();
     }
 
     RouteAddResult add_route(const RouteSpec& spec) override {
@@ -915,11 +922,8 @@ TEST_CASE("runtime routing transaction rejects a rule without explicit authority
     CHECK(netlink.events.empty());
 }
 
-TEST_CASE("runtime routing transaction accepts and observes an authorized external table") {
+TEST_CASE("runtime routing transaction accepts an authorized empty external table") {
     ScriptedRoutingNetlink netlink;
-    auto external = transaction_route(170U);
-    external.protocol = 4U;
-    netlink.seed_route(external, 4U);
     auto request = transaction_request({}, {transaction_rule(170U)});
     request.authorized_external_tables.push_back({170U, AF_INET});
 

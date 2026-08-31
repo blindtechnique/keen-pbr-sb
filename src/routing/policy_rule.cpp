@@ -86,7 +86,8 @@ std::vector<RuleSpec> find_orphaned_generated_rules(
     const std::set<uint32_t>& corroborated_route_tables) {
     std::vector<RuleSpec> orphaned;
     for (const auto& candidate : live) {
-        if ((candidate.family != AF_INET && candidate.family != AF_INET6) ||
+        if (!candidate.exact_identity_representable ||
+            (candidate.family != AF_INET && candidate.family != AF_INET6) ||
             candidate.priority != candidate.table ||
             corroborated_route_tables.count(candidate.table) == 0) {
             continue;
@@ -227,7 +228,22 @@ void PolicyRuleManager::add(const RuleSpec& spec) {
             for (auto it = newly_owned.rbegin(); it != newly_owned.rend(); ++it) {
                 bool rollback_known = true;
                 try {
-                    netlink_.delete_rule_for_family(*it, it->family);
+                    if (netlink_.supports_exact_rule_transaction()) {
+                        rollback_known = netlink_.delete_rule_if_exact(
+                                             *it, it->family) !=
+                                         RuleExactDeleteResult::PreconditionMismatch;
+                        if (!rollback_known) {
+                            Logger::instance().warn(
+                                "Exact policy-rule rollback refused changed "
+                                "kernel identity (table={}, priority={}, "
+                                "family={})",
+                                it->table,
+                                it->priority,
+                                it->family);
+                        }
+                    } else {
+                        netlink_.delete_rule_for_family(*it, it->family);
+                    }
                 } catch (const std::exception& e) {
                     Logger::instance().error(
                         "Failed to roll back policy rule family {}: {}",
@@ -290,7 +306,25 @@ bool PolicyRuleManager::remove(const RuleSpec& spec) {
                     continue;
                 }
                 try {
-                    netlink_.delete_rule_for_family(*owned, owned->family);
+                    if (netlink_.supports_exact_rule_transaction()) {
+                        const auto receipt =
+                            netlink_.delete_rule_if_exact(
+                                *owned, owned->family);
+                        if (receipt ==
+                            RuleExactDeleteResult::PreconditionMismatch) {
+                            Logger::instance().warn(
+                                "Exact policy-rule delete refused changed "
+                                "kernel identity (table={}, priority={}, "
+                                "family={})",
+                                owned->table,
+                                owned->priority,
+                                owned->family);
+                            return false;
+                        }
+                    } else {
+                        netlink_.delete_rule_for_family(
+                            *owned, owned->family);
+                    }
                 } catch (const std::exception& e) {
                     Logger::instance().error(
                         "Failed to delete policy rule family {}: {}",
@@ -441,7 +475,26 @@ std::set<uint32_t> PolicyRuleManager::remove_orphaned_generated(
             continue;
         }
         try {
-            netlink_.delete_rule_for_family(rule, rule.family);
+            if (netlink_.supports_exact_rule_transaction()) {
+                const auto receipt = netlink_.delete_rule_if_exact(
+                    rule, rule.family);
+                if (receipt ==
+                    RuleExactDeleteResult::PreconditionMismatch) {
+                    Logger::instance().warn(
+                        "Exact stale policy-rule delete refused changed "
+                        "kernel identity (table={}, fwmark={}, mask={}, "
+                        "priority={}, family={})",
+                        rule.table,
+                        rule.fwmark,
+                        rule.fwmask,
+                        rule.priority,
+                        rule.family);
+                    uncertain_tables.insert(rule.table);
+                    continue;
+                }
+            } else {
+                netlink_.delete_rule_for_family(rule, rule.family);
+            }
             Logger::instance().info(
                 "Removed stale managed policy rule (table={}, fwmark={}, mask={}, priority={}, family={})",
                 rule.table,
@@ -576,6 +629,13 @@ void PolicyRuleManager::adopt_desired(const std::vector<RuleSpec>& desired) {
     owned_rules_.clear();
 }
 
+void PolicyRuleManager::adopt_exact_state(
+    std::vector<RuleSpec> desired,
+    std::vector<RuleSpec> owned) noexcept {
+    rules_.swap(desired);
+    owned_rules_.swap(owned);
+}
+
 std::set<uint32_t> PolicyRuleManager::clear() {
     std::set<uint32_t> uncertain_tables;
     std::vector<RuleSpec> retained_owned;
@@ -586,7 +646,13 @@ std::set<uint32_t> PolicyRuleManager::clear() {
         bool deleted = true;
         try {
             if (!dry_run_) {
-                netlink_.delete_rule_for_family(*it, it->family);
+                if (netlink_.supports_exact_rule_transaction()) {
+                    deleted = netlink_.delete_rule_if_exact(
+                        *it, it->family) !=
+                        RuleExactDeleteResult::PreconditionMismatch;
+                } else {
+                    netlink_.delete_rule_for_family(*it, it->family);
+                }
             }
         } catch (const std::exception& e) {
             Logger::instance().error(

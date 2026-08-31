@@ -9447,70 +9447,247 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                         }
 
                         try {
-                            // This is the production off-loop routing write.
-                            // The combined owner serializes both manager
-                            // ledgers; no Daemon RouteTable/PolicyRuleManager
-                            // escape remains.
-                            const auto inventory =
-                                routing_operation_owner_.
-                                    reconcile_compatibility_generation(
-                                    plan.routing.routes,
-                                    plan.routing.rules,
-                                    reconcile_mode,
-                                    [this, &plan]() {
-                                        return !runtime_firewall_owner_
-                                                    ->shutdown_requested() &&
-                                            runtime_generation_.load(
-                                                std::memory_order_acquire) ==
-                                                plan.runtime_generation &&
-                                            routing_observation_epoch_.load(
-                                                std::memory_order_acquire) ==
-                                                plan.route_epoch;
-                                    });
-                            if (!inventory) {
-                                result.ack = runtime_firewall_owner_
-                                                     ->shutdown_requested()
-                                    ? RuntimeRouteMutationAck::shutdown
-                                    : RuntimeRouteMutationAck::stale;
-                                return result;
-                            }
-                            if (classify_runtime_routing_inventory(inventory) !=
-                                RuntimeRoutingInventoryAuthority::
-                                    authoritative) {
-                                // A conservative preimage or an unknown
-                                // delete effect is not sufficient admission
-                                // evidence for the firewall generation. The
-                                // typed stale result keeps one coalesced retry
-                                // and never replays the route body itself.
+                            const auto base_inventory =
+                                routing_operation_owner_.snapshot();
+                            if (classify_runtime_routing_inventory(
+                                    base_inventory) ==
+                                RuntimeRoutingInventoryAuthority::missing) {
                                 result.ack = RuntimeRouteMutationAck::stale;
-                                try {
-                                    result.failure_detail =
-                                        "runtime routing inventory requires "
-                                        "a fresh authoritative "
-                                        "reconciliation";
-                                } catch (...) {
-                                }
+                                result.failure_detail =
+                                    "runtime routing inventory is missing";
                                 return result;
                             }
-                            if (runtime_firewall_owner_
-                                    ->shutdown_requested()) {
-                                result.ack =
-                                    RuntimeRouteMutationAck::shutdown;
-                            } else if (
-                                runtime_generation_.load(
-                                    std::memory_order_acquire) !=
-                                    plan.runtime_generation ||
-                                routing_observation_epoch_.load(
-                                    std::memory_order_acquire) !=
-                                    plan.route_epoch) {
-                                result.ack =
-                                    RuntimeRouteMutationAck::stale;
-                            } else {
-                                result.ack =
-                                    RuntimeRouteMutationAck::applied;
+
+                            RuntimeRoutingOperationRequest routing_request;
+                            routing_request.identity.operation_serial =
+                                plan.operation_serial;
+                            routing_request.identity.runtime_generation =
+                                plan.runtime_generation;
+                            // The worker attempt is the immutable routing
+                            // intent for this generation.
+                            routing_request.identity.intent_serial =
+                                plan.operation_serial;
+                            routing_request.identity.base_inventory_revision =
+                                base_inventory->revision;
+                            routing_request.identity.route_epoch =
+                                plan.route_epoch;
+                            routing_request.desired_routes =
+                                plan.routing.routes;
+                            routing_request.desired_rules =
+                                plan.routing.rules;
+                            routing_request.mode = reconcile_mode;
+
+                            const auto& configured_outbounds =
+                                input.route_health_request.config.outbounds;
+                            if (configured_outbounds) {
+                                const auto append_external_authority =
+                                    [&](std::uint32_t table, int family) {
+                                        const bool duplicate = std::any_of(
+                                            routing_request
+                                                .authorized_external_tables
+                                                .begin(),
+                                            routing_request
+                                                .authorized_external_tables
+                                                .end(),
+                                            [&](const auto& authority) {
+                                                return authority.table ==
+                                                           table &&
+                                                       authority.family ==
+                                                           family;
+                                            });
+                                        if (!duplicate) {
+                                            routing_request
+                                                .authorized_external_tables
+                                                .push_back({table, family});
+                                        }
+                                    };
+                                for (const auto& outbound :
+                                     *configured_outbounds) {
+                                    if (outbound.type !=
+                                            OutboundType::TABLE ||
+                                        !outbound.table ||
+                                        *outbound.table <= 0 ||
+                                        static_cast<std::uint64_t>(
+                                            *outbound.table) >
+                                            std::numeric_limits<
+                                                std::uint32_t>::max()) {
+                                        continue;
+                                    }
+                                    const auto table =
+                                        static_cast<std::uint32_t>(
+                                            *outbound.table);
+                                    for (const auto& rule :
+                                         plan.routing.rules) {
+                                        if (rule.table != table) continue;
+                                        if (rule.family == 0) {
+                                            append_external_authority(
+                                                table, AF_INET);
+                                            append_external_authority(
+                                                table, AF_INET6);
+                                        } else {
+                                            append_external_authority(
+                                                table, rule.family);
+                                        }
+                                    }
+                                }
+                            }
+
+                            const auto previous_operation_serial =
+                                base_inventory
+                                    ->highest_consumed_operation_serial;
+                            const auto base_revision =
+                                base_inventory->revision;
+                            const auto operation =
+                                routing_operation_owner_.reconcile_exact(
+                                    routing_request,
+                                    [this,
+                                     &input,
+                                     &plan,
+                                     previous_operation_serial,
+                                     base_revision]() {
+                                        RuntimeRoutingCurrentFence fence;
+                                        const bool cancelled =
+                                            runtime_firewall_owner_
+                                                ->shutdown_requested() ||
+                                            (input.route_mutation_checkpoint &&
+                                             input.route_mutation_checkpoint
+                                                     ->state() ==
+                                                 RuntimeRouteMutationCheckpointState::
+                                                     acked);
+                                        // The current routing owner claim
+                                        // prevents a successor from entering
+                                        // concurrently. Shutdown or an already
+                                        // terminal checkpoint is represented
+                                        // as a typed replay fence: before a
+                                        // write it stays zero-write; after a
+                                        // write the executor rolls back.
+                                        fence.last_operation_serial = cancelled
+                                            ? plan.operation_serial
+                                            : previous_operation_serial;
+                                        fence.runtime_generation =
+                                            runtime_generation_.load(
+                                                std::memory_order_acquire);
+                                        fence.intent_serial =
+                                            plan.operation_serial;
+                                        fence.inventory_revision =
+                                            base_revision;
+                                        fence.route_epoch =
+                                            routing_observation_epoch_.load(
+                                                std::memory_order_acquire);
+                                        return fence;
+                                    });
+
+                            if (!operation.detail.empty()) {
+                                result.failure_detail = operation.detail;
+                            }
+                            switch (operation.outcome) {
+                                case RuntimeRoutingOperationOutcome::
+                                    exact_candidate_committed:
+                                    if (classify_runtime_routing_inventory(
+                                            operation.inventory) !=
+                                        RuntimeRoutingInventoryAuthority::
+                                            authoritative) {
+                                        result.ack =
+                                            RuntimeRouteMutationAck::
+                                                mutation_failed;
+                                        break;
+                                    }
+                                    if (runtime_firewall_owner_
+                                            ->shutdown_requested()) {
+                                        result.ack =
+                                            RuntimeRouteMutationAck::shutdown;
+                                    } else if (
+                                        runtime_generation_.load(
+                                            std::memory_order_acquire) !=
+                                            plan.runtime_generation ||
+                                        routing_observation_epoch_.load(
+                                            std::memory_order_acquire) !=
+                                            plan.route_epoch) {
+                                        result.ack =
+                                            RuntimeRouteMutationAck::
+                                                mutation_failed;
+                                    } else {
+                                        result.ack =
+                                            RuntimeRouteMutationAck::applied;
+                                    }
+                                    break;
+                                case RuntimeRoutingOperationOutcome::
+                                    exact_candidate_rolled_back:
+                                    if (runtime_firewall_owner_
+                                            ->shutdown_requested()) {
+                                        result.ack =
+                                            RuntimeRouteMutationAck::shutdown;
+                                    } else if (
+                                        classify_runtime_routing_inventory(
+                                            operation.inventory) !=
+                                        RuntimeRoutingInventoryAuthority::
+                                            authoritative) {
+                                        result.ack =
+                                            RuntimeRouteMutationAck::
+                                                mutation_failed;
+                                    } else {
+                                        result.ack = operation
+                                                .route_interface_unavailable
+                                            ? RuntimeRouteMutationAck::
+                                                  route_unavailable
+                                            : RuntimeRouteMutationAck::stale;
+                                    }
+                                    break;
+                                case RuntimeRoutingOperationOutcome::
+                                    exact_precondition_failed:
+                                    if (runtime_firewall_owner_
+                                            ->shutdown_requested()) {
+                                        result.ack =
+                                            RuntimeRouteMutationAck::shutdown;
+                                    } else {
+                                        result.ack =
+                                            classify_runtime_routing_inventory(
+                                                operation.inventory) ==
+                                                    RuntimeRoutingInventoryAuthority::
+                                                        authoritative
+                                            ? RuntimeRouteMutationAck::stale
+                                            : RuntimeRouteMutationAck::
+                                                  mutation_failed;
+                                    }
+                                    break;
+                                case RuntimeRoutingOperationOutcome::
+                                    exact_committed_cleanup_pending:
+                                case RuntimeRoutingOperationOutcome::
+                                    exact_partial_unknown:
+                                    result.ack =
+                                        RuntimeRouteMutationAck::
+                                            mutation_failed;
+                                    break;
+                                case RuntimeRoutingOperationOutcome::
+                                    exact_stale_before_mutation:
+                                case RuntimeRoutingOperationOutcome::
+                                    rejected_invalid_identity:
+                                case RuntimeRoutingOperationOutcome::
+                                    rejected_replay:
+                                case RuntimeRoutingOperationOutcome::
+                                    rejected_stale_inventory:
+                                    result.ack =
+                                        runtime_firewall_owner_
+                                                ->shutdown_requested()
+                                        ? RuntimeRouteMutationAck::shutdown
+                                        : RuntimeRouteMutationAck::stale;
+                                    break;
+                                default:
+                                    result.ack =
+                                        RuntimeRouteMutationAck::
+                                            mutation_failed;
+                                    break;
+                            }
+                            if (result.ack !=
+                                    RuntimeRouteMutationAck::applied &&
+                                result.failure_detail.empty()) {
+                                result.failure_detail =
+                                    "exact runtime routing transaction "
+                                    "did not commit";
                             }
                         } catch (const std::bad_alloc&) {
-                            result.ack = RuntimeRouteMutationAck::stale;
+                            result.ack =
+                                RuntimeRouteMutationAck::mutation_failed;
                             try {
                                 result.failure_detail =
                                     "runtime route mutation could not "
@@ -9526,12 +9703,7 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                             }
                         } catch (const std::exception& error) {
                             result.ack =
-                                classify_runtime_routing_inventory(
-                                    routing_operation_owner_.snapshot()) ==
-                                        RuntimeRoutingInventoryAuthority::
-                                            authoritative
-                                ? RuntimeRouteMutationAck::mutation_failed
-                                : RuntimeRouteMutationAck::stale;
+                                RuntimeRouteMutationAck::mutation_failed;
                             try {
                                 result.failure_detail = error.what();
                             } catch (...) {

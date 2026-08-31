@@ -76,6 +76,13 @@ public:
     // ownership of pre-existing kernel rules.
     void adopt_desired(const std::vector<RuleSpec>& desired);
 
+    // Synchronize the logical and concrete owner ledgers from a completed
+    // exact transaction. The owned input contains only concrete-family rules
+    // backed by a Created receipt or retained from the prior owner ledger.
+    void adopt_exact_state(
+        std::vector<RuleSpec> desired,
+        std::vector<RuleSpec> owned) noexcept;
+
     // Remove all installed policy rules (shutdown cleanup).
     // Retains failed owned/logical rules and returns every table whose exact
     // rule absence was not proven.
@@ -86,6 +93,9 @@ public:
 
     // Read-only access to the tracked rules.
     const std::vector<RuleSpec>& get_rules() const { return rules_; }
+    const std::vector<RuleSpec>& get_owned_rules() const {
+        return owned_rules_;
+    }
 
 private:
     RuleNetlinkOperations& netlink_;

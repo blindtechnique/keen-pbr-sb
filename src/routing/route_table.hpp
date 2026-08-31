@@ -138,6 +138,12 @@ public:
     // replacement itself.
     void adopt_desired(const std::vector<RouteSpec>& desired);
 
+    // Allocation-free terminal publication for an exact transaction. Both
+    // vectors must be prepared before the mutation boundary.
+    void adopt_exact_state(
+        std::vector<RouteSpec> desired,
+        std::vector<RouteSpec> owned) noexcept;
+
     // An explicit kernel UP transition is stronger than a pending retry
     // deadline. Clear only the matching interface's backoff so its routes are
     // eligible for the immediate event-driven reconciliation.
@@ -152,6 +158,9 @@ public:
 
     // Read-only access to the tracked routes.
     const std::vector<RouteSpec>& get_routes() const { return routes_; }
+    const std::vector<RouteSpec>& get_owned_routes() const {
+        return owned_routes_;
+    }
 
 private:
     enum class RouteInstallOutcome {

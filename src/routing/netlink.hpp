@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -92,6 +93,24 @@ enum class RouteExactReplaceResult {
     PreconditionMismatch,
 };
 
+// Lifetime token for one combined route+rule transaction. A capable backend
+// serializes every keen-pbr route/rule writer until this token is destroyed;
+// individual method locks are not a substitute for this scope. Linux does not
+// provide a kernel compare-and-swap primitive against an unrelated process, so
+// external writers must not mutate keen-pbr's reserved protocol/table namespace.
+class ExactRoutingTransactionLease {
+public:
+    virtual ~ExactRoutingTransactionLease() = default;
+
+    ExactRoutingTransactionLease(
+        const ExactRoutingTransactionLease&) = delete;
+    ExactRoutingTransactionLease& operator=(
+        const ExactRoutingTransactionLease&) = delete;
+
+protected:
+    ExactRoutingTransactionLease() = default;
+};
+
 struct DumpedRoute;
 
 // Small testable surface used by RouteTable.  Returning whether the kernel
@@ -101,12 +120,15 @@ class RouteNetlinkOperations {
 public:
     virtual ~RouteNetlinkOperations() = default;
     // A combined exact transaction may perform rollback after any forward
-    // write. Returning true is a strong lease assertion: this same most-
-    // derived backend exclusively serializes the complete route + policy-rule
-    // dependency namespace for the full execute call and implements every
-    // conditional primitive below. A mere per-socket mutex is insufficient.
+    // write. Returning true asserts that this same most-derived backend
+    // serializes every in-process route + policy-rule writer for the full
+    // execute call and implements every prevalidated primitive below.
     virtual bool supports_exact_route_transaction() const noexcept {
         return false;
+    }
+    virtual std::unique_ptr<ExactRoutingTransactionLease>
+    acquire_exact_transaction_lease() {
+        return {};
     }
     virtual RouteAddResult add_route(const RouteSpec& spec) = 0;
     // Atomically replace the route occupying the same kernel slot. Callers
@@ -114,9 +136,9 @@ public:
     // protocol 186); NetlinkManager deliberately does not infer ownership.
     virtual void replace_route(const RouteSpec& spec) = 0;
     virtual void delete_route(const RouteSpec& spec) = 0;
-    // Transactional callers must use this surface.  The safe default refuses
-    // deletion; concrete backends which can submit the full route identity
-    // atomically may override it and return a typed receipt.
+    // Transactional callers must use this surface. The safe default refuses
+    // deletion; concrete backends which can verify and submit the full route
+    // identity under the combined writer lease may return a typed receipt.
     virtual RouteExactDeleteResult delete_route_if_exact(
         const RouteSpec&) {
         return RouteExactDeleteResult::PreconditionMismatch;
@@ -156,16 +178,16 @@ struct DumpedRule;
 class RuleNetlinkOperations {
 public:
     virtual ~RuleNetlinkOperations() = default;
-    // Same combined exclusive-writer lease contract as the route capability;
+    // Same combined in-process writer lease contract as the route capability;
     // execute rejects distinct most-derived route/rule backend objects.
     virtual bool supports_exact_rule_transaction() const noexcept {
         return false;
     }
     virtual RuleAddResult add_rule_for_family(const RuleSpec& spec, int family) = 0;
     virtual void delete_rule_for_family(const RuleSpec& spec, int family) = 0;
-    // Exact transactions must never fall back to the broad policy-rule delete
-    // key. Backends which cannot prove and conditionally delete one complete
-    // rule identity fail closed by default.
+    // Exact transactions must never fall back to an unchecked broad
+    // policy-rule delete. Backends which cannot verify one complete rule
+    // identity under the combined writer lease fail closed by default.
     virtual RuleExactDeleteResult delete_rule_if_exact(
         const RuleSpec&,
         int) {
@@ -237,6 +259,11 @@ public:
     NetlinkManager(NetlinkManager&&) = delete;
     NetlinkManager& operator=(NetlinkManager&&) = delete;
 
+    bool supports_exact_route_transaction() const noexcept override;
+    bool supports_exact_rule_transaction() const noexcept override;
+    std::unique_ptr<ExactRoutingTransactionLease>
+    acquire_exact_transaction_lease() override;
+
     // Route operations
     RouteAddResult add_route(const RouteSpec& spec) override;
     void replace_route(const RouteSpec& spec) override;
@@ -271,6 +298,9 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
+    // Every compatibility writer takes this lock for one call. An exact
+    // transaction takes it recursively for its entire route+rule sequence.
+    std::recursive_mutex exact_transaction_mutex_;
     mutable TracedMutex mutex_;
 };
 

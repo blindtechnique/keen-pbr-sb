@@ -1,4 +1,6 @@
 #include "netlink.hpp"
+#include "policy_rule.hpp"
+#include "raw_rtnetlink_codec.hpp"
 #include "route_table.hpp"
 
 #include "../log/logger.hpp"
@@ -6,14 +8,21 @@
 
 #include <algorithm>
 #include <arpa/inet.h>
+#include <array>
+#include <atomic>
 #include <cerrno>
 #include <cstring>
+#include <linux/fib_rules.h>
+#include <iterator>
+#include <linux/netlink.h>
+#include <linux/rtnetlink.h>
 #include <map>
 #include <memory>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include <netlink/cache.h>
@@ -68,19 +77,6 @@ bool route_delete_target_absent(int error_code) noexcept {
 
 namespace {
 
-// Convert an nl_addr to a plain IP string (no prefix length suffix).
-std::string nl_addr_to_ip_str(struct nl_addr* addr) {
-    if (!addr) return "";
-    char buf[128];
-    nl_addr2str(addr, buf, sizeof(buf));
-    std::string s(buf);
-    auto pos = s.find('/');
-    if (pos != std::string::npos) {
-        s = s.substr(0, pos);
-    }
-    return s;
-}
-
 // Convert an nl_addr to its canonical string form, preserving prefix length.
 std::string nl_addr_to_str(struct nl_addr* addr) {
     if (!addr) return "";
@@ -132,51 +128,6 @@ struct RouteDeleter {
 };
 using RoutePtr = std::unique_ptr<struct rtnl_route, RouteDeleter>;
 
-DumpedRoute dumped_route_from_nl(struct rtnl_route* route) {
-    DumpedRoute dumped;
-    dumped.table = rtnl_route_get_table(route);
-    dumped.family = rtnl_route_get_family(route);
-    dumped.metric = static_cast<uint32_t>(rtnl_route_get_priority(route));
-    dumped.protocol = rtnl_route_get_protocol(route);
-    const int route_type = rtnl_route_get_type(route);
-    dumped.blackhole = route_type == RTN_BLACKHOLE;
-    dumped.unreachable = route_type == RTN_UNREACHABLE;
-    const int nexthop_count = rtnl_route_get_nnexthops(route);
-    dumped.exact_identity_representable =
-        (dumped.blackhole || dumped.unreachable)
-            ? nexthop_count == 0
-            : route_type == RTN_UNICAST && nexthop_count == 1;
-
-    if (struct nl_addr* destination = rtnl_route_get_dst(route)) {
-        if (nl_addr_get_prefixlen(destination) == 0U) {
-            dumped.destination = "default";
-        } else {
-            char buffer[128];
-            nl_addr2str(destination, buffer, sizeof(buffer));
-            dumped.destination = buffer;
-        }
-    }
-
-    if (!dumped.blackhole && !dumped.unreachable &&
-        nexthop_count > 0) {
-        if (struct rtnl_nexthop* nexthop =
-                rtnl_route_nexthop_n(route, 0)) {
-            const int ifindex = rtnl_route_nh_get_ifindex(nexthop);
-            if (ifindex > 0) {
-                char ifname[IF_NAMESIZE];
-                if (if_indextoname(static_cast<unsigned>(ifindex), ifname)) {
-                    dumped.interface = ifname;
-                }
-            }
-            struct nl_addr* gateway = rtnl_route_nh_get_gateway(nexthop);
-            if (gateway && nl_addr_get_len(gateway) > 0) {
-                dumped.gateway = nl_addr_to_ip_str(gateway);
-            }
-        }
-    }
-    return dumped;
-}
-
 // RAII wrapper for rtnl_nexthop
 struct NexthopDeleter {
     void operator()(struct rtnl_nexthop* nh) const {
@@ -192,6 +143,302 @@ struct RuleDeleter {
     }
 };
 using RulePtr = std::unique_ptr<struct rtnl_rule, RuleDeleter>;
+
+class RawNetlinkSocketHandle final {
+public:
+    explicit RawNetlinkSocketHandle(int value) noexcept : value_(value) {}
+    ~RawNetlinkSocketHandle() {
+        if (value_ >= 0) close(value_);
+    }
+    RawNetlinkSocketHandle(const RawNetlinkSocketHandle&) = delete;
+    RawNetlinkSocketHandle& operator=(
+        const RawNetlinkSocketHandle&) = delete;
+    RawNetlinkSocketHandle(
+        RawNetlinkSocketHandle&& other) noexcept
+        : value_(other.value_) {
+        other.value_ = -1;
+    }
+    RawNetlinkSocketHandle& operator=(
+        RawNetlinkSocketHandle&& other) noexcept {
+        if (this == &other) return *this;
+        if (value_ >= 0) close(value_);
+        value_ = other.value_;
+        other.value_ = -1;
+        return *this;
+    }
+
+    int get() const noexcept { return value_; }
+
+private:
+    int value_{-1};
+};
+
+struct RawInterfaceNames final {
+    std::vector<std::string> names;
+    std::vector<RawRtnetlinkInterfaceName> views;
+};
+
+RawInterfaceNames snapshot_raw_interface_names() {
+    RawInterfaceNames result;
+    struct if_nameindex* raw = if_nameindex();
+    if (raw == nullptr) return result;
+
+    struct InterfaceNameList final {
+        explicit InterfaceNameList(struct if_nameindex* value) noexcept
+            : value(value) {}
+        ~InterfaceNameList() {
+            if (value != nullptr) if_freenameindex(value);
+        }
+        struct if_nameindex* value;
+    } retained{raw};
+
+    for (auto* current = raw;
+         current->if_index != 0U && current->if_name != nullptr;
+         ++current) {
+        result.names.emplace_back(current->if_name);
+    }
+    result.views.reserve(result.names.size());
+    std::size_t index = 0U;
+    for (auto* current = raw;
+         current->if_index != 0U && current->if_name != nullptr;
+         ++current, ++index) {
+        result.views.push_back(
+            RawRtnetlinkInterfaceName{
+                static_cast<std::uint32_t>(current->if_index),
+                result.names[index].c_str()});
+    }
+    return result;
+}
+
+std::uint32_t next_raw_rtnetlink_sequence() noexcept {
+    static std::atomic<std::uint32_t> sequence{1U};
+    auto value = sequence.fetch_add(1U, std::memory_order_relaxed);
+    if (value == 0U) {
+        value = sequence.fetch_add(1U, std::memory_order_relaxed);
+    }
+    return value;
+}
+
+struct RawDumpSocket final {
+    RawNetlinkSocketHandle handle{-1};
+    std::uint32_t port_id{0U};
+    std::uint32_t sequence{0U};
+};
+
+class NetlinkManagerExactTransactionLease final
+    : public ExactRoutingTransactionLease {
+public:
+    explicit NetlinkManagerExactTransactionLease(
+        std::recursive_mutex& mutex)
+        : lock_(mutex) {}
+
+private:
+    std::unique_lock<std::recursive_mutex> lock_;
+};
+
+RawDumpSocket open_raw_dump_socket(
+    std::uint16_t message_type,
+    int family) {
+    RawDumpSocket socket_state;
+    socket_state.handle = RawNetlinkSocketHandle{
+        socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE)};
+    if (socket_state.handle.get() < 0) {
+        throw NetlinkError(
+            std::string{"Failed to open raw rtnetlink socket: "} +
+            std::strerror(errno));
+    }
+
+    const timeval timeout{1, 0};
+    if (setsockopt(
+            socket_state.handle.get(),
+            SOL_SOCKET,
+            SO_RCVTIMEO,
+            &timeout,
+            sizeof(timeout)) != 0) {
+        throw NetlinkError(
+            std::string{"Failed to configure raw rtnetlink timeout: "} +
+            std::strerror(errno));
+    }
+
+    sockaddr_nl local{};
+    local.nl_family = AF_NETLINK;
+    if (bind(
+            socket_state.handle.get(),
+            reinterpret_cast<const sockaddr*>(&local),
+            sizeof(local)) != 0) {
+        throw NetlinkError(
+            std::string{"Failed to bind raw rtnetlink socket: "} +
+            std::strerror(errno));
+    }
+    socklen_t local_size = sizeof(local);
+    if (getsockname(
+            socket_state.handle.get(),
+            reinterpret_cast<sockaddr*>(&local),
+            &local_size) != 0 ||
+        local_size != sizeof(local) ||
+        local.nl_family != AF_NETLINK ||
+        local.nl_pid == 0U) {
+        throw NetlinkError(
+            "Failed to resolve raw rtnetlink port identity");
+    }
+    socket_state.port_id = local.nl_pid;
+    socket_state.sequence = next_raw_rtnetlink_sequence();
+
+    sockaddr_nl kernel{};
+    kernel.nl_family = AF_NETLINK;
+    const auto send_request = [&](const void* request,
+                                  std::size_t request_size) {
+        const auto* header =
+            static_cast<const nlmsghdr*>(request);
+        const auto sent = sendto(
+            socket_state.handle.get(),
+            request,
+            request_size,
+            0,
+            reinterpret_cast<const sockaddr*>(&kernel),
+            sizeof(kernel));
+        if (sent != static_cast<ssize_t>(request_size) ||
+            header->nlmsg_len != request_size) {
+            throw NetlinkError(
+                std::string{"Failed to request raw rtnetlink inventory: "} +
+                std::strerror(errno));
+        }
+    };
+    const auto initialize_header = [&](nlmsghdr& header,
+                                       std::size_t payload_size) {
+        header.nlmsg_len = NLMSG_LENGTH(payload_size);
+        header.nlmsg_type = message_type;
+        header.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+        header.nlmsg_seq = socket_state.sequence;
+        header.nlmsg_pid = socket_state.port_id;
+    };
+
+    if (message_type == RTM_GETROUTE) {
+        struct RawRouteDumpRequest final {
+            nlmsghdr header;
+            rtmsg route;
+        } request{};
+        initialize_header(request.header, sizeof(request.route));
+        request.route.rtm_family =
+            static_cast<unsigned char>(family);
+        send_request(&request, request.header.nlmsg_len);
+    } else if (message_type == RTM_GETRULE) {
+        struct RawRuleDumpRequest final {
+            nlmsghdr header;
+            fib_rule_hdr rule;
+        } request{};
+        initialize_header(request.header, sizeof(request.rule));
+        request.rule.family =
+            static_cast<unsigned char>(family);
+        send_request(&request, request.header.nlmsg_len);
+    } else {
+        throw NetlinkError(
+            "Unsupported raw rtnetlink inventory request");
+    }
+    return socket_state;
+}
+
+std::string raw_dump_failure(
+    const char* kind,
+    RawRtnetlinkDumpState state,
+    int kernel_error) {
+    if (state == RawRtnetlinkDumpState::kernel_error &&
+        kernel_error != 0) {
+        const int code =
+            kernel_error < 0 ? -kernel_error : kernel_error;
+        return keen_pbr3::format(
+            "Raw rtnetlink {} dump failed: {}",
+            kind,
+            std::strerror(code));
+    }
+    return keen_pbr3::format(
+        "Raw rtnetlink {} dump is incomplete (state={})",
+        kind,
+        static_cast<int>(state));
+}
+
+std::vector<DumpedRoute> dump_raw_routes(int family) {
+    auto socket_state = open_raw_dump_socket(RTM_GETROUTE, family);
+    const auto interfaces = snapshot_raw_interface_names();
+    RawRtnetlinkDumpOptions options;
+    options.sequence = socket_state.sequence;
+    options.port_id = socket_state.port_id;
+    options.interface_names = interfaces.views.data();
+    options.interface_name_count = interfaces.views.size();
+
+    std::vector<DumpedRoute> result;
+    for (;;) {
+        alignas(nlmsghdr) std::array<std::uint8_t, 65536> response{};
+        sockaddr_nl sender{};
+        iovec vector{response.data(), response.size()};
+        msghdr received{};
+        received.msg_name = &sender;
+        received.msg_namelen = sizeof(sender);
+        received.msg_iov = &vector;
+        received.msg_iovlen = 1U;
+        const auto size = recvmsg(
+            socket_state.handle.get(), &received, 0);
+        if (size < 0 && errno == EINTR) continue;
+        if (size <= 0 || (received.msg_flags & MSG_TRUNC) != 0 ||
+            received.msg_namelen != sizeof(sender) ||
+            sender.nl_pid != 0U) {
+            throw NetlinkError(
+                "Raw rtnetlink route dump did not complete");
+        }
+        auto block = parse_raw_rtnetlink_route_dump_block(
+            response.data(), static_cast<std::size_t>(size), options);
+        if (block.state != RawRtnetlinkDumpState::more &&
+            block.state != RawRtnetlinkDumpState::done) {
+            throw NetlinkError(raw_dump_failure(
+                "route", block.state, block.kernel_error));
+        }
+        result.insert(
+            result.end(),
+            std::make_move_iterator(block.routes.begin()),
+            std::make_move_iterator(block.routes.end()));
+        if (block.state == RawRtnetlinkDumpState::done) return result;
+    }
+}
+
+std::vector<DumpedRule> dump_raw_rules(int family) {
+    auto socket_state = open_raw_dump_socket(RTM_GETRULE, family);
+    RawRtnetlinkDumpOptions options;
+    options.sequence = socket_state.sequence;
+    options.port_id = socket_state.port_id;
+
+    std::vector<DumpedRule> result;
+    for (;;) {
+        alignas(nlmsghdr) std::array<std::uint8_t, 65536> response{};
+        sockaddr_nl sender{};
+        iovec vector{response.data(), response.size()};
+        msghdr received{};
+        received.msg_name = &sender;
+        received.msg_namelen = sizeof(sender);
+        received.msg_iov = &vector;
+        received.msg_iovlen = 1U;
+        const auto size = recvmsg(
+            socket_state.handle.get(), &received, 0);
+        if (size < 0 && errno == EINTR) continue;
+        if (size <= 0 || (received.msg_flags & MSG_TRUNC) != 0 ||
+            received.msg_namelen != sizeof(sender) ||
+            sender.nl_pid != 0U) {
+            throw NetlinkError(
+                "Raw rtnetlink rule dump did not complete");
+        }
+        auto block = parse_raw_rtnetlink_rule_dump_block(
+            response.data(), static_cast<std::size_t>(size), options);
+        if (block.state != RawRtnetlinkDumpState::more &&
+            block.state != RawRtnetlinkDumpState::done) {
+            throw NetlinkError(raw_dump_failure(
+                "rule", block.state, block.kernel_error));
+        }
+        result.insert(
+            result.end(),
+            std::make_move_iterator(block.rules.begin()),
+            std::make_move_iterator(block.rules.end()));
+        if (block.state == RawRtnetlinkDumpState::done) return result;
+    }
+}
 
 int route_family(const RouteSpec& spec) {
     if (spec.family != 0) {
@@ -215,6 +462,7 @@ RoutePtr build_route(const RouteSpec& spec,
     }
 
     rtnl_route_set_family(route.get(), family);
+    rtnl_route_set_scope(route.get(), RT_SCOPE_UNIVERSE);
     if (spec.table != 0) {
         rtnl_route_set_table(route.get(), spec.table);
     }
@@ -304,7 +552,23 @@ NetlinkManager::NetlinkManager() : impl_(std::make_unique<Impl>()) {}
 
 NetlinkManager::~NetlinkManager() = default;
 
+bool NetlinkManager::supports_exact_route_transaction() const noexcept {
+    return true;
+}
+
+bool NetlinkManager::supports_exact_rule_transaction() const noexcept {
+    return true;
+}
+
+std::unique_ptr<ExactRoutingTransactionLease>
+NetlinkManager::acquire_exact_transaction_lease() {
+    return std::make_unique<NetlinkManagerExactTransactionLease>(
+        exact_transaction_mutex_);
+}
+
 RouteAddResult NetlinkManager::add_route(const RouteSpec& spec) {
+    std::lock_guard<std::recursive_mutex> exact_guard(
+        exact_transaction_mutex_);
     KPBR_LOCK_GUARD(mutex_);
     const int family = route_family(spec);
     RoutePtr route = build_route(spec);
@@ -336,6 +600,8 @@ RouteAddResult NetlinkManager::add_route(const RouteSpec& spec) {
 }
 
 void NetlinkManager::replace_route(const RouteSpec& spec) {
+    std::lock_guard<std::recursive_mutex> exact_guard(
+        exact_transaction_mutex_);
     KPBR_LOCK_GUARD(mutex_);
     const int family = route_family(spec);
     RoutePtr route = build_route(spec);
@@ -364,6 +630,8 @@ void NetlinkManager::replace_route(const RouteSpec& spec) {
 }
 
 void NetlinkManager::delete_route(const RouteSpec& spec) {
+    std::lock_guard<std::recursive_mutex> exact_guard(
+        exact_transaction_mutex_);
     KPBR_LOCK_GUARD(mutex_);
     RoutePtr route = build_route(spec, true);
     if (!route) {
@@ -380,28 +648,116 @@ void NetlinkManager::delete_route(const RouteSpec& spec) {
 }
 
 RouteExactDeleteResult NetlinkManager::delete_route_if_exact(
-    const RouteSpec&) {
-    // Linux RTM_DELROUTE has no compare-and-delete predicate. In particular,
-    // metric 0 is a wildcard in the kernel lookup, and a cache proof followed
-    // by delete can remove a foreign racer. Keep the exact API fail-closed
-    // until an exclusive route-writer capability is available.
-    return RouteExactDeleteResult::PreconditionMismatch;
+    const RouteSpec& expected) {
+    std::lock_guard<std::recursive_mutex> exact_guard(
+        exact_transaction_mutex_);
+
+    const auto live = dump_raw_routes(route_family(expected));
+    const DumpedRoute* match = nullptr;
+    std::size_t slot_count = 0U;
+    for (const auto& candidate : live) {
+        if (!route_table_detail::route_occupies_same_slot(
+                expected, candidate)) {
+            continue;
+        }
+        ++slot_count;
+        if (candidate.exact_identity_representable &&
+            route_table_detail::route_matches_live(expected, candidate)) {
+            match = &candidate;
+        }
+    }
+    if (slot_count == 0U) {
+        return RouteExactDeleteResult::AlreadyAbsent;
+    }
+    if (slot_count != 1U || match == nullptr) {
+        return RouteExactDeleteResult::PreconditionMismatch;
+    }
+
+    // Delete the concrete image observed under the combined route+rule lease.
+    // In particular this carries IPv6's materialized metric 1024 instead of
+    // sending metric zero, which RTM_DELROUTE otherwise treats as a wildcard.
+    delete_route(route_table_detail::route_spec_from_live(*match));
+
+    const auto after = dump_raw_routes(route_family(expected));
+    const bool slot_still_occupied = std::any_of(
+        after.begin(), after.end(), [&](const DumpedRoute& candidate) {
+            return route_table_detail::route_occupies_same_slot(
+                expected, candidate);
+        });
+    if (slot_still_occupied) {
+        throw NetlinkError(
+            "Exact route delete did not produce an empty kernel slot");
+    }
+    return RouteExactDeleteResult::Deleted;
 }
 
 RouteExactReplaceResult NetlinkManager::replace_route_if_exact(
     const RouteSpec& expected,
     const RouteSpec& replacement) {
-    (void)expected;
-    (void)replacement;
-    // Linux RTM_NEWROUTE/NLM_F_REPLACE has no compare-and-swap predicate. A
-    // cache check followed by replace can overwrite a firmware/external racer.
-    // Keep the exact transaction fail-closed until one exclusive route writer
-    // owns both observation and replacement. Compatibility callers continue
-    // to use replace_route() explicitly and receive no exactness claim.
-    return RouteExactReplaceResult::PreconditionMismatch;
+    std::lock_guard<std::recursive_mutex> exact_guard(
+        exact_transaction_mutex_);
+
+    const int expected_family = route_family(expected);
+    const int replacement_family = route_family(replacement);
+    const auto normalized_metric = [](const RouteSpec& route) {
+        return route_family(route) == AF_INET6 && route.metric == 0U
+            ? 1024U
+            : route.metric;
+    };
+    if (expected.destination != replacement.destination ||
+        expected.table != replacement.table ||
+        expected_family != replacement_family ||
+        normalized_metric(expected) != normalized_metric(replacement)) {
+        return RouteExactReplaceResult::PreconditionMismatch;
+    }
+
+    const auto live = dump_raw_routes(expected_family);
+    const DumpedRoute* match = nullptr;
+    std::size_t slot_count = 0U;
+    for (const auto& candidate : live) {
+        if (!route_table_detail::route_occupies_same_slot(
+                expected, candidate)) {
+            continue;
+        }
+        ++slot_count;
+        if (candidate.exact_identity_representable &&
+            route_table_detail::route_matches_live(expected, candidate)) {
+            match = &candidate;
+        }
+    }
+    if (slot_count != 1U || match == nullptr) {
+        return RouteExactReplaceResult::PreconditionMismatch;
+    }
+
+    // Keep the kernel slot continuously populated: a single RTM_NEWROUTE
+    // REPLACE updates the prevalidated route while the keen-pbr route/rule
+    // writer lease is held. The raw post-read below verifies the result.
+    replace_route(replacement);
+
+    const auto after = dump_raw_routes(replacement_family);
+    std::size_t replacement_slot_count = 0U;
+    bool replacement_present = false;
+    for (const auto& candidate : after) {
+        if (!route_table_detail::route_occupies_same_slot(
+                replacement, candidate)) {
+            continue;
+        }
+        ++replacement_slot_count;
+        replacement_present = replacement_present ||
+            (candidate.exact_identity_representable &&
+             route_table_detail::route_matches_live(
+                 replacement, candidate));
+    }
+    if (replacement_slot_count != 1U || !replacement_present) {
+        throw NetlinkError(
+            "Exact route replacement could not be re-observed");
+    }
+    return RouteExactReplaceResult::Replaced;
 }
 
 void NetlinkManager::flush_routes_in_table(uint32_t table_id, int family) {
+    std::lock_guard<std::recursive_mutex> exact_guard(
+        exact_transaction_mutex_);
     KPBR_LOCK_GUARD(mutex_);
 
     struct nl_cache* raw_cache = nullptr;
@@ -444,6 +800,8 @@ void NetlinkManager::flush_routes_in_table(uint32_t table_id, int family) {
 }
 
 RuleAddResult NetlinkManager::add_rule_for_family(const RuleSpec& spec, int family) {
+    std::lock_guard<std::recursive_mutex> exact_guard(
+        exact_transaction_mutex_);
     KPBR_LOCK_GUARD(mutex_);
 
     RulePtr rule(rtnl_rule_alloc());
@@ -474,6 +832,8 @@ RuleAddResult NetlinkManager::add_rule_for_family(const RuleSpec& spec, int fami
 }
 
 void NetlinkManager::delete_rule_for_family(const RuleSpec& spec, int family) {
+    std::lock_guard<std::recursive_mutex> exact_guard(
+        exact_transaction_mutex_);
     KPBR_LOCK_GUARD(mutex_);
 
     RulePtr rule(rtnl_rule_alloc());
@@ -503,41 +863,54 @@ void NetlinkManager::delete_rule_for_family(const RuleSpec& spec, int family) {
 }
 
 RuleExactDeleteResult NetlinkManager::delete_rule_if_exact(
-    const RuleSpec&,
-    int) {
-    // Linux RTM_DELRULE does not provide compare-and-delete semantics. A
-    // pre-dump followed by the partial RuleSpec delete is racy and may delete
-    // a foreign rule which acquired the same visible key. Until this backend
-    // has an exclusive-writer proof or a complete atomic primitive, exact
-    // transactions must fail closed. The compatibility deletion API above is
-    // intentionally unchanged for its existing callers.
-    return RuleExactDeleteResult::PreconditionMismatch;
+    const RuleSpec& spec,
+    int family) {
+    std::lock_guard<std::recursive_mutex> exact_guard(
+        exact_transaction_mutex_);
+    if (family != AF_INET && family != AF_INET6) {
+        return RuleExactDeleteResult::PreconditionMismatch;
+    }
+
+    RuleSpec expected = spec;
+    expected.family = family;
+    const auto live = dump_raw_rules(family);
+    const DumpedRule* match = nullptr;
+    std::size_t identity_count = 0U;
+    for (const auto& candidate : live) {
+        if (!policy_rule_detail::rule_matches_live(expected, candidate)) {
+            continue;
+        }
+        ++identity_count;
+        if (candidate.exact_identity_representable) {
+            match = &candidate;
+        }
+    }
+    if (identity_count == 0U) {
+        return RuleExactDeleteResult::AlreadyAbsent;
+    }
+    if (identity_count != 1U || match == nullptr) {
+        return RuleExactDeleteResult::PreconditionMismatch;
+    }
+
+    delete_rule_for_family(expected, family);
+
+    const auto after = dump_raw_rules(family);
+    const bool still_present = std::any_of(
+        after.begin(), after.end(), [&](const DumpedRule& candidate) {
+            return policy_rule_detail::rule_matches_live(
+                expected, candidate);
+        });
+    if (still_present) {
+        throw NetlinkError(
+            "Exact policy-rule delete could not be re-observed");
+    }
+    return RuleExactDeleteResult::Deleted;
 }
 
 std::vector<DumpedRoute> NetlinkManager::dump_routes(int family) {
-    KPBR_LOCK_GUARD(mutex_);
-
-    struct nl_cache* raw_cache = nullptr;
-    int err = rtnl_route_alloc_cache(impl_->sock, family, 0, &raw_cache);
-    if (err < 0) {
-        throw NetlinkError(std::string("Failed to alloc route cache: ") +
-                           nl_geterror(err));
-    }
-    CachePtr cache(raw_cache);
-
-    std::vector<DumpedRoute> result;
-    struct DumpRoutesCtx {
-        std::vector<DumpedRoute>* result;
-    } ctx{&result};
-
-    nl_cache_foreach(cache.get(), [](struct nl_object* obj, void* arg) {
-        auto* ctx = static_cast<DumpRoutesCtx*>(arg);
-        auto* route = reinterpret_cast<struct rtnl_route*>(obj);
-
-        ctx->result->push_back(dumped_route_from_nl(route));
-    }, &ctx);
-
-    return result;
+    std::lock_guard<std::recursive_mutex> exact_guard(
+        exact_transaction_mutex_);
+    return dump_raw_routes(family);
 }
 
 std::vector<DumpedRoute> NetlinkManager::dump_routes_in_table(uint32_t table_id,
@@ -553,40 +926,9 @@ std::vector<DumpedRoute> NetlinkManager::dump_routes_in_table(uint32_t table_id,
 }
 
 std::vector<DumpedRule> NetlinkManager::dump_policy_rules(int family) {
-    KPBR_LOCK_GUARD(mutex_);
-
-    struct nl_cache* raw_cache = nullptr;
-    int err = rtnl_rule_alloc_cache(impl_->sock, family, &raw_cache);
-    if (err < 0) {
-        throw NetlinkError(std::string("Failed to alloc rule cache: ") +
-                           nl_geterror(err));
-    }
-    CachePtr cache(raw_cache);
-
-    std::vector<DumpedRule> result;
-
-    nl_cache_foreach(cache.get(), [](struct nl_object* obj, void* arg) {
-        auto* out = static_cast<std::vector<DumpedRule>*>(arg);
-        auto* rule = reinterpret_cast<struct rtnl_rule*>(obj);
-
-        DumpedRule dr;
-        dr.priority = rtnl_rule_get_prio(rule);
-        dr.fwmark   = rtnl_rule_get_mark(rule);
-        dr.fwmask   = rtnl_rule_get_mask(rule);
-        dr.table    = rtnl_rule_get_table(rule);
-        dr.family   = rtnl_rule_get_family(rule);
-        // libnl's high-level rule cache discards several kernel attributes
-        // (for example FRA_TUN_ID, FRA_UID_RANGE and suppression selectors).
-        // This partial projection therefore cannot prove a complete identity.
-        // Compatibility consumers may still inspect the visible tuple, while
-        // exact transactions fail closed until a raw RTM_GETRULE parser is
-        // supplied.
-        dr.exact_identity_representable = false;
-
-        out->push_back(dr);
-    }, &result);
-
-    return result;
+    std::lock_guard<std::recursive_mutex> exact_guard(
+        exact_transaction_mutex_);
+    return dump_raw_rules(family);
 }
 
 std::vector<DumpedInterface> NetlinkManager::dump_interfaces() {

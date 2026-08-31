@@ -21,9 +21,9 @@ struct RuntimeRoutingTransactionIdentity {
 };
 
 // Explicit authority for a user-selected kernel table which is not populated
-// by a keen-pbr protocol-186 route.  TABLE outbounds are valid only when this
-// exact table/family authority is part of the immutable request and the table
-// is observed non-empty immediately before its rule becomes active.
+// by a keen-pbr protocol-186 route. A configured TABLE outbound is sufficient
+// authority for its exact table/family even while a native tunnel is down and
+// that family is temporarily empty; Linux policy lookup then falls through.
 struct RuntimeRoutingExternalTableAuthority {
     std::uint32_t table{0};
     int family{0};
@@ -44,6 +44,12 @@ struct RuntimeRoutingTransactionRequest {
     RuntimeRoutingTransactionIdentity identity;
     std::vector<RouteSpec> desired_routes;
     std::vector<RuleSpec> desired_rules;
+    // Complete authoritative base generation. If a candidate must roll back,
+    // the executor may report candidate_rolled_back only after this entire
+    // preimage is re-observed exactly under the same combined writer lease.
+    std::vector<RouteSpec> prior_routes;
+    std::vector<RuleSpec> prior_rules;
+    bool require_prior_preimage_proof{false};
     // Exact owner ledger from the request's base inventory.  It is the primary
     // source for retiring old TABLE rules; kernel heuristics are recovery-only.
     std::vector<RuleSpec> prior_owned_rules;
@@ -177,6 +183,9 @@ struct RuntimeRoutingTransactionResult {
     bool candidate_exact_verified{false};
     bool stale_rule_absence_proven{false};
     bool route_cleanup_attempted{false};
+    bool route_interface_unavailable{false};
+    bool prior_preimage_observed{false};
+    bool prior_preimage_exact{false};
     std::string detail;
     std::vector<RuntimeRoutingJournalEntry> journal;
     RuntimeRoutingPublishedJournalPtr published_journal;
@@ -190,11 +199,10 @@ using RuntimeRoutingCurrentFenceProbe =
 // operation owner.  Every possible forward, cleanup, and rollback entry is
 // allocated before the first mutating netlink call.
 //
-// Production wiring is intentionally blocked until its backend can provide an
-// honest complete rule inventory plus exclusive/conditional route replacement
-// and rule deletion. NetlinkManager currently fails those exact operations
-// closed; the transaction is a locally verified prerequisite, not production
-// authority.
+// NetlinkManager supplies a complete raw route/rule inventory and holds one
+// process-wide writer lease across the sequence. The protocol-186/table
+// namespace is reserved to keen-pbr; unrelated processes must not mutate it
+// concurrently because Linux rtnetlink has no kernel compare-and-swap request.
 RuntimeRoutingTransactionResult execute_runtime_routing_transaction(
     const RuntimeRoutingTransactionRequest& request,
     const RuntimeRoutingCurrentFenceProbe& current_fence,

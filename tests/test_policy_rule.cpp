@@ -14,6 +14,10 @@ namespace {
 
 class FakeRuleNetlink : public RuleNetlinkOperations {
 public:
+    bool supports_exact_rule_transaction() const noexcept override {
+        return exact_delete_supported;
+    }
+
     RuleAddResult add_rule_for_family(const RuleSpec& spec, int family) override {
         added.push_back(family);
         added_specs.push_back(spec);
@@ -35,6 +39,17 @@ public:
         deleted.push_back(family);
         deleted_specs.push_back(spec);
         erase_live(spec, family);
+    }
+
+    RuleExactDeleteResult delete_rule_if_exact(
+        const RuleSpec& spec,
+        int family) override {
+        exact_deleted.push_back(family);
+        exact_deleted_specs.push_back(spec);
+        if (exact_delete_result == RuleExactDeleteResult::Deleted) {
+            erase_live(spec, family);
+        }
+        return exact_delete_result;
     }
 
     std::vector<DumpedRule> dump_policy_rules(int family = 0) override {
@@ -78,11 +93,15 @@ public:
 
     int failing_family{0};
     int existing_family{0};
+    bool exact_delete_supported{false};
+    RuleExactDeleteResult exact_delete_result{RuleExactDeleteResult::Deleted};
     std::function<RuleAddResult(const RuleSpec&, int)> add_hook;
     std::vector<int> added;
     std::vector<int> deleted;
+    std::vector<int> exact_deleted;
     std::vector<RuleSpec> added_specs;
     std::vector<RuleSpec> deleted_specs;
+    std::vector<RuleSpec> exact_deleted_specs;
     std::vector<DumpedRule> live;
 
 private:
@@ -146,6 +165,45 @@ TEST_CASE("PolicyRuleManager does not delete a pre-existing rule during rollback
 
     CHECK_THROWS(rules.add(dual_stack_rule()));
     CHECK(netlink.deleted.empty());
+}
+
+TEST_CASE("PolicyRuleManager uses exact delete for dual-stack add rollback") {
+    FakeRuleNetlink netlink;
+    netlink.exact_delete_supported = true;
+    netlink.failing_family = AF_INET6;
+    PolicyRuleManager rules(netlink);
+
+    CHECK_THROWS(rules.add(dual_stack_rule()));
+
+    CHECK(rules.size() == 0);
+    CHECK(netlink.deleted.empty());
+    REQUIRE(netlink.exact_deleted.size() == 1);
+    CHECK(netlink.exact_deleted.front() == AF_INET);
+    CHECK(netlink.live.empty());
+}
+
+TEST_CASE("PolicyRuleManager retains an exact add rollback mismatch") {
+    FakeRuleNetlink netlink;
+    netlink.exact_delete_supported = true;
+    netlink.exact_delete_result =
+        RuleExactDeleteResult::PreconditionMismatch;
+    netlink.failing_family = AF_INET6;
+    PolicyRuleManager rules(netlink);
+
+    CHECK_THROWS(rules.add(dual_stack_rule()));
+
+    CHECK(netlink.deleted.empty());
+    REQUIRE(netlink.exact_deleted.size() == 1);
+    CHECK(netlink.live.size() == 1);
+    CHECK(rules.size() == 1);
+    REQUIRE(rules.get_owned_rules().size() == 1);
+    CHECK(rules.get_owned_rules().front().family == AF_INET);
+
+    const auto uncertain = rules.clear();
+    CHECK(uncertain == std::set<std::uint32_t>{110});
+    CHECK(rules.size() == 1);
+    CHECK(rules.get_owned_rules().size() == 1);
+    CHECK(netlink.live.size() == 1);
 }
 
 TEST_CASE("PolicyRuleManager clears only concrete rules it created") {
@@ -352,6 +410,62 @@ TEST_CASE("PolicyRuleManager removes a corroborated stale mark generation") {
     CHECK(netlink.deleted_specs.front().table == stale.table);
     REQUIRE(netlink.live.size() == 1);
     CHECK(netlink.live.front().table == desired.table);
+}
+
+TEST_CASE("PolicyRuleManager uses exact delete for a corroborated stale rule") {
+    FakeRuleNetlink netlink;
+    netlink.exact_delete_supported = true;
+    const auto desired = ipv4_rule(0x50000, 155, 155);
+    const auto stale = ipv4_rule(0x50000, 152, 152);
+    netlink.add_live(stale, AF_INET);
+    PolicyRuleManager rules(netlink);
+
+    const auto uncertain =
+        rules.remove_orphaned_generated({desired}, {152, 155});
+
+    CHECK(uncertain.empty());
+    CHECK(netlink.deleted.empty());
+    REQUIRE(netlink.exact_deleted_specs.size() == 1);
+    CHECK(netlink.exact_deleted_specs.front().table == stale.table);
+    CHECK(netlink.live.empty());
+}
+
+TEST_CASE("PolicyRuleManager preserves an unrepresentable stale-looking rule") {
+    FakeRuleNetlink netlink;
+    netlink.exact_delete_supported = true;
+    const auto desired = ipv4_rule(0x50000, 155, 155);
+    const auto stale = ipv4_rule(0x50000, 152, 152);
+    netlink.add_live(stale, AF_INET);
+    REQUIRE(netlink.live.size() == 1);
+    netlink.live.front().exact_identity_representable = false;
+    PolicyRuleManager rules(netlink);
+
+    const auto uncertain =
+        rules.remove_orphaned_generated({desired}, {152, 155});
+
+    CHECK(uncertain.empty());
+    CHECK(netlink.deleted.empty());
+    CHECK(netlink.exact_deleted.empty());
+    CHECK(netlink.live.size() == 1);
+}
+
+TEST_CASE("PolicyRuleManager retains a raced stale rule after exact mismatch") {
+    FakeRuleNetlink netlink;
+    netlink.exact_delete_supported = true;
+    netlink.exact_delete_result =
+        RuleExactDeleteResult::PreconditionMismatch;
+    const auto desired = ipv4_rule(0x50000, 155, 155);
+    const auto stale = ipv4_rule(0x50000, 152, 152);
+    netlink.add_live(stale, AF_INET);
+    PolicyRuleManager rules(netlink);
+
+    const auto uncertain =
+        rules.remove_orphaned_generated({desired}, {152, 155});
+
+    CHECK(uncertain == std::set<std::uint32_t>{152});
+    CHECK(netlink.deleted.empty());
+    REQUIRE(netlink.exact_deleted.size() == 1);
+    CHECK(netlink.live.size() == 1);
 }
 
 TEST_CASE("PolicyRuleManager preserves a stale-looking rule without route evidence") {

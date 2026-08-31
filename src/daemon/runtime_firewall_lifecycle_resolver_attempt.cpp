@@ -2,6 +2,8 @@
 
 #include "runtime_resolver_generation_snapshot.hpp"
 
+#include <memory>
+#include <new>
 #include <type_traits>
 #include <utility>
 
@@ -15,9 +17,22 @@ constexpr std::string_view kLostHandoffDetail =
 constexpr std::string_view kFailedCompletionDetail =
     "resolver lifecycle stream did not complete";
 
+static_assert(std::is_nothrow_destructible_v<std::string>);
+static_assert(std::is_nothrow_move_constructible_v<std::string>);
+
+void replace_attempt_id(
+    std::string& destination,
+    std::string&& source) noexcept {
+    // Entware GCC 8 does not advertise std::string move-assignment as
+    // noexcept. Reconstruct from the already allocated parameter instead.
+    auto* storage = std::addressof(destination);
+    using AttemptId = std::string;
+    storage->~AttemptId();
+    ::new (static_cast<void*>(storage)) AttemptId(std::move(source));
+}
+
 } // namespace
 
-static_assert(std::is_nothrow_move_assignable_v<std::string>);
 static_assert(std::is_nothrow_move_assignable_v<
               RuntimeFirewallLifecycleResolverAttempt::GenerationPtr>);
 
@@ -38,7 +53,7 @@ RuntimeFirewallLifecycleResolverAttempt::prearm(
             /*request_terminal_drain=*/false);
     }
 
-    attempt_id_ = std::move(attempt_id);
+    replace_attempt_id(attempt_id_, std::move(attempt_id));
     stream_epoch_ = stream_epoch;
     generation_ = std::move(generation);
     verified_ = false;

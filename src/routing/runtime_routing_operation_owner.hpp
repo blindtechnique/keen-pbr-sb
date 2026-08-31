@@ -2,6 +2,7 @@
 
 #include "policy_rule.hpp"
 #include "route_table.hpp"
+#include "runtime_routing_transaction.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -44,6 +45,12 @@ enum class RuntimeRoutingOperationOutcome : std::uint8_t {
     idle,
     compatibility_converged,
     compatibility_cleanup_pending,
+    exact_candidate_committed,
+    exact_candidate_rolled_back,
+    exact_committed_cleanup_pending,
+    exact_partial_unknown,
+    exact_stale_before_mutation,
+    exact_precondition_failed,
     rejected_invalid_identity,
     rejected_replay,
     rejected_stale_inventory,
@@ -127,6 +134,8 @@ struct RuntimeRoutingOperationRequest final {
     RuntimeRoutingOperationIdentity identity;
     std::vector<RouteSpec> desired_routes;
     std::vector<RuleSpec> desired_rules;
+    std::vector<RuntimeRoutingExternalTableAuthority>
+        authorized_external_tables;
     RouteReconcileMode mode{RouteReconcileMode::Strict};
 };
 
@@ -135,7 +144,12 @@ struct RuntimeRoutingOperationResult final {
     RuntimeRoutingOperationOutcome outcome{
         RuntimeRoutingOperationOutcome::partial_failure};
     RuntimeRoutingMutationJournalPtr journal;
+    RuntimeRoutingPublishedJournalPtr exact_journal;
     RuntimeRoutingInventorySnapshotPtr inventory;
+    RuntimeRoutingFailureStage exact_failure_stage{
+        RuntimeRoutingFailureStage::none};
+    bool route_interface_unavailable{false};
+    std::string detail;
 
     bool compatibility_converged() const noexcept {
         return outcome ==
@@ -147,9 +161,9 @@ struct RuntimeRoutingOperationResult final {
 // facade is the R1 ownership boundary: all manager access is serialized and
 // readers receive copies. The daemon may run the explicitly named
 // compatibility methods off-loop under its existing global mutation
-// admission, but their partial-prefix result remains compatibility-only. The
-// exact R1b transaction is still gated from production until the raw combined
-// backend can provide its stronger receipts.
+// admission, but their partial-prefix result remains compatibility-only.
+// Production generation changes use reconcile_exact() and its published
+// transaction journal.
 class RuntimeRoutingOperationOwner final {
 public:
     explicit RuntimeRoutingOperationOwner(
@@ -167,13 +181,14 @@ public:
 
     RuntimeRoutingOperationResult reconcile(
         const RuntimeRoutingOperationRequest& request);
+    RuntimeRoutingOperationResult reconcile_exact(
+        const RuntimeRoutingOperationRequest& request,
+        const RuntimeRoutingCurrentFenceProbe& current_fence);
 
-    // Production compatibility entry points while the exact R1 transaction
-    // backend is being completed.  Unlike exposing RouteTable and
-    // PolicyRuleManager, these keep every legacy mutation and both ledgers
-    // inside the same serialized owner.  They preserve the established
-    // startup and convergent-repair ordering and propagate the original
-    // failure to the caller.
+    // Compatibility entry points retained for startup and convergent repair.
+    // Unlike exposing RouteTable and PolicyRuleManager, these keep every
+    // legacy mutation and both ledgers inside the same serialized owner and
+    // propagate the original failure to the caller.
     RuntimeRoutingInventorySnapshotPtr populate_initial_generation(
         const std::vector<RouteSpec>& desired_routes,
         const std::vector<RuleSpec>& desired_rules);
@@ -184,6 +199,7 @@ public:
         RuntimeRoutingCompatibilityFenceProbe current_fence = {});
 
     RuntimeRoutingInventorySnapshotPtr snapshot() const;
+    RuntimeRoutingPublishedJournalPtr exact_journal() const;
 
     // Compatibility seams needed while the remaining direct Daemon users are
     // migrated behind this owner. They are serialized but not asynchronous.
@@ -228,6 +244,8 @@ private:
     mutable std::mutex pending_interface_mutex_;
     std::set<std::string> pending_interface_up_;
     RuntimeRoutingInventorySnapshotFactory inventory_factory_;
+    RouteNetlinkOperations& route_netlink_;
+    RuleNetlinkOperations& rule_netlink_;
     RouteTable routes_;
     PolicyRuleManager rules_;
     std::uint64_t inventory_revision_{1U};
@@ -237,6 +255,7 @@ private:
     std::uint64_t highest_consumed_route_epoch_{0U};
     RuntimeRoutingInventorySnapshotPtr published_inventory_;
     std::shared_ptr<RuntimeRoutingMutationJournal> active_journal_;
+    RuntimeRoutingPublishedJournalPtr active_exact_journal_;
 };
 
 } // namespace keen_pbr3

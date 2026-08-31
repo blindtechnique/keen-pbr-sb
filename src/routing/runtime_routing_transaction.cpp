@@ -361,18 +361,6 @@ bool external_table_authorized(
         });
 }
 
-bool external_table_observed(
-    const RuleSpec& rule,
-    const std::vector<DumpedRoute>& live_routes) {
-    return std::any_of(
-        live_routes.begin(), live_routes.end(),
-        [&](const DumpedRoute& route) {
-            return route.table == rule.table &&
-                   route.family == rule.family &&
-                   !route_table_detail::is_generated_route_candidate(route);
-        });
-}
-
 bool rule_dependency_present(
     const RuntimeRoutingTransactionRequest& request,
     const RuleSpec& rule,
@@ -388,8 +376,7 @@ bool rule_dependency_present(
             });
     }
     return external_table_authorized(
-               rule, request.authorized_external_tables) &&
-           external_table_observed(rule, live_routes);
+        rule, request.authorized_external_tables);
 }
 
 bool all_rule_dependencies_present(
@@ -433,6 +420,28 @@ bool all_desired_exact(
         desired_concrete.begin(), desired_concrete.end(),
         [&](const RuleSpec& rule) {
             return exact_rule_state(rule, rules) ==
+                ExactSlotState::exact_single;
+        });
+}
+
+bool expected_inventory_exact(
+    const std::vector<RouteSpec>& expected_routes,
+    const std::vector<RuleSpec>& expected_rules,
+    const std::vector<DumpedRoute>& live_routes,
+    const std::vector<DumpedRule>& live_rules) {
+    if (!std::all_of(
+            expected_routes.begin(), expected_routes.end(),
+            [&](const RouteSpec& route) {
+                return exact_slot_state(route, live_routes) ==
+                    ExactSlotState::exact_single;
+            })) {
+        return false;
+    }
+
+    const auto concrete = concrete_rules(expected_rules);
+    return std::all_of(
+        concrete.begin(), concrete.end(), [&](const RuleSpec& rule) {
+            return exact_rule_state(rule, live_rules) ==
                 ExactSlotState::exact_single;
         });
 }
@@ -485,10 +494,6 @@ std::optional<Plan> build_plan(
             rule, request.authorized_external_tables);
         if (!managed && !external) {
             error = "candidate rule has no owned route anchor or external table authority";
-            return std::nullopt;
-        }
-        if (!managed && !external_table_observed(rule, live_routes)) {
-            error = "authorized external table has no observed route anchor";
             return std::nullopt;
         }
     }
@@ -954,6 +959,23 @@ RuntimeRoutingTransactionResult execute_runtime_routing_transaction(
         return result;
     }
 
+    std::unique_ptr<ExactRoutingTransactionLease> exact_lease;
+    try {
+        exact_lease =
+            route_netlink.acquire_exact_transaction_lease();
+    } catch (...) {
+        result.terminal = RuntimeRoutingTerminal::precondition_failed;
+        result.detail =
+            exception_detail("routing backend exact lease unavailable");
+        return result;
+    }
+    if (!exact_lease) {
+        result.terminal = RuntimeRoutingTerminal::precondition_failed;
+        result.detail =
+            "routing backend lacks one combined exact transaction lease";
+        return result;
+    }
+
     std::vector<DumpedRoute> initial_routes;
     std::vector<DumpedRule> initial_rules;
     try {
@@ -963,6 +985,14 @@ RuntimeRoutingTransactionResult execute_runtime_routing_transaction(
         result.terminal = RuntimeRoutingTerminal::precondition_failed;
         result.detail = exception_detail("initial exact inventory unavailable");
         return result;
+    }
+    if (request.require_prior_preimage_proof) {
+        result.prior_preimage_observed = true;
+        result.prior_preimage_exact = expected_inventory_exact(
+            request.prior_routes,
+            request.prior_rules,
+            initial_routes,
+            initial_rules);
     }
 
     std::string plan_error;
@@ -1060,7 +1090,34 @@ RuntimeRoutingTransactionResult execute_runtime_routing_transaction(
                        route_netlink,
                        rule_netlink,
                        failure_stage)) {
-            result.terminal = RuntimeRoutingTerminal::candidate_rolled_back;
+            bool prior_preimage_restored = true;
+            if (request.require_prior_preimage_proof) {
+                try {
+                    const auto final_routes = route_netlink.dump_routes();
+                    const auto final_rules =
+                        rule_netlink.dump_policy_rules();
+                    result.prior_preimage_observed = true;
+                    result.prior_preimage_exact = expected_inventory_exact(
+                        request.prior_routes,
+                        request.prior_rules,
+                        final_routes,
+                        final_rules);
+                    prior_preimage_restored =
+                        result.prior_preimage_exact;
+                } catch (...) {
+                    result.prior_preimage_observed = false;
+                    result.prior_preimage_exact = false;
+                    prior_preimage_restored = false;
+                }
+            }
+            if (prior_preimage_restored) {
+                result.terminal =
+                    RuntimeRoutingTerminal::candidate_rolled_back;
+            } else {
+                failure_stage =
+                    RuntimeRoutingFailureStage::rollback_route;
+                result.terminal = RuntimeRoutingTerminal::partial_unknown;
+            }
         } else {
             result.terminal = RuntimeRoutingTerminal::partial_unknown;
         }
@@ -1151,6 +1208,28 @@ RuntimeRoutingTransactionResult execute_runtime_routing_transaction(
                     : RuntimeRoutingJournalReceipt::already_present;
             }
             entry.state = RuntimeRoutingJournalState::completed;
+        } catch (const RouteInterfaceUnavailableError& error) {
+            result.route_interface_unavailable = true;
+            entry.state = RuntimeRoutingJournalState::unknown;
+            entry.receipt = RuntimeRoutingJournalReceipt::effect_unknown;
+            try {
+                const auto live = route_netlink.dump_routes(
+                    mutation.candidate.family);
+                if (!route_present(mutation.candidate, live)) {
+                    entry.state = RuntimeRoutingJournalState::failed;
+                    entry.receipt =
+                        RuntimeRoutingJournalReceipt::deleted_or_absent;
+                    return fail_candidate(
+                        RuntimeRoutingFailureStage::candidate_route,
+                        false,
+                        error.what());
+                }
+            } catch (...) {
+            }
+            return fail_candidate(
+                RuntimeRoutingFailureStage::candidate_route,
+                true,
+                error.what());
         } catch (...) {
             entry.state = RuntimeRoutingJournalState::unknown;
             entry.receipt = RuntimeRoutingJournalReceipt::effect_unknown;

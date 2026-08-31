@@ -470,7 +470,22 @@ bool RouteTable::remove(const RouteSpec& spec) {
             }
         } else {
             try {
-                netlink_.delete_route(spec);
+                if (netlink_.supports_exact_route_transaction()) {
+                    const auto receipt =
+                        netlink_.delete_route_if_exact(*owned_it);
+                    if (receipt ==
+                        RouteExactDeleteResult::PreconditionMismatch) {
+                        Logger::instance().warn(
+                            "Exact route delete refused changed kernel "
+                            "identity (dst={}, table={}, family={})",
+                            owned_it->destination,
+                            owned_it->table,
+                            owned_it->family);
+                        return false;
+                    }
+                } else {
+                    netlink_.delete_route(*owned_it);
+                }
             } catch (const std::exception& e) {
                 Logger::instance().error(
                     "Failed to delete route (dst={}, table={}, iface={}, gw={}, metric={}, blackhole={}, unreachable={}): {}",
@@ -845,6 +860,15 @@ std::set<uint32_t> RouteTable::live_generated_route_tables() const {
 void RouteTable::adopt_desired(const std::vector<RouteSpec>& desired) {
     routes_ = desired;
     owned_routes_.clear();
+    repair_records_.clear();
+    pending_replacements_.clear();
+}
+
+void RouteTable::adopt_exact_state(
+    std::vector<RouteSpec> desired,
+    std::vector<RouteSpec> owned) noexcept {
+    routes_.swap(desired);
+    owned_routes_.swap(owned);
     repair_records_.clear();
     pending_replacements_.clear();
 }

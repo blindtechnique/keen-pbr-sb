@@ -23,6 +23,91 @@ bool identity_is_valid(
            identity.route_epoch != 0U;
 }
 
+RuntimeRoutingTransactionIdentity transaction_identity(
+    const RuntimeRoutingOperationIdentity& identity) noexcept {
+    RuntimeRoutingTransactionIdentity result;
+    result.operation_serial = identity.operation_serial;
+    result.runtime_generation = identity.runtime_generation;
+    result.intent_serial = identity.intent_serial;
+    result.base_inventory_revision = identity.base_inventory_revision;
+    result.route_epoch = identity.route_epoch;
+    return result;
+}
+
+RuntimeRoutingOperationOutcome exact_operation_outcome(
+    RuntimeRoutingTerminal terminal) noexcept {
+    switch (terminal) {
+        case RuntimeRoutingTerminal::candidate_committed:
+            return RuntimeRoutingOperationOutcome::
+                exact_candidate_committed;
+        case RuntimeRoutingTerminal::candidate_rolled_back:
+            return RuntimeRoutingOperationOutcome::
+                exact_candidate_rolled_back;
+        case RuntimeRoutingTerminal::committed_cleanup_pending:
+            return RuntimeRoutingOperationOutcome::
+                exact_committed_cleanup_pending;
+        case RuntimeRoutingTerminal::partial_unknown:
+            return RuntimeRoutingOperationOutcome::exact_partial_unknown;
+        case RuntimeRoutingTerminal::stale_before_mutation:
+            return RuntimeRoutingOperationOutcome::
+                exact_stale_before_mutation;
+        case RuntimeRoutingTerminal::prepared:
+        case RuntimeRoutingTerminal::running:
+        case RuntimeRoutingTerminal::precondition_failed:
+            return RuntimeRoutingOperationOutcome::
+                exact_precondition_failed;
+    }
+    return RuntimeRoutingOperationOutcome::exact_precondition_failed;
+}
+
+bool exact_rules_equal(
+    const RuleSpec& left,
+    const RuleSpec& right) noexcept {
+    return left.fwmark == right.fwmark &&
+           left.fwmask == right.fwmask &&
+           left.table == right.table &&
+           left.priority == right.priority &&
+           left.family == right.family;
+}
+
+bool logical_rule_covers(
+    const RuleSpec& logical,
+    const RuleSpec& concrete) noexcept {
+    return logical.fwmark == concrete.fwmark &&
+           logical.fwmask == concrete.fwmask &&
+           logical.table == concrete.table &&
+           logical.priority == concrete.priority &&
+           (logical.family == 0 || logical.family == concrete.family);
+}
+
+void append_unique_rule(
+    std::vector<RuleSpec>& target,
+    const RuleSpec& rule) {
+    const bool present = std::any_of(
+        target.begin(), target.end(), [&](const RuleSpec& candidate) {
+            return exact_rules_equal(candidate, rule);
+        });
+    if (!present) target.push_back(rule);
+}
+
+void append_unique_route(
+    std::vector<RouteSpec>& target,
+    const RouteSpec& route) {
+    const bool present = std::any_of(
+        target.begin(), target.end(), [&](const RouteSpec& candidate) {
+            return candidate.destination == route.destination &&
+                   candidate.table == route.table &&
+                   candidate.interface == route.interface &&
+                   candidate.gateway == route.gateway &&
+                   candidate.blackhole == route.blackhole &&
+                   candidate.unreachable == route.unreachable &&
+                   candidate.family == route.family &&
+                   candidate.metric == route.metric &&
+                   candidate.protocol == route.protocol;
+        });
+    if (!present) target.push_back(route);
+}
+
 void retain_failure_detail(RuntimeRoutingMutationJournal& journal,
                            const char* detail) noexcept {
     try {
@@ -41,6 +126,8 @@ RuntimeRoutingOperationOwner::RuntimeRoutingOperationOwner(
     RouteTable::NowFunction now,
     RuntimeRoutingInventorySnapshotFactory inventory_factory)
     : inventory_factory_(std::move(inventory_factory)),
+      route_netlink_(route_netlink),
+      rule_netlink_(rule_netlink),
       routes_(
           route_netlink,
           false,
@@ -84,6 +171,10 @@ RuntimeRoutingOperationOwner::~RuntimeRoutingOperationOwner() noexcept {
         }
         discard_pending_interface_notifications_locked();
         active_journal_.reset();
+        std::atomic_store_explicit(
+            &active_exact_journal_,
+            RuntimeRoutingPublishedJournalPtr{},
+            std::memory_order_release);
     } catch (...) {
     }
 }
@@ -92,6 +183,12 @@ RuntimeRoutingInventorySnapshotPtr
 RuntimeRoutingOperationOwner::snapshot() const {
     return std::atomic_load_explicit(
         &published_inventory_, std::memory_order_acquire);
+}
+
+RuntimeRoutingPublishedJournalPtr
+RuntimeRoutingOperationOwner::exact_journal() const {
+    return std::atomic_load_explicit(
+        &active_exact_journal_, std::memory_order_acquire);
 }
 
 RuntimeRoutingOperationResult
@@ -638,6 +735,322 @@ RuntimeRoutingOperationResult RuntimeRoutingOperationOwner::reconcile(
     return result;
 }
 
+RuntimeRoutingOperationResult RuntimeRoutingOperationOwner::reconcile_exact(
+    const RuntimeRoutingOperationRequest& request,
+    const RuntimeRoutingCurrentFenceProbe& current_fence) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    consume_pending_interface_notifications_locked();
+
+    if (!identity_is_valid(request.identity)) {
+        return rejected_result(
+            request,
+            RuntimeRoutingOperationOutcome::rejected_invalid_identity);
+    }
+    if (request.identity.operation_serial <=
+            highest_consumed_operation_serial_ ||
+        request.identity.intent_serial <=
+            highest_consumed_intent_serial_ ||
+        request.identity.runtime_generation <
+            highest_consumed_runtime_generation_ ||
+        request.identity.route_epoch < highest_consumed_route_epoch_) {
+        return rejected_result(
+            request,
+            RuntimeRoutingOperationOutcome::rejected_replay);
+    }
+
+    const auto current = std::atomic_load_explicit(
+        &published_inventory_, std::memory_order_acquire);
+    auto consumed_writable = allocate_inventory_snapshot();
+    *consumed_writable = *current;
+
+    const bool base_revision_matches =
+        request.identity.base_inventory_revision == inventory_revision_ &&
+        request.identity.base_inventory_revision == current->revision;
+    const bool prior_inventory_authoritative =
+        classify_runtime_routing_inventory(current) ==
+        RuntimeRoutingInventoryAuthority::authoritative;
+
+    RuntimeRoutingTransactionRequest exact_request;
+    PreparedInventoryPublication committed_publication;
+    PreparedInventoryPublication rolled_back_publication;
+    PreparedInventoryPublication unknown_publication;
+    std::vector<RouteSpec> committed_routes;
+    std::vector<RouteSpec> committed_owned_routes;
+    std::vector<RouteSpec> conservative_routes;
+    std::vector<RouteSpec> conservative_owned_routes;
+    std::vector<RuleSpec> committed_rules;
+    std::vector<RuleSpec> committed_owned_rules;
+    std::vector<RuleSpec> conservative_rules;
+    std::vector<RuleSpec> conservative_owned_rules;
+    std::vector<RuleSpec> created_candidate_rules;
+    if (base_revision_matches) {
+        // Every allocation owned by the facade is completed while the
+        // identity is still retryable and before the exact executor may
+        // publish its journal or enter the kernel mutation boundary.
+        exact_request.identity = transaction_identity(request.identity);
+        exact_request.desired_routes = request.desired_routes;
+        exact_request.desired_rules = request.desired_rules;
+        if (prior_inventory_authoritative) {
+            exact_request.prior_routes = current->routes;
+            exact_request.prior_rules = current->rules;
+            exact_request.require_prior_preimage_proof = true;
+        }
+        exact_request.prior_owned_rules = rules_.get_owned_rules();
+        exact_request.authorized_external_tables =
+            request.authorized_external_tables;
+        exact_request.allow_recovery_rule_heuristic =
+            !prior_inventory_authoritative;
+
+        committed_publication = prepare_inventory_publication_locked(
+            request.desired_routes,
+            request.desired_rules,
+            request.identity,
+            /*inventory_complete=*/true,
+            /*kernel_state_known=*/true);
+        rolled_back_publication = prepare_inventory_publication_locked(
+            current->routes,
+            current->rules,
+            request.identity,
+            current->inventory_complete,
+            current->kernel_state_known);
+        unknown_publication = prepare_inventory_publication_locked(
+            current->routes,
+            current->rules,
+            request.identity,
+            /*inventory_complete=*/false,
+            /*kernel_state_known=*/false);
+
+        committed_routes = request.desired_routes;
+        committed_owned_routes.reserve(request.desired_routes.size());
+        for (const auto& route : request.desired_routes) {
+            if (route.protocol == KEEN_PBR_GENERATED_ROUTE_PROTOCOL) {
+                committed_owned_routes.push_back(route);
+            }
+        }
+        conservative_routes = current->routes;
+        conservative_routes.reserve(
+            current->routes.size() + request.desired_routes.size());
+        for (const auto& route : request.desired_routes) {
+            append_unique_route(conservative_routes, route);
+        }
+        conservative_owned_routes = routes_.get_owned_routes();
+        conservative_owned_routes.reserve(
+            conservative_owned_routes.size() +
+            request.desired_routes.size());
+        for (const auto& route : request.desired_routes) {
+            if (route.protocol == KEEN_PBR_GENERATED_ROUTE_PROTOCOL) {
+                append_unique_route(conservative_owned_routes, route);
+            }
+        }
+
+        committed_rules = request.desired_rules;
+        const std::size_t maximum_new_concrete_rules =
+            request.desired_rules.size() * 2U;
+        committed_owned_rules.reserve(
+            exact_request.prior_owned_rules.size() +
+            maximum_new_concrete_rules);
+        for (const auto& owned : exact_request.prior_owned_rules) {
+            const bool retained = std::any_of(
+                request.desired_rules.begin(),
+                request.desired_rules.end(),
+                [&](const RuleSpec& desired) {
+                    return logical_rule_covers(desired, owned);
+                });
+            if (retained) {
+                append_unique_rule(committed_owned_rules, owned);
+            }
+        }
+        conservative_rules = current->rules;
+        conservative_rules.reserve(
+            current->rules.size() + request.desired_rules.size());
+        for (const auto& rule : request.desired_rules) {
+            append_unique_rule(conservative_rules, rule);
+        }
+        conservative_owned_rules = exact_request.prior_owned_rules;
+        conservative_owned_rules.reserve(
+            conservative_owned_rules.size() +
+            maximum_new_concrete_rules);
+        created_candidate_rules.reserve(maximum_new_concrete_rules);
+    }
+
+    // Structurally valid identities are consumed once, including a stale
+    // base. This mirrors reconcile() and prevents replay with a rewritten
+    // revision. A current non-authoritative base is allowed through the raw
+    // recovery inventory instead of permanently stalling future generations.
+    highest_consumed_operation_serial_ = request.identity.operation_serial;
+    highest_consumed_runtime_generation_ = std::max(
+        highest_consumed_runtime_generation_,
+        request.identity.runtime_generation);
+    highest_consumed_intent_serial_ = request.identity.intent_serial;
+    highest_consumed_route_epoch_ = std::max(
+        highest_consumed_route_epoch_, request.identity.route_epoch);
+    consumed_writable->highest_consumed_operation_serial =
+        highest_consumed_operation_serial_;
+    consumed_writable->highest_consumed_runtime_generation =
+        highest_consumed_runtime_generation_;
+    consumed_writable->highest_consumed_intent_serial =
+        highest_consumed_intent_serial_;
+    consumed_writable->highest_consumed_route_epoch =
+        highest_consumed_route_epoch_;
+    RuntimeRoutingInventorySnapshotPtr consumed_immutable =
+        std::move(consumed_writable);
+    std::atomic_store_explicit(
+        &published_inventory_,
+        std::move(consumed_immutable),
+        std::memory_order_release);
+
+    if (!base_revision_matches) {
+        return rejected_result(
+            request,
+            RuntimeRoutingOperationOutcome::rejected_stale_inventory);
+    }
+    const auto apply_consumed_markers = [&](PreparedInventoryPublication& p) {
+        p.writable->highest_consumed_operation_serial =
+            highest_consumed_operation_serial_;
+        p.writable->highest_consumed_runtime_generation =
+            highest_consumed_runtime_generation_;
+        p.writable->highest_consumed_intent_serial =
+            highest_consumed_intent_serial_;
+        p.writable->highest_consumed_route_epoch =
+            highest_consumed_route_epoch_;
+    };
+    apply_consumed_markers(committed_publication);
+    apply_consumed_markers(rolled_back_publication);
+    apply_consumed_markers(unknown_publication);
+
+    auto exact_result = execute_runtime_routing_transaction(
+        exact_request,
+        current_fence,
+        route_netlink_,
+        rule_netlink_,
+        [&](const RuntimeRoutingPublishedJournalPtr& journal) noexcept {
+            // shared_ptr assignment is allocation-free. The executor refuses
+            // its first write unless this lifetime-owned record is retained.
+            std::atomic_store_explicit(
+                &active_exact_journal_,
+                journal,
+                std::memory_order_release);
+            return true;
+        });
+
+    RuntimeRoutingOperationResult result;
+    result.identity = request.identity;
+    result.outcome = exact_operation_outcome(exact_result.terminal);
+    result.exact_journal = exact_result.published_journal;
+    result.exact_failure_stage = exact_result.published_journal
+        ? exact_result.published_journal->failure_stage.load(
+              std::memory_order_acquire)
+        : RuntimeRoutingFailureStage::none;
+    result.route_interface_unavailable =
+        exact_result.route_interface_unavailable;
+    result.detail = std::move(exact_result.detail);
+
+    const auto& stable_entries = exact_result.published_journal
+        ? exact_result.published_journal->entries
+        : exact_result.journal;
+    for (const auto& entry : stable_entries) {
+        if (entry.operation !=
+                RuntimeRoutingJournalOperation::add_candidate_rule ||
+            entry.state != RuntimeRoutingJournalState::completed ||
+            entry.receipt != RuntimeRoutingJournalReceipt::created ||
+            !entry.rule) {
+            continue;
+        }
+        append_unique_rule(created_candidate_rules, *entry.rule);
+    }
+
+    for (const auto& created : created_candidate_rules) {
+        append_unique_rule(committed_owned_rules, created);
+        append_unique_rule(conservative_owned_rules, created);
+    }
+
+    switch (exact_result.terminal) {
+        case RuntimeRoutingTerminal::candidate_committed:
+            // The exact executor has already proved the complete desired
+            // candidate. Only now may the compatibility managers mirror the
+            // committed generation; no manager mutation participates in the
+            // exact transaction itself.
+            routes_.adopt_exact_state(
+                std::move(committed_routes),
+                std::move(committed_owned_routes));
+            rules_.adopt_exact_state(
+                std::move(committed_rules),
+                std::move(committed_owned_rules));
+            result.inventory = commit_prepared_inventory_locked(
+                std::move(committed_publication),
+                RuntimeRoutingMutationPhase::complete,
+                result.outcome,
+                /*advance_revision=*/true);
+            return result;
+
+        case RuntimeRoutingTerminal::candidate_rolled_back:
+            // Rollback was verified exactly. Preserve the prior manager
+            // ledgers and publish their authoritative preimage at a new
+            // revision because the kernel did cross the mutation boundary.
+            result.inventory = commit_prepared_inventory_locked(
+                std::move(rolled_back_publication),
+                RuntimeRoutingMutationPhase::failed,
+                result.outcome,
+                /*advance_revision=*/true);
+            return result;
+
+        case RuntimeRoutingTerminal::committed_cleanup_pending:
+        case RuntimeRoutingTerminal::partial_unknown:
+            // Neither desired nor prior ledgers describe the complete live
+            // kernel state. Retain the conservative preimage only as recovery
+            // evidence and block authoritative consumers.
+            routes_.adopt_exact_state(
+                std::move(conservative_routes),
+                std::move(conservative_owned_routes));
+            rules_.adopt_exact_state(
+                std::move(conservative_rules),
+                std::move(conservative_owned_rules));
+            result.inventory = commit_prepared_inventory_locked(
+                std::move(unknown_publication),
+                RuntimeRoutingMutationPhase::failed,
+                result.outcome,
+                /*advance_revision=*/exact_result.mutation_started);
+            return result;
+
+        case RuntimeRoutingTerminal::stale_before_mutation:
+        case RuntimeRoutingTerminal::precondition_failed:
+            if (prior_inventory_authoritative &&
+                exact_result.prior_preimage_observed &&
+                !exact_result.prior_preimage_exact) {
+                // The raw preflight disproved the published base even though
+                // this attempt performed no writes. Do not let downstream
+                // treat a drifted route/rule preimage as retained.
+                result.inventory = commit_prepared_inventory_locked(
+                    std::move(unknown_publication),
+                    RuntimeRoutingMutationPhase::failed,
+                    result.outcome,
+                    /*advance_revision=*/false);
+                return result;
+            }
+            result.inventory = snapshot();
+            return result;
+
+        case RuntimeRoutingTerminal::prepared:
+        case RuntimeRoutingTerminal::running:
+            result.outcome =
+                RuntimeRoutingOperationOutcome::exact_partial_unknown;
+            result.inventory = commit_prepared_inventory_locked(
+                std::move(unknown_publication),
+                RuntimeRoutingMutationPhase::failed,
+                result.outcome,
+                /*advance_revision=*/exact_result.mutation_started);
+            return result;
+    }
+
+    result.outcome = RuntimeRoutingOperationOutcome::exact_partial_unknown;
+    result.inventory = commit_prepared_inventory_locked(
+        std::move(unknown_publication),
+        RuntimeRoutingMutationPhase::failed,
+        result.outcome,
+        /*advance_revision=*/exact_result.mutation_started);
+    return result;
+}
+
 void RuntimeRoutingOperationOwner::notify_interface_up(
     const std::string& interface_name) noexcept {
     if (interface_name.empty()) return;
@@ -670,6 +1083,10 @@ RuntimeRoutingOperationOwner::clear() {
         const bool kernel_state_known = clear_ledgers_locked();
         discard_pending_interface_notifications_locked();
         active_journal_.reset();
+        std::atomic_store_explicit(
+            &active_exact_journal_,
+            RuntimeRoutingPublishedJournalPtr{},
+            std::memory_order_release);
         return publish_actual_inventory_or_fallback_locked(
             std::move(fallback),
             std::nullopt,

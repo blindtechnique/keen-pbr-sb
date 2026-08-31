@@ -144,6 +144,8 @@ add_executable(keen-pbr-tests
   test_dependency_analysis.cpp
   test_list_delete_planner.cpp
   test_routing_state.cpp
+  test_raw_rtnetlink_codec.cpp
+  test_runtime_routing_exact_owner.cpp
   test_runtime_routing_operation_owner.cpp
   test_runtime_routing_transaction.cpp
   test_runtime_interface_inventory.cpp
@@ -419,6 +421,7 @@ add_executable(keen-pbr-tests
   ../src/routing/firewall_state.cpp
   ../src/routing/urltest_manager.cpp
   ../src/routing/netlink.cpp
+  ../src/routing/raw_rtnetlink_codec.cpp
   ../src/routing/fib_lookup.cpp
   ../src/routing/interface_monitor.cpp
   ../src/util/blocking_executor.cpp
@@ -443,6 +446,52 @@ add_executable(keen-pbr-tests
   ../src/routing/runtime_routing_transaction.cpp
   ../src/routing/routing_verifier.cpp
   ../src/routing/target.cpp
+)
+
+# Keep the production exact route/rule backend independently buildable. This
+# target covers the raw codec, the combined transaction and its sole owner
+# without relinking the daemon/API monolith.
+add_executable(keen-pbr-runtime-routing-exact-tests
+  test_main.cpp
+  test_raw_rtnetlink_codec.cpp
+  test_runtime_routing_transaction.cpp
+  test_runtime_routing_exact_owner.cpp
+  ../src/routing/netlink.cpp
+  ../src/routing/raw_rtnetlink_codec.cpp
+  ../src/routing/policy_rule.cpp
+  ../src/routing/route_table.cpp
+  ../src/routing/runtime_routing_operation_owner.cpp
+  ../src/routing/runtime_routing_transaction.cpp
+  ../src/log/logger.cpp
+  ../src/log/trace.cpp
+  ../src/util/traced_mutex.cpp
+)
+set_target_properties(keen-pbr-runtime-routing-exact-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_compile_definitions(
+  keen-pbr-runtime-routing-exact-tests PRIVATE KEEN_PBR3_TESTING
+)
+target_include_directories(keen-pbr-runtime-routing-exact-tests PRIVATE
+  ${KEEN_PBR_GENERATED_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+  ${LIBNL_INCLUDE_DIRS}
+  ${LIBNL_ROUTE_INCLUDE_DIRS}
+)
+target_link_libraries(keen-pbr-runtime-routing-exact-tests PRIVATE
+  PkgConfig::LIBNL
+  PkgConfig::LIBNL_ROUTE
+  fmt::fmt-header-only
+  Threads::Threads
+)
+keen_pbr_apply_project_options(keen-pbr-runtime-routing-exact-tests)
+add_test(
+  NAME keen-pbr-runtime-routing-exact-tests
+  COMMAND keen-pbr-runtime-routing-exact-tests
 )
 
 # Keep immutable cache-generation and ListStreamer snapshot invariants in a

@@ -517,6 +517,7 @@ set(SOURCES
   src/health/tunnel_candidate_scan.cpp
   src/routing/target.cpp
   src/routing/netlink.cpp
+  src/routing/raw_rtnetlink_codec.cpp
   src/routing/interface_monitor.cpp
   src/routing/route_table.cpp
   src/routing/policy_rule.cpp
