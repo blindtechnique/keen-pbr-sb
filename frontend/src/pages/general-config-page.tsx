@@ -1004,7 +1004,11 @@ function LoadedGeneralConfigPage({
                         <Select
                           items={tunnelProbeListItems}
                           onValueChange={(value) =>
-                            field.handleChange(value === TUNNEL_PROBE_LIST_AUTO ? "" : value)
+                            field.handleChange(
+                              !value || value === TUNNEL_PROBE_LIST_AUTO
+                                ? ""
+                                : value
+                            )
                           }
                           value={field.state.value || TUNNEL_PROBE_LIST_AUTO}
                         >
