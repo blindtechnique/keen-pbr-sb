@@ -558,6 +558,7 @@ set(SOURCES
   src/daemon/daemon_tunnel_probe.cpp
   src/daemon/daemon_resolver.cpp
   src/daemon/runtime_resolver_generation_snapshot.cpp
+  src/daemon/resolver_stream_attempt_owner.cpp
   src/daemon/runtime_resolver_publication.cpp
   src/daemon/runtime_cold_boot_publication.cpp
   src/daemon/keenetic_dns_refresh_coordinator.cpp
@@ -565,6 +566,7 @@ set(SOURCES
   src/daemon/runtime_firewall_backend_transaction.cpp
   src/daemon/runtime_firewall_immediate_completion.cpp
   src/daemon/runtime_firewall_lifecycle_completion.cpp
+  src/daemon/runtime_firewall_lifecycle_resolver_attempt.cpp
   src/daemon/runtime_firewall_generation_input.cpp
   src/daemon/runtime_firewall_core_publication.cpp
   src/daemon/runtime_firewall_conntrack_tail_plan.cpp

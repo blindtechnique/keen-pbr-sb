@@ -14,6 +14,8 @@ add_executable(keen-pbr-tests
   test_runtime_firewall_meta_tail_plan.cpp
   test_runtime_firewall_publication_tail_progress.cpp
   test_runtime_firewall_resolver_tail_plan.cpp
+  test_runtime_firewall_lifecycle_resolver_attempt.cpp
+  test_runtime_firewall_tail_effect_dispatch.cpp
   test_runtime_firewall_terminal_tail_plan.cpp
   test_runtime_resolver_publication.cpp
   test_runtime_cold_boot_publication.cpp
@@ -191,6 +193,7 @@ add_executable(keen-pbr-tests
   test_api_static.cpp
   test_resolver_health.cpp
   test_runtime_resolver_generation_snapshot.cpp
+  test_resolver_stream_attempt_owner.cpp
   test_system_resolver_hook.cpp
   test_system_info.cpp
   test_network_routes.cpp
@@ -237,11 +240,13 @@ add_executable(keen-pbr-tests
   ../src/daemon/daemon_tunnel_probe.cpp
   ../src/daemon/daemon_resolver.cpp
   ../src/daemon/runtime_resolver_generation_snapshot.cpp
+  ../src/daemon/resolver_stream_attempt_owner.cpp
   ../src/daemon/keenetic_dns_refresh_coordinator.cpp
   ../src/daemon/resolver_stream_coordinator.cpp
   ../src/daemon/runtime_firewall_backend_transaction.cpp
   ../src/daemon/runtime_firewall_immediate_completion.cpp
   ../src/daemon/runtime_firewall_lifecycle_completion.cpp
+  ../src/daemon/runtime_firewall_lifecycle_resolver_attempt.cpp
   ../src/daemon/runtime_firewall_generation_input.cpp
   ../src/daemon/runtime_firewall_core_publication.cpp
   ../src/daemon/runtime_firewall_conntrack_tail_plan.cpp
@@ -867,8 +872,12 @@ add_test(
 add_executable(keen-pbr-runtime-resolver-generation-tests
   test_main.cpp
   test_runtime_resolver_generation_snapshot.cpp
+  test_resolver_stream_attempt_owner.cpp
+  test_runtime_firewall_lifecycle_resolver_attempt.cpp
   ../src/cache/cache_manager.cpp
   ../src/daemon/runtime_resolver_generation_snapshot.cpp
+  ../src/daemon/resolver_stream_attempt_owner.cpp
+  ../src/daemon/runtime_firewall_lifecycle_resolver_attempt.cpp
   ../src/config/config_writer.cpp
   ../src/dns/dns_router.cpp
   ../src/dns/dns_server.cpp
@@ -877,6 +886,7 @@ add_executable(keen-pbr-runtime-resolver-generation-tests
   ../src/http/http_client.cpp
   ../src/http/http_transport.cpp
   ../src/http/curl_runtime.cpp
+  ../src/lists/list_shrink_guard.cpp
   ../src/lists/list_streamer.cpp
   ../src/lists/srs_decoder.cpp
   ../src/config/list_parser.cpp
@@ -981,6 +991,7 @@ add_executable(keen-pbr-runtime-firewall-publication-tests
   test_runtime_firewall_meta_tail_plan.cpp
   test_runtime_firewall_publication_tail_progress.cpp
   test_runtime_firewall_resolver_tail_plan.cpp
+  test_runtime_firewall_tail_effect_dispatch.cpp
   test_runtime_firewall_terminal_tail_plan.cpp
   test_runtime_resolver_publication.cpp
   ../src/daemon/runtime_firewall_core_publication.cpp

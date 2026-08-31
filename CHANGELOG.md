@@ -120,6 +120,14 @@
   использует точный borrowed plan. Существующие resolver stream, scheduler,
   incident, admission и bounded retry остаются единственными исполнителями —
   новый защитный или recovery-контур не создавался.
+- Очередной слой P0-1 переносит process-wide владение попыткой resolver stream —
+  IPC gate, exact attempt/generation, inactive START pointer и epochs — из
+  `Daemon` в `ResolverStreamAttemptOwner`, а фазу и точное завершение
+  foreground lifecycle — в value-only
+  `RuntimeFirewallLifecycleResolverAttempt`. Порядок Meta, conntrack, START и
+  background effects закреплён тонким stateless dispatcher без нового writer,
+  admission, retry, incident или recovery-контура. Существующие coordinator и
+  schedulers остаются единственными исполнителями побочных эффектов.
 - API-операции runtime и SIGHUP rollback удерживают точное активное поколение
   конфигурации до завершения, а отложенный list/firewall staging использует
   закреплённый снимок кэша без ссылки на изменяемого владельца `CacheManager`.

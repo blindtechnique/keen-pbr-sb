@@ -379,7 +379,7 @@ bool Daemon::run_system_resolver_hook(std::string_view action,
 
     std::optional<ResolverIpcGate> gate;
     if (manage_ipc_gate) {
-        gate.emplace(ipc_resolver_hook_inflight_);
+        gate.emplace(resolver_stream_attempt_owner_);
     }
 
     int exit_code = 0;
@@ -437,30 +437,14 @@ bool Daemon::run_system_resolver_hook_stream_prepared(
     }
     auto generation = std::make_shared<ResolverGenerationSnapshot>(
         *resolver_generation_snapshot_);
-    generation->stream_epoch =
-        resolver_stream_epoch_.fetch_add(1, std::memory_order_acq_rel) + 1;
+    resolver_stream_attempt_owner_.assign_next_stream_epoch(*generation);
     const std::uint64_t expected_epoch = generation->stream_epoch;
     const std::string attempt_id = generate_resolver_attempt_id();
-    auto lifetime = std::make_shared<ResolverStreamAttemptLifetime>(
-        ipc_resolver_hook_inflight_,
-        nullptr,
-        generation,
-        [this, attempt_id]() noexcept {
-            KPBR_LOCK_GUARD(resolver_stream_attempt_mutex_);
-            if (active_resolver_stream_attempt_id_ == attempt_id) {
-                active_resolver_stream_attempt_id_.clear();
-                active_resolver_stream_generation_.reset();
-                inactive_resolver_activation_generation_.reset();
-            }
-        });
+    auto lifetime = resolver_stream_attempt_owner_.acquire_lifetime(
+        attempt_id, generation);
     resolver_generation_snapshot_ = generation;
-    {
-        KPBR_LOCK_GUARD(resolver_stream_attempt_mutex_);
-        active_resolver_stream_attempt_id_ = attempt_id;
-        active_resolver_stream_generation_ = generation;
-        inactive_resolver_activation_generation_ =
-            inactive_activation_authority ? generation : nullptr;
-    }
+    resolver_stream_attempt_owner_.publish_active(
+        lifetime, inactive_activation_authority);
     if (!run_system_resolver_hook(action, false, attempt_id)) {
         return false;
     }
@@ -494,8 +478,8 @@ bool Daemon::wait_for_resolver_stream_epoch(
     std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
-        if (resolver_stream_completed_epoch_.load(
-                std::memory_order_acquire) == expected_epoch) {
+        if (resolver_stream_attempt_owner_.completed_stream_epoch() ==
+            expected_epoch) {
             return true;
         }
         if (is_event_loop_thread() ||
@@ -504,8 +488,8 @@ bool Daemon::wait_for_resolver_stream_epoch(
         }
         std::this_thread::sleep_for(std::chrono::milliseconds{10});
     }
-    return resolver_stream_completed_epoch_.load(
-               std::memory_order_acquire) == expected_epoch;
+    return resolver_stream_attempt_owner_.completed_stream_epoch() ==
+        expected_epoch;
 }
 
 
@@ -4676,9 +4660,8 @@ void Daemon::start_resolver_reload_retry_attempt(
 
         auto generation = std::make_shared<ResolverGenerationSnapshot>(
             *resolver_generation_snapshot_);
-        generation->stream_epoch =
-            resolver_stream_epoch_.fetch_add(
-                1, std::memory_order_acq_rel) + 1;
+        resolver_stream_attempt_owner_.assign_next_stream_epoch(
+            *generation);
         const std::string attempt_id = generate_resolver_attempt_id();
         const auto args = build_system_resolver_hook_args(
             generation->config, "reload", attempt_id);
@@ -4697,23 +4680,10 @@ void Daemon::start_resolver_reload_retry_attempt(
             return;
         }
 
-        auto lifetime = std::make_shared<ResolverStreamAttemptLifetime>(
-            ipc_resolver_hook_inflight_,
-            mutation_lease,
-            generation,
-            [this, attempt_id]() noexcept {
-                KPBR_LOCK_GUARD(resolver_stream_attempt_mutex_);
-                if (active_resolver_stream_attempt_id_ == attempt_id) {
-                    active_resolver_stream_attempt_id_.clear();
-                    active_resolver_stream_generation_.reset();
-                }
-            });
+        auto lifetime = resolver_stream_attempt_owner_.acquire_lifetime(
+            attempt_id, generation, mutation_lease);
         resolver_generation_snapshot_ = generation;
-        {
-            KPBR_LOCK_GUARD(resolver_stream_attempt_mutex_);
-            active_resolver_stream_attempt_id_ = attempt_id;
-            active_resolver_stream_generation_ = generation;
-        }
+        resolver_stream_attempt_owner_.publish_active(lifetime);
 
         ResolverStreamOperation operation;
         operation.runtime_generation = runtime_generation;

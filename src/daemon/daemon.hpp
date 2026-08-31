@@ -72,6 +72,7 @@
 #include "targeted_probe_admission.hpp"
 #include "runtime_state_store.hpp"
 #include "resolver_sync_state_machine.hpp"
+#include "resolver_stream_attempt_owner.hpp"
 #include "resolver_stream_coordinator.hpp"
 #include "system_resolver_hook.hpp"
 
@@ -462,60 +463,6 @@ inline bool internal_vpn_resolution_requires_catalog_refresh(
     return config_has_stable_internal_vpn_server_policy(config) &&
            state != InternalVpnRuntimeResolutionState::verified;
 }
-
-// Shared by background resolver recovery and foreground lifecycle activation.
-// The lifetime owns the single IPC gate and the exact streamed generation
-// until ResolverStreamCoordinator retires its claim.
-class ResolverIpcGate {
-public:
-    explicit ResolverIpcGate(std::atomic<bool>& flag) : flag_(flag) {
-        if (flag_.exchange(true, std::memory_order_acq_rel)) {
-            throw DaemonError(
-                "system resolver operation is already in progress");
-        }
-    }
-
-    ~ResolverIpcGate() {
-        flag_.store(false, std::memory_order_release);
-    }
-
-    ResolverIpcGate(const ResolverIpcGate&) = delete;
-    ResolverIpcGate& operator=(const ResolverIpcGate&) = delete;
-
-private:
-    std::atomic<bool>& flag_;
-};
-
-class ResolverStreamAttemptLifetime {
-public:
-    ResolverStreamAttemptLifetime(
-        std::atomic<bool>& ipc_gate,
-        std::shared_ptr<RuntimeMutationAdmission::Lease> mutation_lease,
-        std::shared_ptr<const ResolverGenerationSnapshot> generation,
-        std::function<void()> clear_active)
-        : ipc_gate_(ipc_gate),
-          mutation_lease_(std::move(mutation_lease)),
-          generation_(std::move(generation)),
-          clear_active_(std::move(clear_active)) {}
-
-    ~ResolverStreamAttemptLifetime() noexcept {
-        try {
-            if (clear_active_) clear_active_();
-        } catch (...) {
-        }
-    }
-
-    ResolverStreamAttemptLifetime(
-        const ResolverStreamAttemptLifetime&) = delete;
-    ResolverStreamAttemptLifetime& operator=(
-        const ResolverStreamAttemptLifetime&) = delete;
-
-private:
-    ResolverIpcGate ipc_gate_;
-    std::shared_ptr<RuntimeMutationAdmission::Lease> mutation_lease_;
-    std::shared_ptr<const ResolverGenerationSnapshot> generation_;
-    std::function<void()> clear_active_;
-};
 
 // Helper to get tag from any outbound variant
 std::string get_outbound_tag(const Outbound& ob);
@@ -1557,19 +1504,9 @@ private:
     BoundedOperationAdmission routing_test_admission_{2};
     std::atomic<std::uint64_t> runtime_generation_{1};
     KeeneticDnsRefreshCoordinator keenetic_dns_refresh_coordinator_;
-    std::atomic<bool> ipc_resolver_hook_inflight_{false};
-    TracedMutex resolver_stream_attempt_mutex_;
-    std::string active_resolver_stream_attempt_id_
-        GUARDED_BY(resolver_stream_attempt_mutex_);
-    std::shared_ptr<const ResolverGenerationSnapshot>
-        active_resolver_stream_generation_
-            GUARDED_BY(resolver_stream_attempt_mutex_);
-    // Non-null only for the exact committed stream that is activating a
-    // previously stopped runtime.  It is pointer-bound to the active attempt
-    // and cleared with that attempt's lifetime.
-    std::shared_ptr<const ResolverGenerationSnapshot>
-        inactive_resolver_activation_generation_
-            GUARDED_BY(resolver_stream_attempt_mutex_);
+    // Owns the single IPC gate, active id/generation tuple, inactive START
+    // authority and stream epochs. Coordinator/retry policy stays separate.
+    ResolverStreamAttemptOwner resolver_stream_attempt_owner_;
     std::atomic<bool> resolver_hash_refresh_inflight_{false};
     // Control-loop-owned coalescing bit. A changed periodic Keenetic DNS
     // observation is retried once after an active resolver stream retires.
@@ -1581,8 +1518,6 @@ private:
     CoalescedSingleFlightGate internal_vpn_catalog_refresh_gate_;
     int internal_vpn_catalog_refresh_retry_task_id_{-1};
     std::size_t internal_vpn_catalog_refresh_retry_attempt_{0};
-    std::atomic<std::uint64_t> resolver_stream_epoch_{0};
-    std::atomic<std::uint64_t> resolver_stream_completed_epoch_{0};
     TracedMutex system_resolver_hook_mutex_;
     // Legacy cache-publication serialization. Resolver/firewall consumers no
     // longer hold the shared side while dnsmasq performs its IPC stream: each
