@@ -425,7 +425,14 @@ void install_runtime_mocks(const fs::path& root) {
         "count=$((count + 1))\n"
         "printf '%s\\n' \"$count\" > \"$count_file\"\n"
         "printf '%s\\n' \"$*\" >> \"$KEEN_PBR_RESCUE_ROOT/opkg.log\"\n"
-        "exit \"${KEEN_PBR_TEST_OPKG_EXIT:-0}\"\n",
+        "status=${KEEN_PBR_TEST_OPKG_EXIT:-0}\n"
+        "if [ \"$status\" -eq 0 ] && \n"
+        "   [ \"${KEEN_PBR_TEST_OPKG_RUN_GUARD:-0}\" = 1 ]; then\n"
+        "  KEEN_PBR_PACKAGE_POSTINST=1 sh \n"
+        "    \"$KEEN_PBR_RESCUE_ROOT/opt/etc/init.d/S00keen-pbr-rescue\" start ||\n"
+        "    exit 19\n"
+        "fi\n"
+        "exit \"$status\"\n",
         0700);
     write_file(
         root / "opt/bin/curl",
@@ -516,7 +523,8 @@ int run_script(const fs::path& root,
                bool fail_pending_after_commit = false,
                bool persistent_transaction = false,
                bool final_remove = false,
-               bool auth_misconfigured = false) {
+               bool auth_misconfigured = false,
+               bool opkg_runs_startup_guard = false) {
     const auto pid = ::fork();
     if (pid < 0)
         throw std::system_error(errno, std::generic_category(), "fork");
@@ -567,6 +575,8 @@ int run_script(const fs::path& root,
             ::setenv("KEEN_PBR_FINAL_REMOVE", "1", 1);
         if (auth_misconfigured)
             ::setenv("KEEN_PBR_TEST_AUTH_MISCONFIGURED", "1", 1);
+        if (opkg_runs_startup_guard)
+            ::setenv("KEEN_PBR_TEST_OPKG_RUN_GUARD", "1", 1);
         if (!stdout_path.empty()) {
             const int descriptor =
                 ::open(stdout_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
@@ -632,7 +642,8 @@ int run_rescue(const fs::path& root,
                const std::string& stop_after_phase = {},
                bool fail_cleanup = false,
                bool fail_pending_after_commit = false,
-               bool auth_misconfigured = false) {
+               bool auth_misconfigured = false,
+               bool opkg_runs_startup_guard = false) {
     return run_script(root,
                       KEEN_PBR_RESCUE_SCRIPT_PATH,
                       arguments,
@@ -649,10 +660,11 @@ int run_rescue(const fs::path& root,
                       false,
                       false,
                       false,
-                      fail_pending_after_commit,
-                      false,
-                      false,
-                      auth_misconfigured);
+                       fail_pending_after_commit,
+                       false,
+                       false,
+                       auth_misconfigured,
+                       opkg_runs_startup_guard);
 }
 
 int run_lock(const fs::path& root,
@@ -1041,6 +1053,72 @@ TEST_CASE("interrupted staged candidate recovers the baseline package and config
     CHECK_FALSE(fs::exists(rescue / "candidate.ipk"));
 }
 
+TEST_CASE(
+    "explicit pending recovery crosses package UNKNOWN only under its locked transaction") {
+    TempDirectory directory;
+    const auto root = directory.path;
+    const auto rescue = rescue_dir(root);
+    const auto config = config_dir(root);
+    install_runtime_mocks(root);
+
+    write_file(config / "config.json", "config-a\n");
+    write_file(config / "transports.json", "transport-a\n");
+    write_file(rescue / "current.ipk", "package-a\n");
+    write_file(root / "candidate-source.ipk", "package-b\n", 0644);
+    REQUIRE(run_rescue(root,
+                       {"stage", (root / "candidate-source.ipk").string()}) ==
+            0);
+    write_file(rescue / "UNKNOWN", "failed automatic compensation\n");
+    write_file(config / "config.json", "mixed-config-b\n");
+    write_file(config / "transports.json", "mixed-transport-b\n");
+
+    REQUIRE(run_rescue(root,
+                       {"recover-pending"},
+                       0,
+                       0,
+                       {},
+                       false,
+                       false,
+                       false,
+                       true) == 0);
+    CHECK(read_file(config / "config.json") == "config-a\n");
+    CHECK(read_file(config / "transports.json") == "transport-a\n");
+    CHECK(read_file(rescue / "current.ipk") == "package-a\n");
+    CHECK_FALSE(fs::exists(rescue / "pending"));
+    CHECK_FALSE(fs::exists(rescue / "UNKNOWN"));
+    CHECK(count_occurrences(read_file(root / "opkg.log"), "--force-reinstall") ==
+          1);
+}
+
+TEST_CASE("failed explicit pending recovery preserves package UNKNOWN") {
+    TempDirectory directory;
+    const auto root = directory.path;
+    const auto rescue = rescue_dir(root);
+    const auto config = config_dir(root);
+    install_runtime_mocks(root);
+
+    write_file(config / "config.json", "config-a\n");
+    write_file(rescue / "current.ipk", "package-a\n");
+    write_file(root / "candidate-source.ipk", "package-b\n", 0644);
+    REQUIRE(run_rescue(root,
+                       {"stage", (root / "candidate-source.ipk").string()}) ==
+            0);
+    write_file(rescue / "UNKNOWN", "failed automatic compensation\n");
+
+    CHECK(run_rescue(root,
+                     {"recover-pending"},
+                     17,
+                     0,
+                     {},
+                     false,
+                     false,
+                     false,
+                     true) == 1);
+    CHECK(fs::exists(rescue / "pending"));
+    CHECK(fs::exists(rescue / "UNKNOWN"));
+    CHECK(read_file(rescue / "current.ipk") == "package-a\n");
+}
+
 TEST_CASE("early boot guard recovers pending state before legacy services start") {
     TempDirectory directory;
     const auto root = directory.path;
@@ -1084,6 +1162,7 @@ TEST_CASE("early boot guard blocks UNKNOWN and recursive postinst recovery") {
 
     write_file(rescue / "UNKNOWN", "manual recovery required\n");
     CHECK(run_startup_guard(root) == 1);
+    CHECK(run_startup_guard(root, true, true) == 1);
     CHECK_FALSE(fs::exists(root / "opkg.log"));
 
     REQUIRE(fs::remove(rescue / "UNKNOWN"));

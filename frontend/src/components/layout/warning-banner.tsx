@@ -16,6 +16,7 @@ import type {
   WarningBannerMode,
   WarningBannerState,
 } from "@/components/layout/warning-banner-state"
+import { getWarningBannerDraftActions } from "@/components/layout/warning-banner-state"
 
 export function WarningBanner({
   className,
@@ -76,6 +77,8 @@ export function WarningBanner({
   const isLifecycle = state.mode.startsWith("lifecycle-")
   const isError =
     state.mode === "dnsmasq-error" || state.mode === "lifecycle-error"
+  const { canResolveDraft, canApplyOrRestart } =
+    getWarningBannerDraftActions(state.mode, state.hasDraftConfig)
   const handleApplyAndReload = () => {
     if (state.hasDraftConfig) {
       applyConfigMutation.mutate()
@@ -115,7 +118,7 @@ export function WarningBanner({
           </div>
 
           <div className="flex shrink-0 gap-2">
-            {!isConverging && !isLifecycle && state.hasDraftConfig ? (
+            {canResolveDraft ? (
               <Button
                 disabled={state.isActionDisabled}
                 onClick={() => discardConfigMutation.mutate()}
@@ -129,7 +132,7 @@ export function WarningBanner({
                   : t("warning.actions.discard")}
               </Button>
             ) : null}
-            {!isConverging && !isLifecycle ? (
+            {canApplyOrRestart ? (
               <Button
                 disabled={state.isActionDisabled}
                 onClick={handleApplyAndReload}

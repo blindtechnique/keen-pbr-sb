@@ -1057,6 +1057,33 @@ recover_pending() {
     esac
 }
 
+clear_package_unknown_after_recovery() {
+    [ ! -L "$UNKNOWN_FILE" ] || return 1
+    [ -e "$UNKNOWN_FILE" ] || return 0
+    [ -f "$UNKNOWN_FILE" ] || return 1
+    rm -f "$UNKNOWN_FILE" || return 1
+    if ! sync; then
+        mark_unknown \
+            "package recovery completed but UNKNOWN removal durability could not be confirmed" ||
+            true
+        return 1
+    fi
+}
+
+recover_pending_explicit() {
+    local recovery_status=0
+    KEEN_PBR_PACKAGE_UNKNOWN_RECOVERY=recover-pending-v1
+    export KEEN_PBR_PACKAGE_UNKNOWN_RECOVERY
+
+    recover_pending || recovery_status=$?
+    if [ "$recovery_status" -eq 0 ]; then
+        clear_package_unknown_after_recovery || recovery_status=$?
+    fi
+
+    unset KEEN_PBR_PACKAGE_UNKNOWN_RECOVERY
+    return "$recovery_status"
+}
+
 recover_startup() {
     [ ! -e "$UNKNOWN_FILE" ] && [ ! -L "$UNKNOWN_FILE" ] || return 3
     if [ ! -e "$PENDING_FILE" ] && [ ! -L "$PENDING_FILE" ]; then
@@ -1138,7 +1165,7 @@ case "$command" in
         ;;
     recover-pending)
         [ "$#" -eq 1 ] || exit 2
-        recover_pending
+        recover_pending_explicit
         ;;
     *)
         echo "Usage: $0 {stage IPK|verify|promote|rollback-candidate|rollback-previous|recover-startup|recover-pending|can-rollback-previous|status}" >&2

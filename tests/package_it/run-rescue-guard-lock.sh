@@ -83,6 +83,32 @@ set -e
 "$LOCK_UNDER_ROOT" held "$OWNER_PID" "$TOKEN" ||
     fail "the owner lost its lease after the guard borrowed it"
 
+# A generic rescue-transaction environment must not bypass package UNKNOWN.
+# The explicit recover-pending capability is accepted only together with the
+# exact inherited update-lock generation that issued it.
+: > "$RESCUE/UNKNOWN"
+chmod 0600 "$RESCUE/UNKNOWN"
+set +e
+KEEN_PBR_RESCUE_TRANSACTION=1 \
+KEEN_PBR_PACKAGE_UNKNOWN_RECOVERY=recover-pending-v1 \
+    sh "$GUARD" start >/dev/null 2>&1
+unlocked_unknown_status=$?
+set -e
+[ "$unlocked_unknown_status" -ne 0 ] ||
+    fail "package UNKNOWN bypassed startup without the locked recovery owner"
+[ -f "$RESCUE/UNKNOWN" ] ||
+    fail "an unauthorized UNKNOWN check consumed the marker"
+
+KEEN_PBR_RESCUE_TRANSACTION=1 \
+KEEN_PBR_PACKAGE_UNKNOWN_RECOVERY=recover-pending-v1 \
+KEEN_PBR_UPDATE_LOCK_PID="$OWNER_PID" \
+KEEN_PBR_UPDATE_LOCK_TOKEN="$TOKEN" \
+    sh "$GUARD" start >/dev/null 2>&1 ||
+    fail "locked explicit pending recovery could not cross package UNKNOWN"
+[ -f "$RESCUE/UNKNOWN" ] ||
+    fail "startup guard consumed package UNKNOWN before recovery completed"
+rm -f "$RESCUE/UNKNOWN"
+
 # A lifecycle child must become the authoritative owner while it mutates.
 # Otherwise a daemon crash could make its guardian release exclusion while
 # the already-forked S79/S80 child continues. The EXIT path hands ownership

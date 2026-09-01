@@ -186,7 +186,24 @@ validate_private_directory() {
 }
 
 validate_private_directory "$RESCUE_DIR"
-if [ -e "$UNKNOWN_FILE" ] || [ -L "$UNKNOWN_FILE" ]; then
+package_unknown_recovery_is_authorized() {
+    [ "${KEEN_PBR_PACKAGE_UNKNOWN_RECOVERY:-}" = "recover-pending-v1" ] ||
+        return 1
+    [ "${KEEN_PBR_RESCUE_TRANSACTION:-0}" = "1" ] || return 1
+    inherited_pid=${KEEN_PBR_UPDATE_LOCK_PID:-}
+    inherited_token=${KEEN_PBR_UPDATE_LOCK_TOKEN:-}
+    [ -n "$RECOVERY_LOCK_HELPER" ] &&
+        [ -n "$inherited_pid" ] && [ -n "$inherited_token" ] &&
+        "$RECOVERY_LOCK_HELPER" held "$inherited_pid" "$inherited_token" \
+            >/dev/null 2>&1
+}
+
+if [ -L "$UNKNOWN_FILE" ] ||
+   { [ -e "$UNKNOWN_FILE" ] && [ ! -f "$UNKNOWN_FILE" ]; }; then
+    fail "keen-pbr package recovery UNKNOWN marker has an unsafe type"
+fi
+if [ -f "$UNKNOWN_FILE" ] &&
+   ! package_unknown_recovery_is_authorized; then
     fail "keen-pbr package recovery is UNKNOWN; refusing service startup"
 fi
 if [ -L "$PENDING_FILE" ] ||
@@ -195,8 +212,10 @@ if [ -L "$PENDING_FILE" ] ||
 fi
 
 # Package installation and the explicit package rescue transaction start
-# services while a regular PENDING marker is intentionally present. UNKNOWN
-# and unsafe metadata are never bypassed.
+# services while a regular PENDING marker is intentionally present. A locked
+# explicit recover-pending may additionally carry one narrow capability for a
+# regular package UNKNOWN marker; persistent UNKNOWN and unsafe metadata are
+# never bypassed.
 if [ -f "$PENDING_FILE" ] &&
    [ "${KEEN_PBR_RESCUE_TRANSACTION:-0}" != "1" ]; then
         # Calling opkg recursively from another package's postinst is unsafe.

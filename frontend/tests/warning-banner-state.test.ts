@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs"
 import { describe, expect, test } from "bun:test"
 
 import type { HealthResponse } from "../src/api/generated/model"
+import { getWarningBannerDraftActions } from "../src/components/layout/warning-banner-state"
 import { getWarningBannerMode } from "../src/components/layout/warning-banner-state"
 import { retainLifecycleOperation } from "../src/components/layout/warning-banner-state"
 
@@ -103,5 +104,25 @@ describe("WarningBanner draft actions", () => {
     expect(warningBannerSource).toContain('t("warning.actions.discard")')
     expect(warningBannerSource).toContain("handleApplyAndReload")
     expect(warningBannerSource).toContain("state.isActionDisabled")
+  })
+
+  test("keeps apply and discard available after a failed draft lifecycle", () => {
+    expect(getWarningBannerDraftActions("lifecycle-error", true)).toEqual({
+      canResolveDraft: true,
+      canApplyOrRestart: true,
+    })
+    expect(getWarningBannerDraftActions("lifecycle-error", false)).toEqual({
+      canResolveDraft: false,
+      canApplyOrRestart: false,
+    })
+  })
+
+  test("does not expose draft actions during an active or completed lifecycle", () => {
+    for (const mode of ["lifecycle-running", "lifecycle-success"] as const) {
+      expect(getWarningBannerDraftActions(mode, true)).toEqual({
+        canResolveDraft: false,
+        canApplyOrRestart: false,
+      })
+    }
   })
 })

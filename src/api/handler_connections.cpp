@@ -3,6 +3,7 @@
 #include "handler_connections.hpp"
 #include "connection_query.hpp"
 #include "dhcp_bindings.hpp"
+#include "../dns/dns_query_log_maintenance.hpp"
 #include "../util/base64.hpp"
 #include "../util/ndmc.hpp"
 
@@ -10,7 +11,6 @@
 #include <chrono>
 #include <deque>
 #include <fstream>
-#include <filesystem>
 #include <iterator>
 #include <map>
 #include <mutex>
@@ -37,7 +37,6 @@ std::map<std::string, Connection> history;
 constexpr size_t maximum_history_entries = 1500;
 constexpr size_t maximum_dns_addresses = 3000;
 constexpr size_t maximum_domains_per_address = 4;
-constexpr const char* dns_query_log = "/tmp/dnsmasq-keen-pbr-queries.log";
 constexpr auto snapshot_ttl = std::chrono::seconds(2);
 constexpr auto device_names_ttl = std::chrono::seconds(60);
 std::map<std::string, std::deque<std::string>> domains_by_address;
@@ -89,11 +88,21 @@ void remember_domain(const std::string& address, const std::string& domain) {
 }
 
 void read_dns_query_log() {
-    std::error_code ec;
-    const auto size = std::filesystem::file_size(dns_query_log, ec);
-    if (ec) return;
+    const auto maintenance = maintain_dns_query_log();
+    // Never parse an accidentally unbounded tmpfs log. The old order read the
+    // complete file first and only then truncated it, which could block an API
+    // request after days without visiting the connections page.
+    if (maintenance.state != DnsQueryLogMaintenanceState::within_limit) {
+        if (maintenance.state == DnsQueryLogMaintenanceState::truncated) {
+            dns_log_offset = 0;
+        }
+        // Even if truncation itself fails, do not turn an already oversized
+        // tmpfs file into a long blocking API read.
+        return;
+    }
+    const auto size = maintenance.observed_size;
     if (size < static_cast<std::uintmax_t>(dns_log_offset)) dns_log_offset = 0;
-    std::ifstream input(dns_query_log);
+    std::ifstream input(dns_query_log_path);
     if (!input) return;
     input.seekg(dns_log_offset);
     for (std::string line; std::getline(input, line);) {
@@ -107,12 +116,6 @@ void read_dns_query_log() {
     }
     dns_log_offset = static_cast<std::streamoff>(size);
 
-    // The log lives in tmpfs and is used only as a short DNS observation
-    // stream. Keep it bounded; dnsmasq opens the file with append semantics.
-    if (size > 2U * 1024U * 1024U) {
-        std::ofstream truncate(dns_query_log, std::ios::trunc);
-        dns_log_offset = 0;
-    }
 }
 
 std::map<uint32_t, std::string> routes(const Config& config) {

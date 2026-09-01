@@ -315,6 +315,7 @@ add_executable(keen-pbr-tests
   ../src/log/trace.cpp
   ../src/dns/dnsmasq_gen.cpp
   ../src/dns/dnsmasq_access_policy.cpp
+  ../src/dns/dns_query_log_maintenance.cpp
   ../src/dns/dns_txt_client.cpp
   ../src/dns/dns_router.cpp
   ../src/dns/dns_server.cpp
@@ -1392,6 +1393,40 @@ keen_pbr_apply_project_options(
 add_test(
   NAME keen-pbr-api-runtime-lifecycle-tests
   COMMAND keen-pbr-api-runtime-lifecycle-tests
+)
+
+# Keep tmpfs DNS observation log maintenance independently buildable. This
+# target verifies the same-inode truncate contract used with dnsmasq's live
+# O_APPEND descriptor without linking the daemon/API monolith.
+add_executable(keen-pbr-dns-query-log-maintenance-tests
+  test_main.cpp
+  test_dns_query_log_maintenance.cpp
+  ../src/dns/dns_query_log_maintenance.cpp
+)
+set_target_properties(
+  keen-pbr-dns-query-log-maintenance-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_include_directories(
+  keen-pbr-dns-query-log-maintenance-tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+)
+target_link_libraries(
+  keen-pbr-dns-query-log-maintenance-tests PRIVATE
+  Threads::Threads
+)
+keen_pbr_apply_project_options(
+  keen-pbr-dns-query-log-maintenance-tests)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+  target_link_libraries(
+    keen-pbr-dns-query-log-maintenance-tests PRIVATE stdc++fs)
+endif()
+add_test(
+  NAME keen-pbr-dns-query-log-maintenance-tests
+  COMMAND keen-pbr-dns-query-log-maintenance-tests
 )
 
 # Keep the delayed runtime-firewall transport owner independently buildable.

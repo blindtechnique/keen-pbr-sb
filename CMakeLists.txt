@@ -550,6 +550,7 @@ set(SOURCES
   src/dns/dns_txt_client.cpp
   src/dns/dns_probe_server.cpp
   src/dns/dns_router.cpp
+  src/dns/dns_query_log_maintenance.cpp
   src/dns/dnsmasq_gen.cpp
   src/dns/dnsmasq_access_policy.cpp
   src/daemon/config_store.cpp

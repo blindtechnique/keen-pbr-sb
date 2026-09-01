@@ -40,6 +40,7 @@
 
 #include "../cache/cache_manager.hpp"
 #include "../cmd/test_routing.hpp"
+#include "../dns/dns_query_log_maintenance.hpp"
 #include "../dns/dns_router.hpp"
 #include "../dns/dnsmasq_access_policy.hpp"
 #include "../dns/dnsmasq_gen.hpp"
@@ -96,6 +97,8 @@ namespace {
 
 constexpr auto OWNED_SNAT_HEALTH_INTERVAL =
     std::chrono::seconds{60};
+constexpr auto DNS_QUERY_LOG_MAINTENANCE_INTERVAL =
+    std::chrono::minutes{1};
 #ifdef WITH_API
 constexpr auto REMOTE_ACCESS_RECOVERY_WATCHDOG_INTERVAL =
     std::chrono::seconds{60};
@@ -14403,6 +14406,11 @@ void Daemon::run_event_loop() {
 void Daemon::run() {
     auto& log = Logger::instance();
 
+    // dnsmasq writes this tmpfs stream independently of REST API availability.
+    // Bound stale data before potentially lengthy cold-boot work as well as in
+    // headless and --no-api modes.
+    (void)maintain_dns_query_log();
+
     try {
 #if defined(USE_KEENETIC_API) && defined(WITH_API)
         auto native_import_readiness =
@@ -14617,6 +14625,21 @@ void Daemon::run() {
     event_loop_thread_id_.store(
         std::this_thread::get_id(), std::memory_order_relaxed);
     event_loop_active_.store(true, std::memory_order_release);
+    // This common daemon-lifetime timer is registered once, independently of
+    // API startup. Scheduler registration has its own strong rollback, so a
+    // failed timerfd/epoll registration leaves no partial task to duplicate.
+    try {
+        scheduler_->schedule_repeating(
+            DNS_QUERY_LOG_MAINTENANCE_INTERVAL,
+            []() { (void)maintain_dns_query_log(); },
+            "dns-query-log-maintenance");
+    } catch (const std::exception& error) {
+        log.warn(
+            "DNS query log maintenance timer is unavailable: {}",
+            error.what());
+    } catch (...) {
+        log.warn("DNS query log maintenance timer is unavailable");
+    }
     // Arm the first owner admission through the event loop. A rejected timer
     // has not transferred authority, so retry its registration with the
     // existing bounded START delays. Exhaustion keeps the daemon alive and

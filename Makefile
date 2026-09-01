@@ -140,6 +140,7 @@ NARROW_TEST_TARGETS := \
 	keen-pbr-idle-stall-supervisor-tests \
 	keen-pbr-rescue-tests \
 	keen-pbr-keenetic-dns-refresh-tests \
+	keen-pbr-dns-query-log-maintenance-tests \
 	keen-pbr-router-info-cache-tests \
 	keen-pbr-resolver-stream-tests \
 	keen-pbr-backup-restore-journal-tests \

@@ -41,6 +41,25 @@ export type WarningBannerState = {
   progressPercent: number
 }
 
+export function getWarningBannerDraftActions(
+  mode: WarningBannerMode,
+  hasDraftConfig: boolean
+) {
+  const isConverging = mode === "dnsmasq-converging"
+  const isLifecycle = mode.startsWith("lifecycle-")
+  const isFailedLifecycle = mode === "lifecycle-error"
+
+  return {
+    canResolveDraft:
+      hasDraftConfig &&
+      !isConverging &&
+      (!isLifecycle || isFailedLifecycle),
+    canApplyOrRestart:
+      !isConverging &&
+      (!isLifecycle || (isFailedLifecycle && hasDraftConfig)),
+  }
+}
+
 export function useWarningBannerState(): WarningBannerState {
   const { t } = useTranslation()
   const [nowMs, setNowMs] = useState(() => Date.now())
