@@ -2179,7 +2179,7 @@ TEST_CASE("kernel routing reconciliation converges after a partial rule failure"
 
 TEST_CASE(
     "build_firewall_global_prefilter: verified OpenConnect ingress separates "
-    "processed and bypassed client modes") {
+    "forced DNS from destination-policy-only mode") {
     auto cfg = parse_minimal_config(
         R"({"route":{"inbound_interfaces":["br0"],"rules":[]}})");
 
@@ -2208,23 +2208,35 @@ TEST_CASE(
     openconnect.dns_redirect_local_destinations_v4.clear();
     prefilter = build_firewall_global_prefilter_for_runtime_targets(
         cfg, {openconnect});
-    CHECK(prefilter.include_source_cidrs_v4.empty());
-    REQUIRE(prefilter.bypass_source_selectors_v4.size() == 1U);
     CHECK(
-        prefilter.bypass_source_selectors_v4.front().interface ==
-        "oc7");
+        prefilter.include_source_cidrs_v4 ==
+        std::vector<std::string>{"172.16.5.0/24"});
+    CHECK(prefilter.bypass_source_selectors_v4.empty());
+    REQUIRE(
+        prefilter.dns_redirect_bypass_source_selectors_v4.size() ==
+        1U);
     CHECK(
-        prefilter.bypass_source_selectors_v4.front().cidr ==
+        prefilter.dns_redirect_bypass_source_selectors_v4.front()
+            .interface == "oc7");
+    CHECK(
+        prefilter.dns_redirect_bypass_source_selectors_v4.front()
+            .cidr ==
         "172.16.5.0/24");
     CHECK(
         prefilter.dns_redirect_local_destination_selectors_v4.empty());
+    CHECK_FALSE(internal_vpn_target_bypasses_routing(openconnect));
 
-    // An authoritative pool without a verified live ocN ingress remains
-    // fail-closed in exclusion mode.
+    // The authoritative pool still participates in destination policies, but
+    // DNS is never bypassed from a pool alone without an exact live ocN peer.
     openconnect.verified_ingress_interfaces.clear();
     prefilter = build_firewall_global_prefilter_for_runtime_targets(
         cfg, {openconnect});
     CHECK(prefilter.bypass_source_selectors_v4.empty());
+    CHECK(
+        prefilter.include_source_cidrs_v4 ==
+        std::vector<std::string>{"172.16.5.0/24"});
+    CHECK(
+        prefilter.dns_redirect_bypass_source_selectors_v4.empty());
 }
 
 TEST_CASE("kernel routing reconciliation restores a replaced route when policy commit fails") {

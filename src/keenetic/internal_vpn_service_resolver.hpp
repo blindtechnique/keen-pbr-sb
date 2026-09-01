@@ -29,8 +29,9 @@ struct InternalVpnServiceResolutionIssue {
 
 struct InternalVpnServiceResolution {
     std::vector<InternalVpnRuntimeTarget> effective_targets;
-    // Only process_clients=true targets are eligible for LKG retention.
-    // Exclusions are never retained from a stale firmware observation.
+    // process_clients=true targets and OpenConnect destination-policy targets
+    // are eligible for LKG retention. Other exclusions are never retained
+    // from a stale firmware observation.
     std::vector<InternalVpnRuntimeTarget> verified_includes_for_lkg;
     std::vector<std::string> retain_verified_include_service_ids;
     bool retain_all_verified_includes{false};

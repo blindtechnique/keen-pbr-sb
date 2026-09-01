@@ -571,7 +571,7 @@ bool config_forwarded_scope_restricted(
         internal_vpn_targets.begin(),
         internal_vpn_targets.end(),
         [](const InternalVpnRuntimeTarget& target) {
-            return !target.process_clients;
+            return internal_vpn_target_bypasses_routing(target);
         });
     return explicit_inbound_scope || native_vpn_bypass;
 }
@@ -8936,7 +8936,7 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
             transaction.effective_internal_vpn_targets.begin(),
             transaction.effective_internal_vpn_targets.end(),
             [](const InternalVpnRuntimeTarget& target) {
-                return !target.process_clients;
+                return internal_vpn_target_bypasses_routing(target);
             });
         transaction.forwarded_scope_allows_unmarked_cleanup =
             !has_explicit_inbound_scope && !has_native_vpn_bypass;

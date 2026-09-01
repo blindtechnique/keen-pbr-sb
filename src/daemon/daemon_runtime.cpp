@@ -1244,7 +1244,7 @@ void Daemon::apply_firewall(
         runtime_targets.begin(),
         runtime_targets.end(),
         [](const InternalVpnRuntimeTarget& target) {
-            return !target.process_clients;
+            return internal_vpn_target_bypasses_routing(target);
         });
     meta_activation = prepare_meta_udp443_activation_or_throw(
         staged.rule_states,

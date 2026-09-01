@@ -480,12 +480,12 @@ InternalVpnServiceResolution resolve_internal_vpn_service_policies(
     }
 
     for (const auto& [service_id, process_clients] : overrides) {
-        (void)process_clients;
         const auto found = service_by_id.find(service_id);
         if (found == service_by_id.end()) {
             if (unresolved_service_ids.find(service_id) !=
                 unresolved_service_ids.end()) {
-                if (process_clients) {
+                if (process_clients ||
+                    internal_vpn_stable_id_is_openconnect(service_id)) {
                     result.retain_verified_include_service_ids.push_back(
                         service_id);
                 }
@@ -572,7 +572,8 @@ InternalVpnServiceResolution resolve_internal_vpn_service_policies(
         if (configured_ids.find(service_id) != configured_ids.end()) {
             continue;
         }
-        if (default_process_clients) {
+        if (default_process_clients ||
+            internal_vpn_stable_id_is_openconnect(service_id)) {
             result.retain_verified_include_service_ids.push_back(
                 service_id);
         }
@@ -614,7 +615,8 @@ InternalVpnServiceResolution resolve_internal_vpn_service_policies(
             });
             continue;
         }
-        if (target.process_clients) {
+        if (target.process_clients ||
+            internal_vpn_target_is_openconnect(target)) {
             result.verified_includes_for_lkg.push_back(target);
         }
         result.effective_targets.push_back(std::move(target));
@@ -667,12 +669,16 @@ InternalVpnServiceGeneration select_internal_vpn_service_generation(
     }
     for (const auto& target : previous_verified_includes) {
         const auto target_cidrs = parsed_pool(target);
-        if (!target.process_clients ||
+        const bool configured_process_clients =
+            overrides.count(target.stable_id) != 0U
+                ? overrides.at(target.stable_id)
+                : default_process_clients;
+        if ((!target.process_clients &&
+             !internal_vpn_target_is_openconnect(target)) ||
             !target_has_source_pool(target) ||
             !target_cidrs ||
-            !(overrides.count(target.stable_id) != 0U
-                  ? overrides.at(target.stable_id)
-                  : default_process_clients) ||
+            (!configured_process_clients &&
+             !internal_vpn_target_is_openconnect(target)) ||
             (!candidate.retain_all_verified_includes &&
              retain_ids.find(target.stable_id) == retain_ids.end()) ||
             !selected_ids.insert(target.stable_id).second ||
@@ -683,7 +689,9 @@ InternalVpnServiceGeneration select_internal_vpn_service_generation(
             selected_cidrs.end(),
             target_cidrs->begin(),
             target_cidrs->end());
-        retained.push_back(target);
+        auto retained_target = target;
+        retained_target.process_clients = configured_process_clients;
+        retained.push_back(std::move(retained_target));
     }
     const bool retained_previous =
         retained.size() > candidate.effective_targets.size();
@@ -708,7 +716,8 @@ merge_internal_vpn_service_verified_includes_lkg(
 
     for (const auto& target : freshly_verified) {
         const auto target_cidrs = parsed_pool(target);
-        if (!target.process_clients ||
+        if ((!target.process_clients &&
+             !internal_vpn_target_is_openconnect(target)) ||
             !target_has_source_pool(target) ||
             !target_cidrs ||
             !selected_ids.insert(target.stable_id).second ||
@@ -726,7 +735,8 @@ merge_internal_vpn_service_verified_includes_lkg(
         retain_service_ids.begin(), retain_service_ids.end());
     for (const auto& target : previous) {
         const auto target_cidrs = parsed_pool(target);
-        if (!target.process_clients ||
+        if ((!target.process_clients &&
+             !internal_vpn_target_is_openconnect(target)) ||
             !target_has_source_pool(target) ||
             !target_cidrs ||
             retain_ids.find(target.stable_id) == retain_ids.end() ||

@@ -15,7 +15,7 @@ export interface InternalVpnService {
      * @pattern ^[A-Za-z0-9._:-]+$
      */
   service_id: string;
-  /** Whether traffic and DNS requests from the service client pool are processed by keen-pbr. False installs an early source-pool bypass.
+  /** Whether traffic and DNS requests from the service client pool are processed by keen-pbr. For OpenConnect, false preserves ordinary destination-based routing policies and bypasses only forced DNS redirection from an exact verified ocN ingress. For other native VPN services, false installs an early source-pool bypass.
    */
   process_clients: boolean;
 }

@@ -66,6 +66,32 @@ struct InternalVpnRuntimeTarget {
     std::vector<std::string> source_cidrs_v6;
 };
 
+inline bool internal_vpn_stable_id_is_openconnect(
+    const std::string& stable_id) noexcept {
+    return stable_id == "ndms-service:oc-server";
+}
+
+inline bool internal_vpn_target_is_openconnect(
+    const InternalVpnRuntimeTarget& target) noexcept {
+    return target.match_kind == InternalVpnRuntimeMatchKind::source_pool &&
+           internal_vpn_stable_id_is_openconnect(target.stable_id);
+}
+
+// OpenConnect clients must keep ordinary destination-based route policies in
+// both UI modes. With process_clients=false only the forced DNS redirect is
+// bypassed; other native VPN services retain their established full-bypass
+// semantics.
+inline bool internal_vpn_target_bypasses_routing(
+    const InternalVpnRuntimeTarget& target) noexcept {
+    return !target.process_clients &&
+           !internal_vpn_target_is_openconnect(target);
+}
+
+inline bool internal_vpn_target_uses_destination_policies(
+    const InternalVpnRuntimeTarget& target) noexcept {
+    return !internal_vpn_target_bypasses_routing(target);
+}
+
 inline InternalVpnRuntimeTarget internal_vpn_interface_runtime_target(
     const InternalVpnServer& server) {
     InternalVpnRuntimeTarget target;

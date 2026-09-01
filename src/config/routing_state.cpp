@@ -825,13 +825,31 @@ FirewallGlobalPrefilter build_firewall_global_prefilter_for_runtime_targets(
         if (target.match_kind != InternalVpnRuntimeMatchKind::source_pool) {
             continue;
         }
-        if (target.process_clients) {
+        if (internal_vpn_target_uses_destination_policies(target)) {
             include_sources_v4.insert(
                 target.source_cidrs_v4.begin(),
                 target.source_cidrs_v4.end());
             include_sources_v6.insert(
                 target.source_cidrs_v6.begin(),
                 target.source_cidrs_v6.end());
+            if (!target.process_clients) {
+                // OpenConnect OFF keeps the same destination-based PBR as a
+                // LAN client, but it must not force client DNS through the
+                // global REDIRECT. Bind that DNS-only bypass to the exact
+                // live ocN ingress and authoritative service pool.
+                for (const auto& interface :
+                     target.verified_ingress_interfaces) {
+                    for (const auto& cidr : target.source_cidrs_v4) {
+                        dns_redirect_bypass_sources_v4.emplace(
+                            interface, cidr);
+                    }
+                    for (const auto& cidr : target.source_cidrs_v6) {
+                        dns_redirect_bypass_sources_v6.emplace(
+                            interface, cidr);
+                    }
+                }
+                continue;
+            }
             for (const auto& interface :
                  target.dns_redirect_bypass_ingress_v4) {
                 for (const auto& cidr : target.source_cidrs_v4) {

@@ -399,6 +399,77 @@ TEST_CASE("internal VPN service resolution refreshes live IKE ingress") {
     CHECK(bypass.effective_targets.empty());
 }
 
+TEST_CASE(
+    "stale OpenConnect mode change retains the verified pool and rechecks "
+    "the live oc peer") {
+    InternalVpnResolutionCache cache;
+    const std::string service_id = "ndms-service:oc-server";
+
+    auto lan = live_interface("br0");
+    lan.ipv4_addresses = {"192.168.1.1/24"};
+    auto session = live_interface("oc7");
+    session.carrier = true;
+    session.ipv4_addresses = {"172.16.5.1/32"};
+    session.ipv4_peer_addresses = {"172.16.5.42/32"};
+    const std::vector<DumpedInterface> live{lan, session};
+
+    auto fresh = fresh_service_snapshot(
+        service_id, "Bridge0", "172.16.5.0/24");
+    fresh.catalog.services.front().kind =
+        NdmsVpnServerServiceKind::openconnect;
+    const auto verified = cache.resolve_services(
+        service_config(service_id), fresh, live);
+    REQUIRE(verified.effective_targets.size() == 1U);
+    CHECK(verified.effective_targets.front().process_clients);
+    cache.update_verified_service_targets(verified);
+
+    NdmsVpnServerServiceSnapshot stale;
+    stale.status = NdmsCatalogCacheStatus::stale;
+    const auto disabled = cache.resolve_services(
+        service_config(service_id, false), stale, live);
+    CHECK(
+        disabled.state ==
+        InternalVpnRuntimeResolutionState::
+            retained_verified_includes);
+    REQUIRE(disabled.effective_targets.size() == 1U);
+    const auto& target = disabled.effective_targets.front();
+    CHECK_FALSE(target.process_clients);
+    CHECK(
+        target.source_cidrs_v4 ==
+        std::vector<std::string>{"172.16.5.0/24"});
+    CHECK(
+        target.verified_ingress_interfaces ==
+        std::vector<std::string>{"oc7"});
+
+    NdmsVpnServerServiceSnapshot partial;
+    partial.status = NdmsCatalogCacheStatus::fresh;
+    partial.catalog.firmware_available = true;
+    partial.catalog.unresolved_service_ids = {service_id};
+    const auto partial_disabled = cache.resolve_services(
+        service_config(service_id, false), partial, live);
+    CHECK(
+        partial_disabled.state ==
+        InternalVpnRuntimeResolutionState::authoritative_negative);
+    REQUIRE(partial_disabled.effective_targets.size() == 1U);
+    CHECK_FALSE(
+        partial_disabled.effective_targets.front().process_clients);
+    CHECK(
+        partial_disabled.effective_targets.front()
+            .verified_ingress_interfaces ==
+        std::vector<std::string>{"oc7"});
+
+    auto mismatched = session;
+    mismatched.ipv4_peer_addresses = {"172.31.5.42/32"};
+    const auto no_peer = cache.resolve_services(
+        service_config(service_id, false),
+        partial,
+        {lan, mismatched});
+    REQUIRE(no_peer.effective_targets.size() == 1U);
+    CHECK(
+        no_peer.effective_targets.front()
+            .verified_ingress_interfaces.empty());
+}
+
 TEST_CASE("internal VPN resolution cache forwards exact verified publication") {
     InternalVpnResolutionCache cache;
     cache.update_verified_servers(server_resolution(

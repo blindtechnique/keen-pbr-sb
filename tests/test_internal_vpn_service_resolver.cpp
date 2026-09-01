@@ -560,6 +560,108 @@ TEST_CASE("stale service inventory retains verified includes but never bypass") 
 }
 
 TEST_CASE(
+    "stale OpenConnect inventory retains its destination-policy pool across "
+    "the client DNS mode toggle") {
+    const auto disabled_candidate =
+        resolve_internal_vpn_service_policies(
+            {policy("ndms-service:oc-server", false)},
+            NdmsVpnServerServiceCatalog{},
+            /*catalog_authoritative=*/false,
+            /*default_process_clients=*/true);
+
+    InternalVpnRuntimeTarget previous;
+    previous.stable_id = "ndms-service:oc-server";
+    previous.match_kind =
+        InternalVpnRuntimeMatchKind::source_pool;
+    previous.process_clients = true;
+    previous.source_cidrs_v4 = {"172.16.5.0/24"};
+
+    const auto disabled =
+        select_internal_vpn_service_generation(
+            {policy("ndms-service:oc-server", false)},
+            disabled_candidate,
+            {previous},
+            /*default_process_clients=*/true);
+    CHECK(
+        disabled.source ==
+        InternalVpnServiceGenerationSource::
+            retained_previous_includes);
+    REQUIRE(disabled.effective_targets.size() == 1U);
+    CHECK_FALSE(disabled.effective_targets.front().process_clients);
+    CHECK(
+        disabled.effective_targets.front().source_cidrs_v4 ==
+        std::vector<std::string>{"172.16.5.0/24"});
+
+    const auto enabled_candidate =
+        resolve_internal_vpn_service_policies(
+            {policy("ndms-service:oc-server", true)},
+            NdmsVpnServerServiceCatalog{},
+            /*catalog_authoritative=*/false,
+            /*default_process_clients=*/true);
+    const auto enabled =
+        select_internal_vpn_service_generation(
+            {policy("ndms-service:oc-server", true)},
+            enabled_candidate,
+            disabled.effective_targets,
+            /*default_process_clients=*/true);
+    REQUIRE(enabled.effective_targets.size() == 1U);
+    CHECK(enabled.effective_targets.front().process_clients);
+
+    const auto lkg = merge_internal_vpn_service_verified_includes_lkg(
+        {},
+        disabled.effective_targets,
+        {});
+    REQUIRE(lkg.size() == 1U);
+    CHECK_FALSE(lkg.front().process_clients);
+
+    NdmsVpnServerServiceCatalog partial_catalog;
+    partial_catalog.firmware_available = true;
+    partial_catalog.unresolved_service_ids = {
+        "ndms-service:oc-server",
+    };
+    const auto partial_disabled_candidate =
+        resolve_internal_vpn_service_policies(
+            {policy("ndms-service:oc-server", false)},
+            partial_catalog,
+            /*catalog_authoritative=*/true,
+            /*default_process_clients=*/true);
+    CHECK(
+        partial_disabled_candidate.retain_verified_include_service_ids ==
+        std::vector<std::string>{"ndms-service:oc-server"});
+    const auto partial_disabled =
+        select_internal_vpn_service_generation(
+            {policy("ndms-service:oc-server", false)},
+            partial_disabled_candidate,
+            {previous},
+            /*default_process_clients=*/true);
+    REQUIRE(partial_disabled.effective_targets.size() == 1U);
+    CHECK_FALSE(
+        partial_disabled.effective_targets.front().process_clients);
+
+    const auto partial_default_disabled_candidate =
+        resolve_internal_vpn_service_policies(
+            {},
+            partial_catalog,
+            /*catalog_authoritative=*/true,
+            /*default_process_clients=*/false);
+    CHECK(
+        partial_default_disabled_candidate
+            .retain_verified_include_service_ids ==
+        std::vector<std::string>{"ndms-service:oc-server"});
+    const auto partial_default_disabled =
+        select_internal_vpn_service_generation(
+            {},
+            partial_default_disabled_candidate,
+            {previous},
+            /*default_process_clients=*/false);
+    REQUIRE(
+        partial_default_disabled.effective_targets.size() == 1U);
+    CHECK_FALSE(
+        partial_default_disabled.effective_targets.front()
+            .process_clients);
+}
+
+TEST_CASE(
     "one incomplete live service retains only its exact verified include") {
     const auto baseline_catalog =
         parse_ndms_vpn_server_service_catalog(
