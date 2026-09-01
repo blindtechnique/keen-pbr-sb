@@ -13,6 +13,15 @@
 
 namespace keen_pbr3::ipc {
 
+#ifdef KEEN_PBR3_TESTING
+struct IpcControlServiceTestHooks final {
+    // Production pins the control socket to root ownership. Unit tests may
+    // instead pin it to the exact process owner so an unprivileged runner can
+    // exercise the real Unix-socket lifecycle and permission checks.
+    bool allow_current_process_owner{false};
+};
+#endif
+
 struct IpcControlRequest {
     // Sole descriptor ownership belongs to the service while this request is
     // queued. try_take_request() transfers that ownership to the control-loop
@@ -39,6 +48,11 @@ public:
     IpcControlService& operator=(const IpcControlService&) = delete;
 
     void start(std::string socket_path, WakeControlLoop wake_control_loop);
+#ifdef KEEN_PBR3_TESTING
+    void start(std::string socket_path,
+               WakeControlLoop wake_control_loop,
+               IpcControlServiceTestHooks hooks);
+#endif
     void stop() noexcept;
 
     bool active() const noexcept;
@@ -51,6 +65,11 @@ public:
         const nlohmann::json& response) noexcept;
 
 private:
+    void start_with_ownership(std::string socket_path,
+                              WakeControlLoop wake_control_loop,
+                              uid_t socket_owner,
+                              gid_t socket_group,
+                              bool resolve_control_group);
     void run_acceptor() noexcept;
 
     int control_fd_{-1};

@@ -1857,6 +1857,7 @@ add_executable(keen-pbr-firewall-it
   ../src/log/trace.cpp
   ../src/routing/firewall_state.cpp
   ../src/routing/netlink.cpp
+  ../src/routing/raw_rtnetlink_codec.cpp
   ../src/routing/policy_rule.cpp
   ../src/routing/route_table.cpp
   ../src/routing/routing_verifier.cpp

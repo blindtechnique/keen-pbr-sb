@@ -18,6 +18,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 using namespace keen_pbr3::ipc;
 
@@ -130,6 +131,15 @@ bool wait_for_wake(
         [&] { return wakes >= expected; });
 }
 
+void start_test_service(
+    IpcControlService& service,
+    const std::string& path,
+    IpcControlService::WakeControlLoop wake_control_loop) {
+    IpcControlServiceTestHooks hooks;
+    hooks.allow_current_process_owner = true;
+    service.start(path, std::move(wake_control_loop), hooks);
+}
+
 } // namespace
 
 TEST_CASE("IPC control service owns ingress and transfers one request") {
@@ -138,7 +148,7 @@ TEST_CASE("IPC control service owns ingress and transfers one request") {
     std::mutex wake_mutex;
     std::condition_variable wake_condition;
     std::size_t wakes = 0;
-    service.start(socket.path(), [&] {
+    start_test_service(service, socket.path(), [&] {
         {
             std::lock_guard<std::mutex> lock(wake_mutex);
             ++wakes;
@@ -148,6 +158,16 @@ TEST_CASE("IPC control service owns ingress and transfers one request") {
 
     REQUIRE(service.active());
     REQUIRE(std::filesystem::is_socket(socket.path()));
+    struct stat directory_metadata {};
+    struct stat socket_metadata {};
+    REQUIRE(::lstat(socket.directory().c_str(), &directory_metadata) == 0);
+    REQUIRE(::lstat(socket.path().c_str(), &socket_metadata) == 0);
+    CHECK(directory_metadata.st_uid == ::geteuid());
+    CHECK(directory_metadata.st_gid == ::getegid());
+    CHECK((directory_metadata.st_mode & 07777) == 0750);
+    CHECK(socket_metadata.st_uid == ::geteuid());
+    CHECK(socket_metadata.st_gid == ::getegid());
+    CHECK((socket_metadata.st_mode & 07777) == 0600);
 
     const int client = connect_control_socket(socket.path());
     REQUIRE(client >= 0);
@@ -192,7 +212,7 @@ TEST_CASE("IPC control service keeps an enqueued request when wake fails") {
     std::mutex wake_mutex;
     std::condition_variable wake_condition;
     std::size_t wakes = 0;
-    service.start(socket.path(), [&] {
+    start_test_service(service, socket.path(), [&] {
         {
             std::lock_guard<std::mutex> lock(wake_mutex);
             ++wakes;
@@ -234,7 +254,7 @@ TEST_CASE("IPC control service stop closes queued clients and unlinks socket") {
     std::mutex wake_mutex;
     std::condition_variable wake_condition;
     std::size_t wakes = 0;
-    service.start(socket.path(), [&] {
+    start_test_service(service, socket.path(), [&] {
         {
             std::lock_guard<std::mutex> lock(wake_mutex);
             ++wakes;
@@ -263,7 +283,7 @@ TEST_CASE("IPC control service rejects oversized frames before dispatch") {
     TempControlSocket socket;
     IpcControlService service;
     std::atomic<std::size_t> wakes{0};
-    service.start(socket.path(), [&] { ++wakes; });
+    start_test_service(service, socket.path(), [&] { ++wakes; });
 
     const int client = connect_control_socket(socket.path());
     REQUIRE(client >= 0);
@@ -297,7 +317,7 @@ TEST_CASE("IPC control service does not replace a regular path") {
 
     IpcControlService service;
     CHECK_THROWS_WITH(
-        service.start(socket.path(), [] {}),
+        start_test_service(service, socket.path(), [] {}),
         "unsafe stale control socket path");
     CHECK_FALSE(service.active());
     CHECK(std::filesystem::is_regular_file(socket.path()));

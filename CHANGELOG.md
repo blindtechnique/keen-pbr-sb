@@ -673,6 +673,9 @@
 
 ### Исправлено
 
+- GitHub firewall-integration снова линкует raw-rtnetlink codec, а IPC-тесты
+  используют отдельного test-only владельца текущего процесса; production-
+  сокет остаётся строго root:root или root:keen-pbr.
 - Короткая гонка KeeneticOS между публикацией RAW-цепочек и добавлением
   builtin-hook больше не откатывает применение конфигурации. Если в этом
   точном окне исчезает `KeenPbrRawCt`, iptables-backend ограниченно повторно

@@ -61,6 +61,31 @@ IpcControlService::~IpcControlService() {
 void IpcControlService::start(
     std::string socket_path,
     WakeControlLoop wake_control_loop) {
+    start_with_ownership(
+        std::move(socket_path), std::move(wake_control_loop),
+        static_cast<uid_t>(0), static_cast<gid_t>(0), true);
+}
+
+#ifdef KEEN_PBR3_TESTING
+void IpcControlService::start(
+    std::string socket_path,
+    WakeControlLoop wake_control_loop,
+    const IpcControlServiceTestHooks hooks) {
+    const bool current_owner = hooks.allow_current_process_owner;
+    start_with_ownership(
+        std::move(socket_path), std::move(wake_control_loop),
+        current_owner ? ::geteuid() : static_cast<uid_t>(0),
+        current_owner ? ::getegid() : static_cast<gid_t>(0),
+        !current_owner);
+}
+#endif
+
+void IpcControlService::start_with_ownership(
+    std::string socket_path,
+    WakeControlLoop wake_control_loop,
+    const uid_t socket_owner,
+    const gid_t socket_group,
+    const bool resolve_control_group) {
     if (!wake_control_loop) {
         throw std::runtime_error(
             "control wake callback is required");
@@ -87,10 +112,12 @@ void IpcControlService::start(
                 directory_error.message());
         }
 
-        const group* control_group = ::getgrnam("keen-pbr");
+        const group* control_group =
+            resolve_control_group ? ::getgrnam("keen-pbr") : nullptr;
         if (control_group != nullptr) {
             control_group_id_ = control_group->gr_gid;
-            if (::chown(parent.c_str(), 0, control_group_id_) != 0) {
+            if (::chown(
+                    parent.c_str(), socket_owner, control_group_id_) != 0) {
                 throw std::runtime_error(
                     "failed to assign control socket directory group: " +
                     std::string(strerror(errno)));
@@ -134,9 +161,9 @@ void IpcControlService::start(
         std::memcpy(address.sun_path,
                     socket_path_.c_str(),
                     socket_path_.size() + 1);
-        const gid_t socket_group =
+        const gid_t effective_socket_group =
             control_group_id_ == static_cast<gid_t>(-1)
-                ? static_cast<gid_t>(0)
+                ? socket_group
                 : control_group_id_;
         const mode_t socket_mode =
             control_group_id_ == static_cast<gid_t>(-1) ? 0600 : 0660;
@@ -144,7 +171,10 @@ void IpcControlService::start(
                    reinterpret_cast<const sockaddr*>(&address),
                    sizeof(address)) != 0 ||
             ::listen(control_fd_, 16) != 0 ||
-            ::chown(socket_path_.c_str(), 0, socket_group) != 0 ||
+            ::chown(
+                socket_path_.c_str(),
+                socket_owner,
+                effective_socket_group) != 0 ||
             ::chmod(socket_path_.c_str(), socket_mode) != 0) {
             throw std::runtime_error(
                 "control socket setup failed: " +
