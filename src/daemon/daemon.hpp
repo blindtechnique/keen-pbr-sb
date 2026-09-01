@@ -23,6 +23,7 @@
 #include "../dns/dns_txt_client.hpp"
 #include "config_store.hpp"
 #include "config_reload_coordinator.hpp"
+#include "conntrack_cleanup_coordinator.hpp"
 #include "internal_vpn_resolution_cache.hpp"
 #include "internal_vpn_runtime_resolution.hpp"
 #include "keenetic_dns_refresh_coordinator.hpp"
@@ -84,7 +85,6 @@ struct UrltestSelectionChange;
 class DnsProbeServer;
 struct DnsProbeEvent;
 class ConntrackEventMonitor;
-class OwnedConntrackCleanupOperation;
 class RuntimeFirewallOperationOwner;
 class RuntimeFirewallPreownedTerminalContinuation;
 struct RuntimeFirewallCorePublication;
@@ -816,27 +816,10 @@ private:
     OwnedConntrackCleanupSnapshot
     snapshot_owned_conntrack_marks() const;
     void warn_conntrack_unavailable_once();
-    ConntrackCleanupSummary cleanup_owned_conntrack_snapshot(
-        const OwnedConntrackCleanupSnapshot& snapshot,
-        const char* context,
-        bool allow_retry = true);
-    void cleanup_owned_conntrack_marks(const char* context);
     void reconcile_native_vpn_direct_egress_conntrack(
         const std::vector<FirewallSourceEgressSnatSelector>& selectors);
-    void schedule_owned_conntrack_cleanup_retry(
-        const OwnedConntrackCleanupSnapshot& snapshot,
-        std::vector<std::uint32_t> remaining_marks,
-        std::size_t no_progress_attempt = 0);
-    void arm_owned_conntrack_cleanup_retry_timer();
-    void arm_owned_conntrack_cleanup_completion_watchdog(
-        const std::shared_ptr<OwnedConntrackCleanupOperation>& operation);
-    void run_owned_conntrack_cleanup_retry();
-    void complete_owned_conntrack_cleanup_operation(
-        const std::shared_ptr<OwnedConntrackCleanupOperation>& operation);
-    std::optional<OwnedConntrackCleanupRetry>
-    take_active_owned_conntrack_cleanup_retry();
-    void cancel_owned_conntrack_cleanup_retry();
-    void complete_pending_snat_recovery_before_generation_change();
+    void dispatch_owned_conntrack_cleanup_retry(
+        OwnedConntrackCleanupRetry retry) noexcept;
     bool run_system_resolver_hook(std::string_view action,
                                   bool manage_ipc_gate = true,
                                   std::string_view attempt_id = {});
@@ -1167,14 +1150,10 @@ private:
     // One bounded retry chain for races with NDMS firewall publication. The
     // coordinator owns its timer slot and the latched owned-SNAT request.
     RuntimeFirewallRetryCoordinator runtime_firewall_retry_;
-    // Best-effort targeted conntrack retirement can be incomplete under a
-    // short embedded-router command budget. Retain only exact owned marks and
-    // retry them on this runtime generation; never flush global conntrack.
-    int owned_conntrack_cleanup_retry_task_id_{-1};
-    std::optional<OwnedConntrackCleanupRetry>
-        pending_owned_conntrack_cleanup_retry_;
-    std::shared_ptr<OwnedConntrackCleanupOperation>
-        active_owned_conntrack_cleanup_operation_;
+    // Owns the exact pending mark remainder, its one retry timer and the
+    // committed native-VPN source-SNAT cursor. Physical deletion stays in the
+    // shared typed background-point owner; global conntrack is never flushed.
+    ConntrackCleanupCoordinator conntrack_cleanup_coordinator_;
     // Separate bounded repair chain for a resolver hook that failed after
     // routing/firewall COMMIT. A firewall retry cannot repair dnsmasq. After
     // the bounded boot-convergence window this same single owner continues at
@@ -1328,7 +1307,6 @@ private:
     std::map<std::string, ListSetUsage> applied_list_usage_;
     std::map<std::string, std::string> applied_list_fingerprints_;
     ConntrackManager conntrack_manager_;
-    bool conntrack_unavailable_warning_emitted_{false};
     // Relevant link/address observations advance independently of the runtime
     // configuration generation. An off-loop route plan must match both values
     // before control is allowed to mutate route/rule state from it.
@@ -1350,11 +1328,6 @@ private:
     // firmware owns and standalone outbounds urltest never looks at.
     InterfaceProbe interface_probe_;
     InternalVpnResolutionCache internal_vpn_resolution_cache_;
-    // Last source-scoped native VPN SNAT contract committed to the firewall.
-    // A contract change retires only flows from the changed source pools so
-    // old un-NATed conntrack entries cannot mask a successful repair.
-    std::vector<FirewallSourceEgressSnatSelector>
-        applied_native_vpn_direct_egress_snat_selectors_;
     // Registered before scheduler/executor members so their reverse-order
     // destruction completes before this pull-only metrics registry is freed.
     PeriodicTaskMetricsRegistry periodic_task_metrics_{

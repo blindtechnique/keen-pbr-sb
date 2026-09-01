@@ -20,6 +20,7 @@ add_executable(keen-pbr-tests
   test_runtime_resolver_publication.cpp
   test_runtime_cold_boot_publication.cpp
   test_internal_vpn_resolution_cache.cpp
+  test_conntrack_cleanup_coordinator.cpp
   test_runtime_internal_vpn_lkg_store.cpp
   test_runtime_firewall_worker_attempt.cpp
   test_runtime_route_health_plan.cpp
@@ -240,6 +241,7 @@ add_executable(keen-pbr-tests
   ../src/daemon/config_store.cpp
   ../src/api/router_info_cache.cpp
   ../src/daemon/daemon_core.cpp
+  ../src/daemon/conntrack_cleanup_coordinator.cpp
   ../src/daemon/daemon_runtime.cpp
   ../src/daemon/daemon_tunnel_probe.cpp
   ../src/daemon/daemon_resolver.cpp
@@ -752,7 +754,6 @@ add_test(
 # intentionally header-only and does not need the daemon or kernel backends.
 add_executable(keen-pbr-runtime-mutation-admission-tests
   test_main.cpp
-  test_owned_conntrack_cleanup_operation.cpp
   test_runtime_mutation_admission.cpp
 )
 set_target_properties(keen-pbr-runtime-mutation-admission-tests PROPERTIES
@@ -760,10 +761,6 @@ set_target_properties(keen-pbr-runtime-mutation-admission-tests PROPERTIES
   CXX_STANDARD_REQUIRED YES
   CXX_EXTENSIONS NO
 )
-# `test_owned_conntrack_cleanup_operation.cpp` тянет через
-# `owned_conntrack_cleanup_operation.hpp` -> `runtime_recovery_policy.hpp` ->
-# `config.hpp` сгенерированный `api_types.hpp`, а тот — <nlohmann/json.hpp>.
-# Без каталога generated и без самой библиотеки цель не собирается вовсе.
 target_include_directories(keen-pbr-runtime-mutation-admission-tests PRIVATE
   ${KEEN_PBR_GENERATED_INCLUDE_DIR}
   ${CMAKE_SOURCE_DIR}/src
@@ -779,6 +776,39 @@ keen_pbr_apply_project_options(keen-pbr-runtime-mutation-admission-tests)
 add_test(
   NAME keen-pbr-runtime-mutation-admission-tests
   COMMAND keen-pbr-runtime-mutation-admission-tests
+)
+
+# Keep conntrack cleanup retry ownership independently buildable. Physical
+# deletion and mutation admission remain in the existing runtime firewall
+# owner; this target proves only exact remainder, coalescing and timer policy.
+add_executable(keen-pbr-conntrack-cleanup-coordinator-tests
+  test_main.cpp
+  test_conntrack_cleanup_coordinator.cpp
+  ../src/daemon/conntrack_cleanup_coordinator.cpp
+)
+set_target_properties(keen-pbr-conntrack-cleanup-coordinator-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_include_directories(
+  keen-pbr-conntrack-cleanup-coordinator-tests PRIVATE
+  ${KEEN_PBR_GENERATED_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+)
+target_link_libraries(
+  keen-pbr-conntrack-cleanup-coordinator-tests PRIVATE
+  nlohmann_json::nlohmann_json
+  fmt::fmt-header-only
+  Threads::Threads
+)
+keen_pbr_apply_project_options(
+  keen-pbr-conntrack-cleanup-coordinator-tests)
+add_test(
+  NAME keen-pbr-conntrack-cleanup-coordinator-tests
+  COMMAND keen-pbr-conntrack-cleanup-coordinator-tests
 )
 
 # Keep the package-rescue suite independently buildable. It intentionally has

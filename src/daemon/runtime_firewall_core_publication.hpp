@@ -5,6 +5,7 @@
 #include "../keenetic/internal_vpn_runtime_target.hpp"
 #include "../lists/list_set_usage.hpp"
 #include "../routing/firewall_state.hpp"
+#include "conntrack_cleanup_coordinator.hpp"
 #include "internal_vpn_resolution_cache.hpp"
 
 #include <cstdint>
@@ -49,8 +50,7 @@ struct RuntimeFirewallCorePublicationTarget final {
     std::map<std::string, ListSetUsage>& list_usage;
     std::map<std::string, std::string>& list_fingerprints;
     InternalVpnResolutionCache& internal_vpn_resolution_cache;
-    std::vector<FirewallSourceEgressSnatSelector>&
-        native_vpn_direct_egress_snat_selectors;
+    ConntrackCleanupCoordinator& conntrack_cleanup_coordinator;
     std::optional<std::uint32_t>& committed_meta_fwmark;
     std::uint32_t& committed_meta_owned_mask;
 };

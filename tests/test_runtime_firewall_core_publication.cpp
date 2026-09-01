@@ -79,8 +79,7 @@ struct ActiveCore final {
     std::map<std::string, ListSetUsage> list_usage;
     std::map<std::string, std::string> list_fingerprints;
     InternalVpnResolutionCache internal_vpn_resolution_cache;
-    std::vector<FirewallSourceEgressSnatSelector>
-        native_vpn_direct_egress_snat_selectors;
+    ConntrackCleanupCoordinator conntrack_cleanup_coordinator;
     std::optional<std::uint32_t> committed_meta_fwmark;
     std::uint32_t committed_meta_owned_mask{0U};
 
@@ -91,7 +90,7 @@ struct ActiveCore final {
             list_usage,
             list_fingerprints,
             internal_vpn_resolution_cache,
-            native_vpn_direct_egress_snat_selectors,
+            conntrack_cleanup_coordinator,
             committed_meta_fwmark,
             committed_meta_owned_mask};
     }
@@ -107,8 +106,9 @@ void load_active(
     active.internal_vpn_resolution_cache.exchange_active(
         publication.internal_vpn_servers,
         publication.internal_vpn_service_targets);
-    active.native_vpn_direct_egress_snat_selectors =
-        std::move(publication.native_vpn_direct_egress_snat_selectors);
+    active.conntrack_cleanup_coordinator
+        .exchange_native_vpn_direct_egress_snat_selectors(
+            publication.native_vpn_direct_egress_snat_selectors);
     active.committed_meta_fwmark = publication.committed_meta_fwmark;
     active.committed_meta_owned_mask =
         publication.committed_meta_owned_mask;
@@ -154,10 +154,12 @@ void check_active_named(
                 .front()
                 .stable_id ==
         name + "-service");
-    REQUIRE(
-        active.native_vpn_direct_egress_snat_selectors.size() == 1U);
+    const auto& snat_selectors =
+        active.conntrack_cleanup_coordinator
+            .committed_native_vpn_direct_egress_snat_selectors();
+    REQUIRE(snat_selectors.size() == 1U);
     CHECK(
-        active.native_vpn_direct_egress_snat_selectors.front().interface ==
+        snat_selectors.front().interface ==
         name + "-egress");
     CHECK(active.committed_meta_fwmark == meta_fwmark);
     CHECK(active.committed_meta_owned_mask == meta_mask);

@@ -44,7 +44,6 @@
 #include "../util/system_info.hpp"
 #include "../util/time_utils.hpp"
 #include "scheduler.hpp"
-#include "owned_conntrack_cleanup_operation.hpp"
 #include "runtime_firewall_operation_owner.hpp"
 
 #ifndef KEEN_PBR_FRONTEND_ROOT
@@ -786,29 +785,15 @@ void Daemon::stop_routing_runtime_with_lease_return(
                     std::memory_order_acquire);
                 target.conntrack_snapshot =
                     snapshot_owned_conntrack_marks();
-                const auto merge_pending_cleanup = [&target](
-                    const OwnedConntrackCleanupRetry& retry) {
-                    if (!retry.valid() ||
-                        retry.snapshot.runtime_generation !=
-                            target.runtime_generation) {
-                        return;
-                    }
-                    auto exact = owned_conntrack_cleanup_retry_remainder(
-                        retry);
+                if (auto exact = conntrack_cleanup_coordinator_
+                        .pending_remainder(target.runtime_generation);
+                    exact.has_value()) {
                     target.conntrack_snapshot =
                         target.conntrack_snapshot.valid()
                         ? merge_owned_conntrack_cleanup_snapshot(
                               std::move(target.conntrack_snapshot),
-                              std::move(exact))
-                        : std::move(exact);
-                };
-                if (active_owned_conntrack_cleanup_operation_) {
-                    merge_pending_cleanup(
-                        active_owned_conntrack_cleanup_operation_->retry());
-                }
-                if (pending_owned_conntrack_cleanup_retry_.has_value()) {
-                    merge_pending_cleanup(
-                        *pending_owned_conntrack_cleanup_retry_);
+                              std::move(*exact))
+                        : std::move(*exact);
                 }
                 target.cleanup_conntrack =
                     target.conntrack_snapshot.valid();

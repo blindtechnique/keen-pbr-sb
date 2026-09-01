@@ -136,6 +136,7 @@ NARROW_TEST_TARGETS := \
 	keen-pbr-native-tunnel-import-tests \
 	keen-pbr-native-direct-observation-tests \
 	keen-pbr-runtime-mutation-admission-tests \
+	keen-pbr-conntrack-cleanup-coordinator-tests \
 	keen-pbr-rescue-tests \
 	keen-pbr-keenetic-dns-refresh-tests \
 	keen-pbr-router-info-cache-tests \

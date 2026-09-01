@@ -28,8 +28,9 @@ void publish_runtime_firewall_core(
     target.internal_vpn_resolution_cache.exchange_active(
         publication.internal_vpn_servers,
         publication.internal_vpn_service_targets);
-    target.native_vpn_direct_egress_snat_selectors.swap(
-        publication.native_vpn_direct_egress_snat_selectors);
+    target.conntrack_cleanup_coordinator
+        .exchange_native_vpn_direct_egress_snat_selectors(
+            publication.native_vpn_direct_egress_snat_selectors);
 
     if (meta_publication ==
         RuntimeFirewallCoreMetaPublication::exchange_preimage) {

@@ -77,7 +77,6 @@
 #include "runtime_resolver_publication.hpp"
 #include "runtime_cold_boot_publication.hpp"
 #include "runtime_cold_boot_terminal_policy.hpp"
-#include "owned_conntrack_cleanup_operation.hpp"
 #include "runtime_route_health_plan.hpp"
 #include "runtime_urltest_terminal_orchestrator.hpp"
 #include "scheduler.hpp"
@@ -776,7 +775,7 @@ void Daemon::publish_runtime_firewall_core_checkpoint(
             applied_list_usage_,
             applied_list_fingerprints_,
             internal_vpn_resolution_cache_,
-            applied_native_vpn_direct_egress_snat_selectors_,
+            conntrack_cleanup_coordinator_,
             committed_meta_udp443_fwmark_,
             committed_meta_udp443_owned_mask_},
         publication,
@@ -886,6 +885,24 @@ Daemon::Daemon(Config config,
     firewall_state_.set_fwmark_mask(fwmark_mask_value(active_config_snapshot_->config.fwmark.value_or(FwmarkConfig{})));
     list_service_.ensure_dir();
     scheduler_ = std::make_unique<Scheduler>(*this);
+    conntrack_cleanup_coordinator_.configure(
+        ConntrackCleanupCoordinatorCallbacks{
+            [this](std::chrono::milliseconds delay,
+                   std::function<void()> task,
+                   std::string label) {
+                return scheduler_->schedule_oneshot(
+                    delay, std::move(task), std::move(label));
+            },
+            [this](int task_id) { scheduler_->cancel(task_id); },
+            [this](OwnedConntrackCleanupRetry retry) {
+                dispatch_owned_conntrack_cleanup_retry(std::move(retry));
+            },
+            []() {
+                Logger::instance().info(
+                    "Best-effort conntrack cleanup exhausted its targeted "
+                    "retry budget; remaining owned flows will expire "
+                    "naturally.");
+            }});
 
     RuntimeFirewallOperationOwner::Callbacks firewall_owner_callbacks;
     firewall_owner_callbacks.create_domain_state = [] {
@@ -1057,7 +1074,7 @@ Daemon::~Daemon() {
         }
     });
     cleanup_step("cancel scheduled work", [this] {
-        cancel_owned_conntrack_cleanup_retry();
+        conntrack_cleanup_coordinator_.cancel();
         scheduler_->cancel_all();
     });
     cleanup_step("discard queued blocking work", [this] {
@@ -6117,7 +6134,7 @@ void Daemon::finish_preowned_runtime_firewall_urltest_selection(
                     snapshot.marks.insert(*transaction->retired_mark);
                     snapshot.priority_marks.insert(
                         *transaction->retired_mark);
-                    schedule_owned_conntrack_cleanup_retry(
+                    conntrack_cleanup_coordinator_.schedule(
                         snapshot, {*transaction->retired_mark});
                 }
             } catch (...) {
@@ -6311,7 +6328,7 @@ void Daemon::begin_preowned_runtime_firewall_start(
         cancel_idle_stall_observer();
         cancel_meta_udp443_activation_cleanup();
         cancel_owned_snat_health_check();
-        cancel_owned_conntrack_cleanup_retry();
+        conntrack_cleanup_coordinator_.cancel();
         cancel_resolver_reload_retry();
         urltest_after_firewall_gate_.reset();
         runtime_firewall_owner_->cancel_retry();
@@ -6522,30 +6539,18 @@ Daemon::begin_preowned_runtime_firewall_config_preapply(
     // event was latched so a verified terminal clears the exact coordinator
     // payload instead of leaving its broad snapshot behind.
     recovery.requested = true;
-    const auto merge_cleanup_retry = [&recovery, generation](
-        const OwnedConntrackCleanupRetry& retry) {
-        if (!retry.valid() ||
-            retry.snapshot.runtime_generation != generation) {
-            return;
-        }
-        auto exact_remainder =
-            owned_conntrack_cleanup_retry_remainder(retry);
+    if (auto exact_remainder =
+            conntrack_cleanup_coordinator_.pending_remainder(generation);
+        exact_remainder.has_value()) {
         if (recovery.cleanup_snapshot.has_value()) {
             recovery.cleanup_snapshot =
                 merge_owned_conntrack_cleanup_snapshot(
                     std::move(*recovery.cleanup_snapshot),
-                    std::move(exact_remainder));
+                    std::move(*exact_remainder));
         } else {
             recovery.cleanup_snapshot =
-                std::move(exact_remainder);
+                std::move(*exact_remainder);
         }
-    };
-    if (active_owned_conntrack_cleanup_operation_) {
-        merge_cleanup_retry(
-            active_owned_conntrack_cleanup_operation_->retry());
-    }
-    if (pending_owned_conntrack_cleanup_retry_.has_value()) {
-        merge_cleanup_retry(*pending_owned_conntrack_cleanup_retry_);
     }
 
     const bool background_timer_was_pending =
@@ -6588,22 +6593,9 @@ Daemon::begin_preowned_runtime_firewall_config_preapply(
     if (result.disposition ==
         RuntimeFirewallImmediateDisposition::handed_off) {
         // The accepted owner now carries the merged mandatory exact
-        // remainder. Retire the old timer/operation before either can observe
-        // admission after the request eventually crosses its generation.
-        if (owned_conntrack_cleanup_retry_task_id_ >= 0) {
-            const auto task_id =
-                std::exchange(owned_conntrack_cleanup_retry_task_id_, -1);
-            try {
-                scheduler_->cancel(task_id);
-            } catch (...) {
-                // The callback is harmless after both durable retry slots are
-                // cleared below: it observes no pending/active operation.
-            }
-        }
-        pending_owned_conntrack_cleanup_retry_.reset();
-        auto previous_cleanup =
-            std::move(active_owned_conntrack_cleanup_operation_);
-        if (previous_cleanup) previous_cleanup->cancel();
+        // remainder. A dequeued timer is harmless after the coordinator drops
+        // its durable copy.
+        conntrack_cleanup_coordinator_.clear_after_handoff();
         return result.disposition;
     }
 
@@ -7423,7 +7415,8 @@ bool Daemon::publish_prepared_runtime_firewall_config_candidate(
             transaction->base_active_snapshot->config,
             firewall_state_.get_rules(),
             applied_list_content_state_,
-            applied_native_vpn_direct_egress_snat_selectors_,
+            conntrack_cleanup_coordinator_
+                .committed_native_vpn_direct_egress_snat_selectors(),
             internal_vpn_resolution_cache_.active_servers(),
             internal_vpn_resolution_cache_.active_service_targets(),
             transaction->candidate.config,
@@ -8872,7 +8865,8 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                 applied_list_fingerprints_;
             transaction
                 .previous_native_vpn_direct_egress_snat_selectors =
-                    applied_native_vpn_direct_egress_snat_selectors_;
+                    conntrack_cleanup_coordinator_
+                        .committed_native_vpn_direct_egress_snat_selectors();
         }
 
         generation_snapshot.route.route_epoch =
@@ -10782,7 +10776,7 @@ void Daemon::drain_runtime_firewall_terminal(
                         }
                         if (kernel_verified) {
                             clear_exact_tcp_reset_cleanup_ownership();
-                            cancel_owned_conntrack_cleanup_retry();
+                            conntrack_cleanup_coordinator_.cancel();
                             runtime_firewall_retry_
                                 .clear_owned_snat_recovery();
                         }
@@ -11058,7 +11052,7 @@ void Daemon::drain_runtime_firewall_terminal(
             } catch (...) {
             }
             try {
-                cancel_owned_conntrack_cleanup_retry();
+                conntrack_cleanup_coordinator_.cancel();
             } catch (...) {
             }
             try {
@@ -13517,7 +13511,7 @@ void Daemon::drain_runtime_firewall_terminal(
                     case RuntimeFirewallConntrackTailEffect::schedule_retry: {
                         const auto& snapshot =
                             *plan.cleanup_retry_snapshot;
-                        schedule_owned_conntrack_cleanup_retry(
+                        conntrack_cleanup_coordinator_.schedule(
                             snapshot,
                             ordered_owned_conntrack_marks(snapshot));
                         break;
@@ -13653,7 +13647,7 @@ void Daemon::drain_runtime_firewall_terminal(
                                                     applied_list_usage_,
                                                     applied_list_fingerprints_,
                                                     internal_vpn_resolution_cache_,
-                                                    applied_native_vpn_direct_egress_snat_selectors_,
+                                                    conntrack_cleanup_coordinator_,
                                                     committed_meta_udp443_fwmark_,
                                                     committed_meta_udp443_owned_mask_},
                                                 state.core_publication,
@@ -13834,7 +13828,7 @@ void Daemon::drain_runtime_firewall_terminal(
                                                       *cleanup_tail
                                                            .retry_snapshot);
                                         if (!remaining.empty()) {
-                                            schedule_owned_conntrack_cleanup_retry(
+                                            conntrack_cleanup_coordinator_.schedule(
                                                 *cleanup_tail.retry_snapshot,
                                                 std::move(remaining));
                                         }
@@ -14674,7 +14668,7 @@ void Daemon::run() {
         keenetic_dns_refresh_coordinator_.stop();
         cancel_idle_stall_observer();
         cancel_meta_udp443_activation_cleanup();
-        cancel_owned_conntrack_cleanup_retry();
+        conntrack_cleanup_coordinator_.cancel();
         list_refresh_tasks_.request_cancel_active();
         runtime_generation_.fetch_add(1, std::memory_order_acq_rel);
         if (urltest_manager_) {
@@ -14832,7 +14826,7 @@ void Daemon::run() {
     runtime_firewall_owner_->request_shutdown();
     runtime_firewall_owner_->cancel_completion_watchdog();
     runtime_firewall_owner_->cancel_retry();
-    cancel_owned_conntrack_cleanup_retry();
+    conntrack_cleanup_coordinator_.cancel();
     scheduler_->cancel_all();
     runtime_firewall_owner_->cancel_pending_work();
     runtime_firewall_owner_->pump_terminal_for_shutdown();

@@ -33,7 +33,6 @@
 #include "../util/time_utils.hpp"
 #include "../util/cron.hpp"
 #include "scheduler.hpp"
-#include "owned_conntrack_cleanup_operation.hpp"
 #include "resolver_health.hpp"
 #include "system_resolver_hook.hpp"
 
@@ -59,19 +58,9 @@ constexpr std::array<std::chrono::seconds, 5>
     };
 constexpr auto RESOLVER_RELOAD_MAINTENANCE_DELAY =
     std::chrono::seconds{60};
-constexpr std::array<std::chrono::seconds, 5>
-    OWNED_CONNTRACK_CLEANUP_RETRY_DELAYS{
-        std::chrono::seconds{2},
-        std::chrono::seconds{4},
-        std::chrono::seconds{8},
-        std::chrono::seconds{16},
-        std::chrono::seconds{30},
-    };
 constexpr std::size_t OWNED_CONNTRACK_CLEANUP_RETRY_BATCH_SIZE = 4U;
 constexpr auto OWNED_CONNTRACK_CLEANUP_RETRY_BUDGET =
     std::chrono::milliseconds{750};
-constexpr auto OWNED_CONNTRACK_CLEANUP_COMPLETION_WATCHDOG =
-    std::chrono::seconds{2};
 constexpr auto IDLE_STALL_ACTIVE_SCAN_INTERVAL =
     std::chrono::seconds{5};
 constexpr auto IDLE_STALL_QUIET_SCAN_INTERVAL =
@@ -453,10 +442,9 @@ bool Daemon::routing_runtime_active() const {
 }
 
 void Daemon::warn_conntrack_unavailable_once() {
-    if (conntrack_unavailable_warning_emitted_) {
+    if (!conntrack_cleanup_coordinator_.note_command_unavailable()) {
         return;
     }
-    conntrack_unavailable_warning_emitted_ = true;
     Logger::instance().warn(
         "Best-effort conntrack cleanup is unavailable because the conntrack "
         "utility is not installed; existing flows may keep their previous "
@@ -473,25 +461,20 @@ Daemon::snapshot_owned_conntrack_marks() const {
         firewall_state_.get_urltest_selections());
 }
 
-void Daemon::cleanup_owned_conntrack_marks(const char* context) {
-    const auto snapshot = snapshot_owned_conntrack_marks();
-    if (!snapshot.valid()) {
-        return;
-    }
-    (void)cleanup_owned_conntrack_snapshot(snapshot, context);
-}
-
 void Daemon::reconcile_native_vpn_direct_egress_conntrack(
     const std::vector<FirewallSourceEgressSnatSelector>& selectors) {
-    if (selectors == applied_native_vpn_direct_egress_snat_selectors_) {
+    const auto& committed = conntrack_cleanup_coordinator_
+        .committed_native_vpn_direct_egress_snat_selectors();
+    if (selectors == committed) {
         return;
     }
 
     const auto affected_sources =
         changed_native_vpn_direct_egress_source_cidrs(
-            applied_native_vpn_direct_egress_snat_selectors_,
+            committed,
             selectors);
-    applied_native_vpn_direct_egress_snat_selectors_ = selectors;
+    conntrack_cleanup_coordinator_
+        .commit_native_vpn_direct_egress_snat_selectors(selectors);
     if (affected_sources.empty()) {
         return;
     }
@@ -517,180 +500,36 @@ void Daemon::reconcile_native_vpn_direct_egress_conntrack(
     }
 }
 
-ConntrackCleanupSummary Daemon::cleanup_owned_conntrack_snapshot(
-    const OwnedConntrackCleanupSnapshot& snapshot,
-    const char* context,
-    bool allow_retry) {
-    ConntrackCleanupSummary cleanup;
-    if (!snapshot.valid()) {
-        return cleanup;
-    }
-    const auto ordered_marks =
-        ordered_owned_conntrack_marks(snapshot);
-    try {
-        cleanup =
-            conntrack_manager_.delete_marks_ordered(
-                ordered_marks,
-                snapshot.owned_mask,
-                ConntrackCleanupOptions{
-                    snapshot.ipv6_enabled,
-                    std::chrono::seconds{4}});
-        if (cleanup.command_unavailable) {
-            warn_conntrack_unavailable_once();
-        }
-        if (cleanup.failed == 0U &&
-            cleanup.skipped == 0U) {
-            return cleanup;
-        }
-        Logger::instance().info(
-            "Best-effort conntrack cleanup left {} failed and {} skipped "
-            "owned mark(s) {}; "
-            "existing flows may keep their previous path until they expire",
-            cleanup.failed,
-            cleanup.skipped,
-            context);
-    } catch (const std::exception& error) {
-        cleanup.failed = ordered_marks.size();
-        cleanup.remaining_marks = ordered_marks;
-        Logger::instance().info(
-            "Best-effort conntrack cleanup {} raised an error: {}; existing "
-            "flows may keep their previous path until they expire",
-            context,
-            error.what());
-    }
-    if (allow_retry &&
-        !cleanup.command_unavailable &&
-        !cleanup.remaining_marks.empty()) {
-        schedule_owned_conntrack_cleanup_retry(
-            snapshot,
-            cleanup.remaining_marks);
-    }
-    return cleanup;
-}
-
-void Daemon::schedule_owned_conntrack_cleanup_retry(
-    const OwnedConntrackCleanupSnapshot& source_snapshot,
-    std::vector<std::uint32_t> remaining_marks,
-    std::size_t no_progress_attempt) {
-    if (!source_snapshot.valid() || remaining_marks.empty()) {
-        return;
-    }
-
-    std::vector<std::uint32_t> filtered_marks;
-    std::set<std::uint32_t> seen;
-    filtered_marks.reserve(remaining_marks.size());
-    for (const auto mark : remaining_marks) {
-        if ((mark & source_snapshot.owned_mask) != 0U &&
-            seen.insert(mark).second) {
-            filtered_marks.push_back(mark);
-        }
-    }
-    if (filtered_marks.empty()) {
-        return;
-    }
-
-    OwnedConntrackCleanupSnapshot filtered_snapshot = source_snapshot;
-    filtered_snapshot.marks = std::set<std::uint32_t>{
-        filtered_marks.begin(), filtered_marks.end()};
-    for (auto it = filtered_snapshot.priority_marks.begin();
-         it != filtered_snapshot.priority_marks.end();) {
-        if (filtered_snapshot.marks.count(*it) == 0U) {
-            it = filtered_snapshot.priority_marks.erase(it);
-        } else {
-            ++it;
-        }
-    }
-    OwnedConntrackCleanupRetry candidate{
-        std::move(filtered_snapshot),
-        std::move(filtered_marks),
-        no_progress_attempt};
-
-    if (pending_owned_conntrack_cleanup_retry_.has_value()) {
-        auto& pending = *pending_owned_conntrack_cleanup_retry_;
-        if (pending.snapshot.runtime_generation ==
-                candidate.snapshot.runtime_generation &&
-            pending.snapshot.owned_mask == candidate.snapshot.owned_mask) {
-            std::set<std::uint32_t> pending_marks{
-                pending.ordered_marks.begin(),
-                pending.ordered_marks.end()};
-            for (const auto mark : candidate.ordered_marks) {
-                if (pending_marks.insert(mark).second) {
-                    pending.ordered_marks.push_back(mark);
-                    pending.snapshot.marks.insert(mark);
-                    if (candidate.snapshot.priority_marks.count(mark) != 0U) {
-                        pending.snapshot.priority_marks.insert(mark);
-                    }
-                }
+void Daemon::dispatch_owned_conntrack_cleanup_retry(
+    OwnedConntrackCleanupRetry retry) noexcept {
+    const auto requeue = [this, &retry]() noexcept {
+        try {
+            conntrack_cleanup_coordinator_.schedule_retry(retry);
+        } catch (const std::exception& error) {
+            try {
+                Logger::instance().info(
+                    "Best-effort conntrack cleanup retry dispatch failed: {}",
+                    error.what());
+            } catch (...) {
             }
-            pending.snapshot.ipv6_enabled =
-                pending.snapshot.ipv6_enabled ||
-                candidate.snapshot.ipv6_enabled;
-            pending.no_progress_attempt =
-                std::min(
-                    pending.no_progress_attempt,
-                    candidate.no_progress_attempt);
-        } else {
-            cancel_owned_conntrack_cleanup_retry();
-            pending_owned_conntrack_cleanup_retry_ = std::move(candidate);
+        } catch (...) {
+            try {
+                Logger::instance().info(
+                    "Best-effort conntrack cleanup retry dispatch failed: "
+                    "unknown error");
+            } catch (...) {
+            }
         }
-    } else {
-        pending_owned_conntrack_cleanup_retry_ = std::move(candidate);
-    }
-
-    arm_owned_conntrack_cleanup_retry_timer();
-}
-
-void Daemon::arm_owned_conntrack_cleanup_retry_timer() {
-    if (owned_conntrack_cleanup_retry_task_id_ >= 0 ||
-        active_owned_conntrack_cleanup_operation_ ||
-        !pending_owned_conntrack_cleanup_retry_.has_value()) {
-        return;
-    }
-    const auto attempt =
-        pending_owned_conntrack_cleanup_retry_->no_progress_attempt;
-    if (attempt >= OWNED_CONNTRACK_CLEANUP_RETRY_DELAYS.size()) {
-        Logger::instance().info(
-            "Best-effort conntrack cleanup exhausted its targeted retry "
-            "budget; remaining owned flows will expire naturally.");
-        pending_owned_conntrack_cleanup_retry_.reset();
-        return;
-    }
-    owned_conntrack_cleanup_retry_task_id_ = scheduler_->schedule_oneshot(
-        OWNED_CONNTRACK_CLEANUP_RETRY_DELAYS[attempt],
-        [this]() {
-            owned_conntrack_cleanup_retry_task_id_ = -1;
-            run_owned_conntrack_cleanup_retry();
-        },
-        "owned-conntrack-cleanup-retry");
-}
-
-void Daemon::arm_owned_conntrack_cleanup_completion_watchdog(
-    const std::shared_ptr<OwnedConntrackCleanupOperation>& operation) {
-    if (!operation ||
-        operation != active_owned_conntrack_cleanup_operation_ ||
-        owned_conntrack_cleanup_retry_task_id_ >= 0) {
-        return;
-    }
-    owned_conntrack_cleanup_retry_task_id_ = scheduler_->schedule_oneshot(
-        OWNED_CONNTRACK_CLEANUP_COMPLETION_WATCHDOG,
-        [this, operation]() {
-            owned_conntrack_cleanup_retry_task_id_ = -1;
-            complete_owned_conntrack_cleanup_operation(operation);
-        },
-        "owned-conntrack-cleanup-completion-watchdog");
-}
-
-void Daemon::run_owned_conntrack_cleanup_retry() {
-    if (!pending_owned_conntrack_cleanup_retry_.has_value()) {
-        return;
-    }
-    auto retry = std::move(
-        *pending_owned_conntrack_cleanup_retry_);
-    pending_owned_conntrack_cleanup_retry_.reset();
-    if (!owned_conntrack_cleanup_retry_is_current(
-            routing_runtime_active(),
-            retry,
-            runtime_generation_.load(std::memory_order_acquire))) {
+    };
+    try {
+        if (!owned_conntrack_cleanup_retry_is_current(
+                routing_runtime_active(),
+                retry,
+                runtime_generation_.load(std::memory_order_acquire))) {
+            return;
+        }
+    } catch (...) {
+        requeue();
         return;
     }
     try {
@@ -758,10 +597,8 @@ void Daemon::run_owned_conntrack_cleanup_retry() {
                 try {
                     if (!typed) {
                         if (current) {
-                            schedule_owned_conntrack_cleanup_retry(
-                                retry.snapshot,
-                                retry.ordered_marks,
-                                retry.no_progress_attempt);
+                            conntrack_cleanup_coordinator_.schedule_retry(
+                                retry);
                         }
                     } else if (current) {
                         auto cleanup = std::get<
@@ -770,18 +607,12 @@ void Daemon::run_owned_conntrack_cleanup_retry() {
                         if (cleanup.command_unavailable) {
                             warn_conntrack_unavailable_once();
                         } else if (!cleanup.remaining_marks.empty()) {
-                            const bool made_progress =
-                                cleanup.remaining_marks.size() <
-                                retry.ordered_marks.size();
-                            schedule_owned_conntrack_cleanup_retry(
-                                retry.snapshot,
-                                std::move(cleanup.remaining_marks),
-                                made_progress
-                                    ? 0U
-                                    : retry.no_progress_attempt + 1U);
+                            conntrack_cleanup_coordinator_
+                                .schedule_remaining(
+                                    retry,
+                                    std::move(cleanup.remaining_marks));
                         }
                     }
-                    arm_owned_conntrack_cleanup_retry_timer();
                 } catch (...) {}
             }};
         if (begin_preowned_runtime_firewall_background_point_mutation(
@@ -790,205 +621,7 @@ void Daemon::run_owned_conntrack_cleanup_retry() {
         }
         lease.reset();
     } catch (...) {}
-    schedule_owned_conntrack_cleanup_retry(
-        retry.snapshot,
-        retry.ordered_marks,
-        retry.no_progress_attempt);
-}
-
-void Daemon::complete_owned_conntrack_cleanup_operation(
-    const std::shared_ptr<OwnedConntrackCleanupOperation>& operation) {
-    if (!operation ||
-        operation != active_owned_conntrack_cleanup_operation_) {
-        return;
-    }
-
-    auto result = operation->take_result();
-    if (!result.has_value()) {
-        arm_owned_conntrack_cleanup_completion_watchdog(operation);
-        return;
-    }
-
-    if (owned_conntrack_cleanup_retry_task_id_ >= 0) {
-        scheduler_->cancel(owned_conntrack_cleanup_retry_task_id_);
-        owned_conntrack_cleanup_retry_task_id_ = -1;
-    }
-    const auto retry = operation->retry();
-    active_owned_conntrack_cleanup_operation_.reset();
-    operation->cancel();
-
-    const bool current = owned_conntrack_cleanup_retry_is_current(
-        routing_runtime_active(),
-        retry,
-        runtime_generation_.load(std::memory_order_acquire));
-    // Keep mutation ownership until the control loop has either committed the
-    // terminal outcome or safely re-queued the exact remaining selectors.
-    // The local shared lease releases automatically on every exit path,
-    // including a scheduler exception.
-    auto mutation_lease = std::move(result->mutation_lease);
-
-    try {
-        if (result->status ==
-                OwnedConntrackCleanupOperationStatus::busy) {
-            if (current) {
-                schedule_owned_conntrack_cleanup_retry(
-                    retry.snapshot,
-                    retry.ordered_marks,
-                    retry.no_progress_attempt);
-            }
-        } else if (
-            result->status ==
-                OwnedConntrackCleanupOperationStatus::completed &&
-            current) {
-            if (result->cleanup.command_unavailable) {
-                warn_conntrack_unavailable_once();
-            } else if (!result->cleanup.remaining_marks.empty()) {
-                const bool made_progress =
-                    result->cleanup.remaining_marks.size() <
-                    retry.ordered_marks.size();
-                const auto next_attempt = made_progress
-                    ? 0U
-                    : retry.no_progress_attempt + 1U;
-                schedule_owned_conntrack_cleanup_retry(
-                    retry.snapshot,
-                    std::move(result->cleanup.remaining_marks),
-                    next_attempt);
-            }
-        }
-    } catch (const std::exception& error) {
-        Logger::instance().info(
-            "Best-effort conntrack cleanup retry completion failed: {}",
-            error.what());
-    } catch (...) {
-        Logger::instance().info(
-            "Best-effort conntrack cleanup retry completion failed: "
-            "unknown error");
-    }
-    arm_owned_conntrack_cleanup_retry_timer();
-}
-
-std::optional<OwnedConntrackCleanupRetry>
-Daemon::take_active_owned_conntrack_cleanup_retry() {
-    if (!active_owned_conntrack_cleanup_operation_) {
-        return std::nullopt;
-    }
-    auto operation = active_owned_conntrack_cleanup_operation_;
-    active_owned_conntrack_cleanup_operation_.reset();
-    operation->cancel();
-    if (owned_conntrack_cleanup_retry_task_id_ >= 0) {
-        scheduler_->cancel(owned_conntrack_cleanup_retry_task_id_);
-        owned_conntrack_cleanup_retry_task_id_ = -1;
-    }
-    return operation->retry();
-}
-
-void Daemon::cancel_owned_conntrack_cleanup_retry() {
-    if (owned_conntrack_cleanup_retry_task_id_ >= 0) {
-        scheduler_->cancel(owned_conntrack_cleanup_retry_task_id_);
-        owned_conntrack_cleanup_retry_task_id_ = -1;
-    }
-    pending_owned_conntrack_cleanup_retry_.reset();
-    (void)take_active_owned_conntrack_cleanup_retry();
-}
-
-void Daemon::complete_pending_snat_recovery_before_generation_change() {
-    // An earlier verified repair may have restored the SNAT scaffold while
-    // its exact conntrack retirement remained incomplete. That remainder is
-    // independent of the coordinator's pending SNAT recovery: it must be
-    // drained before
-    // numerical marks can be reused by a newer generation.
-    std::vector<OwnedConntrackCleanupRetry> cleanup_retries;
-    if (auto active_retry =
-            take_active_owned_conntrack_cleanup_retry();
-        active_retry.has_value()) {
-        cleanup_retries.push_back(std::move(*active_retry));
-    }
-    if (pending_owned_conntrack_cleanup_retry_.has_value()) {
-        cleanup_retries.push_back(
-            std::move(*pending_owned_conntrack_cleanup_retry_));
-        pending_owned_conntrack_cleanup_retry_.reset();
-    }
-    if (owned_conntrack_cleanup_retry_task_id_ >= 0) {
-        scheduler_->cancel(owned_conntrack_cleanup_retry_task_id_);
-        owned_conntrack_cleanup_retry_task_id_ = -1;
-    }
-
-    bool cleanup_incomplete = false;
-    for (const auto& retry : cleanup_retries) {
-        if (retry.snapshot.runtime_generation ==
-            runtime_generation_.load(std::memory_order_acquire)) {
-            const auto cleanup = cleanup_owned_conntrack_snapshot(
-                retry.snapshot,
-                "before configuration generation change",
-                /*allow_retry=*/false);
-            if (!cleanup.remaining_marks.empty()) {
-                schedule_owned_conntrack_cleanup_retry(
-                    retry.snapshot,
-                    cleanup.remaining_marks,
-                    retry.no_progress_attempt);
-                cleanup_incomplete = true;
-            }
-        }
-    }
-    if (cleanup_incomplete) {
-        throw TransientFirewallError(
-            "owned conntrack cleanup is incomplete before configuration "
-            "generation change");
-    }
-
-    if (!runtime_firewall_retry_.owned_snat_recovery_pending()) {
-        return;
-    }
-
-    auto recovery = runtime_firewall_retry_.pending_owned_snat_recovery();
-    const auto before = firewall_->inspect_owned_snat_state();
-    recovery = observe_owned_snat_state(
-        std::move(recovery),
-        before,
-        before == OwnedSnatState::missing
-            ? std::optional<OwnedConntrackCleanupSnapshot>{
-                  snapshot_owned_conntrack_marks()}
-            : std::nullopt);
-    if (before == OwnedSnatState::unknown) {
-        throw TransientFirewallError(
-            "tunnel SNAT state is unavailable before configuration "
-            "generation change");
-    }
-    if (before == OwnedSnatState::missing) {
-        // The production save path reaches this barrier only through
-        // RuntimeFirewallOperationOwner::config_preapply, whose worker owns
-        // inspection, repair and exact conntrack retirement. Never recreate
-        // that mutation synchronously: a caller which still selects the
-        // legacy fence must fail before reusing numerical marks.
-        throw TransientFirewallError(
-            "tunnel SNAT repair requires the typed configuration pre-apply "
-            "owner");
-    }
-
-    // This is the only synchronous hot cleanup path. It is a strict barrier
-    // before outbound marks can be reassigned to the next configuration.
-    if (recovery.missing_observed &&
-        recovery.cleanup_snapshot.has_value()) {
-        const auto cleanup = cleanup_owned_conntrack_snapshot(
-            *recovery.cleanup_snapshot,
-            "before configuration generation change",
-            /*allow_retry=*/false);
-        if (!cleanup.remaining_marks.empty()) {
-            // Keep the exact old-generation selectors retryable, but do not
-            // let the caller publish a generation which may reuse their
-            // numerical marks. The next apply can proceed only after this
-            // targeted cleanup has converged; global conntrack is never
-            // flushed.
-            schedule_owned_conntrack_cleanup_retry(
-                *recovery.cleanup_snapshot,
-                cleanup.remaining_marks);
-            throw TransientFirewallError(
-                "owned conntrack cleanup is incomplete before configuration "
-                "generation change");
-        }
-    }
-    runtime_firewall_retry_.clear_owned_snat_recovery();
-    runtime_firewall_owner_->cancel_retry();
+    requeue();
 }
 
 void Daemon::setup_static_routing() {

@@ -71,7 +71,7 @@ struct ActiveCore final {
     std::map<std::string, ListSetUsage> list_usage;
     std::map<std::string, std::string> list_fingerprints;
     InternalVpnResolutionCache internal_vpn_resolution_cache;
-    std::vector<FirewallSourceEgressSnatSelector> snat_selectors;
+    ConntrackCleanupCoordinator conntrack_cleanup_coordinator;
     std::optional<std::uint32_t> meta_fwmark;
     std::uint32_t meta_owned_mask{0U};
 
@@ -82,7 +82,7 @@ struct ActiveCore final {
             list_usage,
             list_fingerprints,
             internal_vpn_resolution_cache,
-            snat_selectors,
+            conntrack_cleanup_coordinator,
             meta_fwmark,
             meta_owned_mask};
     }

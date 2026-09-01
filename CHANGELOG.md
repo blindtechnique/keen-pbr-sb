@@ -159,6 +159,19 @@
   владельца active/LKG, legacy и empty-конфигурации, stale include-only
   retention, authoritative removal, IKE ingress/DNS bypass и точный
   publication/rollback без запуска монолитного backend suite.
+- Следующий P0-1 слой выделяет `ConntrackCleanupCoordinator` как единственного
+  владельца точного pending-остатка owned conntrack cleanup, его coalescing,
+  ограниченного backoff, единственного timer, однократного предупреждения об
+  отсутствии `conntrack` и опубликованного native-VPN SNAT cursor. Физическое
+  удаление flows, mutation admission и generation fence по-прежнему выполняет
+  существующий типизированный `RuntimeFirewallOperationOwner`; новый writer,
+  recovery или пользовательский защитный сценарий не добавлялся. Мёртвый
+  параллельный `OwnedConntrackCleanupOperation` вместе с watchdog удалён, а
+  config-preapply и STOP получают тот же точный remainder через coordinator.
+- Добавлен быстрый `keen-pbr-conntrack-cleanup-coordinator-tests`: отдельно
+  проверяются фильтрация и порядок marks, coalescing поколений, bounded retry
+  `2/4/8/16/30` секунд, точное потребление timer, повтор после ошибки scheduler,
+  handoff/cancel, once-warning и обратимый SNAT publication cursor.
 - Продолжено P0-1 отделение publication tail от `Daemon` без нового admission,
   recovery-журнала или пользовательских блокировок. Семь разрозненных
   публикаций rules/list/native-VPN/SNAT/Meta сведены в один небросающий core
