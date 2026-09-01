@@ -81,14 +81,14 @@ ResolverGenerationSnapshot Daemon::make_resolver_generation_snapshot(
     const KeeneticDnsCacheView* keenetic_dns_override) {
     if (!list_cache_snapshot) {
         list_cache_snapshot =
-            capture_relevant_list_cache_generation(config_);
+            capture_relevant_list_cache_generation(active_config_snapshot_->config);
     }
     const ResolverType resolver_type =
         firewall_->backend() == FirewallBackend::nftables
             ? ResolverType::DNSMASQ_NFTSET
             : ResolverType::DNSMASQ_IPSET;
     const Ipv6SupportDecision ipv6_decision =
-        resolve_ipv6_support(config_);
+        resolve_ipv6_support(active_config_snapshot_->config);
     log_ipv6_support_decision_once(ipv6_decision);
     auto trusted_dns_interfaces =
         select_dnsmasq_trusted_interfaces(
@@ -96,12 +96,12 @@ ResolverGenerationSnapshot Daemon::make_resolver_generation_snapshot(
             resolved_internal_vpn_servers_,
             resolved_internal_vpn_service_targets_);
     RuntimeResolverGenerationInput input;
-    input.config = config_;
+    input.config = active_config_snapshot_->config;
     input.keenetic_dns = keenetic_dns_override
         ? *keenetic_dns_override
         : active_keenetic_dns_;
     input.list_cache_snapshot = std::move(list_cache_snapshot);
-    input.list_max_file_size_bytes = max_file_size_bytes(config_);
+    input.list_max_file_size_bytes = max_file_size_bytes(active_config_snapshot_->config);
     input.resolver_type = resolver_type;
     input.ipv6_policy = resolver_ipv6_policy(ipv6_decision);
     input.trusted_dns_interfaces =
@@ -163,7 +163,7 @@ RuntimeStateSnapshot Daemon::build_runtime_state_snapshot() const {
     snapshot.runtime_state_reason = runtime_state_machine_.reason();
 
     if (urltest_manager_) {
-        for (const auto& outbound : config_.outbounds.value_or(std::vector<Outbound>{})) {
+        for (const auto& outbound : active_config_snapshot_->config.outbounds.value_or(std::vector<Outbound>{})) {
             if (outbound.type != OutboundType::URLTEST) {
                 continue;
             }
@@ -249,7 +249,7 @@ void Daemon::schedule_keenetic_dns_refresh() {
         keenetic_dns_refresh_task_id_ = -1;
     }
 
-    if (!config_uses_keenetic_dns(config_.dns)) {
+    if (!config_uses_keenetic_dns(active_config_snapshot_->config.dns)) {
         return;
     }
 
@@ -258,7 +258,7 @@ void Daemon::schedule_keenetic_dns_refresh() {
         [this]() {
             post_control_task([this]() {
                 if (!routing_runtime_active() ||
-                    !config_uses_keenetic_dns(config_.dns)) {
+                    !config_uses_keenetic_dns(active_config_snapshot_->config.dns)) {
                     return;
                 }
                 request_keenetic_dns_refresh();
@@ -269,7 +269,7 @@ void Daemon::schedule_keenetic_dns_refresh() {
 
 void Daemon::request_keenetic_dns_refresh() {
     if (!routing_runtime_active() ||
-        !config_uses_keenetic_dns(config_.dns)) {
+        !config_uses_keenetic_dns(active_config_snapshot_->config.dns)) {
         return;
     }
 
@@ -310,7 +310,7 @@ void Daemon::schedule_deferred_keenetic_dns_refresh(
                     routing_runtime_active(),
                     runtime_generation,
                     runtime_generation_.load(std::memory_order_acquire)) ||
-                !config_uses_keenetic_dns(config_.dns)) {
+                !config_uses_keenetic_dns(active_config_snapshot_->config.dns)) {
                 return;
             }
             request_keenetic_dns_refresh();
@@ -335,7 +335,7 @@ bool Daemon::commit_keenetic_dns_refresh_result(
     const RuntimeMutationLeaseHandoff& mutation_lease) {
     if (generation != runtime_generation_.load(std::memory_order_acquire) ||
         !routing_runtime_active() ||
-        !config_uses_keenetic_dns(config_.dns)) {
+        !config_uses_keenetic_dns(active_config_snapshot_->config.dns)) {
         return false;
     }
 
@@ -395,7 +395,7 @@ bool Daemon::commit_keenetic_dns_refresh_result(
     }
 
     const auto list_cache_snapshot =
-        capture_relevant_list_cache_generation(config_);
+        capture_relevant_list_cache_generation(active_config_snapshot_->config);
     auto lease = std::move(taken.lease);
     if (!begin_preowned_runtime_firewall_keenetic_dns_refresh(
             generation,
@@ -563,7 +563,7 @@ void Daemon::commit_resolver_hash_probe_result(
 }
 
 void Daemon::refresh_resolver_config_hash_actual_async() {
-    const auto dns_cfg_opt = config_.dns;
+    const auto dns_cfg_opt = active_config_snapshot_->config.dns;
     if (!routing_runtime_active() ||
         !dns_cfg_opt.has_value() ||
         !dns_cfg_opt->system_resolver.has_value()) {

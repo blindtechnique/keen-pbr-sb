@@ -19,11 +19,8 @@ ConfigStore::ConfigStore(Config active_config) {
     auto outbound_marks = allocate_outbound_marks(
         active_config.fwmark.value_or(FwmarkConfig{}),
         active_config.outbounds.value_or(std::vector<Outbound>{}));
-    active_snapshot_ = std::make_shared<const ActiveConfigSnapshot>(
-        ActiveConfigSnapshot{
-            std::move(active_config),
-            std::move(outbound_marks),
-        });
+    active_snapshot_ = prepare_active_snapshot(
+        std::move(active_config), std::move(outbound_marks));
 }
 
 ActiveConfigSnapshotHandle ConfigStore::pin_active_snapshot() const {
@@ -70,14 +67,32 @@ bool ConfigStore::config_is_draft() const {
     return staged_config_.has_value();
 }
 
-void ConfigStore::replace_active(Config active_config, OutboundMarkMap outbound_marks) {
-    auto replacement = std::make_shared<const ActiveConfigSnapshot>(
+ActiveConfigSnapshotHandle ConfigStore::prepare_active_snapshot(
+    Config config,
+    OutboundMarkMap outbound_marks) {
+    return std::make_shared<const ActiveConfigSnapshot>(
         ActiveConfigSnapshot{
-            std::move(active_config),
+            std::move(config),
             std::move(outbound_marks),
         });
+}
+
+void ConfigStore::replace_active(Config active_config, OutboundMarkMap outbound_marks) {
+    auto replacement = prepare_active_snapshot(
+        std::move(active_config), std::move(outbound_marks));
     KPBR_SHARED_UNIQUE_LOCK(lock, mutex_);
     active_snapshot_ = std::move(replacement);
+}
+
+PreparedActiveConfigCommit ConfigStore::prepare_active_commit(
+    ActiveConfigSnapshotHandle base,
+    ActiveConfigSnapshotHandle candidate,
+    std::string staged_serialized) {
+    return PreparedActiveConfigCommit{
+        std::move(base),
+        std::move(candidate),
+        std::move(staged_serialized),
+    };
 }
 
 PreparedActiveConfigCommit ConfigStore::prepare_active_commit(
@@ -85,15 +100,21 @@ PreparedActiveConfigCommit ConfigStore::prepare_active_commit(
     Config candidate_config,
     OutboundMarkMap candidate_outbound_marks,
     std::string staged_serialized) {
-    auto candidate = std::make_shared<const ActiveConfigSnapshot>(
-        ActiveConfigSnapshot{
+    return prepare_active_commit(
+        std::move(base),
+        prepare_active_snapshot(
             std::move(candidate_config),
-            std::move(candidate_outbound_marks),
-        });
-    return PreparedActiveConfigCommit{
+            std::move(candidate_outbound_marks)),
+        std::move(staged_serialized));
+}
+
+PreparedActiveRuntimeReloadCommit
+ConfigStore::prepare_active_runtime_reload_commit(
+    ActiveConfigSnapshotHandle base,
+    ActiveConfigSnapshotHandle candidate) {
+    return PreparedActiveRuntimeReloadCommit{
         std::move(base),
         std::move(candidate),
-        std::move(staged_serialized),
     };
 }
 
@@ -102,15 +123,11 @@ ConfigStore::prepare_active_runtime_reload_commit(
     ActiveConfigSnapshotHandle base,
     Config candidate_config,
     OutboundMarkMap candidate_outbound_marks) {
-    auto candidate = std::make_shared<const ActiveConfigSnapshot>(
-        ActiveConfigSnapshot{
-            std::move(candidate_config),
-            std::move(candidate_outbound_marks),
-        });
-    return PreparedActiveRuntimeReloadCommit{
+    return prepare_active_runtime_reload_commit(
         std::move(base),
-        std::move(candidate),
-    };
+        prepare_active_snapshot(
+            std::move(candidate_config),
+            std::move(candidate_outbound_marks)));
 }
 
 void ConfigStore::stage_config(Config staged_config, std::string staged_config_json) {

@@ -431,6 +431,8 @@ struct DaemonConfigGenerationTransaction final {
         RuntimeConfigGenerationPublicationMode::staged_save};
     PreparedRuntimeInputs candidate;
     PreparedRuntimeInputs rollback;
+    ActiveConfigSnapshotHandle base_active_snapshot;
+    ActiveConfigSnapshotHandle candidate_active_snapshot;
     PreparedActiveConfigCommit active_commit;
     PreparedActiveRuntimeReloadCommit active_runtime_reload_commit;
     FirewallConfigApplyPolicy candidate_firewall_policy;
@@ -564,10 +566,9 @@ struct DaemonKeeneticDnsRefreshTransaction final {
 };
 
 static_assert(
-    std::is_nothrow_swappable_v<Config> &&
-        std::is_nothrow_swappable_v<OutboundMarkMap> &&
+    std::is_nothrow_swappable_v<OutboundMarkMap> &&
         std::is_nothrow_swappable_v<KeeneticDnsCacheView>,
-    "config generation publication requires no-throw prepared-state swaps");
+    "config generation publication requires no-throw derived-state swaps");
 
 std::map<std::string, std::string>
 normalized_urltest_selections_for_config(
@@ -870,11 +871,11 @@ Daemon::Daemon(Config config,
     , ndms_native_secret_snapshot_store_(
           "/opt/etc/keen-pbr/native-import-secrets/snapshot.key",
           "/opt/etc/keen-pbr/native-import-snapshots")
-    , config_(std::move(config))
+    , active_config_snapshot_(config_store_.pin_active_snapshot())
     , config_path_(std::move(config_path))
     , opts_(std::move(opts))
     , firewall_(create_firewall(
-          firewall_backend_preference(config_),
+          firewall_backend_preference(active_config_snapshot_->config),
           RawPreroutingMode{opts_.use_raw_prerouting,
                             opts_.use_raw6_prerouting}))
     , interface_monitor_(std::make_unique<InterfaceMonitor>(
@@ -885,8 +886,7 @@ Daemon::Daemon(Config config,
     , routing_operation_owner_(netlink_, netlink_)
     , firewall_state_()
     , url_tester_()
-    , outbound_marks_(allocate_outbound_marks(config_.fwmark.value_or(FwmarkConfig{}),
-                                              config_.outbounds.value_or(std::vector<Outbound>{})))
+    , outbound_marks_(active_config_snapshot_->outbound_marks)
     , keenetic_dns_refresh_coordinator_(
           resolver_io_executor_,
           periodic_task_metrics_,
@@ -928,12 +928,12 @@ Daemon::Daemon(Config config,
     setup_signals();
     setup_control_channel();
 
-    const int64_t verify_max_bytes = config_.daemon.value_or(DaemonConfig{})
+    const int64_t verify_max_bytes = active_config_snapshot_->config.daemon.value_or(DaemonConfig{})
         .firewall_verify_max_bytes.value_or(static_cast<int64_t>(DEFAULT_FIREWALL_VERIFY_CAPTURE_MAX_BYTES));
     set_firewall_verifier_capture_max_bytes(static_cast<size_t>(verify_max_bytes));
 
     firewall_state_.set_outbound_marks(outbound_marks_);
-    firewall_state_.set_fwmark_mask(fwmark_mask_value(config_.fwmark.value_or(FwmarkConfig{})));
+    firewall_state_.set_fwmark_mask(fwmark_mask_value(active_config_snapshot_->config.fwmark.value_or(FwmarkConfig{})));
     list_service_.ensure_dir();
     scheduler_ = std::make_unique<Scheduler>(*this);
 
@@ -3069,7 +3069,7 @@ void Daemon::check_owned_snat_health() {
     // netfilter refresh owner. API/IPC getters remain passive.
     const auto stored_ppe_desired = firewall_->ppe_deoffload_desired();
     const bool configured_ppe_auto =
-        config_.daemon.value_or(DaemonConfig{})
+        active_config_snapshot_->config.daemon.value_or(DaemonConfig{})
             .ppe_deoffload_mode.value_or(api::PpeDeoffloadMode::OFF) ==
         api::PpeDeoffloadMode::AUTO;
     const bool ppe_liveness_owned = configured_ppe_auto ||
@@ -3077,7 +3077,7 @@ void Daemon::check_owned_snat_health() {
     bool ppe_desired_drift = false;
     try {
         const auto observed_ppe_desired =
-            observe_ppe_deoffload_desired(config_);
+            observe_ppe_deoffload_desired(active_config_snapshot_->config);
         ppe_desired_drift =
             !ppe_deoffload_desired_semantically_equal(
                 stored_ppe_desired, observed_ppe_desired);
@@ -3136,7 +3136,7 @@ void Daemon::check_owned_snat_health() {
         return;
     }
     const auto meta_selection = resolve_meta_udp_443_policy_selection(
-        config_,
+        active_config_snapshot_->config,
         firewall_state_.get_rules(),
         firewall_state_.get_fwmark_mask());
     const bool messages_first_active = meta_selection.active();
@@ -3524,8 +3524,8 @@ void Daemon::schedule_remote_access_retry(
         // deferred/trailing generation directly and let its result publish
         // the next non-zero retry hint when needed.
         const std::string listen =
-            config_.api.has_value()
-                ? config_.api->listen.value_or(std::string{})
+            active_config_snapshot_->config.api.has_value()
+                ? active_config_snapshot_->config.api->listen.value_or(std::string{})
                 : std::string{};
         unscheduled_remote_access_retry_generation_.reset();
         try {
@@ -3552,8 +3552,8 @@ void Daemon::schedule_remote_access_retry(
                     return;
                 }
                 const std::string listen =
-                    config_.api.has_value()
-                        ? config_.api->listen.value_or(std::string{})
+                    active_config_snapshot_->config.api.has_value()
+                        ? active_config_snapshot_->config.api->listen.value_or(std::string{})
                         : std::string{};
                 try {
                     (void)retry_remote_access_reconcile(
@@ -3601,8 +3601,8 @@ void Daemon::resume_unscheduled_remote_access_retry() noexcept {
         }
         generation = status.desired_generation;
         const std::string listen =
-            config_.api.has_value()
-                ? config_.api->listen.value_or(std::string{})
+            active_config_snapshot_->config.api.has_value()
+                ? active_config_snapshot_->config.api->listen.value_or(std::string{})
                 : std::string{};
         unscheduled_remote_access_retry_generation_.reset();
         (void)retry_remote_access_reconcile(*generation, listen);
@@ -3644,8 +3644,8 @@ void Daemon::request_remote_access_reconcile_from_control(
             return;
         }
         const std::string listen =
-            config_.api.has_value()
-                ? config_.api->listen.value_or(std::string{})
+            active_config_snapshot_->config.api.has_value()
+                ? active_config_snapshot_->config.api->listen.value_or(std::string{})
                 : std::string{};
         (void)refresh_remote_access_reconcile(listen);
     } catch (const std::exception& error) {
@@ -5160,7 +5160,7 @@ void Daemon::start_runtime_cold_boot_rollback(
                         }
                         const auto deactivate_args =
                             build_system_resolver_hook_args(
-                                config_, "deactivate");
+                                active_config_snapshot_->config, "deactivate");
                         if (deactivate_args.empty()) {
                             resolver_deactivated = true;
                         } else {
@@ -5504,8 +5504,8 @@ void Daemon::open_runtime_cold_boot_services(
             schedule_owned_snat_health_check();
             schedule_keenetic_dns_refresh();
             if (internal_vpn_resolution_requires_catalog_refresh(
-                    config_, transaction->interface_resolution_state) ||
-                (config_requires_internal_vpn_service_inventory(config_) &&
+                    active_config_snapshot_->config, transaction->interface_resolution_state) ||
+                (config_requires_internal_vpn_service_inventory(active_config_snapshot_->config) &&
                  transaction->service_resolution_state !=
                      InternalVpnRuntimeResolutionState::verified)) {
                 schedule_internal_vpn_catalog_refresh_if_needed(
@@ -6524,7 +6524,7 @@ void Daemon::finish_preowned_runtime_firewall_urltest_selection(
                 transaction->runtime_generation) {
             try {
                 const auto owned_mask = fwmark_mask_value(
-                    config_.fwmark.value_or(FwmarkConfig{}));
+                    active_config_snapshot_->config.fwmark.value_or(FwmarkConfig{}));
                 const auto cleanup = conntrack_manager_.delete_mark(
                     *transaction->retired_mark, owned_mask);
                 if (cleanup ==
@@ -6536,7 +6536,7 @@ void Daemon::finish_preowned_runtime_firewall_urltest_selection(
                         transaction->runtime_generation;
                     snapshot.owned_mask = owned_mask;
                     snapshot.ipv6_enabled =
-                        resolve_ipv6_support(config_).enabled;
+                        resolve_ipv6_support(active_config_snapshot_->config).enabled;
                     snapshot.marks.insert(*transaction->retired_mark);
                     snapshot.priority_marks.insert(
                         *transaction->retired_mark);
@@ -6657,7 +6657,7 @@ void Daemon::begin_preowned_runtime_firewall_start(
     KeeneticDnsCacheView prepared_keenetic_dns;
     try {
         prepared_keenetic_dns = prepare_keenetic_dns_view(
-            config_, /*allow_refresh=*/false);
+            active_config_snapshot_->config, /*allow_refresh=*/false);
     } catch (const std::exception& error) {
         mutation_lease.reset();
         settle_rejection(error.what());
@@ -7241,8 +7241,9 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
         }
 
         if (!bootstrap_from_stopped) {
-            rollback.config = config_;
-            rollback.outbound_marks = outbound_marks_;
+            rollback.config = base_active_snapshot->config;
+            rollback.outbound_marks =
+                base_active_snapshot->outbound_marks;
             rollback.keenetic_dns =
                 committed_resolver_generation->keenetic_dns;
             rollback.internal_vpn_resolution.effective_servers =
@@ -7270,7 +7271,9 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
             routing_runtime_active();
         transaction->candidate_firewall_policy =
             firewall_config_apply_policy(
-                firewall_->backend(), config_, candidate.config);
+                firewall_->backend(),
+                base_active_snapshot->config,
+                candidate.config);
         transaction->rollback_firewall_policy =
             firewall_config_apply_policy(
                 firewall_->backend(), candidate.config, rollback.config);
@@ -7340,25 +7343,30 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
         transaction->candidate_resolver_sync.runtime_active = true;
         transaction->candidate_resolver_sync.resolver_configured = true;
 
+        auto candidate_active_snapshot =
+            ConfigStore::prepare_active_snapshot(
+                candidate.config, candidate.outbound_marks);
         switch (publication_mode) {
         case RuntimeConfigGenerationPublicationMode::staged_save:
         case RuntimeConfigGenerationPublicationMode::
                  staged_bootstrap_from_stopped:
             transaction->active_commit =
                 ConfigStore::prepare_active_commit(
-                    std::move(base_active_snapshot),
-                    candidate.config,
-                    candidate.outbound_marks,
+                    base_active_snapshot,
+                    candidate_active_snapshot,
                     std::move(staged_serialized));
             break;
         case RuntimeConfigGenerationPublicationMode::active_runtime_reload:
             transaction->active_runtime_reload_commit =
                 ConfigStore::prepare_active_runtime_reload_commit(
-                    std::move(base_active_snapshot),
-                    candidate.config,
-                    candidate.outbound_marks);
+                    base_active_snapshot,
+                    candidate_active_snapshot);
             break;
         }
+        transaction->candidate_active_snapshot =
+            std::move(candidate_active_snapshot);
+        transaction->base_active_snapshot =
+            std::move(base_active_snapshot);
         transaction->candidate = std::move(candidate);
         transaction->rollback = std::move(rollback);
     } catch (const std::exception& error) {
@@ -7823,6 +7831,8 @@ bool Daemon::publish_prepared_runtime_firewall_config_candidate(
     if (!transaction || transaction->candidate_published ||
         !transaction->candidate_core_publication_ready ||
         !transaction->candidate_resolver_generation ||
+        !transaction->base_active_snapshot ||
+        !transaction->candidate_active_snapshot ||
         runtime_generation_.load(std::memory_order_acquire) !=
             transaction->base_runtime_generation) {
         return false;
@@ -7837,7 +7847,7 @@ bool Daemon::publish_prepared_runtime_firewall_config_candidate(
             transaction->candidate_core_publication;
         auto cleanup = prepare_config_transition_cleanup_plan(
             transaction->previous_runtime_active,
-            config_,
+            transaction->base_active_snapshot->config,
             firewall_state_.get_rules(),
             applied_list_content_state_,
             applied_native_vpn_direct_egress_snat_selectors_,
@@ -7865,7 +7875,8 @@ bool Daemon::publish_prepared_runtime_firewall_config_candidate(
                 using std::swap;
                 auto& publication =
                     transaction->candidate_core_publication;
-                swap(config_, transaction->candidate.config);
+                active_config_snapshot_ =
+                    transaction->candidate_active_snapshot;
                 outbound_marks_.swap(
                     transaction->candidate.outbound_marks);
                 swap(active_keenetic_dns_,
@@ -8062,7 +8073,7 @@ bool Daemon::publish_prepared_runtime_firewall_config_candidate(
     } catch (...) {
     }
     try {
-        refresh_interface_traffic_config_targets(config_);
+        refresh_interface_traffic_config_targets(active_config_snapshot_->config);
     } catch (...) {
     }
     try {
@@ -8884,7 +8895,7 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                   queued_claim.attempt)
             : runtime_firewall_preworker_retry_required(
                   snat_recovery.requested,
-                  config_has_native_vpn_catalog_policy(config_),
+                  config_has_native_vpn_catalog_policy(active_config_snapshot_->config),
                   urltest_after_firewall_gate_.waiting_for(
                       queued_claim.runtime_generation),
                   queued_claim.attempt,
@@ -8911,7 +8922,7 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                   queued_claim.attempt)
             : runtime_firewall_preworker_retry_required(
                   snat_recovery.requested,
-                  config_has_native_vpn_catalog_policy(config_),
+                  config_has_native_vpn_catalog_policy(active_config_snapshot_->config),
                   urltest_after_firewall_gate_.waiting_for(
                       queued_claim.runtime_generation),
                   queued_claim.attempt,
@@ -9036,7 +9047,7 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                 resolver_generation_snapshot_ &&
                         resolver_generation_snapshot_->list_cache_snapshot
                 ? resolver_generation_snapshot_->list_cache_snapshot
-                : capture_relevant_list_cache_generation(config_);
+                : capture_relevant_list_cache_generation(active_config_snapshot_->config);
         } else {
             state.internal_vpn_resolution =
                 prepared_native_vpn_catalog
@@ -9088,11 +9099,11 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                                 ->list_cache_snapshot
                         ? resolver_generation_snapshot_
                               ->list_cache_snapshot
-                        : capture_relevant_list_cache_generation(config_);
+                        : capture_relevant_list_cache_generation(active_config_snapshot_->config);
             }
         } else if (!lifecycle_preowned) {
             state.list_cache_snapshot = state.resolver_refresh_required
-                ? capture_relevant_list_cache_generation(config_)
+                ? capture_relevant_list_cache_generation(active_config_snapshot_->config)
                 : resolver_generation_snapshot_->list_cache_snapshot;
         }
 
@@ -9178,7 +9189,7 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
         }
         transaction.config = config_generation_target
             ? config_generation_target->config
-            : config_;
+            : active_config_snapshot_->config;
         transaction.outbound_marks = config_generation_target
             ? config_generation_target->outbound_marks
             : outbound_marks_;
@@ -9810,7 +9821,7 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                             context->lifecycle_kind) &&
                         runtime_firewall_preworker_retry_required(
                             snat_recovery.requested,
-                            config_has_native_vpn_catalog_policy(config_),
+                            config_has_native_vpn_catalog_policy(active_config_snapshot_->config),
                             urltest_after_firewall_gate_.waiting_for(
                                 queued_claim.runtime_generation),
                             queued_claim.attempt,
@@ -9859,7 +9870,7 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                             context->lifecycle_kind) &&
                         runtime_firewall_preworker_retry_required(
                             snat_recovery.requested,
-                            config_has_native_vpn_catalog_policy(config_),
+                            config_has_native_vpn_catalog_policy(active_config_snapshot_->config),
                             urltest_after_firewall_gate_.waiting_for(
                                 queued_claim.runtime_generation),
                             queued_claim.attempt,
@@ -9962,8 +9973,8 @@ void Daemon::trigger_broad_urltest_probe_noexcept() noexcept {
             "firewall publication...");
     } catch (...) {
     }
-    if (!config_.outbounds.has_value()) return;
-    for (const auto& outbound : *config_.outbounds) {
+    if (!active_config_snapshot_->config.outbounds.has_value()) return;
+    for (const auto& outbound : *active_config_snapshot_->config.outbounds) {
         if (outbound.type != OutboundType::URLTEST) continue;
         try {
             urltest_manager_->trigger_immediate_test(outbound.tag);
@@ -10369,7 +10380,7 @@ bool Daemon::begin_runtime_firewall_start_rollback(
         auto result =
             std::make_shared<RuntimeFirewallStartRollbackResult>();
         const auto deactivate_args = build_system_resolver_hook_args(
-            config_, "deactivate");
+            active_config_snapshot_->config, "deactivate");
         std::weak_ptr<RuntimeFirewallOperationContext> weak_context{
             context};
         state.lifecycle_start_rollback_result = result;
@@ -14504,14 +14515,14 @@ void Daemon::handle_interface_event(const InterfaceMonitor::Event& event) {
     }
     const bool reconcile_immediately =
         interface_event_affects_managed_runtime(
-            config_,
+            active_config_snapshot_->config,
             resolved_internal_vpn_servers_,
             resolved_internal_vpn_service_targets_,
             event.interface_name);
     const bool refresh_stable_catalog =
-        config_has_stable_internal_vpn_server_policy(config_);
+        config_has_stable_internal_vpn_server_policy(active_config_snapshot_->config);
     const bool refresh_service_catalog =
-        config_requires_internal_vpn_service_inventory(config_);
+        config_requires_internal_vpn_service_inventory(active_config_snapshot_->config);
     if (!reconcile_immediately &&
         !refresh_stable_catalog &&
         !refresh_service_catalog) {
@@ -14547,8 +14558,8 @@ void Daemon::handle_interface_event(const InterfaceMonitor::Event& event) {
                  event.interface_name,
                  event.is_up ? "UP" : "DOWN");
     }
-    const auto configured_internal_servers = config_.route.has_value()
-        ? config_.route->internal_vpn_servers.value_or(
+    const auto configured_internal_servers = active_config_snapshot_->config.route.has_value()
+        ? active_config_snapshot_->config.route->internal_vpn_servers.value_or(
               std::vector<InternalVpnServer>{})
         : std::vector<InternalVpnServer>{};
     const bool is_internal_vpn_event = std::any_of(
@@ -14585,7 +14596,7 @@ void Daemon::handle_interface_event(const InterfaceMonitor::Event& event) {
 
 void Daemon::recover_internal_vpn_catalog_after_observation_gap() {
     if (!routing_runtime_active() ||
-        !config_has_native_vpn_catalog_policy(config_)) {
+        !config_has_native_vpn_catalog_policy(active_config_snapshot_->config)) {
         return;
     }
     recover_internal_vpn_after_observation_gap(
@@ -14593,10 +14604,10 @@ void Daemon::recover_internal_vpn_catalog_after_observation_gap() {
         // stable-id mapping. The include-only LKG is intentionally retained by
         // the runtime resolver.
         [this]() {
-            if (config_has_stable_internal_vpn_server_policy(config_)) {
+            if (config_has_stable_internal_vpn_server_policy(active_config_snapshot_->config)) {
                 shared_ndms_catalog_cache().invalidate();
             }
-            if (config_requires_internal_vpn_service_inventory(config_)) {
+            if (config_requires_internal_vpn_service_inventory(active_config_snapshot_->config)) {
                 shared_ndms_vpn_server_service_cache().invalidate();
             }
         },
@@ -14945,31 +14956,31 @@ void Daemon::run() {
     // Prime Keenetic DNS explicitly before the first route/firewall mutation;
     // all runtime consumers below are cache-only and share this exact view.
     active_keenetic_dns_ = prepare_keenetic_dns_view(
-        config_,
+        active_config_snapshot_->config,
         /*allow_refresh=*/true,
         /*force_refresh=*/true);
     auto internal_vpn_resolution =
         resolve_internal_vpn_servers_for_runtime(
-            config_,
+            active_config_snapshot_->config,
             true,
             snapshot_internal_vpn_verified_includes_lkg());
     const auto internal_vpn_resolution_state =
         internal_vpn_resolution.state;
     auto internal_vpn_service_resolution =
         resolve_internal_vpn_services_for_runtime(
-            config_,
+            active_config_snapshot_->config,
             true,
             snapshot_internal_vpn_service_verified_includes_lkg());
     const auto internal_vpn_service_resolution_state =
         internal_vpn_service_resolution.state;
     log.info("Startup lists: checking local cache; only missing remote lists will be downloaded.");
-    const auto relevant_lists = collect_relevant_list_names(config_);
-    const auto dns_relevant_lists = collect_dns_relevant_list_names(config_);
+    const auto relevant_lists = collect_relevant_list_names(active_config_snapshot_->config);
+    const auto dns_relevant_lists = collect_dns_relevant_list_names(active_config_snapshot_->config);
     RemoteListRefreshControl refresh_control;
     refresh_control.cache_commit = make_guarded_cache_commit_callback();
     const RemoteListsRefreshResult refresh_result =
         list_service_.download_uncached(
-            config_,
+            active_config_snapshot_->config,
             outbound_marks_,
             &relevant_lists,
             &dns_relevant_lists,
@@ -14995,7 +15006,7 @@ void Daemon::run() {
     // From this point through the initial firewall retries and resolver
     // stream, both consumers must observe the exact same remote-list bodies.
     auto startup_list_cache_snapshot =
-        capture_relevant_list_cache_generation(config_);
+        capture_relevant_list_cache_generation(active_config_snapshot_->config);
 
     auto cold_boot = std::make_shared<DaemonColdBootTransaction>();
     cold_boot->runtime_generation =
@@ -15337,7 +15348,7 @@ bool Daemon::running() const {
 }
 
 void Daemon::write_pid_file() {
-    const auto pid_file = config_.daemon.value_or(DaemonConfig{}).pid_file.value_or("");
+    const auto pid_file = active_config_snapshot_->config.daemon.value_or(DaemonConfig{}).pid_file.value_or("");
     try {
         pid_file_.acquire(pid_file);
     } catch (const std::exception& error) {

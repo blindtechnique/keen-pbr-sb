@@ -94,11 +94,11 @@ void Daemon::handle_dns_probe_tcp_timer_events(uint32_t events) {
 void Daemon::setup_dns_probe() {
     teardown_dns_probe();
 
-    if (!config_.dns || !config_.dns->dns_test_server.has_value()) {
+    if (!active_config_snapshot_->config.dns || !active_config_snapshot_->config.dns->dns_test_server.has_value()) {
         return;
     }
 
-    const auto& test_cfg = *config_.dns->dns_test_server;
+    const auto& test_cfg = *active_config_snapshot_->config.dns->dns_test_server;
     const std::string* answer_ip = test_cfg.answer_ipv4 ? &*test_cfg.answer_ipv4 : nullptr;
     auto settings = parse_dns_probe_server_settings(test_cfg.listen, answer_ip);
 

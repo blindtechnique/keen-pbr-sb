@@ -875,103 +875,6 @@ void Daemon::stop_routing_runtime_with_lease_return(
     throw DaemonError(std::move(message));
 }
 
-ConfigApplyResult Daemon::apply_validated_config_via_control_task(
-    Config config,
-    std::string saved_config_json,
-    ConfigGenerationFence generation_fence) {
-    auto result = std::make_shared<ConfigApplyResult>();
-    auto prepared = std::make_shared<PreparedRuntimeInputs>();
-    auto rollback_prepared = std::make_shared<PreparedRuntimeInputs>();
-
-    const auto active_snapshot = config_store_.pin_active_snapshot();
-    const Config& active_config = active_snapshot->config;
-    const bool refresh_remote_lists_after_apply =
-        remote_list_sources_changed(active_config, config);
-
-    try {
-        *prepared = prepare_runtime_inputs(
-            config,
-            RemoteListPreparationMode::MissingOrInvalid);
-        *rollback_prepared = prepare_runtime_inputs(
-            active_config,
-            RemoteListPreparationMode::None);
-    } catch (const std::exception& e) {
-        result->error = e.what();
-        result->runtime_unchanged = true;
-        Logger::instance().error("Prepare staged config task failed: {}", e.what());
-        return *result;
-    }
-
-    enqueue_control_task(
-        [this,
-         result,
-         prepared,
-         rollback_prepared,
-         refresh_remote_lists_after_apply,
-         generation_fence,
-         saved_config_json = std::move(saved_config_json)]() mutable {
-            *result = apply_prepared_validated_config_on_control_loop(
-                std::move(*prepared),
-                std::move(*rollback_prepared),
-                refresh_remote_lists_after_apply,
-                std::move(saved_config_json),
-                generation_fence);
-        },
-        true,
-        "api-apply-config");
-    return *result;
-}
-
-ConfigApplyResult
-Daemon::apply_prepared_validated_config_on_control_loop(
-    PreparedRuntimeInputs prepared,
-    PreparedRuntimeInputs rollback_prepared,
-    bool refresh_remote_lists_after_apply,
-    std::string saved_config_json,
-    ConfigGenerationFence generation_fence) {
-    ConfigApplyResult result;
-    const std::int64_t apply_started_ts = unix_timestamp_now_seconds();
-    result.apply_started_ts = apply_started_ts;
-    apply_started_ts_.store(apply_started_ts, std::memory_order_release);
-
-    try {
-        // Rollback must restore the exact DNS snapshot that belongs to the
-        // currently committed runtime generation. The shared prepare cache
-        // may have advanced after both candidates were prepared.
-        rollback_prepared.keenetic_dns = active_keenetic_dns_;
-        apply_prepared_runtime_inputs(
-            std::move(prepared), generation_fence);
-        result.applied = true;
-        result.rolled_back = false;
-        result.runtime_unchanged = false;
-        config_store_.clear_staged_if_matches(saved_config_json);
-        if (refresh_remote_lists_after_apply) {
-            refresh_lists_and_maybe_reload_async("post-apply");
-        }
-    } catch (const std::exception& error) {
-        result.error = error.what();
-        Logger::instance().error(
-            "Apply staged config task failed: {}", error.what());
-
-        try {
-            // Rollback remains on the established synchronous fence until its
-            // own lifecycle is migrated. It must never inherit the verified
-            // fence of the candidate which just failed.
-            apply_prepared_runtime_inputs(std::move(rollback_prepared));
-            result.rolled_back = true;
-        } catch (const std::exception& rollback_error) {
-            result.rolled_back = false;
-            Logger::instance().error(
-                "Rollback to previous config failed: {}",
-                rollback_error.what());
-        } catch (...) {
-            result.rolled_back = false;
-            Logger::instance().error(
-                "Rollback to previous config failed: unknown error");
-        }
-    }
-    return result;
-}
 
 ConfigApplyResult
 Daemon::apply_validated_config_via_control_task_with_lease_return(
@@ -1803,7 +1706,7 @@ void Daemon::setup_api() {
     // A previous bounded attempt may have reached any point below. Always
     // begin from an empty API ownership set; this is also a no-op on the first
     // startup attempt.
-    if (!config_.api || !config_.api->enabled.value_or(false) || opts_.no_api) {
+    if (!active_config_snapshot_->config.api || !active_config_snapshot_->config.api->enabled.value_or(false) || opts_.no_api) {
         retire_api_runtime_resources();
         return;
     }
@@ -1811,7 +1714,7 @@ void Daemon::setup_api() {
     run_api_setup_with_strong_rollback(
         [this]() {
 
-    api_server_ = std::make_unique<ApiServer>(*config_.api);
+    api_server_ = std::make_unique<ApiServer>(*active_config_snapshot_->config.api);
 
     api_ctx_ = std::make_unique<ApiContext>(ApiContext{
         config_path_,
@@ -1999,9 +1902,9 @@ void Daemon::setup_api() {
                 "Legacy config-operation admission reached production wiring");
         },
         []() {},
-        [this](Config config, std::string saved_config_json) -> ConfigApplyResult {
-            return apply_validated_config_via_control_task(std::move(config),
-                                                           std::move(saved_config_json));
+        [](Config, std::string) -> ConfigApplyResult {
+            throw std::logic_error(
+                "Legacy configuration apply reached production wiring");
         },
         []() {
             throw std::logic_error(
@@ -2563,7 +2466,7 @@ void Daemon::setup_api() {
             }
         };
 #endif
-    refresh_interface_traffic_config_targets(config_);
+    refresh_interface_traffic_config_targets(active_config_snapshot_->config);
     lifecycle_operation_store_.set_publish_callback([this]() {
         if (status_stream_) status_stream_->reconcile();
     });
@@ -2647,10 +2550,10 @@ void Daemon::setup_api() {
         }
 
         if (!requested_tag.empty()) {
-            // Target discovery reads config_ and outbound_marks_, which are
-            // owned by the event-loop thread.  The HTTP worker may run beside
-            // a config reload, so admission and the immutable target snapshot
-            // must be taken on that owner thread as one control operation.
+            // Target discovery reads the pinned active snapshot and realized
+            // marks owned by the event-loop thread. The HTTP worker may run
+            // beside a config reload, so admission and target capture must
+            // happen on that owner thread as one control operation.
             bool started = false;
             try {
                 enqueue_control_task(
@@ -2720,7 +2623,7 @@ void Daemon::setup_api() {
         Logger::instance().info("Frontend static root: {}", frontend_root.string());
     }
 
-    const std::string listen_addr = config_.api->listen.value_or("0.0.0.0:12121");
+    const std::string listen_addr = active_config_snapshot_->config.api->listen.value_or("0.0.0.0:12121");
     Logger::instance().info("Starting REST API on {}", listen_addr);
     try {
         api_server_->start();

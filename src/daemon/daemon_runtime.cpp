@@ -361,7 +361,7 @@ bool Daemon::run_system_resolver_hook(std::string_view action,
     auto& log = Logger::instance();
 
     const auto args =
-        build_system_resolver_hook_args(config_, action, attempt_id);
+        build_system_resolver_hook_args(active_config_snapshot_->config, action, attempt_id);
     if (args.empty()) {
         return true;
     }
@@ -411,7 +411,7 @@ bool Daemon::run_system_resolver_hook(std::string_view action,
 
 bool Daemon::run_system_resolver_hook_stream(
     std::string_view action) {
-    if (build_system_resolver_hook_args(config_, action).empty()) {
+    if (build_system_resolver_hook_args(active_config_snapshot_->config, action).empty()) {
         return true;
     }
 
@@ -423,7 +423,7 @@ bool Daemon::run_system_resolver_hook_stream_prepared(
     std::string_view action,
     bool rebuild_snapshot,
     bool inactive_activation_authority) {
-    if (build_system_resolver_hook_args(config_, action).empty()) {
+    if (build_system_resolver_hook_args(active_config_snapshot_->config, action).empty()) {
         return true;
     }
 
@@ -515,7 +515,7 @@ OwnedConntrackCleanupSnapshot
 Daemon::snapshot_owned_conntrack_marks() const {
     return make_owned_conntrack_cleanup_snapshot(
         runtime_generation_.load(std::memory_order_acquire),
-        config_,
+        active_config_snapshot_->config,
         outbound_marks_,
         firewall_state_.get_rules(),
         firewall_state_.get_urltest_selections());
@@ -1040,12 +1040,12 @@ void Daemon::complete_pending_snat_recovery_before_generation_change() {
 }
 
 void Daemon::setup_static_routing() {
-    const Ipv6SupportDecision ipv6_decision = resolve_ipv6_support(config_);
+    const Ipv6SupportDecision ipv6_decision = resolve_ipv6_support(active_config_snapshot_->config);
     log_ipv6_support_decision_once(ipv6_decision);
     const auto main_table_routes = netlink_.dump_routes_in_table(254);
     OutboundReachabilitySnapshot reachability;
     for (const auto& outbound :
-         config_.outbounds.value_or(std::vector<Outbound>{})) {
+         active_config_snapshot_->config.outbounds.value_or(std::vector<Outbound>{})) {
         if (outbound.type != OutboundType::INTERFACE ||
             reachability.count(outbound.tag) != 0U) {
             continue;
@@ -1056,7 +1056,7 @@ void Daemon::setup_static_routing() {
                 outbound, main_table_routes));
     }
     const auto plan = plan_routing_state(
-        config_,
+        active_config_snapshot_->config,
         outbound_marks_,
         reachability,
         &firewall_state_.get_urltest_selections(),
@@ -1069,12 +1069,12 @@ void Daemon::setup_static_routing() {
 }
 
 void Daemon::reconcile_static_routing(RouteReconcileMode mode) {
-    const Ipv6SupportDecision ipv6_decision = resolve_ipv6_support(config_);
+    const Ipv6SupportDecision ipv6_decision = resolve_ipv6_support(active_config_snapshot_->config);
     log_ipv6_support_decision_once(ipv6_decision);
     const auto main_table_routes = netlink_.dump_routes_in_table(254);
     OutboundReachabilitySnapshot reachability;
     for (const auto& outbound :
-         config_.outbounds.value_or(std::vector<Outbound>{})) {
+         active_config_snapshot_->config.outbounds.value_or(std::vector<Outbound>{})) {
         if (outbound.type != OutboundType::INTERFACE ||
             reachability.count(outbound.tag) != 0U) {
             continue;
@@ -1084,7 +1084,7 @@ void Daemon::reconcile_static_routing(RouteReconcileMode mode) {
             is_interface_outbound_reachable(outbound, main_table_routes));
     }
     const auto plan = plan_routing_state(
-        config_,
+        active_config_snapshot_->config,
         outbound_marks_,
         reachability,
         &firewall_state_.get_urltest_selections(),
@@ -1119,14 +1119,14 @@ Daemon::prepare_meta_udp443_activation_or_throw(
     // work receives the owned copy below; the free contract deliberately
     // validates selection again at its trust boundary.
     const auto owned_mask = fwmark_mask_value(
-        config_.fwmark.value_or(FwmarkConfig{}));
+        active_config_snapshot_->config.fwmark.value_or(FwmarkConfig{}));
     if (!resolve_meta_udp_443_policy_selection(
-             config_, candidate_rules, owned_mask).active()) {
+             active_config_snapshot_->config, candidate_rules, owned_mask).active()) {
         return std::nullopt;
     }
 
     MetaUdp443ActivationInput input;
-    input.config = config_;
+    input.config = active_config_snapshot_->config;
     input.candidate_rules = candidate_rules;
     input.candidate_list_content_state = candidate_list_content_state;
     input.forwarded_scope_allows_unmarked_cleanup =
@@ -1526,7 +1526,7 @@ void Daemon::dispatch_meta_udp443_activation_cleanup(
 }
 
 FirewallApplyMode Daemon::runtime_refresh_firewall_mode() const {
-    const auto daemon_config = config_.daemon.value_or(DaemonConfig{});
+    const auto daemon_config = active_config_snapshot_->config.daemon.value_or(DaemonConfig{});
     return daemon_config.reuse_static_sets_on_runtime_refresh.value_or(true)
         ? FirewallApplyMode::RulesOnly
         : FirewallApplyMode::PreserveSets;
@@ -1589,7 +1589,7 @@ void Daemon::apply_firewall(
             runtime_targets);
     if (!list_cache_snapshot) {
         list_cache_snapshot =
-            capture_relevant_list_cache_generation(config_);
+            capture_relevant_list_cache_generation(active_config_snapshot_->config);
     }
 
     // RulesOnly reuses the live sets, which is only true to do while the
@@ -1619,7 +1619,7 @@ void Daemon::apply_firewall(
             previous.list_content_state = &applied_list_content_state_;
         }
         return stage_runtime_firewall(
-            config_,
+            active_config_snapshot_->config,
             outbound_marks_,
             firewall_state_.get_urltest_selections(),
             list_service_.cache_manager(),
@@ -1665,7 +1665,7 @@ void Daemon::apply_firewall(
     // during prepare_apply(). Meta-specific preflight still completes before
     // any Meta filter publication or exact conntrack deletion, so failure
     // leaves the previously committed Meta policy authoritative.
-    const auto route_config = config_.route.value_or(RouteConfig{});
+    const auto route_config = active_config_snapshot_->config.route.value_or(RouteConfig{});
     const bool has_explicit_inbound_scope =
         route_config.inbound_interfaces.has_value() &&
         !route_config.inbound_interfaces->empty();
@@ -1898,7 +1898,7 @@ void Daemon::normalize_urltest_selections() {
     std::map<std::string, std::string> normalized;
 
     for (const auto& outbound :
-         config_.outbounds.value_or(std::vector<Outbound>{})) {
+         active_config_snapshot_->config.outbounds.value_or(std::vector<Outbound>{})) {
         if (outbound.type != OutboundType::URLTEST) {
             continue;
         }
@@ -2081,7 +2081,7 @@ bool Daemon::handle_urltest_selection_change(
         }
 
         const auto outbounds =
-            config_.outbounds.value_or(std::vector<Outbound>{});
+            active_config_snapshot_->config.outbounds.value_or(std::vector<Outbound>{});
         const auto urltest_it = std::find_if(
             outbounds.begin(),
             outbounds.end(),
@@ -2165,8 +2165,8 @@ bool Daemon::handle_urltest_selection_change(
         // config may say.
         bool previous_child_is_selector = false;
         if (!change.previous_child_tag.empty() &&
-            config_.outbounds.has_value()) {
-            for (const auto& outbound : *config_.outbounds) {
+            active_config_snapshot_->config.outbounds.has_value()) {
+            for (const auto& outbound : *active_config_snapshot_->config.outbounds) {
                 if (outbound.tag == change.previous_child_tag) {
                     previous_child_is_selector =
                         outbound.type == OutboundType::URLTEST;
@@ -2226,7 +2226,7 @@ bool Daemon::handle_urltest_selection_change(
         }
 
         const auto list_cache_snapshot =
-            capture_relevant_list_cache_generation(config_);
+            capture_relevant_list_cache_generation(active_config_snapshot_->config);
         auto mutation_lease =
             std::make_unique<RuntimeMutationAdmission::Lease>(
                 std::move(*runtime_mutation));
@@ -2358,14 +2358,14 @@ void Daemon::register_urltest_outbounds() {
 
     UrltestDirectChildInterfaceMap direct_child_interfaces;
     for (const auto& ob :
-         config_.outbounds.value_or(std::vector<Outbound>{})) {
+         active_config_snapshot_->config.outbounds.value_or(std::vector<Outbound>{})) {
         if (ob.type == OutboundType::INTERFACE && ob.interface.has_value() &&
             !ob.interface->empty()) {
             direct_child_interfaces.emplace(ob.tag, *ob.interface);
         }
     }
 
-    for (const auto& ob : config_.outbounds.value_or(std::vector<Outbound>{})) {
+    for (const auto& ob : active_config_snapshot_->config.outbounds.value_or(std::vector<Outbound>{})) {
         if (ob.type == OutboundType::URLTEST) {
             const auto& selections =
                 firewall_state_.get_urltest_selections();
@@ -2400,7 +2400,7 @@ void Daemon::probe_interfaces_now() noexcept {
 bool Daemon::start_targeted_interface_probe(const std::string& tag) noexcept {
     try {
         const auto targets =
-            collect_interface_probe_targets(config_, outbound_marks_);
+            collect_interface_probe_targets(active_config_snapshot_->config, outbound_marks_);
         const auto found = std::find_if(
             targets.begin(), targets.end(),
             [&tag](const InterfaceProbe::Target& candidate) {
@@ -2441,7 +2441,7 @@ bool Daemon::start_targeted_interface_probe(const std::string& tag) noexcept {
                         try {
                             const auto current_targets =
                                 collect_interface_probe_targets(
-                                    config_, outbound_marks_);
+                                    active_config_snapshot_->config, outbound_marks_);
                             // The config may have been reloaded while we were
                             // on the network. Publishing then would attach a
                             // latency measured for one transport to whatever
@@ -2457,7 +2457,7 @@ bool Daemon::start_targeted_interface_probe(const std::string& tag) noexcept {
                             std::vector<std::string> affected_urltests;
                             if (urltest_manager_) {
                                 affected_urltests = find_affected_urltests(
-                                    config_.outbounds.value_or(
+                                    active_config_snapshot_->config.outbounds.value_or(
                                         std::vector<Outbound>{}),
                                     {target.tag});
                             }
@@ -2533,7 +2533,7 @@ void Daemon::start_interface_probe_round() noexcept {
 void Daemon::start_interface_probe_round_impl(
     bool failure_retry_round) {
     const auto configured_targets = collect_interface_probe_targets(
-        config_, outbound_marks_);
+        active_config_snapshot_->config, outbound_marks_);
     const auto expected_runtime_generation =
         runtime_generation_.load(std::memory_order_acquire);
 
@@ -2603,7 +2603,7 @@ void Daemon::start_interface_probe_round_impl(
                             try {
                                 const auto current_targets =
                                     collect_interface_probe_targets(
-                                        config_, outbound_marks_);
+                                        active_config_snapshot_->config, outbound_marks_);
                                 if (!interface_probe_target_is_current(
                                         expected_runtime_generation,
                                         runtime_generation_.load(
@@ -2623,7 +2623,7 @@ void Daemon::start_interface_probe_round_impl(
                                 if (urltest_manager_) {
                                     affected_urltests =
                                         find_affected_urltests(
-                                            config_.outbounds.value_or(
+                                            active_config_snapshot_->config.outbounds.value_or(
                                                 std::vector<Outbound>{}),
                                             {target.tag});
                                 }
@@ -2722,7 +2722,7 @@ void Daemon::start_interface_probe_round_impl(
                     try {
                         const auto current_targets =
                             collect_interface_probe_targets(
-                                config_, outbound_marks_);
+                                active_config_snapshot_->config, outbound_marks_);
                         snapshot_current =
                             interface_probe_snapshot_is_current(
                                 expected_runtime_generation,
@@ -2960,9 +2960,9 @@ void Daemon::schedule_lists_autoupdate() {
         scheduler_->cancel(lists_autoupdate_task_id_);
         lists_autoupdate_task_id_ = -1;
     }
-    if (!config_.lists_autoupdate) return;
-    if (!config_.lists_autoupdate->enabled.value_or(false)) return;
-    const auto& expr = config_.lists_autoupdate->cron.value_or("");
+    if (!active_config_snapshot_->config.lists_autoupdate) return;
+    if (!active_config_snapshot_->config.lists_autoupdate->enabled.value_or(false)) return;
+    const auto& expr = active_config_snapshot_->config.lists_autoupdate->cron.value_or("");
     auto next = cron_next(expr);
     const auto now = std::chrono::system_clock::now();
     auto delay = std::chrono::ceil<std::chrono::seconds>(next - now);
@@ -3615,7 +3615,7 @@ RemoteListRefreshTaskStartResult Daemon::start_remote_list_refresh_task(
                     std::move(*admitted)));
     }
 
-    const Config config_snapshot = config_;
+    const Config config_snapshot = active_config_snapshot_->config;
     const auto target_selection =
         select_remote_list_targets(config_snapshot, std::nullopt);
     if (!target_selection.ok()) {
@@ -4092,7 +4092,7 @@ void Daemon::update_internal_vpn_verified_includes_lkg(
 InternalVpnRuntimeResolution
 Daemon::prepare_internal_vpn_server_resolution_from_cache() {
     return resolve_internal_vpn_servers_for_runtime(
-        config_,
+        active_config_snapshot_->config,
         false,
         snapshot_internal_vpn_verified_includes_lkg());
 }
@@ -4231,16 +4231,16 @@ void Daemon::update_internal_vpn_service_verified_includes_lkg(
 InternalVpnServiceRuntimeResolution
 Daemon::prepare_internal_vpn_service_resolution_from_cache() {
     return resolve_internal_vpn_services_for_runtime(
-        config_,
+        active_config_snapshot_->config,
         false,
         snapshot_internal_vpn_service_verified_includes_lkg());
 }
 
 void Daemon::schedule_internal_vpn_catalog_refresh() {
     const bool needs_interface_catalog =
-        config_has_stable_internal_vpn_server_policy(config_);
+        config_has_stable_internal_vpn_server_policy(active_config_snapshot_->config);
     const bool needs_service_catalog =
-        config_requires_internal_vpn_service_inventory(config_);
+        config_requires_internal_vpn_service_inventory(active_config_snapshot_->config);
     if (!needs_interface_catalog && !needs_service_catalog) {
         return;
     }
@@ -4280,20 +4280,20 @@ void Daemon::schedule_internal_vpn_catalog_refresh() {
                     const bool rerun_is_valid =
                         rerun_requested &&
                         routing_runtime_active() &&
-                        config_has_native_vpn_catalog_policy(config_);
+                        config_has_native_vpn_catalog_policy(active_config_snapshot_->config);
                     if (rerun_is_valid) {
                         schedule_internal_vpn_catalog_refresh();
                     }
 
                     if (!routing_runtime_active() ||
-                        !config_has_native_vpn_catalog_policy(config_)) {
+                        !config_has_native_vpn_catalog_policy(active_config_snapshot_->config)) {
                         return;
                     }
                     const bool current_needs_interface =
-                        config_has_stable_internal_vpn_server_policy(config_);
+                        config_has_stable_internal_vpn_server_policy(active_config_snapshot_->config);
                     const bool current_needs_service =
                         config_requires_internal_vpn_service_inventory(
-                            config_);
+                            active_config_snapshot_->config);
                     const bool worker_is_fresh =
                         (!current_needs_interface ||
                          (worker_interface_snapshot.has_value() &&
@@ -4339,12 +4339,12 @@ void Daemon::schedule_internal_vpn_catalog_refresh() {
                     cancel_internal_vpn_catalog_refresh_retry();
                     auto resolution =
                         resolve_internal_vpn_servers_for_runtime(
-                            config_,
+                            active_config_snapshot_->config,
                             interface_snapshot,
                             snapshot_internal_vpn_verified_includes_lkg());
                     auto service_resolution =
                         resolve_internal_vpn_services_for_runtime(
-                            config_,
+                            active_config_snapshot_->config,
                             service_snapshot,
                             snapshot_internal_vpn_service_verified_includes_lkg());
                     const bool interface_changed =
@@ -4403,7 +4403,7 @@ void Daemon::schedule_internal_vpn_catalog_refresh() {
             "is unavailable");
         if (rerun_requested &&
             routing_runtime_active() &&
-            config_has_native_vpn_catalog_policy(config_)) {
+            config_has_native_vpn_catalog_policy(active_config_snapshot_->config)) {
             schedule_internal_vpn_catalog_refresh();
             return;
         }
@@ -4421,9 +4421,9 @@ void Daemon::schedule_internal_vpn_catalog_refresh_if_needed(
     // not leave workers targeting a runtime that never committed.
     const bool interface_needs_refresh =
         internal_vpn_resolution_requires_catalog_refresh(
-            config_, interface_state);
+            active_config_snapshot_->config, interface_state);
     const bool service_needs_refresh =
-        config_requires_internal_vpn_service_inventory(config_) &&
+        config_requires_internal_vpn_service_inventory(active_config_snapshot_->config) &&
         service_state != InternalVpnRuntimeResolutionState::verified;
     if (!routing_runtime_active() ||
         (!interface_needs_refresh && !service_needs_refresh)) {
@@ -4942,8 +4942,8 @@ void Daemon::resume_deferred_keenetic_dns_refresh() noexcept {
                     keenetic_dns_refresh_deferred_by_resolver_stream_ = true;
                     return;
                 }
-                if (!routing_runtime_active() || !config_.dns.has_value() ||
-                    !dns_config_uses_keenetic_server(*config_.dns)) {
+                if (!routing_runtime_active() || !active_config_snapshot_->config.dns.has_value() ||
+                    !dns_config_uses_keenetic_server(*active_config_snapshot_->config.dns)) {
                     return;
                 }
                 request_keenetic_dns_refresh();
@@ -5755,7 +5755,7 @@ void Daemon::reset_idle_stall_observer(
     bool schedule_if_eligible) noexcept {
     cancel_idle_stall_observer();
     if (!schedule_if_eligible || !routing_runtime_active() ||
-        !idle_stall_observer_requested(config_)) {
+        !idle_stall_observer_requested(active_config_snapshot_->config)) {
         return;
     }
     idle_stall_observer_enabled_.store(true, std::memory_order_release);
@@ -5769,23 +5769,23 @@ void Daemon::run_idle_stall_observer() noexcept {
         if (!routing_runtime_active() ||
             !idle_stall_observer_enabled_.load(
                 std::memory_order_acquire) ||
-            !idle_stall_observer_requested(config_)) {
+            !idle_stall_observer_requested(active_config_snapshot_->config)) {
             cancel_idle_stall_observer();
             return;
         }
         resume_exact_tcp_reset_cleanups();
 
         std::set<std::string> configured_list_names;
-        if (reconnect_unmarked_flows_on_routing_change_enabled(config_)) {
+        if (reconnect_unmarked_flows_on_routing_change_enabled(active_config_snapshot_->config)) {
             configured_list_names =
-                reconnect_owned_flows_on_routing_change_list_names(config_);
+                reconnect_owned_flows_on_routing_change_list_names(active_config_snapshot_->config);
         }
         const bool preventive_guard_available =
             preventive_whatsapp_media_guard_available(
                 firewall_->backend(),
                 opts_.udp_call_affinity_ipset_available);
         const auto preventive_guard_lists =
-            preventive_whatsapp_media_guard_list_names(config_);
+            preventive_whatsapp_media_guard_list_names(active_config_snapshot_->config);
         // The preventive actuator is deliberately iptables-only. On nft the
         // packaged list contributes no automatic observation scope, so it
         // remains inert instead of falling back to a broad delete.
@@ -5803,7 +5803,7 @@ void Daemon::run_idle_stall_observer() noexcept {
             return;
         }
         auto whatsapp_call_affinity_lists =
-            whatsapp_call_affinity_list_names(config_);
+            whatsapp_call_affinity_list_names(active_config_snapshot_->config);
         if (preventive_guard_available) {
             whatsapp_call_affinity_lists.insert(
                 preventive_guard_lists.begin(),
@@ -5959,7 +5959,7 @@ void Daemon::run_idle_stall_observer() noexcept {
         const auto coverage_generation =
             idle_stall_coverage_generation_.load(
                 std::memory_order_acquire);
-        const bool ipv6_enabled = resolve_ipv6_support(config_).enabled;
+        const bool ipv6_enabled = resolve_ipv6_support(active_config_snapshot_->config).enabled;
         if (runtime_generation == 0U || coverage_generation == 0U ||
             owned_mask == 0U) {
             idle_stall_detector_.reset();
@@ -7639,7 +7639,7 @@ void Daemon::execute_committed_stale_flow_reconnect(
                             local_interface_addresses,
                             owned_mask,
                             ConntrackForwardedFlowCleanupOptions{
-                                resolve_ipv6_support(config_).enabled,
+                                resolve_ipv6_support(active_config_snapshot_->config).enabled,
                                 std::chrono::seconds{2},
                                 /*max_flows=*/256U,
                                 /*max_destination_input_cidrs=*/1024U,
@@ -7753,373 +7753,6 @@ void Daemon::execute_committed_stale_flow_reconnect(
     }
 }
 
-void Daemon::apply_prepared_runtime_inputs(
-    PreparedRuntimeInputs prepared,
-    ConfigGenerationFence generation_fence) {
-    if (event_loop_active_.load(std::memory_order_acquire) && !is_event_loop_thread()) {
-        throw DaemonError("apply_prepared_runtime_inputs must run on the control/event-loop thread");
-    }
-
-    // Preparing an API save runs outside the control loop. An interface event
-    // may invalidate the NDMS catalog after preparation but before this queued
-    // apply starts. Re-resolve from the cache-only snapshot on the serialized
-    // control loop so an old prepared process_clients=false binding can never
-    // reintroduce a bypass after its identity lost authority.
-    if (config_has_stable_internal_vpn_server_policy(prepared.config)) {
-        prepared.internal_vpn_resolution =
-            resolve_internal_vpn_servers_for_runtime(
-                prepared.config,
-                false,
-                snapshot_internal_vpn_verified_includes_lkg());
-    }
-    if (config_requires_internal_vpn_service_inventory(prepared.config)) {
-        prepared.internal_vpn_service_resolution =
-            resolve_internal_vpn_services_for_runtime(
-                prepared.config,
-                false,
-                snapshot_internal_vpn_service_verified_includes_lkg());
-    }
-
-    const auto has_restricted_forwarded_scope = [](
-        const Config& config,
-        const std::vector<InternalVpnServer>& internal_vpn_servers,
-        const std::vector<InternalVpnRuntimeTarget>& internal_vpn_targets) {
-        const auto route_config = config.route.value_or(RouteConfig{});
-        const bool has_explicit_inbound_scope =
-            route_config.inbound_interfaces.has_value() &&
-            !route_config.inbound_interfaces->empty();
-        const bool has_native_vpn_bypass = std::any_of(
-            internal_vpn_servers.begin(), internal_vpn_servers.end(),
-            [](const InternalVpnServer& server) {
-                return !server.process_clients;
-            }) || std::any_of(
-            internal_vpn_targets.begin(), internal_vpn_targets.end(),
-            [](const InternalVpnRuntimeTarget& target) {
-                return !target.process_clients;
-            });
-        return has_explicit_inbound_scope || has_native_vpn_bypass;
-    };
-    const bool previous_runtime_active = routing_runtime_active();
-    const bool reconnect_unmarked_flows_on_routing_change =
-        reconnect_unmarked_flows_on_routing_change_enabled(prepared.config);
-    const auto previous_owned_reconnect_list_names =
-        reconnect_owned_flows_on_routing_change_list_names(config_);
-    const auto current_owned_reconnect_list_names =
-        reconnect_owned_flows_on_routing_change_list_names(prepared.config);
-    std::set<std::string> newly_enabled_owned_reconnect_list_names;
-    std::set_difference(
-        current_owned_reconnect_list_names.begin(),
-        current_owned_reconnect_list_names.end(),
-        previous_owned_reconnect_list_names.begin(),
-        previous_owned_reconnect_list_names.end(),
-        std::inserter(
-            newly_enabled_owned_reconnect_list_names,
-            newly_enabled_owned_reconnect_list_names.end()));
-    const bool previous_forwarded_scope_restricted =
-        has_restricted_forwarded_scope(
-            config_,
-            resolved_internal_vpn_servers_,
-            resolved_internal_vpn_service_targets_);
-    const AppliedRoutingSignature previous_routing_signature{
-        firewall_state_.get_fwmark_mask(),
-        firewall_state_.get_rules(),
-    };
-    const AppliedListContentState previous_list_content_state =
-        applied_list_content_state_;
-    const auto firewall_apply_policy = firewall_config_apply_policy(
-        firewall_->backend(), config_, prepared.config);
-    if (firewall_apply_policy.force_clear_dynamic_sets) {
-        Logger::instance().warn(
-            "iptables IPSet capacity changed; recreating keen-pbr sets and "
-            "clearing dnsmasq-learned entries");
-    }
-    // Repair and retire any flows from a previously observed SNAT loss before
-    // publishing `applying` or reassigning numerical marks. A transient
-    // firmware race here must reject the save while the old runtime remains
-    // active, not falsely publish a broken state.
-    if (generation_fence ==
-        ConfigGenerationFence::synchronous_legacy) {
-        complete_pending_snat_recovery_before_generation_change();
-    }
-    if (!drain_exact_tcp_reset_cleanups_before_generation_change()) {
-        resume_exact_tcp_reset_cleanups();
-        throw TransientFirewallError(
-            "exact TCP reset cleanup is incomplete before configuration "
-            "generation change");
-    }
-
-    transition_runtime_or_throw(RuntimeState::applying, "configuration apply started");
-    publish_runtime_state();
-
-    try {
-    cancel_idle_stall_observer();
-    cancel_owned_conntrack_cleanup_retry();
-    const auto applying_runtime_generation =
-        runtime_generation_.fetch_add(1, std::memory_order_acq_rel) + 1U;
-    resolver_after_firewall_gate_.reset();
-    urltest_after_firewall_gate_.reset();
-    runtime_firewall_owner_->cancel_retry();
-    cancel_resolver_reload_retry();
-    cancel_internal_vpn_catalog_refresh_retry();
-
-    if (lists_autoupdate_task_id_ >= 0) {
-        scheduler_->cancel(lists_autoupdate_task_id_);
-        lists_autoupdate_task_id_ = -1;
-    }
-    if (lists_runtime_mutation_retry_task_id_ >= 0) {
-        scheduler_->cancel(lists_runtime_mutation_retry_task_id_);
-        lists_runtime_mutation_retry_task_id_ = -1;
-    }
-    lists_runtime_mutation_retry_force_reconcile_ = false;
-    if (keenetic_dns_refresh_task_id_ >= 0) {
-        scheduler_->cancel(keenetic_dns_refresh_task_id_);
-        keenetic_dns_refresh_task_id_ = -1;
-    }
-    if (keenetic_dns_refresh_admission_retry_task_id_ >= 0) {
-        scheduler_->cancel(keenetic_dns_refresh_admission_retry_task_id_);
-        keenetic_dns_refresh_admission_retry_task_id_ = -1;
-    }
-    if (resolver_config_hash_actual_task_id_ >= 0) {
-        scheduler_->cancel(resolver_config_hash_actual_task_id_);
-        resolver_config_hash_actual_task_id_ = -1;
-    }
-    // The effective vector is moved into the active runtime below. Keep the
-    // small verified-resolution value intact until the complete staged apply
-    // succeeds, otherwise publishing the LKG after the move would
-    // accidentally clear it.
-    const auto internal_vpn_lkg_update =
-        prepared.internal_vpn_resolution;
-    const auto internal_vpn_service_lkg_update =
-        prepared.internal_vpn_service_resolution;
-    outbound_marks_ = std::move(prepared.outbound_marks);
-    resolved_internal_vpn_servers_ =
-        std::move(
-            prepared.internal_vpn_resolution.effective_servers);
-    resolved_internal_vpn_service_targets_ =
-        std::move(
-            prepared.internal_vpn_service_resolution.effective_targets);
-    active_keenetic_dns_ = std::move(prepared.keenetic_dns);
-    config_ = std::move(prepared.config);
-    firewall_state_.set_outbound_marks(outbound_marks_);
-    firewall_state_.set_fwmark_mask(fwmark_mask_value(config_.fwmark.value_or(FwmarkConfig{})));
-    normalize_urltest_selections();
-
-    teardown_dns_probe();
-
-    if (urltest_manager_) {
-        urltest_manager_->clear();
-    }
-    urltest_apply_incidents_.clear();
-    // Reconcile in place: install replacement routes/rules before removing
-    // obsolete owned state. Clearing first creates a visible traffic gap on
-    // every configuration save and makes failover briefly lose its path.
-    reconcile_static_routing(RouteReconcileMode::Strict);
-    register_urltest_outbounds();
-    const auto list_cache_snapshot =
-        capture_relevant_list_cache_generation(config_);
-    retry_hot_apply_firewall(
-        [this, &list_cache_snapshot, &firewall_apply_policy]() {
-            // apply_firewall rebuilds the complete pending transaction on
-            // every call. A retry therefore never reuses the one-shot backend
-            // state from the failed attempt.
-            apply_firewall(
-                firewall_apply_policy.mode,
-                list_cache_snapshot,
-                firewall_apply_policy.force_clear_dynamic_sets);
-        },
-        [](std::chrono::milliseconds delay) {
-            std::this_thread::sleep_for(delay);
-        },
-        [](std::size_t retry,
-           std::chrono::milliseconds delay,
-           const TransientFirewallError& error) {
-            Logger::instance().info(
-                "Hot configuration firewall apply deferred after a "
-                "concurrent firmware change: {}. Retry {} in {}ms.",
-                error.what(),
-                retry,
-                delay.count());
-        });
-    schedule_keenetic_dns_refresh();
-    schedule_lists_autoupdate();
-    commit_resolver_generation_snapshot(
-        make_resolver_generation_snapshot(list_cache_snapshot));
-    setup_dns_probe();
-    const auto resolver_snapshot =
-        resolver_sync_.snapshot(unix_timestamp_now_seconds());
-    if (resolver_reload_required(resolver_snapshot.expected_hash,
-                                 resolver_snapshot.actual_hash,
-                                 resolver_snapshot.live_status)) {
-        if (!run_system_resolver_hook_stream_prepared(
-                "reload",
-                /*rebuild_snapshot=*/false,
-                /*inactive_activation_authority=*/
-                    !previous_runtime_active)) {
-            throw DaemonError(
-                "system resolver reload did not complete its configuration stream");
-        }
-    } else {
-        Logger::instance().info(
-            "Skipping dnsmasq reload: resolver configuration is unchanged and healthy");
-    }
-    refresh_resolver_config_hash_actual_async();
-    // Publish the new LKG only after every routing/firewall/resolver phase has
-    // succeeded. A failed staged apply must leave the active generation's LKG
-    // intact for rollback preparation.
-    update_internal_vpn_verified_includes_lkg(
-        internal_vpn_lkg_update);
-    update_internal_vpn_service_verified_includes_lkg(
-        internal_vpn_service_lkg_update);
-    config_store_.replace_active(config_, outbound_marks_);
-#ifdef WITH_API
-    refresh_interface_traffic_config_targets(config_);
-#endif
-    runtime_state_store_.set_routing_runtime_active(true);
-    schedule_internal_vpn_catalog_refresh_if_needed(
-        internal_vpn_lkg_update.state,
-        internal_vpn_service_lkg_update.state);
-    transition_runtime_or_throw(RuntimeState::running, "configuration apply complete");
-#ifdef WITH_API
-    request_remote_access_reconcile_from_control("configuration apply");
-#endif
-    publish_runtime_state();
-    if (runtime_firewall_retry_.owned_snat_recovery_pending()) {
-        // The transactional save may have replaced the firewall while a
-        // firmware-NAT recovery retry was pending. Reconcile once against the
-        // newly committed generation so the latched missing-SNAT observation
-        // still reaches verified conntrack cleanup.
-        const auto disposition =
-            refresh_iproute_and_firewall_runtime(
-                0,
-                {},
-                /*schedule_catalog_refresh=*/false,
-                runtime_firewall_retry_
-                    .pending_owned_snat_recovery());
-        if (disposition ==
-            RuntimeFirewallImmediateDisposition::rejected) {
-            schedule_netfilter_runtime_refresh_noexcept(
-                NetfilterRefreshReason::nat_only,
-                "post-configuration pending SNAT handoff rejected");
-        }
-    }
-    // Conntrack retirement is irreversible. Keep it as the final, no-throw
-    // phase after the replacement has been persisted, published and fully
-    // reconciled. If an earlier phase throws, the caller can restore the
-    // previous generation without having already destroyed its live flows.
-    const AppliedRoutingSignature current_routing_signature{
-        firewall_state_.get_fwmark_mask(),
-        firewall_state_.get_rules(),
-    };
-    const bool current_forwarded_scope_restricted =
-        has_restricted_forwarded_scope(
-            config_,
-            resolved_internal_vpn_servers_,
-            resolved_internal_vpn_service_targets_);
-    ConntrackDestinationRetirementCoverage destination_coverage;
-    ConntrackDestinationRetirementCoverage owned_destination_coverage;
-    if (previous_runtime_active &&
-        reconnect_unmarked_flows_on_routing_change) {
-        std::set<std::string> changed_list_names;
-        for (const auto& [list_name, current_destinations] :
-             applied_list_content_state_.static_destinations) {
-            const auto previous =
-                previous_list_content_state.static_destinations.find(
-                    list_name);
-            if (previous ==
-                    previous_list_content_state.static_destinations.end() ||
-                previous->second != current_destinations) {
-                changed_list_names.insert(list_name);
-            }
-        }
-        for (const auto& list_name :
-             applied_list_content_state_.domain_entry_lists) {
-            if (previous_list_content_state.domain_entry_lists.count(
-                    list_name) == 0U) {
-                changed_list_names.insert(list_name);
-            }
-        }
-        for (const auto& list_name :
-             applied_list_content_state_.
-                 truncated_static_destination_lists) {
-            if (previous_list_content_state.
-                    truncated_static_destination_lists.count(list_name) ==
-                0U) {
-                changed_list_names.insert(list_name);
-            }
-        }
-        const std::vector<RuleState> no_previous_rules;
-        const auto& comparison_rules =
-            previous_forwarded_scope_restricted &&
-                !current_forwarded_scope_restricted
-            ? no_previous_rules
-            : previous_routing_signature.firewall_rules;
-        const auto destination_plan = plan_conntrack_destination_retirement(
-            comparison_rules,
-            current_routing_signature.firewall_rules,
-            changed_list_names);
-        destination_coverage =
-            collect_conntrack_destination_retirement_coverage(
-                destination_plan,
-                applied_list_content_state_);
-
-        const auto owned_reconnect_lists =
-            plan_conntrack_owned_destination_reconnect(
-                previous_routing_signature.firewall_rules,
-                current_routing_signature.firewall_rules,
-                current_owned_reconnect_list_names,
-                changed_list_names,
-                newly_enabled_owned_reconnect_list_names);
-        if (!owned_reconnect_lists.empty()) {
-            const auto owned_plan =
-                destination_retirement_plan_for_lists(
-                    owned_reconnect_lists);
-            // Include both sides of a list-content transition. Otherwise an
-            // address removed by a refresh could keep an already marked UDP
-            // flow pinned to the obsolete route until its natural timeout.
-            owned_destination_coverage =
-                merge_conntrack_destination_retirement_coverage(
-                    collect_conntrack_destination_retirement_coverage(
-                        owned_plan,
-                        applied_list_content_state_),
-                    collect_conntrack_destination_retirement_coverage(
-                        owned_plan,
-                        previous_list_content_state));
-        }
-    }
-    execute_committed_stale_flow_reconnect(
-        applying_runtime_generation,
-        previous_runtime_active,
-        !current_forwarded_scope_restricted,
-        current_routing_signature.owned_mask,
-        destination_coverage,
-        owned_destination_coverage);
-    reset_idle_stall_observer(/*schedule_if_eligible=*/true);
-    } catch (...) {
-        runtime_state_store_.set_routing_runtime_active(false);
-        cancel_idle_stall_observer();
-        cancel_meta_udp443_activation_cleanup();
-        try {
-            transition_runtime_or_throw(RuntimeState::broken, "configuration apply failed");
-            publish_runtime_state();
-        } catch (const std::exception& state_error) {
-            Logger::instance().error(
-                "Failed to publish broken runtime state after config apply: {}",
-                state_error.what());
-        }
-        throw;
-    }
-}
-
-void Daemon::apply_config(Config config, bool refresh_remote_lists) {
-    if (event_loop_active_.load(std::memory_order_acquire) && !is_event_loop_thread()) {
-        throw DaemonError("apply_config must run on the control/event-loop thread");
-    }
-
-    apply_prepared_runtime_inputs(prepare_runtime_inputs(
-        config,
-        refresh_remote_lists ? RemoteListPreparationMode::RefreshAll
-                             : RemoteListPreparationMode::None));
-}
 
 
 } // namespace keen_pbr3

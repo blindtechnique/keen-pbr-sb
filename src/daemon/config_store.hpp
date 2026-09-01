@@ -88,12 +88,27 @@ public:
     }
     bool config_is_draft() const;
 
+    // Builds one immutable config/mark generation before any publication
+    // lock is taken. The same handle can then be shared by runtime
+    // preparation and either prepared CAS path without rebuilding or copying
+    // the candidate into a second generation object.
+    static ActiveConfigSnapshotHandle prepare_active_snapshot(
+        Config config,
+        OutboundMarkMap outbound_marks);
     void replace_active(Config active_config, OutboundMarkMap outbound_marks);
+    static PreparedActiveConfigCommit prepare_active_commit(
+        ActiveConfigSnapshotHandle base,
+        ActiveConfigSnapshotHandle candidate,
+        std::string staged_serialized);
     static PreparedActiveConfigCommit prepare_active_commit(
         ActiveConfigSnapshotHandle base,
         Config candidate_config,
         OutboundMarkMap candidate_outbound_marks,
         std::string staged_serialized);
+    static PreparedActiveRuntimeReloadCommit
+    prepare_active_runtime_reload_commit(
+        ActiveConfigSnapshotHandle base,
+        ActiveConfigSnapshotHandle candidate);
     static PreparedActiveRuntimeReloadCommit
     prepare_active_runtime_reload_commit(
         ActiveConfigSnapshotHandle base,

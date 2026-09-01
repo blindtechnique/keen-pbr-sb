@@ -763,15 +763,6 @@ private:
                                       std::uint64_t probe_generation,
                                       std::map<std::string, URLTestResult> results,
                                       TraceId trace_id);
-    void apply_config(Config config, bool refresh_remote_lists = true);
-    enum class ConfigGenerationFence : std::uint8_t {
-        synchronous_legacy,
-        owner_verified,
-    };
-    void apply_prepared_runtime_inputs(
-        PreparedRuntimeInputs prepared,
-        ConfigGenerationFence generation_fence =
-            ConfigGenerationFence::synchronous_legacy);
     void execute_committed_stale_flow_reconnect(
         std::uint64_t committed_runtime_generation,
         bool previous_runtime_active,
@@ -949,8 +940,9 @@ private:
     // it was given. Handing it a single target would wipe the health of every
     // other outbound as a side effect of refreshing one row.
     //
-    // Called only on the control loop: target discovery reads config_ and
-    // outbound_marks_. Returns false when the tag is unknown, already in
+    // Called only on the control loop: target discovery reads the pinned
+    // active ConfigStore snapshot and realized outbound marks. Returns false
+    // when the tag is unknown, already in
     // flight, or the daemon could not take the work, so the caller can say so
     // instead of showing a spinner for a probe that never started.
     bool start_targeted_interface_probe(const std::string& tag) noexcept;
@@ -1045,17 +1037,6 @@ private:
         std::string label,
         bool require_runtime_running,
         bool require_runtime_stopped);
-    ConfigApplyResult apply_validated_config_via_control_task(
-        Config config,
-        std::string saved_config_json,
-        ConfigGenerationFence generation_fence =
-            ConfigGenerationFence::synchronous_legacy);
-    ConfigApplyResult apply_prepared_validated_config_on_control_loop(
-        PreparedRuntimeInputs prepared,
-        PreparedRuntimeInputs rollback_prepared,
-        bool refresh_remote_lists_after_apply,
-        std::string saved_config_json,
-        ConfigGenerationFence generation_fence);
     ConfigApplyResult apply_validated_config_via_control_task_with_lease_return(
         Config config,
         std::string saved_config_json,
@@ -1394,9 +1375,12 @@ private:
     ListRefreshTaskCoordinator list_refresh_tasks_;
     RuntimeStateMachine runtime_state_machine_;
 
-    // Event-loop-owned controller state
-    Config config_;
-    // Event-loop-owned DNS snapshot committed with config_. The shared DNS
+    // Event-loop reader pin for the exact immutable generation whose
+    // authority is owned and published by ConfigStore. This is never built or
+    // mutated independently; ConfigStore's no-throw CAS callback advances it
+    // to the same prepared handle that the store publishes immediately after.
+    ActiveConfigSnapshotHandle active_config_snapshot_;
+    // Event-loop-owned DNS snapshot committed with the active config. The shared DNS
     // cache is observational/prepare state only and may advance on a stale
     // worker; active runtime consumers must never read it directly.
     KeeneticDnsCacheView active_keenetic_dns_;

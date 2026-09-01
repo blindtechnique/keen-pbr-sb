@@ -47,7 +47,7 @@ void Daemon::schedule_tunnel_probe() {
     scheduler_->schedule_repeating(
         kTick,
         [this]() {
-            const auto resolved = resolve_tunnel_probe_setup(config_);
+            const auto resolved = resolve_tunnel_probe_setup(active_config_snapshot_->config);
             if (!resolved.setup.has_value()) return;
 
             const auto now = std::chrono::steady_clock::now();
@@ -65,7 +65,7 @@ void Daemon::schedule_tunnel_probe() {
 
             const bool posted = blocking_executor_.try_post(
                 "tunnel-probe",
-                [this, config = config_]() { run_tunnel_probe_pass(config); });
+                [this, config = active_config_snapshot_->config]() { run_tunnel_probe_pass(config); });
             if (!posted) tunnel_probe_running_.store(false);
         },
         "tunnel-probe");

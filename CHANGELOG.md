@@ -112,9 +112,19 @@
 - Единственный ответ на вопрос, активна ли маршрутизация, теперь принадлежит
   `RuntimeStateStore`; отдельное изменяемое поле `Daemon` удалено, а API/SSE
   строят проекцию из того же состояния.
-- `ConfigStore` публикует конфигурацию и соответствующие ей outbound marks как
-  одно неизменяемое поколение. Длительные читатели закрепляют shared snapshot и
-  не смешивают данные двух последовательных apply.
+- `ConfigStore` стал единственным владельцем неизменяемого активного поколения
+  `Config + outbound marks`: дублирующий `Daemon::config_` и legacy daemon
+  apply-путь удалены. Candidate остаётся приватным до точной публикации, а
+  длительные читатели удерживают тот же shared snapshot и не смешивают данные
+  двух последовательных apply.
+- Production config-save, SIGHUP и backup restore переносят один exact mutation
+  lease через candidate/rollback и публикуют ровно подготовленный handle только
+  через exact-base `ConfigStore` CAS. При no-op publication store и reader
+  получают один и тот же prepared handle; stale/base mismatch не переключает
+  reader pin.
+  Отдельный event-loop cursor `outbound_marks_` остаётся следующим
+  дедупликационным cleanup, а не вторым владельцем конфигурации. Новый admission
+  или пользовательский recovery-контур для этого не добавлялся.
 - Продолжено P0-1 отделение publication tail от `Daemon` без нового admission,
   recovery-журнала или пользовательских блокировок. Семь разрозненных
   публикаций rules/list/native-VPN/SNAT/Meta сведены в один небросающий core

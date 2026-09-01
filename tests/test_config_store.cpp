@@ -113,28 +113,7 @@ static_assert(
     CanCommitPreparedActiveRuntimeReload<NoexceptPublication>::value);
 static_assert(
     !CanCommitPreparedActiveRuntimeReload<ThrowingPublication>::value);
-static_assert(std::is_nothrow_swappable_v<Config>);
-
 } // namespace
-
-TEST_CASE("config generations use the no-throw ADL relocation swap") {
-    auto left = config_named("swap-left");
-    auto right = config_named("swap-right");
-    left.api = ApiConfig{};
-    left.api->listen = "127.0.0.1:12121";
-    right.api = ApiConfig{};
-    right.api->listen = "192.0.2.1:12121";
-    const auto left_before = staged_json(left);
-    const auto right_before = staged_json(right);
-
-    using std::swap;
-    swap(left, right);
-    CHECK(staged_json(left) == right_before);
-    CHECK(staged_json(right) == left_before);
-
-    swap(left, left);
-    CHECK(staged_json(left) == right_before);
-}
 
 TEST_CASE(
     "prepared active commit publishes and clears the matching staged draft") {
@@ -152,26 +131,63 @@ TEST_CASE(
     store.stage_config(candidate, serialized);
 
     const auto base = store.pin_active_snapshot();
+    const auto candidate_snapshot =
+        ConfigStore::prepare_active_snapshot(
+            candidate,
+            OutboundMarkMap{{"reused-interface", new_mark}});
     const auto prepared = ConfigStore::prepare_active_commit(
         base,
-        candidate,
-        OutboundMarkMap{{"reused-interface", new_mark}},
+        candidate_snapshot,
         serialized);
     bool published = false;
+    ActiveConfigSnapshotHandle controller_pin = base;
 
     CHECK(
         store.commit_prepared_active(
             prepared,
-            NoexceptPublication{&published}) ==
+            [&]() noexcept {
+                published = true;
+                controller_pin = prepared.candidate;
+            }) ==
         PreparedActiveConfigCommitResult::committed);
     CHECK(published);
     CHECK_FALSE(store.staged_cas_snapshot().has_value());
     const auto committed = store.pin_active_snapshot();
+    CHECK(prepared.candidate == candidate_snapshot);
     CHECK(committed == prepared.candidate);
+    CHECK(controller_pin == committed);
     CHECK(
         committed->config.outbounds->front().interface ==
         std::optional<std::string>{"nwg-new"});
     CHECK(committed->outbound_marks.at("reused-interface") == new_mark);
+}
+
+TEST_CASE(
+    "no-op active commit still publishes one exact immutable generation") {
+    const auto active = config_named("no-op-active");
+    const auto serialized = staged_json(active);
+    ConfigStore store(active);
+    store.stage_config(active, serialized);
+    const auto base = store.pin_active_snapshot();
+    const auto candidate = ConfigStore::prepare_active_snapshot(
+        base->config, base->outbound_marks);
+    const auto prepared = ConfigStore::prepare_active_commit(
+        base, candidate, serialized);
+    ActiveConfigSnapshotHandle controller_pin = base;
+
+    REQUIRE(
+        store.commit_prepared_active(
+            prepared,
+            [&]() noexcept { controller_pin = candidate; }) ==
+        PreparedActiveConfigCommitResult::committed);
+
+    const auto committed = store.pin_active_snapshot();
+    CHECK(committed == candidate);
+    CHECK(controller_pin == committed);
+    CHECK(base != committed);
+    CHECK(staged_json(committed->config) == serialized);
+    CHECK(committed->outbound_marks == base->outbound_marks);
+    CHECK_FALSE(store.staged_snapshot().has_value());
 }
 
 TEST_CASE(
@@ -295,23 +311,53 @@ TEST_CASE("prepared active commit rejects exact base drift before publication") 
     const auto serialized = staged_json(candidate);
     ConfigStore store(active);
     store.stage_config(candidate, serialized);
+    const auto candidate_snapshot =
+        ConfigStore::prepare_active_snapshot(candidate, OutboundMarkMap{});
     const auto prepared = ConfigStore::prepare_active_commit(
         store.pin_active_snapshot(),
-        candidate,
-        OutboundMarkMap{},
+        candidate_snapshot,
         serialized);
 
     const auto drifted = config_named("base-drifted");
     store.replace_active(drifted, OutboundMarkMap{});
     bool published = false;
+    ActiveConfigSnapshotHandle controller_pin = prepared.base;
+    CHECK(
+        store.commit_prepared_active(
+            prepared,
+            [&]() noexcept {
+                published = true;
+                controller_pin = prepared.candidate;
+            }) ==
+        PreparedActiveConfigCommitResult::base_mismatch);
+    CHECK_FALSE(published);
+    CHECK(store.staged_cas_snapshot().has_value());
+    CHECK(prepared.candidate == candidate_snapshot);
+    CHECK(controller_pin == prepared.base);
+    CHECK(store.pin_active_snapshot() != candidate_snapshot);
+    CHECK(store.active_config().daemon->cache_dir == "/tmp/base-drifted");
+}
+
+TEST_CASE(
+    "prepared active commit rejects a null candidate without publication") {
+    const auto active = config_named("null-candidate-active");
+    const auto candidate = config_named("null-candidate-draft");
+    const auto serialized = staged_json(candidate);
+    ConfigStore store(active);
+    store.stage_config(candidate, serialized);
+    const auto base = store.pin_active_snapshot();
+    const auto prepared = ConfigStore::prepare_active_commit(
+        base, ActiveConfigSnapshotHandle{}, serialized);
+    bool published = false;
+
     CHECK(
         store.commit_prepared_active(
             prepared,
             NoexceptPublication{&published}) ==
         PreparedActiveConfigCommitResult::base_mismatch);
     CHECK_FALSE(published);
-    CHECK(store.staged_cas_snapshot().has_value());
-    CHECK(store.active_config().daemon->cache_dir == "/tmp/base-drifted");
+    CHECK(store.pin_active_snapshot() == base);
+    CHECK(store.staged_snapshot().has_value());
 }
 
 TEST_CASE(
@@ -389,11 +435,14 @@ TEST_CASE(
     const auto staged_before = store.staged_cas_snapshot();
     REQUIRE(staged_before.has_value());
 
+    const auto candidate_snapshot =
+        ConfigStore::prepare_active_snapshot(
+            candidate,
+            OutboundMarkMap{{"reused-interface", new_mark}});
     const auto prepared =
         ConfigStore::prepare_active_runtime_reload_commit(
             base,
-            candidate,
-            OutboundMarkMap{{"reused-interface", new_mark}});
+            candidate_snapshot);
     bool published = false;
     REQUIRE(
         store.commit_prepared_active_runtime_reload(
@@ -402,6 +451,7 @@ TEST_CASE(
         PreparedActiveRuntimeReloadCommitResult::committed);
 
     CHECK(published);
+    CHECK(prepared.candidate == candidate_snapshot);
     CHECK(store.pin_active_snapshot() == prepared.candidate);
     CHECK(base != store.pin_active_snapshot());
     CHECK(
@@ -471,6 +521,24 @@ TEST_CASE(
     CHECK(
         store.active_config().daemon->cache_dir ==
         "/tmp/reload-invalid");
+}
+
+TEST_CASE(
+    "prepared runtime reload rejects a null candidate with an exact base") {
+    ConfigStore store(config_named("reload-null-candidate"));
+    const auto base = store.pin_active_snapshot();
+    const auto prepared =
+        ConfigStore::prepare_active_runtime_reload_commit(
+            base, ActiveConfigSnapshotHandle{});
+    bool published = false;
+
+    CHECK(
+        store.commit_prepared_active_runtime_reload(
+            prepared,
+            NoexceptPublication{&published}) ==
+        PreparedActiveRuntimeReloadCommitResult::base_mismatch);
+    CHECK_FALSE(published);
+    CHECK(store.pin_active_snapshot() == base);
 }
 
 TEST_CASE("config store visible snapshot identifies active and draft states") {
@@ -684,6 +752,11 @@ TEST_CASE(
     store.replace_active(
         left_config,
         OutboundMarkMap{{"reused-interface", left_mark}});
+    const auto left_generation = store.pin_active_snapshot();
+    const auto right_generation =
+        ConfigStore::prepare_active_snapshot(
+            right_config,
+            OutboundMarkMap{{"reused-interface", right_mark}});
 
     std::atomic<bool> stop{false};
     std::atomic<bool> incoherent{false};
@@ -738,14 +811,20 @@ TEST_CASE(
     const auto second_ready_status = second_ready.wait_for(wait_budget);
     start_signal.set_value();
     for (std::size_t index = 0; index < 2000U; ++index) {
-        if (index % 2U == 0U) {
-            store.replace_active(
-                right_config,
-                OutboundMarkMap{{"reused-interface", right_mark}});
-        } else {
-            store.replace_active(
-                left_config,
-                OutboundMarkMap{{"reused-interface", left_mark}});
+        const auto base = store.pin_active_snapshot();
+        const auto candidate = index % 2U == 0U
+            ? right_generation
+            : left_generation;
+        const auto prepared =
+            ConfigStore::prepare_active_runtime_reload_commit(
+                base, candidate);
+        const auto committed =
+            store.commit_prepared_active_runtime_reload(
+                prepared, []() noexcept {});
+        if (committed !=
+            PreparedActiveRuntimeReloadCommitResult::committed) {
+            incoherent.store(true, std::memory_order_release);
+            break;
         }
     }
     const auto observation_status =
