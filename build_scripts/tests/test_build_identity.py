@@ -300,6 +300,10 @@ class BuildIdentityTest(unittest.TestCase):
             (entware / "package/feeds/keenPbr/keen-pbr").mkdir(parents=True)
             (entware / "feeds.conf").write_text("", encoding="utf-8")
             write_executable(entware / "scripts/feeds", "#!/bin/sh\nexit 0\n")
+            write_executable(
+                entware / "staging_dir/host/bin/ninja",
+                "#!/bin/sh\nexit 0\n",
+            )
             keenetic_trace = root / "keenetic.trace"
             keenetic_env = pipeline_environment(fake_bin, keenetic_trace, commit)
             keenetic_env["KEEN_PBR_FRONTEND_DIST"] = str(keenetic_dist)
