@@ -70,8 +70,7 @@ struct ActiveCore final {
     AppliedListContentState list_content_state;
     std::map<std::string, ListSetUsage> list_usage;
     std::map<std::string, std::string> list_fingerprints;
-    std::vector<InternalVpnServer> internal_vpn_servers;
-    std::vector<InternalVpnRuntimeTarget> internal_vpn_service_targets;
+    InternalVpnResolutionCache internal_vpn_resolution_cache;
     std::vector<FirewallSourceEgressSnatSelector> snat_selectors;
     std::optional<std::uint32_t> meta_fwmark;
     std::uint32_t meta_owned_mask{0U};
@@ -82,8 +81,7 @@ struct ActiveCore final {
             list_content_state,
             list_usage,
             list_fingerprints,
-            internal_vpn_servers,
-            internal_vpn_service_targets,
+            internal_vpn_resolution_cache,
             snat_selectors,
             meta_fwmark,
             meta_owned_mask};
@@ -186,14 +184,14 @@ TEST_CASE("cold-boot checkpoint publishes and restores core LKG and resolver") {
     candidate_core.committed_meta_owned_mask = 0x0f0000U;
 
     ResolverFixture resolver;
-    RuntimeInternalVpnLkgStore lkg_store;
-    lkg_store.update_servers(resolution_named("base-vpn"));
+    core.internal_vpn_resolution_cache.update_verified_servers(
+        resolution_named("base-vpn"));
     InternalVpnServiceRuntimeResolution empty_services;
     empty_services.state = InternalVpnRuntimeResolutionState::verified;
     auto prepared = prepare_runtime_cold_boot_publication_checkpoint(
         resolver.target(),
         generation_named(2U, "candidate"),
-        lkg_store,
+        core.internal_vpn_resolution_cache,
         resolution_named("candidate-vpn"),
         empty_services);
     RuntimeFirewallPublicationTailProgress progress;
@@ -205,7 +203,6 @@ TEST_CASE("cold-boot checkpoint publishes and restores core LKG and resolver") {
             core.target(),
             candidate_core,
             resolver.target(),
-            lkg_store,
             progress},
         prepared,
         [&]() { runtime_active = true; },
@@ -220,8 +217,15 @@ TEST_CASE("cold-boot checkpoint publishes and restores core LKG and resolver") {
     CHECK(progress.start_finalized());
     CHECK(core.meta_fwmark == 0x40000U);
     CHECK(candidate_core.committed_meta_fwmark == 0x10000U);
-    REQUIRE(lkg_store.snapshot_servers().size() == 1U);
-    CHECK(lkg_store.snapshot_servers().front().interface == "candidate-vpn");
+    REQUIRE(
+        core.internal_vpn_resolution_cache
+                .snapshot_verified_servers()
+                .size() == 1U);
+    CHECK(
+        core.internal_vpn_resolution_cache
+                .snapshot_verified_servers()
+                .front()
+                .interface == "candidate-vpn");
     REQUIRE(resolver.generation);
     CHECK(resolver.generation->generation == 2U);
     CHECK(resolver.retry_attempt == 0U);
@@ -244,14 +248,14 @@ TEST_CASE("cold-boot checkpoint rolls all published tuples back on state failure
     ResolverFixture resolver;
     const auto base_generation = resolver.generation;
     const auto base_sync = resolver.sync.checkpoint();
-    RuntimeInternalVpnLkgStore lkg_store;
-    lkg_store.update_servers(resolution_named("base-vpn"));
+    core.internal_vpn_resolution_cache.update_verified_servers(
+        resolution_named("base-vpn"));
     InternalVpnServiceRuntimeResolution empty_services;
     empty_services.state = InternalVpnRuntimeResolutionState::verified;
     auto prepared = prepare_runtime_cold_boot_publication_checkpoint(
         resolver.target(),
         generation_named(2U, "candidate"),
-        lkg_store,
+        core.internal_vpn_resolution_cache,
         resolution_named("candidate-vpn"),
         empty_services);
     RuntimeFirewallPublicationTailProgress progress;
@@ -263,7 +267,6 @@ TEST_CASE("cold-boot checkpoint rolls all published tuples back on state failure
             core.target(),
             candidate_core,
             resolver.target(),
-            lkg_store,
             progress},
         prepared,
         [&]() { runtime_active = true; },
@@ -283,8 +286,15 @@ TEST_CASE("cold-boot checkpoint rolls all published tuples back on state failure
     CHECK_FALSE(progress.start_finalized());
     CHECK(core.meta_fwmark == 0x10000U);
     CHECK(candidate_core.committed_meta_fwmark == 0x40000U);
-    REQUIRE(lkg_store.snapshot_servers().size() == 1U);
-    CHECK(lkg_store.snapshot_servers().front().interface == "base-vpn");
+    REQUIRE(
+        core.internal_vpn_resolution_cache
+                .snapshot_verified_servers()
+                .size() == 1U);
+    CHECK(
+        core.internal_vpn_resolution_cache
+                .snapshot_verified_servers()
+                .front()
+                .interface == "base-vpn");
     CHECK(resolver.generation == base_generation);
     CHECK(resolver.retry_attempt == 7U);
     CHECK(resolver.apply_started_ts.load(std::memory_order_acquire) == 73);

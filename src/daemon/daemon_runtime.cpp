@@ -301,54 +301,6 @@ bool urltest_contains_child(const Outbound& urltest,
     return false;
 }
 
-bool same_internal_vpn_runtime_servers(
-    const std::vector<InternalVpnServer>& lhs,
-    const std::vector<InternalVpnServer>& rhs) {
-    return lhs.size() == rhs.size() &&
-           std::equal(
-               lhs.begin(),
-               lhs.end(),
-               rhs.begin(),
-               [](const InternalVpnServer& left,
-                  const InternalVpnServer& right) {
-                   return left.interface == right.interface &&
-                          left.ndms_id == right.ndms_id &&
-                          left.process_clients == right.process_clients;
-               });
-}
-
-bool same_internal_vpn_runtime_targets(
-    const std::vector<InternalVpnRuntimeTarget>& lhs,
-    const std::vector<InternalVpnRuntimeTarget>& rhs) {
-    return lhs.size() == rhs.size() &&
-           std::equal(
-               lhs.begin(),
-               lhs.end(),
-               rhs.begin(),
-               [](const auto& left, const auto& right) {
-                   return left.stable_id == right.stable_id &&
-                          left.match_kind == right.match_kind &&
-                          left.process_clients == right.process_clients &&
-                          left.bound_interface_id ==
-                              right.bound_interface_id &&
-                          left.interface == right.interface &&
-                          left.verified_ingress_interfaces ==
-                              right.verified_ingress_interfaces &&
-                          left.verified_bridge_ingress_interfaces ==
-                              right.verified_bridge_ingress_interfaces &&
-                          left.dns_redirect_bypass_ingress_v4 ==
-                              right.dns_redirect_bypass_ingress_v4 &&
-                          left.dns_redirect_bypass_ingress_v6 ==
-                              right.dns_redirect_bypass_ingress_v6 &&
-                          left.dns_redirect_local_destinations_v4 ==
-                              right.dns_redirect_local_destinations_v4 &&
-                          left.dns_redirect_local_destinations_v6 ==
-                              right.dns_redirect_local_destinations_v6 &&
-                          left.source_cidrs_v4 == right.source_cidrs_v4 &&
-                          left.source_cidrs_v6 == right.source_cidrs_v6;
-               });
-}
-
 } // namespace
 
 bool Daemon::fastnat_is_disabled_or_unavailable() {
@@ -1570,9 +1522,13 @@ void Daemon::apply_firewall(
         shared_ndms_catalog_cache().peek();
     const auto service_snapshot =
         shared_ndms_vpn_server_service_cache().peek();
+    const auto& active_internal_vpn_servers =
+        internal_vpn_resolution_cache_.active_servers();
+    const auto& active_internal_vpn_service_targets =
+        internal_vpn_resolution_cache_.active_service_targets();
     const auto effective_interface_servers =
         prefer_authoritative_internal_vpn_service_inventory(
-            resolved_internal_vpn_servers_,
+            active_internal_vpn_servers,
             interface_snapshot.catalog,
             service_snapshot.catalog,
             service_snapshot.status ==
@@ -1582,8 +1538,8 @@ void Daemon::apply_firewall(
             effective_interface_servers);
     runtime_targets.insert(
         runtime_targets.end(),
-        resolved_internal_vpn_service_targets_.begin(),
-        resolved_internal_vpn_service_targets_.end());
+        active_internal_vpn_service_targets.begin(),
+        active_internal_vpn_service_targets.end());
     const auto native_vpn_direct_egress_snat_selectors =
         select_native_vpn_direct_egress_snat_selectors(
             runtime_targets);
@@ -3868,14 +3824,10 @@ PreparedRuntimeInputs Daemon::prepare_runtime_inputs(const Config& config,
         /*allow_refresh=*/!preparing_on_control_loop);
     prepared.internal_vpn_resolution =
         resolve_internal_vpn_servers_for_runtime(
-            config,
-            !preparing_on_control_loop,
-            snapshot_internal_vpn_verified_includes_lkg());
+            config, !preparing_on_control_loop);
     prepared.internal_vpn_service_resolution =
         resolve_internal_vpn_services_for_runtime(
-            config,
-            !preparing_on_control_loop,
-            snapshot_internal_vpn_service_verified_includes_lkg());
+            config, !preparing_on_control_loop);
 
     if (list_mode != RemoteListPreparationMode::None) {
         RemoteListRefreshControl control;
@@ -3953,302 +3905,72 @@ KeeneticDnsCacheView Daemon::prepare_keenetic_dns_view(
 InternalVpnRuntimeResolution
 Daemon::resolve_internal_vpn_servers_for_runtime(
     const Config& config,
-    bool allow_catalog_refresh,
-    const std::vector<InternalVpnServer>& previous_effective) {
+    bool allow_catalog_refresh) {
     const auto configured = config.route.has_value()
         ? config.route->internal_vpn_servers.value_or(
               std::vector<InternalVpnServer>{})
         : std::vector<InternalVpnServer>{};
     if (configured.empty()) {
-        return {
-            {},
-            InternalVpnRuntimeResolutionState::verified,
-        };
+        return internal_vpn_resolution_cache_.resolve_servers(
+            config, NdmsCatalogSnapshot{}, {});
     }
     if (!internal_vpn_server_policies_require_ndms_catalog(configured)) {
         // Legacy exact-interface policies only need the live netlink
         // inventory. Do not add an RCI HTTP timeout to cross-platform startup.
         return resolve_internal_vpn_servers_for_runtime(
-            config,
-            NdmsCatalogSnapshot{},
-            previous_effective);
+            config, NdmsCatalogSnapshot{});
     }
 
     auto& cache = shared_ndms_catalog_cache();
     const auto snapshot =
         allow_catalog_refresh ? cache.force_refresh() : cache.peek();
-    return resolve_internal_vpn_servers_for_runtime(
-        config,
-        snapshot,
-        previous_effective);
+    return resolve_internal_vpn_servers_for_runtime(config, snapshot);
 }
 
 InternalVpnRuntimeResolution
 Daemon::resolve_internal_vpn_servers_for_runtime(
     const Config& config,
-    const NdmsCatalogSnapshot& snapshot,
-    const std::vector<InternalVpnServer>& previous_effective) {
-    const auto configured = config.route.has_value()
-        ? config.route->internal_vpn_servers.value_or(
-              std::vector<InternalVpnServer>{})
-        : std::vector<InternalVpnServer>{};
-    if (configured.empty()) {
-        return {
-            {},
-            InternalVpnRuntimeResolutionState::verified,
-        };
-    }
-
-    std::vector<std::string> runtime_interface_names;
-    for (const auto& interface : netlink_.dump_interfaces()) {
-        runtime_interface_names.push_back(interface.name);
-    }
-
-    auto resolution = resolve_internal_vpn_server_policies(
-        configured,
-        snapshot.catalog,
-        snapshot.status == NdmsCatalogCacheStatus::fresh,
-        runtime_interface_names);
-
-    if (!resolution.complete()) {
-        std::string detail;
-        for (const auto& issue : resolution.issues) {
-            if (!detail.empty()) detail += "; ";
-            detail += describe_internal_vpn_server_resolution_issue(issue);
-        }
-        auto generation = select_internal_vpn_server_generation(
-            configured, resolution, previous_effective);
-        if (!generation.usable()) {
-            throw DaemonError(
-                "Native VPN server policy has no verified runtime generation: " +
-                detail);
-        }
-        const bool authoritative_negative = std::any_of(
-            resolution.issues.begin(),
-            resolution.issues.end(),
-            [](const InternalVpnServerResolutionIssue& issue) {
-                return issue.error !=
-                       InternalVpnServerResolutionError::
-                           catalog_not_authoritative;
-            });
-        if (authoritative_negative) {
-            Logger::instance().warn(
-                "Native VPN server inventory is incomplete; continuing with "
-                "a conservative degraded policy (unverified bypasses are "
-                "disabled; an unresolved included server may be temporarily "
-                "outside keen-pbr processing): {}",
-                detail);
-        } else if (
-            generation.source ==
-            InternalVpnServerGenerationSource::retained_previous) {
-            Logger::instance().info(
-                "Native VPN server inventory is temporarily inconclusive; "
-                "retaining previously verified include-only bindings while "
-                "dropping every unverified bypass: {}",
-                detail);
-        } else {
-            Logger::instance().info(
-                "Native VPN server inventory is temporarily unavailable; "
-                "continuing with a conservative live-name policy while an "
-                "authoritative refresh is pending (unverified bypasses remain "
-                "disabled): {}",
-                detail);
-        }
-        return {
-            std::move(generation.effective_servers),
-            authoritative_negative
-                ? InternalVpnRuntimeResolutionState::
-                      authoritative_negative
-                : generation.source ==
-                          InternalVpnServerGenerationSource::
-                              retained_previous
-                    ? InternalVpnRuntimeResolutionState::
-                          retained_verified_includes
-                    : InternalVpnRuntimeResolutionState::degraded,
-            std::move(resolution.verified_includes_for_lkg),
-            std::move(resolution.retain_verified_include_ndms_ids),
-        };
-    }
-    return {
-        std::move(resolution.effective_servers),
-        InternalVpnRuntimeResolutionState::verified,
-        std::move(resolution.verified_includes_for_lkg),
-        std::move(resolution.retain_verified_include_ndms_ids),
-    };
-}
-
-std::vector<InternalVpnServer>
-Daemon::snapshot_internal_vpn_verified_includes_lkg() const {
-    return internal_vpn_lkg_store_.snapshot_servers();
-}
-
-void Daemon::update_internal_vpn_verified_includes_lkg(
-    const InternalVpnRuntimeResolution& resolution) noexcept {
+    const NdmsCatalogSnapshot& snapshot) {
     try {
-        internal_vpn_lkg_store_.update_servers(resolution);
-    } catch (const std::exception& error) {
-        try {
-            Logger::instance().warn(
-                "Could not publish native VPN verified-binding cache: {}. "
-                "The committed runtime generation remains active.",
-                error.what());
-        } catch (...) {
-        }
-    } catch (...) {
-        try {
-            Logger::instance().warn(
-                "Could not publish native VPN verified-binding cache. "
-                "The committed runtime generation remains active.");
-        } catch (...) {
-        }
+        return internal_vpn_resolution_cache_.resolve_servers(
+            config, snapshot, netlink_.dump_interfaces());
+    } catch (const InternalVpnResolutionError& error) {
+        throw DaemonError(error.what());
     }
 }
 
 InternalVpnRuntimeResolution
 Daemon::prepare_internal_vpn_server_resolution_from_cache() {
     return resolve_internal_vpn_servers_for_runtime(
-        active_config_snapshot_->config,
-        false,
-        snapshot_internal_vpn_verified_includes_lkg());
+        active_config_snapshot_->config, false);
 }
 
 InternalVpnServiceRuntimeResolution
 Daemon::resolve_internal_vpn_services_for_runtime(
     const Config& config,
-    bool allow_catalog_refresh,
-    const std::vector<InternalVpnRuntimeTarget>&
-        previous_verified_includes) {
+    bool allow_catalog_refresh) {
     if (!config_requires_internal_vpn_service_inventory(config)) {
-        return {
-            {},
-            InternalVpnRuntimeResolutionState::verified,
-        };
+        return internal_vpn_resolution_cache_.resolve_services(
+            config, NdmsVpnServerServiceSnapshot{}, {});
     }
     auto& cache = shared_ndms_vpn_server_service_cache();
     const auto snapshot =
         allow_catalog_refresh ? cache.force_refresh() : cache.peek();
-    return resolve_internal_vpn_services_for_runtime(
-        config, snapshot, previous_verified_includes);
+    return resolve_internal_vpn_services_for_runtime(config, snapshot);
 }
 
 InternalVpnServiceRuntimeResolution
 Daemon::resolve_internal_vpn_services_for_runtime(
     const Config& config,
-    const NdmsVpnServerServiceSnapshot& snapshot,
-    const std::vector<InternalVpnRuntimeTarget>&
-        previous_verified_includes) {
-    if (!config_requires_internal_vpn_service_inventory(config)) {
-        return {
-            {},
-            InternalVpnRuntimeResolutionState::verified,
-        };
-    }
-    const auto route = config.route.value_or(RouteConfig{});
-    const auto configured = route.internal_vpn_services.value_or(
-        std::vector<InternalVpnService>{});
-    const bool default_process_clients =
-        internal_vpn_service_default_process_clients(config);
-    const auto live_interfaces = netlink_.dump_interfaces();
-    auto resolution = resolve_internal_vpn_service_policies(
-        configured,
-        snapshot.catalog,
-        snapshot.status == NdmsCatalogCacheStatus::fresh,
-        default_process_clients,
-        internal_vpn_inbound_observation(
-            config, live_interfaces));
-    auto generation = select_internal_vpn_service_generation(
-        configured,
-        resolution,
-        previous_verified_includes,
-        default_process_clients);
-    refresh_internal_vpn_service_ingress_interfaces(
-        generation.effective_targets, live_interfaces);
-
-    InternalVpnRuntimeResolutionState state =
-        InternalVpnRuntimeResolutionState::verified;
-    if (!resolution.complete()) {
-        std::string detail;
-        for (const auto& issue : resolution.issues) {
-            if (!detail.empty()) detail += "; ";
-            detail += describe_internal_vpn_service_resolution_issue(issue);
-        }
-        const bool authoritative_negative = std::any_of(
-            resolution.issues.begin(),
-            resolution.issues.end(),
-            [](const auto& issue) {
-                return issue.error !=
-                       InternalVpnServiceResolutionError::
-                           catalog_not_authoritative;
-            });
-        if (authoritative_negative) {
-            state =
-                InternalVpnRuntimeResolutionState::authoritative_negative;
-            Logger::instance().warn(
-                "Native VPN service inventory is incomplete; every "
-                "unverified source-pool bypass is disabled: {}",
-                detail);
-        } else if (
-            generation.source ==
-            InternalVpnServiceGenerationSource::
-                retained_previous_includes) {
-            state =
-                InternalVpnRuntimeResolutionState::
-                    retained_verified_includes;
-            Logger::instance().info(
-                "Native VPN service inventory is temporarily unavailable; "
-                "retaining only previously verified include pools: {}",
-                detail);
-        } else {
-            state = InternalVpnRuntimeResolutionState::degraded;
-            Logger::instance().info(
-                "Native VPN service inventory is temporarily unavailable; "
-                "no unverified source-pool bypass is active while an "
-                "authoritative refresh is pending: {}",
-                detail);
-        }
-    }
-
-    return {
-        std::move(generation.effective_targets),
-        state,
-        std::move(resolution.verified_includes_for_lkg),
-        std::move(resolution.retain_verified_include_service_ids),
-    };
-}
-
-std::vector<InternalVpnRuntimeTarget>
-Daemon::snapshot_internal_vpn_service_verified_includes_lkg() const {
-    return internal_vpn_lkg_store_.snapshot_service_targets();
-}
-
-void Daemon::update_internal_vpn_service_verified_includes_lkg(
-    const InternalVpnServiceRuntimeResolution& resolution) noexcept {
-    try {
-        internal_vpn_lkg_store_.update_service_targets(resolution);
-    } catch (const std::exception& error) {
-        try {
-            Logger::instance().warn(
-                "Could not publish native VPN service verified-pool cache: "
-                "{}. The committed runtime generation remains active.",
-                error.what());
-        } catch (...) {
-        }
-    } catch (...) {
-        try {
-            Logger::instance().warn(
-                "Could not publish native VPN service verified-pool cache. "
-                "The committed runtime generation remains active.");
-        } catch (...) {
-        }
-    }
+    const NdmsVpnServerServiceSnapshot& snapshot) {
+    return internal_vpn_resolution_cache_.resolve_services(
+        config, snapshot, netlink_.dump_interfaces());
 }
 
 InternalVpnServiceRuntimeResolution
 Daemon::prepare_internal_vpn_service_resolution_from_cache() {
     return resolve_internal_vpn_services_for_runtime(
-        active_config_snapshot_->config,
-        false,
-        snapshot_internal_vpn_service_verified_includes_lkg());
+        active_config_snapshot_->config, false);
 }
 
 void Daemon::schedule_internal_vpn_catalog_refresh() {
@@ -4355,28 +4077,21 @@ void Daemon::schedule_internal_vpn_catalog_refresh() {
                     auto resolution =
                         resolve_internal_vpn_servers_for_runtime(
                             active_config_snapshot_->config,
-                            interface_snapshot,
-                            snapshot_internal_vpn_verified_includes_lkg());
+                            interface_snapshot);
                     auto service_resolution =
                         resolve_internal_vpn_services_for_runtime(
                             active_config_snapshot_->config,
-                            service_snapshot,
-                            snapshot_internal_vpn_service_verified_includes_lkg());
-                    const bool interface_changed =
-                        !same_internal_vpn_runtime_servers(
-                            resolved_internal_vpn_servers_,
-                            resolution.effective_servers);
-                    const bool service_changed =
-                        !same_internal_vpn_runtime_targets(
-                            resolved_internal_vpn_service_targets_,
-                            service_resolution.effective_targets);
-                    if (!interface_changed && !service_changed) {
+                            service_snapshot);
+                    if (internal_vpn_resolution_cache_.active_matches(
+                            resolution.effective_servers,
+                            service_resolution.effective_targets)) {
                         // No kernel replacement is needed, so publishing the
                         // newly verified LKG cannot diverge from forwarding.
-                        update_internal_vpn_verified_includes_lkg(
+                        internal_vpn_resolution_cache_.update_verified_servers(
                             resolution);
-                        update_internal_vpn_service_verified_includes_lkg(
-                            service_resolution);
+                        internal_vpn_resolution_cache_
+                            .update_verified_service_targets(
+                                service_resolution);
                         publish_runtime_state();
                         return;
                     }

@@ -146,6 +146,19 @@
 - Добавлен быстрый `keen-pbr-ipc-control-service-tests`: production acceptor,
   peer credentials, request handoff, bounded rejection, wake-failure ownership
   и stop/join/unlink проверяются без линковки монолитного backend suite.
+- Следующий ownership-срез P0-1 выделяет `InternalVpnResolutionCache` как
+  единственного владельца опубликованной пары native-VPN server/service и её
+  verified include-only LKG. Чистая интерпретация уже полученных NDMS/netlink
+  снимков перенесена из `Daemon`, а RCI I/O, invalidation, single-flight gate,
+  retry, scheduler и runtime generation сохранены в прежнем control loop.
+  Публикация и rollback обменивают одну точную пару через существующий firewall
+  fence; cold boot по-прежнему готовит fallible LKG до fence. Новый admission,
+  recovery или пользовательский защитный сценарий не добавлялся.
+- Узкая цель native-VPN переименована в
+  `keen-pbr-internal-vpn-resolution-cache-tests` и теперь отдельно проверяет
+  владельца active/LKG, legacy и empty-конфигурации, stale include-only
+  retention, authoritative removal, IKE ingress/DNS bypass и точный
+  publication/rollback без запуска монолитного backend suite.
 - Продолжено P0-1 отделение publication tail от `Daemon` без нового admission,
   recovery-журнала или пользовательских блокировок. Семь разрозненных
   публикаций rules/list/native-VPN/SNAT/Meta сведены в один небросающий core

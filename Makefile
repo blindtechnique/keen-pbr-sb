@@ -146,7 +146,7 @@ NARROW_TEST_TARGETS := \
 	keen-pbr-runtime-firewall-lifecycle-completion-tests \
 	keen-pbr-runtime-firewall-owner-tests \
 	keen-pbr-runtime-firewall-publication-tests \
-	keen-pbr-runtime-internal-vpn-lkg-tests \
+	keen-pbr-internal-vpn-resolution-cache-tests \
 	keen-pbr-runtime-resolver-generation-tests \
 	keen-pbr-ipc-control-service-tests \
 	keen-pbr-urltest-manager-tests \

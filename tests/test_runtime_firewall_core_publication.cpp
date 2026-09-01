@@ -78,8 +78,7 @@ struct ActiveCore final {
     AppliedListContentState list_content_state;
     std::map<std::string, ListSetUsage> list_usage;
     std::map<std::string, std::string> list_fingerprints;
-    std::vector<InternalVpnServer> internal_vpn_servers;
-    std::vector<InternalVpnRuntimeTarget> internal_vpn_service_targets;
+    InternalVpnResolutionCache internal_vpn_resolution_cache;
     std::vector<FirewallSourceEgressSnatSelector>
         native_vpn_direct_egress_snat_selectors;
     std::optional<std::uint32_t> committed_meta_fwmark;
@@ -91,8 +90,7 @@ struct ActiveCore final {
             list_content_state,
             list_usage,
             list_fingerprints,
-            internal_vpn_servers,
-            internal_vpn_service_targets,
+            internal_vpn_resolution_cache,
             native_vpn_direct_egress_snat_selectors,
             committed_meta_fwmark,
             committed_meta_owned_mask};
@@ -106,10 +104,9 @@ void load_active(
     active.list_content_state = std::move(publication.list_content_state);
     active.list_usage = std::move(publication.list_usage);
     active.list_fingerprints = std::move(publication.list_fingerprints);
-    active.internal_vpn_servers =
-        std::move(publication.internal_vpn_servers);
-    active.internal_vpn_service_targets =
-        std::move(publication.internal_vpn_service_targets);
+    active.internal_vpn_resolution_cache.exchange_active(
+        publication.internal_vpn_servers,
+        publication.internal_vpn_service_targets);
     active.native_vpn_direct_egress_snat_selectors =
         std::move(publication.native_vpn_direct_egress_snat_selectors);
     active.committed_meta_fwmark = publication.committed_meta_fwmark;
@@ -139,13 +136,23 @@ void check_active_named(
     CHECK(
         active.list_fingerprints.at(name + "-list") ==
         name + "-fingerprint");
-    REQUIRE(active.internal_vpn_servers.size() == 1U);
+    REQUIRE(
+        active.internal_vpn_resolution_cache.active_servers().size() == 1U);
     CHECK(
-        active.internal_vpn_servers.front().interface ==
+        active.internal_vpn_resolution_cache
+                .active_servers()
+                .front()
+                .interface ==
         name + "-vpn");
-    REQUIRE(active.internal_vpn_service_targets.size() == 1U);
+    REQUIRE(
+        active.internal_vpn_resolution_cache
+                .active_service_targets()
+                .size() == 1U);
     CHECK(
-        active.internal_vpn_service_targets.front().stable_id ==
+        active.internal_vpn_resolution_cache
+                .active_service_targets()
+                .front()
+                .stable_id ==
         name + "-service");
     REQUIRE(
         active.native_vpn_direct_egress_snat_selectors.size() == 1U);

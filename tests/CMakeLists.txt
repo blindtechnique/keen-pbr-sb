@@ -19,6 +19,7 @@ add_executable(keen-pbr-tests
   test_runtime_firewall_terminal_tail_plan.cpp
   test_runtime_resolver_publication.cpp
   test_runtime_cold_boot_publication.cpp
+  test_internal_vpn_resolution_cache.cpp
   test_runtime_internal_vpn_lkg_store.cpp
   test_runtime_firewall_worker_attempt.cpp
   test_runtime_route_health_plan.cpp
@@ -258,6 +259,7 @@ add_executable(keen-pbr-tests
   ../src/daemon/runtime_firewall_terminal_tail_plan.cpp
   ../src/daemon/runtime_resolver_publication.cpp
   ../src/daemon/runtime_cold_boot_publication.cpp
+  ../src/daemon/internal_vpn_resolution_cache.cpp
   ../src/daemon/runtime_internal_vpn_lkg_store.cpp
   ../src/daemon/runtime_firewall_operation_owner.cpp
   ../src/daemon/runtime_firewall_worker_attempt.cpp
@@ -1179,17 +1181,21 @@ add_test(
   COMMAND keen-pbr-runtime-firewall-publication-tests
 )
 
-# Keep native-VPN verified include-only LKG ownership independently buildable.
-# This store has no Daemon, backend, admission or recovery dependency.
-add_executable(keen-pbr-runtime-internal-vpn-lkg-tests
+# Keep native-VPN active/LKG ownership and pure snapshot interpretation
+# independently buildable. This owner has no Daemon, backend, NDMS transport,
+# admission or recovery dependency.
+add_executable(keen-pbr-internal-vpn-resolution-cache-tests
   test_main.cpp
+  test_internal_vpn_resolution_cache.cpp
   test_runtime_internal_vpn_lkg_store.cpp
   test_runtime_cold_boot_publication.cpp
+  ../src/daemon/internal_vpn_resolution_cache.cpp
   ../src/daemon/runtime_cold_boot_publication.cpp
   ../src/daemon/runtime_firewall_core_publication.cpp
   ../src/daemon/runtime_resolver_publication.cpp
   ../src/daemon/resolver_sync_state_machine.cpp
   ../src/daemon/runtime_internal_vpn_lkg_store.cpp
+  ../src/keenetic/internal_vpn_ingress_resolver.cpp
   ../src/keenetic/internal_vpn_server_resolver.cpp
   ../src/keenetic/internal_vpn_service_resolver.cpp
   ../src/keenetic/ndms_interface_inventory.cpp
@@ -1200,38 +1206,38 @@ add_executable(keen-pbr-runtime-internal-vpn-lkg-tests
   ../src/routing/firewall_state.cpp
 )
 set_target_properties(
-  keen-pbr-runtime-internal-vpn-lkg-tests PROPERTIES
+  keen-pbr-internal-vpn-resolution-cache-tests PROPERTIES
   CXX_STANDARD 17
   CXX_STANDARD_REQUIRED YES
   CXX_EXTENSIONS NO
 )
 target_include_directories(
-  keen-pbr-runtime-internal-vpn-lkg-tests PRIVATE
+  keen-pbr-internal-vpn-resolution-cache-tests PRIVATE
   ${KEEN_PBR_GENERATED_INCLUDE_DIR}
   ${CMAKE_SOURCE_DIR}/include
   ${CMAKE_SOURCE_DIR}/src
   ${CMAKE_SOURCE_DIR}/third_party/doctest
 )
 target_link_libraries(
-  keen-pbr-runtime-internal-vpn-lkg-tests PRIVATE
+  keen-pbr-internal-vpn-resolution-cache-tests PRIVATE
   nlohmann_json::nlohmann_json
   fmt::fmt-header-only
   Threads::Threads
 )
 target_compile_options(
-  keen-pbr-runtime-internal-vpn-lkg-tests PRIVATE
+  keen-pbr-internal-vpn-resolution-cache-tests PRIVATE
   -ffunction-sections
   -fdata-sections
 )
 target_link_options(
-  keen-pbr-runtime-internal-vpn-lkg-tests PRIVATE
+  keen-pbr-internal-vpn-resolution-cache-tests PRIVATE
   -Wl,--gc-sections
 )
 keen_pbr_apply_project_options(
-  keen-pbr-runtime-internal-vpn-lkg-tests)
+  keen-pbr-internal-vpn-resolution-cache-tests)
 add_test(
-  NAME keen-pbr-runtime-internal-vpn-lkg-tests
-  COMMAND keen-pbr-runtime-internal-vpn-lkg-tests
+  NAME keen-pbr-internal-vpn-resolution-cache-tests
+  COMMAND keen-pbr-internal-vpn-resolution-cache-tests
 )
 
 # Keep the lifecycle completion bridge independently buildable. It is the

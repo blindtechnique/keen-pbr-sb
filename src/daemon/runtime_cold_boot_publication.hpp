@@ -2,7 +2,6 @@
 
 #include "runtime_firewall_core_publication.hpp"
 #include "runtime_firewall_publication_tail_progress.hpp"
-#include "runtime_internal_vpn_lkg_store.hpp"
 #include "runtime_resolver_publication.hpp"
 
 #include <cstdint>
@@ -28,7 +27,6 @@ struct RuntimeColdBootPublicationTarget final {
     RuntimeFirewallCorePublicationTarget core;
     RuntimeFirewallCorePublication& core_publication;
     RuntimeResolverPublicationTarget resolver;
-    RuntimeInternalVpnLkgStore& internal_vpn_lkg_store;
     RuntimeFirewallPublicationTailProgress& progress;
 };
 
@@ -40,7 +38,7 @@ RuntimeColdBootPublicationCheckpoint
 prepare_runtime_cold_boot_publication_checkpoint(
     const RuntimeResolverPublicationTarget& resolver,
     std::shared_ptr<const ResolverGenerationSnapshot> candidate_generation,
-    RuntimeInternalVpnLkgStore& internal_vpn_lkg_store,
+    InternalVpnResolutionCache& internal_vpn_resolution_cache,
     const InternalVpnRuntimeResolution& internal_vpn_resolution,
     const InternalVpnServiceRuntimeResolution&
         internal_vpn_service_resolution);
@@ -156,12 +154,14 @@ bool publish_runtime_cold_boot_checkpoint(
             target.progress.mark_core_restored();
         },
         [&target, &checkpoint]() {
-            target.internal_vpn_lkg_store.exchange(
+            target.core.internal_vpn_resolution_cache
+                .exchange_verified_publication(
                 checkpoint.internal_vpn_lkg);
             target.progress.mark_internal_vpn_lkg_published();
         },
         [&target, &checkpoint]() {
-            target.internal_vpn_lkg_store.exchange(
+            target.core.internal_vpn_resolution_cache
+                .exchange_verified_publication(
                 checkpoint.internal_vpn_lkg);
             target.progress.mark_internal_vpn_lkg_restored();
         },

@@ -23,8 +23,8 @@
 #include "../dns/dns_txt_client.hpp"
 #include "config_store.hpp"
 #include "config_reload_coordinator.hpp"
+#include "internal_vpn_resolution_cache.hpp"
 #include "internal_vpn_runtime_resolution.hpp"
-#include "runtime_internal_vpn_lkg_store.hpp"
 #include "keenetic_dns_refresh_coordinator.hpp"
 #include "../health/interface_probe.hpp"
 #include "../health/tunnel_probe_task.hpp"
@@ -419,50 +419,6 @@ inline bool interface_event_affects_managed_runtime(
         config, {}, {}, interface_name);
 }
 
-inline bool config_has_stable_internal_vpn_server_policy(
-    const Config& config) {
-    const auto configured_internal_servers = config.route.has_value()
-        ? config.route->internal_vpn_servers.value_or(
-              std::vector<InternalVpnServer>{})
-        : std::vector<InternalVpnServer>{};
-    return std::any_of(
-        configured_internal_servers.begin(),
-        configured_internal_servers.end(),
-        [](const InternalVpnServer& server) {
-            return server.ndms_id.has_value();
-        });
-}
-
-inline bool config_requires_internal_vpn_service_inventory(
-    const Config& config) {
-    if (!config.route.has_value()) {
-        return false;
-    }
-    const auto services = config.route->internal_vpn_services.value_or(
-        std::vector<InternalVpnService>{});
-    if (!services.empty()) {
-        return true;
-    }
-    // With an explicit ingress allowlist, unconfigured native service pools
-    // inherit bypass. They must be observed to keep a shared Home/Bridge
-    // ingress from accidentally opting those clients into keen-pbr.
-    return config.route->inbound_interfaces.has_value() &&
-           !config.route->inbound_interfaces->empty();
-}
-
-inline bool config_has_native_vpn_catalog_policy(
-    const Config& config) {
-    return config_has_stable_internal_vpn_server_policy(config) ||
-           config_requires_internal_vpn_service_inventory(config);
-}
-
-inline bool internal_vpn_resolution_requires_catalog_refresh(
-    const Config& config,
-    InternalVpnRuntimeResolutionState state) {
-    return config_has_stable_internal_vpn_server_policy(config) &&
-           state != InternalVpnRuntimeResolutionState::verified;
-}
-
 // Helper to get tag from any outbound variant
 std::string get_outbound_tag(const Outbound& ob);
 
@@ -832,34 +788,20 @@ private:
         bool force_refresh = false) const;
     InternalVpnRuntimeResolution resolve_internal_vpn_servers_for_runtime(
         const Config& config,
-        bool allow_catalog_refresh,
-        const std::vector<InternalVpnServer>& previous_effective = {});
+        bool allow_catalog_refresh);
     InternalVpnRuntimeResolution resolve_internal_vpn_servers_for_runtime(
         const Config& config,
-        const NdmsCatalogSnapshot& snapshot,
-        const std::vector<InternalVpnServer>& previous_effective = {});
-    std::vector<InternalVpnServer>
-    snapshot_internal_vpn_verified_includes_lkg() const;
-    void update_internal_vpn_verified_includes_lkg(
-        const InternalVpnRuntimeResolution& resolution) noexcept;
+        const NdmsCatalogSnapshot& snapshot);
     InternalVpnRuntimeResolution
     prepare_internal_vpn_server_resolution_from_cache();
     InternalVpnServiceRuntimeResolution
     resolve_internal_vpn_services_for_runtime(
         const Config& config,
-        bool allow_catalog_refresh,
-        const std::vector<InternalVpnRuntimeTarget>&
-            previous_verified_includes = {});
+        bool allow_catalog_refresh);
     InternalVpnServiceRuntimeResolution
     resolve_internal_vpn_services_for_runtime(
         const Config& config,
-        const NdmsVpnServerServiceSnapshot& snapshot,
-        const std::vector<InternalVpnRuntimeTarget>&
-            previous_verified_includes = {});
-    std::vector<InternalVpnRuntimeTarget>
-    snapshot_internal_vpn_service_verified_includes_lkg() const;
-    void update_internal_vpn_service_verified_includes_lkg(
-        const InternalVpnServiceRuntimeResolution& resolution) noexcept;
+        const NdmsVpnServerServiceSnapshot& snapshot);
     InternalVpnServiceRuntimeResolution
     prepare_internal_vpn_service_resolution_from_cache();
     void schedule_internal_vpn_catalog_refresh();
@@ -1407,15 +1349,7 @@ private:
     // Latency for every interface outbound, including native tunnels the
     // firmware owns and standalone outbounds urltest never looks at.
     InterfaceProbe interface_probe_;
-    // Runtime-only mapping from stable NDMS identities to current kernel
-    // ingress names. Persisted configuration remains unchanged.
-    std::vector<InternalVpnServer> resolved_internal_vpn_servers_;
-    // API preparation runs outside the control loop. It may reuse only a
-    // thread-safe, previously verified, include-only stable binding. Exclusion
-    // bypasses and degraded/legacy observations are never stored here.
-    RuntimeInternalVpnLkgStore internal_vpn_lkg_store_;
-    std::vector<InternalVpnRuntimeTarget>
-        resolved_internal_vpn_service_targets_;
+    InternalVpnResolutionCache internal_vpn_resolution_cache_;
     // Last source-scoped native VPN SNAT contract committed to the firewall.
     // A contract change retires only flows from the changed source pools so
     // old un-NATed conntrack entries cannot mask a successful repair.

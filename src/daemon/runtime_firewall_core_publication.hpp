@@ -5,6 +5,7 @@
 #include "../keenetic/internal_vpn_runtime_target.hpp"
 #include "../lists/list_set_usage.hpp"
 #include "../routing/firewall_state.hpp"
+#include "internal_vpn_resolution_cache.hpp"
 
 #include <cstdint>
 #include <map>
@@ -47,8 +48,7 @@ struct RuntimeFirewallCorePublicationTarget final {
     AppliedListContentState& list_content_state;
     std::map<std::string, ListSetUsage>& list_usage;
     std::map<std::string, std::string>& list_fingerprints;
-    std::vector<InternalVpnServer>& internal_vpn_servers;
-    std::vector<InternalVpnRuntimeTarget>& internal_vpn_service_targets;
+    InternalVpnResolutionCache& internal_vpn_resolution_cache;
     std::vector<FirewallSourceEgressSnatSelector>&
         native_vpn_direct_egress_snat_selectors;
     std::optional<std::uint32_t>& committed_meta_fwmark;
@@ -56,7 +56,8 @@ struct RuntimeFirewallCorePublicationTarget final {
 };
 
 // Allocation-free controller checkpoint. The caller must already hold the
-// existing control-loop/generation publication authority.
+// existing control-loop/generation publication authority. Native-VPN state is
+// exchanged as one exact pair through its sole owner.
 void publish_runtime_firewall_core(
     RuntimeFirewallCorePublicationTarget target,
     RuntimeFirewallCorePublication& publication,

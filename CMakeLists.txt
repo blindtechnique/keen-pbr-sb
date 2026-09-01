@@ -574,6 +574,7 @@ set(SOURCES
   src/daemon/runtime_firewall_meta_tail_plan.cpp
   src/daemon/runtime_firewall_resolver_tail_plan.cpp
   src/daemon/runtime_firewall_terminal_tail_plan.cpp
+  src/daemon/internal_vpn_resolution_cache.cpp
   src/daemon/runtime_internal_vpn_lkg_store.cpp
   src/daemon/runtime_firewall_operation_owner.cpp
   src/daemon/runtime_firewall_worker_attempt.cpp

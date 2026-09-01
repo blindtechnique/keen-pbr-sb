@@ -9,7 +9,7 @@ RuntimeColdBootPublicationCheckpoint
 prepare_runtime_cold_boot_publication_checkpoint(
     const RuntimeResolverPublicationTarget& resolver,
     std::shared_ptr<const ResolverGenerationSnapshot> candidate_generation,
-    RuntimeInternalVpnLkgStore& internal_vpn_lkg_store,
+    InternalVpnResolutionCache& internal_vpn_resolution_cache,
     const InternalVpnRuntimeResolution& internal_vpn_resolution,
     const InternalVpnServiceRuntimeResolution&
         internal_vpn_service_resolution) {
@@ -37,7 +37,7 @@ prepare_runtime_cold_boot_publication_checkpoint(
     checkpoint.candidate_resolver_sync = candidate_sync.checkpoint();
 
     checkpoint.internal_vpn_lkg =
-        internal_vpn_lkg_store.prepare_publication(
+        internal_vpn_resolution_cache.prepare_verified_publication(
             internal_vpn_resolution,
             internal_vpn_service_resolution);
     return checkpoint;

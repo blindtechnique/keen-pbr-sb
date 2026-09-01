@@ -775,8 +775,7 @@ void Daemon::publish_runtime_firewall_core_checkpoint(
             applied_list_content_state_,
             applied_list_usage_,
             applied_list_fingerprints_,
-            resolved_internal_vpn_servers_,
-            resolved_internal_vpn_service_targets_,
+            internal_vpn_resolution_cache_,
             applied_native_vpn_direct_egress_snat_selectors_,
             committed_meta_udp443_fwmark_,
             committed_meta_udp443_owned_mask_},
@@ -6805,17 +6804,13 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
                 candidate.config)) {
             candidate.internal_vpn_resolution =
                 resolve_internal_vpn_servers_for_runtime(
-                    candidate.config,
-                    false,
-                    snapshot_internal_vpn_verified_includes_lkg());
+                    candidate.config, false);
         }
         if (config_requires_internal_vpn_service_inventory(
                 candidate.config)) {
             candidate.internal_vpn_service_resolution =
                 resolve_internal_vpn_services_for_runtime(
-                    candidate.config,
-                    false,
-                    snapshot_internal_vpn_service_verified_includes_lkg());
+                    candidate.config, false);
         }
 
         if (!bootstrap_from_stopped) {
@@ -6825,9 +6820,9 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
             rollback.keenetic_dns =
                 committed_resolver_generation->keenetic_dns;
             rollback.internal_vpn_resolution.effective_servers =
-                resolved_internal_vpn_servers_;
+                internal_vpn_resolution_cache_.active_servers();
             rollback.internal_vpn_service_resolution.effective_targets =
-                resolved_internal_vpn_service_targets_;
+                internal_vpn_resolution_cache_.active_service_targets();
         }
 
         transaction =
@@ -7429,8 +7424,8 @@ bool Daemon::publish_prepared_runtime_firewall_config_candidate(
             firewall_state_.get_rules(),
             applied_list_content_state_,
             applied_native_vpn_direct_egress_snat_selectors_,
-            resolved_internal_vpn_servers_,
-            resolved_internal_vpn_service_targets_,
+            internal_vpn_resolution_cache_.active_servers(),
+            internal_vpn_resolution_cache_.active_service_targets(),
             transaction->candidate.config,
             publication);
         transaction->candidate_forwarded_scope_exact =
@@ -7621,9 +7616,9 @@ bool Daemon::publish_prepared_runtime_firewall_config_candidate(
         transaction->candidate_normal_retirement,
         transaction->candidate_aggressive_retirement);
     try {
-        update_internal_vpn_verified_includes_lkg(
+        internal_vpn_resolution_cache_.update_verified_servers(
             transaction->candidate.internal_vpn_resolution);
-        update_internal_vpn_service_verified_includes_lkg(
+        internal_vpn_resolution_cache_.update_verified_service_targets(
             transaction->candidate.internal_vpn_service_resolution);
     } catch (...) {
     }
@@ -8563,15 +8558,16 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
             // A selection change reuses the exact published config/catalog
             // generation. Only its private selection map differs.
             state.internal_vpn_resolution.effective_servers =
-                resolved_internal_vpn_servers_;
+                internal_vpn_resolution_cache_.active_servers();
             state.internal_vpn_service_resolution.effective_targets =
-                resolved_internal_vpn_service_targets_;
+                internal_vpn_resolution_cache_.active_service_targets();
             state.lifecycle_trusted_dns_interfaces =
                 resolver_generation_snapshot_
                 ? resolver_generation_snapshot_->trusted_dns_interfaces
                 : build_dnsmasq_trusted_interfaces(
-                      resolved_internal_vpn_servers_,
-                      resolved_internal_vpn_service_targets_);
+                      internal_vpn_resolution_cache_.active_servers(),
+                      internal_vpn_resolution_cache_
+                          .active_service_targets());
             state.resolver_refresh_required = false;
             state.lifecycle_resolver_verified = true;
             state.list_cache_snapshot =
@@ -8580,16 +8576,17 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
             const auto& transaction =
                 *state.keenetic_dns_refresh_transaction;
             state.internal_vpn_resolution.effective_servers =
-                resolved_internal_vpn_servers_;
+                internal_vpn_resolution_cache_.active_servers();
             state.internal_vpn_service_resolution.effective_targets =
-                resolved_internal_vpn_service_targets_;
+                internal_vpn_resolution_cache_.active_service_targets();
             state.lifecycle_trusted_dns_interfaces =
                 transaction.published_resolver_generation
                 ? transaction.published_resolver_generation
                       ->trusted_dns_interfaces
                 : build_dnsmasq_trusted_interfaces(
-                      resolved_internal_vpn_servers_,
-                      resolved_internal_vpn_service_targets_);
+                      internal_vpn_resolution_cache_.active_servers(),
+                      internal_vpn_resolution_cache_
+                          .active_service_targets());
             state.list_cache_snapshot =
                 transaction.list_cache_snapshot;
             state.private_resolver_generation =
@@ -8607,15 +8604,16 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
             // Fence exactly the published generation. A cache refresh here
             // would silently turn pre-apply into candidate generation.
             state.internal_vpn_resolution.effective_servers =
-                resolved_internal_vpn_servers_;
+                internal_vpn_resolution_cache_.active_servers();
             state.internal_vpn_service_resolution.effective_targets =
-                resolved_internal_vpn_service_targets_;
+                internal_vpn_resolution_cache_.active_service_targets();
             state.lifecycle_trusted_dns_interfaces =
                 resolver_generation_snapshot_
                 ? resolver_generation_snapshot_->trusted_dns_interfaces
                 : build_dnsmasq_trusted_interfaces(
-                      resolved_internal_vpn_servers_,
-                      resolved_internal_vpn_service_targets_);
+                      internal_vpn_resolution_cache_.active_servers(),
+                      internal_vpn_resolution_cache_
+                          .active_service_targets());
             state.resolver_refresh_required = false;
             state.lifecycle_resolver_verified = true;
             state.list_cache_snapshot =
@@ -8654,8 +8652,9 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                 resolver_generation_snapshot_
                 ? resolver_generation_snapshot_->trusted_dns_interfaces
                 : build_dnsmasq_trusted_interfaces(
-                      resolved_internal_vpn_servers_,
-                      resolved_internal_vpn_service_targets_);
+                      internal_vpn_resolution_cache_.active_servers(),
+                      internal_vpn_resolution_cache_
+                          .active_service_targets());
             state.resolver_refresh_required =
                 runtime_firewall_lifecycle_is_foreground(
                     context->lifecycle_kind) ||
@@ -13203,9 +13202,9 @@ void Daemon::drain_runtime_firewall_terminal(
 
     if (!shutdown && state.publication_tail.core_published() &&
         !state.publication_tail.internal_vpn_lkg_published()) {
-        update_internal_vpn_verified_includes_lkg(
+        internal_vpn_resolution_cache_.update_verified_servers(
             state.internal_vpn_resolution);
-        update_internal_vpn_service_verified_includes_lkg(
+        internal_vpn_resolution_cache_.update_verified_service_targets(
             state.internal_vpn_service_resolution);
         state.publication_tail.mark_internal_vpn_lkg_published();
     }
@@ -13610,7 +13609,7 @@ void Daemon::drain_runtime_firewall_terminal(
                                         resolver_config_hash_actual_retry_attempt_,
                                         apply_started_ts_},
                                     state.private_resolver_generation,
-                                    internal_vpn_lkg_store_,
+                                    internal_vpn_resolution_cache_,
                                     state.internal_vpn_resolution,
                                     state.internal_vpn_service_resolution));
                         } catch (...) {
@@ -13653,8 +13652,7 @@ void Daemon::drain_runtime_firewall_terminal(
                                                     applied_list_content_state_,
                                                     applied_list_usage_,
                                                     applied_list_fingerprints_,
-                                                    resolved_internal_vpn_servers_,
-                                                    resolved_internal_vpn_service_targets_,
+                                                    internal_vpn_resolution_cache_,
                                                     applied_native_vpn_direct_egress_snat_selectors_,
                                                     committed_meta_udp443_fwmark_,
                                                     committed_meta_udp443_owned_mask_},
@@ -13664,7 +13662,6 @@ void Daemon::drain_runtime_firewall_terminal(
                                                     resolver_sync_,
                                                     resolver_config_hash_actual_retry_attempt_,
                                                     apply_started_ts_},
-                                                internal_vpn_lkg_store_,
                                                 state.publication_tail},
                                             *prepared_publication,
                                             [this]() {
@@ -13740,9 +13737,11 @@ void Daemon::drain_runtime_firewall_terminal(
                         !state.publication_tail
                              .internal_vpn_lkg_published()) {
                         try {
-                            update_internal_vpn_verified_includes_lkg(
+                            internal_vpn_resolution_cache_
+                                .update_verified_servers(
                                 state.internal_vpn_resolution);
-                            update_internal_vpn_service_verified_includes_lkg(
+                            internal_vpn_resolution_cache_
+                                .update_verified_service_targets(
                                 state.internal_vpn_service_resolution);
                             state.publication_tail
                                 .mark_internal_vpn_lkg_published();
@@ -14091,8 +14090,8 @@ void Daemon::handle_interface_event(const InterfaceMonitor::Event& event) {
     const bool reconcile_immediately =
         interface_event_affects_managed_runtime(
             active_config_snapshot_->config,
-            resolved_internal_vpn_servers_,
-            resolved_internal_vpn_service_targets_,
+            internal_vpn_resolution_cache_.active_servers(),
+            internal_vpn_resolution_cache_.active_service_targets(),
             event.interface_name);
     const bool refresh_stable_catalog =
         config_has_stable_internal_vpn_server_policy(active_config_snapshot_->config);
@@ -14138,8 +14137,8 @@ void Daemon::handle_interface_event(const InterfaceMonitor::Event& event) {
               std::vector<InternalVpnServer>{})
         : std::vector<InternalVpnServer>{};
     const bool is_internal_vpn_event = std::any_of(
-        resolved_internal_vpn_servers_.begin(),
-        resolved_internal_vpn_servers_.end(),
+        internal_vpn_resolution_cache_.active_servers().begin(),
+        internal_vpn_resolution_cache_.active_servers().end(),
         [&event](const InternalVpnServer& server) {
             return server.interface == event.interface_name;
         }) ||
@@ -14536,16 +14535,12 @@ void Daemon::run() {
         /*force_refresh=*/true);
     auto internal_vpn_resolution =
         resolve_internal_vpn_servers_for_runtime(
-            active_config_snapshot_->config,
-            true,
-            snapshot_internal_vpn_verified_includes_lkg());
+            active_config_snapshot_->config, true);
     const auto internal_vpn_resolution_state =
         internal_vpn_resolution.state;
     auto internal_vpn_service_resolution =
         resolve_internal_vpn_services_for_runtime(
-            active_config_snapshot_->config,
-            true,
-            snapshot_internal_vpn_service_verified_includes_lkg());
+            active_config_snapshot_->config, true);
     const auto internal_vpn_service_resolution_state =
         internal_vpn_service_resolution.state;
     log.info("Startup lists: checking local cache; only missing remote lists will be downloaded.");

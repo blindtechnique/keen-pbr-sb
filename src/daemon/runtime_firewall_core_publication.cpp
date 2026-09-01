@@ -25,8 +25,8 @@ void publish_runtime_firewall_core(
         publication.list_content_state.truncated_static_destination_lists);
     target.list_usage.swap(publication.list_usage);
     target.list_fingerprints.swap(publication.list_fingerprints);
-    target.internal_vpn_servers.swap(publication.internal_vpn_servers);
-    target.internal_vpn_service_targets.swap(
+    target.internal_vpn_resolution_cache.exchange_active(
+        publication.internal_vpn_servers,
         publication.internal_vpn_service_targets);
     target.native_vpn_direct_egress_snat_selectors.swap(
         publication.native_vpn_direct_egress_snat_selectors);

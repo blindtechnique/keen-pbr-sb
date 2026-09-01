@@ -93,8 +93,8 @@ ResolverGenerationSnapshot Daemon::make_resolver_generation_snapshot(
     auto trusted_dns_interfaces =
         select_dnsmasq_trusted_interfaces(
             std::move(trusted_dns_interfaces_override),
-            resolved_internal_vpn_servers_,
-            resolved_internal_vpn_service_targets_);
+            internal_vpn_resolution_cache_.active_servers(),
+            internal_vpn_resolution_cache_.active_service_targets());
     RuntimeResolverGenerationInput input;
     input.config = active_config_snapshot_->config;
     input.keenetic_dns = keenetic_dns_override
