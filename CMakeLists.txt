@@ -590,6 +590,7 @@ set(SOURCES
   src/daemon/system_resolver_hook.cpp
   src/daemon/scheduler.cpp
   src/runtime/runtime_state_machine.cpp
+  src/ipc/ipc_control_service.cpp
   src/ipc/control_protocol.cpp
   src/ipc/control_client.cpp
   src/ipc/resolver_fallback.cpp

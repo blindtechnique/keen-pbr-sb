@@ -119,6 +119,7 @@ add_executable(keen-pbr-tests
   test_exit_address_check.cpp
   test_list_service.cpp
   test_cache_manager_durability.cpp
+  test_ipc_control_service.cpp
   test_control_protocol.cpp
   test_status_command.cpp
   test_resolver_fallback.cpp
@@ -315,6 +316,7 @@ add_executable(keen-pbr-tests
   ../src/daemon/system_resolver_hook.cpp
   ../src/dns/dns_probe_server.cpp
   ../src/cache/cache_manager.cpp
+  ../src/ipc/ipc_control_service.cpp
   ../src/ipc/control_protocol.cpp
   ../src/ipc/control_client.cpp
   ../src/ipc/resolver_fallback.cpp
@@ -1029,6 +1031,57 @@ target_link_options(test_config_store PRIVATE
 )
 keen_pbr_apply_project_options(test_config_store)
 add_test(NAME test_config_store COMMAND test_config_store)
+
+# Keep the Unix control ingress owner independently runnable. Business
+# dispatch remains in Daemon; this target proves framing, peer transfer,
+# bounded rejection and stop/join/unlink without linking the backend.
+add_executable(keen-pbr-ipc-control-service-tests
+  test_main.cpp
+  test_control_protocol.cpp
+  test_ipc_control_service.cpp
+  ../src/ipc/ipc_control_service.cpp
+  ../src/ipc/control_protocol.cpp
+  ../src/ipc/control_client.cpp
+  ../src/log/logger.cpp
+  ../src/log/trace.cpp
+  ../src/util/traced_mutex.cpp
+)
+set_target_properties(keen-pbr-ipc-control-service-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_include_directories(keen-pbr-ipc-control-service-tests PRIVATE
+  ${KEEN_PBR_GENERATED_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+)
+target_compile_definitions(keen-pbr-ipc-control-service-tests PRIVATE
+  KEEN_PBR3_TESTING
+)
+target_link_libraries(keen-pbr-ipc-control-service-tests PRIVATE
+  nlohmann_json::nlohmann_json
+  fmt::fmt-header-only
+  Threads::Threads
+)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+   CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+  target_link_libraries(
+    keen-pbr-ipc-control-service-tests PRIVATE stdc++fs)
+endif()
+target_compile_options(keen-pbr-ipc-control-service-tests PRIVATE
+  -ffunction-sections
+  -fdata-sections
+)
+target_link_options(keen-pbr-ipc-control-service-tests PRIVATE
+  -Wl,--gc-sections
+)
+keen_pbr_apply_project_options(keen-pbr-ipc-control-service-tests)
+add_test(
+  NAME keen-pbr-ipc-control-service-tests
+  COMMAND keen-pbr-ipc-control-service-tests
+)
 
 # Keep UrltestManager's worker/generation/lifetime contract independently
 # runnable. A daemon-header edit must not force the monolithic backend suite

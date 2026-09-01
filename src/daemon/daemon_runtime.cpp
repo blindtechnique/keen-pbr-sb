@@ -391,7 +391,7 @@ bool Daemon::run_system_resolver_hook(std::string_view action,
             "system-resolver-hook-command", std::move(execute_hook));
         while (hook_result.wait_for(std::chrono::milliseconds{10}) !=
                std::future_status::ready) {
-            handle_ipc_control_socket();
+            handle_ipc_control_requests();
         }
         exit_code = hook_result.get();
     } else {
@@ -484,7 +484,7 @@ bool Daemon::wait_for_resolver_stream_epoch(
         }
         if (is_event_loop_thread() ||
             !event_loop_active_.load(std::memory_order_acquire)) {
-            handle_ipc_control_socket();
+            handle_ipc_control_requests();
         }
         std::this_thread::sleep_for(std::chrono::milliseconds{10});
     }

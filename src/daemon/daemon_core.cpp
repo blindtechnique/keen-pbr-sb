@@ -15,14 +15,12 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
-#include <grp.h>
 #include <iterator>
 #include <limits>
 #include <map>
 #include <new>
 #include <nlohmann/json.hpp>
 #include <ostream>
-#include <poll.h>
 #include <signal.h>
 #include <set>
 #include <sstream>
@@ -34,7 +32,6 @@
 #include <sys/socket.h>
 #include <sys/signalfd.h>
 #include <sys/stat.h>
-#include <sys/un.h>
 #include <thread>
 #include <type_traits>
 #include <unistd.h>
@@ -106,11 +103,6 @@ constexpr auto REMOTE_ACCESS_RECOVERY_WATCHDOG_INTERVAL =
 #endif
 constexpr auto INTERFACE_MONITOR_RECONNECT_RETRY_DELAY = std::chrono::seconds{5};
 constexpr std::size_t kResolverStreamChunkBytes = 16U * 1024U;
-constexpr std::size_t kMaxPendingControlClients = 64U;
-constexpr std::size_t kMaxControlRequestBytes = 4U * 1024U;
-constexpr auto kControlIngressTimeout = std::chrono::seconds{1};
-constexpr auto kControlResponseSendTimeout =
-    std::chrono::seconds{1};
 constexpr std::array<std::chrono::seconds, 6>
     RUNTIME_FIREWALL_RETRY_DELAYS{
         std::chrono::seconds{1},
@@ -137,27 +129,6 @@ void send_all(int fd, const char* data, std::size_t size) {
         }
         written += static_cast<std::size_t>(count);
     }
-}
-
-void send_control_response_and_close(
-    int fd,
-    const nlohmann::json& response) noexcept {
-    try {
-        const auto frame = ipc::encode_message(response);
-        ipc::send_all_bounded_nonblocking(
-            fd,
-            frame.data(),
-            frame.size(),
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                kControlResponseSendTimeout));
-    } catch (const std::exception& error) {
-        try {
-            Logger::instance().warn(
-                "control response failed: {}", error.what());
-        } catch (...) {
-        }
-    }
-    ::close(fd);
 }
 
 class UniqueSocketFd {
@@ -252,26 +223,6 @@ std::string resolver_runtime_reason(
     default:
         return "daemon_error";
     }
-}
-
-bool peer_has_group(const ucred& peer, gid_t group_id) {
-    if (peer.gid == group_id) return true;
-
-    std::ifstream status(
-        "/proc/" + std::to_string(peer.pid) + "/status");
-    std::string line;
-    while (std::getline(status, line)) {
-        if (line.rfind("Groups:", 0) != 0) continue;
-        std::istringstream groups(line.substr(7));
-        unsigned long group = 0;
-        while (groups >> group) {
-            if (group == static_cast<unsigned long>(group_id)) {
-                return true;
-            }
-        }
-        break;
-    }
-    return false;
 }
 
 std::int64_t steady_duration_ms(std::chrono::steady_clock::time_point started_at) {
@@ -1025,7 +976,9 @@ Daemon::Daemon(Config config,
     // Acquire ownership before touching the shared control-socket path. A
     // second instance must fail without unlinking the live daemon's socket.
     write_pid_file();
-    setup_ipc_control_socket();
+    ipc_control_service_.start(
+        KEEN_PBR_CONTROL_SOCKET,
+        [this] { wake_control_loop(); });
 }
 
 Daemon::~Daemon() {
@@ -1132,8 +1085,8 @@ Daemon::~Daemon() {
     // Stop ingress while the eventfd wake target is still alive. Otherwise an
     // acceptor finishing a frame during teardown could write to a descriptor
     // which has already been closed and reused by another subsystem.
-    cleanup_step("remove IPC control socket", [this] {
-        remove_ipc_control_socket();
+    cleanup_step("stop IPC control service", [this] {
+        ipc_control_service_.stop();
     });
     cleanup_step("close posted control task gate", [this] {
         {
@@ -1201,393 +1154,15 @@ void Daemon::setup_control_channel() {
     }
 }
 
-void Daemon::setup_ipc_control_socket() {
-    ipc_control_socket_path_ = KEEN_PBR_CONTROL_SOCKET;
-    if (ipc_control_socket_path_.empty() ||
-        ipc_control_socket_path_.size() >=
-            sizeof(sockaddr_un::sun_path)) {
-        throw DaemonError("control socket path is invalid");
-    }
-
-    const auto parent =
-        std::filesystem::path(ipc_control_socket_path_).parent_path();
-    std::error_code directory_error;
-    std::filesystem::create_directories(parent, directory_error);
-    if (directory_error) {
-        throw DaemonError(
-            "failed to create control socket directory: " +
-            directory_error.message());
-    }
-
-    const group* control_group = ::getgrnam("keen-pbr");
-    if (control_group != nullptr) {
-        ipc_control_group_id_ = control_group->gr_gid;
-        if (::chown(parent.c_str(), 0, ipc_control_group_id_) != 0) {
-            throw DaemonError(
-                "failed to assign control socket directory group: " +
-                std::string(strerror(errno)));
-        }
-    } else {
-        ipc_control_group_id_ = static_cast<gid_t>(-1);
-        Logger::instance().info(
-            "Optional keen-pbr group is absent; control socket is root-only");
-    }
-    if (::chmod(parent.c_str(), 0750) != 0) {
-        throw DaemonError(
-            "failed to set control socket directory mode: " +
-            std::string(strerror(errno)));
-    }
-
-    struct stat existing {};
-    if (::lstat(ipc_control_socket_path_.c_str(), &existing) == 0) {
-        if (!S_ISSOCK(existing.st_mode) ||
-            ::unlink(ipc_control_socket_path_.c_str()) != 0) {
-            throw DaemonError("unsafe stale control socket path");
-        }
-    } else if (errno != ENOENT) {
-        throw DaemonError(
-            "failed to inspect control socket path: " +
-            std::string(strerror(errno)));
-    }
-
-    ipc_control_fd_ =
-        ::socket(AF_UNIX,
-                 SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
-                 0);
-    if (ipc_control_fd_ < 0) {
-        throw DaemonError(
-            "control socket create failed: " +
-            std::string(strerror(errno)));
-    }
-
-    sockaddr_un address{};
-    address.sun_family = AF_UNIX;
-    std::memcpy(address.sun_path,
-                ipc_control_socket_path_.c_str(),
-                ipc_control_socket_path_.size() + 1);
-    const gid_t socket_group =
-        ipc_control_group_id_ == static_cast<gid_t>(-1)
-            ? static_cast<gid_t>(0)
-            : ipc_control_group_id_;
-    const mode_t socket_mode =
-        ipc_control_group_id_ == static_cast<gid_t>(-1) ? 0600 : 0660;
-    if (::bind(ipc_control_fd_,
-               reinterpret_cast<const sockaddr*>(&address),
-               sizeof(address)) != 0 ||
-        ::listen(ipc_control_fd_, 16) != 0 ||
-        ::chown(ipc_control_socket_path_.c_str(), 0, socket_group) != 0 ||
-        ::chmod(ipc_control_socket_path_.c_str(), socket_mode) != 0) {
-        const std::string error = strerror(errno);
-        remove_ipc_control_socket();
-        throw DaemonError("control socket setup failed: " + error);
-    }
-
-    ipc_accept_running_.store(true, std::memory_order_release);
-    try {
-        ipc_accept_thread_ =
-            std::thread([this] { run_ipc_control_acceptor(); });
-    } catch (...) {
-        ipc_accept_running_.store(false, std::memory_order_release);
-        remove_ipc_control_socket();
-        throw;
-    }
-}
-
-void Daemon::run_ipc_control_acceptor() noexcept {
-    struct PendingClient {
-        int fd{-1};
-        std::string frame;
-        std::optional<std::size_t> expected_size;
-        std::chrono::steady_clock::time_point deadline;
-    };
-
-    std::vector<PendingClient> pending;
-    pending.reserve(kMaxPendingControlClients);
-    const auto reject = [](int fd,
-                           std::string_view code,
-                           std::string_view message) {
-        send_control_response_and_close(
-            fd,
-            {{"protocol_version", ipc::kControlProtocolVersion},
-             {"request_id", nullptr},
-             {"ok", false},
-             {"error", {{"code", code}, {"message", message}}}});
-    };
-
-    while (ipc_accept_running_.load(std::memory_order_acquire)) {
-        std::vector<pollfd> poll_fds;
-        poll_fds.reserve(pending.size() + 1U);
-        poll_fds.push_back({ipc_control_fd_, POLLIN, 0});
-        for (const auto& client : pending) {
-            poll_fds.push_back({client.fd, POLLIN, 0});
-        }
-
-        const int ready =
-            ::poll(poll_fds.data(), poll_fds.size(), 100);
-        if (ready < 0) {
-            if (errno == EINTR) continue;
-            if (ipc_accept_running_.load(std::memory_order_acquire)) {
-                try {
-                    Logger::instance().error(
-                        "control socket acceptor poll failed: {}",
-                        strerror(errno));
-                } catch (...) {
-                }
-            }
-            break;
-        }
-
-        if (!poll_fds.empty() &&
-            (poll_fds.front().revents & POLLIN) != 0) {
-            while (ipc_accept_running_.load(std::memory_order_acquire)) {
-                const int client = ::accept4(
-                    ipc_control_fd_,
-                    nullptr,
-                    nullptr,
-                    SOCK_NONBLOCK | SOCK_CLOEXEC);
-                if (client < 0) {
-                    if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-                    if (errno == EINTR) continue;
-                    if (ipc_accept_running_.load(
-                            std::memory_order_acquire)) {
-                        try {
-                            Logger::instance().error(
-                                "control socket accept failed: {}",
-                                strerror(errno));
-                        } catch (...) {
-                        }
-                    }
-                    break;
-                }
-
-                std::size_t completed_count = 0;
-                {
-                    KPBR_LOCK_GUARD(ipc_accepted_clients_mutex_);
-                    completed_count = ipc_accepted_clients_.size();
-                }
-                if (pending.size() + completed_count >=
-                    kMaxPendingControlClients) {
-                    reject(
-                        client,
-                        "busy",
-                        "control ingress queue is full");
-                    continue;
-                }
-                pending.push_back(
-                    {client,
-                     {},
-                     std::nullopt,
-                     std::chrono::steady_clock::now() +
-                         kControlIngressTimeout});
-            }
-        }
-
-        const auto now = std::chrono::steady_clock::now();
-        for (std::size_t index = pending.size(); index-- > 0;) {
-            auto& client = pending[index];
-            short revents = 0;
-            if (poll_fds.size() > index + 1U) {
-                revents = poll_fds[index + 1U].revents;
-            }
-            bool failed = false;
-            bool complete = false;
-
-            if ((revents & POLLIN) != 0) {
-                char buffer[4096];
-                for (;;) {
-                    const ssize_t count = ::recv(
-                        client.fd, buffer, sizeof(buffer), 0);
-                    if (count > 0) {
-                        client.frame.append(
-                            buffer, static_cast<std::size_t>(count));
-                        if (!client.expected_size.has_value() &&
-                            client.frame.size() >=
-                                sizeof(std::uint32_t)) {
-                            std::uint32_t network_size = 0;
-                            std::memcpy(
-                                &network_size,
-                                client.frame.data(),
-                                sizeof(network_size));
-                            const std::size_t payload_size =
-                                ntohl(network_size);
-                            if (payload_size >
-                                kMaxControlRequestBytes) {
-                                failed = true;
-                                break;
-                            }
-                            client.expected_size =
-                                sizeof(network_size) + payload_size;
-                        }
-                        if (client.expected_size.has_value() &&
-                            client.frame.size() >=
-                                *client.expected_size) {
-                            complete =
-                                client.frame.size() ==
-                                *client.expected_size;
-                            failed = !complete;
-                            break;
-                        }
-                        continue;
-                    }
-                    if (count == 0) {
-                        failed = true;
-                        break;
-                    }
-                    if (errno == EINTR) continue;
-                    if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                        failed = true;
-                    }
-                    break;
-                }
-            }
-            if (!complete &&
-                ((revents & (POLLERR | POLLHUP | POLLNVAL)) != 0 ||
-                 now >= client.deadline)) {
-                failed = true;
-            }
-            if (!complete && !failed) continue;
-
-            const int fd = client.fd;
-            std::string frame = std::move(client.frame);
-            pending.erase(
-                pending.begin() + static_cast<std::ptrdiff_t>(index));
-            if (failed) {
-                reject(
-                    fd,
-                    "protocol_error",
-                    "incomplete control request");
-                continue;
-            }
-
-            nlohmann::json request = nlohmann::json::object();
-            try {
-                ucred peer{};
-                socklen_t peer_length = sizeof(peer);
-                if (::getsockopt(
-                        fd,
-                        SOL_SOCKET,
-                        SO_PEERCRED,
-                        &peer,
-                        &peer_length) != 0) {
-                    throw ipc::ControlProtocolError(
-                        "unable to verify control peer");
-                }
-                request = ipc::decode_message(frame);
-                ipc::validate_request_envelope(request);
-
-                const int flags = ::fcntl(fd, F_GETFL, 0);
-                if (flags < 0 ||
-                    ::fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) != 0) {
-                    throw ipc::ControlProtocolError(
-                        "unable to prepare control response socket");
-                }
-                timeval timeout{5, 0};
-                if (::setsockopt(
-                        fd,
-                        SOL_SOCKET,
-                        SO_SNDTIMEO,
-                        &timeout,
-                        sizeof(timeout)) != 0) {
-                    throw ipc::ControlProtocolError(
-                        "unable to bound control response socket");
-                }
-
-                bool queued = false;
-                {
-                    KPBR_LOCK_GUARD(ipc_accepted_clients_mutex_);
-                    if (ipc_accept_running_.load(
-                            std::memory_order_acquire) &&
-                        ipc_accepted_clients_.size() <
-                            kMaxPendingControlClients) {
-                        ipc_accepted_clients_.push_back(
-                            {fd,
-                             peer.pid,
-                             peer.uid,
-                             peer.gid,
-                             std::move(request)});
-                        queued = true;
-                    }
-                }
-                if (!queued) {
-                    reject(
-                        fd,
-                        "busy",
-                        "control dispatch queue is unavailable");
-                    continue;
-                }
-                try {
-                    wake_control_loop();
-                } catch (const std::exception& error) {
-                    try {
-                        Logger::instance().error(
-                            "control socket wake failed: {}",
-                            error.what());
-                    } catch (...) {
-                    }
-                }
-            } catch (const std::exception& error) {
-                send_control_response_and_close(
-                    fd,
-                    ipc::make_error_response(
-                        request, "protocol_error", error.what()));
-            }
-        }
-    }
-
-    for (const auto& client : pending) {
-        ::close(client.fd);
-    }
-}
-
-void Daemon::remove_ipc_control_socket() noexcept {
-    ipc_accept_running_.store(false, std::memory_order_release);
-    if (ipc_control_fd_ >= 0) {
-        (void)::shutdown(ipc_control_fd_, SHUT_RDWR);
-    }
-    if (ipc_accept_thread_.joinable()) {
-        ipc_accept_thread_.join();
-    }
-    if (ipc_control_fd_ >= 0) {
-        ::close(ipc_control_fd_);
-        ipc_control_fd_ = -1;
-    }
-    {
-        KPBR_LOCK_GUARD(ipc_accepted_clients_mutex_);
-        for (const auto& client : ipc_accepted_clients_) {
-            ::close(client.fd);
-        }
-        ipc_accepted_clients_.clear();
-    }
-    ipc_control_group_id_ = static_cast<gid_t>(-1);
-    if (!ipc_control_socket_path_.empty()) {
-        struct stat metadata {};
-        if (::lstat(ipc_control_socket_path_.c_str(), &metadata) == 0 &&
-            S_ISSOCK(metadata.st_mode)) {
-            (void)::unlink(ipc_control_socket_path_.c_str());
-        }
-        ipc_control_socket_path_.clear();
-    }
-}
-
-void Daemon::handle_ipc_control_socket() {
+void Daemon::handle_ipc_control_requests() {
     while (true) {
-        IpcControlRequest accepted;
-        {
-            KPBR_LOCK_GUARD(ipc_accepted_clients_mutex_);
-            if (ipc_accepted_clients_.empty()) return;
-            accepted = std::move(ipc_accepted_clients_.front());
-            ipc_accepted_clients_.pop_front();
-        }
-        const int client = accepted.fd;
-        nlohmann::json request = std::move(accepted.request);
+        auto accepted = ipc_control_service_.try_take_request();
+        if (!accepted.has_value()) return;
+        const int client = accepted->fd;
+        nlohmann::json request = std::move(accepted->request);
         nlohmann::json response;
         bool stream_dispatched = false;
         try {
-            ucred peer{};
-            peer.pid = accepted.peer_pid;
-            peer.uid = accepted.peer_uid;
-            peer.gid = accepted.peer_gid;
-
             const std::string operation =
                 request.at("operation").get<std::string>();
             const bool resolver_hook_inflight =
@@ -1595,15 +1170,15 @@ void Daemon::handle_ipc_control_socket() {
             const bool resolver_read_only_operation =
                 operation == "status" ||
                 operation == "resolver-config-hash";
-            const bool root_peer = peer.uid == 0;
+            const bool root_peer = accepted->peer_uid == 0;
             const bool list_control_operation =
                 operation == "download" ||
                 operation == "download-status" ||
                 operation == "download-cancel";
             const bool list_update_member =
-                ipc_control_group_id_ != static_cast<gid_t>(-1) &&
-                peer_has_group(peer, ipc_control_group_id_) &&
-                list_control_operation;
+                list_control_operation &&
+                ipc_control_service_.peer_is_control_group_member(
+                    *accepted);
             if (!root_peer && !list_update_member) {
                 throw ipc::ControlProtocolError(
                     "control peer is not authorized for this operation");
@@ -2247,7 +1822,8 @@ void Daemon::handle_ipc_control_socket() {
         }
 
         if (!stream_dispatched) {
-            send_control_response_and_close(client, response);
+            ipc::IpcControlService::send_response_and_close(
+                client, response);
         }
     }
 }
@@ -2294,8 +1870,8 @@ void Daemon::quiesce_runtime_mutations() noexcept {
             // waiting for its terminal control callback. Keep both channels
             // alive until the exact mutation lease is returned, including
             // startup rollback where event_loop_active_ was never set.
-            if (ipc_control_fd_ >= 0) {
-                handle_ipc_control_socket();
+            if (ipc_control_service_.active()) {
+                handle_ipc_control_requests();
             }
             if (control_fd_ >= 0) {
                 handle_control_commands();
@@ -2339,8 +1915,8 @@ void Daemon::quiesce_resolver_stream_recovery() noexcept {
     while (!resolver_stream_coordinator_.wait_for_idle_for(
         std::chrono::milliseconds{10})) {
         try {
-            if (ipc_control_fd_ >= 0) {
-                handle_ipc_control_socket();
+            if (ipc_control_service_.active()) {
+                handle_ipc_control_requests();
             }
             if (control_fd_ >= 0) {
                 handle_control_commands();
@@ -2668,7 +2244,7 @@ void Daemon::handle_control_commands() {
     // Ingress frames are read and validated by the dedicated acceptor. Drain
     // them before unrelated deferred work so a ready CLI request is not left
     // behind a potentially expensive control callback.
-    handle_ipc_control_socket();
+    handle_ipc_control_requests();
 
     std::vector<ControlTaskOwner> commands;
     {
@@ -2745,7 +2321,9 @@ bool Daemon::run_process_shutdown_cleanup() noexcept {
                 runtime_firewall_owner_->pending_successor());
             if (!owner_ready) {
                 try {
-                    if (ipc_control_fd_ >= 0) handle_ipc_control_socket();
+                    if (ipc_control_service_.active()) {
+                        handle_ipc_control_requests();
+                    }
                     if (control_fd_ >= 0) handle_control_commands();
                 } catch (...) {
                 }

@@ -133,6 +133,19 @@
   не добавлялся.
 - Добавлен узкий `keen-pbr-urltest-manager-tests`, чтобы проверка worker,
   generation и snapshot lifetime не пересобирала монолитный backend suite.
+- Продолжено P0-1 отделение `Daemon`: новый `IpcControlService` единолично
+  владеет Unix listener, путём и группой сокета, accept-потоком, ограниченным
+  framing, `SO_PEERCRED`, очередью принятых запросов и stop/join/unlink.
+  `Daemon` остался composition root и обрабатывает status, list refresh,
+  routing test и resolver stream на прежнем сериализованном control loop.
+  PID lock по-прежнему берётся до старта сокета, а ingress останавливается
+  только после resolver/runtime drain и до закрытия control eventfd. Уже
+  переданный dispatcher или ровно один async worker остаётся единственным
+  владельцем client FD. Существующие admission, resolver/list coordinators и
+  recovery-пути не заменялись.
+- Добавлен быстрый `keen-pbr-ipc-control-service-tests`: production acceptor,
+  peer credentials, request handoff, bounded rejection, wake-failure ownership
+  и stop/join/unlink проверяются без линковки монолитного backend suite.
 - Продолжено P0-1 отделение publication tail от `Daemon` без нового admission,
   recovery-журнала или пользовательских блокировок. Семь разрозненных
   публикаций rules/list/native-VPN/SNAT/Meta сведены в один небросающий core
@@ -609,6 +622,11 @@
 
 ### Исправлено
 
+- Обязательный `make test` снова перечисляет все объявленные узкие CMake-цели.
+  В список добавлены новые IPC и URLTEST targets, а также ранее пропущенные
+  `keen-pbr-runtime-firewall-publication-tests` и
+  `keen-pbr-runtime-internal-vpn-lkg-tests`; coverage gate больше не роняет
+  backend CI до начала самих тестов.
 - URLTEST после штатного `opkg`/START больше не зацикливается на
   `admitted=false`: при занятом writer или отказе typed handoff менеджер
   возвращает курсор к уже применённому child, а один отложенный проход

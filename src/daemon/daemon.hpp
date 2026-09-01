@@ -5,7 +5,6 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
-#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
@@ -18,7 +17,6 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
-#include <sys/types.h>
 
 #include "../config/config.hpp"
 #include "../dns/keenetic_dns.hpp"
@@ -30,6 +28,7 @@
 #include "keenetic_dns_refresh_coordinator.hpp"
 #include "../health/interface_probe.hpp"
 #include "../health/tunnel_probe_task.hpp"
+#include "../ipc/ipc_control_service.hpp"
 #include "pid_file.hpp"
 #include "../health/url_tester.hpp"
 #include "../keenetic/internal_vpn_ingress_resolver.hpp"
@@ -538,9 +537,7 @@ private:
     void handle_signal();
     void setup_control_channel();
     void handle_control_commands();
-    void setup_ipc_control_socket();
-    void run_ipc_control_acceptor() noexcept;
-    void handle_ipc_control_socket();
+    void handle_ipc_control_requests();
     struct RoutingTestSnapshot {
         Config config;
         std::vector<RuleState> realized_rules;
@@ -548,7 +545,6 @@ private:
         bool unapplied_draft{false};
     };
     RoutingTestSnapshot capture_routing_test_snapshot();
-    void remove_ipc_control_socket() noexcept;
     void wake_control_loop();
     bool cancel_control_task_if_still_queued(
         const daemon_detail::ControlTaskAdmissionHandle& token) noexcept;
@@ -1316,21 +1312,7 @@ private:
 
     PidFile pid_file_;
     int control_fd_{-1};
-    int ipc_control_fd_{-1};
-    gid_t ipc_control_group_id_{static_cast<gid_t>(-1)};
-    std::string ipc_control_socket_path_;
-    std::atomic<bool> ipc_accept_running_{false};
-    std::thread ipc_accept_thread_;
-    struct IpcControlRequest {
-        int fd{-1};
-        pid_t peer_pid{0};
-        uid_t peer_uid{0};
-        gid_t peer_gid{0};
-        nlohmann::json request;
-    };
-    TracedMutex ipc_accepted_clients_mutex_;
-    std::deque<IpcControlRequest> ipc_accepted_clients_
-        GUARDED_BY(ipc_accepted_clients_mutex_);
+    ipc::IpcControlService ipc_control_service_;
     struct ControlTask {
         std::function<void()> callback;
         std::string label;
