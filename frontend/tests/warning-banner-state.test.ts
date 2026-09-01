@@ -4,6 +4,7 @@ import { describe, expect, test } from "bun:test"
 
 import type { HealthResponse } from "../src/api/generated/model"
 import { getWarningBannerDraftActions } from "../src/components/layout/warning-banner-state"
+import { getLifecycleFailureReason } from "../src/components/layout/warning-banner-state"
 import { getWarningBannerMode } from "../src/components/layout/warning-banner-state"
 import { retainLifecycleOperation } from "../src/components/layout/warning-banner-state"
 
@@ -94,9 +95,62 @@ describe("getWarningBannerMode", () => {
       })
     ).toBeNull()
   })
+
+  test("keeps the exact failed lifecycle reason for the persistent banner", () => {
+    expect(
+      getLifecycleFailureReason({
+        id: "lifecycle-2",
+        type: "apply_config",
+        status: "failed",
+        started_at: 100,
+        error: "  firewall publication failed  ",
+        stages: [
+          {
+            id: "commit_and_apply",
+            title: "Commit and apply",
+            status: "failed",
+            detail: "stage fallback",
+          },
+        ],
+      })
+    ).toBe("firewall publication failed")
+
+    expect(
+      getLifecycleFailureReason({
+        id: "lifecycle-3",
+        type: "apply_config",
+        status: "failed",
+        started_at: 100,
+        stages: [
+          {
+            id: "commit_and_apply",
+            title: "Commit and apply",
+            status: "failed",
+            detail: "  exact stage failure  ",
+          },
+        ],
+      })
+    ).toBe("exact stage failure")
+  })
 })
 
 describe("WarningBanner draft actions", () => {
+  test("shows the backend reason when applying a draft fails", () => {
+    const applyStart = warningBannerSource.indexOf(
+      "const applyConfigMutation = useApplyConfigMutation"
+    )
+    const discardStart = warningBannerSource.indexOf(
+      "const discardConfigMutation",
+      applyStart
+    )
+    const applySetup = warningBannerSource.slice(applyStart, discardStart)
+
+    expect(applySetup).toContain("onError")
+    expect(applySetup).toContain("getApiErrorMessage")
+    expect(applySetup).toContain("warning.applyFailed")
+    expect(applySetup).toContain("toast.error")
+  })
+
   test("offers guarded discard alongside apply for a pending draft", () => {
     expect(warningBannerSource).toContain("useDiscardConfigMutation")
     expect(warningBannerSource).toContain("state.hasDraftConfig")

@@ -1216,6 +1216,31 @@ enum class IptablesCommandOutcome {
     PermanentFailure,
 };
 
+// KeeneticOS may replace a table after we published an owned chain but before
+// the separate builtin-hook reconciliation reaches it. Keep this exact race
+// distinguishable from every other transient failure: apply() can safely
+// restage the same already-pinned family under its existing single writer,
+// while a generic/ambiguous firewall failure must still escape to rollback.
+class HookTargetChangedError final : public TransientFirewallError {
+public:
+    HookTargetChangedError(
+        std::string message,
+        std::vector<std::string> command,
+        ExecCaptureResult result)
+        : TransientFirewallError(std::move(message)),
+          command_(std::move(command)),
+          result_(std::move(result)) {}
+
+    const std::vector<std::string>& command() const noexcept {
+        return command_;
+    }
+    const ExecCaptureResult& result() const noexcept { return result_; }
+
+private:
+    std::vector<std::string> command_;
+    ExecCaptureResult result_;
+};
+
 static constexpr std::array<std::chrono::milliseconds, 4>
     iptables_control_retry_delays{
         std::chrono::milliseconds{25},
@@ -3700,22 +3725,26 @@ void IptablesFirewall::reconcile_hook(
             classify_iptables_command(mutation);
         if (mutation_outcome ==
             IptablesCommandOutcome::PermanentFailure) {
-            record_iptables_control_failure(mutate_args, mutation);
             // KeeneticOS can replace the firewall scaffold after the
             // successful snapshot above but before this mutation. In that
             // publication window xtables commonly reports exit 2 together
             // with "No chain/target/match by that name". The builtin chain
             // still exists; it is our target chain that vanished. Retrying
             // only this append/delete cannot recreate the target, so surface
-            // the recognized race as transient and let the outer runtime
-            // reconciler rebuild the complete owned generation.
-            if (command_reports_chain_missing(mutation)) {
-                throw TransientFirewallError(keen_pbr3::format(
+            // the recognized race to the enclosing same-family publisher.
+            // It restages the pinned family before trying the hooks again.
+            if (!mutation.timed_out && !mutation.truncated &&
+                !mutation.termination_uncertain &&
+                command_reports_chain_missing(mutation)) {
+                throw HookTargetChangedError(keen_pbr3::format(
                     "{} {}/{} hook target changed during reconciliation",
                     command,
                     table,
-                    builtin_chain));
+                    builtin_chain),
+                    mutate_args,
+                    mutation);
             }
+            record_iptables_control_failure(mutate_args, mutation);
             throw FirewallError(keen_pbr3::format(
                 "failed to reconcile {} {}/{} hook",
                 command, table, builtin_chain));
@@ -6261,6 +6290,85 @@ void IptablesFirewall::apply_nat_rules(
             global_prefilter_, effective_ipv6));
 }
 
+void IptablesFirewall::apply_rule_family_with_hook_repair(
+    bool ipv6,
+    FirewallSetGeneration generation,
+    const FirewallGlobalPrefilter& prefilter) {
+    const char* restore = ipv6 ? "ip6tables-restore" : "iptables-restore";
+
+    const auto stage_family = [&]() {
+        if (uses_raw_prerouting(ipv6)) {
+            // Publish the complete same-family trio again on an exact
+            // vanished-target retry. The selected A/B slot and all pending
+            // rules are pinned for the duration of apply(), so this is an
+            // idempotent convergence of the same candidate, not a replay of a
+            // configuration transaction.
+            pipe_to_cmd(
+                {restore, "--noflush", "--counters"},
+                build_raw_conntrack_script(
+                    ipv6,
+                    /*replace_active_chain=*/true,
+                    prefilter,
+                    pending_rules_));
+            pipe_to_cmd(
+                {restore, "--noflush", "--counters"},
+                build_output_generation_script(
+                    ipv6,
+                    generation_output_chain(generation),
+                    /*replace_active_chain=*/true,
+                    pending_rules_,
+                    prefilter));
+            pipe_to_cmd(
+                {restore, "--noflush", "--counters"},
+                build_raw_prerouting_script(
+                    ipv6,
+                    raw_generation_prerouting_chain(generation),
+                    /*replace_active_chain=*/true,
+                    pending_rules_,
+                    prefilter));
+            return;
+        }
+
+        const std::string prerouting_chain =
+            generation_prerouting_chain(generation);
+        const std::string output_chain =
+            generation_output_chain(generation);
+        pipe_to_cmd(
+            {restore, "--noflush", "--counters"},
+            build_generation_ipt_script(
+                ipv6,
+                prerouting_chain,
+                output_chain,
+                /*replace_active_chains=*/true,
+                pending_rules_,
+                prefilter));
+    };
+
+    for (std::size_t attempt = 0U;; ++attempt) {
+        stage_family();
+        try {
+            reconcile_hooks(ipv6);
+            return;
+        } catch (const HookTargetChangedError& error) {
+            if (attempt >= iptables_control_retry_delays.size()) {
+                record_iptables_control_failure(
+                    error.command(), error.result());
+                throw;
+            }
+            Logger::instance().verbose(
+                "{} hook target changed during family publication; "
+                "restaging the same family in {} ms ({}/{}): {}",
+                ipv6 ? "ip6tables" : "iptables",
+                iptables_control_retry_delays[attempt].count(),
+                attempt + 1U,
+                iptables_control_retry_delays.size(),
+                error.what());
+            std::this_thread::sleep_for(
+                iptables_control_retry_delays[attempt]);
+        }
+    }
+}
+
 void IptablesFirewall::apply(FirewallApplyMode mode) {
     std::lock_guard<std::mutex> lock(pair_state_mutex_);
     if (!apply_prepared_) {
@@ -6407,79 +6515,15 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
         else has_v4 = true;
     }
 
-    // Per-family raw pipeline: the trio (mangle ctmark companion, mangle
-    // OUTPUT generation, raw PREROUTING generation) is identical in shape for
-    // both families, so one lambda serves iptables and ip6tables alike.
-    const auto apply_raw_family = [&](bool ipv6,
-                                      FirewallSetGeneration generation) {
-        const char* restore = ipv6 ? "ip6tables-restore" : "iptables-restore";
-        // The small mangle companion restores/saves ctmark after conntrack
-        // attaches to packets classified in raw PREROUTING. Publish it before
-        // switching the raw generation; it is generic for both A/B
-        // generations.
-        pipe_to_cmd(
-            {restore, "--noflush", "--counters"},
-            build_raw_conntrack_script(
-                ipv6,
-                /*replace_active_chain=*/true,
-                effective_prefilter,
-                pending_rules_));
-        pipe_to_cmd(
-            {restore, "--noflush", "--counters"},
-            build_output_generation_script(
-                ipv6,
-                generation_output_chain(generation),
-                /*replace_active_chain=*/true,
-                pending_rules_,
-                effective_prefilter));
-        pipe_to_cmd(
-            {restore, "--noflush", "--counters"},
-            build_raw_prerouting_script(
-                ipv6,
-                raw_generation_prerouting_chain(generation),
-                /*replace_active_chain=*/true,
-                pending_rules_,
-                effective_prefilter));
-    };
-
     if (has_v4) {
-        if (uses_raw_prerouting(false)) {
-            apply_raw_family(false, target_v4_generation_);
-        } else {
-            const std::string output_chain =
-                generation_output_chain(target_v4_generation_);
-            const std::string prerouting_chain =
-                generation_prerouting_chain(target_v4_generation_);
-            pipe_to_cmd({"iptables-restore", "--noflush", "--counters"},
-                        build_generation_ipt_script(
-                            false, prerouting_chain, output_chain,
-                            /*replace_active_chains=*/true,
-                            pending_rules_, effective_prefilter));
-        }
+        apply_rule_family_with_hook_repair(
+            false, target_v4_generation_, effective_prefilter);
         chain_v4_created_ = true;
     }
     if (has_v6) {
-        if (uses_raw_prerouting(true)) {
-            apply_raw_family(true, target_v6_generation_);
-        } else {
-            const std::string prerouting_chain =
-                generation_prerouting_chain(target_v6_generation_);
-            const std::string output_chain =
-                generation_output_chain(target_v6_generation_);
-            pipe_to_cmd({"ip6tables-restore", "--noflush", "--counters"},
-                        build_generation_ipt_script(
-                            true, prerouting_chain, output_chain,
-                            /*replace_active_chains=*/true,
-                            pending_rules_, effective_prefilter));
-        }
+        apply_rule_family_with_hook_repair(
+            true, target_v6_generation_, effective_prefilter);
         chain_v6_created_ = true;
-    }
-
-    // Builtin hooks are reconciled separately so repeated --noflush restores
-    // cannot accumulate duplicate jumps.
-    reconcile_hooks(false);
-    if (has_v6) {
-        reconcile_hooks(true);
     }
 
     // Inside the same serialized apply on purpose. A separate writer for this

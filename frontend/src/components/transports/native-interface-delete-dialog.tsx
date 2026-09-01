@@ -7,6 +7,8 @@ import {
   postNdmsNativeDeleteOnce,
   type NdmsNativeDeleteResult,
 } from "@/api/native-mutation"
+import type { ApiError } from "@/api/client"
+import { getApiErrorMessage } from "@/lib/api-errors"
 import type { NativeInterfaceModel } from "@/lib/native-interfaces"
 
 /**
@@ -70,9 +72,12 @@ export function NativeInterfaceDeleteDialog({
 
         try {
           restoreLinkedRoute = await prepareLinkedRouteRemoval?.()
-        } catch {
+        } catch (error) {
           toast.error(
-            t("transports.nativeMutation.deleteDialog.deleteFailed"),
+            t(
+              "transports.nativeMutation.deleteDialog.routePreparationFailedDescription",
+              { reason: getApiErrorMessage(error as ApiError) }
+            ),
             { id: toastId, richColors: true }
           )
           return

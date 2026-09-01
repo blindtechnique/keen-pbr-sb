@@ -26,7 +26,18 @@ export function WarningBanner({
   state: WarningBannerState
 }) {
   const { t } = useTranslation()
-  const applyConfigMutation = useApplyConfigMutation()
+  const applyConfigMutation = useApplyConfigMutation({
+    mutation: {
+      onError: (error) => {
+        toast.error(
+          t("warning.applyFailed", {
+            reason: getApiErrorMessage(error as ApiError),
+          }),
+          { richColors: true }
+        )
+      },
+    },
+  })
   const discardConfigMutation = useDiscardConfigMutation({
     mutation: {
       onError: (error) => {
@@ -77,8 +88,10 @@ export function WarningBanner({
   const isLifecycle = state.mode.startsWith("lifecycle-")
   const isError =
     state.mode === "dnsmasq-error" || state.mode === "lifecycle-error"
-  const { canResolveDraft, canApplyOrRestart } =
-    getWarningBannerDraftActions(state.mode, state.hasDraftConfig)
+  const { canResolveDraft, canApplyOrRestart } = getWarningBannerDraftActions(
+    state.mode,
+    state.hasDraftConfig
+  )
   const handleApplyAndReload = () => {
     if (state.hasDraftConfig) {
       applyConfigMutation.mutate()
@@ -115,6 +128,11 @@ export function WarningBanner({
             <p className="text-[12px] leading-4 text-muted-foreground">
               {t(getWarningBannerDescriptionKey(state.mode))}
             </p>
+            {state.mode === "lifecycle-error" && state.operationError ? (
+              <p className="mt-1 text-[12px] leading-4 text-destructive">
+                {t("lifecycle.errorReason", { reason: state.operationError })}
+              </p>
+            ) : null}
           </div>
 
           <div className="flex shrink-0 gap-2">

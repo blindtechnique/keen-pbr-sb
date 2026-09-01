@@ -889,6 +889,15 @@ public:
     fw.apply(FirewallApplyMode::PreserveSets);
   }
 
+  static void apply_raw_family_with_hook_repair_for_test() {
+    IptablesFirewall fw(/*use_raw_prerouting=*/true);
+    fw.set_ipv6_enabled(false);
+    fw.apply_rule_family_with_hook_repair(
+        /*ipv6=*/false,
+        FirewallSetGeneration::B,
+        FirewallGlobalPrefilter{});
+  }
+
   static std::string build_nat_validation_script(
       const std::string& nat_script) {
     return IptablesFirewall::build_nat_validation_script(nat_script);
@@ -1503,6 +1512,199 @@ TEST_CASE("preserve apply keeps existing NAT when raw companion hook fails") {
   const std::string command_log = read_iptables_test_file(calls);
   CHECK(command_log.find("-t mangle -S PREROUTING") != std::string::npos);
   CHECK(command_log.find("-t nat ") == std::string::npos);
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("raw family is restaged when Keenetic removes a hook target once") {
+  IptablesTestTempDir temp;
+  const auto state = temp.path() / "hook-state";
+  const auto calls = temp.path() / "iptables-calls";
+  const auto restores = temp.path() / "restore-scripts";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "printf '%s\\n' \"$*\" >> \"$KPBR_IPTABLES_CALLS\"\n"
+      "case \"$*\" in\n"
+      "  '-w 0 -t filter -S KeenPbrWaitProbe')\n"
+      "    echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "    exit 1 ;;\n"
+      "esac\n"
+      "[ \"$1\" = -w ] && [ \"$2\" = 2 ] && shift 2\n"
+      "case \"$*\" in\n"
+      "  '-t raw -S PREROUTING')\n"
+      "    echo '-A PREROUTING -j KeenPbrRaw' ;;\n"
+      "  '-t mangle -S OUTPUT')\n"
+      "    echo '-A OUTPUT -j KeenPbrOutput' ;;\n"
+      "  '-t mangle -S PREROUTING')\n"
+      "    [ \"$(cat \"$KPBR_HOOK_STATE\" 2>/dev/null)\" = repaired ] && "
+      "echo '-A PREROUTING -j KeenPbrRawCt' ;;\n"
+      "  '-t mangle -A PREROUTING -j KeenPbrRawCt')\n"
+      "    if [ ! -f \"$KPBR_HOOK_STATE\" ]; then\n"
+      "      : > \"$KPBR_HOOK_STATE\"\n"
+      "      printf 'iptables v1.4.21: Couldn\\047t load target "
+      "\\140KeenPbrRawCt\\047:No such file or directory\\n' >&2\n"
+      "      exit 2\n"
+      "    fi\n"
+      "    echo repaired > \"$KPBR_HOOK_STATE\" ;;\n"
+      "esac\n"
+      "exit 0\n");
+  write_iptables_test_executable(
+      temp.path() / "iptables-restore",
+      "#!/bin/sh\n"
+      "if [ \"$1\" = -w ] && [ \"$2\" = 0 ]; then exit 0; fi\n"
+      "{ echo '=== restore ==='; /bin/cat; } >> \"$KPBR_RESTORE_SCRIPTS\"\n"
+      "exit 0\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment state_env("KPBR_HOOK_STATE");
+  IptablesTestEnvironment calls_env("KPBR_IPTABLES_CALLS");
+  IptablesTestEnvironment restores_env("KPBR_RESTORE_SCRIPTS");
+  use_iptables_test_path(path, temp.path());
+  state_env.set(state.string());
+  calls_env.set(calls.string());
+  restores_env.set(restores.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK_NOTHROW(T::apply_raw_family_with_hook_repair_for_test());
+  const std::string scripts = read_iptables_test_file(restores);
+  const std::string command_log = read_iptables_test_file(calls);
+  const auto count_script = [&scripts](std::string_view needle) {
+    std::size_t count = 0U;
+    for (std::size_t pos = 0U;
+         (pos = scripts.find(needle, pos)) != std::string::npos;
+         pos += 1U) {
+      ++count;
+    }
+    return count;
+  };
+  CHECK(count_script(":KeenPbrRawCt - [0:0]") == 2U);
+  CHECK(count_script(":KeenPbrOutput_B - [0:0]") == 2U);
+  CHECK(count_script(":KeenPbrRaw_B - [0:0]") == 2U);
+  std::size_t append_count = 0U;
+  for (std::size_t pos = 0U;
+       (pos = command_log.find(
+            "-t mangle -A PREROUTING -j KeenPbrRawCt", pos)) !=
+           std::string::npos;
+       pos += 1U) {
+    ++append_count;
+  }
+  CHECK(append_count == 2U);
+  CHECK_FALSE(std::filesystem::exists(temp.path() / "last-failure"));
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("raw family hook target repair remains bounded") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "iptables-calls";
+  const auto restores = temp.path() / "restore-scripts";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "printf '%s\\n' \"$*\" >> \"$KPBR_IPTABLES_CALLS\"\n"
+      "case \"$*\" in\n"
+      "  '-w 0 -t filter -S KeenPbrWaitProbe')\n"
+      "    echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "    exit 1 ;;\n"
+      "esac\n"
+      "[ \"$1\" = -w ] && [ \"$2\" = 2 ] && shift 2\n"
+      "case \"$*\" in\n"
+      "  '-t raw -S PREROUTING')\n"
+      "    echo '-A PREROUTING -j KeenPbrRaw' ;;\n"
+      "  '-t mangle -S OUTPUT')\n"
+      "    echo '-A OUTPUT -j KeenPbrOutput' ;;\n"
+      "  '-t mangle -S PREROUTING') exit 0 ;;\n"
+      "  '-t mangle -A PREROUTING -j KeenPbrRawCt')\n"
+      "    printf 'iptables v1.4.21: Couldn\\047t load target "
+      "\\140KeenPbrRawCt\\047:No such file or directory\\n' >&2\n"
+      "    exit 2 ;;\n"
+      "esac\n"
+      "exit 0\n");
+  write_iptables_test_executable(
+      temp.path() / "iptables-restore",
+      "#!/bin/sh\n"
+      "if [ \"$1\" = -w ] && [ \"$2\" = 0 ]; then exit 0; fi\n"
+      "{ echo '=== restore ==='; /bin/cat; } >> \"$KPBR_RESTORE_SCRIPTS\"\n"
+      "exit 0\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_IPTABLES_CALLS");
+  IptablesTestEnvironment restores_env("KPBR_RESTORE_SCRIPTS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+  restores_env.set(restores.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK_THROWS_AS(
+      T::apply_raw_family_with_hook_repair_for_test(),
+      TransientFirewallError);
+  const std::string scripts = read_iptables_test_file(restores);
+  const auto count_script = [&scripts](std::string_view needle) {
+    std::size_t count = 0U;
+    for (std::size_t pos = 0U;
+         (pos = scripts.find(needle, pos)) != std::string::npos;
+         pos += 1U) {
+      ++count;
+    }
+    return count;
+  };
+  CHECK(count_script(":KeenPbrRawCt - [0:0]") == 5U);
+  CHECK(count_script(":KeenPbrOutput_B - [0:0]") == 5U);
+  CHECK(count_script(":KeenPbrRaw_B - [0:0]") == 5U);
+  CHECK(std::filesystem::exists(temp.path() / "last-failure"));
+  CHECK(read_iptables_test_file(temp.path() / "last-failure")
+            .find("KeenPbrRawCt") != std::string::npos);
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("raw family is not restaged for a non-race permanent failure") {
+  IptablesTestTempDir temp;
+  const auto restores = temp.path() / "restore-scripts";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "case \"$*\" in\n"
+      "  '-w 0 -t filter -S KeenPbrWaitProbe')\n"
+      "    echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "    exit 1 ;;\n"
+      "esac\n"
+      "[ \"$1\" = -w ] && [ \"$2\" = 2 ] && shift 2\n"
+      "case \"$*\" in\n"
+      "  '-t raw -S PREROUTING')\n"
+      "    echo '-A PREROUTING -j KeenPbrRaw' ;;\n"
+      "  '-t mangle -S OUTPUT')\n"
+      "    echo '-A OUTPUT -j KeenPbrOutput' ;;\n"
+      "  '-t mangle -S PREROUTING') exit 0 ;;\n"
+      "  '-t mangle -A PREROUTING -j KeenPbrRawCt')\n"
+      "    echo 'iptables: Permission denied.' >&2\n"
+      "    exit 2 ;;\n"
+      "esac\n"
+      "exit 0\n");
+  write_iptables_test_executable(
+      temp.path() / "iptables-restore",
+      "#!/bin/sh\n"
+      "if [ \"$1\" = -w ] && [ \"$2\" = 0 ]; then exit 0; fi\n"
+      "{ echo '=== restore ==='; /bin/cat; } >> \"$KPBR_RESTORE_SCRIPTS\"\n"
+      "exit 0\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment restores_env("KPBR_RESTORE_SCRIPTS");
+  use_iptables_test_path(path, temp.path());
+  restores_env.set(restores.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK_THROWS_AS(
+      T::apply_raw_family_with_hook_repair_for_test(),
+      FirewallError);
+  const std::string scripts = read_iptables_test_file(restores);
+  std::size_t companion_count = 0U;
+  for (std::size_t pos = 0U;
+       (pos = scripts.find(":KeenPbrRawCt - [0:0]", pos)) !=
+           std::string::npos;
+       pos += 1U) {
+    ++companion_count;
+  }
+  CHECK(companion_count == 1U);
+  CHECK(std::filesystem::exists(temp.path() / "last-failure"));
   testing::reset_restore_wait_option_probe_for_test();
 }
 

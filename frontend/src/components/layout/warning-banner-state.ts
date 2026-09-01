@@ -36,6 +36,7 @@ export type WarningBannerState = {
   isActionDisabled: boolean
   isVisible: boolean
   mode: WarningBannerMode
+  operationError?: string
   operationType?: LifecycleOperationType
   operationSteps: WarningBannerStep[]
   progressPercent: number
@@ -136,6 +137,7 @@ export function useWarningBannerState(): WarningBannerState {
       })) ?? [],
     [t, visibleOperation]
   )
+  const operationError = getLifecycleFailureReason(visibleOperation)
   const progressPercent =
     mode === "dnsmasq-converging" && convergingStartedAtMs !== null
       ? Math.min(
@@ -160,10 +162,23 @@ export function useWarningBannerState(): WarningBannerState {
       anyPending || visibleOperation?.status === "running" || !serviceHealth,
     isVisible: mode !== "hidden",
     mode,
+    operationError,
     operationType: visibleOperation?.type,
     operationSteps,
     progressPercent,
   }
+}
+
+export function getLifecycleFailureReason(
+  operation: LifecycleOperation | null | undefined
+): string | undefined {
+  if (operation?.status !== "failed") return undefined
+  const operationError = operation.error?.trim()
+  if (operationError) return operationError
+  const failedStageDetail = operation.stages
+    .find((stage) => stage.status === "failed")
+    ?.detail.trim()
+  return failedStageDetail || undefined
 }
 
 export function getWarningBannerMode(

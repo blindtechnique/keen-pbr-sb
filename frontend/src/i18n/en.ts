@@ -989,7 +989,10 @@ export const enTranslation = {
           "The linked route “{{name}}” will be deleted with the VPN. If the router rejects VPN deletion, the route will be restored.",
         routePreparationFailedTitle: "The route was not removed",
         routePreparationFailedDescription:
-          "The linked route removal could not be applied, so the VPN was left unchanged. Refresh the page and try again.",
+          "The VPN was not deleted: the related changes could not be prepared. Reason: {{reason}}",
+        inUse:
+          "This VPN is used by: {{dependencies}}. Deleting the VPN will also remove it from those groups, rules, and settings.",
+        moreDependencies: "{{count}} more",
         routeRestoreFailedTitle: "The route could not be restored",
         routeRestoreFailedDescription:
           "The router rejected VPN deletion, but restoration of the linked route was not confirmed. The VPN was not deleted; refresh and inspect the route.",
@@ -1644,6 +1647,8 @@ export const enTranslation = {
   },
   warning: {
     draftChanged: "Configuration was changed. Save it to disk to apply it.",
+    applyFailed:
+      "Changes could not be applied. Active routing was not changed; your edits remain in the draft. Reason: {{reason}}",
     actions: {
       applying: "Applying...",
       apply: "Apply",
@@ -1686,6 +1691,7 @@ export const enTranslation = {
     successDescription: "All stages completed successfully.",
     error: "Operation failed",
     errorDescription: "Remaining stages were skipped. Check the failed stage.",
+    errorReason: "Reason: {{reason}}",
     dismiss: "Dismiss",
     stages: {
       validate_config: "Validate configuration",

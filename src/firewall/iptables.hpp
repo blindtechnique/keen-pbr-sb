@@ -417,6 +417,10 @@ private:
     static FirewallSetGeneration target_generation_for_states(
         LiveGenerationState primary,
         LiveGenerationState secondary);
+    void apply_rule_family_with_hook_repair(
+        bool ipv6,
+        FirewallSetGeneration generation,
+        const FirewallGlobalPrefilter& prefilter);
     void reconcile_hooks(bool ipv6) const;
     // Keeps our single tagged RETURN first in the firmware's TTL chain, when
     // that chain exists and the kernel has the matches. Never creates,

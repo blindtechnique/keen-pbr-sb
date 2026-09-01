@@ -72,6 +72,7 @@ import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
 import { NativeInterfaceDetails } from "@/components/transports/native-interface-details"
 import { NativeInterfaceDeleteDialog } from "@/components/transports/native-interface-delete-dialog"
+import { summarizeNativeDeleteDependencies } from "@/components/transports/native-interface-delete-guard"
 import { NativeMutationRecovery } from "@/components/transports/native-mutation-recovery"
 import { NativeRetainedDeletions } from "@/components/transports/native-retained-deletions"
 import { NativeRouteOffer } from "@/components/transports/native-route-offer"
@@ -1695,6 +1696,31 @@ export function TransportsPage({
           const revision =
             nativeInterface.source.native_mutation.ownership_revision
           if (!deleteReady || !revision) return
+          const dependencies = boundOutbound
+            ? (transportDependencies.dependenciesByTarget.get(
+                `outbound:${boundOutbound.tag}`
+              ) ?? [])
+            : []
+          if (dependencies.length > 0) {
+            const summary = summarizeNativeDeleteDependencies(dependencies)
+            const dependencyLabels = [
+              ...summary.labels,
+              ...(summary.remainingCount > 0
+                ? [
+                    t(
+                      "transports.nativeMutation.deleteDialog.moreDependencies",
+                      { count: summary.remainingCount }
+                    ),
+                  ]
+                : []),
+            ].join(", ")
+            toast.warning(
+              t("transports.nativeMutation.deleteDialog.inUse", {
+                dependencies: dependencyLabels,
+              }),
+              { richColors: true }
+            )
+          }
           setNativeDeleteSelection({
             id: nativeInterface.id,
             expectedOwnershipRevision: revision,
