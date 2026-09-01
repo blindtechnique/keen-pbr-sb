@@ -886,7 +886,6 @@ Daemon::Daemon(Config config,
     , routing_operation_owner_(netlink_, netlink_)
     , firewall_state_()
     , url_tester_()
-    , outbound_marks_(active_config_snapshot_->outbound_marks)
     , keenetic_dns_refresh_coordinator_(
           resolver_io_executor_,
           periodic_task_metrics_,
@@ -932,7 +931,8 @@ Daemon::Daemon(Config config,
         .firewall_verify_max_bytes.value_or(static_cast<int64_t>(DEFAULT_FIREWALL_VERIFY_CAPTURE_MAX_BYTES));
     set_firewall_verifier_capture_max_bytes(static_cast<size_t>(verify_max_bytes));
 
-    firewall_state_.set_outbound_marks(outbound_marks_);
+    firewall_state_.set_outbound_marks(
+        active_config_snapshot_->outbound_marks);
     firewall_state_.set_fwmark_mask(fwmark_mask_value(active_config_snapshot_->config.fwmark.value_or(FwmarkConfig{})));
     list_service_.ensure_dir();
     scheduler_ = std::make_unique<Scheduler>(*this);
@@ -7877,8 +7877,6 @@ bool Daemon::publish_prepared_runtime_firewall_config_candidate(
                     transaction->candidate_core_publication;
                 active_config_snapshot_ =
                     transaction->candidate_active_snapshot;
-                outbound_marks_.swap(
-                    transaction->candidate.outbound_marks);
                 swap(active_keenetic_dns_,
                      transaction->candidate.keenetic_dns);
                 firewall_state_.swap_outbound_marks(
@@ -8052,7 +8050,6 @@ bool Daemon::publish_prepared_runtime_firewall_config_candidate(
     } catch (...) {
     }
     try {
-        if (urltest_manager_) urltest_manager_->clear();
         register_urltest_outbounds();
     } catch (...) {
     }
@@ -9192,7 +9189,7 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
             : active_config_snapshot_->config;
         transaction.outbound_marks = config_generation_target
             ? config_generation_target->outbound_marks
-            : outbound_marks_;
+            : active_config_snapshot_->outbound_marks;
         transaction.urltest_selections = lifecycle_config_generation
             ? (runtime_firewall_lifecycle_is_config_candidate(
                        context->lifecycle_kind)
@@ -14981,7 +14978,7 @@ void Daemon::run() {
     const RemoteListsRefreshResult refresh_result =
         list_service_.download_uncached(
             active_config_snapshot_->config,
-            outbound_marks_,
+            active_config_snapshot_->outbound_marks,
             &relevant_lists,
             &dns_relevant_lists,
             refresh_control);

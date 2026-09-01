@@ -122,9 +122,17 @@
   через exact-base `ConfigStore` CAS. При no-op publication store и reader
   получают один и тот же prepared handle; stale/base mismatch не переключает
   reader pin.
-  Отдельный event-loop cursor `outbound_marks_` остаётся следующим
-  дедупликационным cleanup, а не вторым владельцем конфигурации. Новый admission
-  или пользовательский recovery-контур для этого не добавлялся.
+  Отдельный event-loop cursor `Daemon::outbound_marks_` удалён: синхронные
+  потребители читают paired config/marks из одного active snapshot, а async
+  list-refresh удерживает тот же handle до завершения worker. `UrltestManager`
+  атомарно меняет immutable marks generation и владеет aliasing `shared_ptr`
+  точного `ActiveConfigSnapshot`, поэтому старые probes не получают dangling
+  reference и не смешивают поколения. `FirewallState` сохраняет отдельную
+  realized-проекцию marks для диагностики candidate/rollback; это не authority
+  конфигурации. Новый admission или пользовательский recovery-контур для этого
+  не добавлялся.
+- Добавлен узкий `keen-pbr-urltest-manager-tests`, чтобы проверка worker,
+  generation и snapshot lifetime не пересобирала монолитный backend suite.
 - Продолжено P0-1 отделение publication tail от `Daemon` без нового admission,
   recovery-журнала или пользовательских блокировок. Семь разрозненных
   публикаций rules/list/native-VPN/SNAT/Meta сведены в один небросающий core

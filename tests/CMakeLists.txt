@@ -1030,6 +1030,55 @@ target_link_options(test_config_store PRIVATE
 keen_pbr_apply_project_options(test_config_store)
 add_test(NAME test_config_store COMMAND test_config_store)
 
+# Keep UrltestManager's worker/generation/lifetime contract independently
+# runnable. A daemon-header edit must not force the monolithic backend suite
+# to relink merely to prove that an old probe cannot observe a new marks
+# generation.
+add_executable(keen-pbr-urltest-manager-tests
+  test_main.cpp
+  test_urltest_manager.cpp
+  ../src/health/circuit_breaker.cpp
+  ../src/health/url_tester.cpp
+  ../src/http/http_transport.cpp
+  ../src/log/logger.cpp
+  ../src/log/trace.cpp
+  ../src/routing/urltest_manager.cpp
+  ../src/util/blocking_executor.cpp
+  ../src/util/traced_mutex.cpp
+)
+set_target_properties(keen-pbr-urltest-manager-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_include_directories(keen-pbr-urltest-manager-tests PRIVATE
+  ${KEEN_PBR_GENERATED_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+)
+target_compile_definitions(keen-pbr-urltest-manager-tests PRIVATE
+  KEEN_PBR3_TESTING
+)
+target_link_libraries(keen-pbr-urltest-manager-tests PRIVATE
+  nlohmann_json::nlohmann_json
+  fmt::fmt-header-only
+  ${KEEN_PBR_CURL_TARGET}
+  Threads::Threads
+)
+target_compile_options(keen-pbr-urltest-manager-tests PRIVATE
+  -ffunction-sections
+  -fdata-sections
+)
+target_link_options(keen-pbr-urltest-manager-tests PRIVATE
+  -Wl,--gc-sections
+)
+keen_pbr_apply_project_options(keen-pbr-urltest-manager-tests)
+add_test(
+  NAME keen-pbr-urltest-manager-tests
+  COMMAND keen-pbr-urltest-manager-tests
+)
+
 # Keep the allocation-free runtime firewall core publication checkpoint
 # independently buildable. No Daemon, backend, Netlink or scheduler belongs
 # in this target.

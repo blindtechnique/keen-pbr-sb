@@ -516,7 +516,7 @@ Daemon::snapshot_owned_conntrack_marks() const {
     return make_owned_conntrack_cleanup_snapshot(
         runtime_generation_.load(std::memory_order_acquire),
         active_config_snapshot_->config,
-        outbound_marks_,
+        active_config_snapshot_->outbound_marks,
         firewall_state_.get_rules(),
         firewall_state_.get_urltest_selections());
 }
@@ -1057,7 +1057,7 @@ void Daemon::setup_static_routing() {
     }
     const auto plan = plan_routing_state(
         active_config_snapshot_->config,
-        outbound_marks_,
+        active_config_snapshot_->outbound_marks,
         reachability,
         &firewall_state_.get_urltest_selections(),
         ipv6_decision.enabled);
@@ -1085,7 +1085,7 @@ void Daemon::reconcile_static_routing(RouteReconcileMode mode) {
     }
     const auto plan = plan_routing_state(
         active_config_snapshot_->config,
-        outbound_marks_,
+        active_config_snapshot_->outbound_marks,
         reachability,
         &firewall_state_.get_urltest_selections(),
         ipv6_decision.enabled);
@@ -1620,7 +1620,7 @@ void Daemon::apply_firewall(
         }
         return stage_runtime_firewall(
             active_config_snapshot_->config,
-            outbound_marks_,
+            active_config_snapshot_->outbound_marks,
             firewall_state_.get_urltest_selections(),
             list_service_.cache_manager(),
             *firewall_,
@@ -1907,7 +1907,9 @@ void Daemon::normalize_urltest_selections() {
             continue;
         }
         if (urltest_contains_child(outbound, selection->second) &&
-            outbound_marks_.find(selection->second) != outbound_marks_.end()) {
+            active_config_snapshot_->outbound_marks.find(
+                selection->second) !=
+                active_config_snapshot_->outbound_marks.end()) {
             normalized.emplace(selection->first, selection->second);
             continue;
         }
@@ -2183,8 +2185,10 @@ bool Daemon::handle_urltest_selection_change(
             !change.previous_child_tag.empty() &&
             change.previous_child_tag != change.new_child_tag) {
             const auto old_mark_it =
-                outbound_marks_.find(change.previous_child_tag);
-            if (old_mark_it != outbound_marks_.end()) {
+                active_config_snapshot_->outbound_marks.find(
+                    change.previous_child_tag);
+            if (old_mark_it !=
+                active_config_snapshot_->outbound_marks.end()) {
                 retired_mark = old_mark_it->second;
             }
         }
@@ -2330,10 +2334,14 @@ bool Daemon::commit_urltest_probe_results(
 }
 
 void Daemon::register_urltest_outbounds() {
+    const auto active_generation = active_config_snapshot_;
+    const UrltestMarksGenerationHandle marks_generation(
+        active_generation,
+        &active_generation->outbound_marks);
     if (!urltest_manager_) {
         urltest_manager_ = std::make_unique<UrltestManager>(
             url_tester_,
-            outbound_marks_,
+            marks_generation,
             *scheduler_,
             blocking_executor_,
             [this](const UrltestSelectionChange& change) {
@@ -2354,18 +2362,24 @@ void Daemon::register_urltest_outbounds() {
                                                     std::move(results),
                                                     trace_id);
             });
+    } else {
+        urltest_manager_->replace_marks_generation(
+            marks_generation);
     }
 
     UrltestDirectChildInterfaceMap direct_child_interfaces;
     for (const auto& ob :
-         active_config_snapshot_->config.outbounds.value_or(std::vector<Outbound>{})) {
+         active_generation->config.outbounds.value_or(
+             std::vector<Outbound>{})) {
         if (ob.type == OutboundType::INTERFACE && ob.interface.has_value() &&
             !ob.interface->empty()) {
             direct_child_interfaces.emplace(ob.tag, *ob.interface);
         }
     }
 
-    for (const auto& ob : active_config_snapshot_->config.outbounds.value_or(std::vector<Outbound>{})) {
+    for (const auto& ob :
+         active_generation->config.outbounds.value_or(
+             std::vector<Outbound>{})) {
         if (ob.type == OutboundType::URLTEST) {
             const auto& selections =
                 firewall_state_.get_urltest_selections();
@@ -2399,8 +2413,9 @@ void Daemon::probe_interfaces_now() noexcept {
 
 bool Daemon::start_targeted_interface_probe(const std::string& tag) noexcept {
     try {
-        const auto targets =
-            collect_interface_probe_targets(active_config_snapshot_->config, outbound_marks_);
+        const auto generation = active_config_snapshot_;
+        const auto targets = collect_interface_probe_targets(
+            generation->config, generation->outbound_marks);
         const auto found = std::find_if(
             targets.begin(), targets.end(),
             [&tag](const InterfaceProbe::Target& candidate) {
@@ -2441,7 +2456,9 @@ bool Daemon::start_targeted_interface_probe(const std::string& tag) noexcept {
                         try {
                             const auto current_targets =
                                 collect_interface_probe_targets(
-                                    active_config_snapshot_->config, outbound_marks_);
+                                    active_config_snapshot_->config,
+                                    active_config_snapshot_
+                                        ->outbound_marks);
                             // The config may have been reloaded while we were
                             // on the network. Publishing then would attach a
                             // latency measured for one transport to whatever
@@ -2532,8 +2549,9 @@ void Daemon::start_interface_probe_round() noexcept {
 
 void Daemon::start_interface_probe_round_impl(
     bool failure_retry_round) {
+    const auto generation = active_config_snapshot_;
     const auto configured_targets = collect_interface_probe_targets(
-        active_config_snapshot_->config, outbound_marks_);
+        generation->config, generation->outbound_marks);
     const auto expected_runtime_generation =
         runtime_generation_.load(std::memory_order_acquire);
 
@@ -2603,7 +2621,9 @@ void Daemon::start_interface_probe_round_impl(
                             try {
                                 const auto current_targets =
                                     collect_interface_probe_targets(
-                                        active_config_snapshot_->config, outbound_marks_);
+                                        active_config_snapshot_->config,
+                                        active_config_snapshot_
+                                            ->outbound_marks);
                                 if (!interface_probe_target_is_current(
                                         expected_runtime_generation,
                                         runtime_generation_.load(
@@ -2722,7 +2742,9 @@ void Daemon::start_interface_probe_round_impl(
                     try {
                         const auto current_targets =
                             collect_interface_probe_targets(
-                                active_config_snapshot_->config, outbound_marks_);
+                                active_config_snapshot_->config,
+                                active_config_snapshot_
+                                    ->outbound_marks);
                         snapshot_current =
                             interface_probe_snapshot_is_current(
                                 expected_runtime_generation,
@@ -2922,8 +2944,10 @@ void Daemon::schedule_catalog_refresh() {
             uint32_t mark = 0;
             const auto detour = catalog_detour();
             if (!detour.empty()) {
-                const auto it = outbound_marks_.find(detour);
-                if (it != outbound_marks_.end()) {
+                const auto it =
+                    active_config_snapshot_->outbound_marks.find(detour);
+                if (it !=
+                    active_config_snapshot_->outbound_marks.end()) {
                     mark = it->second;
                 }
             }
@@ -2989,16 +3013,12 @@ CacheCommitCallback Daemon::make_guarded_cache_commit_callback() {
 void Daemon::commit_remote_list_refresh_task_result(
     std::string task_id,
     ListRefreshCancellationToken cancellation,
-    Config config_snapshot,
-    bool runtime_active_snapshot,
     std::uint64_t generation,
     bool reload,
     std::optional<RemoteListsRefreshResult> refresh_result,
     std::string error,
     std::string source,
     TraceId trace_id) {
-    (void)config_snapshot;
-    (void)runtime_active_snapshot;
     const bool reschedule = source == "autoupdate" || source == "post-apply";
     const std::string fallback_task_id = task_id;
     const ListRefreshCancellationToken fallback_cancellation = cancellation;
@@ -3615,7 +3635,8 @@ RemoteListRefreshTaskStartResult Daemon::start_remote_list_refresh_task(
                     std::move(*admitted)));
     }
 
-    const Config config_snapshot = active_config_snapshot_->config;
+    const auto active_generation = active_config_snapshot_;
+    const auto& config_snapshot = active_generation->config;
     const auto target_selection =
         select_remote_list_targets(config_snapshot, std::nullopt);
     if (!target_selection.ok()) {
@@ -3656,8 +3677,6 @@ RemoteListRefreshTaskStartResult Daemon::start_remote_list_refresh_task(
     log.info("Lists refresh ({}): checking for updates", source);
     const std::string task_id = started.task.id;
     const ListRefreshCancellationToken cancellation = started.cancellation;
-    const OutboundMarkMap marks_snapshot = outbound_marks_;
-    const bool runtime_active_snapshot = routing_runtime_active();
     const auto relevant_lists = collect_relevant_list_names(config_snapshot);
     const auto dns_relevant_lists = collect_dns_relevant_list_names(config_snapshot);
     const auto generation = runtime_generation_.load(std::memory_order_acquire);
@@ -3669,9 +3688,7 @@ RemoteListRefreshTaskStartResult Daemon::start_remote_list_refresh_task(
         [this,
          task_id,
          cancellation,
-         config_snapshot,
-         marks_snapshot,
-         runtime_active_snapshot,
+         active_generation,
          relevant_lists,
          dns_relevant_lists,
          generation,
@@ -3707,8 +3724,8 @@ RemoteListRefreshTaskStartResult Daemon::start_remote_list_refresh_task(
                 control.cache_commit =
                     make_guarded_cache_commit_callback();
                 refresh_result = list_service_.refresh_remote_lists(
-                    config_snapshot,
-                    marks_snapshot,
+                    active_generation->config,
+                    active_generation->outbound_marks,
                     &relevant_lists,
                     nullptr,
                     &dns_relevant_lists,
@@ -3723,8 +3740,6 @@ RemoteListRefreshTaskStartResult Daemon::start_remote_list_refresh_task(
             commit_remote_list_refresh_task_result(
                 task_id,
                 cancellation,
-                config_snapshot,
-                runtime_active_snapshot,
                 generation,
                 reload,
                 std::move(refresh_result),

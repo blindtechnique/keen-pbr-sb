@@ -940,8 +940,8 @@ private:
     // it was given. Handing it a single target would wipe the health of every
     // other outbound as a side effect of refreshing one row.
     //
-    // Called only on the control loop: target discovery reads the pinned
-    // active ConfigStore snapshot and realized outbound marks. Returns false
+    // Called only on the control loop: target discovery reads paired config
+    // and marks from one pinned active ConfigStore snapshot. Returns false
     // when the tag is unknown, already in
     // flight, or the daemon could not take the work, so the caller can say so
     // instead of showing a spinner for a probe that never started.
@@ -961,8 +961,6 @@ private:
     void commit_remote_list_refresh_task_result(
         std::string task_id,
         ListRefreshCancellationToken cancellation,
-        Config config_snapshot,
-        bool runtime_active_snapshot,
         std::uint64_t generation,
         bool reload,
         std::optional<RemoteListsRefreshResult> refresh_result,
@@ -1427,7 +1425,6 @@ private:
     // Latency for every interface outbound, including native tunnels the
     // firmware owns and standalone outbounds urltest never looks at.
     InterfaceProbe interface_probe_;
-    OutboundMarkMap outbound_marks_;
     // Runtime-only mapping from stable NDMS identities to current kernel
     // ingress names. Persisted configuration remains unchanged.
     std::vector<InternalVpnServer> resolved_internal_vpn_servers_;

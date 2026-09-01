@@ -8,6 +8,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -88,6 +89,15 @@ std::chrono::seconds normalize_interval_seconds(const Outbound& outbound) {
     return interval;
 }
 
+UrltestMarksGenerationHandle require_marks_generation(
+    UrltestMarksGenerationHandle marks_generation) {
+    if (!marks_generation) {
+        throw std::invalid_argument(
+            "urltest marks generation is unavailable");
+    }
+    return marks_generation;
+}
+
 } // namespace
 
 bool should_cleanup_retired_urltest_flows(
@@ -121,17 +131,32 @@ bool should_cleanup_retired_urltest_flows(
 }
 
 UrltestManager::UrltestManager(URLTester& tester,
-                               const OutboundMarkMap& marks,
+                               UrltestMarksGenerationHandle marks_generation,
                                RepeatingTaskScheduler& scheduler,
                                BlockingExecutor& blocking_executor,
                                UrltestChangeCallback on_change,
                                UrltestCommitCallback on_commit)
     : tester_(tester)
-    , marks_(marks)
+    , marks_generation_(
+          require_marks_generation(std::move(marks_generation)))
     , scheduler_(scheduler)
     , blocking_executor_(blocking_executor)
     , on_change_(std::move(on_change))
     , on_commit_(std::move(on_commit)) {}
+
+UrltestManager::UrltestManager(URLTester& tester,
+                               const OutboundMarkMap& marks,
+                               RepeatingTaskScheduler& scheduler,
+                               BlockingExecutor& blocking_executor,
+                               UrltestChangeCallback on_change,
+                               UrltestCommitCallback on_commit)
+    : UrltestManager(
+          tester,
+          std::make_shared<const OutboundMarkMap>(marks),
+          scheduler,
+          blocking_executor,
+          std::move(on_change),
+          std::move(on_commit)) {}
 
 UrltestManager::~UrltestManager() {
     try {
@@ -793,6 +818,26 @@ void UrltestManager::clear() {
         ++generation_;
     }
 
+    cancel_retired_states(std::move(retired_states));
+}
+
+void UrltestManager::replace_marks_generation(
+    UrltestMarksGenerationHandle marks_generation) {
+    auto replacement =
+        require_marks_generation(std::move(marks_generation));
+    std::map<std::string, UrltestState> retired_states;
+    {
+        KPBR_SHARED_UNIQUE_LOCK(lock, mutex_);
+        states_.swap(retired_states);
+        marks_generation_ = std::move(replacement);
+        ++generation_;
+    }
+
+    cancel_retired_states(std::move(retired_states));
+}
+
+void UrltestManager::cancel_retired_states(
+    std::map<std::string, UrltestState> retired_states) noexcept {
     // Scheduler cancellation may synchronously rendezvous with the control
     // loop. Never hold the manager mutex across it: a timer callback already
     // dispatched on that loop may itself be waiting to inspect manager state.
@@ -931,8 +976,9 @@ bool UrltestManager::queue_probe_unlocked(const std::string& tag,
 
         for (const auto& group : state.config.outbound_groups.value_or(std::vector<OutboundGroup>{})) {
             for (const auto& child_tag : group.outbounds) {
-                const auto mark_it = marks_.find(child_tag);
-                if (mark_it == marks_.end()) {
+                const auto mark_it =
+                    marks_generation_->find(child_tag);
+                if (mark_it == marks_generation_->end()) {
                     continue;
                 }
 

@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -22,6 +23,12 @@ class RepeatingTaskScheduler;
 // dynamic leaf and binding them to one interface would change that contract.
 using UrltestDirectChildInterfaceMap =
     std::map<std::string, std::string>;
+// Immutable mark assignment for one complete active configuration
+// generation. Production supplies an aliasing shared_ptr whose control block
+// owns the exact ActiveConfigSnapshot; the routing layer does not need to
+// depend on the daemon's ConfigStore type.
+using UrltestMarksGenerationHandle =
+    std::shared_ptr<const OutboundMarkMap>;
 
 // Per-urltest outbound state: test results, circuit breakers, selected child.
 struct UrltestState {
@@ -110,7 +117,16 @@ using UrltestCommitCallback = std::function<bool(const std::string&,
 // All public methods are thread-safe.
 class UrltestManager {
 public:
-    UrltestManager(URLTester& tester, const OutboundMarkMap& marks,
+    UrltestManager(URLTester& tester,
+                   UrltestMarksGenerationHandle marks_generation,
+                   RepeatingTaskScheduler& scheduler,
+                   BlockingExecutor& blocking_executor,
+                   UrltestChangeCallback on_change,
+                   UrltestCommitCallback on_commit);
+    // Owning-copy convenience for isolated callers and focused tests. Runtime
+    // wiring uses the generation-handle overload above.
+    UrltestManager(URLTester& tester,
+                   const OutboundMarkMap& marks,
                    RepeatingTaskScheduler& scheduler,
                    BlockingExecutor& blocking_executor,
                    UrltestChangeCallback on_change,
@@ -170,6 +186,12 @@ public:
 
     // Cancel all scheduled tasks and unregister all outbounds.
     void clear();
+    // Retire every registered selector and advance to one exact immutable
+    // marks generation under the same manager lock. Already queued workers
+    // retain scalar TestCandidate values and their stale completions are
+    // rejected by the existing generation fence.
+    void replace_marks_generation(
+        UrltestMarksGenerationHandle marks_generation);
 
 private:
     struct ExternalHealthResolution {
@@ -227,8 +249,11 @@ private:
     std::string select_outbound(const std::string& tag) REQUIRES_SHARED(mutex_);
     static std::string select_outbound_from_state(const UrltestState& state);
 
+    void cancel_retired_states(
+        std::map<std::string, UrltestState> retired_states) noexcept;
+
     URLTester& tester_;
-    const OutboundMarkMap& marks_;
+    UrltestMarksGenerationHandle marks_generation_ GUARDED_BY(mutex_);
     RepeatingTaskScheduler& scheduler_;
     BlockingExecutor& blocking_executor_;
     UrltestChangeCallback on_change_;

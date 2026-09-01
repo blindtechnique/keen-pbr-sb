@@ -161,6 +161,31 @@ private:
     std::map<std::uint32_t, std::string> bind_interfaces_;
 };
 
+class MarkCaptureUrltestTransport final : public HttpTransport {
+public:
+    HttpTransportResponse perform(
+        const HttpTransportRequest& request) override {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ++calls_[request.fwmark];
+        }
+        return HttpTransportResponse{
+            .status_code = 204,
+            .elapsed = std::chrono::milliseconds(1),
+        };
+    }
+
+    std::size_t calls(std::uint32_t fwmark) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto found = calls_.find(fwmark);
+        return found != calls_.end() ? found->second : 0U;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::map<std::uint32_t, std::size_t> calls_;
+};
+
 class CoordinatedUrltestTransport final : public HttpTransport {
 public:
     HttpTransportResponse perform(const HttpTransportRequest& request) override {
@@ -685,7 +710,8 @@ TEST_CASE("urltest ignores a probe result from a previous registration") {
 
     manager.register_urltest(make_urltest_outbound());
     auto stale = commits.pop();
-    manager.clear();
+    manager.replace_marks_generation(
+        std::make_shared<const OutboundMarkMap>(marks));
     CHECK(scheduler.cancelled());
 
     manager.register_urltest(make_urltest_outbound());
@@ -1730,7 +1756,8 @@ TEST_CASE("stale worker completion cannot abandon a newer urltest generation") {
     const auto stale_generation =
         manager.get_state("automatic")->generation;
 
-    manager.clear();
+    manager.replace_marks_generation(
+        std::make_shared<const OutboundMarkMap>(marks));
     manager.register_urltest(make_single_candidate_urltest_outbound());
     const auto current_generation =
         manager.get_state("automatic")->generation;
@@ -1744,6 +1771,70 @@ TEST_CASE("stale worker completion cannot abandon a newer urltest generation") {
     CHECK(manager.commit_probe_results(current.tag,
                                        current.generation,
                                        std::move(current.results)));
+}
+
+TEST_CASE(
+    "urltest marks generation owns its alias parent and replaces atomically") {
+    struct MarksOwner {
+        OutboundMarkMap marks;
+    };
+
+    constexpr std::uint32_t old_mark = 0x31000U;
+    constexpr std::uint32_t new_mark = 0x41000U;
+    auto old_owner = std::make_shared<MarksOwner>();
+    old_owner->marks = {{"primary", old_mark}};
+    std::weak_ptr<MarksOwner> old_lifetime = old_owner;
+    UrltestMarksGenerationHandle old_generation(
+        old_owner, &old_owner->marks);
+
+    auto transport = std::make_shared<MarkCaptureUrltestTransport>();
+    URLTester tester(transport);
+    FakeRepeatingScheduler scheduler;
+    BlockingExecutor executor(1, 8);
+    CommitQueue commits;
+    UrltestManager manager(
+        tester,
+        old_generation,
+        scheduler,
+        executor,
+        [](const UrltestSelectionChange&) { return true; },
+        [&commits](const std::string& tag,
+                   std::uint64_t generation,
+                   std::map<std::string, URLTestResult> results,
+                   TraceId) {
+            commits.push(tag, generation, std::move(results));
+            return true;
+        });
+
+    old_generation.reset();
+    old_owner.reset();
+    CHECK_FALSE(old_lifetime.expired());
+
+    manager.register_urltest(
+        make_single_candidate_urltest_outbound());
+    auto old_commit = commits.pop();
+    CHECK(transport->calls(old_mark) == 1U);
+    CHECK(manager.commit_probe_results(
+        old_commit.tag,
+        old_commit.generation,
+        std::move(old_commit.results)));
+
+    auto new_owner = std::make_shared<MarksOwner>();
+    new_owner->marks = {{"primary", new_mark}};
+    UrltestMarksGenerationHandle new_generation(
+        new_owner, &new_owner->marks);
+    manager.replace_marks_generation(new_generation);
+    CHECK(old_lifetime.expired());
+
+    manager.register_urltest(
+        make_single_candidate_urltest_outbound());
+    auto new_commit = commits.pop();
+    CHECK(transport->calls(old_mark) == 1U);
+    CHECK(transport->calls(new_mark) == 1U);
+    CHECK(manager.commit_probe_results(
+        new_commit.tag,
+        new_commit.generation,
+        std::move(new_commit.results)));
 }
 
 TEST_CASE("retired-flow cleanup defaults to failure-only") {
