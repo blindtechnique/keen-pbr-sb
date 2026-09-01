@@ -847,6 +847,163 @@ TEST_CASE("runtime routing transaction retains an after-effect route as partial 
         RuntimeRoutingJournalReceipt::effect_unknown);
 }
 
+TEST_CASE(
+    "runtime routing transaction rolls back an observed after-effect rule add") {
+    ScriptedRoutingNetlink netlink;
+    const auto route = transaction_route(151U);
+    const auto rule = transaction_rule(151U);
+    netlink.rule_add_fault_priority = rule.priority;
+    netlink.rule_add_fault = FaultTiming::after_effect;
+
+    const auto result = run_transaction(
+        transaction_request({route}, {rule}), netlink);
+
+    CHECK(result.terminal == RuntimeRoutingTerminal::candidate_rolled_back);
+    CHECK(result.mutation_started);
+    CHECK(netlink.events == std::vector<std::string>{
+        "route:add:151",
+        "rule:add:151",
+        "rule:delete:151",
+        "route:delete:151"});
+    CHECK_FALSE(netlink.has_route(route));
+    CHECK_FALSE(netlink.has_exact_rule(rule));
+    REQUIRE(static_cast<bool>(result.published_journal));
+    const auto add_entry = std::find_if(
+        result.published_journal->entries.begin(),
+        result.published_journal->entries.end(),
+        [](const RuntimeRoutingJournalEntry& entry) {
+            return entry.operation ==
+                RuntimeRoutingJournalOperation::add_candidate_rule;
+        });
+    REQUIRE(add_entry != result.published_journal->entries.end());
+    CHECK(add_entry->state == RuntimeRoutingJournalState::completed);
+    CHECK(add_entry->receipt == RuntimeRoutingJournalReceipt::created);
+    const auto rollback_entry = std::find_if(
+        result.published_journal->entries.begin(),
+        result.published_journal->entries.end(),
+        [](const RuntimeRoutingJournalEntry& entry) {
+            return entry.operation ==
+                RuntimeRoutingJournalOperation::rollback_created_rule;
+        });
+    REQUIRE(rollback_entry != result.published_journal->entries.end());
+    CHECK(rollback_entry->state == RuntimeRoutingJournalState::rolled_back);
+    CHECK(
+        rollback_entry->receipt ==
+        RuntimeRoutingJournalReceipt::deleted_or_absent);
+}
+
+TEST_CASE(
+    "runtime routing transaction rolls back only the observed rule for an external table") {
+    ScriptedRoutingNetlink netlink;
+    auto external_route = transaction_route(170U);
+    external_route.protocol = 4U;
+    const auto rule = transaction_rule(170U);
+    netlink.seed_route(external_route, 4U);
+    netlink.rule_add_fault_priority = rule.priority;
+    netlink.rule_add_fault = FaultTiming::after_effect;
+    auto request = transaction_request({}, {rule});
+    request.authorized_external_tables.push_back({170U, AF_INET});
+
+    const auto result = run_transaction(request, netlink);
+
+    CHECK(result.terminal == RuntimeRoutingTerminal::candidate_rolled_back);
+    CHECK(result.mutation_started);
+    CHECK(netlink.events == std::vector<std::string>{
+        "rule:add:170", "rule:delete:170"});
+    CHECK_FALSE(netlink.has_exact_rule(rule));
+    CHECK(netlink.has_route(external_route));
+}
+
+TEST_CASE(
+    "runtime routing transaction retains an observed rule when exact rollback loses its precondition") {
+    ScriptedRoutingNetlink netlink;
+    const auto route = transaction_route(151U);
+    const auto rule = transaction_rule(151U);
+    netlink.rule_add_fault_priority = rule.priority;
+    netlink.rule_add_fault = FaultTiming::after_effect;
+    netlink.before_exact_rule_delete =
+        [&](const RuleSpec& candidate, int family) {
+            for (auto& live : netlink.rules) {
+                if (live.priority == candidate.priority &&
+                    live.fwmark == candidate.fwmark &&
+                    live.fwmask == candidate.fwmask &&
+                    live.table == candidate.table &&
+                    live.family == family) {
+                    live.exact_identity_representable = false;
+                }
+            }
+        };
+
+    const auto result = run_transaction(
+        transaction_request({route}, {rule}), netlink);
+
+    CHECK(result.terminal == RuntimeRoutingTerminal::partial_unknown);
+    CHECK(netlink.events == std::vector<std::string>{
+        "route:add:151", "rule:add:151", "rule:delete:151"});
+    CHECK(netlink.has_route(route));
+    REQUIRE(netlink.rules.size() == 1U);
+    CHECK_FALSE(netlink.rules.front().exact_identity_representable);
+    REQUIRE(static_cast<bool>(result.published_journal));
+    const auto add_entry = std::find_if(
+        result.published_journal->entries.begin(),
+        result.published_journal->entries.end(),
+        [](const RuntimeRoutingJournalEntry& entry) {
+            return entry.operation ==
+                RuntimeRoutingJournalOperation::add_candidate_rule;
+        });
+    REQUIRE(add_entry != result.published_journal->entries.end());
+    CHECK(add_entry->state == RuntimeRoutingJournalState::completed);
+    CHECK(add_entry->receipt == RuntimeRoutingJournalReceipt::created);
+    const auto rollback_entry = std::find_if(
+        result.published_journal->entries.begin(),
+        result.published_journal->entries.end(),
+        [](const RuntimeRoutingJournalEntry& entry) {
+            return entry.operation ==
+                RuntimeRoutingJournalOperation::rollback_created_rule;
+        });
+    REQUIRE(rollback_entry != result.published_journal->entries.end());
+    CHECK(rollback_entry->state == RuntimeRoutingJournalState::unknown);
+    CHECK(
+        rollback_entry->receipt ==
+        RuntimeRoutingJournalReceipt::precondition_mismatch);
+}
+
+TEST_CASE(
+    "runtime routing transaction never claims a rule before its add starts") {
+    ScriptedRoutingNetlink netlink;
+    const auto route = transaction_route(151U);
+    const auto rule = transaction_rule(151U);
+    std::size_t route_dumps = 0U;
+    netlink.before_dump_routes = [&](int) {
+        ++route_dumps;
+        if (route_dumps != 2U) return;
+        netlink.seed_rule(rule);
+        throw std::runtime_error("rule dependency dump failed");
+    };
+
+    const auto result = run_transaction(
+        transaction_request({route}, {rule}), netlink);
+
+    CHECK(result.terminal == RuntimeRoutingTerminal::partial_unknown);
+    CHECK(result.mutation_started);
+    CHECK(netlink.events == std::vector<std::string>{"route:add:151"});
+    CHECK(netlink.has_route(route));
+    CHECK(netlink.has_exact_rule(rule));
+    REQUIRE(static_cast<bool>(result.published_journal));
+    const auto add_entry = std::find_if(
+        result.published_journal->entries.begin(),
+        result.published_journal->entries.end(),
+        [](const RuntimeRoutingJournalEntry& entry) {
+            return entry.operation ==
+                RuntimeRoutingJournalOperation::add_candidate_rule;
+        });
+    REQUIRE(add_entry != result.published_journal->entries.end());
+    CHECK(add_entry->state == RuntimeRoutingJournalState::unknown);
+    CHECK(
+        add_entry->receipt ==
+        RuntimeRoutingJournalReceipt::effect_unknown);
+}
+
 TEST_CASE("runtime routing transaction never deletes an old same-slot replacement image") {
     ScriptedRoutingNetlink netlink;
     const auto previous = transaction_route(160U);

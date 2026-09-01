@@ -160,6 +160,9 @@ public:
             });
         if (present) return RuleAddResult::AlreadyPresent;
         rules.push_back(to_live(spec, family));
+        if (fail_rule_add_after_effect) {
+            throw std::runtime_error("rule add failed after effect");
+        }
         return RuleAddResult::Created;
     }
 
@@ -208,6 +211,7 @@ public:
     std::function<void()> before_write;
     bool fail_route_add_after_effect{false};
     bool fail_rule_add_before_effect{false};
+    bool fail_rule_add_after_effect{false};
     bool force_route_delete_precondition{false};
     bool force_rule_delete_precondition{false};
     std::size_t broad_route_deletes{0U};
@@ -586,6 +590,51 @@ TEST_CASE("exact routing owner makes an ambiguous effect non-authoritative") {
     REQUIRE(netlink.rules.size() == 1U);
     CHECK(netlink.routes.front().table == 151U);
     CHECK(netlink.rules.front().table == 151U);
+}
+
+TEST_CASE(
+    "exact routing owner retains observed rule ownership until exact recovery") {
+    ExactOwnerNetlink netlink;
+    netlink.fail_rule_add_after_effect = true;
+    netlink.force_rule_delete_precondition = true;
+    RuntimeRoutingOperationOwner owner(netlink, netlink);
+    const auto request = exact_owner_request(1U, 101U, 1U, 11U, 151U);
+
+    const auto result = run_exact(owner, request, 0U);
+
+    CHECK(
+        result.outcome ==
+        RuntimeRoutingOperationOutcome::exact_partial_unknown);
+    REQUIRE(static_cast<bool>(result.inventory));
+    CHECK(
+        classify_runtime_routing_inventory(result.inventory) !=
+        RuntimeRoutingInventoryAuthority::authoritative);
+    REQUIRE(netlink.rules.size() == 1U);
+    REQUIRE(netlink.routes.size() == 1U);
+    CHECK(netlink.broad_rule_deletes == 0U);
+    CHECK(netlink.broad_route_deletes == 0U);
+
+    netlink.fail_rule_add_after_effect = false;
+    netlink.force_rule_delete_precondition = false;
+    netlink.events.clear();
+    (void)owner.clear();
+
+    CHECK(netlink.rules.empty());
+    CHECK(netlink.routes.empty());
+    CHECK(netlink.broad_rule_deletes == 0U);
+    CHECK(netlink.broad_route_deletes == 0U);
+    CHECK(std::any_of(
+        netlink.events.begin(),
+        netlink.events.end(),
+        [](const std::string& event) {
+            return event.find("rule:delete:") == 0U;
+        }));
+    CHECK(std::any_of(
+        netlink.events.begin(),
+        netlink.events.end(),
+        [](const std::string& event) {
+            return event.find("route:delete:") == 0U;
+        }));
 }
 
 TEST_CASE("exact routing owner does not publish desired state while cleanup is pending") {

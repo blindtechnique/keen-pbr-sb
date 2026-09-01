@@ -1270,6 +1270,7 @@ RuntimeRoutingTransactionResult execute_runtime_routing_transaction(
 
     for (auto& mutation : plan.rules) {
         auto& entry = journal(plan)[mutation.forward_journal];
+        bool add_started = false;
         try {
             const auto current_routes = route_netlink.dump_routes(
                 mutation.candidate.family);
@@ -1306,6 +1307,7 @@ RuntimeRoutingTransactionResult execute_runtime_routing_transaction(
                     "routing fence changed before rule creation");
             }
             enter_mutation();
+            add_started = true;
             const auto receipt = rule_netlink.add_rule_for_family(
                 mutation.candidate, mutation.candidate.family);
             mutation.created_receipt = receipt == RuleAddResult::Created;
@@ -1319,8 +1321,9 @@ RuntimeRoutingTransactionResult execute_runtime_routing_transaction(
             try {
                 const auto live = rule_netlink.dump_policy_rules(
                     mutation.candidate.family);
-                if (exact_rule_state(mutation.candidate, live) ==
-                    ExactSlotState::empty) {
+                const auto observed_state = exact_rule_state(
+                    mutation.candidate, live);
+                if (observed_state == ExactSlotState::empty) {
                     entry.state = RuntimeRoutingJournalState::failed;
                     entry.receipt =
                         RuntimeRoutingJournalReceipt::deleted_or_absent;
@@ -1328,6 +1331,28 @@ RuntimeRoutingTransactionResult execute_runtime_routing_transaction(
                         RuntimeRoutingFailureStage::candidate_rule,
                         false,
                         "candidate rule mutation failed");
+                }
+                if (add_started &&
+                    observed_state == ExactSlotState::exact_single) {
+                    // Planning and the immediate pre-write dump both proved
+                    // this exact identity absent. Under the still-held
+                    // combined writer lease, the composite policy-rule
+                    // identity (family/table/mark/mask/priority) is reserved
+                    // to keen-pbr. This claims only the exact rule, not the
+                    // contents of an externally authorized route table. The
+                    // sole exact image observed after the entered add is
+                    // therefore this call's effect even when rtnetlink did
+                    // not return its receipt.
+                    // Promote it to owned Created evidence so the normal
+                    // exact rollback can remove it without a broad delete.
+                    mutation.created_receipt = true;
+                    entry.state = RuntimeRoutingJournalState::completed;
+                    entry.receipt =
+                        RuntimeRoutingJournalReceipt::created;
+                    return fail_candidate(
+                        RuntimeRoutingFailureStage::candidate_rule,
+                        false,
+                        "candidate rule mutation completed with an observed service-owned effect");
                 }
             } catch (...) {
             }
