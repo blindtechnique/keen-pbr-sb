@@ -164,6 +164,7 @@ add_executable(keen-pbr-tests
   test_conntrack_event_monitor.cpp
   test_conntrack_manager.cpp
   test_idle_stall_detector.cpp
+  test_idle_stall_supervisor.cpp
   test_udp_call_affinity.cpp
   test_interface_traffic_cadence.cpp
   test_interface_traffic_sampler.cpp
@@ -242,6 +243,7 @@ add_executable(keen-pbr-tests
   ../src/api/router_info_cache.cpp
   ../src/daemon/daemon_core.cpp
   ../src/daemon/conntrack_cleanup_coordinator.cpp
+  ../src/daemon/idle_stall_supervisor.cpp
   ../src/daemon/daemon_runtime.cpp
   ../src/daemon/daemon_tunnel_probe.cpp
   ../src/daemon/daemon_resolver.cpp
@@ -809,6 +811,40 @@ keen_pbr_apply_project_options(
 add_test(
   NAME keen-pbr-conntrack-cleanup-coordinator-tests
   COMMAND keen-pbr-conntrack-cleanup-coordinator-tests
+)
+
+# Keep idle forwarded-flow cadence, scope identity and single-flight ownership
+# independently buildable. Conntrack observation and physical mutation remain
+# in Daemon and the existing typed runtime firewall owner.
+add_executable(keen-pbr-idle-stall-supervisor-tests
+  test_main.cpp
+  test_idle_stall_detector.cpp
+  test_idle_stall_supervisor.cpp
+  ../src/daemon/idle_stall_supervisor.cpp
+)
+set_target_properties(keen-pbr-idle-stall-supervisor-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_include_directories(
+  keen-pbr-idle-stall-supervisor-tests PRIVATE
+  ${KEEN_PBR_GENERATED_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+)
+target_link_libraries(
+  keen-pbr-idle-stall-supervisor-tests PRIVATE
+  nlohmann_json::nlohmann_json
+  fmt::fmt-header-only
+  Threads::Threads
+)
+keen_pbr_apply_project_options(
+  keen-pbr-idle-stall-supervisor-tests)
+add_test(
+  NAME keen-pbr-idle-stall-supervisor-tests
+  COMMAND keen-pbr-idle-stall-supervisor-tests
 )
 
 # Keep the package-rescue suite independently buildable. It intentionally has

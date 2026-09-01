@@ -24,6 +24,7 @@
 #include "config_store.hpp"
 #include "config_reload_coordinator.hpp"
 #include "conntrack_cleanup_coordinator.hpp"
+#include "idle_stall_supervisor.hpp"
 #include "internal_vpn_resolution_cache.hpp"
 #include "internal_vpn_runtime_resolution.hpp"
 #include "keenetic_dns_refresh_coordinator.hpp"
@@ -50,8 +51,6 @@
 #include "../runtime/meta_udp_443_activation_plan.hpp"
 #include "../runtime/periodic_task_metrics.hpp"
 #include "../runtime/conntrack_manager.hpp"
-#include "../runtime/idle_stall_detector.hpp"
-#include "../runtime/udp_call_affinity.hpp"
 #include "../runtime/interface_traffic_cadence.hpp"
 #include "../runtime/interface_traffic_sampler.hpp"
 #include "../runtime/interface_uptime_anchor.hpp"
@@ -754,7 +753,6 @@ private:
         const FirewallExactTcpResetRule& rule) noexcept;
     void resume_exact_tcp_reset_cleanups() noexcept;
     void fence_exact_tcp_reset_cleanups_for_stop() noexcept;
-    bool drain_exact_tcp_reset_cleanups_before_generation_change() noexcept;
     void clear_exact_tcp_reset_cleanup_ownership() noexcept;
     void run_idle_stall_observer() noexcept;
     void commit_idle_stall_observation(
@@ -1189,18 +1187,10 @@ private:
     // Retry task for interface monitor netlink reconnect after failure.
     int interface_monitor_reconnect_task_id_{-1};
     // Bounded one-shot observer for a client reusing a long-idle forwarded
-    // flow which no longer receives replies. It is armed only for explicitly
-    // selected strong-reconnect lists and never performs a broad conntrack
-    // flush. All detector state belongs to the control/event-loop thread.
-    int idle_stall_observer_task_id_{-1};
-    IdleStallDetector idle_stall_detector_;
-    UdpCallAffinityDetector udp_call_affinity_detector_;
-    std::vector<std::string> idle_stall_destination_selectors_;
-    std::vector<std::string> udp_call_affinity_destination_selectors_;
-    std::optional<std::uint32_t> idle_stall_preventive_owned_mark_;
-    bool idle_stall_packaged_whatsapp_only_observation_{false};
-    std::atomic<bool> idle_stall_observer_enabled_{false};
-    std::atomic<bool> idle_stall_observer_inflight_{false};
+    // flow which no longer receives replies. Eligibility and physical I/O
+    // remain in Daemon; cadence, detector state and scope identity have one
+    // control-loop owner.
+    IdleStallSupervisor idle_stall_supervisor_;
     // Serializes the worker's live pair/conntrack mutation with every
     // firewall apply or cleanup lifecycle boundary. Generation fences decide
     // whether queued work is still eligible after acquiring this barrier.
@@ -1208,7 +1198,6 @@ private:
     // Every bounded observer/maintenance mutation receives one immutable
     // identity before it enters the shared firewall owner.
     std::uint64_t background_point_mutation_serial_{0U};
-    std::atomic<std::uint64_t> idle_stall_coverage_generation_{1};
     // Every published exact reset owns a generation- and rule-fenced timer.
     // A transient removal failure is retried without allowing an older timer
     // to retire a later window for the same five-tuple.

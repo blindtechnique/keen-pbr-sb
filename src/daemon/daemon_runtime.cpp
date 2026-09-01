@@ -254,29 +254,6 @@ bool same_forwarded_five_tuple(
            left.destination_port == right.destination_port;
 }
 
-class AtomicFlagResetGuard {
-public:
-    explicit AtomicFlagResetGuard(std::atomic<bool>& flag) noexcept
-        : flag_(flag) {}
-
-    ~AtomicFlagResetGuard() {
-        if (armed_) {
-            flag_.store(false, std::memory_order_release);
-        }
-    }
-
-    AtomicFlagResetGuard(const AtomicFlagResetGuard&) = delete;
-    AtomicFlagResetGuard& operator=(const AtomicFlagResetGuard&) = delete;
-
-    void release() noexcept {
-        armed_ = false;
-    }
-
-private:
-    std::atomic<bool>& flag_;
-    bool armed_{true};
-};
-
 bool urltest_contains_child(const Outbound& urltest,
                             const std::string& child_tag) {
     for (const auto& group :
@@ -4329,74 +4306,16 @@ void Daemon::resume_deferred_keenetic_dns_refresh() noexcept {
 }
 
 void Daemon::cancel_idle_stall_observer() noexcept {
-    idle_stall_observer_enabled_.store(false, std::memory_order_release);
-    try {
-        if (scheduler_ && idle_stall_observer_task_id_ >= 0) {
-            scheduler_->cancel(idle_stall_observer_task_id_);
-        }
-    } catch (...) {
-    }
-    idle_stall_observer_task_id_ = -1;
-    idle_stall_detector_.reset();
-    udp_call_affinity_detector_.reset();
-    idle_stall_destination_selectors_.clear();
-    udp_call_affinity_destination_selectors_.clear();
-    idle_stall_preventive_owned_mark_.reset();
-    idle_stall_packaged_whatsapp_only_observation_ = false;
-    idle_stall_coverage_generation_.fetch_add(
-        1U, std::memory_order_acq_rel);
+    idle_stall_supervisor_.cancel();
 }
 
 void Daemon::schedule_idle_stall_observer_after(
     std::chrono::seconds delay) noexcept {
     try {
-        if (!scheduler_ ||
-            !idle_stall_observer_enabled_.load(
-                std::memory_order_acquire) ||
-            !routing_runtime_active()) {
-            return;
-        }
-        if (idle_stall_observer_task_id_ >= 0) {
-            scheduler_->cancel(idle_stall_observer_task_id_);
-            idle_stall_observer_task_id_ = -1;
-        }
-        idle_stall_observer_task_id_ = scheduler_->schedule_oneshot(
-            std::chrono::duration_cast<std::chrono::milliseconds>(delay),
-            [this]() {
-                idle_stall_observer_task_id_ = -1;
-                run_idle_stall_observer();
-            },
-            "idle-stall-observer");
-    } catch (const std::exception& error) {
-        idle_stall_observer_task_id_ = -1;
-        idle_stall_observer_enabled_.store(
-            false, std::memory_order_release);
-        idle_stall_detector_.reset();
-        udp_call_affinity_detector_.reset();
-        idle_stall_destination_selectors_.clear();
-        udp_call_affinity_destination_selectors_.clear();
-        idle_stall_preventive_owned_mark_.reset();
-        idle_stall_packaged_whatsapp_only_observation_ = false;
-        idle_stall_coverage_generation_.fetch_add(
-            1U, std::memory_order_acq_rel);
-        try {
-            Logger::instance().info(
-                "Idle forwarded-flow observer was not scheduled: {}",
-                error.what());
-        } catch (...) {
-        }
+        idle_stall_supervisor_.schedule_after(
+            delay, routing_runtime_active());
     } catch (...) {
-        idle_stall_observer_task_id_ = -1;
-        idle_stall_observer_enabled_.store(
-            false, std::memory_order_release);
-        idle_stall_detector_.reset();
-        udp_call_affinity_detector_.reset();
-        idle_stall_destination_selectors_.clear();
-        udp_call_affinity_destination_selectors_.clear();
-        idle_stall_preventive_owned_mark_.reset();
-        idle_stall_packaged_whatsapp_only_observation_ = false;
-        idle_stall_coverage_generation_.fetch_add(
-            1U, std::memory_order_acq_rel);
+        idle_stall_supervisor_.cancel();
     }
 }
 
@@ -4723,7 +4642,8 @@ bool Daemon::begin_idle_stall_exact_tcp_reset_point(
                     // observer/generation drain can resume its cleanup.
                 }
                 try {
-                    idle_stall_detector_.acknowledge_delete_result(
+                    idle_stall_supervisor_.idle_detector().
+                        acknowledge_delete_result(
                         decision,
                         succeeded,
                         IdleStallDetector::Clock::now());
@@ -4736,16 +4656,14 @@ bool Daemon::begin_idle_stall_exact_tcp_reset_point(
                             RuntimeFirewallLifecycleOutcome::shutdown &&
                         running_.load(std::memory_order_acquire) &&
                         routing_runtime_active() &&
-                        idle_stall_observer_enabled_.load(
-                            std::memory_order_acquire) &&
+                        idle_stall_supervisor_.enabled() &&
                         runtime_generation_.load(
                             std::memory_order_acquire) ==
                             expected_runtime_generation &&
-                        idle_stall_coverage_generation_.load(
-                            std::memory_order_acquire) ==
-                            expected_coverage_generation) {
+                        idle_stall_supervisor_.current_coverage(
+                            expected_coverage_generation)) {
                         const auto fast_followup =
-                            idle_stall_detector_.
+                            idle_stall_supervisor_.idle_detector().
                                 take_whatsapp_fast_followup_delay();
                         schedule_idle_stall_observer_after(
                             fast_followup.value_or(
@@ -4830,14 +4748,12 @@ bool Daemon::begin_idle_stall_exact_cleanup_point(
                             RuntimeFirewallLifecycleOutcome::shutdown &&
                         running_.load(std::memory_order_acquire) &&
                         routing_runtime_active() &&
-                        idle_stall_observer_enabled_.load(
-                            std::memory_order_acquire) &&
+                        idle_stall_supervisor_.enabled() &&
                         runtime_generation_.load(
                             std::memory_order_acquire) ==
                             expected_runtime_generation &&
-                        idle_stall_coverage_generation_.load(
-                            std::memory_order_acquire) ==
-                            expected_coverage_generation;
+                        idle_stall_supervisor_.current_coverage(
+                            expected_coverage_generation);
                 } catch (...) {}
                 const bool typed =
                     lease_returned &&
@@ -4858,7 +4774,8 @@ bool Daemon::begin_idle_stall_exact_cleanup_point(
                         const IdleStallDeleteDecision& decision,
                         bool success) noexcept {
                         try {
-                            idle_stall_detector_.acknowledge_delete_result(
+                            idle_stall_supervisor_.idle_detector().
+                                acknowledge_delete_result(
                                 decision, success,
                                 IdleStallDetector::Clock::now());
                             acknowledged.insert(decision.attempt_id);
@@ -4909,7 +4826,7 @@ bool Daemon::begin_idle_stall_exact_cleanup_point(
                                 recovered_or_replaced);
                         }
                         const auto fast_followup =
-                            idle_stall_detector_.
+                            idle_stall_supervisor_.idle_detector().
                                 take_whatsapp_fast_followup_delay();
                         schedule_idle_stall_observer_after(
                             fast_followup.value_or(
@@ -4925,18 +4842,6 @@ bool Daemon::begin_idle_stall_exact_cleanup_point(
         lease.reset();
     } catch (...) {}
     return false;
-}
-
-bool Daemon::drain_exact_tcp_reset_cleanups_before_generation_change()
-    noexcept {
-    // This caller already owns the generation mutation lease. It must not
-    // bypass the point owner with a direct firewall write, and it cannot
-    // acquire a second physical writer. Fence exact timers and reject this
-    // generation change until their typed cleanup has completed.
-    if (!pending_exact_tcp_reset_cleanups_.empty()) {
-        fence_exact_tcp_reset_cleanups_for_stop();
-    }
-    return pending_exact_tcp_reset_cleanups_.empty();
 }
 
 void Daemon::clear_exact_tcp_reset_cleanup_ownership() noexcept {
@@ -5116,22 +5021,25 @@ void Daemon::run_exact_tcp_reset_cleanup(
 
 void Daemon::reset_idle_stall_observer(
     bool schedule_if_eligible) noexcept {
-    cancel_idle_stall_observer();
-    if (!schedule_if_eligible || !routing_runtime_active() ||
-        !idle_stall_observer_requested(active_config_snapshot_->config)) {
-        return;
+    try {
+        const bool enable =
+            schedule_if_eligible &&
+            routing_runtime_active() &&
+            idle_stall_observer_requested(
+                active_config_snapshot_->config);
+        // The first short observation only establishes whether relevant
+        // flows exist. Subsequent empty scans back off to 30 seconds.
+        idle_stall_supervisor_.reset(
+            enable, IDLE_STALL_ACTIVE_SCAN_INTERVAL);
+    } catch (...) {
+        idle_stall_supervisor_.cancel();
     }
-    idle_stall_observer_enabled_.store(true, std::memory_order_release);
-    // The first short observation only establishes whether relevant flows
-    // exist. Subsequent empty scans back off to the 30-second quiet interval.
-    schedule_idle_stall_observer_after(IDLE_STALL_ACTIVE_SCAN_INTERVAL);
 }
 
 void Daemon::run_idle_stall_observer() noexcept {
     try {
         if (!routing_runtime_active() ||
-            !idle_stall_observer_enabled_.load(
-                std::memory_order_acquire) ||
+            !idle_stall_supervisor_.enabled() ||
             !idle_stall_observer_requested(active_config_snapshot_->config)) {
             cancel_idle_stall_observer();
             return;
@@ -5231,12 +5139,7 @@ void Daemon::run_idle_stall_observer() noexcept {
             !runtime_recovery_detail::contains_global_destination_selector(
                 coverage);
         if (!coverage_complete) {
-            idle_stall_detector_.reset();
-            udp_call_affinity_detector_.reset();
-            idle_stall_destination_selectors_.clear();
-            udp_call_affinity_destination_selectors_.clear();
-            idle_stall_coverage_generation_.fetch_add(
-                1U, std::memory_order_acq_rel);
+            idle_stall_supervisor_.invalidate_incomplete_scope();
             schedule_idle_stall_observer_after(
                 IDLE_STALL_QUIET_SCAN_INTERVAL);
             return;
@@ -5273,7 +5176,7 @@ void Daemon::run_idle_stall_observer() noexcept {
                 call_affinity_targets.clear();
                 trusted_whatsapp_marks.clear();
                 whatsapp_destination_selectors.clear();
-                udp_call_affinity_detector_.reset();
+                idle_stall_supervisor_.reset_affinity_detector();
             }
         }
         const auto owned_mask = firewall_state_.get_fwmark_mask();
@@ -5291,50 +5194,33 @@ void Daemon::run_idle_stall_observer() noexcept {
             ? std::optional<std::uint32_t>{
                   *trusted_whatsapp_marks.begin()}
             : std::nullopt;
-        const bool idle_observation_scope_changed =
-            destination_selectors != idle_stall_destination_selectors_ ||
-            whatsapp_destination_selectors !=
-                udp_call_affinity_destination_selectors_ ||
-            preventive_owned_mark != idle_stall_preventive_owned_mark_ ||
-            packaged_whatsapp_only_observation !=
-                idle_stall_packaged_whatsapp_only_observation_;
-        if (idle_observation_scope_changed) {
-            idle_stall_detector_.reset();
-            udp_call_affinity_detector_.reset();
-            idle_stall_destination_selectors_ = destination_selectors;
-            udp_call_affinity_destination_selectors_ =
-                whatsapp_destination_selectors;
-            idle_stall_preventive_owned_mark_ = preventive_owned_mark;
-            idle_stall_packaged_whatsapp_only_observation_ =
-                packaged_whatsapp_only_observation;
-            idle_stall_coverage_generation_.fetch_add(
-                1U, std::memory_order_acq_rel);
-        }
+        idle_stall_supervisor_.update_observation_scope(
+            destination_selectors,
+            whatsapp_destination_selectors,
+            preventive_owned_mark,
+            packaged_whatsapp_only_observation);
         const auto affinity_snapshot_time =
             UdpCallAffinityDetector::Clock::now();
         const auto retained_affinity_sources =
             call_affinity_targets.empty()
             ? std::vector<std::string>{}
-            : udp_call_affinity_detector_.retained_guard_sources(
+            : idle_stall_supervisor_.affinity_detector().
+                  retained_guard_sources(
                   affinity_snapshot_time);
         const auto runtime_generation =
             runtime_generation_.load(std::memory_order_acquire);
         const auto coverage_generation =
-            idle_stall_coverage_generation_.load(
-                std::memory_order_acquire);
+            idle_stall_supervisor_.coverage_generation();
         const bool ipv6_enabled = resolve_ipv6_support(active_config_snapshot_->config).enabled;
         if (runtime_generation == 0U || coverage_generation == 0U ||
             owned_mask == 0U) {
-            idle_stall_detector_.reset();
-            udp_call_affinity_detector_.reset();
+            idle_stall_supervisor_.reset_detectors();
             schedule_idle_stall_observer_after(
                 IDLE_STALL_QUIET_SCAN_INTERVAL);
             return;
         }
 
-        bool expected = false;
-        if (!idle_stall_observer_inflight_.compare_exchange_strong(
-                expected, true, std::memory_order_acq_rel)) {
+        if (!idle_stall_supervisor_.try_begin_inflight()) {
             schedule_idle_stall_observer_after(
                 IDLE_STALL_ACTIVE_SCAN_INTERVAL);
             return;
@@ -5357,8 +5243,8 @@ void Daemon::run_idle_stall_observer() noexcept {
              whatsapp_destination_selectors,
              destination_selectors =
                  std::move(destination_selectors)]() mutable {
-                AtomicFlagResetGuard inflight_guard(
-                    idle_stall_observer_inflight_);
+                auto inflight_guard =
+                    idle_stall_supervisor_.adopt_inflight();
                 ConntrackFlowObservation observation;
                 std::vector<std::string> local_interface_addresses;
                 std::string failure_detail;
@@ -5366,14 +5252,12 @@ void Daemon::run_idle_stall_observer() noexcept {
                 const auto generation_is_current = [this,
                                                      runtime_generation,
                                                      coverage_generation]() {
-                    return idle_stall_observer_enabled_.load(
-                               std::memory_order_acquire) &&
+                    return idle_stall_supervisor_.enabled() &&
                            runtime_generation_.load(
                                std::memory_order_acquire) ==
                                runtime_generation &&
-                           idle_stall_coverage_generation_.load(
-                               std::memory_order_acquire) ==
-                               coverage_generation;
+                           idle_stall_supervisor_.current_coverage(
+                               coverage_generation);
                 };
 
                 try {
@@ -5443,10 +5327,8 @@ void Daemon::run_idle_stall_observer() noexcept {
                                 coverage_complete,
                                 std::move(failure_detail));
                         } catch (const std::exception& error) {
-                            idle_stall_observer_inflight_.store(
-                                false, std::memory_order_release);
-                            idle_stall_detector_.reset();
-                            udp_call_affinity_detector_.reset();
+                            idle_stall_supervisor_.finish_inflight();
+                            idle_stall_supervisor_.reset_detectors();
                             Logger::instance().info(
                                 "Idle forwarded-flow observation commit "
                                 "failed closed: {}",
@@ -5454,10 +5336,8 @@ void Daemon::run_idle_stall_observer() noexcept {
                             schedule_idle_stall_observer_after(
                                 IDLE_STALL_QUIET_SCAN_INTERVAL);
                         } catch (...) {
-                            idle_stall_observer_inflight_.store(
-                                false, std::memory_order_release);
-                            idle_stall_detector_.reset();
-                            udp_call_affinity_detector_.reset();
+                            idle_stall_supervisor_.finish_inflight();
+                            idle_stall_supervisor_.reset_detectors();
                             schedule_idle_stall_observer_after(
                                 IDLE_STALL_QUIET_SCAN_INTERVAL);
                         }
@@ -5471,26 +5351,21 @@ void Daemon::run_idle_stall_observer() noexcept {
             trace_id);
 
         if (!enqueued) {
-            idle_stall_observer_inflight_.store(
-                false, std::memory_order_release);
+            idle_stall_supervisor_.finish_inflight();
             schedule_idle_stall_observer_after(
                 IDLE_STALL_ACTIVE_SCAN_INTERVAL);
         }
     } catch (const std::exception& error) {
-        idle_stall_observer_inflight_.store(
-            false, std::memory_order_release);
-        idle_stall_detector_.reset();
-        udp_call_affinity_detector_.reset();
+        idle_stall_supervisor_.finish_inflight();
+        idle_stall_supervisor_.reset_detectors();
         Logger::instance().info(
             "Idle forwarded-flow observation failed closed: {}",
             error.what());
         schedule_idle_stall_observer_after(
             IDLE_STALL_QUIET_SCAN_INTERVAL);
     } catch (...) {
-        idle_stall_observer_inflight_.store(
-            false, std::memory_order_release);
-        idle_stall_detector_.reset();
-        udp_call_affinity_detector_.reset();
+        idle_stall_supervisor_.finish_inflight();
+        idle_stall_supervisor_.reset_detectors();
         schedule_idle_stall_observer_after(
             IDLE_STALL_QUIET_SCAN_INTERVAL);
     }
@@ -5525,14 +5400,12 @@ void Daemon::execute_runtime_background_point_mutation(
             const auto generation_is_current =
                 [this, &operation]() noexcept {
                     return running_.load(std::memory_order_acquire) &&
-                           idle_stall_observer_enabled_.load(
-                               std::memory_order_acquire) &&
+                           idle_stall_supervisor_.enabled() &&
                            runtime_generation_.load(
                                std::memory_order_acquire) ==
                                operation.runtime_generation &&
-                           idle_stall_coverage_generation_.load(
-                               std::memory_order_acquire) ==
-                               operation.coverage_generation;
+                           idle_stall_supervisor_.current_coverage(
+                               operation.coverage_generation);
             };
             KPBR_LOCK_GUARD(udp_call_affinity_mutation_mutex_);
             if (!generation_is_current() || !firewall_) {
@@ -5852,14 +5725,12 @@ void Daemon::execute_runtime_background_point_mutation(
             const auto generation_is_current =
                 [this, &operation]() noexcept {
                     return running_.load(std::memory_order_acquire) &&
-                        idle_stall_observer_enabled_.load(
-                            std::memory_order_acquire) &&
+                        idle_stall_supervisor_.enabled() &&
                         runtime_generation_.load(
                             std::memory_order_acquire) ==
                             operation.runtime_generation &&
-                        idle_stall_coverage_generation_.load(
-                            std::memory_order_acquire) ==
-                            operation.coverage_generation;
+                        idle_stall_supervisor_.current_coverage(
+                            operation.coverage_generation);
                 };
             KPBR_LOCK_GUARD(udp_call_affinity_mutation_mutex_);
             if (!generation_is_current()) {
@@ -6085,7 +5956,10 @@ void Daemon::dispatch_udp_call_affinity_mutations(
     if (decisions.empty()) return;
     const auto release_decisions = [this, &decisions]() noexcept {
         for (const auto& decision : decisions) {
-            try { udp_call_affinity_detector_.release_failed(decision); }
+            try {
+                idle_stall_supervisor_.affinity_detector().
+                    release_failed(decision);
+            }
             catch (...) {}
         }
     };
@@ -6095,13 +5969,11 @@ void Daemon::dispatch_udp_call_affinity_mutations(
             try {
                 return running_.load(std::memory_order_acquire) &&
                     routing_runtime_active() &&
-                    idle_stall_observer_enabled_.load(
-                        std::memory_order_acquire) &&
+                    idle_stall_supervisor_.enabled() &&
                     runtime_generation_.load(std::memory_order_acquire) ==
                         expected_runtime_generation &&
-                    idle_stall_coverage_generation_.load(
-                        std::memory_order_acquire) ==
-                        expected_coverage_generation;
+                    idle_stall_supervisor_.current_coverage(
+                        expected_coverage_generation);
             } catch (...) { return false; }
         };
     if (!generation_is_current() || !firewall_) {
@@ -6162,8 +6034,8 @@ void Daemon::dispatch_udp_call_affinity_mutations(
                 const auto release_all = [this, &operation]() noexcept {
                     for (const auto& item : operation.work) {
                         try {
-                            udp_call_affinity_detector_.release_failed(
-                                item.decision);
+                            idle_stall_supervisor_.affinity_detector().
+                                release_failed(item.decision);
                         } catch (...) {}
                     }
                 };
@@ -6178,14 +6050,12 @@ void Daemon::dispatch_udp_call_affinity_mutations(
                             RuntimeFirewallLifecycleOutcome::shutdown &&
                         running_.load(std::memory_order_acquire) &&
                         routing_runtime_active() &&
-                        idle_stall_observer_enabled_.load(
-                            std::memory_order_acquire) &&
+                        idle_stall_supervisor_.enabled() &&
                         runtime_generation_.load(
                             std::memory_order_acquire) ==
                             expected_runtime_generation &&
-                        idle_stall_coverage_generation_.load(
-                            std::memory_order_acquire) ==
-                            expected_coverage_generation;
+                        idle_stall_supervisor_.current_coverage(
+                            expected_coverage_generation);
                 } catch (...) {}
                 const bool typed =
                     lease_returned &&
@@ -6229,11 +6099,13 @@ void Daemon::dispatch_udp_call_affinity_mutations(
                     if (outcome.installed) {
                         bool accepted = false;
                         try {
-                            accepted = udp_call_affinity_detector_.
+                            accepted = idle_stall_supervisor_.
+                                affinity_detector().
                                 confirm_installed(
                                     outcome.decision, completed_at);
                         } catch (...) {
-                            udp_call_affinity_detector_.reset();
+                            idle_stall_supervisor_.
+                                reset_affinity_detector();
                         }
                         if (accepted) {
                             outcome.decision.refresh_only
@@ -6241,8 +6113,8 @@ void Daemon::dispatch_udp_call_affinity_mutations(
                         }
                     } else {
                         try {
-                            udp_call_affinity_detector_.release_failed(
-                                outcome.decision);
+                            idle_stall_supervisor_.affinity_detector().
+                                release_failed(outcome.decision);
                         } catch (...) {}
                     }
                 }
@@ -6297,17 +6169,13 @@ void Daemon::commit_idle_stall_observation(
                                         expected_runtime_generation,
                                         expected_coverage_generation]() {
         return routing_runtime_active() &&
-               idle_stall_observer_enabled_.load(
-                   std::memory_order_acquire) &&
                runtime_generation_.load(std::memory_order_acquire) ==
                    expected_runtime_generation &&
-               idle_stall_coverage_generation_.load(
-                   std::memory_order_acquire) ==
-                   expected_coverage_generation;
+               idle_stall_supervisor_.current_coverage(
+                   expected_coverage_generation);
     };
     if (!generation_is_current()) {
-        idle_stall_observer_inflight_.store(
-            false, std::memory_order_release);
+        idle_stall_supervisor_.finish_inflight();
         return;
     }
 
@@ -6372,7 +6240,8 @@ void Daemon::commit_idle_stall_observation(
     const auto observation_time = UdpCallAffinityDetector::Clock::now();
     std::vector<UdpCallAffinityDecision> affinity_decisions;
     try {
-        affinity_decisions = udp_call_affinity_detector_.observe(
+        affinity_decisions =
+            idle_stall_supervisor_.affinity_detector().observe(
             scan.epoch,
             scan.status,
             owned_mask,
@@ -6381,15 +6250,15 @@ void Daemon::commit_idle_stall_observation(
             observation.source_wide_udp_flows,
             observation_time);
     } catch (const std::exception& error) {
-        udp_call_affinity_detector_.reset();
+        idle_stall_supervisor_.reset_affinity_detector();
         Logger::instance().info(
             "UDP call affinity detector failed closed: {}",
             error.what());
     } catch (...) {
-        udp_call_affinity_detector_.reset();
+        idle_stall_supervisor_.reset_affinity_detector();
     }
     const bool affinity_fast_followup =
-        udp_call_affinity_detector_.needs_fast_followup(
+        idle_stall_supervisor_.affinity_detector().needs_fast_followup(
             observation_time);
     const bool affinity_discovery_enabled =
         !call_affinity_targets.empty();
@@ -6400,7 +6269,8 @@ void Daemon::commit_idle_stall_observation(
     // to the final live revalidation, while an expired/reset peer is not.
     auto retained_affinity_peers = call_affinity_targets.empty()
         ? std::vector<UdpCallAffinityGuardPeer>{}
-        : udp_call_affinity_detector_.retained_guard_peers(
+        : idle_stall_supervisor_.affinity_detector().
+              retained_guard_peers(
               observation_time);
 
     dispatch_udp_call_affinity_mutations(
@@ -6413,24 +6283,24 @@ void Daemon::commit_idle_stall_observation(
 
     std::vector<IdleStallDeleteDecision> decisions;
     try {
-        decisions = idle_stall_detector_.observe(
+        decisions = idle_stall_supervisor_.idle_detector().observe(
             scan, observation_time);
     } catch (const std::exception& error) {
-        idle_stall_detector_.reset();
+        idle_stall_supervisor_.reset_idle_detector();
         Logger::instance().info(
             "Idle forwarded-flow detector failed closed: {}",
             error.what());
     } catch (...) {
-        idle_stall_detector_.reset();
+        idle_stall_supervisor_.reset_idle_detector();
     }
     const bool relevant_flows_observed =
         !observation.flows.empty() ||
         !observation.source_wide_udp_flows.empty();
     if (decisions.empty()) {
         const auto whatsapp_fast_followup =
-            idle_stall_detector_.take_whatsapp_fast_followup_delay();
-        idle_stall_observer_inflight_.store(
-            false, std::memory_order_release);
+            idle_stall_supervisor_.idle_detector().
+                take_whatsapp_fast_followup_delay();
+        idle_stall_supervisor_.finish_inflight();
         // A bounded/truncated snapshot cannot produce a safe decision. Back
         // off instead of reparsing the same oversized conntrack table every
         // five seconds on a small router.
@@ -6441,7 +6311,8 @@ void Daemon::commit_idle_stall_observation(
             } else if (affinity_fast_followup) {
                 next_interval = UDP_CALL_AFFINITY_FAST_SCAN_INTERVAL;
             } else if (relevant_flows_observed ||
-                       idle_stall_detector_.tracked_flow_count() != 0U) {
+                       idle_stall_supervisor_.idle_detector().
+                           tracked_flow_count() != 0U) {
                 next_interval = IDLE_STALL_ACTIVE_SCAN_INTERVAL;
             } else if (affinity_discovery_enabled) {
                 next_interval =
@@ -6497,16 +6368,17 @@ void Daemon::commit_idle_stall_observation(
     const auto release_pending_decisions = [this, &decisions]() {
         const auto now = IdleStallDetector::Clock::now();
         for (const auto& decision : decisions) {
-            idle_stall_detector_.acknowledge_delete_result(
+            idle_stall_supervisor_.idle_detector().
+                acknowledge_delete_result(
                 decision, false, now);
         }
     };
     if (pending_deletes.empty() || !generation_is_current()) {
         release_pending_decisions();
-        idle_stall_observer_inflight_.store(
-            false, std::memory_order_release);
+        idle_stall_supervisor_.finish_inflight();
         const auto fast_followup =
-            idle_stall_detector_.take_whatsapp_fast_followup_delay();
+            idle_stall_supervisor_.idle_detector().
+                take_whatsapp_fast_followup_delay();
         const auto next_interval =
             fast_followup.value_or(IDLE_STALL_ACTIVE_SCAN_INTERVAL);
         schedule_idle_stall_observer_after(next_interval);
@@ -6547,8 +6419,8 @@ void Daemon::commit_idle_stall_observation(
          ipv6_enabled,
          observed_local_interface_addresses =
              std::move(observed_local_interface_addresses)]() mutable {
-            AtomicFlagResetGuard inflight_guard(
-                idle_stall_observer_inflight_);
+            auto inflight_guard =
+                idle_stall_supervisor_.adopt_inflight();
             std::size_t media_protected = 0U;
             std::size_t recovered_or_replaced = 0U;
             bool live_scope_changed = false;
@@ -6561,14 +6433,11 @@ void Daemon::commit_idle_stall_observation(
             const auto generation_is_current = [this,
                                                  expected_runtime_generation,
                                                  expected_coverage_generation]() {
-                return idle_stall_observer_enabled_.load(
-                           std::memory_order_acquire) &&
-                       runtime_generation_.load(
+                return runtime_generation_.load(
                            std::memory_order_acquire) ==
                            expected_runtime_generation &&
-                       idle_stall_coverage_generation_.load(
-                           std::memory_order_acquire) ==
-                           expected_coverage_generation;
+                       idle_stall_supervisor_.current_coverage(
+                           expected_coverage_generation);
             };
 
             try {
@@ -6728,21 +6597,17 @@ void Daemon::commit_idle_stall_observation(
                  media_protected,
                  recovered_or_replaced,
                  live_scope_changed]() mutable {
-                    idle_stall_observer_inflight_.store(
-                        false, std::memory_order_release);
+                    idle_stall_supervisor_.finish_inflight();
                     const auto generation_is_current = [this,
                                                         expected_runtime_generation,
                                                         expected_coverage_generation]() {
                         return running_.load(std::memory_order_acquire) &&
                                routing_runtime_active() &&
-                               idle_stall_observer_enabled_.load(
-                                   std::memory_order_acquire) &&
                                runtime_generation_.load(
                                    std::memory_order_acquire) ==
                                    expected_runtime_generation &&
-                               idle_stall_coverage_generation_.load(
-                                   std::memory_order_acquire) ==
-                                   expected_coverage_generation;
+                               idle_stall_supervisor_.current_coverage(
+                                   expected_coverage_generation);
                     };
                     if (!generation_is_current()) {
                         return;
@@ -6757,7 +6622,8 @@ void Daemon::commit_idle_stall_observation(
                         [this, &acknowledged_attempts](
                             const IdleStallDeleteDecision& decision,
                             bool delete_succeeded) {
-                            idle_stall_detector_.acknowledge_delete_result(
+                            idle_stall_supervisor_.idle_detector().
+                                acknowledge_delete_result(
                                 decision,
                                 delete_succeeded,
                                 IdleStallDetector::Clock::now());
@@ -6845,14 +6711,11 @@ void Daemon::commit_idle_stall_observation(
 
                     if (!running_.load(std::memory_order_acquire) ||
                         !routing_runtime_active() ||
-                        !idle_stall_observer_enabled_.load(
-                            std::memory_order_acquire) ||
                         runtime_generation_.load(
                             std::memory_order_acquire) !=
                             expected_runtime_generation ||
-                        idle_stall_coverage_generation_.load(
-                            std::memory_order_acquire) !=
-                            expected_coverage_generation) {
+                        !idle_stall_supervisor_.current_coverage(
+                            expected_coverage_generation)) {
                         return;
                     }
                     if (succeeded != 0U) {
@@ -6900,7 +6763,7 @@ void Daemon::commit_idle_stall_observation(
                             expected_runtime_generation);
                     }
                     const auto fast_followup =
-                        idle_stall_detector_.
+                        idle_stall_supervisor_.idle_detector().
                             take_whatsapp_fast_followup_delay();
                     const auto next_interval = fast_followup.value_or(
                         IDLE_STALL_ACTIVE_SCAN_INTERVAL);
@@ -6915,10 +6778,10 @@ void Daemon::commit_idle_stall_observation(
 
     if (!enqueued) {
         release_pending_decisions();
-        idle_stall_observer_inflight_.store(
-            false, std::memory_order_release);
+        idle_stall_supervisor_.finish_inflight();
         const auto fast_followup =
-            idle_stall_detector_.take_whatsapp_fast_followup_delay();
+            idle_stall_supervisor_.idle_detector().
+                take_whatsapp_fast_followup_delay();
         const auto next_interval =
             fast_followup.value_or(IDLE_STALL_ACTIVE_SCAN_INTERVAL);
         schedule_idle_stall_observer_after(next_interval);

@@ -903,6 +903,21 @@ Daemon::Daemon(Config config,
                     "retry budget; remaining owned flows will expire "
                     "naturally.");
             }});
+    idle_stall_supervisor_.configure(
+        IdleStallSupervisorCallbacks{
+            [this](std::chrono::milliseconds delay,
+                   std::function<void()> task,
+                   std::string label) {
+                return scheduler_->schedule_oneshot(
+                    delay, std::move(task), std::move(label));
+            },
+            [this](int task_id) { scheduler_->cancel(task_id); },
+            [this]() { run_idle_stall_observer(); },
+            [](std::string detail) {
+                Logger::instance().info(
+                    "Idle forwarded-flow observer was not scheduled: {}",
+                    detail);
+            }});
 
     RuntimeFirewallOperationOwner::Callbacks firewall_owner_callbacks;
     firewall_owner_callbacks.create_domain_state = [] {
@@ -4010,10 +4025,8 @@ bool Daemon::begin_preowned_runtime_firewall_exact_tcp_reset_point(
         (target.kind ==
              RuntimeExactTcpResetPointMutationKind::
                  install_then_delete_exact_flow &&
-         (!idle_stall_observer_enabled_.load(std::memory_order_acquire) ||
-          target.coverage_generation !=
-              idle_stall_coverage_generation_.load(
-                  std::memory_order_acquire))) ||
+         !idle_stall_supervisor_.current_coverage(
+             target.coverage_generation)) ||
         runtime_firewall_owner_->shutdown_requested() ||
         runtime_firewall_owner_->active_context() ||
         runtime_firewall_owner_->pending_successor()) {
@@ -8165,11 +8178,8 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                             return result;
                         }
 
-                        if (!idle_stall_observer_enabled_.load(
-                                std::memory_order_acquire) ||
-                            idle_stall_coverage_generation_.load(
-                                std::memory_order_acquire) !=
-                                target.coverage_generation ||
+                        if (!idle_stall_supervisor_.current_coverage(
+                                target.coverage_generation) ||
                             !target.exact_flow.has_value()) {
                             return result;
                         }

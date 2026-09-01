@@ -556,6 +556,7 @@ set(SOURCES
   src/daemon/pid_file.cpp
   src/daemon/daemon_core.cpp
   src/daemon/conntrack_cleanup_coordinator.cpp
+  src/daemon/idle_stall_supervisor.cpp
   src/daemon/daemon_runtime.cpp
   src/daemon/daemon_tunnel_probe.cpp
   src/daemon/daemon_resolver.cpp

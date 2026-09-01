@@ -172,6 +172,22 @@
   проверяются фильтрация и порядок marks, coalescing поколений, bounded retry
   `2/4/8/16/30` секунд, точное потребление timer, повтор после ошибки scheduler,
   handoff/cancel, once-warning и обратимый SNAT publication cursor.
+- Следующий service-extraction слой P0-1 выделяет `IdleStallSupervisor` как
+  единственного владельца observer timer и его schedule identity, enabled /
+  single-flight / coverage generation, обоих detector и полного observation
+  scope. `Daemon` остаётся composition root: eligibility, netlink/conntrack
+  observation, blocking executor/control commit, mutation admission,
+  типизированные physical point mutations и exact-TCP cleanup ledger не
+  дублировались и не получили нового writer/recovery/UI-контура. Устаревший
+  callback после cancel/re-arm теперь отсекается serial fence, а исключение или
+  отрицательный ID scheduler не оставляют включённый observer без timer.
+- Добавлен быстрый `keen-pbr-idle-stall-supervisor-tests`: отдельно проверены
+  timer replace/consume/inline/stale callback, scope identity, detector reset,
+  single-flight, coverage invalidation и scheduler failure. Focused target
+  прошёл `39/39`, `343/343`; production target полностью слинкован,
+  изменённые `IdleStallSupervisor`, `daemon_core` и `daemon_runtime`
+  проверены реальным Keenetic GCC 8.4, coverage gate прошёл `4/4`. Полный
+  несвязанный suite, IPK, роутер и origin не менялись.
 - Продолжено P0-1 отделение publication tail от `Daemon` без нового admission,
   recovery-журнала или пользовательских блокировок. Семь разрозненных
   публикаций rules/list/native-VPN/SNAT/Meta сведены в один небросающий core
