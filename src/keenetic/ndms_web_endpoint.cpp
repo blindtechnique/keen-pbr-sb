@@ -1,4 +1,5 @@
 #include "ndms_web_endpoint.hpp"
+#include "ndms_interface_resource.hpp"
 #include "ndms_running_config_resource.hpp"
 
 #include "../http/http_client.hpp"
@@ -18,8 +19,6 @@
 namespace keen_pbr3 {
 namespace {
 
-constexpr const char* kRciInterfaces =
-    "http://127.0.0.1:79/rci/show/interface";
 constexpr const char* kRciHttpConfig =
     "http://127.0.0.1:79/rci/show/rc/ip/http";
 constexpr std::size_t kMaximumAddresses = 128U;
@@ -328,11 +327,20 @@ std::optional<NdmsWebEndpoint> discover_ndms_web_endpoint(
     const NdmsWebEndpointProbe& probe,
     std::string* error) {
     try {
+        const auto interface_snapshot =
+            shared_ndms_interface_resource().get();
+        if (!interface_snapshot.document) {
+            throw std::runtime_error(
+                "NDMS interface snapshot is unavailable");
+        }
+        const auto interface_body = interface_snapshot.document->body();
+        auto interfaces = nlohmann::json::parse(
+            interface_body.begin(), interface_body.end());
+        JsonWipeGuard interface_wipe(interfaces);
+
         HttpClient client;
         client.set_timeout(std::chrono::seconds(1));
         client.set_max_response_size(2U * 1024U * 1024U);
-        const auto interfaces = nlohmann::json::parse(
-            client.download(kRciInterfaces));
         NdmsHttpServiceConfig service;
         try {
             service = parse_ndms_http_service_config(

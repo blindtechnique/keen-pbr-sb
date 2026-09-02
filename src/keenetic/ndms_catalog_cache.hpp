@@ -1,22 +1,17 @@
 #pragma once
 
 #include "ndms_interface_inventory.hpp"
+#include "ndms_interface_resource.hpp"
 
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 
 namespace keen_pbr3 {
-
-enum class NdmsCatalogCacheStatus : std::uint8_t {
-    fresh,
-    stale,
-    unavailable,
-};
 
 struct NdmsCatalogSnapshot {
     NdmsInterfaceCatalog catalog;
@@ -53,62 +48,58 @@ struct NdmsCatalogSnapshot {
     std::uint64_t invalidation_epoch{0};
 };
 
-// Thread-safe, single-flight cache for the loopback NDMS request. Failed
-// refreshes never replace the most recent catalog that parsed successfully.
-// peek() is deliberately non-blocking with respect to network I/O so runtime
-// reconciliation can use the last safe snapshot from the control loop.
+// Typed, non-secret projection of the shared passive show/interface resource.
+// The daemon and API consume this projection; native VPN mutation evidence
+// deliberately keeps its separate exact operation-local observation path.
 class NdmsCatalogCache {
 public:
-    using Clock = std::chrono::steady_clock;
-    using FetchFn = std::function<std::string()>;
-    using NowFn = std::function<Clock::time_point()>;
+    using Clock = NdmsInterfaceResource::Clock;
+    using FetchFn = NdmsInterfaceResource::FetchFn;
+    using NowFn = NdmsInterfaceResource::NowFn;
 
+    // Compatibility/test constructor. The owned raw resource still supplies
+    // the same single-flight, invalidation-epoch and LKG contract as the
+    // production shared resource.
     explicit NdmsCatalogCache(
         FetchFn fetch_fn,
         Clock::duration cache_ttl = std::chrono::seconds(30),
         Clock::duration failure_retry = std::chrono::seconds(5),
         NowFn now_fn = {});
 
+    explicit NdmsCatalogCache(NdmsInterfaceResource& resource);
+
     NdmsCatalogSnapshot get();
     // Requests a fresh RCI observation even while the regular TTL is valid.
-    // Repeated forced refreshes are still throttled by failure_retry_ and
-    // concurrent callers share one in-flight request.
+    // Repeated forced refreshes are still throttled by the raw resource's
+    // failure retry and concurrent callers share one in-flight request.
     NdmsCatalogSnapshot force_refresh();
-    // Invalidates catalog authority without performing I/O. Interface events
-    // call this before their cache-only reconciliation so a recently cached
-    // kernel binding cannot be reused after an NDMS renumber/name-reuse event.
-    // The next forced refresh is allowed immediately.
+    // Invalidates raw catalog authority without performing I/O. Interface
+    // events call this before cache-only reconciliation; the next forced
+    // refresh is allowed immediately by the shared resource.
     void invalidate();
     NdmsCatalogSnapshot peek() const;
 
 private:
-    NdmsCatalogSnapshot get_impl(bool force_refresh);
-    NdmsCatalogSnapshot snapshot_locked(bool refreshed = false) const;
+    NdmsCatalogSnapshot project(const NdmsInterfaceSnapshot& raw) const;
+    NdmsCatalogSnapshot snapshot_locked(
+        const NdmsInterfaceSnapshot& raw,
+        bool refreshed = false) const;
 
-    FetchFn fetch_fn_;
-    NowFn now_fn_;
-    Clock::duration cache_ttl_;
-    Clock::duration failure_retry_;
+    std::unique_ptr<NdmsInterfaceResource> owned_resource_;
+    NdmsInterfaceResource* resource_{nullptr};
 
     mutable std::mutex mutex_;
-    std::condition_variable refresh_finished_;
-    std::optional<NdmsInterfaceCatalog> catalog_;
-    std::optional<Clock::time_point> catalog_observed_at_;
-    NdmsCatalogCacheStatus status_{NdmsCatalogCacheStatus::unavailable};
-    Clock::time_point refresh_after_{};
-    Clock::time_point forced_refresh_after_{};
-    bool refresh_attempted_{false};
-    bool refresh_in_progress_{false};
-    bool last_refresh_accepted_{false};
-    std::uint64_t refresh_generation_{0};
-    std::uint64_t invalidation_epoch_{0};
-    std::uint64_t last_completed_refresh_epoch_{0};
-    std::uint64_t accepted_observation_generation_{0};
-    std::uint64_t accepted_observation_epoch_{0};
+    mutable std::optional<NdmsInterfaceCatalog> catalog_;
+    mutable std::optional<Clock::time_point> source_observed_at_;
+    mutable std::uint64_t source_content_generation_{0};
+    mutable std::uint64_t source_observation_generation_{0};
+    mutable std::uint64_t source_observation_epoch_{0};
+    mutable std::uint64_t attempted_content_generation_{0};
 };
 
-// Shared by the daemon runtime and the API inventory. This prevents duplicate
-// RCI polling and gives control-loop code a cache-only peek path.
+// Shared by the daemon runtime and API projections. All passive consumers use
+// the same raw show/interface owner and therefore cannot start duplicate RCI
+// polling loops.
 NdmsCatalogCache& shared_ndms_catalog_cache();
 
 } // namespace keen_pbr3

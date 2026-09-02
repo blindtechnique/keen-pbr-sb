@@ -352,8 +352,12 @@ add_executable(keen-pbr-tests
   ../src/api/update_version.cpp
   ../src/http/http_transport.cpp
   ../src/http/curl_runtime.cpp
+  ../src/keenetic/ndms_rci_json_resource.cpp
+  ../src/keenetic/ndms_interface_resource.cpp
+  ../src/keenetic/ndms_interface_resource_production.cpp
   ../src/keenetic/ndms_interface_inventory.cpp
   ../src/keenetic/ndms_catalog_cache.cpp
+  ../src/keenetic/ndms_catalog_cache_production.cpp
   ../src/keenetic/ndms_running_config_resource.cpp
   ../src/keenetic/ndms_running_config_resource_production.cpp
   ../src/keenetic/internal_vpn_server_resolver.cpp
@@ -962,6 +966,7 @@ add_test(
 add_executable(keen-pbr-ndms-running-config-resource-tests
   test_main.cpp
   test_ndms_running_config_resource.cpp
+  ../src/keenetic/ndms_rci_json_resource.cpp
   ../src/keenetic/ndms_running_config_resource.cpp
   ../src/keenetic/ndms_vpn_server_service.cpp
   ../src/keenetic/ndms_vpn_server_service_cache.cpp
@@ -987,6 +992,41 @@ keen_pbr_apply_project_options(
 add_test(
   NAME keen-pbr-ndms-running-config-resource-tests
   COMMAND keen-pbr-ndms-running-config-resource-tests
+)
+
+# Keep the passive interface raw owner independently buildable. These tests
+# cover single-flight publication, semantic generations, LKG and invalidation
+# without HTTP, daemon or API dependencies.
+add_executable(keen-pbr-ndms-interface-resource-tests
+  test_main.cpp
+  test_ndms_interface_resource.cpp
+  ../src/keenetic/ndms_rci_json_resource.cpp
+  ../src/keenetic/ndms_interface_resource.cpp
+  ../src/keenetic/ndms_catalog_cache.cpp
+  ../src/keenetic/ndms_interface_inventory.cpp
+  ../src/keenetic/ndms_wireguard_identity.cpp
+)
+set_target_properties(
+  keen-pbr-ndms-interface-resource-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_include_directories(
+  keen-pbr-ndms-interface-resource-tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+)
+target_link_libraries(
+  keen-pbr-ndms-interface-resource-tests PRIVATE
+  nlohmann_json::nlohmann_json
+  Threads::Threads
+)
+keen_pbr_apply_project_options(
+  keen-pbr-ndms-interface-resource-tests)
+add_test(
+  NAME keen-pbr-ndms-interface-resource-tests
+  COMMAND keen-pbr-ndms-interface-resource-tests
 )
 
 # Keep the resolver hook handoff independently buildable. These tests cover

@@ -395,7 +395,11 @@ set(SOURCES
   src/http/http_client.cpp
   src/http/http_transport.cpp
   src/http/curl_runtime.cpp
+  src/keenetic/ndms_rci_json_resource.cpp
+  src/keenetic/ndms_interface_resource.cpp
+  src/keenetic/ndms_interface_resource_production.cpp
   src/keenetic/ndms_catalog_cache.cpp
+  src/keenetic/ndms_catalog_cache_production.cpp
   src/keenetic/ndms_running_config_resource.cpp
   src/keenetic/ndms_running_config_resource_production.cpp
   src/keenetic/ndms_interface_inventory.cpp
