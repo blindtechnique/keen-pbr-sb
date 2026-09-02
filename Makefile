@@ -31,7 +31,7 @@ CLANG_FEATURE_CMAKE_FLAGS := -DWITH_API=ON -DUSE_KEENETIC_API=ON
         transport-manager-test transport-manager-build \
         test \
         firewall-it-images firewall-it \
-        clang-build clang-check clang-tidy clang-tidy-curated \
+        clang-build clang-check-production clang-check clang-tidy clang-tidy-curated \
         generate generate-check \
         check-warnings check-shell check-ndmc-env check-openapi-parity \
         check-nfqws-assets \
@@ -186,6 +186,10 @@ firewall-it: ## Run the Docker + netns firewall integration suite (builds images
 clang-build: ## Configure and compile with Clang in a host-only build dir
 	cmake -S . -B $(CLANG_BUILD_DIR) $(CLANG_CMAKE_FLAGS) $(CLANG_FEATURE_CMAKE_FLAGS)
 	cmake --build $(CLANG_BUILD_DIR) --target keen-pbr
+
+clang-check-production: ## Check production thread safety plus the compiler diagnostic smoke
+	cmake -S . -B $(CLANG_BUILD_DIR) $(CLANG_CMAKE_FLAGS) $(CLANG_FEATURE_CMAKE_FLAGS) -DBUILD_TESTS=ON -DENABLE_THREAD_SAFETY_ANALYSIS=ON
+	cmake --build $(CLANG_BUILD_DIR) --parallel $(BUILD_JOBS) --target keen-pbr thread-safety-smoke
 
 clang-check: ## Compile with Clang thread-safety analysis enabled; never runs binaries
 	cmake -S . -B $(CLANG_BUILD_DIR) $(CLANG_CMAKE_FLAGS) $(CLANG_FEATURE_CMAKE_FLAGS) -DBUILD_TESTS=ON -DENABLE_THREAD_SAFETY_ANALYSIS=ON

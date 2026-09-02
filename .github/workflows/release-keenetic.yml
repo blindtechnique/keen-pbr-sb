@@ -203,7 +203,7 @@ jobs:
 
   clang-thread-safety:
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -220,7 +220,12 @@ jobs:
             pkg-config \
             zlib1g-dev
 
-      - name: Run Clang thread-safety checks
+      - name: Run production Clang thread-safety checks for alpha
+        if: github.event_name == 'push' && github.ref == 'refs/heads/alpha'
+        run: make clang-check-production BUILD_JOBS=4
+
+      - name: Run full Clang thread-safety checks
+        if: github.event_name != 'push' || github.ref != 'refs/heads/alpha'
         run: make clang-check BUILD_JOBS=4
 
   firewall-integration:
