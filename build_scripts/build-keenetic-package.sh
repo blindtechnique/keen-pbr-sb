@@ -20,6 +20,7 @@ KEEN_PBR_COMMIT="$(bash "$WORKSPACE/build_scripts/resolve-version.sh" commit "$W
 : "${KEEN_PBR_TRANSPORT_MANAGER_BIN:?KEEN_PBR_TRANSPORT_MANAGER_BIN is required}"
 KEEN_PBR_JOBS="${KEEN_PBR_JOBS:-2}"
 NINJA_BIN="$ENTWARE_DIR/staging_dir/host/bin/ninja"
+NINJA_WRAPPER="$ENTWARE_DIR/staging_dir/host/bin/keen-pbr-ninja"
 
 case "$KEEN_PBR_JOBS" in
     ''|*[!0-9]*|0)
@@ -32,6 +33,14 @@ if [ ! -x "$NINJA_BIN" ]; then
     echo "Entware Ninja is missing or not executable: $NINJA_BIN" >&2
     exit 1
 fi
+
+# Meson treats the NINJA environment value as one executable path and does not
+# split command-line flags from it. Keep the bounded parallelism in a wrapper
+# so clean dependency builds can discover Ninja without interpreting
+# "$NINJA_BIN -j$KEEN_PBR_JOBS" as a nonexistent filename.
+printf '#!/bin/sh\nexec "%s" "-j%s" "$@"\n' \
+    "$NINJA_BIN" "$KEEN_PBR_JOBS" > "$NINJA_WRAPPER"
+chmod 0755 "$NINJA_WRAPPER"
 
 KEEN_PBR_RELEASE_OVERRIDE="$KEEN_PBR_RELEASE" \
     sh "$WORKSPACE/build_scripts/ensure-frontend-dist.sh" \
@@ -66,7 +75,7 @@ if ! grep -Eq '^CONFIG_PACKAGE_conntrack=(m|y)$' .config; then
     exit 1
 fi
 make package/keen-pbr/compile V=s "-j$KEEN_PBR_JOBS" \
-    NINJA="$NINJA_BIN -j$KEEN_PBR_JOBS" \
+    NINJA="$NINJA_WRAPPER" \
     KEEN_PBR_SRC="$WORKSPACE" \
     KEEN_PBR_FRONTEND_DIST="$FRONTEND_DIST" \
     KEEN_PBR_TRANSPORT_MANAGER_BIN="$KEEN_PBR_TRANSPORT_MANAGER_BIN" \

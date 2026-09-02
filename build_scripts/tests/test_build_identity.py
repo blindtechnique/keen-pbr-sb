@@ -263,12 +263,20 @@ class BuildIdentityTest(unittest.TestCase):
                 "    ;;\n"
                 "  *\" package/keen-pbr/compile \"*)\n"
                 "    commit=\n"
+                "    ninja=\n"
                 "    for argument in \"$@\"; do\n"
                 "      case \"$argument\" in\n"
                 "        KEEN_PBR_COMMIT=*) commit=${argument#*=} ;;\n"
+                "        NINJA=*) ninja=${argument#*=} ;;\n"
                 "      esac\n"
                 "    done\n"
                 "    [ -n \"$commit\" ] || exit 91\n"
+                "    if [ -n \"${NINJA_TRACE:-}\" ]; then\n"
+                "      [ -n \"$ninja\" ] || exit 92\n"
+                "      case \"$ninja\" in *' '*) exit 93 ;; esac\n"
+                "      [ -x \"$ninja\" ] || exit 94\n"
+                "      \"$ninja\" --version >/dev/null || exit 95\n"
+                "    fi\n"
                 "    printf '%s\\n' \"$commit\" >> \"$IDENTITY_TRACE\"\n"
                 "    ;;\n"
                 "esac\n",
@@ -302,13 +310,18 @@ class BuildIdentityTest(unittest.TestCase):
             write_executable(entware / "scripts/feeds", "#!/bin/sh\nexit 0\n")
             write_executable(
                 entware / "staging_dir/host/bin/ninja",
-                "#!/bin/sh\nexit 0\n",
+                "#!/bin/sh\n"
+                "set -eu\n"
+                "printf '%s\\n' \"$*\" >> \"$NINJA_TRACE\"\n"
+                "printf '1.13.2\\n'\n",
             )
             keenetic_trace = root / "keenetic.trace"
+            ninja_trace = root / "ninja.trace"
             keenetic_env = pipeline_environment(fake_bin, keenetic_trace, commit)
             keenetic_env["KEEN_PBR_FRONTEND_DIST"] = str(keenetic_dist)
             keenetic_env["KEEN_PBR_TRANSPORT_MANAGER_BIN"] = str(transport)
             keenetic_env["KEEN_PBR_JOBS"] = "1"
+            keenetic_env["NINJA_TRACE"] = str(ninja_trace)
             keenetic = run(
                 [
                     "sh",
@@ -323,6 +336,9 @@ class BuildIdentityTest(unittest.TestCase):
             )
             self.assertEqual(keenetic.returncode, 0, keenetic.stderr)
             self.assertEqual(keenetic_trace.read_text(encoding="utf-8"), f"{commit}\n")
+            self.assertEqual(
+                ninja_trace.read_text(encoding="utf-8"), "-j1 --version\n"
+            )
 
             # OpenWrt: feeds and compiler are faked, but the production script
             # executes every handoff step through the SDK make invocation.
