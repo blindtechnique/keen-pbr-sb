@@ -217,6 +217,18 @@ int configured_port(const ApiConfig& config) {
     return std::stoi(config.listen->substr(separator + 1));
 }
 
+std::string poll_after_background_credential_read(ApiServer& server) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds{2};
+    std::string outcome;
+    do {
+        outcome = server.poll_router_credentials_for_testing();
+        if (outcome != "concurrent") return outcome;
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    } while (std::chrono::steady_clock::now() < deadline);
+    return outcome;
+}
+
 void write_text(const std::filesystem::path& path,
                 const std::string& body) {
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
@@ -2704,10 +2716,13 @@ TEST_CASE("API requests never perform the router credential RCI read") {
         "KEEN_PBR_AUTH_FILE", auth_path.string());
 
     std::atomic<unsigned int> reads{0U};
+    std::mutex read_mutex;
+    std::condition_variable read_cv;
     httplib::Server ndms;
     ndms.Get("/rci/show/rc/user",
-             [&reads](const httplib::Request&, httplib::Response& response) {
+             [&](const httplib::Request&, httplib::Response& response) {
                  reads.fetch_add(1U, std::memory_order_relaxed);
+                 read_cv.notify_all();
                  response.set_content(
                      R"({"admin":{"password":{"nt":{"hash":"aaaa"}},"tag":["http"]}})",
                      "application/json");
@@ -2726,6 +2741,13 @@ TEST_CASE("API requests never perform the router credential RCI read") {
     const auto config = auth_api_config();
     ApiServer server(config);
     server.start();
+    {
+        std::unique_lock lock(read_mutex);
+        REQUIRE(read_cv.wait_for(
+            lock,
+            std::chrono::seconds{2},
+            [&]() { return reads.load(std::memory_order_relaxed) != 0U; }));
+    }
     httplib::Client client("127.0.0.1", configured_port(config));
     for (int request = 0; request < 8; ++request) {
         const auto response = client.Get("/api/auth/status");
@@ -2734,10 +2756,90 @@ TEST_CASE("API requests never perform the router credential RCI read") {
     }
     server.stop();
 
-    // One startup read establishes the baseline before sessions can be
-    // published. The worker then waits 30 seconds; the eight requests cannot
-    // wake it or perform RCI inline.
+    // The worker starts one background baseline read immediately and then
+    // waits 30 seconds; the eight requests cannot wake it or perform RCI
+    // inline.
     CHECK(reads.load(std::memory_order_relaxed) == 1U);
+}
+
+TEST_CASE(
+    "a blocked startup credential poll does not stall the API control plane") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    write_text(
+        auth_path,
+        R"({"enabled":true,"provider":"keenetic",)"
+        R"("keenetic_endpoint_mode":"manual",)"
+        R"("keenetic_endpoint":"127.0.0.1:80"})");
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+
+    std::mutex read_mutex;
+    std::condition_variable read_cv;
+    bool entered = false;
+    bool release = false;
+    httplib::Server ndms;
+    ndms.Get("/rci/show/rc/user",
+             [&](const httplib::Request&, httplib::Response& response) {
+                 {
+                     std::unique_lock lock(read_mutex);
+                     entered = true;
+                     read_cv.notify_all();
+                     read_cv.wait(lock, [&]() { return release; });
+                 }
+                 response.set_content(
+                     R"({"admin":{"password":{"nt":{"hash":"aaaa"}},"tag":["http"]}})",
+                     "application/json");
+             });
+    BoundHttpServer running_ndms(ndms);
+    EnvironmentVariableGuard endpoint_override(
+        "KEEN_PBR_TEST_NDMS_USER_ENDPOINT",
+        "http://127.0.0.1:" + std::to_string(running_ndms.port()) +
+            "/rci/show/rc/user");
+
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    struct CredentialReadRelease {
+        std::mutex& mutex;
+        std::condition_variable& cv;
+        bool& release;
+
+        void now() noexcept {
+            {
+                std::lock_guard lock(mutex);
+                release = true;
+            }
+            cv.notify_all();
+        }
+
+        ~CredentialReadRelease() { now(); }
+    } release_read{read_mutex, read_cv, release};
+
+    const auto start_begin = std::chrono::steady_clock::now();
+    server.start();
+    const auto start_elapsed =
+        std::chrono::steady_clock::now() - start_begin;
+    CHECK(start_elapsed < std::chrono::milliseconds{750});
+
+    bool first_poll_entered = false;
+    {
+        std::unique_lock lock(read_mutex);
+        first_poll_entered = read_cv.wait_for(
+            lock, std::chrono::seconds{2}, [&]() { return entered; });
+    }
+    REQUIRE(first_poll_entered);
+    REQUIRE(server.listening());
+
+    httplib::Client client("127.0.0.1", configured_port(config));
+    client.set_connection_timeout(1, 0);
+    client.set_read_timeout(1, 0);
+    const auto heartbeat = client.Get("/api/auth/status");
+    REQUIRE(heartbeat != nullptr);
+    CHECK(heartbeat->status == 200);
+
+    release_read.now();
+    server.stop();
+    CHECK_FALSE(server.listening());
 }
 
 TEST_CASE("concurrent router credential polls never queue another RCI read") {
@@ -2765,6 +2867,7 @@ TEST_CASE("concurrent router credential polls never queue another RCI read") {
                      response.set_content(
                          R"({"admin":{"password":{"nt":{"hash":"aaaa"}},"tag":["http"]}})",
                          "application/json");
+                     read_cv.notify_all();
                      return;
                  }
                  entered = true;
@@ -2783,9 +2886,21 @@ TEST_CASE("concurrent router credential polls never queue another RCI read") {
     const auto config = auth_api_config();
     ApiServer server(config);
     server.start();
+    {
+        std::unique_lock lock(read_mutex);
+        REQUIRE(read_cv.wait_for(
+            lock,
+            std::chrono::seconds{5},
+            [&]() { return reads >= 1U; }));
+    }
     std::string first_outcome;
     std::thread first([&]() {
-        first_outcome = server.poll_router_credentials_for_testing();
+        do {
+            first_outcome = server.poll_router_credentials_for_testing();
+            if (first_outcome == "concurrent") {
+                std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            }
+        } while (first_outcome == "concurrent");
     });
 
     bool first_entered = false;
@@ -2828,37 +2943,46 @@ TEST_CASE("an external router credential change revokes the session cohort") {
     // Stands in for the firmware RCI, which lives on a fixed loopback port a
     // test cannot occupy.
     std::mutex document_mutex;
+    std::condition_variable document_cv;
+    unsigned int document_reads = 0U;
     std::string document =
         R"({"admin":{"password":{"nt":{"hash":"aaaa"}},"tag":["http"]}})";
     bool serve = true;
     httplib::Server ndms;
     ndms.Get("/rci/show/rc/user",
              [&](const httplib::Request&, httplib::Response& response) {
-                 std::lock_guard<std::mutex> lock(document_mutex);
-                 if (!serve) {
-                     response.status = 503;
-                     return;
+                 {
+                     std::lock_guard<std::mutex> lock(document_mutex);
+                     ++document_reads;
+                     if (!serve) {
+                         response.status = 503;
+                     } else {
+                         response.set_content(document, "application/json");
+                     }
                  }
-                 response.set_content(document, "application/json");
+                 document_cv.notify_all();
              });
-    const int ndms_port = ndms.bind_to_any_port("127.0.0.1");
-    REQUIRE(ndms_port > 0);
-    std::thread ndms_thread([&ndms]() { ndms.listen_after_bind(); });
-    while (!ndms.is_running()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
+    BoundHttpServer running_ndms(ndms);
 
     EnvironmentVariableGuard endpoint_override(
         "KEEN_PBR_TEST_NDMS_USER_ENDPOINT",
-        "http://127.0.0.1:" + std::to_string(ndms_port) +
+        "http://127.0.0.1:" + std::to_string(running_ndms.port()) +
             "/rci/show/rc/user");
     const auto config = auth_api_config();
     ApiServer server(config);
     server.start();
 
-    // Startup already established the baseline before the listener admitted a
-    // session. A repeat is unchanged, not a second baseline.
-    CHECK(server.poll_router_credentials_for_testing() == "unchanged");
+    // The background baseline must start immediately. Once it releases the
+    // credential poll lock, a repeat is unchanged rather than a second
+    // baseline.
+    {
+        std::unique_lock lock(document_mutex);
+        REQUIRE(document_cv.wait_for(
+            lock,
+            std::chrono::seconds{2},
+            [&]() { return document_reads != 0U; }));
+    }
+    CHECK(poll_after_background_credential_read(server) == "unchanged");
 
     // The firmware becomes unreachable. That is not evidence of a change, and
     // it must not become the new baseline either.
@@ -2881,8 +3005,6 @@ TEST_CASE("an external router credential change revokes the session cohort") {
     CHECK(server.poll_router_credentials_for_testing() == "unchanged");
 
     server.stop();
-    ndms.stop();
-    ndms_thread.join();
 }
 
 TEST_CASE(
@@ -2891,6 +3013,8 @@ TEST_CASE(
     const auto auth_path = directory.path / "auth.json";
 
     std::mutex document_mutex;
+    std::condition_variable document_cv;
+    unsigned int document_reads = 0U;
     std::string document =
         R"({"admin":{"password":{"nt":{"hash":"aaaa"}},"tag":["http"]}})";
     std::atomic<unsigned int> forwarded_credentials{0U};
@@ -2909,8 +3033,12 @@ TEST_CASE(
     });
     router.Get("/rci/show/rc/user",
                [&](const httplib::Request&, httplib::Response& response) {
-                   std::lock_guard lock(document_mutex);
-                   response.set_content(document, "application/json");
+                   {
+                       std::lock_guard lock(document_mutex);
+                       ++document_reads;
+                       response.set_content(document, "application/json");
+                   }
+                   document_cv.notify_all();
                });
     BoundHttpServer running_router(router);
     write_text(
@@ -2934,7 +3062,14 @@ TEST_CASE(
     const auto config = auth_api_config();
     ApiServer server(config);
     server.start();
-    CHECK(server.poll_router_credentials_for_testing() == "unchanged");
+    {
+        std::unique_lock lock(document_mutex);
+        REQUIRE(document_cv.wait_for(
+            lock,
+            std::chrono::seconds{2},
+            [&]() { return document_reads != 0U; }));
+    }
+    CHECK(poll_after_background_credential_read(server) == "unchanged");
 
     std::mutex barrier_mutex;
     std::condition_variable barrier_cv;

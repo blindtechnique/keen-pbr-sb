@@ -1043,6 +1043,7 @@ struct ApiServer::Impl {
     std::condition_variable credential_generation_worker_cv;
     std::thread credential_generation_worker;
     bool credential_generation_worker_stop{false};
+    bool credential_generation_initial_poll_completed{false};
     AuthLoginRateLimiter login_rate_limiter;
     // Sized from the firmware defaults measured on a live Keenetic. Reading
     // the router's actual policy over RCI is a separate slice; until then the
@@ -1675,13 +1676,11 @@ struct ApiServer::Impl {
         std::lock_guard lock(credential_generation_worker_mutex);
         if (credential_generation_worker.joinable()) return;
         credential_generation_worker_stop = false;
+        credential_generation_initial_poll_completed = false;
         credential_generation_worker = std::thread([this]() {
             std::unique_lock worker_lock(
                 credential_generation_worker_mutex);
-            while (!credential_generation_worker_cv.wait_for(
-                worker_lock,
-                kCredentialGenerationInterval,
-                [this]() { return credential_generation_worker_stop; })) {
+            while (!credential_generation_worker_stop) {
                 worker_lock.unlock();
                 try {
                     (void)revoke_sessions_if_router_credentials_changed();
@@ -1690,7 +1689,25 @@ struct ApiServer::Impl {
                     // unknown input never replaces the last known generation.
                 }
                 worker_lock.lock();
+                credential_generation_initial_poll_completed = true;
+                credential_generation_worker_cv.notify_all();
+                if (credential_generation_worker_cv.wait_for(
+                        worker_lock,
+                        kCredentialGenerationInterval,
+                        [this]() {
+                            return credential_generation_worker_stop;
+                        })) {
+                    break;
+                }
             }
+        });
+    }
+
+    void wait_for_initial_credential_generation_poll() {
+        std::unique_lock lock(credential_generation_worker_mutex);
+        credential_generation_worker_cv.wait(lock, [this]() {
+            return credential_generation_initial_poll_completed ||
+                   credential_generation_worker_stop;
         });
     }
 
@@ -1906,6 +1923,12 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
         auto auth_state = state->auth_snapshot_with_generation();
         auto auth = std::move(auth_state.first);
         auto auth_generation = auth_state.second;
+        if (auth.uses_router_account()) {
+            state->wait_for_initial_credential_generation_poll();
+            auth_state = state->auth_snapshot_with_generation();
+            auth = std::move(auth_state.first);
+            auth_generation = auth_state.second;
+        }
         res.set_header("Cache-Control", "no-store");
         const auto* admission =
             res.user_data.get<CredentialAuthAdmission>(
@@ -2050,6 +2073,12 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
         auto auth_state = state->auth_snapshot_with_generation();
         auto auth = std::move(auth_state.first);
         auto auth_generation = auth_state.second;
+        if (auth.uses_router_account()) {
+            state->wait_for_initial_credential_generation_poll();
+            auth_state = state->auth_snapshot_with_generation();
+            auth = std::move(auth_state.first);
+            auth_generation = auth_state.second;
+        }
         res.set_header("Cache-Control", "no-store");
         const auto* admission =
             res.user_data.get<CredentialAuthAdmission>(
@@ -3437,16 +3466,6 @@ void ApiServer::start() {
     {
         KPBR_LOCK_GUARD(impl_->state_mutex);
         impl_->listen_error_message.clear();
-    }
-
-    // Establish the router credential baseline before the server can publish
-    // a session. This is the sole bounded startup read (one-second timeout),
-    // not request-path work; subsequent observations belong to the worker.
-    try {
-        (void)impl_->revoke_sessions_if_router_credentials_changed();
-    } catch (...) {
-        // Unknown remains unknown and the periodic worker retries. Startup is
-        // not made dependent on a diagnostic sink or a temporarily absent RCI.
     }
 
     impl_->listen_thread = std::thread([this]() {
