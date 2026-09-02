@@ -240,7 +240,6 @@ jobs:
 
   build:
     needs:
-      - backend
       - frontend
       - transport-manager
     runs-on: ubuntu-latest
