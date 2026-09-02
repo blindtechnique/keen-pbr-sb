@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ndms_http_service_config.hpp"
+
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -16,11 +18,6 @@ struct NdmsWebAddress {
     bool preferred{false};
 };
 
-struct NdmsHttpServiceConfig {
-    bool enabled{false};
-    std::uint16_t port{80};
-};
-
 struct NdmsWebEndpoint {
     std::string host;
     std::uint16_t port{80};
@@ -31,9 +28,6 @@ struct NdmsWebEndpoint {
 // discovery. Only connected private management interfaces are returned.
 std::vector<NdmsWebAddress> parse_ndms_web_addresses(
     const nlohmann::json& interfaces);
-
-NdmsHttpServiceConfig parse_ndms_http_service_config(
-    const nlohmann::json& http_config);
 
 // Compatibility parser for older firmware without /show/rc/ip/http.
 NdmsHttpServiceConfig parse_ndms_running_config_http_service(

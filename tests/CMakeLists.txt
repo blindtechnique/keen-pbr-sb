@@ -307,6 +307,7 @@ add_executable(keen-pbr-tests
   ../src/firewall/ppe_deoffload.cpp
   ../src/firewall/ttl_bypass.cpp
   ../src/keenetic/ndms_lockout_policy.cpp
+  ../src/keenetic/ndms_lockout_policy_production.cpp
   ../src/api/system_auth_capability.cpp
   ../src/api/step_up.cpp
   ../src/api/auth_runtime.cpp
@@ -355,6 +356,11 @@ add_executable(keen-pbr-tests
   ../src/keenetic/ndms_rci_json_resource.cpp
   ../src/keenetic/ndms_interface_resource.cpp
   ../src/keenetic/ndms_interface_resource_production.cpp
+  ../src/keenetic/ndms_http_config_resource.cpp
+  ../src/keenetic/ndms_http_config_resource_production.cpp
+  ../src/keenetic/ndms_http_service_config.cpp
+  ../src/keenetic/ndms_http_config_projection.cpp
+  ../src/keenetic/ndms_http_config_projection_production.cpp
   ../src/keenetic/ndms_interface_inventory.cpp
   ../src/keenetic/ndms_catalog_cache.cpp
   ../src/keenetic/ndms_catalog_cache_production.cpp
@@ -1027,6 +1033,40 @@ keen_pbr_apply_project_options(
 add_test(
   NAME keen-pbr-ndms-interface-resource-tests
   COMMAND keen-pbr-ndms-interface-resource-tests
+)
+
+# Keep the structured HTTP-config owner and its independent service/lockout
+# projections buildable without daemon, API or HTTP production dependencies.
+add_executable(keen-pbr-ndms-http-config-resource-tests
+  test_main.cpp
+  test_ndms_http_config_resource.cpp
+  ../src/keenetic/ndms_rci_json_resource.cpp
+  ../src/keenetic/ndms_http_config_resource.cpp
+  ../src/keenetic/ndms_http_service_config.cpp
+  ../src/keenetic/ndms_http_config_projection.cpp
+  ../src/keenetic/ndms_lockout_policy.cpp
+)
+set_target_properties(
+  keen-pbr-ndms-http-config-resource-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_include_directories(
+  keen-pbr-ndms-http-config-resource-tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+)
+target_link_libraries(
+  keen-pbr-ndms-http-config-resource-tests PRIVATE
+  nlohmann_json::nlohmann_json
+  Threads::Threads
+)
+keen_pbr_apply_project_options(
+  keen-pbr-ndms-http-config-resource-tests)
+add_test(
+  NAME keen-pbr-ndms-http-config-resource-tests
+  COMMAND keen-pbr-ndms-http-config-resource-tests
 )
 
 # Keep the resolver hook handoff independently buildable. These tests cover

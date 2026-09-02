@@ -1,13 +1,11 @@
 #include "ndms_web_endpoint.hpp"
+#include "ndms_http_config_projection.hpp"
 #include "ndms_interface_resource.hpp"
 #include "ndms_running_config_resource.hpp"
-
-#include "../http/http_client.hpp"
 
 #include <arpa/inet.h>
 #include <algorithm>
 #include <charconv>
-#include <chrono>
 #include <cctype>
 #include <limits>
 #include <nlohmann/json.hpp>
@@ -19,8 +17,6 @@
 namespace keen_pbr3 {
 namespace {
 
-constexpr const char* kRciHttpConfig =
-    "http://127.0.0.1:79/rci/show/rc/ip/http";
 constexpr std::size_t kMaximumAddresses = 128U;
 constexpr std::size_t kMaximumRunningConfigLines = 16384U;
 constexpr std::size_t kMaximumLineBytes = 4096U;
@@ -212,40 +208,6 @@ std::vector<NdmsWebAddress> parse_ndms_web_addresses(
     return unique_addresses;
 }
 
-NdmsHttpServiceConfig parse_ndms_http_service_config(
-    const nlohmann::json& http_config) {
-    if (!http_config.is_object() || http_config.empty()) {
-        throw std::invalid_argument(
-            "NDMS HTTP configuration response is invalid");
-    }
-    const auto port = http_config.find("port");
-    if (port == http_config.end()) {
-        throw std::invalid_argument(
-            "NDMS HTTP configuration has no port");
-    }
-    std::optional<std::uint16_t> parsed;
-    if (port->is_string()) {
-        parsed = parse_port(port->get_ref<const std::string&>());
-    } else if (port->is_number_unsigned()) {
-        const auto value = port->get<std::uint64_t>();
-        if (value > 0U &&
-            value <= std::numeric_limits<std::uint16_t>::max()) {
-            parsed = static_cast<std::uint16_t>(value);
-        }
-    } else if (port->is_number_integer()) {
-        const auto value = port->get<std::int64_t>();
-        if (value > 0 &&
-            value <= std::numeric_limits<std::uint16_t>::max()) {
-            parsed = static_cast<std::uint16_t>(value);
-        }
-    }
-    if (!parsed) {
-        throw std::invalid_argument(
-            "NDMS HTTP configuration port is invalid");
-    }
-    return NdmsHttpServiceConfig{true, *parsed};
-}
-
 NdmsHttpServiceConfig parse_ndms_running_config_http_service(
     const nlohmann::json& running_config) {
     if (!running_config.is_object()) {
@@ -338,18 +300,6 @@ std::optional<NdmsWebEndpoint> discover_ndms_web_endpoint(
             interface_body.begin(), interface_body.end());
         JsonWipeGuard interface_wipe(interfaces);
 
-        HttpClient client;
-        client.set_timeout(std::chrono::seconds(1));
-        client.set_max_response_size(2U * 1024U * 1024U);
-        NdmsHttpServiceConfig service;
-        try {
-            service = parse_ndms_http_service_config(
-                nlohmann::json::parse(
-                    client.download(kRciHttpConfig)));
-        } catch (const std::exception&) {
-            // Older NDMS releases do not expose the structured subtree.
-            service = cached_running_config_http_service();
-        }
         const auto addresses = parse_ndms_web_addresses(interfaces);
         if (addresses.empty()) {
             if (error) {
@@ -358,6 +308,36 @@ std::optional<NdmsWebEndpoint> discover_ndms_web_endpoint(
             }
             return std::nullopt;
         }
+
+        const auto structured =
+            shared_ndms_http_service_config_cache().get();
+        if (structured.config) {
+            if (!structured.config->enabled) {
+                if (error) *error = "NDMS HTTP service is disabled";
+                return std::nullopt;
+            }
+            auto endpoint = select_ndms_web_endpoint(
+                addresses, *structured.config, probe);
+            if (endpoint) {
+                if (error) error->clear();
+                return endpoint;
+            }
+            if (structured.status == NdmsCatalogCacheStatus::fresh) {
+                if (error) {
+                    *error =
+                        "NDMS management addresses did not expose an auth challenge";
+                }
+                return std::nullopt;
+            }
+            // A stale structured LKG is useful only while its address:port
+            // still proves the Keenetic challenge. If it does not, try the
+            // already shared running-config compatibility projection.
+        }
+
+        // Older NDMS releases do not expose a usable structured subtree.
+        // This is a second shared resource lookup, not another reader of the
+        // structured HTTP-config URL.
+        const auto service = cached_running_config_http_service();
         if (!service.enabled) {
             if (error) *error = "NDMS HTTP service is disabled";
             return std::nullopt;

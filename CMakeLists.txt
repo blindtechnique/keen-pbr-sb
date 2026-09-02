@@ -398,6 +398,11 @@ set(SOURCES
   src/keenetic/ndms_rci_json_resource.cpp
   src/keenetic/ndms_interface_resource.cpp
   src/keenetic/ndms_interface_resource_production.cpp
+  src/keenetic/ndms_http_config_resource.cpp
+  src/keenetic/ndms_http_config_resource_production.cpp
+  src/keenetic/ndms_http_service_config.cpp
+  src/keenetic/ndms_http_config_projection.cpp
+  src/keenetic/ndms_http_config_projection_production.cpp
   src/keenetic/ndms_catalog_cache.cpp
   src/keenetic/ndms_catalog_cache_production.cpp
   src/keenetic/ndms_running_config_resource.cpp
@@ -461,6 +466,7 @@ set(SOURCES
   src/keenetic/ndms_web_endpoint.cpp
   src/keenetic/ndms_credential_generation.cpp
   src/keenetic/ndms_lockout_policy.cpp
+  src/keenetic/ndms_lockout_policy_production.cpp
   src/api/system_auth_capability.cpp
   src/api/step_up.cpp
   src/crash/crash_diagnostics.cpp

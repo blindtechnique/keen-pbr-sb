@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <optional>
+#include <string>
 
 #include <nlohmann/json_fwd.hpp>
 
@@ -33,12 +34,13 @@ struct NdmsLockoutPolicy {
 std::optional<NdmsLockoutPolicy> parse_ndms_lockout_policy(
     const nlohmann::json& http_config);
 
-// One bounded read of the fixed loopback RCI URL. No timer and no polling
-// loop: callers decide when a refresh is warranted, exactly as endpoint
-// discovery does.
+// Reads the shared typed snapshot. The call may perform one bounded raw RCI
+// refresh or be a cache hit shared with endpoint discovery; there is no timer
+// or polling loop here.
 //
-// Returns nullopt on any failure, which callers must treat as "keep the
-// conservative default and say so", never as "no policy, so no limit".
+// Returns nullopt for stale/unavailable/invalid policy, which callers must
+// treat as "keep the conservative default and say so", never as "no policy,
+// so no limit".
 std::optional<NdmsLockoutPolicy> fetch_ndms_lockout_policy(
     std::string* error = nullptr);
 
