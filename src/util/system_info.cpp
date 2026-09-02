@@ -1,7 +1,6 @@
 #include "system_info.hpp"
 
-#include "../http/http_client.hpp"
-#include "../log/logger.hpp"
+#include "../keenetic/ndms_version_projection.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -170,19 +169,11 @@ std::optional<bool> keenetic_version_supports_encrypted_dns(
 }
 
 std::optional<std::string> detect_keenetic_version() {
-    try {
-        HttpClient client;
-        client.set_timeout(std::chrono::seconds(2));
-        client.set_max_response_size(2048);
-        return parse_keenetic_version_from_rci_response(
-            client.download("http://127.0.0.1:79/rci/show/version"));
-    } catch (const HttpError& error) {
-        Logger::instance().warn(
-            "Keenetic RCI is unavailable; unable to detect KeeneticOS "
-            "version: {}",
-            error.what());
-        return std::nullopt;
-    }
+    // SystemInfo and the overview consume independent typed projections of
+    // one process-local /show/version observation. A transient refresh
+    // failure may therefore reuse the exact typed LKG without another RCI
+    // request from this call site.
+    return shared_ndms_firmware_version_cache().get().version;
 }
 
 SystemInfo detect_system_info() {

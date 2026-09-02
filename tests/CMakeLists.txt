@@ -361,6 +361,10 @@ add_executable(keen-pbr-tests
   ../src/keenetic/ndms_http_service_config.cpp
   ../src/keenetic/ndms_http_config_projection.cpp
   ../src/keenetic/ndms_http_config_projection_production.cpp
+  ../src/keenetic/ndms_version_resource.cpp
+  ../src/keenetic/ndms_version_resource_production.cpp
+  ../src/keenetic/ndms_version_projection.cpp
+  ../src/keenetic/ndms_version_projection_production.cpp
   ../src/keenetic/ndms_interface_inventory.cpp
   ../src/keenetic/ndms_catalog_cache.cpp
   ../src/keenetic/ndms_catalog_cache_production.cpp
@@ -1069,6 +1073,38 @@ add_test(
   COMMAND keen-pbr-ndms-http-config-resource-tests
 )
 
+# Keep /show/version's shared raw owner and independent firmware/facts
+# projections buildable without daemon, API or HTTP production dependencies.
+add_executable(keen-pbr-ndms-version-resource-tests
+  test_main.cpp
+  test_ndms_version_resource.cpp
+  ../src/keenetic/ndms_rci_json_resource.cpp
+  ../src/keenetic/ndms_version_resource.cpp
+  ../src/keenetic/ndms_version_projection.cpp
+)
+set_target_properties(
+  keen-pbr-ndms-version-resource-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_include_directories(
+  keen-pbr-ndms-version-resource-tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+)
+target_link_libraries(
+  keen-pbr-ndms-version-resource-tests PRIVATE
+  nlohmann_json::nlohmann_json
+  Threads::Threads
+)
+keen_pbr_apply_project_options(
+  keen-pbr-ndms-version-resource-tests)
+add_test(
+  NAME keen-pbr-ndms-version-resource-tests
+  COMMAND keen-pbr-ndms-version-resource-tests
+)
+
 # Keep the resolver hook handoff independently buildable. These tests cover
 # exact attempt/epoch correlation and terminal ownership without relinking the
 # daemon-wide suite on the Windows bind mount.
@@ -1185,6 +1221,11 @@ add_executable(test_config_store
   ../src/http/curl_runtime.cpp
   ../src/http/http_client.cpp
   ../src/http/http_transport.cpp
+  ../src/keenetic/ndms_rci_json_resource.cpp
+  ../src/keenetic/ndms_version_resource.cpp
+  ../src/keenetic/ndms_version_resource_production.cpp
+  ../src/keenetic/ndms_version_projection.cpp
+  ../src/keenetic/ndms_version_projection_production.cpp
   ../src/log/logger.cpp
   ../src/log/trace.cpp
   ../src/util/system_info.cpp
@@ -1964,6 +2005,11 @@ add_executable(keen-pbr-firewall-it
   ../src/http/http_client.cpp
   ../src/http/http_transport.cpp
   ../src/http/curl_runtime.cpp
+  ../src/keenetic/ndms_rci_json_resource.cpp
+  ../src/keenetic/ndms_version_resource.cpp
+  ../src/keenetic/ndms_version_resource_production.cpp
+  ../src/keenetic/ndms_version_projection.cpp
+  ../src/keenetic/ndms_version_projection_production.cpp
   ../src/lists/kernel_set_tester.cpp
   ../src/lists/list_set_usage.cpp
   ../src/lists/list_shrink_guard.cpp
@@ -2114,6 +2160,11 @@ if(KEEN_PBR_FUZZ)
     ../src/http/http_client.cpp
     ../src/http/http_transport.cpp
     ../src/http/curl_runtime.cpp
+    ../src/keenetic/ndms_rci_json_resource.cpp
+    ../src/keenetic/ndms_version_resource.cpp
+    ../src/keenetic/ndms_version_resource_production.cpp
+    ../src/keenetic/ndms_version_projection.cpp
+    ../src/keenetic/ndms_version_projection_production.cpp
     ../src/log/logger.cpp
     ../src/log/trace.cpp
     ../src/util/traced_mutex.cpp

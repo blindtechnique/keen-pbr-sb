@@ -4,6 +4,7 @@
 #include "router_info_cache.hpp"
 
 #include "../http/http_client.hpp"
+#include "../keenetic/ndms_version_projection.hpp"
 #include "../log/logger.hpp"
 
 #include <algorithm>
@@ -55,18 +56,6 @@ bool has_number_field(const nlohmann::json& value, const char* field) {
 bool has_boolean_field(const nlohmann::json& value, const char* field) {
     const auto found = value.find(field);
     return found != value.end() && found->is_boolean();
-}
-
-bool authoritative_version(const std::optional<nlohmann::json>& value) {
-    if (!value || !value->is_object()) {
-        return false;
-    }
-    return has_string_field(*value, "model") ||
-           has_string_field(*value, "vendor") ||
-           has_string_field(*value, "release") ||
-           has_string_field(*value, "title") ||
-           has_string_field(*value, "arch") ||
-           (value->contains("ndm") && value->at("ndm").is_object());
 }
 
 bool authoritative_system(const std::optional<nlohmann::json>& value) {
@@ -256,12 +245,11 @@ ClientCounts count_clients(const nlohmann::json& hotspot) {
 RouterInfoCache::FetchResult build_router_info() {
     nlohmann::json out;
 
-    const auto version_result = rci_get("/show/version");
+    const auto version_snapshot =
+        shared_ndms_router_version_facts_cache().get();
     const auto system_result = rci_get("/show/system");
     const auto internet_result = rci_get("/show/internet/status");
     const auto hotspot_result = rci_get("/show/ip/hotspot");
-    const auto version =
-        version_result.value_or(nlohmann::json::object());
     const auto system =
         system_result.value_or(nlohmann::json::object());
     const auto internet =
@@ -269,17 +257,18 @@ RouterInfoCache::FetchResult build_router_info() {
     const auto hotspot =
         hotspot_result.value_or(nlohmann::json::object());
 
-    out["model"] = version.value("model", std::string{});
-    out["vendor"] = version.value("vendor", std::string{});
-    out["hw_id"] = version.value("hw_id", std::string{});
-    out["region"] = version.value("region", std::string{});
-    out["arch"] = version.value("arch", std::string{});
-    out["firmware_title"] = version.value("title", std::string{});
-    out["firmware_release"] = version.value("release", std::string{});
-    out["firmware_channel"] = version.value("sandbox", std::string{});
-    if (const auto ndm = version.find("ndm");
-        ndm != version.end() && ndm->is_object()) {
-        out["firmware_date"] = ndm->value("cdate", std::string{});
+    const auto version = version_snapshot.facts.value_or(
+        NdmsRouterVersionFacts{});
+    out["model"] = version.model;
+    out["vendor"] = version.vendor;
+    out["hw_id"] = version.hw_id;
+    out["region"] = version.region;
+    out["arch"] = version.arch;
+    out["firmware_title"] = version.title;
+    out["firmware_release"] = version.release;
+    out["firmware_channel"] = version.sandbox;
+    if (!version.firmware_date.empty()) {
+        out["firmware_date"] = version.firmware_date;
     }
 
     out["cpu_model"] = cpu_model();
@@ -364,7 +353,8 @@ RouterInfoCache::FetchResult build_router_info() {
                        !out["cpu_model"].get<std::string>().empty();
     return {
         std::move(out),
-        authoritative_version(version_result) &&
+        version_snapshot.facts.has_value() &&
+            version_snapshot.status == NdmsCatalogCacheStatus::fresh &&
             authoritative_system(system_result) &&
             authoritative_internet(internet_result) &&
             authoritative_hotspot(hotspot_result) &&

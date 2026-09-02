@@ -403,6 +403,10 @@ set(SOURCES
   src/keenetic/ndms_http_service_config.cpp
   src/keenetic/ndms_http_config_projection.cpp
   src/keenetic/ndms_http_config_projection_production.cpp
+  src/keenetic/ndms_version_resource.cpp
+  src/keenetic/ndms_version_resource_production.cpp
+  src/keenetic/ndms_version_projection.cpp
+  src/keenetic/ndms_version_projection_production.cpp
   src/keenetic/ndms_catalog_cache.cpp
   src/keenetic/ndms_catalog_cache_production.cpp
   src/keenetic/ndms_running_config_resource.cpp

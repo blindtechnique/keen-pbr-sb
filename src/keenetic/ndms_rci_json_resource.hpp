@@ -46,6 +46,7 @@ enum class NdmsRciJsonFailure : std::uint8_t {
 enum class NdmsRciJsonShape : std::uint8_t {
     object,
     running_config,
+    version_document,
 };
 
 struct NdmsRciJsonSnapshot {

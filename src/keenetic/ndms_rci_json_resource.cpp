@@ -70,6 +70,36 @@ ValidatedDocument validate_document(
     if (body.size() > kMaximumDocumentBytes) {
         return {NdmsRciJsonFailure::response_too_large, {}};
     }
+    if (shape == NdmsRciJsonShape::version_document) {
+        const auto begin = body.find_first_not_of(" \t\r\n");
+        if (begin == std::string::npos) {
+            return {NdmsRciJsonFailure::malformed_response, {}};
+        }
+        const auto end = body.find_last_not_of(" \t\r\n");
+        if (body[begin] != '{' && body[begin] != '[') {
+            // Preserve the exact legacy SystemInfo contract: every trimmed
+            // non-object/non-array payload is a human version value. Quoted
+            // strings are unwrapped, while JSON-looking numbers and UTF-8
+            // titles remain valid plain values.
+            auto normalized = body.substr(begin, end - begin + 1U);
+            StringWipeGuard normalized_wipe(normalized);
+            if (normalized.size() >= 2U &&
+                normalized.front() == '"' && normalized.back() == '"') {
+                normalized =
+                    normalized.substr(1U, normalized.size() - 2U);
+            }
+            if (normalized.empty()) {
+                return {NdmsRciJsonFailure::malformed_response, {}};
+            }
+            try {
+                auto canonical = nlohmann::json(normalized).dump();
+                StringWipeGuard canonical_wipe(canonical);
+                return {NdmsRciJsonFailure::none, Sha256::hex(canonical)};
+            } catch (...) {
+                return {NdmsRciJsonFailure::malformed_response, {}};
+            }
+        }
+    }
     try {
         auto document = nlohmann::json::parse(body);
         JsonWipeGuard wipe(document);
