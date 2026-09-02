@@ -72,6 +72,10 @@ struct OwnerHarness final {
     bool throw_dispatch_attempt{false};
     bool capture_retained_mutation_lease{false};
     bool promote_successor_during_drain{false};
+    RuntimeFirewallOperationContext::SuccessorMode
+        promotion_successor_mode{
+            RuntimeFirewallOperationContext::SuccessorMode::
+                reschedule_retry};
     bool promotion_retained{false};
     bool promotion_eager_launch_result{true};
     bool retry_first_terminal_drain{false};
@@ -312,8 +316,7 @@ struct OwnerHarness final {
                     promotion_retained =
                         owner->retain_pending_successor(
                             context,
-                            RuntimeFirewallOperationContext::SuccessorMode::
-                                reschedule_retry,
+                            promotion_successor_mode,
                             /*attempt=*/0U,
                             /*runtime_generation=*/77U,
                             {},
@@ -1089,6 +1092,49 @@ TEST_CASE(
 
     harness.owner.reset();
     CHECK_FALSE(admission.active().has_value());
+}
+
+TEST_CASE(
+    "preowned handoff retires a terminal-ready background owner without a retry loop") {
+    OwnerHarness harness;
+    harness.create_owner();
+
+    REQUIRE(harness.owner->start_immediate(
+                /*attempt=*/0U,
+                /*runtime_generation=*/77U,
+                {},
+                {},
+                /*schedule_catalog_refresh=*/false,
+                std::make_shared<TestDomainState>()) ==
+            RuntimeFirewallImmediateDisposition::handed_off);
+    const auto background = harness.owner->active_context();
+    REQUIRE(background);
+
+    harness.reject_control_post = true;
+    harness.owner->terminate_before_worker(
+        background,
+        harness.dispatched_claim,
+        RuntimeFirewallOperationContext::SuccessorMode::
+            defer_same_attempt,
+        /*force_rerun=*/true);
+    harness.reject_control_post = false;
+    REQUIRE(background->terminal_ready.load(std::memory_order_acquire));
+    CHECK(harness.drain_calls == 0);
+
+    // Model the production drain retaining its exact background intent as a
+    // successor. The handoff must retire that replaceable timer as part of
+    // the same control-loop pass, not ask the API caller to retry.
+    harness.promote_successor_during_drain = true;
+    harness.promotion_successor_mode =
+        RuntimeFirewallOperationContext::SuccessorMode::
+            defer_same_attempt;
+    harness.owner->retire_ready_background_for_preowned_handoff();
+
+    CHECK(harness.drain_calls == 1);
+    CHECK(harness.promotion_retained);
+    CHECK_FALSE(harness.owner->active_context());
+    CHECK_FALSE(harness.owner->pending_successor());
+    CHECK_FALSE(harness.coordinator.retry_pending());
 }
 
 TEST_CASE("runtime firewall config rollback accepts and returns its exact lease") {

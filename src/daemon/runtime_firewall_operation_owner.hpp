@@ -559,6 +559,12 @@ public:
                bool schedule_catalog_refresh,
                OwnedSnatRecovery snat_recovery);
     void cancel_retry() noexcept;
+    // A foreground config handoff may arrive after a background attempt has
+    // already published its terminal but before the queued control callback
+    // drains it. Finish only that replaceable background terminal inline,
+    // then cancel the successor timer it may create. Running and foreground
+    // owners remain untouched.
+    void retire_ready_background_for_preowned_handoff() noexcept;
     // Retire any timer/queued envelope before the final process STOP without
     // setting the owner's permanent shutdown bit. A foreground timer is
     // converted into its exact coordinator terminal so its preowned lease is

@@ -6628,7 +6628,8 @@ Daemon::begin_preowned_runtime_firewall_config_preapply(
 
     const bool background_timer_was_pending =
         runtime_firewall_retry_.retry_pending();
-    runtime_firewall_owner_->cancel_retry();
+    runtime_firewall_owner_->
+        retire_ready_background_for_preowned_handoff();
     if (runtime_firewall_owner_->active_context() ||
         runtime_firewall_owner_->pending_successor()) {
         if (background_timer_was_pending) {

@@ -1043,6 +1043,27 @@ void RuntimeFirewallOperationOwner::cancel_retry() noexcept {
     }
 }
 
+void RuntimeFirewallOperationOwner::
+retire_ready_background_for_preowned_handoff() noexcept {
+    cancel_retry();
+
+    const auto context = active_context_;
+    if (!context ||
+        context->lifecycle_kind !=
+            RuntimeFirewallLifecycleKind::background ||
+        !context->terminal_ready.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    // We are already on the daemon control loop. The ordinary terminal post
+    // may still be queued behind this config handoff, so drain the same
+    // terminal synchronously instead of rejecting the user's save. If the
+    // drain retained the background intent as a timer, it is replaceable by
+    // the foreground pre-apply and is cancelled immediately.
+    dispatch_terminal_drain(context, /*shutdown=*/false);
+    cancel_retry();
+}
+
 void RuntimeFirewallOperationOwner::prepare_for_process_cleanup() noexcept {
     // First retire a detached successor and every not-yet-running executor
     // envelope. Their exact preowned continuations remain live and receive
