@@ -37,6 +37,37 @@ TEST_CASE("config reload coalesces a newer request and schedules one rerun") {
     CHECK_FALSE(rerun_completion.rerun_requested);
 }
 
+TEST_CASE(
+    "claimed config reload schedules exactly one coalesced busy rerun") {
+    ConfigReloadCoordinator coordinator;
+
+    const auto first = coordinator.request();
+    REQUIRE(first.status == ConfigReloadRequestStatus::started);
+    REQUIRE(first.claim);
+    REQUIRE(coordinator.claim_commit(first.claim) ==
+            ConfigReloadCommitStatus::claimed);
+
+    const auto deferred = coordinator.request();
+    CHECK(deferred.status == ConfigReloadRequestStatus::coalesced);
+    CHECK_FALSE(deferred.claim);
+
+    const auto completion = coordinator.complete(first.claim);
+    REQUIRE(completion.owned);
+    CHECK(completion.rerun_requested);
+    CHECK_FALSE(coordinator.complete(first.claim).owned);
+
+    const auto rerun = coordinator.request();
+    REQUIRE(rerun.status == ConfigReloadRequestStatus::started);
+    REQUIRE(rerun.claim);
+    CHECK(rerun.claim.token != first.claim.token);
+    REQUIRE(coordinator.claim_commit(rerun.claim) ==
+            ConfigReloadCommitStatus::claimed);
+
+    const auto rerun_completion = coordinator.complete(rerun.claim);
+    CHECK(rerun_completion.owned);
+    CHECK_FALSE(rerun_completion.rerun_requested);
+}
+
 TEST_CASE("config reload cancel wins an ambiguous control-post outcome") {
     ConfigReloadCoordinator coordinator;
     const auto request = coordinator.request();

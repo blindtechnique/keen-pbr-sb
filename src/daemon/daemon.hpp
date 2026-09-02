@@ -518,12 +518,17 @@ private:
     void cancel_owned_snat_health_check();
     void check_owned_snat_health();
     void quiesce_runtime_mutations() noexcept;
-    void handle_sighup();
-    void defer_sighup_reload(ConfigReloadClaim claim);
+    void handle_sighup(
+        bool active_runtime_reload_busy_retry_available = true);
+    void defer_sighup_reload(
+        ConfigReloadClaim claim,
+        bool active_runtime_reload_busy_retry_available);
     void complete_sighup_reload(ConfigReloadClaim claim,
                                 std::unique_ptr<RuntimeMutationAdmission::Lease>
                                     mutation_lease,
-                                bool allow_coalesced_rerun) noexcept;
+                                bool allow_coalesced_rerun,
+                                bool active_runtime_reload_busy_retry_available)
+        noexcept;
     void handle_interface_monitor_events(uint32_t events);
     void reconnect_interface_monitor();
     void register_interface_monitor_fd();

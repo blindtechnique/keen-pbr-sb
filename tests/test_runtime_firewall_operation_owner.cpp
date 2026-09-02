@@ -1026,6 +1026,71 @@ TEST_CASE("runtime firewall config candidate accepts and returns its exact lease
         RuntimeFirewallLifecycleKind::config_candidate);
 }
 
+TEST_CASE(
+    "runtime firewall config candidate replaces a background retry before handoff") {
+    OwnerHarness harness;
+    harness.create_owner();
+
+    std::function<void()> retry_callback;
+    std::size_t retry_runs{0U};
+    const auto retry = harness.coordinator.schedule(
+        /*attempt=*/0U,
+        /*runtime_generation=*/77U,
+        /*bounded_retry_count=*/3U,
+        {},
+        [&](const RuntimeFirewallRetryPlan&, auto callback) {
+            retry_callback = std::move(callback);
+            return 918;
+        },
+        [](std::uint64_t) { return true; },
+        [&](std::size_t, OwnedSnatRecovery) { ++retry_runs; });
+    REQUIRE(retry.schedule);
+    REQUIRE(harness.coordinator.retry_pending());
+
+    harness.owner->cancel_retry();
+    CHECK_FALSE(harness.coordinator.retry_pending());
+    REQUIRE(retry_callback);
+    retry_callback();
+    CHECK(retry_runs == 0U);
+
+    RuntimeMutationAdmission admission;
+    auto lease = acquire_test_lease(
+        admission, "config-candidate-after-background-retry");
+    REQUIRE(lease);
+    auto* const exact_lease = lease.get();
+    const auto exact_token = lease->token();
+    RuntimeFirewallOperationOwner::PreownedTerminalContinuation
+        continuation{
+            [](RuntimeFirewallLifecycleTerminal,
+               RuntimeFirewallOperationOwner::MutationLeasePtr) noexcept {}};
+
+    auto start = harness.owner->start_immediate_preowned(
+        /*attempt=*/0U,
+        /*runtime_generation=*/77U,
+        {},
+        {},
+        /*schedule_catalog_refresh=*/false,
+        std::make_shared<TestDomainState>(),
+        admission,
+        std::move(lease),
+        {},
+        RuntimeFirewallLifecycleKind::config_candidate,
+        std::move(continuation));
+
+    REQUIRE(start.disposition ==
+            RuntimeFirewallImmediateDisposition::handed_off);
+    CHECK_FALSE(start.unaccepted_lease);
+    const auto context = harness.owner->active_context();
+    REQUIRE(context);
+    REQUIRE(context->retained_mutation_lease);
+    CHECK(context->retained_mutation_lease.get() == exact_lease);
+    CHECK(context->retained_mutation_lease->token() == exact_token);
+    CHECK(admission.owns(*context->retained_mutation_lease));
+
+    harness.owner.reset();
+    CHECK_FALSE(admission.active().has_value());
+}
+
 TEST_CASE("runtime firewall config rollback accepts and returns its exact lease") {
     check_config_generation_accepts_and_returns_exact_lease(
         RuntimeFirewallLifecycleKind::config_rollback);

@@ -304,6 +304,65 @@ TEST_CASE("config candidate terminal policy is evidence complete") {
     }
 }
 
+TEST_CASE(
+    "active runtime reload defers only a clean transient owner rejection") {
+    LifecycleTerminal terminal;
+    terminal.outcome = LifecycleOutcome::not_verified;
+    terminal.committed = false;
+    terminal.commit_ambiguous = false;
+    terminal.transient = true;
+    terminal.previous_generation_certainly_retained = true;
+    terminal.detail =
+        kConfigCandidateOwnerDidNotAcceptOperation;
+
+    CHECK(should_defer_active_runtime_reload_owner_rejection(
+        /*retry_available=*/true,
+        /*exact_lease_owned=*/true,
+        /*published_generation_current=*/true,
+        /*shutdown_requested=*/false,
+        terminal));
+    CHECK_FALSE(should_defer_active_runtime_reload_owner_rejection(
+        /*retry_available=*/false,
+        /*exact_lease_owned=*/true,
+        /*published_generation_current=*/true,
+        /*shutdown_requested=*/false,
+        terminal));
+    CHECK_FALSE(should_defer_active_runtime_reload_owner_rejection(
+        /*retry_available=*/true,
+        /*exact_lease_owned=*/false,
+        /*published_generation_current=*/true,
+        /*shutdown_requested=*/false,
+        terminal));
+    CHECK_FALSE(should_defer_active_runtime_reload_owner_rejection(
+        /*retry_available=*/true,
+        /*exact_lease_owned=*/true,
+        /*published_generation_current=*/false,
+        /*shutdown_requested=*/false,
+        terminal));
+    CHECK_FALSE(should_defer_active_runtime_reload_owner_rejection(
+        /*retry_available=*/true,
+        /*exact_lease_owned=*/true,
+        /*published_generation_current=*/true,
+        /*shutdown_requested=*/true,
+        terminal));
+
+    terminal.transient = false;
+    CHECK_FALSE(should_defer_active_runtime_reload_owner_rejection(
+        true, true, true, false, terminal));
+    terminal.transient = true;
+    terminal.commit_ambiguous = true;
+    CHECK_FALSE(should_defer_active_runtime_reload_owner_rejection(
+        true, true, true, false, terminal));
+    terminal.commit_ambiguous = false;
+    terminal.previous_generation_certainly_retained = false;
+    CHECK_FALSE(should_defer_active_runtime_reload_owner_rejection(
+        true, true, true, false, terminal));
+    terminal.previous_generation_certainly_retained = true;
+    terminal.detail = "different clean rejection";
+    CHECK_FALSE(should_defer_active_runtime_reload_owner_rejection(
+        true, true, true, false, terminal));
+}
+
 TEST_CASE("config candidate terminal policy binds exact operation identity") {
     struct IdentityCase {
         const char* name;

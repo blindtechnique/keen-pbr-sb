@@ -4,10 +4,37 @@
 #include "runtime_firewall_lifecycle_completion.hpp"
 
 #include <cstdint>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 
 namespace keen_pbr3 {
+
+inline constexpr std::string_view
+    kConfigCandidateOwnerDidNotAcceptOperation =
+        "configuration candidate owner did not accept the operation";
+
+// A disk reload may be prepared while an unrelated background firewall
+// refresh is retiring. Only that asynchronous reload gets one fresh
+// preparation after a clean pre-handoff rejection. API saves keep their
+// synchronous result, and loss of the exact lease/generation or shutdown
+// remains terminal rather than being relabelled as contention.
+inline bool should_defer_active_runtime_reload_owner_rejection(
+    bool retry_available,
+    bool exact_lease_owned,
+    bool published_generation_current,
+    bool shutdown_requested,
+    const RuntimeFirewallLifecycleTerminal& terminal) noexcept {
+    return retry_available && exact_lease_owned &&
+           published_generation_current && !shutdown_requested &&
+           terminal.transient &&
+           terminal.outcome ==
+               RuntimeFirewallLifecycleOutcome::not_verified &&
+           !terminal.committed && !terminal.commit_ambiguous &&
+           terminal.previous_generation_certainly_retained &&
+           terminal.detail ==
+               kConfigCandidateOwnerDidNotAcceptOperation;
+}
 
 // Pure decision boundary between an asynchronous candidate-firewall owner and
 // the config/WAL publisher. It deliberately carries evidence rather than an

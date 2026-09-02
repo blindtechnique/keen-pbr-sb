@@ -3295,7 +3295,8 @@ void Daemon::schedule_netfilter_runtime_refresh_noexcept(
     schedule_netfilter_runtime_refresh(reason);
 }
 
-void Daemon::handle_sighup() {
+void Daemon::handle_sighup(
+    bool active_runtime_reload_busy_retry_available) {
     auto& log = Logger::instance();
     const auto request = sighup_reload_coordinator_.request();
     if (request.status == ConfigReloadRequestStatus::coalesced) {
@@ -3325,7 +3326,8 @@ void Daemon::handle_sighup() {
                 "SIGHUP: reload deferred because runtime mutation '{}' is "
                 "already in progress",
                 active.has_value() ? active->label : std::string{"unknown"});
-            defer_sighup_reload(claim);
+            defer_sighup_reload(
+                claim, active_runtime_reload_busy_retry_available);
             return;
         }
         const auto expected_lease_token = admitted->token();
@@ -3345,7 +3347,8 @@ void Daemon::handle_sighup() {
             complete_sighup_reload(
                 claim,
                 std::move(exact.lease),
-                /*allow_coalesced_rerun=*/false);
+                /*allow_coalesced_rerun=*/false,
+                active_runtime_reload_busy_retry_available);
             return;
         }
 
@@ -3365,6 +3368,7 @@ void Daemon::handle_sighup() {
              mutation_lease,
              expected_lease_token,
              expected_runtime_generation,
+             active_runtime_reload_busy_retry_available,
              trace_id]() mutable {
                 bool posted = false;
                 try {
@@ -3417,6 +3421,7 @@ void Daemon::handle_sighup() {
                          mutation_lease,
                          expected_lease_token,
                          expected_runtime_generation,
+                         active_runtime_reload_busy_retry_available,
                          preparation_error =
                              std::move(preparation_error)]() mutable {
                             const auto commit_claim =
@@ -3529,7 +3534,9 @@ void Daemon::handle_sighup() {
                                             [this,
                                              claim,
                                              expected_lease_token,
+                                             expected_runtime_generation,
                                              allow_coalesced_rerun,
+                                             active_runtime_reload_busy_retry_available,
                                              schedule_cache_reconcile](
                                                 RuntimeFirewallLifecycleTerminal
                                                     terminal,
@@ -3564,6 +3571,27 @@ void Daemon::handle_sighup() {
                                                         (terminal.committed ||
                                                          terminal
                                                              .candidate_noop_verified);
+                                                const bool retry_owner_busy =
+                                                    should_defer_active_runtime_reload_owner_rejection(
+                                                        allow_coalesced_rerun &&
+                                                            active_runtime_reload_busy_retry_available,
+                                                        exact_lease_returned,
+                                                        runtime_generation_.load(
+                                                            std::memory_order_acquire) ==
+                                                            expected_runtime_generation,
+                                                        runtime_firewall_owner_
+                                                            ->shutdown_requested(),
+                                                        terminal);
+                                                bool busy_rerun_queued = false;
+                                                if (retry_owner_busy) {
+                                                    const auto retry =
+                                                        sighup_reload_coordinator_
+                                                            .request();
+                                                    busy_rerun_queued =
+                                                        retry.status ==
+                                                        ConfigReloadRequestStatus::
+                                                            coalesced;
+                                                }
                                                 try {
                                                     auto& terminal_log =
                                                         Logger::instance();
@@ -3588,6 +3616,14 @@ void Daemon::handle_sighup() {
                                                             "did not return "
                                                             "its exact "
                                                             "mutation lease");
+                                                    } else if (
+                                                        busy_rerun_queued) {
+                                                        terminal_log.info(
+                                                            "SIGHUP: runtime "
+                                                            "firewall owner "
+                                                            "was busy; "
+                                                            "deferring one "
+                                                            "fresh reload");
                                                     } else if (
                                                         candidate_published) {
                                                         terminal_log.info(
@@ -3641,8 +3677,11 @@ void Daemon::handle_sighup() {
                                                 complete_sighup_reload(
                                                     claim,
                                                     std::move(exact),
-                                                    allow_coalesced_rerun);
-                                                if (!candidate_published) {
+                                                    allow_coalesced_rerun,
+                                                    active_runtime_reload_busy_retry_available &&
+                                                        !retry_owner_busy);
+                                                if (!candidate_published &&
+                                                    !busy_rerun_queued) {
                                                     schedule_cache_reconcile();
                                                 }
                                             }};
@@ -3659,7 +3698,8 @@ void Daemon::handle_sighup() {
                                         complete_sighup_reload(
                                             claim,
                                             std::move(exact.lease),
-                                            allow_coalesced_rerun);
+                                            allow_coalesced_rerun,
+                                            active_runtime_reload_busy_retry_available);
                                         schedule_cache_reconcile();
                                         return;
                                     }
@@ -3697,7 +3737,8 @@ void Daemon::handle_sighup() {
                             complete_sighup_reload(
                                 claim,
                                 std::move(exact.lease),
-                                allow_coalesced_rerun);
+                                allow_coalesced_rerun,
+                                active_runtime_reload_busy_retry_available);
                             if (force_cache_reconcile) {
                                 schedule_cache_reconcile();
                             }
@@ -3731,7 +3772,8 @@ void Daemon::handle_sighup() {
                         complete_sighup_reload(
                             claim,
                             std::move(exact.lease),
-                            /*allow_coalesced_rerun=*/false);
+                            /*allow_coalesced_rerun=*/false,
+                            active_runtime_reload_busy_retry_available);
                     }
                 }
             },
@@ -3745,7 +3787,8 @@ void Daemon::handle_sighup() {
                 complete_sighup_reload(
                     claim,
                     std::move(exact.lease),
-                    /*allow_coalesced_rerun=*/false);
+                    /*allow_coalesced_rerun=*/false,
+                    active_runtime_reload_busy_retry_available);
             }
         }
     } catch (const std::exception& e) {
@@ -3754,7 +3797,8 @@ void Daemon::handle_sighup() {
             complete_sighup_reload(
                 claim,
                 std::move(exact.lease),
-                /*allow_coalesced_rerun=*/false);
+                /*allow_coalesced_rerun=*/false,
+                active_runtime_reload_busy_retry_available);
         }
         log.error("SIGHUP: reload rejected: {}", e.what());
     } catch (...) {
@@ -3763,13 +3807,16 @@ void Daemon::handle_sighup() {
             complete_sighup_reload(
                 claim,
                 std::move(exact.lease),
-                /*allow_coalesced_rerun=*/false);
+                /*allow_coalesced_rerun=*/false,
+                active_runtime_reload_busy_retry_available);
         }
         log.error("SIGHUP: reload rejected: unknown error");
     }
 }
 
-void Daemon::defer_sighup_reload(ConfigReloadClaim claim) {
+void Daemon::defer_sighup_reload(
+    ConfigReloadClaim claim,
+    bool active_runtime_reload_busy_retry_available) {
     auto abandon = [this, claim]() noexcept {
         if (sighup_reload_coordinator_.cancel(claim)) {
             (void)sighup_reload_coordinator_.complete(claim);
@@ -3778,7 +3825,10 @@ void Daemon::defer_sighup_reload(ConfigReloadClaim claim) {
 
     const bool queued = blocking_executor_.try_post(
         "sighup-runtime-mutation-wait",
-        [this, claim, abandon]() mutable {
+        [this,
+         claim,
+         active_runtime_reload_busy_retry_available,
+         abandon]() mutable {
             if (!runtime_mutation_admission_.wait_until_idle()) {
                 abandon();
                 return;
@@ -3787,7 +3837,9 @@ void Daemon::defer_sighup_reload(ConfigReloadClaim claim) {
             bool posted = false;
             try {
                 posted = post_control_task(
-                    [this, claim]() {
+                    [this,
+                     claim,
+                     active_runtime_reload_busy_retry_available]() {
                         if (!sighup_reload_coordinator_.cancel(claim)) {
                             return;
                         }
@@ -3799,7 +3851,8 @@ void Daemon::defer_sighup_reload(ConfigReloadClaim claim) {
                             // fresh generation. If another mutation won the
                             // race after the idle observation, handle_sighup()
                             // defers again.
-                            handle_sighup();
+                            handle_sighup(
+                                active_runtime_reload_busy_retry_available);
                         }
                     },
                     "sighup-runtime-mutation-resume");
@@ -3837,7 +3890,10 @@ void Daemon::defer_sighup_reload(ConfigReloadClaim claim) {
     try {
         scheduler_->schedule_oneshot(
             std::chrono::milliseconds{100},
-            [this, claim]() { defer_sighup_reload(claim); },
+            [this, claim, active_runtime_reload_busy_retry_available]() {
+                defer_sighup_reload(
+                    claim, active_runtime_reload_busy_retry_available);
+            },
             "sighup-runtime-mutation-wait-retry");
     } catch (const std::exception& error) {
         Logger::instance().error(
@@ -3850,7 +3906,8 @@ void Daemon::defer_sighup_reload(ConfigReloadClaim claim) {
 void Daemon::complete_sighup_reload(
     ConfigReloadClaim claim,
     std::unique_ptr<RuntimeMutationAdmission::Lease> mutation_lease,
-    bool allow_coalesced_rerun) noexcept {
+    bool allow_coalesced_rerun,
+    bool active_runtime_reload_busy_retry_available) noexcept {
     const auto completion =
         sighup_reload_coordinator_.complete(claim);
     if (!completion.owned) {
@@ -3869,7 +3926,7 @@ void Daemon::complete_sighup_reload(
     try {
         Logger::instance().info(
             "SIGHUP: starting the coalesced trailing reload");
-        handle_sighup();
+        handle_sighup(active_runtime_reload_busy_retry_available);
     } catch (const std::exception& error) {
         try {
             Logger::instance().error(
@@ -6695,11 +6752,13 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
         RuntimeFirewallPreownedTerminalContinuation continuation,
         std::unique_ptr<RuntimeMutationAdmission::Lease> exact,
         std::string_view detail,
-        bool previous_retained) noexcept {
+        bool previous_retained,
+        bool transient = false) noexcept {
         RuntimeFirewallLifecycleTerminal terminal;
         terminal.outcome = RuntimeFirewallLifecycleOutcome::not_verified;
         terminal.committed = false;
         terminal.commit_ambiguous = false;
+        terminal.transient = transient;
         terminal.previous_generation_certainly_retained =
             previous_retained;
         try {
@@ -7040,6 +7099,13 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
             return;
         }
     }
+    if (!bootstrap_from_stopped) {
+        // The pre-apply owner returned the exact writer lease, but an
+        // unrelated background timer may have been armed while the private
+        // candidate was prepared. Retire only that replaceable retry before
+        // asking the same owner to accept the candidate generation.
+        runtime_firewall_owner_->cancel_retry();
+    }
     const auto lifecycle_kind = bootstrap_from_stopped
         ? RuntimeFirewallLifecycleKind::config_bootstrap_from_stopped
         : RuntimeFirewallLifecycleKind::config_candidate;
@@ -7048,6 +7114,16 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
             lifecycle_kind,
             lease,
             continuation)) {
+        const bool transient_owner_rejection =
+            publication_mode ==
+                RuntimeConfigGenerationPublicationMode::
+                    active_runtime_reload &&
+            transaction && lease && static_cast<bool>(*lease) &&
+            lease->token() == transaction->mutation_lease_token &&
+            runtime_mutation_admission_.owns(*lease) && continuation &&
+            runtime_generation_.load(std::memory_order_acquire) ==
+                transaction->base_runtime_generation &&
+            !runtime_firewall_owner_->shutdown_requested();
         if (!bootstrap_from_stopped) {
             schedule_netfilter_runtime_refresh_noexcept(
                 NetfilterRefreshReason::full,
@@ -7057,8 +7133,9 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
         reject(
             std::move(transaction->final_continuation),
             std::move(lease),
-            "configuration candidate owner did not accept the operation",
-            true);
+            kConfigCandidateOwnerDidNotAcceptOperation,
+            true,
+            transient_owner_rejection);
     }
 }
 
