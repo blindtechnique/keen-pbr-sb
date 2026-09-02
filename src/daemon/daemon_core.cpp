@@ -6626,37 +6626,217 @@ Daemon::begin_preowned_runtime_firewall_config_preapply(
         }
     }
 
+    PreparedNativeVpnCatalogPtr preapply_catalog;
+    bool preapply_schedule_catalog_refresh{false};
+    bool active_background_has_future_intent{false};
+    bool observed_replaceable_background{false};
+    const auto merge_current_generation_recovery =
+        [&recovery, generation](const OwnedSnatRecovery& extra) {
+            auto filtered = extra;
+            if (filtered.cleanup_snapshot &&
+                (!filtered.cleanup_snapshot->valid() ||
+                 filtered.cleanup_snapshot->runtime_generation !=
+                     generation)) {
+                filtered.cleanup_snapshot.reset();
+            }
+            recovery = merge_owned_snat_recovery(
+                std::move(recovery), std::move(filtered));
+        };
+    const auto retain_current_generation_catalog =
+        [&preapply_catalog,
+         &preapply_schedule_catalog_refresh,
+         &active_background_has_future_intent,
+         generation](
+            const PreparedNativeVpnCatalogPtr& catalog) {
+            if (!catalog) return;
+            preapply_schedule_catalog_refresh =
+                preapply_schedule_catalog_refresh ||
+                catalog->schedule_catalog_refresh;
+            if (catalog->runtime_generation > generation) {
+                active_background_has_future_intent = true;
+                return;
+            }
+            if (catalog->runtime_generation == generation &&
+                (!preapply_catalog ||
+                 catalog->runtime_generation >=
+                     preapply_catalog->runtime_generation)) {
+                preapply_catalog = catalog;
+            }
+        };
+
+    // If the background owner is a replaceable timer, cancel_retry() below
+    // can retire its context synchronously. Copy its still-current trailing
+    // intent first; if a queued/running envelope remains, the same data stays
+    // authoritative in that context until its terminal is drained.
+    if (const auto context =
+            runtime_firewall_owner_->active_context();
+        context &&
+        context->lifecycle_kind ==
+            RuntimeFirewallLifecycleKind::background &&
+        !context->worker_commit_ambiguous) {
+        observed_replaceable_background = true;
+        if (context->queued_claim.runtime_generation > generation ||
+            context->successor_runtime_generation > generation) {
+            active_background_has_future_intent = true;
+        }
+        preapply_schedule_catalog_refresh =
+            preapply_schedule_catalog_refresh ||
+            context->successor_schedule_catalog_refresh;
+        merge_current_generation_recovery(
+            context->trailing_snat_recovery);
+        retain_current_generation_catalog(
+            context->prepared_native_vpn_catalog);
+        retain_current_generation_catalog(
+            context->trailing_prepared_native_vpn_catalog);
+        if (context->terminal_ready.load(std::memory_order_acquire)) {
+            merge_current_generation_recovery(
+                context->completion.snat_recovery);
+            retain_current_generation_catalog(
+                context->completion.next_prepared_catalog);
+        }
+    }
+    if (active_background_has_future_intent) {
+        return RuntimeFirewallImmediateDisposition::rejected;
+    }
+
+    // Allocate the foreground domain state before retiring any replaceable
+    // background owner. A construction failure must leave that durable owner
+    // completely untouched.
+    auto preapply_state =
+        std::make_shared<DaemonRuntimeFirewallOperationState>();
+
     const bool background_timer_was_pending =
         runtime_firewall_retry_.retry_pending();
     runtime_firewall_owner_->
         retire_ready_background_for_preowned_handoff();
-    if (runtime_firewall_owner_->active_context() ||
-        runtime_firewall_owner_->pending_successor()) {
-        if (background_timer_was_pending) {
+
+    bool background_intent_replaced =
+        observed_replaceable_background &&
+        background_timer_was_pending &&
+        !runtime_firewall_owner_->active_context();
+    const auto restore_replaced_background =
+        [this,
+         &background_intent_replaced,
+         generation,
+         &recovery,
+         &preapply_catalog,
+         &preapply_schedule_catalog_refresh]() noexcept {
+            if (!background_intent_replaced) return;
+            try {
+                // Keep the foreground copies until defer() has durably
+                // accepted the same recovery/catalogue payload. This is the
+                // transactional rollback for an unaccepted preowned start.
+                runtime_firewall_owner_->defer(
+                    /*attempt=*/0U,
+                    generation,
+                    preapply_catalog,
+                    preapply_schedule_catalog_refresh,
+                    recovery);
+                if (runtime_firewall_owner_->active_context() ||
+                    runtime_firewall_owner_->pending_successor() ||
+                    runtime_firewall_retry_.retry_pending()) {
+                    return;
+                }
+            } catch (...) {
+            }
+            schedule_netfilter_runtime_refresh_noexcept(
+                NetfilterRefreshReason::full,
+                "config pre-apply could not restore replaced background intent");
+        };
+
+    bool absorbed_background{false};
+    try {
+        if (!runtime_firewall_owner_->active_context() &&
+            runtime_firewall_owner_->pending_successor()) {
+            absorbed_background = runtime_firewall_owner_->
+                absorb_pending_background_for_preowned_handoff(
+                    generation,
+                    recovery,
+                    preapply_catalog,
+                    preapply_schedule_catalog_refresh);
+            background_intent_replaced =
+                background_intent_replaced || absorbed_background;
+        }
+    } catch (...) {
+        restore_replaced_background();
+        throw;
+    }
+
+    const auto blocking_context =
+        runtime_firewall_owner_->active_context();
+    const auto* blocking_successor =
+        runtime_firewall_owner_->pending_successor_state();
+    if (blocking_context || blocking_successor) {
+        const bool replaceable_pending_background =
+            !blocking_successor ||
+            (blocking_successor->lifecycle_kind ==
+                 RuntimeFirewallLifecycleKind::background &&
+             !blocking_successor->retained_mutation_lease &&
+             !blocking_successor->lifecycle_completion &&
+             !blocking_successor->preowned_terminal_continuation &&
+             blocking_successor->runtime_generation <= generation &&
+             (!blocking_successor->prepared_catalog ||
+              blocking_successor->prepared_catalog
+                      ->runtime_generation <= generation));
+        const bool replaceable_active_background =
+            blocking_context &&
+            blocking_context->lifecycle_kind ==
+                RuntimeFirewallLifecycleKind::background &&
+            !blocking_context->worker_commit_ambiguous &&
+            replaceable_pending_background;
+        if (background_timer_was_pending &&
+            !replaceable_active_background) {
             schedule_netfilter_runtime_refresh_noexcept(
                 NetfilterRefreshReason::full,
                 "config pre-apply could not replace background timer");
         }
-        return RuntimeFirewallImmediateDisposition::rejected;
+        // A running background refresh already owns the single firewall
+        // executor, but it has not consumed this exact config lease or
+        // continuation. Let the API worker wait for that one existing pass
+        // and retry only this ownership handoff. Its cancelled background
+        // successor is superseded by the foreground config generation.
+        const auto disposition = replaceable_active_background
+            ? RuntimeFirewallImmediateDisposition::background_busy
+            : RuntimeFirewallImmediateDisposition::rejected;
+        restore_replaced_background();
+        return disposition;
+    }
+
+    try {
+        if (preapply_schedule_catalog_refresh && preapply_catalog &&
+            !preapply_catalog->schedule_catalog_refresh) {
+            auto refreshed_catalog =
+                std::make_shared<PreparedNativeVpnCatalog>(
+                    *preapply_catalog);
+            refreshed_catalog->schedule_catalog_refresh = true;
+            preapply_catalog = std::move(refreshed_catalog);
+        }
+    } catch (...) {
+        restore_replaced_background();
+        throw;
     }
 
     RuntimeFirewallOperationOwner::PreownedImmediateStartResult result;
     try {
-        auto state =
-            std::make_shared<DaemonRuntimeFirewallOperationState>();
+        // Keep caller-owned copies until the owner confirms handoff. Argument
+        // construction and a clean coordinator rejection can therefore roll
+        // the displaced background intent back into defer() exactly once.
+        auto dispatch_recovery = recovery;
+        auto dispatch_catalog = preapply_catalog;
         result = runtime_firewall_owner_->start_immediate_preowned(
             0U,
             generation,
-            std::move(recovery),
-            {},
-            /*schedule_catalog_refresh=*/false,
-            state,
+            std::move(dispatch_recovery),
+            std::move(dispatch_catalog),
+            preapply_schedule_catalog_refresh,
+            preapply_state,
             runtime_mutation_admission_,
             std::move(mutation_lease),
             {},
             RuntimeFirewallLifecycleKind::config_preapply,
             std::move(continuation));
     } catch (...) {
+        restore_replaced_background();
         if (background_timer_was_pending) {
             schedule_netfilter_runtime_refresh_noexcept(
                 NetfilterRefreshReason::full,
@@ -6675,6 +6855,7 @@ Daemon::begin_preowned_runtime_firewall_config_preapply(
 
     mutation_lease = std::move(result.unaccepted_lease);
     continuation = std::move(result.unaccepted_continuation);
+    restore_replaced_background();
     if (background_timer_was_pending) {
         schedule_netfilter_runtime_refresh_noexcept(
             NetfilterRefreshReason::full,

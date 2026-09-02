@@ -906,6 +906,7 @@ inline bool absorb_trailing_runtime_firewall_completion(
 enum class RuntimeFirewallImmediateDisposition : std::uint8_t {
     handed_off,
     coalesced,
+    background_busy,
     rejected,
 };
 

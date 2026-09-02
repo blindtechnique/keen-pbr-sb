@@ -1057,11 +1057,78 @@ retire_ready_background_for_preowned_handoff() noexcept {
 
     // We are already on the daemon control loop. The ordinary terminal post
     // may still be queued behind this config handoff, so drain the same
-    // terminal synchronously instead of rejecting the user's save. If the
-    // drain retained the background intent as a timer, it is replaceable by
-    // the foreground pre-apply and is cancelled immediately.
+    // terminal synchronously instead of rejecting the user's save. Keep any
+    // successor created by that drain until the next handoff probe: cancelling
+    // it here would open a terminal-publication race in which its exact
+    // recovery/catalogue payload exists in neither owner.
     dispatch_terminal_drain(context, /*shutdown=*/false);
-    cancel_retry();
+}
+
+bool RuntimeFirewallOperationOwner::
+absorb_pending_background_for_preowned_handoff(
+    std::uint64_t runtime_generation,
+    OwnedSnatRecovery& snat_recovery,
+    PreparedNativeVpnCatalogPtr& prepared_catalog,
+    bool& schedule_catalog_refresh) {
+    if (active_context_ || launching_pending_successor_ ||
+        coordinator_.retry_pending() || !pending_successor_) {
+        return false;
+    }
+
+    const auto& pending = *pending_successor_;
+    if (pending.lifecycle_kind !=
+            RuntimeFirewallLifecycleKind::background ||
+        pending.retained_mutation_lease ||
+        pending.lifecycle_completion ||
+        pending.preowned_terminal_continuation ||
+        pending.runtime_generation > runtime_generation ||
+        (pending.prepared_catalog &&
+         pending.prepared_catalog->runtime_generation >
+             runtime_generation)) {
+        return false;
+    }
+
+    // Prepare every allocating merge before touching the durable slot. A
+    // stale generation may still request a full SNAT verification, but its
+    // exact mark selector must never be replayed against the current config.
+    auto pending_recovery = pending.snat_recovery;
+    if (pending_recovery.cleanup_snapshot &&
+        (!pending_recovery.cleanup_snapshot->valid() ||
+         pending_recovery.cleanup_snapshot->runtime_generation !=
+             runtime_generation)) {
+        pending_recovery.cleanup_snapshot.reset();
+    }
+    auto merged_recovery = merge_owned_snat_recovery(
+        snat_recovery, std::move(pending_recovery));
+    auto newest_catalog = prepared_catalog;
+    const bool merged_schedule_catalog_refresh =
+        schedule_catalog_refresh ||
+        pending.schedule_catalog_refresh ||
+        (pending.prepared_catalog &&
+         pending.prepared_catalog->schedule_catalog_refresh);
+    if (pending.prepared_catalog &&
+        pending.prepared_catalog->runtime_generation ==
+            runtime_generation &&
+        (!newest_catalog ||
+         pending.prepared_catalog->runtime_generation >=
+             newest_catalog->runtime_generation)) {
+        newest_catalog = pending.prepared_catalog;
+    }
+    if (merged_schedule_catalog_refresh && newest_catalog &&
+        !newest_catalog->schedule_catalog_refresh) {
+        auto refreshed_catalog =
+            std::make_shared<PreparedNativeVpnCatalog>(
+                *newest_catalog);
+        refreshed_catalog->schedule_catalog_refresh = true;
+        newest_catalog = std::move(refreshed_catalog);
+    }
+
+    snat_recovery = std::move(merged_recovery);
+    prepared_catalog = std::move(newest_catalog);
+    schedule_catalog_refresh = merged_schedule_catalog_refresh;
+    pending_successor_.reset();
+    cancel_pending_successor_watchdog();
+    return true;
 }
 
 void RuntimeFirewallOperationOwner::prepare_for_process_cleanup() noexcept {

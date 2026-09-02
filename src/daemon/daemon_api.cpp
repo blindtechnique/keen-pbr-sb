@@ -56,6 +56,10 @@ namespace {
 
 constexpr auto conntrack_publish_delay = std::chrono::milliseconds{500};
 constexpr auto interface_traffic_sample_interval = std::chrono::seconds{2};
+constexpr auto config_preapply_background_wait_budget =
+    std::chrono::seconds{5};
+constexpr auto config_preapply_background_wait_step =
+    std::chrono::milliseconds{100};
 
 #ifdef USE_KEENETIC_API
 class NativeImportBodyWipeGuard final {
@@ -1112,30 +1116,52 @@ Daemon::apply_validated_config_via_control_task_with_lease_return(
     std::optional<RuntimeFirewallImmediateDisposition> disposition;
     bool handoff_task_completed = false;
     std::exception_ptr handoff_failure;
-    try {
-        // Only this short ownership handoff is synchronous. The API worker,
-        // never the control loop, waits for the typed terminal below.
-        enqueue_control_task(
-            [this,
-             &lease_owner,
-             &continuation,
-             &disposition,
-             &handoff_task_completed,
-             &handoff_failure]() mutable {
-                try {
-                    disposition =
-                        begin_preowned_runtime_firewall_config_preapply(
-                            lease_owner, continuation);
-                } catch (...) {
-                    handoff_failure = std::current_exception();
-                }
-                handoff_task_completed = true;
-            },
-            true,
-            "api-config-preapply-owner",
-            true);
-    } catch (...) {
-        handoff_failure = std::current_exception();
+    const auto background_wait_deadline =
+        std::chrono::steady_clock::now() +
+        config_preapply_background_wait_budget;
+    for (;;) {
+        disposition.reset();
+        handoff_task_completed = false;
+        handoff_failure = {};
+        try {
+            // Only this short ownership handoff is synchronous. The API
+            // worker, never the control loop, waits for a pre-existing
+            // background owner and for the typed config terminal below.
+            enqueue_control_task(
+                [this,
+                 &lease_owner,
+                 &continuation,
+                 &disposition,
+                 &handoff_task_completed,
+                 &handoff_failure]() mutable {
+                    try {
+                        disposition =
+                            begin_preowned_runtime_firewall_config_preapply(
+                                lease_owner, continuation);
+                    } catch (...) {
+                        handoff_failure = std::current_exception();
+                    }
+                    handoff_task_completed = true;
+                },
+                true,
+                "api-config-preapply-owner",
+                true);
+        } catch (...) {
+            handoff_failure = std::current_exception();
+        }
+
+        if (!handoff_task_completed || handoff_failure ||
+            !disposition.has_value() ||
+            *disposition !=
+                RuntimeFirewallImmediateDisposition::background_busy) {
+            break;
+        }
+        if (std::chrono::steady_clock::now() >=
+            background_wait_deadline) {
+            break;
+        }
+        std::this_thread::sleep_for(
+            config_preapply_background_wait_step);
     }
 
     if (!handoff_task_completed) {
@@ -1199,10 +1225,30 @@ Daemon::apply_validated_config_via_control_task_with_lease_return(
 
     if (*disposition !=
         RuntimeFirewallImmediateDisposition::handed_off) {
+        if (*disposition ==
+            RuntimeFirewallImmediateDisposition::background_busy) {
+            try {
+                enqueue_control_task(
+                    [this]() {
+                        schedule_netfilter_runtime_refresh_noexcept(
+                            NetfilterRefreshReason::full,
+                            "config pre-apply background wait expired");
+                    },
+                    true,
+                    "api-config-preapply-background-recovery",
+                    true);
+            } catch (...) {
+                // Periodic health remains the fallback; preserve the exact
+                // foreground lease return and its original failure.
+            }
+        }
         if (lease_owner) {
             owner = std::move(*lease_owner);
         }
-        result->error = "Configuration pre-apply owner is busy";
+        result->error = *disposition ==
+                RuntimeFirewallImmediateDisposition::background_busy
+            ? "Configuration pre-apply background owner did not finish"
+            : "Configuration pre-apply owner is busy";
         result->runtime_unchanged = true;
         return *result;
     }

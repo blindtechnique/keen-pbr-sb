@@ -561,10 +561,20 @@ public:
     void cancel_retry() noexcept;
     // A foreground config handoff may arrive after a background attempt has
     // already published its terminal but before the queued control callback
-    // drains it. Finish only that replaceable background terminal inline,
-    // then cancel the successor timer it may create. Running and foreground
-    // owners remain untouched.
+    // drains it. Finish only that replaceable background terminal inline and
+    // leave any promoted successor owned until the next handoff probe.
+    // Running and foreground owners remain untouched.
     void retire_ready_background_for_preowned_handoff() noexcept;
+    // A completed background attempt may leave one detached successor while
+    // the caller already owns the exact foreground mutation lease. That
+    // successor cannot acquire admission and would otherwise block forever.
+    // Move its remaining recovery/catalog intent into the foreground
+    // pre-apply before retiring the replaceable background slot.
+    bool absorb_pending_background_for_preowned_handoff(
+        std::uint64_t runtime_generation,
+        OwnedSnatRecovery& snat_recovery,
+        PreparedNativeVpnCatalogPtr& prepared_catalog,
+        bool& schedule_catalog_refresh);
     // Retire any timer/queued envelope before the final process STOP without
     // setting the owner's permanent shutdown bit. A foreground timer is
     // converted into its exact coordinator terminal so its preowned lease is

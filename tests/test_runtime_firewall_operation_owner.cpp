@@ -76,7 +76,12 @@ struct OwnerHarness final {
         promotion_successor_mode{
             RuntimeFirewallOperationContext::SuccessorMode::
                 reschedule_retry};
+    std::uint64_t promotion_runtime_generation{77U};
+    OwnedSnatRecovery promotion_snat_recovery;
+    PreparedNativeVpnCatalogPtr promotion_prepared_catalog;
+    bool promotion_schedule_catalog_refresh{false};
     bool promotion_retained{false};
+    bool launch_promoted_successor{true};
     bool promotion_eager_launch_result{true};
     bool retry_first_terminal_drain{false};
     bool drained_transport_exhausted{false};
@@ -318,10 +323,10 @@ struct OwnerHarness final {
                             context,
                             promotion_successor_mode,
                             /*attempt=*/0U,
-                            /*runtime_generation=*/77U,
-                            {},
-                            {},
-                            /*schedule_catalog_refresh=*/false);
+                            promotion_runtime_generation,
+                            promotion_snat_recovery,
+                            promotion_prepared_catalog,
+                            promotion_schedule_catalog_refresh);
                 }
                 owner->cancel_completion_watchdog();
                 owner->reset_if_active(context);
@@ -340,7 +345,8 @@ struct OwnerHarness final {
                     detached_restart_launch_result =
                         owner->launch_pending_successor();
                 }
-                if (promotion_retained) {
+                if (promotion_retained &&
+                    launch_promoted_successor) {
                     try {
                         promotion_eager_launch_result =
                             owner->launch_pending_successor();
@@ -1095,7 +1101,7 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "preowned handoff retires a terminal-ready background owner without a retry loop") {
+    "preowned handoff preserves a promoted background successor until the next probe") {
     OwnerHarness harness;
     harness.create_owner();
 
@@ -1122,8 +1128,8 @@ TEST_CASE(
     CHECK(harness.drain_calls == 0);
 
     // Model the production drain retaining its exact background intent as a
-    // successor. The handoff must retire that replaceable timer as part of
-    // the same control-loop pass, not ask the API caller to retry.
+    // successor. The first probe drains the terminal but must not cancel the
+    // newly promoted timer in the same call.
     harness.promote_successor_during_drain = true;
     harness.promotion_successor_mode =
         RuntimeFirewallOperationContext::SuccessorMode::
@@ -1132,9 +1138,413 @@ TEST_CASE(
 
     CHECK(harness.drain_calls == 1);
     CHECK(harness.promotion_retained);
+    REQUIRE(harness.owner->active_context());
+    CHECK_FALSE(harness.owner->pending_successor());
+    CHECK(harness.coordinator.retry_pending());
+
+    // The next API probe snapshots the promoted context first and can then
+    // retire its still-unstarted timer without a terminal-publication gap.
+    harness.owner->retire_ready_background_for_preowned_handoff();
     CHECK_FALSE(harness.owner->active_context());
     CHECK_FALSE(harness.owner->pending_successor());
     CHECK_FALSE(harness.coordinator.retry_pending());
+}
+
+TEST_CASE(
+    "preowned handoff waits through a background terminal publication race") {
+    OwnerHarness harness;
+    harness.create_owner();
+
+    REQUIRE(harness.owner->start_immediate(
+                /*attempt=*/0U,
+                /*runtime_generation=*/77U,
+                {},
+                {},
+                /*schedule_catalog_refresh=*/false,
+                std::make_shared<TestDomainState>()) ==
+            RuntimeFirewallImmediateDisposition::handed_off);
+    const auto background = harness.owner->active_context();
+    REQUIRE(background);
+
+    // First probe: the background envelope is still authoritative.
+    harness.owner->retire_ready_background_for_preowned_handoff();
+    CHECK(harness.drain_calls == 0);
+    CHECK(harness.owner->active_context() == background);
+
+    // Terminal publication wins after that probe. A rejected control post
+    // models the ordinary drain being queued behind the config call.
+    harness.promote_successor_during_drain = true;
+    harness.promotion_successor_mode =
+        RuntimeFirewallOperationContext::SuccessorMode::defer_same_attempt;
+    harness.launch_promoted_successor = false;
+    harness.reject_control_post = true;
+    harness.owner->terminate_before_worker(
+        background,
+        harness.dispatched_claim,
+        RuntimeFirewallOperationContext::SuccessorMode::defer_same_attempt,
+        /*force_rerun=*/true);
+    harness.reject_control_post = false;
+    REQUIRE(background->terminal_ready.load(std::memory_order_acquire));
+    CHECK(harness.drain_calls == 0);
+
+    harness.owner->retire_ready_background_for_preowned_handoff();
+    CHECK(harness.drain_calls == 1);
+    CHECK_FALSE(harness.owner->active_context());
+    REQUIRE(harness.owner->pending_successor());
+
+    OwnedSnatRecovery recovery;
+    PreparedNativeVpnCatalogPtr catalog;
+    bool schedule_catalog_refresh{false};
+    REQUIRE(harness.owner->
+        absorb_pending_background_for_preowned_handoff(
+            /*runtime_generation=*/77U,
+            recovery,
+            catalog,
+            schedule_catalog_refresh));
+    CHECK_FALSE(harness.owner->pending_successor());
+}
+
+TEST_CASE(
+    "preowned handoff absorbs a detached background successor before exact config dispatch") {
+    OwnerHarness harness;
+    harness.create_owner();
+
+    REQUIRE(harness.owner->start_immediate(
+                /*attempt=*/0U,
+                /*runtime_generation=*/77U,
+                {},
+                {},
+                /*schedule_catalog_refresh=*/false,
+                std::make_shared<TestDomainState>()) ==
+            RuntimeFirewallImmediateDisposition::handed_off);
+    const auto background = harness.owner->active_context();
+    REQUIRE(background);
+
+    // Config admission is independent of the already-running background
+    // firewall pass. Keep this exact physical lease across the wait: neither
+    // the background terminal nor its replaceable successor may consume it.
+    RuntimeMutationAdmission admission;
+    auto lease = acquire_test_lease(
+        admission, "config-preapply-after-running-background");
+    REQUIRE(lease);
+    auto* const exact_lease = lease.get();
+    const auto exact_token = lease->token();
+
+    harness.promotion_snat_recovery.requested = true;
+    harness.promotion_snat_recovery.missing_observed = true;
+    harness.promotion_snat_recovery.cleanup_snapshot =
+        OwnedConntrackCleanupSnapshot{
+            77U, 0x00ffU, {0x0101U}, {0x0101U}, false};
+    auto background_catalog =
+        std::make_shared<PreparedNativeVpnCatalog>();
+    background_catalog->runtime_generation = 77U;
+    background_catalog->schedule_catalog_refresh = false;
+    harness.promotion_prepared_catalog = background_catalog;
+    harness.promotion_schedule_catalog_refresh = true;
+    harness.promote_successor_during_drain = true;
+    harness.promotion_successor_mode =
+        RuntimeFirewallOperationContext::SuccessorMode::
+            defer_same_attempt;
+    harness.launch_promoted_successor = false;
+
+    harness.reject_control_post = true;
+    harness.owner->terminate_before_worker(
+        background,
+        harness.dispatched_claim,
+        RuntimeFirewallOperationContext::SuccessorMode::
+            defer_same_attempt,
+        /*force_rerun=*/true);
+    harness.reject_control_post = false;
+    REQUIRE(background->terminal_ready.load(std::memory_order_acquire));
+    harness.owner->retire_ready_background_for_preowned_handoff();
+
+    const auto* pending = harness.owner->pending_successor_state();
+    REQUIRE(pending != nullptr);
+    CHECK(pending->lifecycle_kind ==
+          RuntimeFirewallLifecycleKind::background);
+    CHECK_FALSE(pending->retained_mutation_lease);
+    CHECK_FALSE(pending->lifecycle_completion);
+    CHECK_FALSE(pending->preowned_terminal_continuation);
+
+    OwnedSnatRecovery foreground_recovery;
+    PreparedNativeVpnCatalogPtr foreground_catalog;
+    bool foreground_schedule_catalog_refresh{false};
+    REQUIRE(harness.owner->
+        absorb_pending_background_for_preowned_handoff(
+            /*runtime_generation=*/77U,
+            foreground_recovery,
+            foreground_catalog,
+            foreground_schedule_catalog_refresh));
+    CHECK_FALSE(harness.owner->active_context());
+    CHECK_FALSE(harness.owner->pending_successor());
+    CHECK_FALSE(harness.coordinator.retry_pending());
+    CHECK(foreground_recovery.requested);
+    CHECK(foreground_recovery.missing_observed);
+    REQUIRE(foreground_recovery.cleanup_snapshot.has_value());
+    CHECK(foreground_recovery.cleanup_snapshot
+              ->runtime_generation == 77U);
+    REQUIRE(foreground_catalog);
+    CHECK(foreground_catalog != background_catalog);
+    CHECK(foreground_catalog->runtime_generation == 77U);
+    CHECK(foreground_catalog->schedule_catalog_refresh);
+    CHECK_FALSE(background_catalog->schedule_catalog_refresh);
+    CHECK(foreground_schedule_catalog_refresh);
+    CHECK(harness.timer_with_label(
+              "runtime-firewall-terminal-watchdog").cancelled);
+    REQUIRE(admission.active().has_value());
+    CHECK(admission.active()->token == exact_token);
+
+    RuntimeFirewallOperationOwner::PreownedTerminalContinuation
+        continuation{
+            [](RuntimeFirewallLifecycleTerminal,
+               RuntimeFirewallOperationOwner::MutationLeasePtr) noexcept {}};
+    auto start = harness.owner->start_immediate_preowned(
+        /*attempt=*/0U,
+        /*runtime_generation=*/77U,
+        std::move(foreground_recovery),
+        foreground_catalog,
+        foreground_schedule_catalog_refresh,
+        std::make_shared<TestDomainState>(),
+        admission,
+        std::move(lease),
+        {},
+        RuntimeFirewallLifecycleKind::config_preapply,
+        std::move(continuation));
+
+    REQUIRE(start.disposition ==
+            RuntimeFirewallImmediateDisposition::handed_off);
+    CHECK_FALSE(start.unaccepted_lease);
+    const auto foreground = harness.owner->active_context();
+    REQUIRE(foreground);
+    REQUIRE(foreground->retained_mutation_lease);
+    CHECK(foreground->retained_mutation_lease.get() == exact_lease);
+    CHECK(foreground->retained_mutation_lease->token() == exact_token);
+    CHECK(admission.owns(*foreground->retained_mutation_lease));
+    CHECK(harness.dispatch_calls == 2);
+    CHECK(harness.dispatched_recovery.requested);
+    CHECK(harness.dispatched_recovery.missing_observed);
+    REQUIRE(harness.dispatched_recovery.cleanup_snapshot.has_value());
+    CHECK(harness.dispatched_recovery.cleanup_snapshot
+              ->runtime_generation == 77U);
+    CHECK(harness.dispatched_catalog == foreground_catalog);
+    REQUIRE(harness.dispatched_catalog);
+    CHECK(harness.dispatched_catalog->schedule_catalog_refresh);
+    CHECK(harness.dispatched_schedule_catalog_refresh);
+
+    harness.owner.reset();
+    CHECK_FALSE(admission.active().has_value());
+}
+
+TEST_CASE(
+    "preowned handoff restores absorbed background intent after a clean start rejection") {
+    OwnerHarness harness;
+    harness.create_owner();
+
+    REQUIRE(harness.owner->start_immediate(
+                /*attempt=*/0U,
+                /*runtime_generation=*/77U,
+                {},
+                {},
+                /*schedule_catalog_refresh=*/false,
+                std::make_shared<TestDomainState>()) ==
+            RuntimeFirewallImmediateDisposition::handed_off);
+    const auto background = harness.owner->active_context();
+    REQUIRE(background);
+
+    harness.promotion_snat_recovery.requested = true;
+    harness.promotion_snat_recovery.missing_observed = true;
+    harness.promotion_snat_recovery.cleanup_snapshot =
+        OwnedConntrackCleanupSnapshot{
+            77U, 0x00ffU, {0x0a0aU}, {0x0a0aU}, false};
+    auto exact_catalog = std::make_shared<PreparedNativeVpnCatalog>();
+    exact_catalog->runtime_generation = 77U;
+    exact_catalog->schedule_catalog_refresh = true;
+    harness.promotion_prepared_catalog = exact_catalog;
+    harness.promotion_schedule_catalog_refresh = true;
+    harness.promote_successor_during_drain = true;
+    harness.promotion_successor_mode =
+        RuntimeFirewallOperationContext::SuccessorMode::defer_same_attempt;
+    harness.launch_promoted_successor = false;
+    harness.reject_control_post = true;
+    harness.owner->terminate_before_worker(
+        background,
+        harness.dispatched_claim,
+        RuntimeFirewallOperationContext::SuccessorMode::defer_same_attempt,
+        /*force_rerun=*/true);
+    harness.reject_control_post = false;
+    harness.owner->retire_ready_background_for_preowned_handoff();
+    REQUIRE(harness.owner->pending_successor());
+
+    OwnedSnatRecovery recovery;
+    PreparedNativeVpnCatalogPtr catalog;
+    bool schedule_catalog_refresh{false};
+    REQUIRE(harness.owner->
+        absorb_pending_background_for_preowned_handoff(
+            /*runtime_generation=*/77U,
+            recovery,
+            catalog,
+            schedule_catalog_refresh));
+    REQUIRE(catalog == exact_catalog);
+    REQUIRE(schedule_catalog_refresh);
+
+    RuntimeMutationAdmission admission;
+    auto lease = acquire_test_lease(
+        admission, "config-preapply-clean-rejection");
+    REQUIRE(lease);
+    RuntimeFirewallOperationOwner::PreownedTerminalContinuation
+        continuation{
+            [](RuntimeFirewallLifecycleTerminal,
+               RuntimeFirewallOperationOwner::MutationLeasePtr) noexcept {}};
+    auto rejected = harness.owner->start_immediate_preowned(
+        /*attempt=*/0U,
+        /*runtime_generation=*/77U,
+        recovery,
+        catalog,
+        schedule_catalog_refresh,
+        {},
+        admission,
+        std::move(lease),
+        {},
+        RuntimeFirewallLifecycleKind::config_preapply,
+        std::move(continuation));
+    REQUIRE(rejected.disposition ==
+            RuntimeFirewallImmediateDisposition::rejected);
+    REQUIRE(rejected.unaccepted_lease);
+
+    // This is the daemon rollback path: the exact foreground copies remain
+    // available and are durably deferred again before the lease is returned.
+    harness.owner->defer(
+        /*attempt=*/0U,
+        /*runtime_generation=*/77U,
+        catalog,
+        schedule_catalog_refresh,
+        recovery);
+    REQUIRE(harness.owner->active_context());
+    CHECK(harness.coordinator.retry_pending());
+    auto callback = harness.timer_with_label(
+        "runtime-firewall-admission-retry").callback;
+    callback();
+    CHECK(harness.dispatch_calls == 2);
+    CHECK(harness.dispatched_recovery.requested);
+    CHECK(harness.dispatched_recovery.missing_observed);
+    REQUIRE(harness.dispatched_recovery.cleanup_snapshot.has_value());
+    CHECK(harness.dispatched_recovery.cleanup_snapshot
+              ->runtime_generation == 77U);
+    CHECK(harness.dispatched_catalog == exact_catalog);
+    CHECK(harness.dispatched_schedule_catalog_refresh);
+
+    rejected.unaccepted_lease.reset();
+    harness.owner.reset();
+    CHECK_FALSE(admission.active().has_value());
+}
+
+TEST_CASE(
+    "preowned handoff filters stale detached background payload") {
+    OwnerHarness harness;
+    harness.create_owner();
+
+    REQUIRE(harness.owner->start_immediate(
+                /*attempt=*/0U,
+                /*runtime_generation=*/77U,
+                {},
+                {},
+                /*schedule_catalog_refresh=*/false,
+                std::make_shared<TestDomainState>()) ==
+            RuntimeFirewallImmediateDisposition::handed_off);
+    const auto background = harness.owner->active_context();
+    REQUIRE(background);
+
+    harness.promotion_runtime_generation = 76U;
+    harness.promotion_snat_recovery.requested = true;
+    harness.promotion_snat_recovery.missing_observed = true;
+    harness.promotion_snat_recovery.cleanup_snapshot =
+        OwnedConntrackCleanupSnapshot{
+            76U, 0x00ffU, {0x0303U}, {0x0303U}, false};
+    auto stale_catalog =
+        std::make_shared<PreparedNativeVpnCatalog>();
+    stale_catalog->runtime_generation = 76U;
+    harness.promotion_prepared_catalog = stale_catalog;
+    harness.promotion_schedule_catalog_refresh = true;
+    harness.promote_successor_during_drain = true;
+    harness.promotion_successor_mode =
+        RuntimeFirewallOperationContext::SuccessorMode::
+            defer_same_attempt;
+    harness.launch_promoted_successor = false;
+    harness.reject_control_post = true;
+    harness.owner->terminate_before_worker(
+        background,
+        harness.dispatched_claim,
+        RuntimeFirewallOperationContext::SuccessorMode::
+            defer_same_attempt,
+        /*force_rerun=*/true);
+    harness.reject_control_post = false;
+    REQUIRE(background->terminal_ready.load(std::memory_order_acquire));
+    harness.owner->retire_ready_background_for_preowned_handoff();
+    REQUIRE(harness.owner->pending_successor());
+
+    OwnedSnatRecovery foreground_recovery;
+    PreparedNativeVpnCatalogPtr foreground_catalog;
+    bool foreground_schedule_catalog_refresh{false};
+    REQUIRE(harness.owner->
+        absorb_pending_background_for_preowned_handoff(
+            /*runtime_generation=*/77U,
+            foreground_recovery,
+            foreground_catalog,
+            foreground_schedule_catalog_refresh));
+    CHECK(foreground_recovery.requested);
+    CHECK(foreground_recovery.missing_observed);
+    CHECK_FALSE(foreground_recovery.cleanup_snapshot.has_value());
+    CHECK_FALSE(foreground_catalog);
+    CHECK(foreground_schedule_catalog_refresh);
+    CHECK_FALSE(harness.owner->pending_successor());
+}
+
+TEST_CASE(
+    "preowned handoff preserves catalog refresh without a prepared catalog") {
+    OwnerHarness harness;
+    harness.create_owner();
+
+    REQUIRE(harness.owner->start_immediate(
+                /*attempt=*/0U,
+                /*runtime_generation=*/77U,
+                {},
+                {},
+                /*schedule_catalog_refresh=*/false,
+                std::make_shared<TestDomainState>()) ==
+            RuntimeFirewallImmediateDisposition::handed_off);
+    const auto background = harness.owner->active_context();
+    REQUIRE(background);
+
+    harness.promote_successor_during_drain = true;
+    harness.promotion_successor_mode =
+        RuntimeFirewallOperationContext::SuccessorMode::
+            defer_same_attempt;
+    harness.promotion_schedule_catalog_refresh = true;
+    harness.launch_promoted_successor = false;
+    harness.reject_control_post = true;
+    harness.owner->terminate_before_worker(
+        background,
+        harness.dispatched_claim,
+        RuntimeFirewallOperationContext::SuccessorMode::
+            defer_same_attempt,
+        /*force_rerun=*/true);
+    harness.reject_control_post = false;
+    REQUIRE(background->terminal_ready.load(std::memory_order_acquire));
+    harness.owner->retire_ready_background_for_preowned_handoff();
+    REQUIRE(harness.owner->pending_successor());
+
+    OwnedSnatRecovery foreground_recovery;
+    PreparedNativeVpnCatalogPtr foreground_catalog;
+    bool foreground_schedule_catalog_refresh{false};
+    REQUIRE(harness.owner->
+        absorb_pending_background_for_preowned_handoff(
+            /*runtime_generation=*/77U,
+            foreground_recovery,
+            foreground_catalog,
+            foreground_schedule_catalog_refresh));
+    CHECK_FALSE(foreground_catalog);
+    CHECK(foreground_schedule_catalog_refresh);
+    CHECK_FALSE(harness.owner->pending_successor());
 }
 
 TEST_CASE("runtime firewall config rollback accepts and returns its exact lease") {
