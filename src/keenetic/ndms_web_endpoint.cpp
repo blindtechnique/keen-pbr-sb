@@ -1,4 +1,5 @@
 #include "ndms_web_endpoint.hpp"
+#include "ndms_running_config_resource.hpp"
 
 #include "../http/http_client.hpp"
 
@@ -21,8 +22,6 @@ constexpr const char* kRciInterfaces =
     "http://127.0.0.1:79/rci/show/interface";
 constexpr const char* kRciHttpConfig =
     "http://127.0.0.1:79/rci/show/rc/ip/http";
-constexpr const char* kRciRunningConfig =
-    "http://127.0.0.1:79/rci/show/running-config";
 constexpr std::size_t kMaximumAddresses = 128U;
 constexpr std::size_t kMaximumRunningConfigLines = 16384U;
 constexpr std::size_t kMaximumLineBytes = 4096U;
@@ -106,6 +105,39 @@ std::string endpoint_text(const std::string& host,
                ? host + ":" + std::to_string(port)
                : "[" + host + "]:" + std::to_string(port);
 }
+
+void secure_wipe(std::string& value) noexcept {
+    volatile char* bytes = value.empty() ? nullptr : &value[0];
+    for (std::size_t offset = 0; offset < value.size(); ++offset) {
+        bytes[offset] = 0;
+    }
+    value.clear();
+}
+
+void wipe_json_strings(nlohmann::json& value) noexcept {
+    try {
+        if (value.is_string()) {
+            auto& text = value.get_ref<std::string&>();
+            secure_wipe(text);
+        } else if (value.is_array()) {
+            for (auto& child : value) wipe_json_strings(child);
+        } else if (value.is_object()) {
+            for (auto& item : value.items()) {
+                wipe_json_strings(item.value());
+            }
+        }
+    } catch (...) {
+    }
+}
+
+class JsonWipeGuard final {
+public:
+    explicit JsonWipeGuard(nlohmann::json& value) : value_(value) {}
+    ~JsonWipeGuard() { wipe_json_strings(value_); }
+
+private:
+    nlohmann::json& value_;
+};
 
 } // namespace
 
@@ -262,6 +294,18 @@ NdmsHttpServiceConfig parse_ndms_running_config_http_service(
     return result;
 }
 
+NdmsHttpServiceConfig cached_running_config_http_service() {
+    const auto snapshot = shared_ndms_running_config_resource().get();
+    if (!snapshot.document) {
+        throw std::runtime_error(
+            "NDMS running-config snapshot is unavailable");
+    }
+    const auto body = snapshot.document->body();
+    auto document = nlohmann::json::parse(body.begin(), body.end());
+    JsonWipeGuard wipe(document);
+    return parse_ndms_running_config_http_service(document);
+}
+
 std::optional<NdmsWebEndpoint> select_ndms_web_endpoint(
     const std::vector<NdmsWebAddress>& addresses,
     const NdmsHttpServiceConfig& service,
@@ -296,9 +340,7 @@ std::optional<NdmsWebEndpoint> discover_ndms_web_endpoint(
                     client.download(kRciHttpConfig)));
         } catch (const std::exception&) {
             // Older NDMS releases do not expose the structured subtree.
-            service = parse_ndms_running_config_http_service(
-                nlohmann::json::parse(
-                    client.download(kRciRunningConfig)));
+            service = cached_running_config_http_service();
         }
         const auto addresses = parse_ndms_web_addresses(interfaces);
         if (addresses.empty()) {

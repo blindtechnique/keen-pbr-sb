@@ -1,12 +1,13 @@
 #pragma once
 
 #include "ndms_catalog_cache.hpp"
+#include "ndms_running_config_resource.hpp"
 #include "ndms_vpn_server_service.hpp"
 
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -17,22 +18,32 @@ struct NdmsVpnServerServiceSnapshot {
     NdmsVpnServerServiceCatalog catalog;
     NdmsCatalogCacheStatus status{NdmsCatalogCacheStatus::unavailable};
     bool refreshed{false};
+    bool changed{false};
+    // Exact raw running-config content generation from which catalog was
+    // parsed. Zero means that no typed projection has been accepted.
+    std::uint64_t source_content_generation{0};
+    std::uint64_t source_observation_generation{0};
 };
 
-// One shared, typed and single-flight observation of the VPN service sections
-// in NDMS running-config. Both the daemon and Web API consume this cache, so
-// opening Settings never starts a second polling loop.
+// Typed, non-secret projection of the sole running-config resource. Both the
+// daemon and Web API consume this projection; it performs no independent RCI
+// I/O and reparses only when the raw content generation changes.
 class NdmsVpnServerServiceCache {
 public:
-    using Clock = std::chrono::steady_clock;
-    using FetchFn = std::function<std::string()>;
-    using NowFn = std::function<Clock::time_point()>;
+    using Clock = NdmsRunningConfigResource::Clock;
+    using FetchFn = NdmsRunningConfigResource::FetchFn;
+    using NowFn = NdmsRunningConfigResource::NowFn;
 
+    // Compatibility/test constructor. The created raw owner still follows the
+    // same single-flight/LKG contract as the production shared resource.
     explicit NdmsVpnServerServiceCache(
         FetchFn fetch_fn,
         Clock::duration cache_ttl = std::chrono::seconds(30),
         Clock::duration failure_retry = std::chrono::seconds(5),
         NowFn now_fn = {});
+
+    explicit NdmsVpnServerServiceCache(
+        NdmsRunningConfigResource& resource);
 
     NdmsVpnServerServiceSnapshot get();
     NdmsVpnServerServiceSnapshot force_refresh();
@@ -40,27 +51,21 @@ public:
     NdmsVpnServerServiceSnapshot peek() const;
 
 private:
-    NdmsVpnServerServiceSnapshot get_impl(bool force_refresh);
+    NdmsVpnServerServiceSnapshot project(
+        const NdmsRunningConfigSnapshot& raw) const;
     NdmsVpnServerServiceSnapshot snapshot_locked(
-        bool refreshed = false) const;
+        const NdmsRunningConfigSnapshot& raw,
+        bool refreshed = false,
+        bool changed = false) const;
 
-    FetchFn fetch_fn_;
-    NowFn now_fn_;
-    Clock::duration cache_ttl_;
-    Clock::duration failure_retry_;
+    std::unique_ptr<NdmsRunningConfigResource> owned_resource_;
+    NdmsRunningConfigResource* resource_{nullptr};
 
     mutable std::mutex mutex_;
-    std::condition_variable refresh_finished_;
-    std::optional<NdmsVpnServerServiceCatalog> catalog_;
-    NdmsCatalogCacheStatus status_{NdmsCatalogCacheStatus::unavailable};
-    Clock::time_point refresh_after_{};
-    Clock::time_point forced_refresh_after_{};
-    bool refresh_attempted_{false};
-    bool refresh_in_progress_{false};
-    bool last_refresh_accepted_{false};
-    std::uint64_t refresh_generation_{0};
-    std::uint64_t invalidation_epoch_{0};
-    std::uint64_t last_completed_refresh_epoch_{0};
+    mutable std::optional<NdmsVpnServerServiceCatalog> catalog_;
+    mutable std::uint64_t source_content_generation_{0};
+    mutable std::uint64_t source_observation_generation_{0};
+    mutable std::uint64_t attempted_content_generation_{0};
 };
 
 NdmsVpnServerServiceCache& shared_ndms_vpn_server_service_cache();

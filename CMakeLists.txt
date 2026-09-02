@@ -396,10 +396,13 @@ set(SOURCES
   src/http/http_transport.cpp
   src/http/curl_runtime.cpp
   src/keenetic/ndms_catalog_cache.cpp
+  src/keenetic/ndms_running_config_resource.cpp
+  src/keenetic/ndms_running_config_resource_production.cpp
   src/keenetic/ndms_interface_inventory.cpp
   src/keenetic/internal_vpn_server_resolver.cpp
   src/keenetic/ndms_vpn_server_service.cpp
   src/keenetic/ndms_vpn_server_service_cache.cpp
+  src/keenetic/ndms_vpn_server_service_cache_production.cpp
   src/keenetic/internal_vpn_service_resolver.cpp
   src/keenetic/internal_vpn_ingress_resolver.cpp
   src/keenetic/ndms_interface_management.cpp

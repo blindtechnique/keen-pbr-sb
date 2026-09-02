@@ -354,9 +354,12 @@ add_executable(keen-pbr-tests
   ../src/http/curl_runtime.cpp
   ../src/keenetic/ndms_interface_inventory.cpp
   ../src/keenetic/ndms_catalog_cache.cpp
+  ../src/keenetic/ndms_running_config_resource.cpp
+  ../src/keenetic/ndms_running_config_resource_production.cpp
   ../src/keenetic/internal_vpn_server_resolver.cpp
   ../src/keenetic/ndms_vpn_server_service.cpp
   ../src/keenetic/ndms_vpn_server_service_cache.cpp
+  ../src/keenetic/ndms_vpn_server_service_cache_production.cpp
   ../src/keenetic/internal_vpn_service_resolver.cpp
   ../src/keenetic/internal_vpn_ingress_resolver.cpp
   ../src/keenetic/ndms_interface_management.cpp
@@ -951,6 +954,39 @@ keen_pbr_apply_project_options(keen-pbr-router-info-cache-tests)
 add_test(
   NAME keen-pbr-router-info-cache-tests
   COMMAND keen-pbr-router-info-cache-tests
+)
+
+# Keep the sensitive running-config resource independently buildable. These
+# tests prove single-flight publication, semantic unchanged detection,
+# invalidation epochs and LKG without HTTP, daemon or API dependencies.
+add_executable(keen-pbr-ndms-running-config-resource-tests
+  test_main.cpp
+  test_ndms_running_config_resource.cpp
+  ../src/keenetic/ndms_running_config_resource.cpp
+  ../src/keenetic/ndms_vpn_server_service.cpp
+  ../src/keenetic/ndms_vpn_server_service_cache.cpp
+)
+set_target_properties(
+  keen-pbr-ndms-running-config-resource-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_include_directories(
+  keen-pbr-ndms-running-config-resource-tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+)
+target_link_libraries(
+  keen-pbr-ndms-running-config-resource-tests PRIVATE
+  nlohmann_json::nlohmann_json
+  Threads::Threads
+)
+keen_pbr_apply_project_options(
+  keen-pbr-ndms-running-config-resource-tests)
+add_test(
+  NAME keen-pbr-ndms-running-config-resource-tests
+  COMMAND keen-pbr-ndms-running-config-resource-tests
 )
 
 # Keep the resolver hook handoff independently buildable. These tests cover
