@@ -60,6 +60,8 @@ constexpr auto config_preapply_background_wait_budget =
     std::chrono::seconds{5};
 constexpr auto config_preapply_background_wait_step =
     std::chrono::milliseconds{100};
+constexpr const char* runtime_firewall_background_owner_label =
+    "runtime-firewall-worker";
 
 #ifdef USE_KEENETIC_API
 class NativeImportBodyWipeGuard final {
@@ -574,7 +576,10 @@ Daemon::acquire_runtime_mutation_or_throw(
     std::string label,
     bool require_runtime_running,
     bool require_runtime_stopped) {
-    auto lease = runtime_mutation_admission_.try_acquire(label);
+    auto lease = runtime_mutation_admission_.try_acquire_after_for(
+        label,
+        runtime_firewall_background_owner_label,
+        config_preapply_background_wait_budget);
     if (!lease.has_value()) {
         const auto active = runtime_mutation_admission_.active();
         const std::string detail = active.has_value() && !active->label.empty()

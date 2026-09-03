@@ -178,6 +178,44 @@ public:
         return Lease{state_, state_->active_token};
     }
 
+    // Foreground API mutations normally fail immediately when another writer
+    // owns the runtime. The periodic firewall worker is different: it is
+    // replaceable background maintenance which is normally about to publish
+    // its terminal. Wait for that exact predecessor once, then claim the
+    // admission under the same mutex which observed its release. If another
+    // owner wins, shutdown starts, or the predecessor does not finish within
+    // the caller's small budget, no claim is made.
+    template<class Rep, class Period>
+    std::optional<Lease> try_acquire_after_for(
+        std::string label,
+        const std::string& waitable_active_label,
+        const std::chrono::duration<Rep, Period>& timeout) {
+        const auto state = state_;
+        std::unique_lock<std::mutex> lock(state->mutex);
+        if (!state->accepting || state->handoff_count != 0) {
+            return std::nullopt;
+        }
+        if (state->active_token == 0) {
+            return acquire_locked(state, std::move(label));
+        }
+        if (state->active_label != waitable_active_label) {
+            return std::nullopt;
+        }
+
+        const auto predecessor_token = state->active_token;
+        if (!state->idle_cv.wait_for(lock, timeout, [&] {
+                return !state->accepting ||
+                       state->active_token != predecessor_token;
+            })) {
+            return std::nullopt;
+        }
+        if (!state->accepting || state->active_token != 0 ||
+            state->handoff_count != 0) {
+            return std::nullopt;
+        }
+        return acquire_locked(state, std::move(label));
+    }
+
     // Admit exactly one internal cleanup only after shutdown() has closed
     // ordinary writers and every previously accepted lease/handoff has
     // quiesced. The returned object is the same exact RAII Lease used by
@@ -269,6 +307,18 @@ public:
     }
 
 private:
+    static Lease acquire_locked(
+        const std::shared_ptr<State>& state,
+        std::string label) {
+        ++state->next_token;
+        if (state->next_token == 0) {
+            ++state->next_token;
+        }
+        state->active_token = state->next_token;
+        state->active_label = std::move(label);
+        return Lease{state, state->active_token};
+    }
+
     std::shared_ptr<State> state_;
 };
 

@@ -7914,6 +7914,13 @@ bool Daemon::publish_prepared_runtime_firewall_config_candidate(
         refresh_interface_traffic_config_targets(active_config_snapshot_->config);
     } catch (...) {
     }
+    // The periodic cadence rotates two routes per tick. A route created by a
+    // composite transport import could otherwise remain "verification
+    // pending" for several ticks even though the same per-row probe works
+    // immediately. Schedule that existing targeted probe only after the
+    // candidate has become the published routing generation.
+    probe_new_interface_outbounds_after_config_publish(
+        transaction->base_active_snapshot);
     try {
         refresh_resolver_config_hash_actual_async();
     } catch (...) {

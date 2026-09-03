@@ -585,6 +585,12 @@ func (s *Supervisor) Status(ctx context.Context, tag string) (Status, error) {
 	return status, nil
 }
 
+// RuntimeReady reports local process/TUN readiness only for the exact tags
+// named by a caller. It deliberately excludes remote reachability.
+func (s *Supervisor) RuntimeReady(tags []string) bool {
+	return s.manager.RuntimeReady(tags)
+}
+
 func (s *Supervisor) decorate(status *Status) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -620,4 +626,5 @@ var _ interface {
 	Restart(context.Context, string) error
 	Status(context.Context, string) (Status, error)
 	Statuses(context.Context) []Status
+	RuntimeReady([]string) bool
 } = (*Supervisor)(nil)

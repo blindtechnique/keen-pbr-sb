@@ -1438,6 +1438,10 @@ export const enTranslation = {
         "http and https only. URLs with credentials before the host name (user:password@) are refused: a URL ends up in logs and history.",
       fetch: "Fetch",
       apply: "Import selected ({{count}})",
+      applying: "Importing...",
+      selectionLimit:
+        "You can import up to {{limit}} connections at a time. Selected: {{count}}.",
+      completed: "Subscription imported. Connections ready: {{count}}.",
       done: "Done",
       discardConfirm: "Close the import and discard the current selection?",
       expired: "The preview has expired - the daemon keeps it for ten minutes.",
@@ -1458,7 +1462,7 @@ export const enTranslation = {
         "Already imported by an earlier run and left alone: {{count}}.",
       failedEntry: "Line {{line}} ({{tag}}) was not created",
       nextSteps:
-        "The created transports are stopped and not yet routed. Start them and link outbounds from the transports list.",
+        "Successfully created connections are already running and linked to routing. Entries with errors remain in the list.",
       dispositions: {
         duplicate_in_document: "duplicate of line {{line}}",
         already_configured: "already configured",

@@ -8,10 +8,13 @@ import {
   buildSelections,
   effectiveTag,
   initialSelectedLines,
+  isActionableSubscriptionUrl,
   isSelectable,
   isValidTag,
+  MAXIMUM_SUBSCRIPTION_SELECTION,
   requiresTagOverride,
   selectionProblems,
+  toggleSelectedLine,
 } from "./subscription-import-model"
 
 function candidate(
@@ -45,25 +48,40 @@ describe("what may be selected", () => {
     }
   })
 
-  it("preselects the importable and leaves conflicts to a decision", () => {
+  it("preselects only the first importable and leaves the rest to a decision", () => {
     const selected = initialSelectedLines([
       candidate({ line: 1 }),
       candidate({ line: 2, disposition: "tag_conflict" }),
       candidate({ line: 3, disposition: "already_configured" }),
       candidate({ line: 4 }),
     ])
-    expect([...selected].sort()).toEqual([1, 4])
+    expect([...selected]).toEqual([1])
+  })
+
+  it("allows at most eight explicit selections and always allows deselection", () => {
+    let selected = new Set<number>()
+    for (let line = 1; line <= MAXIMUM_SUBSCRIPTION_SELECTION; line += 1) {
+      selected = toggleSelectedLine(selected, line)
+    }
+    expect(selected.size).toBe(MAXIMUM_SUBSCRIPTION_SELECTION)
+
+    selected = toggleSelectedLine(selected, 9)
+    expect(selected.has(9)).toBe(false)
+    expect(selected.size).toBe(MAXIMUM_SUBSCRIPTION_SELECTION)
+
+    selected = toggleSelectedLine(selected, 1)
+    selected = toggleSelectedLine(selected, 9)
+    expect(selected.has(1)).toBe(false)
+    expect(selected.has(9)).toBe(true)
   })
 })
 
 describe("what blocks the apply button", () => {
   it("demands a rename for a selected conflict", () => {
-    const candidates = [
-      candidate({ line: 1, disposition: "tag_conflict" }),
-    ]
-    expect(
-      selectionProblems(candidates, new Set([1]), new Map())
-    ).toEqual([{ line: 1, kind: "tag_required" }])
+    const candidates = [candidate({ line: 1, disposition: "tag_conflict" })]
+    expect(selectionProblems(candidates, new Set([1]), new Map())).toEqual([
+      { line: 1, kind: "tag_required" },
+    ])
     expect(
       selectionProblems(candidates, new Set([1]), new Map([[1, "fresh"]]))
     ).toEqual([])
@@ -168,9 +186,7 @@ describe("tags and their fallback", () => {
   it("requires an override exactly for conflicts", () => {
     expect(requiresTagOverride(candidate({ line: 1 }))).toBe(false)
     expect(
-      requiresTagOverride(
-        candidate({ line: 1, disposition: "tag_conflict" })
-      )
+      requiresTagOverride(candidate({ line: 1, disposition: "tag_conflict" }))
     ).toBe(true)
   })
 })
@@ -188,6 +204,15 @@ describe("what the operator pasted", () => {
     expect(classifyPastedLink("HTTPS://provider.example/sub")).toBe(
       "subscription"
     )
+  })
+
+  it("offers the import action only for a complete subscription URL", () => {
+    expect(isActionableSubscriptionUrl("https:")).toBe(false)
+    expect(isActionableSubscriptionUrl("https://")).toBe(false)
+    expect(
+      isActionableSubscriptionUrl("https://provider.example/subscription")
+    ).toBe(true)
+    expect(isActionableSubscriptionUrl("vless://provider.example")).toBe(false)
   })
 
   it("calls everything else a share link", () => {

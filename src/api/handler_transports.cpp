@@ -541,6 +541,79 @@ public:
             response, expected_revision, "create");
     }
 
+    void validate_create_many(
+        const std::vector<nlohmann::json>& transports,
+        const std::string& expected_revision) const {
+        const auto response = post(
+            "/v1/config/transports/batch/validate",
+            nlohmann::json{{"transports", transports}},
+            expected_revision);
+        (void)parse_batch_revision_response(
+            response, expected_revision, "validate");
+    }
+
+    std::vector<bool> validate_create_items(
+        const std::vector<nlohmann::json>& transports,
+        const std::string& expected_revision) const {
+        const auto response = post(
+            "/v1/config/transports/batch/validate-items",
+            nlohmann::json{{"transports", transports}},
+            expected_revision);
+        if (!response) {
+            throw ApiError("transport manager is unavailable", 503);
+        }
+        if (response->status == 412) {
+            throw ConfigCommitNoMutationConflict(
+                "Transport configuration changed while the "
+                "subscription was being checked",
+                409);
+        }
+        if (response->status < 200 || response->status >= 300) {
+            throw ApiError(
+                "transport manager could not check the subscription "
+                "selection",
+                response->status == 400
+                    ? 400
+                    : response->status == 503 ? 503 : 502);
+        }
+        const auto body = parse_json_response(
+            *response, "subscription item validation response");
+        if (!body.is_object() ||
+            body.value("config_revision", std::string{}) !=
+                expected_revision ||
+            !body.contains("valid") ||
+            !body.at("valid").is_array() ||
+            body.at("valid").size() != transports.size()) {
+            throw ApiError(
+                "transport manager returned an invalid subscription "
+                "item validation response",
+                502);
+        }
+        std::vector<bool> valid;
+        valid.reserve(transports.size());
+        for (const auto& value : body.at("valid")) {
+            if (!value.is_boolean()) {
+                throw ApiError(
+                    "transport manager returned an invalid subscription "
+                    "item validation result",
+                    502);
+            }
+            valid.push_back(value.get<bool>());
+        }
+        return valid;
+    }
+
+    std::string create_many(
+        const std::vector<nlohmann::json>& transports,
+        const std::string& expected_revision) const {
+        const auto response = post(
+            "/v1/config/transports/batch",
+            nlohmann::json{{"transports", transports}},
+            expected_revision);
+        return parse_batch_revision_response(
+            response, expected_revision, "create");
+    }
+
     void wait_for_revision(
         const std::string& expected_revision) const {
         if (!valid_revision(expected_revision)) {
@@ -596,6 +669,69 @@ public:
             parse_json_response(*response, "runtime settings");
         validate_transport_runtime_settings(body);
         return body;
+    }
+
+    bool runtime_ready(
+        const std::vector<std::string>& tags) const {
+        httplib::Client client(endpoint_.host, endpoint_.port);
+        client.set_connection_timeout(1, 0);
+        client.set_read_timeout(3, 0);
+        const httplib::Headers headers{
+            {"Authorization", "Bearer " + endpoint_.api_key},
+        };
+        const auto response = client.Post(
+            "/v1/transports/runtime-ready",
+            headers,
+            nlohmann::json{{"tags", tags}}.dump(),
+            "application/json");
+        if (!response) {
+            throw ApiError("transport manager is unavailable", 503);
+        }
+        if (response->status < 200 || response->status >= 300) {
+            throw ApiError(
+                "transport manager could not report local runtime "
+                "readiness",
+                response->status == 503 ? 503 : 502);
+        }
+        const auto body = parse_json_response(
+            *response, "local runtime readiness response");
+        if (!body.is_object() || !body.contains("ready") ||
+            !body.at("ready").is_boolean()) {
+            throw ApiError(
+                "transport manager returned invalid local runtime "
+                "readiness",
+                502);
+        }
+        return body.at("ready").get<bool>();
+    }
+
+    void wait_for_runtime_ready(
+        const std::vector<std::string>& tags,
+        const std::size_t attempts,
+        const std::chrono::milliseconds interval) const {
+        if (tags.empty()) return;
+        if (attempts == 0U) {
+            throw ApiError(
+                "transport runtime readiness wait is disabled", 500);
+        }
+        for (std::size_t attempt = 0U;
+             attempt < attempts;
+            ++attempt) {
+            try {
+                if (runtime_ready(tags)) {
+                    return;
+                }
+            } catch (const ApiError&) {
+                if (attempt + 1U == attempts) throw;
+            }
+            if (attempt + 1U < attempts) {
+                std::this_thread::sleep_for(interval);
+            }
+        }
+        throw ApiError(
+            "transport manager did not make the requested "
+            "transport runtime locally ready",
+            503);
     }
 
     nlohmann::json set_sing_box_process_mode(
@@ -778,6 +914,62 @@ private:
         return revision;
     }
 
+    static std::string parse_batch_revision_response(
+        const httplib::Result& response,
+        const std::string& expected_revision,
+        const char* operation) {
+        if (!response) {
+            throw ApiError(
+                "transport manager is unavailable", 503);
+        }
+        if (response->status == 412) {
+            throw ConfigCommitNoMutationConflict(
+                "Transport configuration changed while "
+                "the subscription was being prepared",
+                409);
+        }
+        if (response->status < 200 || response->status >= 300) {
+            const int status =
+                response->status == 400
+                    ? 400
+                    : response->status == 409
+                          ? 409
+                          : response->status == 503 ? 503 : 502;
+            // A manager parser error may quote the credential-bearing share
+            // link. The subscription boundary reports only the status class.
+            throw ApiError(
+                std::string("transport manager could not ") +
+                    operation + " the subscription selection",
+                status);
+        }
+        const auto body = parse_json_response(
+            *response, "subscription configuration response");
+        if (!body.is_object() ||
+            !body.contains("config_revision") ||
+            !body.at("config_revision").is_string()) {
+            throw ApiError(
+                "transport manager omitted the committed "
+                "configuration revision",
+                502);
+        }
+        const auto revision =
+            body.at("config_revision").get<std::string>();
+        if (!valid_revision(revision)) {
+            throw ApiError(
+                "transport manager returned an invalid "
+                "configuration revision",
+                502);
+        }
+        if (std::string(operation) == "validate" &&
+            revision != expected_revision) {
+            throw ApiError(
+                "Transport configuration changed while "
+                "the subscription was being validated",
+                409);
+        }
+        return revision;
+    }
+
     TransportManagerEndpoint endpoint_;
 };
 
@@ -864,6 +1056,146 @@ using CompositeConfigCommit = std::function<std::string(
     ApiContext&,
     std::string,
     PrepareConfigCommit)>;
+
+PreparedConfigCommit prepare_linked_transport_creates(
+    ApiContext& ctx,
+    std::vector<LinkedTransportCreate> creates,
+    const bool batch_manager_api) {
+    if (creates.empty()) {
+        throw ApiError(
+            "at least one linked transport is required", 400);
+    }
+    if (ctx.config_is_draft()) {
+        throw ApiError(
+            "Save or discard the current configuration draft before "
+            "creating a linked transport",
+            409);
+    }
+
+    auto candidate = ctx.get_visible_config();
+    auto outbounds = candidate.outbounds.value_or(
+        std::vector<Outbound>{});
+    std::vector<nlohmann::json> transports;
+    transports.reserve(creates.size());
+    std::vector<std::string> runtime_tags;
+    for (const auto& create : creates) {
+        const auto tag =
+            create.transport.at("tag").get<std::string>();
+        const auto interface_name =
+            create.transport.at("interface").get<std::string>();
+        for (const auto& outbound : outbounds) {
+            if (outbound.tag == tag) {
+                throw ApiError(
+                    "An outgoing route with tag '" + tag +
+                        "' already exists",
+                    409);
+            }
+            if (outbound.type == OutboundType::INTERFACE &&
+                outbound.interface.has_value() &&
+                *outbound.interface == interface_name) {
+                throw ApiError(
+                    "Interface '" + interface_name +
+                        "' is already owned by outgoing route '" +
+                        outbound.tag + "'",
+                    409);
+            }
+        }
+
+        Outbound outbound;
+        outbound.type = OutboundType::INTERFACE;
+        outbound.tag = tag;
+        outbound.interface = interface_name;
+        if (create.display_name.has_value()) {
+            outbound.display_name = *create.display_name;
+        } else if (create.transport.contains("display_name") &&
+                   create.transport.at("display_name").is_string() &&
+                   !create.transport.at("display_name")
+                        .get_ref<const std::string&>()
+                        .empty()) {
+            outbound.display_name =
+                create.transport.at("display_name").get<std::string>();
+        }
+        if (create.strict_enforcement.has_value()) {
+            outbound.strict_enforcement =
+                *create.strict_enforcement;
+        }
+        outbounds.push_back(std::move(outbound));
+        transports.push_back(create.transport);
+        if (create.transport.value("auto_start", false)) {
+            runtime_tags.push_back(tag);
+        }
+    }
+    candidate.outbounds = std::move(outbounds);
+
+    const auto endpoint = load_endpoint(ctx.config_path);
+    TransportManagerClient client(endpoint);
+    const auto expected_revision = client.current_revision();
+    if (batch_manager_api) {
+        client.validate_create_many(transports, expected_revision);
+    } else {
+        if (transports.size() != 1U) {
+            throw ApiError(
+                "single transport manager operation received a batch",
+                500);
+        }
+        client.validate_create(transports.front(), expected_revision);
+    }
+
+    PreparedConfigCommit prepared;
+    prepared.config = std::move(candidate);
+    prepared.serialized =
+        serialize_config_for_persistence(prepared.config);
+    prepared.success_status = "applied";
+    prepared.success_message = creates.size() == 1U
+        ? "Transport and linked outgoing route created"
+        : "Transports and linked outgoing routes created";
+    prepared.transport = ConfigCommitTransportEffect{
+        (std::filesystem::path(ctx.config_path).parent_path() /
+         "transports.json")
+            .string(),
+        expected_revision,
+        [endpoint,
+         transports = std::move(transports),
+         batch_manager_api,
+         expected_revision]() {
+            TransportManagerClient client(endpoint);
+            return batch_manager_api
+                ? client.create_many(transports, expected_revision)
+                : client.create(transports.front(), expected_revision);
+        },
+        [endpoint,
+         runtime_tags = std::move(runtime_tags),
+         attempts = ctx.transport_runtime_ready_wait_attempts,
+         interval = std::chrono::milliseconds(
+             ctx.transport_runtime_ready_wait_interval_ms)](
+            const std::string& revision) {
+            TransportManagerClient client(endpoint);
+            client.wait_for_revision(revision);
+            client.wait_for_runtime_ready(
+                runtime_tags, attempts, interval);
+        },
+        [&ctx](const std::string& revision,
+               MaintenanceLease& maintenance) {
+            restart_transport_manager_and_wait(
+                ctx, revision, &maintenance);
+        },
+    };
+    return prepared;
+}
+
+std::vector<bool> validate_linked_transport_create_items(
+    ApiContext& ctx,
+    const std::vector<LinkedTransportCreate>& creates) {
+    if (creates.empty()) return {};
+    std::vector<nlohmann::json> transports;
+    transports.reserve(creates.size());
+    for (const auto& create : creates) {
+        transports.push_back(create.transport);
+    }
+    TransportManagerClient client(load_endpoint(ctx.config_path));
+    const auto expected_revision = client.current_revision();
+    return client.validate_create_items(transports, expected_revision);
+}
 
 static void register_transports_handler_impl(
     ApiServer& server,
@@ -1742,142 +2074,25 @@ static void register_transports_handler_impl(
                     400);
             }
 
+            LinkedTransportCreate create;
+            create.transport = transport;
+            if (linked.contains("display_name")) {
+                create.display_name =
+                    linked.at("display_name").get<std::string>();
+            }
+            if (linked.contains("strict_enforcement") &&
+                linked.at("strict_enforcement").is_boolean()) {
+                create.strict_enforcement =
+                    linked.at("strict_enforcement").get<bool>();
+            }
             return commit_config(
                 ctx,
                 "transport-linked-create",
-                [&ctx,
-                 transport,
-                 linked]() -> PreparedConfigCommit {
-                    if (ctx.config_is_draft()) {
-                        throw ApiError(
-                            "Save or discard the current "
-                            "configuration draft before "
-                            "creating a linked transport",
-                            409);
-                    }
-
-                    auto candidate =
-                        ctx.get_visible_config();
-                    auto outbounds =
-                        candidate.outbounds.value_or(
-                            std::vector<Outbound>{});
-                    const auto tag =
-                        transport.at("tag")
-                            .get<std::string>();
-                    const auto interface_name =
-                        transport.at("interface")
-                            .get<std::string>();
-                    for (const auto& outbound :
-                         outbounds) {
-                        if (outbound.tag == tag) {
-                            throw ApiError(
-                                "An outgoing route with tag '" +
-                                    tag +
-                                    "' already exists",
-                                409);
-                        }
-                        if (outbound.type ==
-                                OutboundType::INTERFACE &&
-                            outbound.interface.has_value() &&
-                            *outbound.interface ==
-                                interface_name) {
-                            throw ApiError(
-                                "Interface '" +
-                                    interface_name +
-                                    "' is already owned by "
-                                    "outgoing route '" +
-                                    outbound.tag + "'",
-                                409);
-                        }
-                    }
-
-                    Outbound outbound;
-                    outbound.type =
-                        OutboundType::INTERFACE;
-                    outbound.tag = tag;
-                    outbound.interface = interface_name;
-                    if (linked.contains("display_name")) {
-                        outbound.display_name =
-                            linked.at("display_name")
-                                .get<std::string>();
-                    } else if (
-                        transport.contains(
-                            "display_name") &&
-                        transport.at("display_name")
-                            .is_string() &&
-                        !transport.at("display_name")
-                             .get_ref<
-                                 const std::string&>()
-                             .empty()) {
-                        outbound.display_name =
-                            transport.at("display_name")
-                                .get<std::string>();
-                    }
-                    if (linked.contains(
-                            "strict_enforcement") &&
-                        linked.at("strict_enforcement")
-                            .is_boolean()) {
-                        outbound.strict_enforcement =
-                            linked.at(
-                                "strict_enforcement")
-                                .get<bool>();
-                    }
-                    outbounds.push_back(
-                        std::move(outbound));
-                    candidate.outbounds =
-                        std::move(outbounds);
-
-                    const auto endpoint =
-                        load_endpoint(ctx.config_path);
-                    TransportManagerClient client(endpoint);
-                    const auto expected_revision =
-                        client.current_revision();
-                    client.validate_create(
-                        transport, expected_revision);
-
-                    PreparedConfigCommit prepared;
-                    prepared.config =
-                        std::move(candidate);
-                    prepared.serialized =
-                        serialize_config_for_persistence(
-                            prepared.config);
-                    prepared.success_status = "applied";
-                    prepared.success_message =
-                        "Transport and linked outgoing route "
-                        "created";
-                    prepared.transport =
-                        ConfigCommitTransportEffect{
-                            (std::filesystem::path(
-                                 ctx.config_path)
-                                 .parent_path() /
-                             "transports.json")
-                                .string(),
-                            expected_revision,
-                            [endpoint,
-                             transport,
-                             expected_revision]() {
-                                return TransportManagerClient(
-                                           endpoint)
-                                    .create(
-                                        transport,
-                                        expected_revision);
-                            },
-                            [endpoint](
-                                const std::string&
-                                    revision) {
-                                TransportManagerClient(
-                                    endpoint)
-                                    .wait_for_revision(
-                                        revision);
-                            },
-                            [&ctx](
-                                const std::string& revision,
-                                MaintenanceLease& maintenance) {
-                                restart_transport_manager_and_wait(
-                                    ctx, revision, &maintenance);
-                            },
-                        };
-                    return prepared;
+                [&ctx, create = std::move(create)]() mutable {
+                    std::vector<LinkedTransportCreate> creates;
+                    creates.push_back(std::move(create));
+                    return prepare_linked_transport_creates(
+                        ctx, std::move(creates), false);
                 });
         });
 

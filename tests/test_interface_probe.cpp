@@ -793,6 +793,42 @@ TEST_CASE("interface probe exact lookup never lends health to a reused tag") {
     CHECK_FALSE(probe.result_for("friendly").has_value());
 }
 
+TEST_CASE("new interface routes receive an immediate first probe") {
+    const std::vector<InterfaceProbe::Target> previous{
+        {"existing", 0x80000, "tun0"},
+        {"unchanged", 0x90000, "tun1"},
+    };
+
+    SUBCASE("a newly linked route is selected without reprobeing survivors") {
+        const std::vector<InterfaceProbe::Target> current{
+            {"existing", 0x80000, "tun0"},
+            {"unchanged", 0x90000, "tun1"},
+            {"vlesstest", 0xA0000, "tun2"},
+        };
+
+        CHECK(select_initial_interface_probe_tags(previous, current) ==
+              std::vector<std::string>{"vlesstest"});
+    }
+
+    SUBCASE("a reused tag with a new exact route identity is selected") {
+        auto current = previous;
+        current.front().interface = "tun9";
+
+        CHECK(select_initial_interface_probe_tags(previous, current) ==
+              std::vector<std::string>{"existing"});
+    }
+
+    SUBCASE("reordering and removing routes starts no network work") {
+        const std::vector<InterfaceProbe::Target> reordered{
+            previous.back(), previous.front()};
+        CHECK(select_initial_interface_probe_tags(previous, reordered).empty());
+        CHECK(select_initial_interface_probe_tags(
+                  previous,
+                  std::vector<InterfaceProbe::Target>{previous.front()})
+                  .empty());
+    }
+}
+
 TEST_CASE("periodic probing rotates instead of sweeping everything") {
     const std::vector<InterfaceProbe::Target> targets = {
         {"a", 1, "nwg1"}, {"b", 2, "nwg2"}, {"c", 3, "nwg3"},

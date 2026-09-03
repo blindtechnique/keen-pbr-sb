@@ -1,5 +1,10 @@
-import { CheckCircle2Icon, InfoIcon, XCircleIcon } from "lucide-react"
-import { useEffect, useState } from "react"
+import {
+  CheckCircle2Icon,
+  InfoIcon,
+  LoaderCircleIcon,
+  XCircleIcon,
+} from "lucide-react"
+import { useEffect, useRef, useState } from "react"
 
 import type { ApiError } from "@/api/client"
 import { useTranslation } from "react-i18next"
@@ -33,19 +38,25 @@ import {
   buildSelections,
   initialSelectedLines,
   isSelectable,
+  MAXIMUM_SUBSCRIPTION_SELECTION,
   requiresTagOverride,
   selectionProblems,
+  toggleSelectedLine,
 } from "./subscription-import-model"
 
 // The dialog walks one direction: url -> preview -> results. The preview
 // holds no share links - the backend keeps those in daemon memory behind the
 // preview id - so everything shown here is safe to render, log, or screenshot.
 export function SubscriptionImportDialog({
+  onComplete,
   onOpenChange,
+  onResultsDismiss,
   open,
   seed,
 }: {
+  onComplete: (results: SubscriptionApplyResponse) => void
   onOpenChange: (open: boolean) => void
+  onResultsDismiss: () => void
   open: boolean
   // What the add-transport modal already has in hand. The operator pasted a
   // subscription URL or chose a subscription file there; asking them for it a
@@ -58,11 +69,10 @@ export function SubscriptionImportDialog({
   const [preview, setPreview] = useState<SubscriptionPreviewResponse | null>(
     null
   )
-  const [results, setResults] = useState<SubscriptionApplyResponse | null>(
-    null
-  )
+  const [results, setResults] = useState<SubscriptionApplyResponse | null>(null)
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [overrides, setOverrides] = useState<Map<number, string>>(new Map())
+  const focusedProblemRef = useRef<string | null>(null)
 
   const previewMutation = usePostSubscriptionPreviewMutation()
   const applyMutation = usePostSubscriptionApplyMutation()
@@ -85,9 +95,18 @@ export function SubscriptionImportDialog({
       if (applyMutation.isPending) return
       // Escape and a backdrop click land here too, and during selection they
       // would silently discard every checkbox and tag edit.
+      // Once a mixed result has been shown, however, some durable work may
+      // already have left this form. Any deliberate exit must finish the
+      // source dialog too instead of returning to its stale URL and showing a
+      // false unsaved-changes warning.
+      if (results) {
+        reset()
+        onOpenChange(false)
+        onResultsDismiss()
+        return
+      }
       if (
         preview &&
-        !results &&
         !window.confirm(t("transports.subscriptionImport.discardConfirm"))
       ) {
         return
@@ -127,14 +146,28 @@ export function SubscriptionImportDialog({
   const problems = preview
     ? selectionProblems(preview.candidates, selected, overrides)
     : []
+  const firstProblem = problems[0]
+
+  useEffect(() => {
+    if (!preview || results || !firstProblem) {
+      focusedProblemRef.current = null
+      return
+    }
+    const problemKey = `${preview.preview_id}:${firstProblem.line}:${firstProblem.kind}`
+    if (focusedProblemRef.current === problemKey) return
+    focusedProblemRef.current = problemKey
+    queueMicrotask(() => {
+      const input = document.getElementById(
+        `subscription-tag-${firstProblem.line}`
+      )
+      input?.scrollIntoView({ behavior: "smooth", block: "center" })
+      input?.focus()
+    })
+  }, [firstProblem, preview, results])
 
   const apply = () => {
     if (!preview || problems.length > 0) return
-    const selections = buildSelections(
-      preview.candidates,
-      selected,
-      overrides
-    )
+    const selections = buildSelections(preview.candidates, selected, overrides)
     if (selections.length === 0) return
     applyMutation.mutate(
       { data: { preview_id: preview.preview_id, selections } },
@@ -142,6 +175,18 @@ export function SubscriptionImportDialog({
         onSuccess: (response) => {
           if (response.status === 200) {
             setResults(response.data)
+            // A partial result must stay visible: otherwise the operator
+            // cannot tell which entries need attention. A complete success
+            // has no remaining form state, so close both nested and source
+            // dialogs without offering the http URL as a second transport.
+            if (
+              response.data.results.length > 0 &&
+              response.data.results.every(
+                (result) => result.outcome !== "failed"
+              )
+            ) {
+              onComplete(response.data)
+            }
           }
         },
       }
@@ -149,15 +194,7 @@ export function SubscriptionImportDialog({
   }
 
   const toggle = (line: number) => {
-    setSelected((current) => {
-      const next = new Set(current)
-      if (next.has(line)) {
-        next.delete(line)
-      } else {
-        next.add(line)
-      }
-      return next
-    })
+    setSelected((current) => toggleSelectedLine(current, line))
   }
 
   const setOverride = (line: number, value: string) => {
@@ -209,9 +246,7 @@ export function SubscriptionImportDialog({
     <Dialog onOpenChange={close} open={open}>
       <DialogContent className="max-sm:top-auto max-sm:bottom-0 max-sm:left-0 max-sm:max-h-[calc(100dvh-0.75rem)] max-sm:max-w-none max-sm:translate-x-0 max-sm:translate-y-0 max-sm:overflow-y-auto max-sm:rounded-b-none max-sm:border-x-0 max-sm:border-b-0 sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>
-            {t("transports.subscriptionImport.title")}
-          </DialogTitle>
+          <DialogTitle>{t("transports.subscriptionImport.title")}</DialogTitle>
           <DialogDescription>
             {t("transports.subscriptionImport.description")}
           </DialogDescription>
@@ -222,21 +257,33 @@ export function SubscriptionImportDialog({
         ) : preview ? (
           <div className="space-y-3">
             {hasCandidates ? (
-              <div className="max-h-[50vh] space-y-2 overflow-y-auto pr-1">
-                {preview.candidates.map((candidate) => (
-                  <CandidateRow
-                    candidate={candidate}
-                    key={candidate.line}
-                    onOverride={setOverride}
-                    onToggle={toggle}
-                    override={overrides.get(candidate.line) ?? ""}
-                    problem={problems.find(
-                      (entry) => entry.line === candidate.line
-                    )}
-                    selected={selected.has(candidate.line)}
-                  />
-                ))}
-              </div>
+              <>
+                <p className="text-xs text-muted-foreground">
+                  {t("transports.subscriptionImport.selectionLimit", {
+                    count: selectionCount,
+                    limit: MAXIMUM_SUBSCRIPTION_SELECTION,
+                  })}
+                </p>
+                <div className="max-h-[50vh] space-y-2 overflow-y-auto pr-1">
+                  {preview.candidates.map((candidate) => (
+                    <CandidateRow
+                      candidate={candidate}
+                      key={candidate.line}
+                      onOverride={setOverride}
+                      onToggle={toggle}
+                      override={overrides.get(candidate.line) ?? ""}
+                      problem={problems.find(
+                        (entry) => entry.line === candidate.line
+                      )}
+                      selectionLimitReached={
+                        selectionCount >= MAXIMUM_SUBSCRIPTION_SELECTION &&
+                        !selected.has(candidate.line)
+                      }
+                      selected={selected.has(candidate.line)}
+                    />
+                  ))}
+                </div>
+              </>
             ) : (
               <Alert>
                 <AlertDescription>
@@ -250,11 +297,7 @@ export function SubscriptionImportDialog({
               <Alert variant="destructive">
                 <AlertDescription className="flex flex-wrap items-center gap-2">
                   {t("transports.subscriptionImport.expired")}
-                  <Button
-                    onClick={refetchExpired}
-                    size="sm"
-                    variant="outline"
-                  >
+                  <Button onClick={refetchExpired} size="sm" variant="outline">
                     {t("transports.subscriptionImport.expiredRefetch")}
                   </Button>
                 </AlertDescription>
@@ -269,7 +312,7 @@ export function SubscriptionImportDialog({
             {problems.length > 0 ? (
               // The per-row explanations live inside a scroll area; the
               // disabled apply button must not leave its reason out of view.
-              <p className="text-destructive text-xs">
+              <p className="text-xs text-destructive">
                 {t("transports.subscriptionImport.problemsSummary", {
                   count: problems.length,
                 })}
@@ -296,7 +339,7 @@ export function SubscriptionImportDialog({
               placeholder={t("transports.subscriptionImport.urlPlaceholder")}
               value={url}
             />
-            <p className="text-muted-foreground text-xs">
+            <p className="text-xs text-muted-foreground">
               {t("transports.subscriptionImport.urlHint")}
             </p>
             {previewMutation.error ? (
@@ -332,9 +375,16 @@ export function SubscriptionImportDialog({
               }
               onClick={apply}
             >
-              {t("transports.subscriptionImport.apply", {
-                count: selectionCount,
-              })}
+              {applyMutation.isPending ? (
+                <>
+                  <LoaderCircleIcon className="animate-spin" />
+                  {t("transports.subscriptionImport.applying")}
+                </>
+              ) : (
+                t("transports.subscriptionImport.apply", {
+                  count: selectionCount,
+                })
+              )}
             </Button>
           ) : (
             <Button
@@ -356,6 +406,7 @@ function CandidateRow({
   onToggle,
   override,
   problem,
+  selectionLimitReached,
   selected,
 }: {
   candidate: SubscriptionPreviewCandidate
@@ -363,6 +414,7 @@ function CandidateRow({
   onToggle: (line: number) => void
   override: string
   problem?: { kind: string }
+  selectionLimitReached: boolean
   selected: boolean
 }) {
   const { t } = useTranslation()
@@ -377,22 +429,22 @@ function CandidateRow({
     <div
       className={cn(
         "rounded-[4px] border px-3 py-2",
-        !selectable && "opacity-60"
+        !selectable && "opacity-60",
+        problem &&
+          "border-destructive bg-destructive/5 ring-1 ring-destructive/20"
       )}
     >
       <div className="flex items-center gap-2.5">
         <Checkbox
           aria-label={label}
           checked={selected && selectable}
-          disabled={!selectable}
+          disabled={!selectable || selectionLimitReached}
           onCheckedChange={() => onToggle(candidate.line)}
         />
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-medium">{label}</div>
-          <div className="text-muted-foreground truncate text-xs">
-            {[candidate.scheme, candidate.endpoint]
-              .filter(Boolean)
-              .join(" · ")}
+          <div className="truncate text-xs text-muted-foreground">
+            {[candidate.scheme, candidate.endpoint].filter(Boolean).join(" · ")}
           </div>
         </div>
         <DispositionBadge candidate={candidate} />
@@ -400,38 +452,39 @@ function CandidateRow({
       {selectable && selected ? (
         <div className="mt-2 flex items-center gap-2 pl-7">
           <label
-            className="text-muted-foreground text-xs"
+            className="text-xs text-muted-foreground"
             htmlFor={`subscription-tag-${candidate.line}`}
           >
             {t("transports.subscriptionImport.tagLabel")}
           </label>
           <Input
             aria-describedby={
-              problem
-                ? `subscription-tag-problem-${candidate.line}`
-                : undefined
+              problem ? `subscription-tag-problem-${candidate.line}` : undefined
             }
             aria-invalid={problem ? true : undefined}
-            className="h-7 max-w-48 font-mono text-xs"
+            className={cn(
+              "h-7 max-w-48 font-mono text-xs",
+              problem && "border-destructive ring-2 ring-destructive/20"
+            )}
             id={`subscription-tag-${candidate.line}`}
-            onChange={(event) =>
-              onOverride(candidate.line, event.target.value)
-            }
+            onChange={(event) => onOverride(candidate.line, event.target.value)}
             // A conflicted tag has no usable default - the suggestion is the
             // very name that collides - so it stays a placeholder the operator
             // must replace. Elsewhere an empty field means "use the
             // suggestion", and the field shows exactly what will be sent.
             placeholder={candidate.suggested_tag ?? ""}
-            value={conflicted ? override : override || (candidate.suggested_tag ?? "")}
+            value={
+              conflicted
+                ? override
+                : override || (candidate.suggested_tag ?? "")
+            }
           />
           {problem ? (
             <span
-              className="text-destructive text-xs"
+              className="text-xs text-destructive"
               id={`subscription-tag-problem-${candidate.line}`}
             >
-              {t(
-                `transports.subscriptionImport.problems.${problem.kind}`
-              )}
+              {t(`transports.subscriptionImport.problems.${problem.kind}`)}
             </span>
           ) : null}
         </div>
@@ -446,9 +499,7 @@ function DispositionBadge({
   candidate: SubscriptionPreviewCandidate
 }) {
   const { t } = useTranslation()
-  if (
-    candidate.disposition === "importable"
-  ) {
+  if (candidate.disposition === "importable") {
     return null
   }
   return (
@@ -475,9 +526,7 @@ function ResultsView({ results }: { results: SubscriptionApplyResponse }) {
   const alreadyImported = results.results.filter(
     (result) => result.outcome === "already_imported"
   )
-  const failed = results.results.filter(
-    (result) => result.outcome === "failed"
-  )
+  const failed = results.results.filter((result) => result.outcome === "failed")
 
   return (
     <div className="space-y-2">
@@ -514,7 +563,7 @@ function ResultsView({ results }: { results: SubscriptionApplyResponse }) {
         </Alert>
       ))}
       {created.length > 0 ? (
-        <p className="text-muted-foreground text-xs">
+        <p className="text-xs text-muted-foreground">
           {t("transports.subscriptionImport.nextSteps")}
         </p>
       ) : null}

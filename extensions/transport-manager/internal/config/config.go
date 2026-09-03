@@ -395,6 +395,24 @@ func (a *Admin) CreateIfRevision(
 	return a.revision, true, err
 }
 
+// CreateManyIfRevision creates one subscription selection as one durable
+// transport configuration mutation. Validation, runtime registration and the
+// final save all run while the same Admin lock owns expectedRevision, so a
+// caller never observes a half-imported subscription batch.
+func (a *Admin) CreateManyIfRevision(
+	ctx context.Context,
+	specs []transport.TransportSpec,
+	expectedRevision string,
+) (string, bool, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if expectedRevision != a.revision {
+		return a.revision, false, nil
+	}
+	err := a.createManyLocked(ctx, specs)
+	return a.revision, true, err
+}
+
 // ValidateCreateAtRevision performs the complete create validation without
 // changing the durable configuration, manager, or supervisor.
 func (a *Admin) ValidateCreateAtRevision(
@@ -411,6 +429,162 @@ func (a *Admin) ValidateCreateAtRevision(
 		err = a.validateSharedInventoryLocked(nextSpecs)
 	}
 	return a.revision, true, err
+}
+
+// ValidateCreateManyAtRevision performs the complete cumulative validation of
+// a subscription batch without changing durable or runtime state.
+func (a *Admin) ValidateCreateManyAtRevision(
+	specs []transport.TransportSpec,
+	expectedRevision string,
+) (string, bool, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if expectedRevision != "" && expectedRevision != a.revision {
+		return a.revision, false, nil
+	}
+	nextSpecs, _, hasShared, err := a.prepareCreateManyLocked(specs)
+	if err == nil && hasShared {
+		err = a.validateSharedInventoryLocked(nextSpecs)
+	}
+	return a.revision, true, err
+}
+
+// ValidateCreateItemsAtRevision validates each item independently against the
+// same committed configuration. It is used to keep one malformed subscription
+// entry from rejecting otherwise valid selections; cumulative conflicts are
+// still checked by ValidateCreateManyAtRevision before the atomic mutation.
+func (a *Admin) ValidateCreateItemsAtRevision(
+	specs []transport.TransportSpec,
+	expectedRevision string,
+) (string, bool, []bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if expectedRevision != "" && expectedRevision != a.revision {
+		return a.revision, false, nil
+	}
+	valid := make([]bool, len(specs))
+	for index, spec := range specs {
+		// prepareCreateLocked performs the authoritative share-link/spec
+		// parser check. Do not run a complete shared sing-box build for every
+		// item: the surviving batch gets exactly one cumulative validation
+		// immediately before mutation.
+		_, _, err := a.prepareCreateLocked(spec)
+		valid[index] = err == nil
+	}
+	return a.revision, true, valid
+}
+
+func (a *Admin) prepareCreateManyLocked(
+	specs []transport.TransportSpec,
+) ([]transport.TransportSpec, []transport.Transport, bool, error) {
+	if len(specs) == 0 {
+		return nil, nil, false, errors.New("transport batch must not be empty")
+	}
+
+	nextSpecs := append([]transport.TransportSpec(nil), a.config.Transports...)
+	managed := make([]transport.Transport, len(specs))
+	hasShared := false
+	for index, spec := range specs {
+		for _, existing := range nextSpecs {
+			if existing.Tag == spec.Tag {
+				return nil, nil, false, fmt.Errorf("transport %q already exists", spec.Tag)
+			}
+		}
+		nextSpecs = append(nextSpecs, spec)
+		if err := transport.ValidateUniqueTunAddresses(nextSpecs); err != nil {
+			return nil, nil, false, err
+		}
+		if a.shared != nil && isSharedSpec(spec) {
+			if _, err := transport.NewSingBox(
+				spec,
+				a.config.SingBoxBinary,
+				a.config.RuntimeDir,
+				a.config.HealthEndpoint(),
+			); err != nil {
+				return nil, nil, false, err
+			}
+			hasShared = true
+			continue
+		}
+		created, err := transport.NewFromSpec(
+			spec,
+			a.config.SingBoxBinary,
+			a.config.RuntimeDir,
+			a.config.HealthEndpoint(),
+		)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		managed[index] = created
+	}
+	return nextSpecs, managed, hasShared, nil
+}
+
+func (a *Admin) createManyLocked(
+	ctx context.Context,
+	specs []transport.TransportSpec,
+) error {
+	nextSpecs, managed, hasShared, err := a.prepareCreateManyLocked(specs)
+	if err != nil {
+		return err
+	}
+	if hasShared {
+		if err := a.validateSharedInventoryLocked(nextSpecs); err != nil {
+			return err
+		}
+	}
+
+	previous := append([]transport.TransportSpec(nil), a.config.Transports...)
+	sharedApplied := false
+	if hasShared {
+		if err := a.shared.ApplyInventory(ctx, nextSpecs); err != nil {
+			return err
+		}
+		sharedApplied = true
+	}
+
+	added := make([]transport.TransportSpec, 0, len(specs))
+	rollback := func() error {
+		var rollbackErr error
+		for index := len(added) - 1; index >= 0; index-- {
+			spec := added[index]
+			a.supervisor.Forget(spec.Tag)
+			if a.shared != nil && isSharedSpec(spec) {
+				rollbackErr = errors.Join(rollbackErr, a.manager.Forget(spec.Tag))
+			} else {
+				rollbackErr = errors.Join(rollbackErr, a.manager.Remove(ctx, spec.Tag))
+			}
+		}
+		if sharedApplied {
+			rollbackErr = errors.Join(rollbackErr, a.rollbackSharedInventoryLocked(previous))
+		}
+		return rollbackErr
+	}
+
+	for index, spec := range specs {
+		created := managed[index]
+		if a.shared != nil && isSharedSpec(spec) {
+			created, err = a.shared.Member(spec.Tag)
+			if err != nil {
+				return errors.Join(err, rollback())
+			}
+		}
+		if err := a.manager.Add(created); err != nil {
+			return errors.Join(err, rollback())
+		}
+		a.supervisor.Register(spec)
+		added = append(added, spec)
+	}
+
+	next := a.config
+	next.Transports = nextSpecs
+	revision, err := saveAdminConfig(a.path, next)
+	if err != nil {
+		return errors.Join(err, rollback())
+	}
+	a.config = next
+	a.revision = revision
+	return nil
 }
 
 func (a *Admin) prepareCreateLocked(

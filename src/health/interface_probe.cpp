@@ -638,6 +638,34 @@ bool interface_probe_target_is_current(
            same_target_identity(expected_target, *matching_tag);
 }
 
+std::vector<std::string> select_initial_interface_probe_tags(
+    const std::vector<InterfaceProbe::Target>& previous_targets,
+    const std::vector<InterfaceProbe::Target>& current_targets) {
+    std::vector<std::string> selected;
+    selected.reserve(current_targets.size());
+
+    for (const auto& current : current_targets) {
+        const auto exact_previous = std::find_if(
+            previous_targets.begin(),
+            previous_targets.end(),
+            [&current](const InterfaceProbe::Target& previous) {
+                return same_target_identity(previous, current);
+            });
+        if (exact_previous != previous_targets.end()) {
+            continue;
+        }
+
+        // Invalid duplicate tags are rejected by configuration validation,
+        // but keep this planner deterministic if it is handed such a shape:
+        // one targeted admission attempt is enough to reject it.
+        if (std::find(selected.begin(), selected.end(), current.tag) ==
+            selected.end()) {
+            selected.push_back(current.tag);
+        }
+    }
+    return selected;
+}
+
 InterfaceProbeRotation select_interface_probe_rotation(
     const std::vector<InterfaceProbe::Target>& targets,
     const std::size_t cursor,

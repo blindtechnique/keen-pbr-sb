@@ -5,6 +5,10 @@
 #include "handlers.hpp"
 #include "server.hpp"
 
+#ifdef KEEN_PBR3_TESTING
+#include "handler_config.hpp"
+#endif
+
 #include <functional>
 #include <string>
 
@@ -31,7 +35,9 @@ void register_subscriptions_handler(ApiServer& server, ApiContext& ctx);
 void register_subscriptions_handler_for_test(
     ApiServer& server,
     ApiContext& ctx,
-    SubscriptionFetcher fetcher);
+    SubscriptionFetcher fetcher,
+    ConfigFileWriterForTest write_config_file,
+    ConfigSaveTestOptions options = {});
 #endif
 
 } // namespace keen_pbr3

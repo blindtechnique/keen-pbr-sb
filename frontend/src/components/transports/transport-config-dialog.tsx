@@ -55,7 +55,7 @@ import {
   type NativeWireGuardImportedIdentity,
 } from "@/lib/native-wireguard-import-completion"
 import { SubscriptionImportDialog } from "@/components/transports/subscription-import-dialog"
-import { classifyPastedLink } from "@/components/transports/subscription-import-model"
+import { isActionableSubscriptionUrl } from "@/components/transports/subscription-import-model"
 import {
   generateTransportIdentity,
   inferTransportProtocol,
@@ -405,8 +405,11 @@ export function TransportConfigForm({
   const [importedNativeIdentity, setImportedNativeIdentity] =
     useState<NativeWireGuardImportedIdentity | null>(null)
   const [nativeImportSubmitted, setNativeImportSubmitted] = useState(false)
+  const [subscriptionImportSubmitted, setSubscriptionImportSubmitted] =
+    useState(false)
   const importedNativeFocusPendingRef = useRef(false)
   const displayNameInputRef = useRef<HTMLInputElement>(null)
+  const subscriptionOfferButtonRef = useRef<HTMLButtonElement>(null)
   const nativeImportHandoffCloseTimerRef = useRef<number | null>(null)
   const nativeInterfaceTriggerRef = useRef<HTMLButtonElement>(null)
   // What the operator handed over that turned out to be a subscription rather
@@ -461,6 +464,15 @@ export function TransportConfigForm({
     })
   const nativeImportPreviewOnly =
     isSingBox && isNativeImportPreviewOnlyMode(sourceMode, nativeUriActive)
+  const subscriptionLinkActive =
+    isSingBox &&
+    sourceMode === "link" &&
+    isActionableSubscriptionUrl(spec.link ?? "")
+  // A subscription is imported by its own planner. Saving the outer form as
+  // well would create a second transport from the same http(s) URL and race
+  // the just-started apply operation.
+  const sourceImportPreviewOnly =
+    nativeImportPreviewOnly || subscriptionLinkActive
   // Списки для выпадающих полей считаем здесь: `Select` показывает выбранное
   // значение по этому же списку, поэтому он должен быть один и тот же для
   // кнопки и для меню.
@@ -696,6 +708,20 @@ export function TransportConfigForm({
     })
   }, [])
 
+  useEffect(() => {
+    if (!subscriptionLinkActive) return
+    // Debounce typed URLs so focus moves only after the operator pauses; a
+    // pasted complete URL still brings the newly relevant action into view.
+    const focusTimer = window.setTimeout(() => {
+      subscriptionOfferButtonRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "center",
+      })
+      subscriptionOfferButtonRef.current?.focus()
+    }, 300)
+    return () => window.clearTimeout(focusTimer)
+  }, [spec.link, subscriptionLinkActive])
+
   // Ошибка имени не показывается на открытии: окно встречало пользователя
   // красным полем и строкой о том, что он уже ошибся, — до того как он
   // что-либо напечатал. Показываем, когда поле тронули либо когда в форме уже
@@ -705,12 +731,19 @@ export function TransportConfigForm({
     Boolean(displayNameError) && (displayNameTouched || isDirty)
 
   useEffect(() => {
-    onDirtyChange(isDirty && !nativeImportSubmitted)
-  }, [isDirty, nativeImportSubmitted, onDirtyChange])
+    onDirtyChange(
+      isDirty && !nativeImportSubmitted && !subscriptionImportSubmitted
+    )
+  }, [
+    isDirty,
+    nativeImportSubmitted,
+    onDirtyChange,
+    subscriptionImportSubmitted,
+  ])
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
-    if (nativeImportPreviewOnly) return
+    if (sourceImportPreviewOnly) return
     const submission = normalizeTransportFormValue(formValue, Boolean(initial))
     onSubmit(submission.spec, submission.options)
   }
@@ -1119,18 +1152,21 @@ export function TransportConfigForm({
                   subscription is an ordinary web address. That is the whole
                   difference, so the field takes either and this offer appears
                   when the operator has pasted the second kind. */}
-                {classifyPastedLink(spec.link ?? "") === "subscription" ? (
-                  <div className="flex flex-wrap items-center gap-2 rounded-md border border-dashed p-3">
-                    <p className="text-sm text-muted-foreground">
+                {subscriptionLinkActive ? (
+                  <div
+                    aria-live="polite"
+                    className="flex flex-wrap items-center gap-2 rounded-md border border-primary/50 bg-primary/5 p-3"
+                  >
+                    <p className="text-sm font-medium text-foreground">
                       {t("transports.form.subscriptionDetected")}
                     </p>
                     <Button
                       onClick={() =>
                         setSubscriptionSeed({ url: (spec.link ?? "").trim() })
                       }
+                      ref={subscriptionOfferButtonRef}
                       size="sm"
                       type="button"
-                      variant="outline"
                     >
                       {t("transports.subscriptionImport.open")}
                     </Button>
@@ -1249,9 +1285,9 @@ export function TransportConfigForm({
           type="button"
           variant="outline"
         >
-          {t(nativeImportPreviewOnly ? "common.close" : "common.cancel")}
+          {t(sourceImportPreviewOnly ? "common.close" : "common.cancel")}
         </Button>
-        {!nativeImportPreviewOnly ? (
+        {!sourceImportPreviewOnly ? (
           <Button
             disabled={
               isPending ||
@@ -1272,8 +1308,23 @@ export function TransportConfigForm({
       {/* Seeded, so the operator is not asked for the subscription a second
           time: the modal already has what they gave it. */}
       <SubscriptionImportDialog
+        onComplete={(results) => {
+          setSubscriptionImportSubmitted(true)
+          onDirtyChange(false)
+          toast.success(
+            t("transports.subscriptionImport.completed", {
+              count: results.results.length,
+            })
+          )
+          complete()
+        }}
         onOpenChange={(next) => {
           if (!next) setSubscriptionSeed(null)
+        }}
+        onResultsDismiss={() => {
+          setSubscriptionImportSubmitted(true)
+          onDirtyChange(false)
+          complete()
         }}
         open={subscriptionSeed !== null}
         {...(subscriptionSeed ? { seed: subscriptionSeed } : {})}

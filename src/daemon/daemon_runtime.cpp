@@ -2086,6 +2086,50 @@ bool Daemon::start_targeted_interface_probe(const std::string& tag) noexcept {
     }
 }
 
+void Daemon::probe_new_interface_outbounds_after_config_publish(
+    const ActiveConfigSnapshotHandle& previous_snapshot) noexcept {
+    try {
+        const auto current_snapshot = active_config_snapshot_;
+        if (!previous_snapshot || !current_snapshot) return;
+
+        const auto previous_targets = collect_interface_probe_targets(
+            previous_snapshot->config,
+            previous_snapshot->outbound_marks);
+        const auto current_targets = collect_interface_probe_targets(
+            current_snapshot->config,
+            current_snapshot->outbound_marks);
+        const auto tags = select_initial_interface_probe_tags(
+            previous_targets, current_targets);
+
+        // A reused tag must not make its first observation look like a health
+        // transition from the old device. The normal full-round path performs
+        // the same exact-identity pruning; do it once here before launching
+        // the targeted checks.
+        interface_probe_.retain_only(current_targets);
+
+        for (const auto& tag : tags) {
+            // Reuse the per-row path. Besides avoiding a full sweep, it does
+            // not request a runtime/firewall reconciliation after the probe,
+            // so an initial health check cannot contend with the config
+            // mutation which just created the route.
+            (void)start_targeted_interface_probe(tag);
+        }
+    } catch (const std::exception& error) {
+        try {
+            Logger::instance().info(
+                "Initial interface probe scheduling was skipped: {}",
+                error.what());
+        } catch (...) {
+        }
+    } catch (...) {
+        try {
+            Logger::instance().info(
+                "Initial interface probe scheduling was skipped");
+        } catch (...) {
+        }
+    }
+}
+
 void Daemon::start_interface_probe_round() noexcept {
     const bool failure_retry_round =
         interface_probe_failure_retry_.consume_for_round();

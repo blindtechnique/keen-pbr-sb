@@ -1398,8 +1398,7 @@ export function TransportsPage({
         </div>
 
         {dnsServersByInterface.has(item.interface) ||
-        (!isNative && !item.desired_up) ||
-        item.retry_count ? (
+        (!isNative && !item.desired_up) ? (
           <div className="flex min-w-0 flex-wrap items-center gap-1.5">
             {dnsServersByInterface.has(item.interface) ? (
               <Badge size="xs" variant="outline">
@@ -1410,11 +1409,6 @@ export function TransportsPage({
             {!isNative && !item.desired_up ? (
               <Badge size="xs" variant="secondary">
                 {t("transports.paused")}
-              </Badge>
-            ) : null}
-            {item.retry_count ? (
-              <Badge size="xs" variant="warning">
-                {t("transports.retryCount")}: {item.retry_count}
               </Badge>
             ) : null}
           </div>

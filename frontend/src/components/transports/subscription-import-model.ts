@@ -13,6 +13,11 @@ import type { SubscriptionApplySelection } from "@/api/generated/model"
 
 const TAG_PATTERN = /^[a-z][a-z0-9_]{0,23}$/
 
+// Isolated mode is the backwards-compatible default and runs one sing-box
+// process per selected connection. Keep one accidental click from turning a
+// large provider catalogue into hundreds of router processes.
+export const MAXIMUM_SUBSCRIPTION_SELECTION = 8
+
 export function isValidTag(tag: string) {
   return TAG_PATTERN.test(tag)
 }
@@ -36,22 +41,35 @@ export function requiresTagOverride(candidate: SubscriptionPreviewCandidate) {
   )
 }
 
-// Importable entries start selected: the common case is "import what is new".
-// Conflicts start unselected, because selecting one is a decision (a rename)
-// the operator has to make, not a default they have to notice and undo.
+// Start with one useful connection, not the provider's whole catalogue. In the
+// default isolated runtime every selected entry becomes a running process;
+// additional entries therefore stay an explicit operator choice. Conflicts
+// remain unselected because they also require a rename.
 export function initialSelectedLines(
   candidates: SubscriptionPreviewCandidate[]
 ): Set<number> {
-  const selected = new Set<number>()
   for (const candidate of candidates) {
     if (
       candidate.disposition ===
       SubscriptionPreviewCandidateDisposition.importable
     ) {
-      selected.add(candidate.line)
+      return new Set([candidate.line])
     }
   }
-  return selected
+  return new Set()
+}
+
+export function toggleSelectedLine(
+  selected: ReadonlySet<number>,
+  line: number
+): Set<number> {
+  const next = new Set(selected)
+  if (next.has(line)) {
+    next.delete(line)
+  } else if (next.size < MAXIMUM_SUBSCRIPTION_SELECTION) {
+    next.add(line)
+  }
+  return next
 }
 
 export function effectiveTag(
@@ -156,9 +174,21 @@ export function classifyPastedLink(value: string): PastedLinkKind {
   const trimmed = value.trim()
   if (trimmed.length === 0) return "empty"
   const scheme = trimmed.slice(0, trimmed.indexOf(":")).toLowerCase()
-  return scheme === "http" || scheme === "https"
-    ? "subscription"
-    : "share-link"
+  return scheme === "http" || scheme === "https" ? "subscription" : "share-link"
+}
+
+// The offer must not steal focus while the operator has only typed `https:`
+// or another incomplete prefix. Wait until the browser can parse a complete
+// http(s) address with a host; the backend remains authoritative for the
+// stricter public-destination policy.
+export function isActionableSubscriptionUrl(value: string): boolean {
+  if (classifyPastedLink(value) !== "subscription") return false
+  try {
+    const parsed = new URL(value.trim())
+    return Boolean(parsed.hostname)
+  } catch {
+    return false
+  }
 }
 
 // A file dropped into the import tab. WireGuard configurations start with a

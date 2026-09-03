@@ -870,6 +870,12 @@ private:
     // flight, or the daemon could not take the work, so the caller can say so
     // instead of showing a spinner for a probe that never started.
     bool start_targeted_interface_probe(const std::string& tag) noexcept;
+    // A successful config publication can add an interface outbound after the
+    // periodic cursor has passed its position. Start the existing targeted
+    // check for only those new/changed exact targets so their first health
+    // result does not wait through several 20-second rotation slices.
+    void probe_new_interface_outbounds_after_config_publish(
+        const ActiveConfigSnapshotHandle& previous_snapshot) noexcept;
     CacheCommitCallback make_guarded_cache_commit_callback();
     void refresh_lists_and_maybe_reload_async(
         std::string source = "autoupdate",

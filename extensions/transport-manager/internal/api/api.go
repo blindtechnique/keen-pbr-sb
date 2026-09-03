@@ -21,12 +21,17 @@ type API struct {
 	admin   TransportAdmin
 }
 
+// Mirrors the public subscription planner's maximum entry count. The internal
+// batch endpoint must accept every selection the public API can produce.
+const maximumTransportBatchSize = 512
+
 type TransportRuntime interface {
 	Statuses(context.Context) []transport.Status
 	Status(context.Context, string) (transport.Status, error)
 	Up(context.Context, string) error
 	Down(context.Context, string) error
 	Restart(context.Context, string) error
+	RuntimeReady([]string) bool
 }
 
 type TransportAdmin interface {
@@ -62,6 +67,14 @@ type ConditionalTransportAdmin interface {
 	) (revision string, matched bool, err error)
 }
 
+type ConditionalTransportBatchAdmin interface {
+	CreateManyIfRevision(
+		context.Context,
+		[]transport.TransportSpec,
+		string,
+	) (revision string, matched bool, err error)
+}
+
 type TransportConfigValidator interface {
 	ValidateCreateAtRevision(
 		transport.TransportSpec,
@@ -72,6 +85,20 @@ type TransportConfigValidator interface {
 		transport.TransportSpec,
 		string,
 	) (revision string, matched bool, err error)
+}
+
+type TransportConfigBatchValidator interface {
+	ValidateCreateManyAtRevision(
+		[]transport.TransportSpec,
+		string,
+	) (revision string, matched bool, err error)
+}
+
+type TransportConfigItemValidator interface {
+	ValidateCreateItemsAtRevision(
+		[]transport.TransportSpec,
+		string,
+	) (revision string, matched bool, valid []bool)
 }
 
 type TransportRuntimeSettingsAdmin interface {
@@ -93,12 +120,16 @@ func New(manager TransportRuntime, key string, admins ...TransportAdmin) http.Ha
 	mux.HandleFunc("GET /v1/transports", a.list)
 	mux.HandleFunc("GET /v1/transports/{tag}", a.status)
 	mux.HandleFunc("POST /v1/transports/{tag}/{action}", a.action)
+	mux.HandleFunc("POST /v1/transports/runtime-ready", a.runtimeReady)
 	mux.HandleFunc("GET /v1/config/transports", a.listConfig)
 	mux.HandleFunc("GET /v1/config/transports/state", a.configState)
 	mux.HandleFunc("GET /v1/config/transports/export", a.exportConfig)
 	mux.HandleFunc("POST /v1/config/transports/validate", a.validateCreateConfig)
+	mux.HandleFunc("POST /v1/config/transports/batch/validate", a.validateCreateBatchConfig)
+	mux.HandleFunc("POST /v1/config/transports/batch/validate-items", a.validateCreateItemsConfig)
 	mux.HandleFunc("PUT /v1/config/transports/{tag}/validate", a.validateUpdateConfig)
 	mux.HandleFunc("POST /v1/config/transports", a.createConfig)
+	mux.HandleFunc("POST /v1/config/transports/batch", a.createBatchConfig)
 	mux.HandleFunc("PUT /v1/config/transports/{tag}", a.updateConfig)
 	mux.HandleFunc("DELETE /v1/config/transports/{tag}", a.deleteConfig)
 	mux.HandleFunc("GET /v1/config/settings", a.getSettings)
@@ -218,6 +249,47 @@ func (a *API) createConfig(w http.ResponseWriter, r *http.Request) {
 	writeRevisionResult(w, http.StatusCreated, "created", spec.Tag, a.currentRevision())
 }
 
+func (a *API) createBatchConfig(w http.ResponseWriter, r *http.Request) {
+	if a.admin == nil {
+		write(w, http.StatusServiceUnavailable, map[string]string{"error": "transport admin unavailable"})
+		return
+	}
+	admin, ok := a.admin.(ConditionalTransportBatchAdmin)
+	if !ok {
+		write(w, http.StatusServiceUnavailable, map[string]string{"error": "conditional transport batch admin unavailable"})
+		return
+	}
+	specs, err := decodeTransportBatch(w, r)
+	if err != nil {
+		write(w, http.StatusBadRequest, map[string]string{"error": "invalid transport batch JSON"})
+		return
+	}
+	expectedRevision, conditional, err := parseIfMatch(r)
+	if err != nil {
+		write(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if !conditional {
+		write(w, http.StatusBadRequest, map[string]string{"error": "transport batch requires If-Match"})
+		return
+	}
+	revision, matched, err := admin.CreateManyIfRevision(r.Context(), specs, expectedRevision)
+	if !matched {
+		writePreconditionFailed(w, revision)
+		return
+	}
+	if err != nil {
+		writeRevisionError(w, http.StatusBadRequest, revision, err)
+		return
+	}
+	setRevisionHeader(w, revision)
+	write(w, http.StatusCreated, map[string]any{
+		"status":          "created",
+		"created":         len(specs),
+		"config_revision": revision,
+	})
+}
+
 func (a *API) updateConfig(w http.ResponseWriter, r *http.Request) {
 	if a.admin == nil {
 		write(w, http.StatusServiceUnavailable, map[string]string{"error": "transport admin unavailable"})
@@ -295,6 +367,76 @@ func (a *API) validateCreateConfig(w http.ResponseWriter, r *http.Request) {
 	writeValidationResult(w, spec.Tag, revision)
 }
 
+func (a *API) validateCreateBatchConfig(w http.ResponseWriter, r *http.Request) {
+	if a.admin == nil {
+		write(w, http.StatusServiceUnavailable, map[string]string{"error": "transport admin unavailable"})
+		return
+	}
+	validator, ok := a.admin.(TransportConfigBatchValidator)
+	if !ok {
+		write(w, http.StatusServiceUnavailable, map[string]string{"error": "transport batch validation unavailable"})
+		return
+	}
+	specs, err := decodeTransportBatch(w, r)
+	if err != nil {
+		write(w, http.StatusBadRequest, map[string]string{"error": "invalid transport batch JSON"})
+		return
+	}
+	expectedRevision, _, err := parseIfMatch(r)
+	if err != nil {
+		write(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	revision, matched, err := validator.ValidateCreateManyAtRevision(specs, expectedRevision)
+	if !matched {
+		writePreconditionFailed(w, revision)
+		return
+	}
+	if err != nil {
+		writeRevisionError(w, http.StatusBadRequest, revision, err)
+		return
+	}
+	setRevisionHeader(w, revision)
+	write(w, http.StatusOK, map[string]any{
+		"status":          "valid",
+		"validated":       len(specs),
+		"config_revision": revision,
+	})
+}
+
+func (a *API) validateCreateItemsConfig(w http.ResponseWriter, r *http.Request) {
+	if a.admin == nil {
+		write(w, http.StatusServiceUnavailable, map[string]string{"error": "transport admin unavailable"})
+		return
+	}
+	validator, ok := a.admin.(TransportConfigItemValidator)
+	if !ok {
+		write(w, http.StatusServiceUnavailable, map[string]string{"error": "transport item validation unavailable"})
+		return
+	}
+	specs, err := decodeTransportBatch(w, r)
+	if err != nil {
+		write(w, http.StatusBadRequest, map[string]string{"error": "invalid transport batch JSON"})
+		return
+	}
+	expectedRevision, _, err := parseIfMatch(r)
+	if err != nil {
+		write(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	revision, matched, valid := validator.ValidateCreateItemsAtRevision(specs, expectedRevision)
+	if !matched {
+		writePreconditionFailed(w, revision)
+		return
+	}
+	setRevisionHeader(w, revision)
+	write(w, http.StatusOK, map[string]any{
+		"status":          "validated",
+		"config_revision": revision,
+		"valid":           valid,
+	})
+}
+
 func (a *API) validateUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	if a.admin == nil {
 		write(w, http.StatusServiceUnavailable, map[string]string{"error": "transport admin unavailable"})
@@ -348,6 +490,36 @@ func decodeTransportSpec(w http.ResponseWriter, r *http.Request) (transport.Tran
 		return transport.TransportSpec{}, err
 	}
 	return spec, nil
+}
+
+func decodeTransportBatch(w http.ResponseWriter, r *http.Request) ([]transport.TransportSpec, error) {
+	var request struct {
+		Transports []transport.TransportSpec `json:"transports"`
+	}
+	// A source subscription is allowed to approach 1 MiB. JSON quoting plus
+	// the batch envelope can expand the same accepted links, so the loopback
+	// manager endpoint needs bounded headroom rather than a smaller effective
+	// import limit.
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		return nil, err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return nil, errors.New("multiple JSON values")
+		}
+		return nil, err
+	}
+	if len(request.Transports) == 0 || len(request.Transports) > maximumTransportBatchSize {
+		return nil, errors.New("transport batch size is outside 1..512")
+	}
+	for _, spec := range request.Transports {
+		if err := transport.ValidateDisplayName(spec.DisplayName); err != nil {
+			return nil, err
+		}
+	}
+	return request.Transports, nil
 }
 
 func (a *API) deleteConfig(w http.ResponseWriter, r *http.Request) {
@@ -467,6 +639,29 @@ func (a *API) status(w http.ResponseWriter, r *http.Request) {
 	statuses := []transport.Status{status}
 	a.decorateStatuses(statuses)
 	write(w, http.StatusOK, statuses[0])
+}
+
+func (a *API) runtimeReady(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Tags []string `json:"tags"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		write(w, http.StatusBadRequest, map[string]string{"error": "invalid runtime readiness JSON"})
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		write(w, http.StatusBadRequest, map[string]string{"error": "invalid runtime readiness JSON"})
+		return
+	}
+	if len(request.Tags) == 0 || len(request.Tags) > maximumTransportBatchSize {
+		write(w, http.StatusBadRequest, map[string]string{"error": "runtime readiness requires 1..512 tags"})
+		return
+	}
+	write(w, http.StatusOK, map[string]bool{
+		"ready": a.manager.RuntimeReady(request.Tags),
+	})
 }
 
 func (a *API) decorateStatuses(statuses []transport.Status) {

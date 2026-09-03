@@ -3,6 +3,8 @@
 #include "handler_subscriptions.hpp"
 
 #include "generated/api_types.hpp"
+#include "handler_config.hpp"
+#include "handler_transports.hpp"
 #include "maintenance_api.hpp"
 #include "transport_manager_endpoint.hpp"
 
@@ -39,6 +41,10 @@ constexpr std::chrono::seconds kPreviewTtl{600};
 // An operator compares at most a couple of subscriptions at once. The cap is
 // about bounding held credentials, not about capacity.
 constexpr std::size_t kMaximumPreviews = 4U;
+// Eight isolated sing-box processes fit the smallest supported routers; a
+// larger one-click auto-start batch can exhaust memory before the operator can
+// disable any item. Larger subscriptions remain importable in bounded groups.
+constexpr std::size_t kMaximumSubscriptionApplyEntries = 8U;
 
 struct TransportIdentity {
     std::optional<std::string> tag;
@@ -127,6 +133,20 @@ struct ExistingTransports {
     std::set<std::string> link_fingerprints;
     std::map<std::string, TransportIdentity> identities_by_fingerprint;
 };
+
+void add_core_route_names(
+    const Config& config,
+    ExistingTransports& existing) {
+    for (const auto& outbound :
+         config.outbounds.value_or(std::vector<Outbound>{})) {
+        existing.tags.insert(outbound.tag);
+        if (outbound.type == OutboundType::INTERFACE &&
+            outbound.interface.has_value() &&
+            !outbound.interface->empty()) {
+            existing.interfaces.insert(*outbound.interface);
+        }
+    }
+}
 
 ExistingTransports read_existing_transports(
     const TransportManagerEndpoint& endpoint) {
@@ -244,19 +264,21 @@ bool valid_override_tag(const std::string& tag) {
     return true;
 }
 
-// Manager response text is parser-controlled and can echo or transform any
-// part of the credential-bearing link (percent-decoding is enough to defeat a
-// substring filter). It belongs in the manager's root-only diagnostics, never
-// in this browser-facing API.
-std::string sanitized_manager_error(const int status) {
-    return "transport manager refused this entry (HTTP " +
-           std::to_string(status) + ")";
-}
+class SubscriptionApplyNoMutation final : public std::exception {
+public:
+    const char* what() const noexcept override {
+        return "subscription selection needs no mutation";
+    }
+};
 
 void register_subscriptions_handler_impl(
     ApiServer& server,
     ApiContext& ctx,
-    SubscriptionFetcher fetcher) {
+    SubscriptionFetcher fetcher,
+    std::function<std::string(
+        ApiContext&,
+        std::string,
+        PrepareConfigCommit)> commit_config) {
     server.post(
         "/api/subscriptions/preview",
         [&ctx, fetcher = std::move(fetcher)](
@@ -313,7 +335,8 @@ void register_subscriptions_handler_impl(
             // URL import is not allowed to be.
             const auto endpoint =
                 load_transport_manager_endpoint(ctx.config_path);
-            const auto existing = read_existing_transports(endpoint);
+            auto existing = read_existing_transports(endpoint);
+            add_core_route_names(ctx.get_visible_config(), existing);
 
             // No size check here on purpose. plan_subscription_import already
             // refuses a body over kSubscriptionMaximumBytes and says so as
@@ -380,7 +403,8 @@ void register_subscriptions_handler_impl(
 
     server.post(
         "/api/subscriptions/apply",
-        [&ctx](const std::string& request_body) -> std::string {
+        [&ctx,
+         commit_config](const std::string& request_body) -> std::string {
             api::SubscriptionApplyRequest request;
             try {
                 request = nlohmann::json::parse(request_body)
@@ -394,6 +418,12 @@ void register_subscriptions_handler_impl(
                 throw ApiError("subscription apply requires at least one "
                                "selection",
                                400);
+            }
+            if (request.selections.size() >
+                kMaximumSubscriptionApplyEntries) {
+                throw ApiError(
+                    "select at most 8 connections per import",
+                    400);
             }
             {
                 std::set<int64_t> seen;
@@ -415,6 +445,7 @@ void register_subscriptions_handler_impl(
                 std::string link;
                 std::string scheme;
                 std::string remark;
+                std::string endpoint;
                 std::string tag;
             };
             std::vector<ResolvedEntry> entries;
@@ -484,166 +515,235 @@ void register_subscriptions_handler_impl(
                     entry.link = session.plan.links[index];
                     entry.scheme = candidate.scheme;
                     entry.remark = candidate.remark;
+                    entry.endpoint = candidate.endpoint;
                     entry.tag = overridden ? *selection.tag
                                            : candidate.suggested_tag;
                     entries.push_back(std::move(entry));
                 }
             }
 
-            try {
-                auto maintenance =
-                    ctx.acquire_maintenance_lease("subscription-import");
-                // The endpoint and API key belong to the same serialized
-                // configuration as the transports below. Reading them before
-                // the lease would let a concurrent Save publish a new manager
-                // identity while this apply continued with stale authority.
-                const auto endpoint =
-                    load_transport_manager_endpoint(ctx.config_path);
-                // Preview state is advisory. Another serialized mutation can
-                // create the same transport after preview, so identity and
-                // naming must be refreshed only after this apply owns the
-                // common mutation lease. Reading first leaves a deterministic
-                // duplicate window between the GET and lease acquisition.
-                auto existing = read_existing_transports(endpoint);
-                std::set<std::string> taken = existing.interfaces;
-                taken.insert(existing.tags.begin(), existing.tags.end());
-                (void)maintenance->reserve(maintenance->base_generation());
-
-                httplib::Client client(endpoint.host, endpoint.port);
-                client.set_connection_timeout(1, 0);
-                client.set_read_timeout(15, 0);
-                const httplib::Headers headers{
-                    {"Authorization", "Bearer " + endpoint.api_key},
+            api::SubscriptionApplyResponse response;
+            const auto remember_import =
+                [&request](const std::size_t line,
+                           TransportIdentity identity) {
+                    auto& registry = preview_registry();
+                    std::lock_guard<std::mutex> lock(registry.mutex);
+                    const auto found =
+                        registry.sessions.find(request.preview_id);
+                    if (found != registry.sessions.end()) {
+                        found->second.imported_lines.insert_or_assign(
+                            line, std::move(identity));
+                    }
                 };
 
-                api::SubscriptionApplyResponse response;
-                const auto remember_import =
-                    [&request](const std::size_t line,
-                               TransportIdentity identity) {
-                        auto& registry = preview_registry();
-                        std::lock_guard<std::mutex> lock(registry.mutex);
-                        const auto found =
-                            registry.sessions.find(request.preview_id);
-                        if (found != registry.sessions.end()) {
-                            found->second.imported_lines.insert_or_assign(
-                                line, std::move(identity));
-                        }
-                    };
-                for (const auto& entry : entries) {
-                    api::SubscriptionApplyResultElement result;
-                    result.line = static_cast<int64_t>(entry.line);
-
-                    std::optional<TransportIdentity> imported_identity;
-                    {
-                        auto& registry = preview_registry();
-                        std::lock_guard<std::mutex> lock(registry.mutex);
-                        const auto found =
-                            registry.sessions.find(request.preview_id);
-                        if (found != registry.sessions.end()) {
-                            const auto imported =
-                                found->second.imported_lines.find(entry.line);
-                            if (imported !=
-                                found->second.imported_lines.end()) {
-                                imported_identity = imported->second;
-                            }
+            std::vector<ResolvedEntry> pending;
+            for (auto& entry : entries) {
+                std::optional<TransportIdentity> imported_identity;
+                {
+                    auto& registry = preview_registry();
+                    std::lock_guard<std::mutex> lock(registry.mutex);
+                    const auto found =
+                        registry.sessions.find(request.preview_id);
+                    if (found != registry.sessions.end()) {
+                        const auto imported =
+                            found->second.imported_lines.find(entry.line);
+                        if (imported !=
+                            found->second.imported_lines.end()) {
+                            imported_identity = imported->second;
                         }
                     }
-                    if (imported_identity.has_value()) {
-                        // Not a failure: nothing went wrong and there is
-                        // nothing to fix. Reporting it as one would teach
-                        // the operator to distrust the report.
-                        result.outcome = api::Outcome::ALREADY_IMPORTED;
-                        result.tag = imported_identity->tag;
-                        result.interface = imported_identity->interface_name;
-                        response.results.push_back(std::move(result));
-                        continue;
-                    }
-
-                    const auto fingerprint =
-                        subscription_link_fingerprint(entry.link);
-                    if (fingerprint.empty()) {
-                        result.outcome = api::Outcome::FAILED;
-                        result.error = "cannot derive link identity";
-                        response.results.push_back(std::move(result));
-                        continue;
-                    }
-                    if (existing.link_fingerprints.count(fingerprint) != 0U) {
-                        // A previous or concurrent serialized operation won
-                        // after preview. This is the same benign state as a
-                        // consumed line: no POST and nothing to repair.
-                        result.outcome = api::Outcome::ALREADY_IMPORTED;
-                        TransportIdentity identity;
-                        const auto actual =
-                            existing.identities_by_fingerprint.find(fingerprint);
-                        if (actual !=
-                            existing.identities_by_fingerprint.end()) {
-                            identity = actual->second;
-                        }
-                        result.tag = identity.tag;
-                        result.interface = identity.interface_name;
-                        remember_import(entry.line, std::move(identity));
-                        response.results.push_back(std::move(result));
-                        continue;
-                    }
-
-                    const std::string interface_name =
-                        derive_subscription_interface(entry.scheme, taken);
-                    if (interface_name.empty()) {
-                        result.outcome = api::Outcome::FAILED;
-                        result.error =
-                            "no free interface name could be derived";
-                        response.results.push_back(std::move(result));
-                        continue;
-                    }
-                    nlohmann::json spec{
-                        {"tag", entry.tag},
-                        {"type", "sing-box"},
-                        {"interface", interface_name},
-                        {"link", entry.link},
-                        {"auto_start", false},
-                    };
-                    // The provider's label survives as the display alias when
-                    // it is one the manager would accept; a name is never a
-                    // reason to fail the import.
-                    if (!entry.remark.empty() &&
-                        display_name::is_valid(entry.remark, false)) {
-                        spec["display_name"] = entry.remark;
-                    }
-
-                    const auto created = client.Post(
-                        "/v1/config/transports",
-                        headers,
-                        spec.dump(),
-                        "application/json");
-                    if (!created) {
-                        result.outcome = api::Outcome::FAILED;
-                        result.error = "transport manager is unavailable";
-                    } else if (created->status < 200 ||
-                               created->status >= 300) {
-                        result.outcome = api::Outcome::FAILED;
-                        result.error =
-                            sanitized_manager_error(created->status);
-                    } else {
-                        result.outcome = api::Outcome::CREATED;
-                        result.tag = entry.tag;
-                        result.interface = interface_name;
-                        taken.insert(entry.tag);
-                        taken.insert(interface_name);
-                        existing.link_fingerprints.insert(fingerprint);
-                        TransportIdentity identity{
-                            entry.tag, interface_name};
-                        existing.identities_by_fingerprint.insert_or_assign(
-                            fingerprint, identity);
-                        remember_import(entry.line, std::move(identity));
-                    }
-                    response.results.push_back(std::move(result));
                 }
-
-                maintenance->verify_held();
-                return nlohmann::json(response).dump();
-            } catch (const MaintenanceLockError& error) {
-                throw_maintenance_api_error(error);
+                if (!imported_identity.has_value()) {
+                    pending.push_back(std::move(entry));
+                    continue;
+                }
+                api::SubscriptionApplyResultElement result;
+                result.line = static_cast<int64_t>(entry.line);
+                result.outcome = api::Outcome::ALREADY_IMPORTED;
+                result.tag = imported_identity->tag;
+                result.interface = imported_identity->interface_name;
+                response.results.push_back(std::move(result));
             }
+            if (pending.empty()) {
+                return nlohmann::json(response).dump();
+            }
+
+            struct PlannedCreate {
+                std::size_t line;
+                std::string tag;
+                std::string interface_name;
+            };
+            std::vector<PlannedCreate> planned;
+            try {
+                (void)commit_config(
+                    ctx,
+                    "subscription-import",
+                    [&]() -> PreparedConfigCommit {
+                        // Preview state is advisory. Refresh identities and
+                        // derived names only after the existing composite
+                        // commit owns maintenance + runtime admission.
+                        const auto endpoint =
+                            load_transport_manager_endpoint(ctx.config_path);
+                        auto existing =
+                            read_existing_transports(endpoint);
+                        add_core_route_names(
+                            ctx.get_visible_config(), existing);
+                        std::set<std::string> taken = existing.interfaces;
+                        taken.insert(existing.tags.begin(),
+                                     existing.tags.end());
+
+                        std::vector<LinkedTransportCreate> creates;
+                        for (const auto& entry : pending) {
+                            const auto fingerprint =
+                                subscription_link_fingerprint(entry.link);
+                            if (fingerprint.empty()) {
+                                api::SubscriptionApplyResultElement result;
+                                result.line =
+                                    static_cast<int64_t>(entry.line);
+                                result.outcome = api::Outcome::FAILED;
+                                result.error =
+                                    "cannot derive link identity";
+                                response.results.push_back(
+                                    std::move(result));
+                                continue;
+                            }
+                            if (existing.link_fingerprints.count(
+                                    fingerprint) != 0U) {
+                                TransportIdentity identity;
+                                const auto actual =
+                                    existing.identities_by_fingerprint.find(
+                                        fingerprint);
+                                if (actual !=
+                                    existing.identities_by_fingerprint.end()) {
+                                    identity = actual->second;
+                                }
+                                api::SubscriptionApplyResultElement result;
+                                result.line =
+                                    static_cast<int64_t>(entry.line);
+                                result.outcome =
+                                    api::Outcome::ALREADY_IMPORTED;
+                                result.tag = identity.tag;
+                                result.interface = identity.interface_name;
+                                remember_import(
+                                    entry.line, std::move(identity));
+                                response.results.push_back(
+                                    std::move(result));
+                                continue;
+                            }
+
+                            if (taken.count(entry.tag) != 0U) {
+                                api::SubscriptionApplyResultElement result;
+                                result.line =
+                                    static_cast<int64_t>(entry.line);
+                                result.outcome = api::Outcome::FAILED;
+                                result.error = "name is already in use";
+                                response.results.push_back(
+                                    std::move(result));
+                                continue;
+                            }
+
+                            const auto interface_name =
+                                derive_subscription_interface(
+                                    entry.scheme, taken);
+                            if (interface_name.empty()) {
+                                api::SubscriptionApplyResultElement result;
+                                result.line =
+                                    static_cast<int64_t>(entry.line);
+                                result.outcome = api::Outcome::FAILED;
+                                result.error =
+                                    "no free interface name could be derived";
+                                response.results.push_back(
+                                    std::move(result));
+                                continue;
+                            }
+
+                            const auto alias =
+                                !entry.remark.empty() &&
+                                        display_name::is_valid(
+                                            entry.remark, false)
+                                    ? entry.remark
+                                    : (!entry.endpoint.empty() &&
+                                               display_name::is_valid(
+                                                   entry.endpoint, false)
+                                           ? entry.endpoint
+                                           : std::string{});
+                            nlohmann::json spec{
+                                {"tag", entry.tag},
+                                {"type", "sing-box"},
+                                {"interface", interface_name},
+                                {"link", entry.link},
+                                {"auto_start", true},
+                            };
+                            if (!alias.empty()) {
+                                spec["display_name"] = alias;
+                            }
+                            LinkedTransportCreate create;
+                            create.transport = std::move(spec);
+                            if (!alias.empty()) {
+                                create.display_name = alias;
+                            }
+                            creates.push_back(std::move(create));
+                            planned.push_back(
+                                {entry.line, entry.tag, interface_name});
+                            taken.insert(entry.tag);
+                            taken.insert(interface_name);
+                            existing.link_fingerprints.insert(fingerprint);
+                        }
+                        if (creates.empty()) {
+                            throw SubscriptionApplyNoMutation{};
+                        }
+                        const auto valid =
+                            validate_linked_transport_create_items(
+                                ctx, creates);
+                        std::vector<LinkedTransportCreate>
+                            accepted_creates;
+                        std::vector<PlannedCreate> accepted_planned;
+                        accepted_creates.reserve(creates.size());
+                        accepted_planned.reserve(planned.size());
+                        for (std::size_t index = 0U;
+                             index < creates.size();
+                             ++index) {
+                            if (valid[index]) {
+                                accepted_creates.push_back(
+                                    std::move(creates[index]));
+                                accepted_planned.push_back(
+                                    std::move(planned[index]));
+                                continue;
+                            }
+                            api::SubscriptionApplyResultElement result;
+                            result.line = static_cast<int64_t>(
+                                planned[index].line);
+                            result.outcome = api::Outcome::FAILED;
+                            result.error =
+                                "connection data was not accepted";
+                            response.results.push_back(
+                                std::move(result));
+                        }
+                        creates = std::move(accepted_creates);
+                        planned = std::move(accepted_planned);
+                        if (creates.empty()) {
+                            throw SubscriptionApplyNoMutation{};
+                        }
+                        return prepare_linked_transport_creates(
+                            ctx, std::move(creates));
+                    });
+            } catch (const SubscriptionApplyNoMutation&) {
+                return nlohmann::json(response).dump();
+            }
+
+            for (const auto& created : planned) {
+                api::SubscriptionApplyResultElement result;
+                result.line = static_cast<int64_t>(created.line);
+                result.outcome = api::Outcome::CREATED;
+                result.tag = created.tag;
+                result.interface = created.interface_name;
+                response.results.push_back(std::move(result));
+                remember_import(
+                    created.line,
+                    TransportIdentity{
+                        created.tag, created.interface_name});
+            }
+            return nlohmann::json(response).dump();
         });
 }
 
@@ -673,15 +773,42 @@ SubscriptionFetcher make_subscription_fetcher() {
 
 void register_subscriptions_handler(ApiServer& server, ApiContext& ctx) {
     register_subscriptions_handler_impl(
-        server, ctx, make_subscription_fetcher());
+        server,
+        ctx,
+        make_subscription_fetcher(),
+        [](ApiContext& commit_ctx,
+           std::string operation,
+           PrepareConfigCommit prepare) {
+            return commit_prepared_config(
+                commit_ctx,
+                std::move(operation),
+                std::move(prepare));
+        });
 }
 
 #ifdef KEEN_PBR3_TESTING
 void register_subscriptions_handler_for_test(
     ApiServer& server,
     ApiContext& ctx,
-    SubscriptionFetcher fetcher) {
-    register_subscriptions_handler_impl(server, ctx, std::move(fetcher));
+    SubscriptionFetcher fetcher,
+    ConfigFileWriterForTest write_config_file,
+    ConfigSaveTestOptions options) {
+    register_subscriptions_handler_impl(
+        server,
+        ctx,
+        std::move(fetcher),
+        [write_config_file = std::move(write_config_file),
+         options = std::move(options)](
+            ApiContext& commit_ctx,
+            std::string operation,
+            PrepareConfigCommit prepare) {
+            return commit_prepared_config_for_test(
+                commit_ctx,
+                std::move(operation),
+                std::move(prepare),
+                write_config_file,
+                options);
+        });
 }
 #endif
 

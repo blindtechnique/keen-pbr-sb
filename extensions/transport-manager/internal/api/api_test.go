@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -33,6 +35,28 @@ type recordingAdminStub struct {
 type revisionAdminStub struct {
 	*recordingAdminStub
 	revision string
+}
+
+type readinessRuntimeStub struct {
+	ready    map[string]bool
+	lastTags []string
+}
+
+func (s *readinessRuntimeStub) Statuses(context.Context) []transport.Status { return nil }
+func (s *readinessRuntimeStub) Status(context.Context, string) (transport.Status, error) {
+	return transport.Status{}, errors.New("not found")
+}
+func (s *readinessRuntimeStub) Up(context.Context, string) error      { return nil }
+func (s *readinessRuntimeStub) Down(context.Context, string) error    { return nil }
+func (s *readinessRuntimeStub) Restart(context.Context, string) error { return nil }
+func (s *readinessRuntimeStub) RuntimeReady(tags []string) bool {
+	s.lastTags = append([]string(nil), tags...)
+	for _, tag := range tags {
+		if !s.ready[tag] {
+			return false
+		}
+	}
+	return true
 }
 
 func (s revisionAdminStub) Revision() string {
@@ -118,6 +142,46 @@ func TestTransportListWithAuthentication(t *testing.T) {
 	New(transport.NewManager(), "secret").ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("got status %d", recorder.Code)
+	}
+}
+
+func TestRuntimeReadinessChecksOnlyTheExactRequestedTags(t *testing.T) {
+	runtime := &readinessRuntimeStub{ready: map[string]bool{
+		"old_unavailable": false,
+		"new_ready":       true,
+	}}
+	handler := New(runtime, "secret")
+
+	request := authenticatedRequest(
+		http.MethodPost,
+		"/v1/transports/runtime-ready",
+		`{"tags":["new_ready"]}`,
+	)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("exact readiness returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response map[string]bool
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response["ready"] || len(runtime.lastTags) != 1 || runtime.lastTags[0] != "new_ready" {
+		t.Fatalf("unrelated old transport affected exact readiness: response=%#v tags=%#v", response, runtime.lastTags)
+	}
+
+	request = authenticatedRequest(
+		http.MethodPost,
+		"/v1/transports/runtime-ready",
+		`{"tags":["new_ready","old_unavailable"]}`,
+	)
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["ready"] {
+		t.Fatal("requested unready tag was reported ready")
 	}
 }
 
@@ -525,5 +589,129 @@ func TestTransportValidationHasNoSideEffects(t *testing.T) {
 	}
 	if _, exists := manager.Get("native_one"); exists {
 		t.Fatal("validation registered a runtime transport")
+	}
+}
+
+func TestConditionalTransportBatchValidatesThenCreatesAtOneRevision(t *testing.T) {
+	handler, admin, manager, _ := newConditionalAdminHandler(t)
+	initialRevision := admin.Revision()
+	body := `{"transports":[` +
+		`{"tag":"native_one","type":"native","interface":"nwg1"},` +
+		`{"tag":"native_two","type":"native","interface":"nwg2"}` +
+		`]}`
+
+	validate := authenticatedRequest(
+		http.MethodPost, "/v1/config/transports/batch/validate", body,
+	)
+	validate.Header.Set("If-Match", initialRevision)
+	validateRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(validateRecorder, validate)
+	if validateRecorder.Code != http.StatusOK {
+		t.Fatalf("batch validation returned %d: %s", validateRecorder.Code, validateRecorder.Body.String())
+	}
+	if len(admin.Specs()) != 0 {
+		t.Fatal("batch validation mutated config")
+	}
+
+	create := authenticatedRequest(
+		http.MethodPost, "/v1/config/transports/batch", body,
+	)
+	create.Header.Set("If-Match", `"`+initialRevision+`"`)
+	createRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(createRecorder, create)
+	if createRecorder.Code != http.StatusCreated {
+		t.Fatalf("batch create returned %d: %s", createRecorder.Code, createRecorder.Body.String())
+	}
+	var result struct {
+		Created        int    `json:"created"`
+		ConfigRevision string `json:"config_revision"`
+	}
+	if err := json.Unmarshal(createRecorder.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Created != 2 || result.ConfigRevision == "" || result.ConfigRevision == initialRevision {
+		t.Fatalf("unexpected batch result: %#v", result)
+	}
+	if len(admin.Specs()) != 2 {
+		t.Fatalf("batch did not commit both specs: %#v", admin.Specs())
+	}
+	for _, tag := range []string{"native_one", "native_two"} {
+		if _, exists := manager.Get(tag); !exists {
+			t.Fatalf("batch transport %q is not registered", tag)
+		}
+	}
+
+	stale := authenticatedRequest(
+		http.MethodPost, "/v1/config/transports/batch", body,
+	)
+	stale.Header.Set("If-Match", initialRevision)
+	staleRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(staleRecorder, stale)
+	if staleRecorder.Code != http.StatusPreconditionFailed {
+		t.Fatalf("stale batch returned %d: %s", staleRecorder.Code, staleRecorder.Body.String())
+	}
+}
+
+func TestTransportBatchItemValidationReturnsOnlyIndexedVerdicts(t *testing.T) {
+	handler, admin, _, _ := newConditionalAdminHandler(t)
+	body := `{"transports":[` +
+		`{"tag":"native_one","type":"native","interface":"nwg1"},` +
+		`{"tag":"broken","type":"native","interface":""}` +
+		`]}`
+	request := authenticatedRequest(
+		http.MethodPost, "/v1/config/transports/batch/validate-items", body,
+	)
+	request.Header.Set("If-Match", admin.Revision())
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("item validation returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Valid []bool `json:"valid"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Valid) != 2 || !response.Valid[0] || response.Valid[1] {
+		t.Fatalf("unexpected item verdicts: %#v", response.Valid)
+	}
+	if len(admin.Specs()) != 0 {
+		t.Fatal("item validation mutated config")
+	}
+	if strings.Contains(recorder.Body.String(), "interface") ||
+		strings.Contains(recorder.Body.String(), "broken") {
+		t.Fatalf("item validation exposed parser context: %s", recorder.Body.String())
+	}
+}
+
+func TestTransportBatchAcceptsMaximumPublicSubscriptionWrapper(t *testing.T) {
+	handler, admin, _, _ := newConditionalAdminHandler(t)
+	specs := make([]transport.TransportSpec, maximumTransportBatchSize)
+	for index := range specs {
+		specs[index] = transport.TransportSpec{
+			Tag:       fmt.Sprintf("n%03d", index),
+			Type:      "native",
+			Interface: fmt.Sprintf("nwg%03d", index),
+			Link:      strings.Repeat("x", 2100),
+		}
+	}
+	body, err := json.Marshal(map[string]any{"transports": specs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) <= 1<<20 || len(body) >= 4<<20 {
+		t.Fatalf("test wrapper size %d does not exercise configured headroom", len(body))
+	}
+	request := authenticatedRequest(
+		http.MethodPost,
+		"/v1/config/transports/batch/validate",
+		string(body),
+	)
+	request.Header.Set("If-Match", admin.Revision())
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("maximum subscription wrapper returned %d: %s", recorder.Code, recorder.Body.String())
 	}
 }

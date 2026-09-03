@@ -6,14 +6,18 @@
 #include "../src/api/handler_subscriptions.hpp"
 #include "../src/api/maintenance_api.hpp"
 #include "../src/api/sse_broadcaster.hpp"
+#include "../src/config/config_writer.hpp"
 #include "../src/config/subscription_import_plan.hpp"
+#include "../src/crypto/sha256.hpp"
 #include "../src/http/curl_runtime.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <thread>
@@ -70,7 +74,9 @@ ApiContext make_subscriptions_test_context(
         [](const std::string&) { return TestRoutingResult{}; },
         []() {},
         []() {},
-        [](Config, std::string) { return ConfigApplyResult{}; },
+        [](Config, std::string) {
+            return ConfigApplyResult{true, false, std::nullopt, {}};
+        },
         []() {},
         []() {},
         []() {},
@@ -80,8 +86,10 @@ ApiContext make_subscriptions_test_context(
     };
     context.maintenance_lease_factory_fn =
         [](std::string) -> std::unique_ptr<MaintenanceLease> {
-        return std::make_unique<SubscriptionsTestMaintenanceLease>();
-    };
+            return std::make_unique<SubscriptionsTestMaintenanceLease>();
+        };
+    context.restart_restore_service_fn =
+        [](const std::string&) { return 0; };
     return context;
 }
 
@@ -93,28 +101,45 @@ struct FakeManager {
     httplib::Server server;
     std::thread thread;
     int port{0};
+    std::filesystem::path config_path;
+    std::mutex mutex;
+    std::string current_revision;
     std::vector<nlohmann::json> created;
     std::atomic<int> create_status{201};
     std::string create_error_body;
+    std::atomic<int> batch_validate_calls{0};
+    std::atomic<int> batch_create_calls{0};
+    std::atomic<int> item_validate_calls{0};
+    std::atomic<int> runtime_ready_calls{0};
+    std::atomic<int> runtime_ready_after_calls{1};
+    std::vector<std::string> last_runtime_ready_tags;
+    std::string rejected_link;
     std::string late_existing_link;
     std::atomic<bool> expose_late_existing{false};
     std::atomic<bool> expose_late_identity{true};
     std::atomic<bool> expose_duplicate_late_identity{false};
     std::atomic<bool> rotated_api_key{false};
 
-    explicit FakeManager(const std::filesystem::path& directory) {
+    explicit FakeManager(const std::filesystem::path& directory)
+        : config_path(directory / "transports.json") {
+        const auto authorized = [this](
+                                    const httplib::Request& request,
+                                    httplib::Response& response) {
+            const auto expected = rotated_api_key.load(
+                                      std::memory_order_acquire)
+                                      ? "Bearer rotated-secret"
+                                      : "Bearer test-secret";
+            if (request.get_header_value("Authorization") != expected) {
+                response.status = 401;
+                return false;
+            }
+            return true;
+        };
         server.Get(
             "/v1/config/transports",
-            [this](const httplib::Request& request,
+            [this, authorized](const httplib::Request& request,
                    httplib::Response& response) {
-                const auto expected = rotated_api_key.load(
-                                          std::memory_order_acquire)
-                                          ? "Bearer rotated-secret"
-                                          : "Bearer test-secret";
-                if (request.get_header_value("Authorization") != expected) {
-                    response.status = 401;
-                    return;
-                }
+                if (!authorized(request, response)) return;
                 auto transports = nlohmann::json::array(
                     {{{"tag", "nl"},
                       {"type", "sing-box"},
@@ -144,39 +169,151 @@ struct FakeManager {
                                   late_existing_link)}});
                     }
                 }
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    for (const auto& spec : created) {
+                        auto redacted = spec;
+                        if (redacted.contains("link") &&
+                            redacted.at("link").is_string()) {
+                            redacted["link_fingerprint"] =
+                                subscription_link_fingerprint(
+                                    redacted.at("link").get<std::string>());
+                            redacted.erase("link");
+                        }
+                        transports.push_back(std::move(redacted));
+                    }
+                }
                 response.set_content(transports.dump(), "application/json");
             });
-        server.Post(
-            "/v1/config/transports",
-            [this](const httplib::Request& request,
+        server.Get(
+            "/healthz",
+            [this](const httplib::Request&,
                    httplib::Response& response) {
-                const auto expected = rotated_api_key.load(
-                                          std::memory_order_acquire)
-                                          ? "Bearer rotated-secret"
-                                          : "Bearer test-secret";
-                if (request.get_header_value("Authorization") != expected) {
-                    response.status = 401;
+                std::lock_guard<std::mutex> lock(mutex);
+                response.set_content(
+                    nlohmann::json{
+                        {"status", "ok"},
+                        {"config_revision", current_revision},
+                    }.dump(),
+                    "application/json");
+            });
+        server.Post(
+            "/v1/transports/runtime-ready",
+            [this, authorized](const httplib::Request& request,
+                               httplib::Response& response) {
+                if (!authorized(request, response)) return;
+                const auto call = ++runtime_ready_calls;
+                const auto body = nlohmann::json::parse(request.body);
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    last_runtime_ready_tags =
+                        body.at("tags").get<std::vector<std::string>>();
+                }
+                response.set_content(
+                    nlohmann::json{
+                        {"ready",
+                         call >= runtime_ready_after_calls.load()},
+                    }.dump(),
+                    "application/json");
+            });
+        server.Post(
+            "/v1/config/transports/batch/validate-items",
+            [this, authorized](const httplib::Request& request,
+                               httplib::Response& response) {
+                if (!authorized(request, response)) return;
+                ++item_validate_calls;
+                std::lock_guard<std::mutex> lock(mutex);
+                if (request.get_header_value("If-Match") !=
+                    "\"" + current_revision + "\"") {
+                    response.status = 412;
                     return;
                 }
-                created.push_back(nlohmann::json::parse(request.body));
+                const auto body = nlohmann::json::parse(request.body);
+                auto valid = nlohmann::json::array();
+                for (const auto& spec : body.at("transports")) {
+                    valid.push_back(
+                        rejected_link.empty() ||
+                        spec.value("link", std::string{}) != rejected_link);
+                }
+                response.set_content(
+                    nlohmann::json{
+                        {"status", "validated"},
+                        {"config_revision", current_revision},
+                        {"valid", std::move(valid)},
+                    }.dump(),
+                    "application/json");
+            });
+        server.Post(
+            "/v1/config/transports/batch/validate",
+            [this, authorized](const httplib::Request& request,
+                   httplib::Response& response) {
+                if (!authorized(request, response)) return;
+                ++batch_validate_calls;
+                const auto body = nlohmann::json::parse(request.body);
+                if (!body.contains("transports") ||
+                    !body.at("transports").is_array() ||
+                    body.at("transports").empty()) {
+                    response.status = 400;
+                    return;
+                }
+                std::lock_guard<std::mutex> lock(mutex);
+                if (request.get_header_value("If-Match") !=
+                    "\"" + current_revision + "\"") {
+                    response.status = 412;
+                    return;
+                }
+                response.set_content(
+                    nlohmann::json{
+                        {"status", "valid"},
+                        {"config_revision", current_revision},
+                    }.dump(),
+                    "application/json");
+            });
+        server.Post(
+            "/v1/config/transports/batch",
+            [this, authorized](const httplib::Request& request,
+                               httplib::Response& response) {
+                if (!authorized(request, response)) return;
+                ++batch_create_calls;
+                std::lock_guard<std::mutex> lock(mutex);
+                if (request.get_header_value("If-Match") !=
+                    "\"" + current_revision + "\"") {
+                    response.status = 412;
+                    return;
+                }
                 response.status = create_status.load();
                 if (response.status >= 300) {
                     response.set_content(create_error_body, "text/plain");
-                } else {
-                    response.set_content(
-                        nlohmann::json{{"status", "created"}}.dump(),
-                        "application/json");
+                    return;
                 }
+                const auto body = nlohmann::json::parse(request.body);
+                const auto& batch = body.at("transports");
+                auto persisted = nlohmann::json::parse(read_config());
+                auto& transports = persisted["transports"];
+                for (const auto& spec : batch) {
+                    created.push_back(spec);
+                    transports.push_back(spec);
+                }
+                const auto exact = persisted.dump(2) + "\n";
+                write_config(exact);
+                current_revision = Sha256::hex(exact);
+                response.set_content(
+                    nlohmann::json{
+                        {"status", "created"},
+                        {"created", batch.size()},
+                        {"config_revision", current_revision},
+                    }.dump(),
+                    "application/json");
             });
         port = server.bind_to_any_port("127.0.0.1");
         REQUIRE(port > 0);
-        {
-            std::ofstream config(directory / "transports.json");
-            config << nlohmann::json{
+        const auto initial = nlohmann::json{
                 {"listen", "127.0.0.1:" + std::to_string(port)},
                 {"api_key", "test-secret"},
-            };
-        }
+                {"transports", nlohmann::json::array()},
+            }.dump(2) + "\n";
+        write_config(initial);
+        current_revision = Sha256::hex(initial);
         thread = std::thread([this]() { server.listen_after_bind(); });
         while (!server.is_running()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -185,6 +322,45 @@ struct FakeManager {
     ~FakeManager() {
         server.stop();
         thread.join();
+    }
+
+    void rotate_authority() {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto config = nlohmann::json::parse(read_config());
+        config["api_key"] = "rotated-secret";
+        const auto exact = config.dump(2) + "\n";
+        write_config(exact);
+        current_revision = Sha256::hex(exact);
+        rotated_api_key.store(true, std::memory_order_release);
+    }
+
+    void reload_from_disk() {
+        std::lock_guard<std::mutex> lock(mutex);
+        const auto exact = read_config();
+        const auto config = nlohmann::json::parse(exact);
+        created.clear();
+        if (config.contains("transports") &&
+            config.at("transports").is_array()) {
+            for (const auto& spec : config.at("transports")) {
+                created.push_back(spec);
+            }
+        }
+        current_revision = Sha256::hex(exact);
+    }
+
+private:
+    std::string read_config() const {
+        std::ifstream input(config_path, std::ios::binary);
+        return {
+            std::istreambuf_iterator<char>(input),
+            std::istreambuf_iterator<char>(),
+        };
+    }
+
+    void write_config(const std::string& body) const {
+        std::ofstream output(
+            config_path, std::ios::binary | std::ios::trunc);
+        output.write(body.data(), static_cast<std::streamsize>(body.size()));
     }
 };
 
@@ -195,6 +371,8 @@ struct SubscriptionsHarness {
     ApiContext context;
     ApiServer server;
     std::size_t fetch_calls{0};
+    std::size_t apply_calls{0};
+    Config visible_config;
     std::string fetch_body;
 
     explicit SubscriptionsHarness(const int api_port,
@@ -208,16 +386,44 @@ struct SubscriptionsHarness {
                   "127.0.0.1:" + std::to_string(api_port);
               return api_config;
           }()) {
+        {
+            std::ofstream config(
+                directory.path / "config.json",
+                std::ios::binary | std::ios::trunc);
+            config << "{}\n";
+        }
         if (with_manager) {
             manager = std::make_unique<FakeManager>(directory.path);
         }
+        context.get_visible_config_fn =
+            [this]() { return visible_config; };
+        context.config_is_draft_fn = []() { return false; };
+        context.restart_restore_service_fn =
+            [this](const std::string&) {
+                if (manager) manager->reload_from_disk();
+                return 0;
+            };
+        context.enqueue_apply_validated_config_fn =
+            [this](Config candidate, std::string) {
+                ++apply_calls;
+                visible_config = std::move(candidate);
+                return ConfigApplyResult{true, false, std::nullopt, {}};
+            };
+        context.transport_runtime_ready_wait_attempts = 4U;
+        context.transport_runtime_ready_wait_interval_ms = 1U;
+        ConfigSaveTestOptions options;
+        options.recovery_state_root = directory.path / "recovery";
         register_subscriptions_handler_for_test(
             server,
             context,
             [this](const std::string&) {
                 ++fetch_calls;
                 return fetch_body;
-            });
+            },
+            [](const std::string& path, const std::string& body) {
+                write_config_atomically(path, body);
+            },
+            options);
         server.start();
     }
     ~SubscriptionsHarness() { server.stop(); }
@@ -404,7 +610,7 @@ TEST_CASE("preview refuses to plan without the manager") {
     CHECK(harness.fetch_calls == 0U);
 }
 
-TEST_CASE("apply creates the selected entry through the manager") {
+TEST_CASE("apply atomically creates a selected transport and linked route") {
     constexpr int api_port = 18284;
     SubscriptionsHarness harness(api_port);
     harness.fetch_body =
@@ -434,8 +640,12 @@ TEST_CASE("apply creates the selected entry through the manager") {
     // free one, by the same rule the manual dialog uses.
     CHECK(result.at("interface") == "vless2");
 
-    // What reached the manager is the full spec, link included: the create
-    // pipeline is the manager's, not a parallel writer.
+    // What reached the manager is one batch containing the full spec, while
+    // the same composite commit applied the linked INTERFACE outbound.
+    CHECK(harness.manager->batch_validate_calls.load() == 1);
+    CHECK(harness.manager->batch_create_calls.load() == 1);
+    CHECK(harness.manager->item_validate_calls.load() == 1);
+    CHECK(harness.apply_calls == 1U);
     REQUIRE(harness.manager->created.size() == 1U);
     const auto& spec = harness.manager->created.front();
     CHECK(spec.at("tag") == "fresh_nl");
@@ -444,8 +654,19 @@ TEST_CASE("apply creates the selected entry through the manager") {
     CHECK(spec.at("link").get<std::string>().find(
               "22222222-2222-2222-2222-222222222222") !=
           std::string::npos);
-    CHECK(spec.at("auto_start") == false);
+    CHECK(spec.at("auto_start") == true);
     CHECK(spec.at("display_name") == "Fresh NL");
+    REQUIRE(harness.visible_config.outbounds.has_value());
+    const auto linked = std::find_if(
+        harness.visible_config.outbounds->begin(),
+        harness.visible_config.outbounds->end(),
+        [](const Outbound& outbound) {
+            return outbound.tag == "fresh_nl";
+        });
+    REQUIRE(linked != harness.visible_config.outbounds->end());
+    CHECK(linked->type == OutboundType::INTERFACE);
+    CHECK(linked->interface == std::optional<std::string>("vless2"));
+    CHECK(linked->display_name == std::optional<std::string>("Fresh NL"));
 
     // A preview is a one-shot import: the consumed line cannot be created
     // twice, and saying so is a per-entry outcome, not a request failure.
@@ -470,6 +691,237 @@ TEST_CASE("apply creates the selected entry through the manager") {
     CHECK(second.at("results")[0].at("interface") == "vless2");
     CHECK(second.at("results")[0].at("error").is_null());
     CHECK(harness.manager->created.size() == 1U);
+    CHECK(harness.manager->batch_create_calls.load() == 1);
+    CHECK(harness.apply_calls == 1U);
+}
+
+TEST_CASE("one subscription batch creates every selected transport and route") {
+    constexpr int api_port = 18292;
+    SubscriptionsHarness harness(api_port);
+    harness.manager->runtime_ready_after_calls.store(2);
+    harness.fetch_body =
+        "vless://22222222-2222-2222-2222-222222222222@b.example:443#One\n"
+        "trojan://password@c.example:8443\n";
+    httplib::Client client("127.0.0.1", api_port);
+    const auto preview_id = preview_and_get_id(client);
+
+    const auto response = client.Post(
+        "/api/subscriptions/apply",
+        nlohmann::json{
+            {"preview_id", preview_id},
+            {"selections",
+             nlohmann::json::array({{{"line", 1}}, {{"line", 2}}})},
+        }.dump(),
+        "application/json");
+    REQUIRE(response != nullptr);
+    REQUIRE(response->status == 200);
+    CHECK(nlohmann::json::parse(response->body).at("results").size() == 2U);
+    CHECK(harness.manager->batch_validate_calls.load() == 1);
+    CHECK(harness.manager->batch_create_calls.load() == 1);
+    CHECK(harness.manager->item_validate_calls.load() == 1);
+    CHECK(harness.manager->runtime_ready_calls.load() == 2);
+    CHECK(harness.manager->last_runtime_ready_tags ==
+          std::vector<std::string>{"one", "sub_2"});
+    CHECK(harness.manager->created.size() == 2U);
+    CHECK(harness.apply_calls == 1U);
+    REQUIRE(harness.visible_config.outbounds.has_value());
+    CHECK(harness.visible_config.outbounds->size() == 2U);
+    CHECK(harness.manager->created[1].at("display_name") ==
+          "c.example:8443");
+    CHECK(harness.visible_config.outbounds->at(1).display_name ==
+          std::optional<std::string>("c.example:8443"));
+}
+
+TEST_CASE("one rejected item does not block valid subscription selections") {
+    constexpr int api_port = 18294;
+    SubscriptionsHarness harness(api_port);
+    const std::string rejected = "vless://noauth#Broken";
+    harness.fetch_body =
+        rejected + "\n" +
+        "trojan://password@c.example:8443#Working\n";
+    harness.manager->rejected_link = rejected;
+    httplib::Client client("127.0.0.1", api_port);
+    const auto preview_id = preview_and_get_id(client);
+
+    const auto response = client.Post(
+        "/api/subscriptions/apply",
+        nlohmann::json{
+            {"preview_id", preview_id},
+            {"selections",
+             nlohmann::json::array({{{"line", 1}}, {{"line", 2}}})},
+        }.dump(),
+        "application/json");
+    REQUIRE(response != nullptr);
+    REQUIRE(response->status == 200);
+    const auto results = nlohmann::json::parse(response->body).at("results");
+    REQUIRE(results.size() == 2U);
+    const auto failed = std::find_if(
+        results.begin(), results.end(), [](const nlohmann::json& item) {
+            return item.at("line") == 1;
+        });
+    const auto created = std::find_if(
+        results.begin(), results.end(), [](const nlohmann::json& item) {
+            return item.at("line") == 2;
+        });
+    REQUIRE(failed != results.end());
+    REQUIRE(created != results.end());
+    CHECK(failed->at("outcome") == "failed");
+    CHECK(failed->at("tag").is_null());
+    CHECK(failed->at("interface").is_null());
+    CHECK(created->at("outcome") == "created");
+    CHECK(harness.manager->item_validate_calls.load() == 1);
+    CHECK(harness.manager->batch_validate_calls.load() == 1);
+    CHECK(harness.manager->batch_create_calls.load() == 1);
+    REQUIRE(harness.manager->created.size() == 1U);
+    CHECK(harness.manager->created[0].at("tag") == "working");
+    CHECK(harness.apply_calls == 1U);
+    REQUIRE(harness.visible_config.outbounds.has_value());
+    CHECK(harness.visible_config.outbounds->size() == 1U);
+    CHECK(harness.visible_config.outbounds->at(0).tag == "working");
+}
+
+TEST_CASE("duplicate selected names fail one item without blocking the batch") {
+    constexpr int api_port = 18296;
+    SubscriptionsHarness harness(api_port);
+    harness.fetch_body =
+        "vless://22222222-2222-2222-2222-222222222222@b.example:443#One\n"
+        "trojan://password@c.example:8443#Two\n";
+    httplib::Client client("127.0.0.1", api_port);
+    const auto preview_id = preview_and_get_id(client);
+
+    const auto response = client.Post(
+        "/api/subscriptions/apply",
+        nlohmann::json{
+            {"preview_id", preview_id},
+            {"selections",
+             nlohmann::json::array({
+                 {{"line", 1}, {"tag", "same_name"}},
+                 {{"line", 2}, {"tag", "same_name"}},
+             })},
+        }.dump(),
+        "application/json");
+    REQUIRE(response != nullptr);
+    REQUIRE(response->status == 200);
+    const auto results = nlohmann::json::parse(response->body).at("results");
+    REQUIRE(results.size() == 2U);
+    const auto failed = std::find_if(
+        results.begin(), results.end(), [](const nlohmann::json& item) {
+            return item.at("line") == 2;
+        });
+    REQUIRE(failed != results.end());
+    CHECK(failed->at("outcome") == "failed");
+    CHECK(failed->at("error") == "name is already in use");
+    REQUIRE(harness.manager->created.size() == 1U);
+    CHECK(harness.manager->created[0].at("tag") == "same_name");
+    CHECK(harness.apply_calls == 1U);
+}
+
+TEST_CASE("new local runtime readiness has a bounded failure") {
+    constexpr int api_port = 18295;
+    SubscriptionsHarness harness(api_port);
+    harness.context.transport_runtime_ready_wait_attempts = 2U;
+    harness.context.transport_runtime_ready_wait_interval_ms = 1U;
+    harness.manager->runtime_ready_after_calls.store(100);
+    harness.fetch_body =
+        "vless://22222222-2222-2222-2222-222222222222@b.example:443#New\n";
+    httplib::Client client("127.0.0.1", api_port);
+    const auto preview_id = preview_and_get_id(client);
+
+    const auto response = client.Post(
+        "/api/subscriptions/apply",
+        nlohmann::json{
+            {"preview_id", preview_id},
+            {"selections", nlohmann::json::array({{{"line", 1}}})},
+        }.dump(),
+        "application/json");
+    REQUIRE(response != nullptr);
+    CHECK(response->status == 503);
+    CHECK(harness.manager->runtime_ready_calls.load() == 2);
+    CHECK(harness.manager->created.empty());
+    CHECK(harness.apply_calls == 0U);
+    CHECK_FALSE(harness.visible_config.outbounds.has_value());
+}
+
+TEST_CASE("subscription auto-start batches are capped before mutation") {
+    constexpr int api_port = 18297;
+    SubscriptionsHarness harness(api_port);
+    nlohmann::json nine = nlohmann::json::array();
+    nlohmann::json eight = nlohmann::json::array();
+    for (int line = 1; line <= 9; ++line) {
+        harness.fetch_body +=
+            "trojan://password@node" + std::to_string(line) +
+            ".example:443#Node" + std::to_string(line) + "\n";
+        nine.push_back({{"line", line}});
+        if (line <= 8) eight.push_back({{"line", line}});
+    }
+    httplib::Client client("127.0.0.1", api_port);
+    const auto preview_id = preview_and_get_id(client);
+
+    const auto refused = client.Post(
+        "/api/subscriptions/apply",
+        nlohmann::json{
+            {"preview_id", preview_id},
+            {"selections", nine},
+        }.dump(),
+        "application/json");
+    REQUIRE(refused != nullptr);
+    CHECK(refused->status == 400);
+    CHECK(harness.manager->item_validate_calls.load() == 0);
+    CHECK(harness.manager->batch_create_calls.load() == 0);
+    CHECK(harness.apply_calls == 0U);
+
+    const auto accepted = client.Post(
+        "/api/subscriptions/apply",
+        nlohmann::json{
+            {"preview_id", preview_id},
+            {"selections", eight},
+        }.dump(),
+        "application/json");
+    REQUIRE(accepted != nullptr);
+    REQUIRE(accepted->status == 200);
+    CHECK(nlohmann::json::parse(accepted->body).at("results").size() == 8U);
+    CHECK(harness.manager->item_validate_calls.load() == 1);
+    CHECK(harness.manager->batch_create_calls.load() == 1);
+    CHECK(harness.manager->created.size() == 8U);
+    CHECK(harness.apply_calls == 1U);
+}
+
+TEST_CASE("preview and apply include existing core route names") {
+    constexpr int api_port = 18293;
+    SubscriptionsHarness harness(api_port);
+    Outbound core_owned;
+    core_owned.type = OutboundType::INTERFACE;
+    core_owned.tag = "fresh";
+    core_owned.interface = "vless2";
+    harness.visible_config.outbounds =
+        std::vector<Outbound>{core_owned};
+    harness.fetch_body =
+        "vless://22222222-2222-2222-2222-222222222222@b.example:443#Fresh\n";
+    httplib::Client client("127.0.0.1", api_port);
+
+    const auto preview = client.Post(
+        "/api/subscriptions/preview",
+        nlohmann::json{{"url", "https://provider.example/sub"}}.dump(),
+        "application/json");
+    REQUIRE(preview != nullptr);
+    REQUIRE(preview->status == 200);
+    const auto preview_body = nlohmann::json::parse(preview->body);
+    CHECK(preview_body.at("candidates")[0].at("disposition") ==
+          "tag_conflict");
+
+    const auto response = client.Post(
+        "/api/subscriptions/apply",
+        nlohmann::json{
+            {"preview_id", preview_body.at("preview_id")},
+            {"selections",
+             nlohmann::json::array(
+                 {{{"line", 1}, {"tag", "fresh_subscription"}}})},
+        }.dump(),
+        "application/json");
+    REQUIRE(response != nullptr);
+    REQUIRE(response->status == 200);
+    REQUIRE(harness.manager->created.size() == 1U);
+    CHECK(harness.manager->created[0].at("interface") == "vless3");
 }
 
 TEST_CASE("apply rechecks link identity after acquiring the mutation lease") {
@@ -608,17 +1060,7 @@ TEST_CASE("apply reads manager authority only after acquiring the mutation lease
         // new manager key becomes authoritative while the lease is acquired.
         // Reading transports.json before the lease sends the stale key and
         // fails; reading it under the lease observes one coherent generation.
-        {
-            std::ofstream config(harness.directory.path / "transports.json");
-            config << nlohmann::json{
-                {"listen",
-                 "127.0.0.1:" +
-                     std::to_string(harness.manager->port)},
-                {"api_key", "rotated-secret"},
-            };
-        }
-        harness.manager->rotated_api_key.store(
-            true, std::memory_order_release);
+        harness.manager->rotate_authority();
         return std::make_unique<SubscriptionsTestMaintenanceLease>();
     };
 
@@ -733,68 +1175,13 @@ TEST_CASE("manager response text is never reflected through the API") {
             .dump(),
         "application/json");
     REQUIRE(response != nullptr);
-    REQUIRE(response->status == 200);
-    const auto body = nlohmann::json::parse(response->body);
-    CHECK(body.at("results")[0].at("outcome") == "failed");
-    CHECK(body.at("results")[0].at("tag").is_null());
-    CHECK(body.at("results")[0].at("interface").is_null());
-    const auto error =
-        body.at("results")[0].at("error").get<std::string>();
-    CHECK(error == "transport manager refused this entry (HTTP 400)");
-    CHECK(error.find("p%40ss") == std::string::npos);
-    // A partial echo is the same leak: the credential lives between "://"
-    // and "@", and an error quoting only that fragment has quoted the secret.
-    harness.manager->create_error_body =
-        "user \"p%40ss\" is not valid";
-    const auto partial = client.Post(
-        "/api/subscriptions/apply",
-        nlohmann::json{
-            {"preview_id", preview_id},
-            {"selections", nlohmann::json::array({{{"line", 1}}})},
-        }
-            .dump(),
-        "application/json");
-    REQUIRE(partial != nullptr);
-    CHECK(nlohmann::json::parse(partial->body)
-              .at("results")[0]
-              .at("error")
-              .get<std::string>()
-              .find("p%40ss") == std::string::npos);
-
-    // Percent-decoded output does not contain an exact substring from the
-    // original link, but it is still the same password.
-    harness.manager->create_error_body = "password p@ss is not valid";
-    const auto second = client.Post(
-        "/api/subscriptions/apply",
-        nlohmann::json{
-            {"preview_id", preview_id},
-            {"selections", nlohmann::json::array({{{"line", 1}}})},
-        }
-            .dump(),
-        "application/json");
-    REQUIRE(second != nullptr);
-    const auto second_body = nlohmann::json::parse(second->body);
-    CHECK(second_body.at("results")[0].at("error") ==
-          "transport manager refused this entry (HTTP 400)");
-    CHECK(second->body.find("p@ss") == std::string::npos);
-
-    // Even apparently harmless text is not a safe protocol field: future
-    // manager versions may put arbitrary parser context in it.
-    harness.manager->create_error_body = "tag already exists";
-    const auto harmless = client.Post(
-        "/api/subscriptions/apply",
-        nlohmann::json{
-            {"preview_id", preview_id},
-            {"selections", nlohmann::json::array({{{"line", 1}}})},
-        }
-            .dump(),
-        "application/json");
-    REQUIRE(harmless != nullptr);
-    CHECK(nlohmann::json::parse(harmless->body)
-              .at("results")[0]
-              .at("error") ==
-          "transport manager refused this entry (HTTP 400)");
-    CHECK(harmless->body.find("tag already exists") == std::string::npos);
+    CHECK(response->status == 400);
+    CHECK(response->body.find("p%40ss") == std::string::npos);
+    CHECK(response->body.find("p@ss") == std::string::npos);
+    CHECK(response->body.find(harness.manager->create_error_body) ==
+          std::string::npos);
+    CHECK(harness.manager->created.empty());
+    CHECK(harness.apply_calls == 0U);
 }
 
 TEST_CASE("the production fetcher carries the destination policy") {

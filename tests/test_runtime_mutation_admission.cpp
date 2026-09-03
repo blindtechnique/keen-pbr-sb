@@ -245,6 +245,84 @@ TEST_CASE("runtime mutation admission wakes deferred writer after release") {
     CHECK(waiter_admitted.load(std::memory_order_acquire));
 }
 
+TEST_CASE("foreground mutation atomically follows the exact background owner") {
+    RuntimeMutationAdmission admission;
+    auto background = admission.try_acquire("runtime-firewall-worker");
+    REQUIRE(background.has_value());
+    const auto background_token = background->token();
+
+    std::optional<RuntimeMutationAdmission::Lease> foreground;
+    std::thread waiter([&] {
+        foreground = admission.try_acquire_after_for(
+            "save-config",
+            "runtime-firewall-worker",
+            std::chrono::seconds{1});
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    background->release();
+    waiter.join();
+
+    REQUIRE(foreground.has_value());
+    CHECK(admission.owns(*foreground));
+    CHECK(foreground->token() != background_token);
+    const auto active = admission.active();
+    REQUIRE(active.has_value());
+    CHECK(active->label == "save-config");
+}
+
+TEST_CASE("foreground mutation does not wait behind another foreground owner") {
+    RuntimeMutationAdmission admission;
+    auto blocker = admission.try_acquire("other-user-request");
+    REQUIRE(blocker.has_value());
+
+    const auto started = std::chrono::steady_clock::now();
+    const auto foreground = admission.try_acquire_after_for(
+        "save-config",
+        "runtime-firewall-worker",
+        std::chrono::seconds{1});
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    CHECK_FALSE(foreground.has_value());
+    CHECK(elapsed < std::chrono::milliseconds{100});
+    CHECK(admission.owns(*blocker));
+}
+
+TEST_CASE("foreground background wait stops at timeout and shutdown") {
+    SUBCASE("timeout") {
+        RuntimeMutationAdmission admission;
+        auto background = admission.try_acquire("runtime-firewall-worker");
+        REQUIRE(background.has_value());
+
+        const auto foreground = admission.try_acquire_after_for(
+            "save-config",
+            "runtime-firewall-worker",
+            std::chrono::milliseconds{10});
+
+        CHECK_FALSE(foreground.has_value());
+        CHECK(admission.owns(*background));
+    }
+
+    SUBCASE("shutdown") {
+        RuntimeMutationAdmission admission;
+        auto background = admission.try_acquire("runtime-firewall-worker");
+        REQUIRE(background.has_value());
+
+        std::optional<RuntimeMutationAdmission::Lease> foreground;
+        std::thread waiter([&] {
+            foreground = admission.try_acquire_after_for(
+                "save-config",
+                "runtime-firewall-worker",
+                std::chrono::seconds{1});
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+        admission.shutdown();
+        waiter.join();
+
+        CHECK_FALSE(foreground.has_value());
+        CHECK(admission.owns(*background));
+    }
+}
+
 TEST_CASE("deferred SIGHUP coalescing retains one fresh reload") {
     RuntimeMutationAdmission admission;
     auto blocker = admission.try_acquire("api-restore");

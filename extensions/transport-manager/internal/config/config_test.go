@@ -442,6 +442,229 @@ func TestConditionalCreateAllowsOnlyOneWriterPerRevision(t *testing.T) {
 	}
 }
 
+func TestConditionalBatchValidateAndCreateAreOneRevisionMutation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transports.json")
+	cfg := Config{
+		APIKey:        "secret",
+		SingBoxBinary: "sing-box",
+		RuntimeDir:    t.TempDir(),
+	}
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, revision, err := LoadWithRevision(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := transport.NewManager()
+	supervisor := transport.NewSupervisor(manager)
+	admin := NewAdminWithRevision(path, loaded, revision, manager, supervisor)
+	specs := []transport.TransportSpec{
+		{Tag: "native_one", Type: "native", Interface: "nwg1"},
+		{Tag: "native_two", Type: "native", Interface: "nwg2"},
+	}
+
+	validatedRevision, matched, err := admin.ValidateCreateManyAtRevision(specs, revision)
+	if err != nil || !matched || validatedRevision != revision {
+		t.Fatalf("batch validation failed: revision=%q matched=%t err=%v", validatedRevision, matched, err)
+	}
+	if len(admin.Specs()) != 0 {
+		t.Fatal("batch validation mutated in-memory config")
+	}
+	for _, spec := range specs {
+		if _, exists := manager.Get(spec.Tag); exists {
+			t.Fatalf("batch validation registered %q", spec.Tag)
+		}
+	}
+
+	nextRevision, matched, err := admin.CreateManyIfRevision(context.Background(), specs, revision)
+	if err != nil || !matched {
+		t.Fatalf("batch create failed: matched=%t err=%v", matched, err)
+	}
+	if nextRevision == revision {
+		t.Fatal("batch create did not advance one durable revision")
+	}
+	stored, storedRevision, err := LoadWithRevision(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Transports) != 2 || storedRevision != nextRevision {
+		t.Fatalf("unexpected durable batch: revision=%q transports=%#v", storedRevision, stored.Transports)
+	}
+	for _, spec := range specs {
+		if _, exists := manager.Get(spec.Tag); !exists {
+			t.Fatalf("committed transport %q is missing", spec.Tag)
+		}
+	}
+	if _, matched, err := admin.CreateManyIfRevision(context.Background(), specs, revision); err != nil || matched {
+		t.Fatalf("stale batch was not rejected: matched=%t err=%v", matched, err)
+	}
+}
+
+func TestBatchCreateRollsBackRuntimeWhenSaveFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transports.json")
+	cfg := Config{APIKey: "secret", RuntimeDir: t.TempDir()}
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, revision, err := LoadWithRevision(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := transport.NewManager()
+	admin := NewAdminWithRevision(
+		path, loaded, revision, manager, transport.NewSupervisor(manager),
+	)
+	originalOperations := defaultSaveOperations
+	t.Cleanup(func() { defaultSaveOperations = originalOperations })
+	syncCalls := 0
+	defaultSaveOperations.syncDirectory = func(directory string) error {
+		syncCalls++
+		if syncCalls == 1 {
+			return errors.New("injected batch save failure")
+		}
+		return originalOperations.syncDirectory(directory)
+	}
+	specs := []transport.TransportSpec{
+		{Tag: "native_one", Type: "native", Interface: "nwg1"},
+		{Tag: "native_two", Type: "native", Interface: "nwg2"},
+	}
+
+	if _, matched, err := admin.CreateManyIfRevision(context.Background(), specs, revision); err == nil || !matched {
+		t.Fatalf("expected matched batch save failure, matched=%t err=%v", matched, err)
+	}
+	if len(admin.Specs()) != 0 || admin.Revision() != revision {
+		t.Fatal("failed batch save changed in-memory config")
+	}
+	for _, spec := range specs {
+		if _, exists := manager.Get(spec.Tag); exists {
+			t.Fatalf("failed batch save left runtime transport %q", spec.Tag)
+		}
+	}
+	stored, storedRevision, err := LoadWithRevision(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Transports) != 0 || storedRevision != revision {
+		t.Fatal("failed batch save changed durable config")
+	}
+}
+
+func TestMixedBatchRollsBackEarlierAndCurrentSharedStateOnAddFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transports.json")
+	runtimeDir := t.TempDir()
+	cfg := Config{
+		APIKey:             "secret",
+		SingBoxBinary:      "sing-box",
+		SingBoxProcessMode: SingBoxProcessModeShared,
+		RuntimeDir:         runtimeDir,
+	}
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, revision, err := LoadWithRevision(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	group, err := transport.NewSharedSingBoxGroup(
+		nil, cfg.SingBoxBinary, runtimeDir, cfg.HealthEndpoint(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := transport.NewManager()
+	if err := manager.SetSharedGroup(group); err != nil {
+		t.Fatal(err)
+	}
+	shared := transport.TransportSpec{
+		Tag:       "proxy_one",
+		Type:      "sing-box",
+		Interface: "vless1",
+		OutboundJSON: `{"type":"vless","server":"one.example","server_port":443,` +
+			`"uuid":"11111111-1111-1111-1111-111111111111"}`,
+	}
+	ghostSpec := transport.TransportSpec{Tag: shared.Tag, Type: "native", Interface: "ghost1"}
+	ghost, err := transport.NewFromSpec(ghostSpec, "sing-box", runtimeDir, cfg.HealthEndpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Add(ghost); err != nil {
+		t.Fatal(err)
+	}
+	admin := NewAdminWithRevision(
+		path, loaded, revision, manager, transport.NewSupervisor(manager),
+	)
+	native := transport.TransportSpec{Tag: "native_one", Type: "native", Interface: "nwg1"}
+
+	if _, matched, err := admin.CreateManyIfRevision(
+		context.Background(), []transport.TransportSpec{native, shared}, revision,
+	); err == nil || !matched {
+		t.Fatalf("expected manager Add failure, matched=%t err=%v", matched, err)
+	}
+	if _, exists := manager.Get(native.Tag); exists {
+		t.Fatal("mixed batch left the earlier isolated transport")
+	}
+	if _, err := group.Member(shared.Tag); err == nil {
+		t.Fatal("mixed batch left the current shared member in inventory")
+	}
+	if current, exists := manager.Get(shared.Tag); !exists || current != ghost {
+		t.Fatal("rollback replaced or removed the pre-existing manager owner")
+	}
+	if len(admin.Specs()) != 0 || admin.Revision() != revision {
+		t.Fatal("mixed batch failure changed admin config")
+	}
+}
+
+func TestItemValidationDoesNotRunFullSharedInventoryCheck(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transports.json")
+	runtimeDir := t.TempDir()
+	cfg := Config{
+		APIKey:             "secret",
+		SingBoxBinary:      filepath.Join(t.TempDir(), "missing-sing-box"),
+		SingBoxProcessMode: SingBoxProcessModeShared,
+		RuntimeDir:         runtimeDir,
+	}
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, revision, err := LoadWithRevision(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	group, err := transport.NewSharedSingBoxGroup(
+		nil, cfg.SingBoxBinary, runtimeDir, cfg.HealthEndpoint(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := transport.NewManager()
+	if err := manager.SetSharedGroup(group); err != nil {
+		t.Fatal(err)
+	}
+	admin := NewAdminWithRevision(
+		path, loaded, revision, manager, transport.NewSupervisor(manager),
+	)
+	spec := transport.TransportSpec{
+		Tag:       "proxy_one",
+		Type:      "sing-box",
+		Interface: "vless1",
+		OutboundJSON: `{"type":"vless","server":"one.example","server_port":443,` +
+			`"uuid":"11111111-1111-1111-1111-111111111111"}`,
+	}
+
+	gotRevision, matched, valid := admin.ValidateCreateItemsAtRevision(
+		[]transport.TransportSpec{spec}, revision,
+	)
+	if !matched || gotRevision != revision || len(valid) != 1 || !valid[0] {
+		t.Fatalf("cheap item parser rejected valid spec: revision=%q matched=%t valid=%#v", gotRevision, matched, valid)
+	}
+	if _, matched, err := admin.ValidateCreateManyAtRevision(
+		[]transport.TransportSpec{spec}, revision,
+	); err == nil || !matched {
+		t.Fatalf("full shared check did not exercise missing binary: matched=%t err=%v", matched, err)
+	}
+}
+
 func TestValidateUpdatePreservesSecretsWithoutMutation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "transports.json")
 	cfg := Config{

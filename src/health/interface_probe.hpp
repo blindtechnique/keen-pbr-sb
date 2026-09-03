@@ -210,6 +210,15 @@ bool interface_probe_target_is_current(
     const InterfaceProbe::Target& expected_target,
     const std::vector<InterfaceProbe::Target>& current_targets) noexcept;
 
+// Selects current targets which do not have the same exact tag/mark/device
+// identity in the previously published configuration. These are the rows
+// which would otherwise show "verification pending" until their turn in the
+// rotating background cadence. Removed targets and a pure declaration-order
+// change require no new network work.
+std::vector<std::string> select_initial_interface_probe_tags(
+    const std::vector<InterfaceProbe::Target>& previous_targets,
+    const std::vector<InterfaceProbe::Target>& current_targets);
+
 // How many targets one periodic tick measures. Small on purpose: the point of
 // rotating is that a tick stops being a synchronised sweep, and a slice large
 // enough to cover a typical configuration would restore exactly that.
