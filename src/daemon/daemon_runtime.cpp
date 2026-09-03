@@ -1565,17 +1565,18 @@ void Daemon::resume_urltest_firewall_recovery(
             return;
         }
 
-        // The gate already owns the exact selector set. This is only a wake
-        // for the existing central reconciler after a foreground or typed
-        // owner returned its physical lease; it creates no second retry
-        // policy and never replays a URLTEST candidate.
-        (void)refresh_iproute_and_firewall_runtime(
+        // The gate already owns the exact selector set. Use the central
+        // owner's existing admission retry so a wake that races the retiring
+        // typed owner cannot be lost; this never replays a URLTEST candidate.
+        runtime_firewall_owner_->defer(
             0,
+            runtime_generation,
             {},
-            /*schedule_catalog_refresh=*/false);
+            /*schedule_catalog_refresh=*/false,
+            {});
     } catch (...) {
         // Periodic runtime health observes the same generation gate and is
-        // the existing fallback if this immediate owner admission fails.
+        // the existing fallback if this durable owner wake cannot be armed.
     }
 }
 
