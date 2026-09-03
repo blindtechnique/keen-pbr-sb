@@ -1,6 +1,7 @@
 #include "daemon.hpp"
 #include "api_runtime_lifecycle.hpp"
 #include "keenetic_dns_firewall_lifecycle_policy.hpp"
+#include "netfilter_refresh_mutation_policy.hpp"
 
 #include "../keenetic/ndms_native_writer_lease.hpp"
 
@@ -2874,6 +2875,27 @@ void Daemon::reconcile_pending_netfilter_runtime_refresh() noexcept {
             Logger::instance().info(
                 "Netfilter event: {} runtime refresh was retained behind "
                 "the active lifecycle operation.",
+                reason_label);
+            return;
+        }
+        const auto active_runtime_mutation =
+            runtime_mutation_admission_.active();
+        if (should_defer_netfilter_refresh_for_runtime_mutation(
+                active_runtime_mutation.has_value(),
+                active_runtime_mutation.has_value() &&
+                    active_runtime_mutation->label ==
+                        "runtime-firewall-worker")) {
+            // The foreground request already owns the only runtime writer but
+            // has not reached its firewall-owner handoff yet. Re-arm the same
+            // source event; once the handoff happens, the branch above folds
+            // it into that exact foreground lifecycle.
+            pending_netfilter_refresh_reasons_ |= reasons;
+            schedule_netfilter_runtime_refresh(
+                full_refresh ? NetfilterRefreshReason::full
+                             : NetfilterRefreshReason::nat_only);
+            Logger::instance().info(
+                "Netfilter event: {} runtime refresh was retained behind "
+                "the active foreground mutation.",
                 reason_label);
             return;
         }

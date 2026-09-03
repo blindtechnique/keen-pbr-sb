@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include "daemon/runtime_recovery_policy.hpp"
+#include "daemon/netfilter_refresh_mutation_policy.hpp"
 #include "runtime/runtime_state_machine.hpp"
 
 #include <chrono>
@@ -293,6 +294,19 @@ TEST_CASE("periodic health owns URLTEST recovery when its timer is missing") {
     CHECK_FALSE(should_run_periodic_netfilter_refresh(
         /*retry_timer_armed=*/false,
         /*refresh_reason_pending=*/false));
+
+}
+
+TEST_CASE("netfilter refresh waits behind a foreground runtime mutation") {
+    CHECK(should_defer_netfilter_refresh_for_runtime_mutation(
+        /*runtime_mutation_active=*/true,
+        /*active_mutation_is_netfilter_worker=*/false));
+    CHECK_FALSE(should_defer_netfilter_refresh_for_runtime_mutation(
+        /*runtime_mutation_active=*/true,
+        /*active_mutation_is_netfilter_worker=*/true));
+    CHECK_FALSE(should_defer_netfilter_refresh_for_runtime_mutation(
+        /*runtime_mutation_active=*/false,
+        /*active_mutation_is_netfilter_worker=*/false));
 }
 
 TEST_CASE("periodic PPE liveness coalesces only confirmed drift") {

@@ -922,8 +922,35 @@ func (g *SharedSingBoxGroup) HasDesiredLocked() bool {
 	return false
 }
 
+func lockMutexContext(ctx context.Context, mutex *sync.Mutex) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if mutex.TryLock() {
+		return nil
+	}
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if mutex.TryLock() {
+				return nil
+			}
+		}
+	}
+}
+
 func (g *SharedSingBoxGroup) Close(ctx context.Context) error {
-	g.opMu.Lock()
+	// Shutdown is bounded by the manager's eight-second grace period. A config
+	// transition may still own opMu while the init script asks the manager to
+	// stop; an unconditional Lock here can outlive that grace period and make a
+	// service restart stop the old manager without ever starting its replacement.
+	if err := lockMutexContext(ctx, &g.opMu); err != nil {
+		return fmt.Errorf("wait for shared sing-box operation before shutdown: %w", err)
+	}
 	defer g.opMu.Unlock()
 	g.mu.RLock()
 	process := g.process

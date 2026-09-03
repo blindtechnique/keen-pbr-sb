@@ -793,6 +793,49 @@ func TestManagerClosesSharedGroupWithoutRegisteredMembers(t *testing.T) {
 	}
 }
 
+func TestSharedRuntimeCloseHonorsDeadlineWhileOperationIsBusy(t *testing.T) {
+	fake := &fakeSharedRuntime{failStartAt: make(map[int]error)}
+	group, err := newSharedSingBoxGroup(
+		sharedRuntimeSpecs(), "sing-box", t.TempDir(), RoutingHealthEndpoint{}, fake.hooks(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Model an inventory transition which was already in flight when S79 asked
+	// transport-manager to stop. Close must return to the process shutdown path
+	// when its grace period expires instead of waiting on opMu forever.
+	group.opMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			group.opMu.Unlock()
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- group.Close(ctx)
+	}()
+
+	select {
+	case closeErr := <-done:
+		if !errors.Is(closeErr, context.DeadlineExceeded) {
+			t.Fatalf("Close error = %v, want context deadline exceeded", closeErr)
+		}
+	case <-time.After(time.Second):
+		group.opMu.Unlock()
+		locked = false
+		<-done
+		t.Fatal("Close ignored its shutdown deadline while opMu was busy")
+	}
+
+	group.opMu.Unlock()
+	locked = false
+}
+
 func TestSupervisorSharedHealthIncludesPerProxyRoutingVerdict(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"outbounds":[{"interfaces":[` +

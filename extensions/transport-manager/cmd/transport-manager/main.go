@@ -102,7 +102,10 @@ func main() {
 		}
 	}()
 	<-ctx.Done()
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Entware rc.func gives the process roughly eleven seconds to stop before it
+	// declares restart failed. Keep an explicit margin for logging and process
+	// teardown after transports have consumed their bounded shutdown budget.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	if err := supervisor.Close(shutdownCtx); err != nil {
 		encoded, _ := json.Marshal(map[string]string{"shutdown_error": err.Error()})
