@@ -569,10 +569,8 @@ static StagedRuntimeFirewall stage_runtime_firewall_with_streamer(
                 continue;
             }
 
-            const auto resolved_servers = dns_registry->get_servers(server.tag);
-            if (resolved_servers.empty()) {
-                throw FirewallError("DNS server tag not found during detour setup: " + server.tag);
-            }
+            const auto resolved_servers =
+                dns_registry->detour_servers(server.tag);
 
             for (const DnsServerConfig* resolved_server : resolved_servers) {
                 FirewallRuleCriteria criteria;

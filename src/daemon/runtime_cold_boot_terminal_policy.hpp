@@ -178,8 +178,10 @@ struct RuntimeColdBootCandidateBudgetPlan final {
 // completed_candidate_bodies is shared by retained-owner retries and fresh
 // post-lease observations. It is deliberately a body count, not a per-owner
 // retry counter: splitting recovery across new contexts must not multiply the
-// START budget. Attempt zero is immediate; every later body consumes the
-// delay following the previously completed global attempt.
+// START budget. Attempt zero is armed by the startup handoff with delay slot
+// zero; every later body consumes its own indexed delay. This keeps the first
+// delay from being consumed twice and leaves the final boot-window delay
+// reachable.
 constexpr RuntimeColdBootCandidateBudgetPlan
 plan_runtime_cold_boot_candidate_budget(
     std::size_t completed_candidate_bodies,
@@ -196,7 +198,7 @@ plan_runtime_cold_boot_candidate_budget(
     return RuntimeColdBootCandidateBudgetPlan{
         RuntimeColdBootCandidateBudgetDispatch::schedule_with_backoff,
         /*next_attempt=*/completed_candidate_bodies,
-        /*backoff_index=*/completed_candidate_bodies - 1U};
+        /*backoff_index=*/completed_candidate_bodies};
 }
 
 // A fresh observation is never a same-body replay. It starts only after the

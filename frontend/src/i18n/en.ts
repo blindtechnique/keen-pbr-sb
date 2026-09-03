@@ -1771,6 +1771,7 @@ export const enTranslation = {
       unknown: "State unknown",
       badgeTransitioning: "In progress",
       restart: "Restart",
+      restartRouting: "Restart routing",
       restartRequested: "Restart requested",
       restartComplete: "Restart complete: routing and DNS are ready",
       // The command's terminal result. A toast holds one line - enough to say

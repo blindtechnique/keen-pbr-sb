@@ -310,6 +310,7 @@ TEST_CASE("runtime resolver generation is built only from its candidate input") 
     candidate.keenetic_dns.snapshot = KeeneticDnsSnapshot{
         {"192.0.2.53"},
         {},
+        {},
         {{"candidate.example", "192.0.2.80"}}};
     candidate.keenetic_dns.status = KeeneticDnsCacheStatus::fresh;
     candidate.keenetic_dns.generation = 41U;

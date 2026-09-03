@@ -540,6 +540,256 @@ TEST_CASE("generate-resolver-config includes all keenetic fallback servers in se
     CHECK(output.find("# 127.0.0.1:40508 -> DoH | https://resolver.example/dns-query\n") != std::string::npos);
 }
 
+TEST_CASE("generate-resolver-config preserves scoped Keenetic DNS policy over global fallback") {
+    KeeneticDnsTestStateGuard guard;
+    const KeeneticDnsSnapshot snapshot = prepare_keenetic_dns_snapshot(R"({
+          "proxy-status": [
+            {
+              "proxy-name": "System",
+              "proxy-config": "dns_server = 77.88.8.1 youtube.com\ndns_server = 127.0.0.1:40508 youtube.com # https://doh.opendns.com/dns-query@dnsm\ndns_server = 77.88.8.8 www.youtube.com\ndns_server = 127.0.0.1:40509 www.youtube.com # https://doh.opendns.com/dns-query@dnsm\ndns_server = 127.0.0.1:40500 . # tls://common.dot.dns.example\n"
+            }
+          ]
+        })");
+
+    CacheManager cache("/nonexistent/cache");
+    ListStreamer streamer(cache);
+
+    DnsServer keenetic_server;
+    keenetic_server.tag = "keenetic";
+    keenetic_server.type = api::DnsServerType::KEENETIC;
+    DnsServer google_server;
+    google_server.tag = "google";
+    google_server.address = "8.8.8.8";
+
+    DnsConfig dns_cfg;
+    dns_cfg.servers =
+        std::vector<DnsServer>{keenetic_server, google_server};
+    dns_cfg.fallback = std::vector<std::string>{"keenetic", "google"};
+
+    auto route_cfg = make_route_cfg("mylist");
+    auto lists = std::map<std::string, ListConfig>{
+        {"mylist", make_list_cfg({"example.com"})}};
+
+    DnsServerRegistry registry(dns_cfg, snapshot);
+    REQUIRE(registry.keenetic_fallback_enabled());
+    DnsmasqGenerator generator(
+        registry, streamer, route_cfg, dns_cfg, lists);
+    const std::string output = run_generate(generator);
+
+    CHECK(output.find("server=127.0.0.1#40500\n") != std::string::npos);
+    CHECK(output.find("server=8.8.8.8\n") != std::string::npos);
+    CHECK(output.find(
+              "server=/youtube.com/127.0.0.1#40508\n") !=
+          std::string::npos);
+    CHECK(output.find(
+              "server=/www.youtube.com/127.0.0.1#40509\n") !=
+          std::string::npos);
+    CHECK(output.find("server=/youtube.com/77.88.8.1\n") ==
+          std::string::npos);
+    CHECK(output.find("server=/www.youtube.com/77.88.8.8\n") ==
+          std::string::npos);
+    CHECK(output.find("server=/youtube.com/8.8.8.8\n") ==
+          std::string::npos);
+}
+
+TEST_CASE("generate-resolver-config does not publish scoped Keenetic policy outside fallback") {
+    KeeneticDnsTestStateGuard guard;
+    const KeeneticDnsSnapshot snapshot = prepare_keenetic_dns_snapshot(R"({
+          "proxy-status": [
+            {
+              "proxy-name": "System",
+              "proxy-config": "dns_server = 127.0.0.1:40508 youtube.com # https://resolver.example/dns-query@dnsm\ndns_server = 127.0.0.1:40500 . # tls://resolver.example\n"
+            }
+          ]
+        })");
+
+    CacheManager cache("/nonexistent/cache");
+    ListStreamer streamer(cache);
+
+    DnsServer keenetic_server;
+    keenetic_server.tag = "keenetic";
+    keenetic_server.type = api::DnsServerType::KEENETIC;
+    DnsServer fallback_server;
+    fallback_server.tag = "fallback";
+    fallback_server.address = "9.9.9.9";
+
+    DnsRule rule;
+    rule.list = std::vector<std::string>{"mylist"};
+    rule.server = "keenetic";
+
+    DnsConfig dns_cfg;
+    dns_cfg.servers =
+        std::vector<DnsServer>{keenetic_server, fallback_server};
+    dns_cfg.fallback = std::vector<std::string>{"fallback"};
+    dns_cfg.rules = std::vector<DnsRule>{rule};
+
+    auto route_cfg = make_route_cfg("mylist");
+    auto lists = std::map<std::string, ListConfig>{
+        {"mylist", make_list_cfg({"example.com"})}};
+
+    DnsServerRegistry registry(dns_cfg, snapshot);
+    CHECK_FALSE(registry.keenetic_fallback_enabled());
+    DnsmasqGenerator generator(
+        registry, streamer, route_cfg, dns_cfg, lists);
+    const std::string output = run_generate(generator);
+
+    CHECK(output.find("server=9.9.9.9\n") != std::string::npos);
+    CHECK(output.find("server=/youtube.com/") == std::string::npos);
+    CHECK(output.find(
+              "server=/example.com/127.0.0.1#40500\n") !=
+          std::string::npos);
+}
+
+TEST_CASE("managed DNS rules override overlapping scoped Keenetic policy") {
+    KeeneticDnsTestStateGuard guard;
+    const KeeneticDnsSnapshot snapshot = prepare_keenetic_dns_snapshot(R"({
+          "proxy-status": [
+            {
+              "proxy-name": "System",
+              "proxy-config": "dns_server = 127.0.0.1:40508 youtube.com # https://resolver.example/youtube@dnsm\ndns_server = 127.0.0.1:40509 api.example.com # https://resolver.example/api@dnsm\ndns_server = 127.0.0.1:40510 keep.example.net # https://resolver.example/keep@dnsm\ndns_server = 127.0.0.1:40500 . # tls://resolver.example\n"
+            }
+          ]
+        })");
+
+    CacheManager cache("/nonexistent/cache");
+    ListStreamer streamer(cache);
+
+    DnsServer keenetic_server;
+    keenetic_server.tag = "keenetic";
+    keenetic_server.type = api::DnsServerType::KEENETIC;
+    DnsServer managed_server;
+    managed_server.tag = "managed";
+    managed_server.address = "9.9.9.9";
+
+    DnsRule rule;
+    rule.list = std::vector<std::string>{"managed-domains"};
+    rule.server = "managed";
+
+    DnsConfig dns_cfg;
+    dns_cfg.servers =
+        std::vector<DnsServer>{keenetic_server, managed_server};
+    dns_cfg.fallback = std::vector<std::string>{"keenetic"};
+    dns_cfg.rules = std::vector<DnsRule>{rule};
+
+    auto route_cfg = make_route_cfg("managed-domains");
+    auto lists = std::map<std::string, ListConfig>{
+        {"managed-domains",
+         make_list_cfg({"YouTube.com.", "*.Example.com",
+                        "www.KEEP.example.net"})}};
+
+    DnsServerRegistry registry(dns_cfg, snapshot);
+    DnsmasqGenerator generator(
+        registry, streamer, route_cfg, dns_cfg, lists);
+    const std::string output = run_generate(generator);
+
+    // Exact managed match and a broader managed suffix suppress inherited
+    // Keenetic rows, independent of case/wildcard/final-dot spelling.
+    CHECK(output.find("server=/youtube.com/127.0.0.1#40508\n") ==
+          std::string::npos);
+    CHECK(output.find("server=/api.example.com/127.0.0.1#40509\n") ==
+          std::string::npos);
+
+    // A more-specific managed suffix already wins by dnsmasq longest-match;
+    // retain the inherited parent for the rest of that namespace.
+    CHECK(output.find("server=/keep.example.net/127.0.0.1#40510\n") !=
+          std::string::npos);
+    CHECK(output.find("/9.9.9.9\n") != std::string::npos);
+}
+
+TEST_CASE("suppressed scoped Keenetic policy does not affect resolver hash") {
+    const KeeneticDnsSnapshot first_snapshot =
+        extract_keenetic_dns_snapshot_from_rci(R"({
+          "proxy-status": [{
+            "proxy-name": "System",
+            "proxy-config": "dns_server = 127.0.0.1:40508 youtube.com # https://resolver.example/first@dnsm\ndns_server = 127.0.0.1:40500 . # tls://resolver.example\n"
+          }]
+        })");
+    const KeeneticDnsSnapshot second_snapshot =
+        extract_keenetic_dns_snapshot_from_rci(R"({
+          "proxy-status": [{
+            "proxy-name": "System",
+            "proxy-config": "dns_server = 127.0.0.1:40509 youtube.com # https://resolver.example/second@dnsm\ndns_server = 127.0.0.1:40500 . # tls://resolver.example\n"
+          }]
+        })");
+
+    DnsServer keenetic_server;
+    keenetic_server.tag = "keenetic";
+    keenetic_server.type = api::DnsServerType::KEENETIC;
+    DnsServer managed_server;
+    managed_server.tag = "managed";
+    managed_server.address = "9.9.9.9";
+    DnsRule rule;
+    rule.list = std::vector<std::string>{"youtube"};
+    rule.server = "managed";
+    DnsConfig dns_cfg;
+    dns_cfg.servers =
+        std::vector<DnsServer>{keenetic_server, managed_server};
+    dns_cfg.fallback = std::vector<std::string>{"keenetic"};
+    dns_cfg.rules = std::vector<DnsRule>{rule};
+
+    CacheManager cache("/nonexistent/cache");
+    ListStreamer first_streamer(cache);
+    ListStreamer second_streamer(cache);
+    auto route_cfg = make_route_cfg("youtube");
+    auto lists = std::map<std::string, ListConfig>{
+        {"youtube", make_list_cfg({"youtube.com"})}};
+
+    DnsServerRegistry first_registry(dns_cfg, first_snapshot);
+    DnsServerRegistry second_registry(dns_cfg, second_snapshot);
+    DnsmasqGenerator first_generator(
+        first_registry, first_streamer, route_cfg, dns_cfg, lists);
+    DnsmasqGenerator second_generator(
+        second_registry, second_streamer, route_cfg, dns_cfg, lists);
+
+    CHECK(first_generator.compute_config_hash() ==
+          second_generator.compute_config_hash());
+}
+
+TEST_CASE("scoped Keenetic DNS policy participates in resolver hash") {
+    const KeeneticDnsSnapshot first_snapshot =
+        extract_keenetic_dns_snapshot_from_rci(R"({
+          "proxy-status": [
+            {
+              "proxy-name": "System",
+              "proxy-config": "dns_server = 127.0.0.1:40508 youtube.com # https://resolver.example/dns-query@dnsm\ndns_server = 127.0.0.1:40500 . # tls://resolver.example\n"
+            }
+          ]
+        })");
+    const KeeneticDnsSnapshot second_snapshot =
+        extract_keenetic_dns_snapshot_from_rci(R"({
+          "proxy-status": [
+            {
+              "proxy-name": "System",
+              "proxy-config": "dns_server = 127.0.0.1:40509 youtube.com # https://resolver.example/dns-query@dnsm\ndns_server = 127.0.0.1:40500 . # tls://resolver.example\n"
+            }
+          ]
+        })");
+
+    DnsServer keenetic_server;
+    keenetic_server.tag = "keenetic";
+    keenetic_server.type = api::DnsServerType::KEENETIC;
+    DnsConfig dns_cfg;
+    dns_cfg.servers = std::vector<DnsServer>{keenetic_server};
+    dns_cfg.fallback = std::vector<std::string>{"keenetic"};
+
+    CacheManager cache("/nonexistent/cache");
+    ListStreamer first_streamer(cache);
+    ListStreamer second_streamer(cache);
+    auto route_cfg = make_route_cfg("mylist");
+    auto lists = std::map<std::string, ListConfig>{
+        {"mylist", make_list_cfg({"example.com"})}};
+
+    DnsServerRegistry first_registry(dns_cfg, first_snapshot);
+    DnsServerRegistry second_registry(dns_cfg, second_snapshot);
+    DnsmasqGenerator first_generator(
+        first_registry, first_streamer, route_cfg, dns_cfg, lists);
+    DnsmasqGenerator second_generator(
+        second_registry, second_streamer, route_cfg, dns_cfg, lists);
+
+    CHECK(first_generator.compute_config_hash() !=
+          second_generator.compute_config_hash());
+}
+
 TEST_CASE("generate-resolver-config includes all keenetic dns rule servers") {
     KeeneticDnsTestStateGuard guard;
     const KeeneticDnsSnapshot snapshot = prepare_keenetic_dns_snapshot(R"({

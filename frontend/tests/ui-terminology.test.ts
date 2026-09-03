@@ -43,6 +43,9 @@ describe("public routing terminology", () => {
     expect(ruTranslation.pages.routesAndTunnels.tabs.tunnels).toBe(
       "VPN и прокси"
     )
+    expect(ruTranslation.overview.services.restartRouting).toBe(
+      "Перезапустить маршрутизацию"
+    )
     // Ступени внутри группы не называются «группами»: «группа внутри группы»
     // читалась бы как ошибка.
     expect(ruTranslation.pages.outboundUpsert.urltest.groupTitle).toBe(
@@ -75,6 +78,9 @@ describe("public routing terminology", () => {
     )
     expect(enTranslation.pages.routesAndTunnels.tabs.tunnels).toBe(
       "VPN and proxies"
+    )
+    expect(enTranslation.overview.services.restartRouting).toBe(
+      "Restart routing"
     )
     expect(enTranslation.pages.outboundUpsert.urltest.groupTitle).toBe(
       "Tier {{index}}"

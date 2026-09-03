@@ -1780,6 +1780,7 @@ export const ruTranslation = {
       unknown: "Состояние неизвестно",
       badgeTransitioning: "Выполняется",
       restart: "Перезапустить",
+      restartRouting: "Перезапустить маршрутизацию",
       restartRequested: "Перезапуск запрошен",
       restartComplete: "Перезапуск завершён: маршрутизация и DNS готовы",
       // Терминальный результат команды. Тост вмещает одну строку — этого

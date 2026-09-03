@@ -2,10 +2,11 @@
 
 namespace keen_pbr3 {
 
-// A transport may publish its TUN while a foreground Save already owns the
-// runtime mutation lease but has not yet handed that lease to the firewall
-// owner. Starting a background refresh in that narrow interval makes it wait
-// for the Save's lease while the Save then waits for the background owner.
+// A transport or firmware event may arrive while a preowned foreground
+// lifecycle (including cold boot or Save) already owns the runtime mutation
+// lease but has not yet handed that lease to the firewall owner. Starting a
+// background refresh in that narrow interval lets it occupy the owner while
+// the foreground lifecycle still owns the admission.
 // Keep the firmware event in the existing debounce queue instead. The
 // background worker itself is allowed through so later events can coalesce
 // with its already admitted pass.

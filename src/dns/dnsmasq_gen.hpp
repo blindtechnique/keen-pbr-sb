@@ -84,6 +84,8 @@ private:
     const std::map<std::string, ListConfig>& lists_;
     std::vector<KeeneticStaticDnsEntry> keenetic_static_entries_;
     std::vector<KeeneticDnsUpstreamEntry> keenetic_dns_upstreams_;
+    std::vector<KeeneticDnsScopedUpstreamEntry>
+        keenetic_scoped_dns_upstreams_;
     ResolverType resolver_type_;
     std::string hash_version_;
     ResolverIpv6Policy ipv6_policy_;

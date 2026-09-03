@@ -297,7 +297,10 @@ TEST_CASE("periodic health owns URLTEST recovery when its timer is missing") {
 
 }
 
-TEST_CASE("netfilter refresh waits behind a foreground runtime mutation") {
+TEST_CASE("netfilter refresh waits behind preowned foreground admission including cold boot") {
+    // runtime-cold-boot owns admission before its typed firewall-owner handoff.
+    // Letting a background refresh through here would make that handoff lose
+    // the owner race; the label is intentionally not exempted.
     CHECK(should_defer_netfilter_refresh_for_runtime_mutation(
         /*runtime_mutation_active=*/true,
         /*active_mutation_is_netfilter_worker=*/false));

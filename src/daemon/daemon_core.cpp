@@ -4286,13 +4286,13 @@ void Daemon::start_runtime_cold_boot_attempt(
     }
     const auto consume_dispatch_budget = [transaction]() noexcept {
         if (transaction->dispatch_rejections <
-            kRuntimeFirewallStartBoundedRetryCount) {
+            kRuntimeColdBootBoundedRetryCount) {
             ++transaction->dispatch_rejections;
         }
     };
     if (plan_runtime_cold_boot_candidate_budget(
             transaction->completed_candidate_bodies,
-            kRuntimeFirewallStartBoundedRetryCount)
+            kRuntimeColdBootBoundedRetryCount)
             .dispatch ==
         RuntimeColdBootCandidateBudgetDispatch::exhausted) {
         schedule_runtime_cold_boot_recovery(
@@ -4408,7 +4408,7 @@ void Daemon::complete_runtime_cold_boot_attempt(
     if (!transaction) return;
     if (transaction->completed_candidate_bodies <= candidate_attempt) {
         if (transaction->dispatch_rejections <
-            kRuntimeFirewallStartBoundedRetryCount) {
+            kRuntimeColdBootBoundedRetryCount) {
             ++transaction->dispatch_rejections;
         }
     } else {
@@ -4957,10 +4957,10 @@ void Daemon::schedule_runtime_cold_boot_recovery(
     }
     const auto budget = plan_runtime_cold_boot_candidate_budget(
         transaction->completed_candidate_bodies,
-        kRuntimeFirewallStartBoundedRetryCount);
+        kRuntimeColdBootBoundedRetryCount);
     const bool dispatch_retry_available =
         transaction->dispatch_rejections == 0U ||
-        runtime_firewall_preapply_preworker_retry_available(
+        runtime_cold_boot_retry_available(
             transaction->dispatch_rejections);
     const auto recovery_dispatch =
         plan_runtime_cold_boot_fresh_recovery_dispatch(
@@ -4993,13 +4993,10 @@ void Daemon::schedule_runtime_cold_boot_recovery(
         RuntimeColdBootRecoveryDispatch::schedule_with_backoff) {
         return;
     }
-    const auto backoff_index = transaction->dispatch_rejections != 0U
-        ? std::min(
-              transaction->dispatch_rejections - 1U,
-              kRuntimeFirewallStartRetryDelays.size() - 1U)
-        : budget.backoff_index;
-    const auto delay =
-        kRuntimeFirewallStartRetryDelays[backoff_index];
+    const auto delay = transaction->dispatch_rejections != 0U
+        ? runtime_cold_boot_followup_retry_delay(
+              transaction->dispatch_rejections - 1U)
+        : kRuntimeColdBootRetryDelays[budget.backoff_index];
     try {
         const int task_id = scheduler_->schedule_oneshot(
             delay,
@@ -5017,7 +5014,7 @@ void Daemon::schedule_runtime_cold_boot_recovery(
             detail ? detail : "retry requested");
     } catch (...) {
         transaction->completed_candidate_bodies =
-            kRuntimeFirewallStartBoundedRetryCount;
+            kRuntimeColdBootBoundedRetryCount;
         schedule_runtime_cold_boot_recovery(
             transaction, "cold-boot recovery timer could not be armed");
     }
@@ -5188,6 +5185,10 @@ void Daemon::open_runtime_cold_boot_services(
     step("tunnel probe", [this] { schedule_tunnel_probe(); });
 
     if (runtime_ready) {
+        // URLTEST is the route selector, not ancillary maintenance. Register
+        // it independently so an SNAT/DNS/catalog scheduling failure cannot
+        // leave successful child probes with no published group selection.
+        step("URLTEST", [this] { register_urltest_outbounds(); });
         step("runtime maintenance", [this, transaction] {
             reset_idle_stall_observer(/*schedule_if_eligible=*/true);
             schedule_owned_snat_health_check();
@@ -5201,7 +5202,6 @@ void Daemon::open_runtime_cold_boot_services(
                     transaction->interface_resolution_state,
                     transaction->service_resolution_state);
             }
-            register_urltest_outbounds();
             refresh_resolver_config_hash_actual_async();
             probe_interfaces_now();
         });
@@ -8128,6 +8128,17 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
     const bool lifecycle_preowned =
         runtime_firewall_lifecycle_uses_preowned_continuation(
             context->lifecycle_kind);
+    const bool lifecycle_cold_boot =
+        runtime_firewall_lifecycle_is_cold_boot(
+            context->lifecycle_kind);
+    const auto preowned_preworker_retry_available =
+        [lifecycle_cold_boot](std::size_t current_attempt) noexcept {
+            return lifecycle_cold_boot
+                ? runtime_cold_boot_followup_retry_available(
+                      current_attempt)
+                : runtime_firewall_preapply_preworker_retry_available(
+                      current_attempt);
+        };
 
     context->queued_claim = queued_claim;
     if (lifecycle_config_generation) {
@@ -8755,7 +8766,7 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                 "runtime mutation admission failed";
         }
         const bool retry_required = lifecycle_preowned
-            ? runtime_firewall_preapply_preworker_retry_available(
+            ? preowned_preworker_retry_available(
                   queued_claim.attempt)
             : runtime_firewall_preworker_retry_required(
                   snat_recovery.requested,
@@ -8782,7 +8793,7 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
         } catch (...) {
         }
         const bool retry_required = lifecycle_preowned
-            ? runtime_firewall_preapply_preworker_retry_available(
+            ? preowned_preworker_retry_available(
                   queued_claim.attempt)
             : runtime_firewall_preworker_retry_required(
                   snat_recovery.requested,
@@ -9651,7 +9662,7 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
                 "runtime route interface is unavailable";
         }
         const bool retry_required = lifecycle_preowned
-            ? runtime_firewall_preapply_preworker_retry_available(
+            ? preowned_preworker_retry_available(
                   queued_claim.attempt)
             : snat_recovery.requested ||
                   urltest_after_firewall_gate_.waiting_for(
@@ -9684,7 +9695,7 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
         } else {
             const bool retry_required = transport_rejected ||
                 (lifecycle_preowned
-                     ? runtime_firewall_preapply_preworker_retry_available(
+                     ? preowned_preworker_retry_available(
                            queued_claim.attempt)
                      : (!runtime_firewall_lifecycle_is_start(
                             context->lifecycle_kind) &&
@@ -9733,7 +9744,7 @@ void Daemon::dispatch_runtime_firewall_worker_attempt(
         } else {
             const bool retry_required = transport_rejected ||
                 (lifecycle_preowned
-                     ? runtime_firewall_preapply_preworker_retry_available(
+                     ? preowned_preworker_retry_available(
                            queued_claim.attempt)
                      : (!runtime_firewall_lifecycle_is_start(
                             context->lifecycle_kind) &&
@@ -10391,6 +10402,14 @@ void Daemon::drain_runtime_firewall_terminal(
     const bool lifecycle_cold_boot =
         runtime_firewall_lifecycle_is_cold_boot(
             context->lifecycle_kind);
+    const auto preowned_preworker_retry_available =
+        [lifecycle_cold_boot](std::size_t current_attempt) noexcept {
+            return lifecycle_cold_boot
+                ? runtime_cold_boot_followup_retry_available(
+                      current_attempt)
+                : runtime_firewall_preapply_preworker_retry_available(
+                      current_attempt);
+        };
     const bool lifecycle_stop_cleanup =
         runtime_firewall_lifecycle_is_stop_cleanup(
             context->lifecycle_kind);
@@ -11441,13 +11460,19 @@ void Daemon::drain_runtime_firewall_terminal(
         };
 
     const auto finish_preworker_failure_policy =
-        [this, &context, &state, shutdown, lifecycle_preowned]() {
+        [this,
+         &context,
+         &state,
+         shutdown,
+         lifecycle_preowned,
+         lifecycle_cold_boot,
+         preowned_preworker_retry_available]() {
             if (state.preworker_failure_policy_finished) return;
             if (lifecycle_preowned) {
-                // Config pre-apply owns no URLTest, resolver or runtime-state
-                // lifecycle. A transport/preparation failure must return its
-                // exact request authority without publishing unrelated
-                // incidents or moving the running runtime to broken.
+                // A preowned lifecycle must retain its exact request/startup
+                // authority across a clean preworker retry. Cold boot uses
+                // the firmware-settle window; interactive config mutations
+                // retain their shorter response-time budget.
                 const auto kind = context->foreground_transport_exhausted
                     ? DaemonRuntimeFirewallOperationState::
                           PreworkerFailureKind::transport_rejected
@@ -11463,16 +11488,18 @@ void Daemon::drain_runtime_firewall_terminal(
                         context->force_successor = false;
                         state.suppress_coordinator_rerun = true;
                         try {
-                            state.lifecycle_failure_detail =
-                                "configuration pre-apply worker transport "
-                                "retry limit was exhausted";
+                            state.lifecycle_failure_detail = lifecycle_cold_boot
+                                ? "cold-boot worker transport retry limit was "
+                                  "exhausted"
+                                : "configuration pre-apply worker transport "
+                                  "retry limit was exhausted";
                         } catch (...) {
                         }
                     }
                 } else if (
                     kind != DaemonRuntimeFirewallOperationState::
                                 PreworkerFailureKind::none &&
-                    !runtime_firewall_preapply_preworker_retry_available(
+                    !preowned_preworker_retry_available(
                         context->queued_claim.attempt)) {
                     // The old-generation SNAT recovery remains eligible for a
                     // background refresh after the exact request lease is
@@ -11483,9 +11510,10 @@ void Daemon::drain_runtime_firewall_terminal(
                     context->force_successor = false;
                     state.suppress_coordinator_rerun = true;
                     try {
-                        state.lifecycle_failure_detail =
-                            "configuration pre-apply preparation retry limit "
-                            "was exhausted";
+                        state.lifecycle_failure_detail = lifecycle_cold_boot
+                            ? "cold-boot preparation retry limit was exhausted"
+                            : "configuration pre-apply preparation retry "
+                              "limit was exhausted";
                     } catch (...) {
                     }
                 }
@@ -12851,7 +12879,7 @@ void Daemon::drain_runtime_firewall_terminal(
                               ->completed_candidate_bodies,
                           context->queued_claim.attempt + 1U)
                     : 0U,
-                kRuntimeFirewallStartBoundedRetryCount);
+                kRuntimeColdBootBoundedRetryCount);
         const bool cold_retry_budget_available =
             cold_budget_after_body.dispatch !=
             RuntimeColdBootCandidateBudgetDispatch::exhausted;
@@ -14934,12 +14962,12 @@ void Daemon::run() {
     // opens diagnostics without touching the observed kernel generation.
     bool initial_cold_boot_handoff = false;
     for (std::size_t attempt = 0U;
-         attempt < kRuntimeFirewallStartBoundedRetryCount &&
+         attempt < kRuntimeColdBootBoundedRetryCount &&
          !initial_cold_boot_handoff;
          ++attempt) {
         try {
             const int task_id = scheduler_->schedule_oneshot(
-                kRuntimeFirewallStartRetryDelays[attempt],
+                kRuntimeColdBootRetryDelays[attempt],
                 [this, cold_boot]() noexcept {
                     start_runtime_cold_boot_attempt(cold_boot);
                 },

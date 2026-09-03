@@ -35,7 +35,7 @@ TEST_CASE("keenetic dns: cache view swap is a noexcept transaction primitive") {
     static_assert(std::is_nothrow_swappable_v<KeeneticDnsCacheView>);
 
     KeeneticDnsCacheView left{
-        KeeneticDnsSnapshot{{"192.0.2.1"}, {}, {}},
+        KeeneticDnsSnapshot{{"192.0.2.1"}, {}, {}, {}},
         KeeneticDnsCacheStatus::fresh,
         true,
         true,
@@ -66,7 +66,7 @@ TEST_CASE("keenetic dns: cache view swap is a noexcept transaction primitive") {
 }
 
 TEST_CASE("keenetic dns: parse address from RCI System policy") {
-    SUBCASE("ignores domain-scoped entries in real System payload shape") {
+    SUBCASE("retains domain-scoped entries from the System policy") {
         const std::string json = R"({
           "proxy-status": [
             {
@@ -80,8 +80,77 @@ TEST_CASE("keenetic dns: parse address from RCI System policy") {
           ]
         })";
 
-        CHECK(extract_keenetic_dns_snapshot_from_rci(json).addresses
-              == std::vector<std::string>{"127.0.0.1:40508", "127.0.0.1:40509"});
+        const KeeneticDnsSnapshot snapshot =
+            extract_keenetic_dns_snapshot_from_rci(json);
+        CHECK(snapshot.addresses ==
+              std::vector<std::string>{"127.0.0.1:40508",
+                                       "127.0.0.1:40509"});
+        REQUIRE(snapshot.scoped_upstreams.size() == 2);
+        CHECK(snapshot.scoped_upstreams[0].domain == "provider.example");
+        CHECK(snapshot.scoped_upstreams[0].address == "203.0.113.10");
+        CHECK(snapshot.scoped_upstreams[0].kind == "Plain");
+        CHECK(snapshot.scoped_upstreams[1].domain == "provider.example");
+        CHECK(snapshot.scoped_upstreams[1].address == "203.0.113.11");
+    }
+
+    SUBCASE("prefers encrypted servers independently for each scoped domain") {
+        const std::string json = R"({
+          "proxy-status": [
+            {
+              "proxy-name": "System",
+              "proxy-config": "dns_server = 77.88.8.1 youtube.com\ndns_server = 127.0.0.1:40508 youtube.com # https://doh.opendns.com/dns-query@dnsm\ndns_server = 77.88.8.8 www.youtube.com\ndns_server = 127.0.0.1:40509 www.youtube.com # https://doh.opendns.com/dns-query@dnsm\ndns_server = 127.0.0.1:40500 . # tls://common.dot.dns.example\n"
+            }
+          ]
+        })";
+
+        const KeeneticDnsSnapshot snapshot =
+            extract_keenetic_dns_snapshot_from_rci(json);
+        CHECK(snapshot.addresses ==
+              std::vector<std::string>{"127.0.0.1:40500"});
+        REQUIRE(snapshot.scoped_upstreams.size() == 2);
+        CHECK(snapshot.scoped_upstreams[0].domain == "youtube.com");
+        CHECK(snapshot.scoped_upstreams[0].address == "127.0.0.1:40508");
+        CHECK(snapshot.scoped_upstreams[0].kind == "DoH");
+        CHECK(snapshot.scoped_upstreams[0].target ==
+              "https://doh.opendns.com/dns-query");
+        CHECK(snapshot.scoped_upstreams[1].domain == "www.youtube.com");
+        CHECK(snapshot.scoped_upstreams[1].address == "127.0.0.1:40509");
+        CHECK(snapshot.scoped_upstreams[1].kind == "DoH");
+    }
+
+    SUBCASE("normalizes safe scoped domains and skips invalid ones") {
+        const std::string json = R"({
+          "proxy-status": [
+            {
+              "proxy-name": "System",
+              "proxy-config": "dns_server = 127.0.0.1:40508 *.YouTube.com. # https://resolver.example/dns-query@dnsm\ndns_server = 192.0.2.54 invalid/domain\ndns_server = 192.0.2.53 .\n"
+            }
+          ]
+        })";
+
+        const KeeneticDnsSnapshot snapshot =
+            extract_keenetic_dns_snapshot_from_rci(json);
+        REQUIRE(snapshot.scoped_upstreams.size() == 1);
+        CHECK(snapshot.scoped_upstreams[0].domain == "youtube.com");
+        CHECK(snapshot.scoped_upstreams[0].address == "127.0.0.1:40508");
+    }
+
+    SUBCASE("matches scoped domains case-insensitively when preferring encrypted servers") {
+        const std::string json = R"({
+          "proxy-status": [
+            {
+              "proxy-name": "System",
+              "proxy-config": "dns_server = 77.88.8.1 YouTube.com\ndns_server = 127.0.0.1:40508 youtube.COM # https://resolver.example/dns-query@dnsm\ndns_server = 192.0.2.53 .\n"
+            }
+          ]
+        })";
+
+        const KeeneticDnsSnapshot snapshot =
+            extract_keenetic_dns_snapshot_from_rci(json);
+        REQUIRE(snapshot.scoped_upstreams.size() == 1);
+        CHECK(snapshot.scoped_upstreams[0].domain == "youtube.com");
+        CHECK(snapshot.scoped_upstreams[0].address == "127.0.0.1:40508");
+        CHECK(snapshot.scoped_upstreams[0].kind == "DoH");
     }
 
     SUBCASE("extracts static a and aaaa entries from System policy") {
@@ -329,7 +398,7 @@ TEST_CASE("keenetic dns: parse address from RCI System policy") {
         REQUIRE(snapshot.addresses == std::vector<std::string>{"198.51.100.10", "198.51.100.11"});
     }
 
-    SUBCASE("ignores domain-scoped plaintext and dot entries from real RCI payload") {
+    SUBCASE("keeps only System domain-scoped entries from real RCI payload") {
         const std::string json = R"({
           "proxy-status": [
             {
@@ -347,8 +416,18 @@ TEST_CASE("keenetic dns: parse address from RCI System policy") {
           ]
         })";
 
-        CHECK(extract_keenetic_dns_snapshot_from_rci(json).addresses
-              == std::vector<std::string>{"127.0.0.1:40508", "127.0.0.1:40509"});
+        const KeeneticDnsSnapshot snapshot =
+            extract_keenetic_dns_snapshot_from_rci(json);
+        CHECK(snapshot.addresses ==
+              std::vector<std::string>{"127.0.0.1:40508",
+                                       "127.0.0.1:40509"});
+        REQUIRE(snapshot.scoped_upstreams.size() == 3);
+        CHECK(snapshot.scoped_upstreams[0].domain == "scoped-a.example");
+        CHECK(snapshot.scoped_upstreams[0].address == "198.51.100.20");
+        CHECK(snapshot.scoped_upstreams[1].domain == "scoped-a.example");
+        CHECK(snapshot.scoped_upstreams[1].address == "198.51.100.21");
+        CHECK(snapshot.scoped_upstreams[2].domain == "domain.example.com");
+        CHECK(snapshot.scoped_upstreams[2].address == "127.0.0.1:40500");
     }
 }
 
@@ -503,6 +582,41 @@ TEST_CASE("keenetic dns: cache refresh semantics") {
         REQUIRE(get_keenetic_static_dns_entries().size() == 1);
         CHECK(get_keenetic_static_dns_entries()[0].domain == "host.example");
         CHECK(get_keenetic_static_dns_entries()[0].address == "198.51.100.180");
+    }
+
+    SUBCASE("reports updated when only a scoped DNS policy changes") {
+        const KeeneticDnsRefreshResult initial =
+            refresh_keenetic_dns_address_cache(false);
+        REQUIRE(initial.snapshot.has_value());
+        CHECK(initial.snapshot->addresses ==
+              std::vector<std::string>{"203.0.113.10"});
+        CHECK(initial.snapshot->scoped_upstreams.empty());
+        CHECK(fetch_count == 1);
+
+        set_keenetic_dns_fetcher_for_tests([&fetch_count]() {
+            ++fetch_count;
+            return std::string(R"({
+              "proxy-status": [
+                {
+                  "proxy-name": "System",
+                  "proxy-config": "dns_server = 203.0.113.10 .\ndns_server = 127.0.0.1:40508 youtube.com # https://resolver.example/dns-query@dnsm\n"
+                }
+              ]
+            })");
+        });
+
+        const KeeneticDnsRefreshResult result =
+            refresh_keenetic_dns_address_cache(true);
+        CHECK(result.status == KeeneticDnsRefreshStatus::UPDATED);
+        CHECK(result.addresses ==
+              std::vector<std::string>{"203.0.113.10"});
+        REQUIRE(result.snapshot.has_value());
+        REQUIRE(result.snapshot->scoped_upstreams.size() == 1);
+        CHECK(result.snapshot->scoped_upstreams[0].domain == "youtube.com");
+        CHECK(result.snapshot->scoped_upstreams[0].address ==
+              "127.0.0.1:40508");
+        CHECK(result.generation > initial.generation);
+        CHECK(fetch_count == 2);
     }
 
     SUBCASE("fails without cache when initial fetch fails") {

@@ -31,9 +31,17 @@ struct KeeneticDnsUpstreamEntry {
     std::string target;
 };
 
+struct KeeneticDnsScopedUpstreamEntry {
+    std::string domain;
+    std::string address;
+    std::string kind;
+    std::string target;
+};
+
 struct KeeneticDnsSnapshot {
     std::vector<std::string> addresses;
     std::vector<KeeneticDnsUpstreamEntry> upstreams;
+    std::vector<KeeneticDnsScopedUpstreamEntry> scoped_upstreams;
     std::vector<KeeneticStaticDnsEntry> static_entries;
 };
 
@@ -42,6 +50,7 @@ inline void swap(KeeneticDnsSnapshot& lhs,
     using std::swap;
     swap(lhs.addresses, rhs.addresses);
     swap(lhs.upstreams, rhs.upstreams);
+    swap(lhs.scoped_upstreams, rhs.scoped_upstreams);
     swap(lhs.static_entries, rhs.static_entries);
 }
 
@@ -142,8 +151,10 @@ KeeneticDnsCache& shared_keenetic_dns_cache();
 // RCI endpoint used as source of truth for the built-in DNS proxy:
 // GET http://127.0.0.1:79/rci/show/dns-proxy
 //
-// We read proxy-status entry with proxy-name == "System" and only consider
-// unscoped "dns_server = ..." directives. Domain-scoped entries are ignored.
+// We read proxy-status entry with proxy-name == "System". Unscoped
+// "dns_server = ..." directives provide the ordinary upstream set, while
+// domain-scoped directives are retained so dnsmasq can preserve Keenetic's
+// per-domain resolver policy.
 // When the System policy has unscoped encrypted resolvers, we use all of them
 // in order. Otherwise we fall back to all unscoped plaintext resolvers.
 KeeneticDnsSnapshot extract_keenetic_dns_snapshot_from_rci(const std::string& response_body);

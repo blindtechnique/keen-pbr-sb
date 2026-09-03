@@ -32,6 +32,41 @@ std::string keenetic_static_domain_pattern(const std::string& domain) {
     return "/" + domain;
 }
 
+std::string dnsmasq_server_address(const std::string& address) {
+    const auto parsed = parse_dns_address_str(address);
+    std::string result = parsed.ip;
+    if (parsed.port != 53) {
+        result += "#" + std::to_string(parsed.port);
+    }
+    return result;
+}
+
+std::string canonical_dns_domain(std::string domain) {
+    if (domain.size() >= 2 && domain[0] == '*' && domain[1] == '.') {
+        domain.erase(0, 2);
+    }
+    while (!domain.empty() && domain.back() == '.') {
+        domain.pop_back();
+    }
+    for (char& ch : domain) {
+        if (ch >= 'A' && ch <= 'Z') {
+            ch = static_cast<char>(ch - 'A' + 'a');
+        }
+    }
+    return domain;
+}
+
+bool is_same_or_subdomain(const std::string& domain,
+                          const std::string& suffix) {
+    if (domain == suffix) {
+        return true;
+    }
+    return domain.size() > suffix.size() &&
+           domain.compare(domain.size() - suffix.size(),
+                          suffix.size(), suffix) == 0 &&
+           domain[domain.size() - suffix.size() - 1] == '.';
+}
+
 } // anonymous namespace
 
 DnsmasqGenerator::DnsmasqGenerator(const DnsServerRegistry& dns_registry,
@@ -54,6 +89,11 @@ DnsmasqGenerator::DnsmasqGenerator(const DnsServerRegistry& dns_registry,
       keenetic_dns_upstreams_(dns_registry.keenetic_snapshot()
                                   ? dns_registry.keenetic_snapshot()->upstreams
                                   : std::vector<KeeneticDnsUpstreamEntry>{}),
+      keenetic_scoped_dns_upstreams_(
+          dns_registry.keenetic_fallback_enabled() &&
+                  dns_registry.keenetic_snapshot()
+              ? dns_registry.keenetic_snapshot()->scoped_upstreams
+              : std::vector<KeeneticDnsScopedUpstreamEntry>{}),
       resolver_type_(resolver_type),
       hash_version_(std::move(hash_version)),
       ipv6_policy_(ipv6_policy),
@@ -218,6 +258,13 @@ void DnsmasqGenerator::generate_directives(
     if (out != nullptr && dns_config_.fallback.has_value() && !dns_config_.fallback->empty()) {
         *out << "\n";
     }
+
+    // Keep memory bounded while giving explicit keen-pbr DNS rules priority
+    // over inherited Keenetic policy. During the existing single list pass we
+    // only mark the small set of inherited rows that an active managed suffix
+    // covers; the inherited directives are emitted after that pass.
+    std::vector<bool> keenetic_scoped_dns_suppressed(
+        keenetic_scoped_dns_upstreams_.size(), false);
 
     std::set<std::string> ipset_lists;
     for (const auto& rule : route_config_.rules.value_or(std::vector<RouteRule>{})) {
@@ -407,6 +454,21 @@ void DnsmasqGenerator::generate_directives(
                 return;
             }
 
+            if (!dns_servers.empty() &&
+                !keenetic_scoped_dns_upstreams_.empty()) {
+                const std::string managed_domain =
+                    canonical_dns_domain(bare);
+                for (size_t scoped_index = 0;
+                     scoped_index < keenetic_scoped_dns_upstreams_.size();
+                     ++scoped_index) {
+                    if (is_same_or_subdomain(
+                            keenetic_scoped_dns_upstreams_[scoped_index].domain,
+                            managed_domain)) {
+                        keenetic_scoped_dns_suppressed[scoped_index] = true;
+                    }
+                }
+            }
+
             if (needs_ipset) {
                 if (hash_record_callback) {
                     hash_record_callback("domain-route|" + list_name + "|" + bare);
@@ -447,6 +509,36 @@ void DnsmasqGenerator::generate_directives(
         if (out != nullptr && wrote_list_header) {
             *out << "\n";
         }
+    }
+
+    bool wrote_keenetic_scoped_header = false;
+    for (size_t scoped_index = 0;
+         scoped_index < keenetic_scoped_dns_upstreams_.size();
+         ++scoped_index) {
+        if (keenetic_scoped_dns_suppressed[scoped_index]) {
+            continue;
+        }
+        const auto& upstream =
+            keenetic_scoped_dns_upstreams_[scoped_index];
+        const std::string server_address =
+            dnsmasq_server_address(upstream.address);
+        if (hash_record_callback) {
+            hash_record_callback(
+                "keenetic-scoped-server|" +
+                std::to_string(scoped_index) + "|" +
+                upstream.domain + "|" + server_address);
+        }
+        if (out != nullptr) {
+            if (!wrote_keenetic_scoped_header) {
+                *out << "# Keenetic domain-specific DNS policy\n";
+                wrote_keenetic_scoped_header = true;
+            }
+            *out << "server=/" << upstream.domain << "/"
+                 << server_address << "\n";
+        }
+    }
+    if (out != nullptr && wrote_keenetic_scoped_header) {
+        *out << "\n";
     }
 }
 

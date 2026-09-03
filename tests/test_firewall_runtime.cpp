@@ -585,6 +585,47 @@ TEST_CASE("Runtime firewall uses the prepared Keenetic DNS snapshot") {
 }
 
 TEST_CASE(
+    "Runtime firewall detours scoped public Keenetic DNS without marking local proxies") {
+    const auto config = keenetic_detour_config();
+    CacheManager cache{"/nonexistent/keen-pbr-test-cache"};
+    RecordingFirewall firewall;
+    KeeneticDnsSnapshot snapshot;
+    snapshot.addresses = {"127.0.0.1:40500"};
+    snapshot.scoped_upstreams = {
+        {"youtube.com", "77.88.8.1", "Plain", ""},
+        {"secure.example", "127.0.0.1:40508", "DoH",
+         "https://resolver.example/dns-query"},
+        {"video.example", "77.88.8.1:53", "Plain", ""},
+    };
+
+    CHECK_NOTHROW(apply_runtime_firewall(
+        config,
+        {{"vpn", 0x00070000U}},
+        {},
+        cache,
+        firewall,
+        FirewallApplyMode::PreserveSets,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        /*udp_call_affinity_ipset_available=*/true,
+        snapshot));
+
+    // The public endpoint is marked exactly once even when several scoped
+    // domains reuse it. Keenetic's local DoH listeners remain local and do
+    // not receive a meaningless external-route mark.
+    CHECK(firewall.marked_destinations ==
+          std::vector<std::string>{"77.88.8.1"});
+    CHECK(std::count(
+              firewall.events.begin(), firewall.events.end(), "mark:53") ==
+          1);
+    CHECK(std::count(
+              firewall.events.begin(), firewall.events.end(),
+              "output-mark:53") == 1);
+}
+
+TEST_CASE(
     "Runtime firewall rejects Keenetic DNS without a prepared snapshot before mutation") {
     const auto config = keenetic_detour_config();
     CacheManager cache{"/nonexistent/keen-pbr-test-cache"};

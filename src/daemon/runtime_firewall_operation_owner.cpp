@@ -23,6 +23,14 @@ static_assert(
     kRuntimeFirewallStartRetryDelays.size() ==
         kRuntimeFirewallStartBoundedRetryCount,
     "START retry policy must match the lifecycle publication fence");
+static_assert(
+    kRuntimeColdBootRetryDelays.size() ==
+        kRuntimeColdBootBoundedRetryCount,
+    "cold-boot retry policy must match the lifecycle publication fence");
+static_assert(
+    kRuntimeColdBootFollowupRetryCount + 1U ==
+        kRuntimeColdBootBoundedRetryCount,
+    "cold-boot owner retries must follow the startup handoff slot");
 constexpr auto kAdmissionRetryDelay = std::chrono::seconds{1};
 constexpr auto kMaintenanceRetryDelay = std::chrono::seconds{60};
 constexpr auto kTerminalWatchdogDelay = std::chrono::milliseconds{200};
@@ -30,6 +38,9 @@ constexpr std::size_t kForegroundTransportRetryLimit = 4U;
 
 std::size_t bounded_retry_count(
     RuntimeFirewallLifecycleKind lifecycle_kind) noexcept {
+    if (runtime_firewall_lifecycle_is_cold_boot(lifecycle_kind)) {
+        return kRuntimeColdBootFollowupRetryCount;
+    }
     return runtime_firewall_lifecycle_uses_hot_retry(lifecycle_kind)
         ? kRuntimeFirewallStartRetryDelays.size()
         : kRetryDelays.size();
@@ -38,6 +49,9 @@ std::size_t bounded_retry_count(
 std::chrono::milliseconds bounded_retry_delay(
     RuntimeFirewallLifecycleKind lifecycle_kind,
     std::size_t attempt) noexcept {
+    if (runtime_firewall_lifecycle_is_cold_boot(lifecycle_kind)) {
+        return runtime_cold_boot_followup_retry_delay(attempt);
+    }
     if (runtime_firewall_lifecycle_uses_hot_retry(lifecycle_kind)) {
         return kRuntimeFirewallStartRetryDelays[attempt];
     }

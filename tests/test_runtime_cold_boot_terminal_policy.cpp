@@ -269,26 +269,46 @@ TEST_CASE("cold boot recovery exhaustion stays available but never running") {
           RuntimeColdBootRecoveryDispatch::none);
 }
 
-TEST_CASE("cold boot shares one three-body budget across retained and fresh contexts") {
+TEST_CASE("cold boot retry budget spans the Keenetic firmware settle window") {
     constexpr auto maximum =
-        kRuntimeFirewallStartBoundedRetryCount;
-    static_assert(maximum == 3U);
+        kRuntimeColdBootBoundedRetryCount;
+    static_assert(maximum == 5U);
+    static_assert(kRuntimeFirewallStartBoundedRetryCount == 3U);
+    static_assert(kRuntimeColdBootFollowupRetryCount == 4U);
+    CHECK(kRuntimeFirewallStartRetryDelays.back() ==
+          std::chrono::milliseconds{400});
+    CHECK(runtime_cold_boot_followup_retry_available(0U));
+    CHECK(runtime_cold_boot_followup_retry_available(3U));
+    CHECK_FALSE(runtime_cold_boot_followup_retry_available(4U));
+    CHECK(runtime_cold_boot_followup_retry_delay(0U) ==
+          std::chrono::milliseconds{200});
+    CHECK(runtime_cold_boot_followup_retry_delay(1U) ==
+          std::chrono::milliseconds{400});
+    CHECK(runtime_cold_boot_followup_retry_delay(2U) ==
+          std::chrono::seconds{30});
+    CHECK(runtime_cold_boot_followup_retry_delay(3U) ==
+          std::chrono::seconds{60});
+    CHECK(runtime_cold_boot_followup_retry_delay(99U) ==
+          std::chrono::seconds{60});
 
     const auto initial =
         plan_runtime_cold_boot_candidate_budget(0U, maximum);
     CHECK(initial.dispatch ==
           RuntimeColdBootCandidateBudgetDispatch::dispatch_immediately);
     CHECK(initial.next_attempt == 0U);
+    CHECK(initial.backoff_index == 0U);
+    CHECK(kRuntimeColdBootRetryDelays[initial.backoff_index] ==
+          std::chrono::milliseconds{100});
 
     const auto retained_retry =
         plan_runtime_cold_boot_candidate_budget(1U, maximum);
     CHECK(retained_retry.dispatch ==
           RuntimeColdBootCandidateBudgetDispatch::schedule_with_backoff);
     CHECK(retained_retry.next_attempt == 1U);
-    CHECK(retained_retry.backoff_index == 0U);
-    CHECK(kRuntimeFirewallStartRetryDelays[
+    CHECK(retained_retry.backoff_index == 1U);
+    CHECK(kRuntimeColdBootRetryDelays[
               retained_retry.backoff_index] ==
-          std::chrono::milliseconds{100});
+          std::chrono::milliseconds{200});
 
     // A rollback and fresh observation do not reset the global counter.
     const auto fresh_after_rollback =
@@ -296,17 +316,36 @@ TEST_CASE("cold boot shares one three-body budget across retained and fresh cont
     CHECK(fresh_after_rollback.dispatch ==
           RuntimeColdBootCandidateBudgetDispatch::schedule_with_backoff);
     CHECK(fresh_after_rollback.next_attempt == 2U);
-    CHECK(fresh_after_rollback.backoff_index == 1U);
-    CHECK(kRuntimeFirewallStartRetryDelays[
+    CHECK(fresh_after_rollback.backoff_index == 2U);
+    CHECK(kRuntimeColdBootRetryDelays[
               fresh_after_rollback.backoff_index] ==
-          std::chrono::milliseconds{200});
+          std::chrono::milliseconds{400});
+
+    const auto delayed_fresh_observation =
+        plan_runtime_cold_boot_candidate_budget(3U, maximum);
+    CHECK(delayed_fresh_observation.dispatch ==
+          RuntimeColdBootCandidateBudgetDispatch::schedule_with_backoff);
+    CHECK(delayed_fresh_observation.next_attempt == 3U);
+    CHECK(kRuntimeColdBootRetryDelays[
+              delayed_fresh_observation.backoff_index] ==
+          std::chrono::seconds{30});
+
+    const auto final_fresh_observation =
+        plan_runtime_cold_boot_candidate_budget(4U, maximum);
+    CHECK(final_fresh_observation.dispatch ==
+          RuntimeColdBootCandidateBudgetDispatch::schedule_with_backoff);
+    CHECK(kRuntimeColdBootRetryDelays[
+              final_fresh_observation.backoff_index] ==
+          std::chrono::seconds{60});
 
     const auto exhausted =
-        plan_runtime_cold_boot_candidate_budget(3U, maximum);
+        plan_runtime_cold_boot_candidate_budget(5U, maximum);
     CHECK(exhausted.dispatch ==
           RuntimeColdBootCandidateBudgetDispatch::exhausted);
     CHECK(exhausted.next_attempt == 0U);
 
+    CHECK(runtime_cold_boot_retry_available(4U));
+    CHECK_FALSE(runtime_cold_boot_retry_available(5U));
     CHECK(plan_runtime_cold_boot_candidate_budget(0U, 0U).dispatch ==
           RuntimeColdBootCandidateBudgetDispatch::exhausted);
 }

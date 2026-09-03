@@ -1,5 +1,6 @@
 #include "keenetic_dns.hpp"
 
+#include "../config/list_parser.hpp"
 #include "dns_server.hpp"
 #include "../http/http_client.hpp"
 
@@ -8,6 +9,7 @@
 #include <cctype>
 #include <chrono>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <sstream>
 #include <utility>
@@ -76,9 +78,18 @@ std::string trim_copy(const std::string& s) {
     return s.substr(begin, end - begin);
 }
 
+std::string ascii_lowercase_copy(std::string value) {
+    for (char& ch : value) {
+        if (ch >= 'A' && ch <= 'Z') {
+            ch = static_cast<char>(ch - 'A' + 'a');
+        }
+    }
+    return value;
+}
+
 struct ParsedDnsServerLine {
     std::string address;
-    bool has_specific_domains{false};
+    std::string domain;
     bool is_encrypted{false};
     std::string kind;
     std::string target;
@@ -115,7 +126,9 @@ ParsedDnsServerLine parse_dns_server_line(const std::string& line) {
     } else {
         parsed.address = trim_copy(rest.substr(0, first_space));
         const std::string suffix = trim_copy(rest.substr(first_space + 1));
-        parsed.has_specific_domains = !suffix.empty() && suffix != ".";
+        if (!suffix.empty() && suffix != ".") {
+            parsed.domain = suffix;
+        }
     }
     if (parsed.address.empty()) {
         return {};
@@ -209,6 +222,7 @@ bool keenetic_dns_snapshots_equal_impl(const KeeneticDnsSnapshot& lhs,
                                        const KeeneticDnsSnapshot& rhs) {
     if (lhs.addresses.size() != rhs.addresses.size() ||
         lhs.upstreams.size() != rhs.upstreams.size() ||
+        lhs.scoped_upstreams.size() != rhs.scoped_upstreams.size() ||
         lhs.static_entries.size() != rhs.static_entries.size()) {
         return false;
     }
@@ -224,6 +238,18 @@ bool keenetic_dns_snapshots_equal_impl(const KeeneticDnsSnapshot& lhs,
             return false;
         }
     }
+    for (size_t i = 0; i < lhs.scoped_upstreams.size(); ++i) {
+        if (lhs.scoped_upstreams[i].domain !=
+                rhs.scoped_upstreams[i].domain ||
+            lhs.scoped_upstreams[i].address !=
+                rhs.scoped_upstreams[i].address ||
+            lhs.scoped_upstreams[i].kind !=
+                rhs.scoped_upstreams[i].kind ||
+            lhs.scoped_upstreams[i].target !=
+                rhs.scoped_upstreams[i].target) {
+            return false;
+        }
+    }
     for (size_t i = 0; i < lhs.static_entries.size(); ++i) {
         if (lhs.static_entries[i].domain != rhs.static_entries[i].domain ||
             lhs.static_entries[i].address != rhs.static_entries[i].address) {
@@ -233,8 +259,10 @@ bool keenetic_dns_snapshots_equal_impl(const KeeneticDnsSnapshot& lhs,
     return true;
 }
 
-KeeneticDnsSnapshot build_keenetic_dns_snapshot(std::vector<ParsedDnsServerLine> selected_servers,
-                                                std::vector<KeeneticStaticDnsEntry> static_entries) {
+KeeneticDnsSnapshot build_keenetic_dns_snapshot(
+    std::vector<ParsedDnsServerLine> selected_servers,
+    std::vector<ParsedDnsServerLine> selected_scoped_servers,
+    std::vector<KeeneticStaticDnsEntry> static_entries) {
     if (selected_servers.empty()) {
         throw KeeneticDnsError(
             "Built-in DNS proxy appears disabled or has no unscoped 'dns_server = ...' directives in System policy");
@@ -247,6 +275,11 @@ KeeneticDnsSnapshot build_keenetic_dns_snapshot(std::vector<ParsedDnsServerLine>
         snapshot.addresses.push_back(server.address);
         snapshot.upstreams.push_back({server.address, server.kind, server.target});
     }
+    snapshot.scoped_upstreams.reserve(selected_scoped_servers.size());
+    for (const auto& server : selected_scoped_servers) {
+        snapshot.scoped_upstreams.push_back(
+            {server.domain, server.address, server.kind, server.target});
+    }
     snapshot.static_entries = std::move(static_entries);
     return snapshot;
 }
@@ -258,6 +291,28 @@ std::vector<ParsedDnsServerLine> collect_selected_keenetic_dns_servers(
         return unscoped_encrypted_servers;
     }
     return unscoped_plaintext_servers;
+}
+
+std::vector<ParsedDnsServerLine>
+collect_selected_keenetic_scoped_dns_servers(
+    const std::vector<ParsedDnsServerLine>& scoped_servers) {
+    std::map<std::string, bool> domain_has_encrypted_server;
+    for (const auto& server : scoped_servers) {
+        auto& has_encrypted =
+            domain_has_encrypted_server[server.domain];
+        has_encrypted = has_encrypted || server.is_encrypted;
+    }
+
+    std::vector<ParsedDnsServerLine> selected;
+    selected.reserve(scoped_servers.size());
+    for (const auto& server : scoped_servers) {
+        const bool prefer_encrypted =
+            domain_has_encrypted_server.at(server.domain);
+        if (!prefer_encrypted || server.is_encrypted) {
+            selected.push_back(server);
+        }
+    }
+    return selected;
 }
 
 } // namespace
@@ -313,6 +368,7 @@ KeeneticDnsSnapshot extract_keenetic_dns_snapshot_from_rci(const std::string& re
         }
         std::vector<ParsedDnsServerLine> unscoped_plaintext_servers;
         std::vector<ParsedDnsServerLine> unscoped_encrypted_servers;
+        std::vector<ParsedDnsServerLine> scoped_servers;
         std::vector<KeeneticStaticDnsEntry> static_entries;
         std::istringstream in(cfg_it->get<std::string>());
         std::string line;
@@ -349,7 +405,17 @@ KeeneticDnsSnapshot extract_keenetic_dns_snapshot_from_rci(const std::string& re
                     "RCI returned invalid dns_server address '" + parsed.address + "': " + e.what());
             }
 
-            if (parsed.has_specific_domains) {
+            if (!parsed.domain.empty()) {
+                const auto normalized_domain =
+                    ListParser::normalize_domain(parsed.domain);
+                if (!normalized_domain) {
+                    continue;
+                }
+                // DNS names are case-insensitive. Canonicalize before
+                // selecting encrypted/plaintext candidates so differently
+                // cased RCI rows for the same domain cannot split the group.
+                parsed.domain = ascii_lowercase_copy(*normalized_domain);
+                scoped_servers.push_back(std::move(parsed));
                 continue;
             }
             if (parsed.is_encrypted) {
@@ -364,6 +430,8 @@ KeeneticDnsSnapshot extract_keenetic_dns_snapshot_from_rci(const std::string& re
                 collect_selected_keenetic_dns_servers(
                     unscoped_plaintext_servers,
                     unscoped_encrypted_servers),
+                collect_selected_keenetic_scoped_dns_servers(
+                    scoped_servers),
                 std::move(static_entries));
         }
         throw KeeneticDnsError(

@@ -20,6 +20,7 @@ import {
   useRoutingControlPendingState,
 } from "@/api/mutations"
 import { getDnsmasqBadgeState } from "@/components/overview/dnsmasq-status"
+import { selectRoutingRecoveryAction } from "@/components/overview/service-routing-recovery"
 import { Switch } from "@/components/ui/switch"
 import { SectionCard } from "@/components/shared/section-card"
 import { Badge } from "@/components/ui/badge"
@@ -163,9 +164,15 @@ export function ServicesStatusCard() {
       return response.data
     },
   }
-  const routingRestartMutation = useMutation({
+  const routingRecoveryMutation = useMutation({
     mutationFn: async () => {
-      await serviceRestartMutation.mutateAsync()
+      const healthResponse = await getHealthService({ cache: "no-store" })
+      const action = selectRoutingRecoveryAction(healthResponse.data)
+      if (action === "start") {
+        await serviceStartMutation.mutateAsync()
+      } else {
+        await serviceRestartMutation.mutateAsync()
+      }
       await waitForRuntimeReadiness(runtimeReadinessProbe)
     },
     onSuccess: async () => {
@@ -332,13 +339,13 @@ export function ServicesStatusCard() {
           : serviceRunning
             ? "up"
             : "down",
-      onRestart: serviceHealth
-        ? () => routingRestartMutation.mutate()
-        : undefined,
-      restarting: routingRestartMutation.isPending || serviceTransitioning,
       toggle: {
         checked: serviceRunning,
-        disabled: routingActionPending || serviceTransitioning || !serviceHealth,
+        disabled:
+          routingActionPending ||
+          routingRecoveryMutation.isPending ||
+          serviceTransitioning ||
+          !serviceHealth,
         label: serviceRunning
           ? t("overview.runtime.actions.stop")
           : t("overview.runtime.actions.start"),
@@ -417,7 +424,31 @@ export function ServicesStatusCard() {
   ]
 
   return (
-    <SectionCard className="h-full" title={t("overview.services.title")}>
+    <SectionCard
+      action={
+        <Button
+          disabled={
+            routingActionPending ||
+            routingRecoveryMutation.isPending ||
+            serviceTransitioning ||
+            !serviceHealth
+          }
+          onClick={() => routingRecoveryMutation.mutate()}
+          size="sm"
+          variant="outline"
+        >
+          <RotateCw
+            className={cn(
+              "size-3.5",
+              routingRecoveryMutation.isPending && "animate-spin"
+            )}
+          />
+          {t("overview.services.restartRouting")}
+        </Button>
+      }
+      className="h-full"
+      title={t("overview.services.title")}
+    >
       <div className="space-y-3">
         {rows.map((row) => (
           <div
