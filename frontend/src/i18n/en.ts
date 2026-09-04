@@ -937,6 +937,7 @@ export const enTranslation = {
       liveUnavailableShort: "No data",
       connectedState: "Connection",
       connected: "Connected",
+      notWorking: "Not working",
       disconnected: "Disconnected",
       linkState: "Link",
       linkUp: "Link up",

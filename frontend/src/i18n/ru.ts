@@ -940,6 +940,7 @@ export const ruTranslation = {
       liveUnavailableShort: "Нет данных",
       connectedState: "Подключение",
       connected: "Подключено",
+      notWorking: "Не работает",
       disconnected: "Отключено",
       linkState: "Линия",
       linkUp: "Линия активна",

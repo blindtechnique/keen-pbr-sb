@@ -148,6 +148,7 @@ import {
   dedupeLegacyNativeTransports,
   getNativeBindBlockReason,
   mapNativeInterfaces,
+  nativeInterfaceConnectionState,
   type NativeInterfaceModel,
 } from "@/lib/native-interfaces"
 import {
@@ -1483,6 +1484,14 @@ export function TransportsPage({
     const nativeTracker = nativeInterface.kernelName
       ? nativeTrackerByInterface.get(nativeInterface.kernelName)
       : undefined
+    const boundRuntime = boundOutbound
+      ? runtimeOutboundByTag.get(boundOutbound.tag)
+      : undefined
+    const connectionState = nativeInterfaceConnectionState(
+      nativeInterface,
+      boundRuntime,
+      Boolean(boundOutbound)
+    )
     const expandedId = `native:${nativeInterface.id}`
     const expanded = expandedTransportIds.has(expandedId)
     const latencyMs = nativeInterface.kernelName
@@ -1582,15 +1591,19 @@ export function TransportsPage({
         key="state"
         title={
           nativeInterface.runtime
-            ? undefined
+            ? boundRuntime?.detail
             : t("transports.nativeInterface.liveUnavailable")
         }
-        tone={nativeInterface.live ? "success" : "neutral"}
+        tone={connectionState === "up" ? "success" : "neutral"}
       >
         {nativeInterface.runtime
-          ? nativeInterface.live
+          ? connectionState === "up"
             ? t("transports.nativeInterface.connected")
-            : t("transports.nativeInterface.disconnected")
+            : connectionState === "down"
+              ? t("transports.nativeInterface.disconnected")
+              : connectionState === "unavailable"
+                ? t("transports.nativeInterface.notWorking")
+                : t("transports.operationalStates.verificationPending")
           : t("transports.nativeInterface.liveUnavailableShort")}
       </KeeneticStatus>,
       showLatency ? (
