@@ -290,6 +290,10 @@ nlohmann::json subscription_metadata(const SubscriptionFetchResult& fetched,
     const auto header = fetched.headers.find("subscription-userinfo");
     auto metadata = parse_subscription_userinfo(
         header == fetched.headers.end() ? "" : header->second);
+    const auto title_header = fetched.headers.find("profile-title");
+    const auto title = parse_subscription_title(
+        title_header == fetched.headers.end() ? "" : title_header->second);
+    if (!title.empty()) metadata["provider_name"] = title;
     const auto now = subscription_now();
     metadata["checked_at"] = now;
     metadata["updated_at"] = now;
@@ -456,6 +460,10 @@ void register_subscriptions_handler_impl(
             response.document_kind = response_kind(plan.kind);
             response.expires_in_seconds = kPreviewTtl.count();
             response.preview_id = random_preview_token();
+            const auto title_header = fetched.headers.find("profile-title");
+            const auto title = parse_subscription_title(
+                title_header == fetched.headers.end() ? "" : title_header->second);
+            if (!title.empty()) response.subscription_name = title;
             response.candidates.reserve(plan.candidates.size());
             for (const auto& candidate : plan.candidates) {
                 api::SubscriptionPreviewCandidate entry;

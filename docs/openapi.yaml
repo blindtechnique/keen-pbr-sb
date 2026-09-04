@@ -5120,6 +5120,9 @@ components:
       type: object
       required: [preview_id, document_kind, expires_in_seconds, candidates]
       properties:
+        subscription_name:
+          type: string
+          description: Subscription title supplied by the provider, when available.
         preview_id:
           type: string
           pattern: "^[0-9a-f]{64}$"

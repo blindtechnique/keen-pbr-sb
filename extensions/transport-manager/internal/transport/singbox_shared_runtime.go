@@ -116,7 +116,7 @@ type sharedRuntimeHooks struct {
 	interfaceByName  func(string) (*net.Interface, error)
 	ensureRules      func([]TransportSpec) error
 	rulesPresent     func([]TransportSpec) bool
-	removeRules      func(map[string]bool, map[string]TransportSpec)
+	removeRules      func(context.Context, map[string]bool, map[string]TransportSpec) error
 	removeCrashRules func(map[string]bool, map[string]TransportSpec)
 	now              func() time.Time
 	startupGrace     time.Duration
@@ -755,15 +755,17 @@ func (g *SharedSingBoxGroup) removeRulesForActive() {
 }
 
 func (g *SharedSingBoxGroup) removeRulesForTags(tags map[string]bool, specs map[string]TransportSpec) {
-	g.hooks.removeRules(tags, specs)
+	_ = g.hooks.removeRules(context.Background(), tags, specs)
 }
 
-func removeForwardingRulesForTags(tags map[string]bool, specs map[string]TransportSpec) {
+func removeForwardingRulesForTags(ctx context.Context, tags map[string]bool, specs map[string]TransportSpec) error {
+	interfaces := make([]string, 0, len(tags))
 	for tag := range tags {
 		if spec, exists := specs[tag]; exists {
-			removeForwardingRules(spec.Interface, true)
+			interfaces = append(interfaces, spec.Interface)
 		}
 	}
+	return systemForwardingRules.cleanupInterfacesContext(ctx, interfaces, true)
 }
 
 func removeOwnedForwardingRulesForTags(tags map[string]bool, specs map[string]TransportSpec) {
@@ -966,7 +968,14 @@ func (g *SharedSingBoxGroup) Close(ctx context.Context) error {
 			return err
 		}
 	}
-	g.removeRulesForActive()
+	g.mu.RLock()
+	tags := cloneBoolMap(g.activeTags)
+	specs := cloneSpecMap(g.specs)
+	g.mu.RUnlock()
+	// The init script's stop budget covers firewall cleanup as well as the
+	// process and opMu. A fresh timeout per rule can otherwise strand restart
+	// after the old manager eventually exits.
+	cleanupErr := g.hooks.removeRules(ctx, tags, specs)
 	g.mu.Lock()
 	g.process = nil
 	g.state = StateDown
@@ -976,7 +985,7 @@ func (g *SharedSingBoxGroup) Close(ctx context.Context) error {
 		g.memberUpdated[tag] = now
 	}
 	g.mu.Unlock()
-	return nil
+	return cleanupErr
 }
 
 type SharedSingBoxMember struct {

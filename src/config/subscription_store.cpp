@@ -2,6 +2,7 @@
 #include "config_writer.hpp"
 #include "../crypto/sha256.hpp"
 #include "../util/display_name.hpp"
+#include "../util/base64.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -33,6 +34,11 @@ json& require_record(json& records, const std::string& id) {
     throw std::out_of_range("subscription not found");
 }
 void merge_metadata(json& record, const json& metadata) {
+    const bool custom_name = record.value("name_is_custom",
+        record.value("name", "") != record.value("source_host", "") &&
+        record.value("name", "") != record.value("provider_name", ""));
+    if (!custom_name && metadata.contains("provider_name"))
+        record["name"] = metadata.at("provider_name");
     // An unsuccessful refresh keeps the last successful limits and counters.
     // A successful response without the header clears old limits: unknown is
     // not unlimited, nor should the old provider limits look freshly verified.
@@ -45,6 +51,16 @@ void merge_metadata(json& record, const json& metadata) {
         record[it.key()] = it.value();
 }
 } // namespace
+
+std::string parse_subscription_title(const std::string& header) {
+    auto title = trim(header);
+    if (title.size() > 1024U) return {};
+    if (title.compare(0, 7, "base64:") == 0) {
+        try { title = trim(base64_decode(title.substr(7))); }
+        catch (...) { return {}; }
+    }
+    return display_name::is_valid(title, false) ? title : std::string{};
+}
 
 nlohmann::json parse_subscription_userinfo(const std::string& header) {
     json result = json::object();
@@ -89,6 +105,8 @@ std::string subscription_source_host(const std::string& url) {
 
 nlohmann::json public_subscription(nlohmann::json record) {
     record.erase("url");
+    record.erase("name_is_custom");
+    record.erase("provider_name");
     return record;
 }
 
@@ -145,12 +163,16 @@ nlohmann::json SubscriptionStore::save(
     });
     if (it == records.end()) {
         records.push_back({{"id", "sub-" + Sha256::hex(url).substr(0, 24)}, {"url", url},
-                           {"name", subscription_source_host(url)},
+                           {"name", subscription_source_host(url)}, {"name_is_custom", false},
                            {"source_host", subscription_source_host(url)},
                            {"transport_tags", json::array()}});
         it = std::prev(records.end());
     }
-    if (!name.empty()) { check_name(name); (*it)["name"] = name; }
+    if (!name.empty()) {
+        check_name(name);
+        (*it)["name"] = name;
+        (*it)["name_is_custom"] = true;
+    }
     auto linked = (*it).value("transport_tags", std::vector<std::string>{});
     for (const auto& tag : tags)
         if (std::find(linked.begin(), linked.end(), tag) == linked.end()) linked.push_back(tag);
@@ -177,6 +199,7 @@ nlohmann::json SubscriptionStore::rename(const std::string& id, const std::strin
     auto records = read();
     auto& record = require_record(records, id);
     record["name"] = name;
+    record["name_is_custom"] = true;
     const auto result = public_subscription(record);
     write(records);
     return result;

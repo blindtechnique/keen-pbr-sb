@@ -9,6 +9,8 @@ import type { SubscriptionPreviewCandidate } from './subscriptionPreviewCandidat
 import type { SubscriptionPreviewResponseDocumentKind } from './subscriptionPreviewResponseDocumentKind';
 
 export interface SubscriptionPreviewResponse {
+  /** Subscription title supplied by the provider, when available. */
+  subscription_name?: string;
   /**
      * Opaque handle for apply. The links it refers to live only in daemon memory and die with the preview.
 

@@ -282,7 +282,13 @@ func (m *forwardingRuleManager) rulesPresentLocked(interfaceNames []string) (boo
 }
 
 func (m *forwardingRuleManager) cleanupInterfaces(interfaceNames []string, includeLegacy bool) error {
-	m.mu.Lock()
+	return m.cleanupInterfacesContext(context.Background(), interfaceNames, includeLegacy)
+}
+
+func (m *forwardingRuleManager) cleanupInterfacesContext(ctx context.Context, interfaceNames []string, includeLegacy bool) error {
+	if err := lockMutexContext(ctx, &m.mu); err != nil {
+		return err
+	}
 	defer m.mu.Unlock()
 
 	var cleanupErrors []error
@@ -296,7 +302,10 @@ func (m *forwardingRuleManager) cleanupInterfaces(interfaceNames []string, inclu
 				rules = append(rules, legacyForwardingRuleArgs(interfaceName))
 			}
 			for _, rule := range rules {
-				if err := m.removeAllRulesLocked(binary, rule); err != nil {
+				if err := ctx.Err(); err != nil {
+					return errors.Join(append(cleanupErrors, err)...)
+				}
+				if err := m.removeAllRulesLocked(ctx, binary, rule); err != nil {
 					cleanupErrors = append(cleanupErrors, fmt.Errorf("remove forwarding rule for %s with %s: %w", interfaceName, binary, err))
 				}
 			}
@@ -446,12 +455,12 @@ func (m *forwardingRuleManager) dedupeRulePreservingOneLocked(binary string, rul
 	return nil
 }
 
-func (m *forwardingRuleManager) removeAllRulesLocked(binary string, rule []string) error {
+func (m *forwardingRuleManager) removeAllRulesLocked(ctx context.Context, binary string, rule []string) error {
 	if isManagedMarkedForwardingRule(rule) && m.commentSupport[binary] == commentMatchUnavailable {
 		return nil
 	}
 	for deleted := 0; deleted < maximumForwardingRuleDeletes; deleted++ {
-		result, err := m.deleteRuleLocked(binary, rule)
+		result, err := m.deleteRuleContextLocked(ctx, binary, rule)
 		if err != nil {
 			if isManagedMarkedForwardingRule(rule) && errors.Is(err, errCommentMatchUnavailable) {
 				m.commentSupport[binary] = commentMatchUnavailable
@@ -471,10 +480,14 @@ func (m *forwardingRuleManager) removeAllRulesLocked(binary string, rule []strin
 }
 
 func (m *forwardingRuleManager) deleteRuleLocked(binary string, rule []string) (firewallCommandResult, error) {
+	return m.deleteRuleContextLocked(context.Background(), binary, rule)
+}
+
+func (m *forwardingRuleManager) deleteRuleContextLocked(ctx context.Context, binary string, rule []string) (firewallCommandResult, error) {
 	args := append([]string{"-D"}, rule...)
 	ambiguousScaffoldRetryUsed := false
 	for attempt := 0; ; attempt++ {
-		result, err := m.runLocked(binary, args)
+		result, err := m.runContextLocked(ctx, binary, args)
 		if err != nil {
 			return result, err
 		}
@@ -486,7 +499,7 @@ func (m *forwardingRuleManager) deleteRuleLocked(binary string, rule []string) (
 			continue
 		}
 		if isForwardingScaffoldUnavailable(result) {
-			if scaffoldErr := m.confirmForwardingScaffoldLocked(binary); scaffoldErr != nil {
+			if scaffoldErr := m.confirmForwardingScaffoldContextLocked(ctx, binary); scaffoldErr != nil {
 				return result, scaffoldErr
 			}
 			if !ambiguousScaffoldRetryUsed {
@@ -530,9 +543,13 @@ func (m *forwardingRuleManager) ruleCountLocked(binary string, rule []string) (i
 // classify a repeated failure as Keenetic's unavailable comment matcher and
 // use the existing unmarked compatibility rule.
 func (m *forwardingRuleManager) confirmForwardingScaffoldLocked(binary string) error {
+	return m.confirmForwardingScaffoldContextLocked(context.Background(), binary)
+}
+
+func (m *forwardingRuleManager) confirmForwardingScaffoldContextLocked(ctx context.Context, binary string) error {
 	args := []string{"-S", "FORWARD"}
 	for attempt := 0; ; attempt++ {
-		result, err := m.runLocked(binary, args)
+		result, err := m.runContextLocked(ctx, binary, args)
 		if err != nil {
 			return err
 		}
@@ -551,7 +568,14 @@ func (m *forwardingRuleManager) confirmForwardingScaffoldLocked(binary string) e
 }
 
 func (m *forwardingRuleManager) runLocked(binary string, args []string) (firewallCommandResult, error) {
-	waitSupport, err := m.waitSupportLocked(binary)
+	return m.runContextLocked(context.Background(), binary, args)
+}
+
+func (m *forwardingRuleManager) runContextLocked(parent context.Context, binary string, args []string) (firewallCommandResult, error) {
+	if err := parent.Err(); err != nil {
+		return firewallCommandResult{}, err
+	}
+	waitSupport, err := m.waitSupportContextLocked(parent, binary)
 	if err != nil {
 		return firewallCommandResult{}, err
 	}
@@ -562,29 +586,40 @@ func (m *forwardingRuleManager) runLocked(binary string, args []string) (firewal
 	case xtablesWaitFlagOnly:
 		commandArgs = append([]string{"-w"}, commandArgs...)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), forwardingRuleCommandTimeout)
+	ctx, cancel := context.WithTimeout(parent, forwardingRuleCommandTimeout)
 	defer cancel()
-	return m.runner.Run(ctx, binary, commandArgs), nil
+	result := m.runner.Run(ctx, binary, commandArgs)
+	return result, ctx.Err()
 }
 
 func (m *forwardingRuleManager) waitSupportLocked(binary string) (xtablesWaitMode, error) {
+	return m.waitSupportContextLocked(context.Background(), binary)
+}
+
+func (m *forwardingRuleManager) waitSupportContextLocked(parent context.Context, binary string) (xtablesWaitMode, error) {
 	if support := m.waitSupport[binary]; support != xtablesWaitUnknown {
 		return support, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), forwardingRuleCommandTimeout)
+	ctx, cancel := context.WithTimeout(parent, forwardingRuleCommandTimeout)
 	defer cancel()
 	// Probe xtables wait syntax with a chainless listing. FORWARD can
 	// temporarily disappear while NDMS republishes the filter table, and that
 	// runtime state must not be confused with the binary's wait capability.
 	result := m.runner.Run(ctx, binary, []string{"-w", forwardingRuleProbeWaitSeconds, "-S"})
+	if err := ctx.Err(); err != nil {
+		return xtablesWaitUnknown, err
+	}
 	if result.exitCode == 0 || isKnownNoMutationLockFailure(result) {
 		m.waitSupport[binary] = xtablesWaitWithTimeout
 		return xtablesWaitWithTimeout, nil
 	}
 	if isWaitValueUnavailable(result, forwardingRuleProbeWaitSeconds) {
-		bareCtx, bareCancel := context.WithTimeout(context.Background(), forwardingRuleCommandTimeout)
+		bareCtx, bareCancel := context.WithTimeout(parent, forwardingRuleCommandTimeout)
 		defer bareCancel()
 		bareResult := m.runner.Run(bareCtx, binary, []string{"-w", "-S"})
+		if err := bareCtx.Err(); err != nil {
+			return xtablesWaitUnknown, err
+		}
 		if bareResult.exitCode == 0 || isKnownNoMutationLockFailure(bareResult) {
 			m.waitSupport[binary] = xtablesWaitFlagOnly
 			return xtablesWaitFlagOnly, nil

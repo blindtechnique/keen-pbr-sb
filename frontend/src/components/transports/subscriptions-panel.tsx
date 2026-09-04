@@ -1,18 +1,18 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query"
-import { Pencil, Plus, RefreshCw, Trash2 } from "lucide-react"
+import { Plus, RefreshCw } from "lucide-react"
 import { useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
 import {
   getGetSubscriptionsQueryKey,
-  postSubscriptionSource,
   postSubscriptionRefresh,
   postSubscriptionRename,
   postSubscriptionRemove,
   useGetSubscriptions,
 } from "@/api/generated/keen-api"
 import type { SavedSubscription, TransportStatus } from "@/api/generated/model"
+import { KeenPencilIcon, KeenTrashIcon } from "@/components/shared/keen-icons"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -25,9 +25,9 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { subscriptionBytes, subscriptionUsage } from "./subscription-usage"
+import { SubscriptionImportDialog } from "./subscription-import-dialog"
 
 type Action =
-  | { kind: "add"; name: string; url: string }
   | { kind: "rename"; id: string; name: string }
   | { kind: "refresh" | "remove"; id: string }
 
@@ -39,18 +39,16 @@ export function SubscriptionsPanel({
   const { t, i18n } = useTranslation()
   const client = useQueryClient()
   const query = useGetSubscriptions({ query: { retry: false } })
-  const [editing, setEditing] = useState<SavedSubscription | "new" | null>(null)
+  const [editing, setEditing] = useState<SavedSubscription | null>(null)
+  const [importing, setImporting] = useState(false)
   const [removing, setRemoving] = useState<SavedSubscription | null>(null)
   const [name, setName] = useState("")
-  const [url, setUrl] = useState("")
   const names = new Map(
     transports.map((item) => [item.tag, item.display_name || item.tag])
   )
   const mutation = useMutation({
     mutationFn: async (action: Action) => {
       switch (action.kind) {
-        case "add":
-          return postSubscriptionSource({ name: action.name, url: action.url })
         case "rename":
           return postSubscriptionRename({ id: action.id, name: action.name })
         case "refresh":
@@ -63,9 +61,8 @@ export function SubscriptionsPanel({
       await client.invalidateQueries({
         queryKey: getGetSubscriptionsQueryKey(),
       })
-      if (action.kind === "add" || action.kind === "rename") {
+      if (action.kind === "rename") {
         setEditing(null)
-        setUrl("")
       }
       if (action.kind === "remove") setRemoving(null)
       if ("error" in response.data && response.data.error)
@@ -79,16 +76,14 @@ export function SubscriptionsPanel({
     },
   })
   const records = query.data?.status === 200 ? query.data.data : []
-  const edit = (record: SavedSubscription | "new") => {
+  const edit = (record: SavedSubscription) => {
     mutation.reset()
-    setName(record === "new" ? "" : record.name)
-    setUrl("")
+    setName(record.name)
     setEditing(record)
   }
   const close = () => {
     if (!mutation.isPending) {
       setEditing(null)
-      setUrl("")
       mutation.reset()
     }
   }
@@ -104,7 +99,11 @@ export function SubscriptionsPanel({
         <p className="max-w-3xl text-sm text-muted-foreground">
           {t("subscriptions.description")}
         </p>
-        <Button onClick={() => edit("new")} variant="outline">
+        <Button
+          onClick={() => setImporting(true)}
+          variant="outline"
+          disabled={importing || mutation.isPending}
+        >
           <Plus />
           {t("subscriptions.add")}
         </Button>
@@ -158,7 +157,8 @@ export function SubscriptionsPanel({
               <div className="flex shrink-0 gap-1">
                 <Button
                   size="icon"
-                  variant="ghost"
+                  variant="outline"
+                  className="keen-row-action size-8 rounded-[4px]"
                   disabled={mutation.isPending}
                   aria-label={t("subscriptions.refresh")}
                   title={t("subscriptions.refresh")}
@@ -166,21 +166,25 @@ export function SubscriptionsPanel({
                     mutation.mutate({ kind: "refresh", id: record.id })
                   }
                 >
-                  <RefreshCw className={refreshing ? "animate-spin" : ""} />
+                  <RefreshCw
+                    className={refreshing ? "size-4 animate-spin" : "size-4"}
+                  />
                 </Button>
                 <Button
                   size="icon"
-                  variant="ghost"
+                  variant="outline"
+                  className="keen-row-action size-8 rounded-[4px]"
                   disabled={mutation.isPending}
                   aria-label={t("subscriptions.rename")}
                   title={t("subscriptions.rename")}
                   onClick={() => edit(record)}
                 >
-                  <Pencil />
+                  <KeenPencilIcon className="size-4" />
                 </Button>
                 <Button
                   size="icon"
-                  variant="ghost"
+                  variant="outline"
+                  className="keen-row-action keen-row-action--danger size-8 rounded-[4px]"
                   disabled={mutation.isPending}
                   aria-label={t("subscriptions.remove")}
                   title={t("subscriptions.remove")}
@@ -189,7 +193,7 @@ export function SubscriptionsPanel({
                     setRemoving(record)
                   }}
                 >
-                  <Trash2 />
+                  <KeenTrashIcon className="size-4" />
                 </Button>
               </div>
             </div>
@@ -276,6 +280,14 @@ export function SubscriptionsPanel({
           </article>
         )
       })}
+      {importing ? (
+        <SubscriptionImportDialog
+          open
+          onOpenChange={setImporting}
+          onComplete={() => setImporting(false)}
+          onResultsDismiss={() => setImporting(false)}
+        />
+      ) : null}
       <Dialog
         open={editing !== null}
         onOpenChange={(open) => {
@@ -284,57 +296,31 @@ export function SubscriptionsPanel({
       >
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle>
-              {editing === "new"
-                ? t("subscriptions.add")
-                : t("subscriptions.rename")}
-            </DialogTitle>
+            <DialogTitle>{t("subscriptions.rename")}</DialogTitle>
           </DialogHeader>
           <form
             className="space-y-4"
             onSubmit={(event) => {
               event.preventDefault()
               if (!editing || mutation.isPending) return
-              mutation.mutate(
-                editing === "new"
-                  ? { kind: "add", name: name.trim(), url: url.trim() }
-                  : { kind: "rename", id: editing.id, name: name.trim() }
-              )
+              mutation.mutate({
+                kind: "rename",
+                id: editing.id,
+                name: name.trim(),
+              })
             }}
           >
-            {editing === "new" ? (
-              <label className="block space-y-1 text-sm">
-                <span>{t("subscriptions.url")}</span>
-                <Input
-                  autoFocus
-                  type="url"
-                  required
-                  value={url}
-                  onChange={(event) => setUrl(event.target.value)}
-                  disabled={mutation.isPending}
-                />
-              </label>
-            ) : null}
             <label className="block space-y-1 text-sm">
-              <span>
-                {editing === "new"
-                  ? t("subscriptions.optionalName")
-                  : t("subscriptions.name")}
-              </span>
+              <span>{t("subscriptions.name")}</span>
               <Input
-                autoFocus={editing !== "new"}
-                required={editing !== "new"}
+                autoFocus
+                required
                 maxLength={80}
                 value={name}
                 onChange={(event) => setName(event.target.value)}
                 disabled={mutation.isPending}
               />
             </label>
-            {editing === "new" ? (
-              <p className="text-xs text-muted-foreground">
-                {t("subscriptions.addHint")}
-              </p>
-            ) : null}
             {mutation.isError ? (
               <p role="alert" className="text-sm text-destructive">
                 {t("subscriptions.saveFailed")}

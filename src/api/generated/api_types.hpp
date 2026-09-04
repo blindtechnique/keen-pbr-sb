@@ -1784,6 +1784,7 @@ namespace api {
         DocumentKind document_kind;
         int64_t expires_in_seconds = 0;
         std::string preview_id;
+        std::optional<std::string> subscription_name;
     };
 
     struct SubscriptionRenameRequest {
@@ -6388,6 +6389,7 @@ namespace api {
         x.document_kind = j.at("document_kind").get<DocumentKind>();
         x.expires_in_seconds = j.at("expires_in_seconds").get<int64_t>();
         x.preview_id = j.at("preview_id").get<std::string>();
+        x.subscription_name = get_stack_optional<std::string>(j, "subscription_name");
     }
 
     inline void to_json(json & j, const SubscriptionPreviewResponse & x) {
@@ -6396,6 +6398,7 @@ namespace api {
         j["document_kind"] = x.document_kind;
         j["expires_in_seconds"] = x.expires_in_seconds;
         j["preview_id"] = x.preview_id;
+        j["subscription_name"] = x.subscription_name;
     }
 
     inline void from_json(const json & j, SubscriptionRenameRequest& x) {

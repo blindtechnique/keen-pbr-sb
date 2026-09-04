@@ -288,7 +288,8 @@ bool stop_routing_best_effort(
     const std::string& reason,
     bool applied,
     bool rolled_back,
-    const std::string& recovery_error = {}) {
+    const std::string& recovery_error = {},
+    const std::string& apply_error = {}) {
     const bool runtime_quiesced =
         stop_routing_best_effort(ctx, config_operation);
     nlohmann::json payload = {
@@ -302,6 +303,9 @@ bool stop_routing_best_effort(
     if (!recovery_error.empty()) {
         payload["recovery_error"] = recovery_error;
     }
+    if (!apply_error.empty()) payload["apply_error"] = apply_error;
+    Logger::instance().error("Config save recovery required: {}; apply: {}; recovery: {}",
+                             reason, apply_error, recovery_error);
     throw ApiError(
         "Persistent recovery required",
         503,
@@ -961,6 +965,10 @@ std::string commit_prepared_config_impl(
 
         if (!apply_result.error.empty() ||
             !apply_result.applied) {
+            // Keep the original failure even when a subsequent service restart
+            // also fails. The rollback error must not hide why Apply stopped.
+            Logger::instance().error("Config apply failed: {}; rolled_back={}; runtime_unchanged={}",
+                apply_result.error, apply_result.rolled_back, apply_result.runtime_unchanged);
             if (!apply_result.rolled_back &&
                 !apply_result.runtime_unchanged) {
                 fail_lifecycle_best_effort(
@@ -1014,7 +1022,8 @@ std::string commit_prepared_config_impl(
                     "proven",
                     apply_result.applied,
                     true,
-                    recovery_error);
+                    recovery_error,
+                    apply_result.error);
             }
 
             fail_lifecycle_best_effort(

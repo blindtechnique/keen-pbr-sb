@@ -1655,6 +1655,10 @@ TEST_CASE(
               "Cannot verify config-save recovery journal: Restore journal "
               "is unsafe: Restore rollback payload size does not match "
               "active marker");
+        if (failure.runtime_rolled_back)
+            CHECK(payload.at("apply_error") == "synthetic runtime apply failure");
+        else
+            CHECK_FALSE(payload.contains("apply_error"));
         CHECK(validation_calls == 1U);
         CHECK(write_calls == 1U);
         CHECK(apply_calls ==

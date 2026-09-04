@@ -32,6 +32,28 @@ TEST_CASE("subscription provider counters preserve unknown and zero") {
     CHECK_FALSE(unspecified.contains("expires_at"));
 }
 
+TEST_CASE("subscription provider title accepts plain and base64 names") {
+    CHECK(parse_subscription_title(" Тариф VPN ") == "Тариф VPN");
+    CHECK(parse_subscription_title("base64:UGxhbg==") == "Plan");
+    CHECK(parse_subscription_title("").empty());
+    CHECK(parse_subscription_title("base64:!invalid!").empty());
+    CHECK(parse_subscription_title("one\ntwo").empty());
+}
+
+TEST_CASE("provider name fills subscription names without overwriting a rename") {
+    SubscriptionDirectory directory;
+    SubscriptionStore store((directory.path / "subscriptions.json").string());
+    const std::string url = "https://provider.example/sub";
+    const auto initial = store.save(url, "", {{"provider_name", "Provider plan"}}, {"vpn1"});
+    const auto id = initial.at("id").get<std::string>();
+    CHECK(initial.at("name") == "Provider plan");
+    CHECK_FALSE(initial.contains("name_is_custom"));
+    CHECK(store.refresh(id, {{"provider_name", "Updated plan"}}).at("name") == "Updated plan");
+    CHECK(store.rename(id, "My name").at("name") == "My name");
+    CHECK(store.refresh(id, {{"provider_name", "Another plan"}}).at("name") == "My name");
+    CHECK(store.save(url, "", {{"provider_name", "Reimported plan"}}, {"vpn2"}).at("name") == "My name");
+}
+
 TEST_CASE("subscription header rejects malformed overflowing and ambiguous fields") {
     CHECK(parse_subscription_userinfo("upload=-1; download=1e9; total=999999999999999999999; expire=9007199254740991").empty());
     CHECK(parse_subscription_userinfo("total=100; total=200; total=300").empty());

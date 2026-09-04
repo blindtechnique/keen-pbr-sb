@@ -14,6 +14,20 @@ const base: SavedSubscription = {
   checked_at: 1,
 }
 describe("subscription metadata presentation", () => {
+  test("Add subscription uses the existing VPN import workflow, not metadata-only save", () => {
+    const source = readFileSync(
+      new URL(
+        "../src/components/transports/subscriptions-panel.tsx",
+        import.meta.url
+      ),
+      "utf8"
+    )
+    expect(source).toContain("<SubscriptionImportDialog")
+    expect(source).not.toContain("postSubscriptionSource")
+    expect(source).toContain("<KeenPencilIcon")
+    expect(source).toContain("<KeenTrashIcon")
+    expect(source).toContain("keen-row-action keen-row-action--danger size-8")
+  })
   test("missing counters or limits are unknown, not zero or unlimited", () => {
     expect(subscriptionUsage(base).remaining).toBeUndefined()
     expect(

@@ -126,6 +126,9 @@ export function SubscriptionImportDialog({
         onSuccess: (response) => {
           if (response.status === 200) {
             setPreview(response.data)
+            setSubscriptionName(
+              (current) => current || response.data.subscription_name || ""
+            )
             setSelected(initialSelectedLines(response.data.candidates))
             setOverrides(new Map())
           }
@@ -177,7 +180,10 @@ export function SubscriptionImportDialog({
         data: {
           preview_id: preview.preview_id,
           selections,
-          subscription_name: subscriptionName.trim() || undefined,
+          subscription_name:
+            subscriptionName.trim() === preview.subscription_name
+              ? undefined
+              : subscriptionName.trim() || undefined,
         },
       },
       {

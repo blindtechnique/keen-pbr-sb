@@ -167,10 +167,11 @@ func (f *fakeSharedRuntime) hooks() sharedRuntimeHooks {
 			defer f.mu.Unlock()
 			return !f.rulesMissing
 		},
-		removeRules: func(map[string]bool, map[string]TransportSpec) {
+		removeRules: func(context.Context, map[string]bool, map[string]TransportSpec) error {
 			f.mu.Lock()
 			f.removeCalls++
 			f.mu.Unlock()
+			return nil
 		},
 		removeCrashRules: func(map[string]bool, map[string]TransportSpec) {
 			f.mu.Lock()

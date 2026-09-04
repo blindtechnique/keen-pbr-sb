@@ -9,6 +9,7 @@ namespace keen_pbr3 {
 
 // Only provider counters are stored, never subscription bodies or share links.
 nlohmann::json parse_subscription_userinfo(const std::string& header);
+std::string parse_subscription_title(const std::string& header);
 std::string subscription_source_host(const std::string& url);
 nlohmann::json public_subscription(nlohmann::json record);
 
