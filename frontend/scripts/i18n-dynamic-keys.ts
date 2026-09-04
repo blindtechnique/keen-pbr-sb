@@ -19,6 +19,13 @@ export type DynamicTranslationUsage = Readonly<{
  */
 export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
   {
+    file: "src/components/overview/target-facts.tsx",
+    argument: "`overview.targetFacts.availability.reasons.${probe.reason}`",
+    keys: ["overview.targetFacts.availability.reasons.*"],
+    reason:
+      "SiteProbeFailure is the finite failure-reason union in site-probe-model.ts.",
+  },
+  {
     file: "src/components/shared/interface-picker.tsx",
     argument: "`common.interfacePicker.kinds.${*}`",
     keys: ["common.interfacePicker.kinds.*"],

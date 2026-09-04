@@ -30,7 +30,14 @@ import { getApiErrorMessage } from "@/lib/api-errors"
 
 import { RoutingDiagnosticsResult } from "./routing-diagnostics-result"
 import { sanitizeRoutingTarget } from "./sanitize-routing-target"
-import { TargetFacts, type SiteAvailability } from "./target-facts"
+import { TargetFacts } from "./target-facts"
+import {
+  probeBrowserReachability,
+  routerProbeRequestFailure,
+  routerProbeResult,
+  type SiteProbeResult,
+  type SiteProbeState,
+} from "./site-probe-model"
 
 export function RoutingTestPanel({
   lists,
@@ -69,31 +76,24 @@ export function RoutingTestPanel({
   })
   const registrySaving =
     registryConsentQuery.isPending || consentMutation.isPending
-  const siteAvailabilityMutation = useMutation({
+  const browserProbeMutation = useMutation({
     mutationFn: async ({ target, url }: { target: string; url: string }) => {
-      const [browserProbe, routerProbe] = await Promise.allSettled([
-        probeBrowserReachability(url),
-        nfqwsAction<NfqwsActionResult>({
+      return { target, result: await probeBrowserReachability(url) }
+    },
+  })
+  const routerProbeMutation = useMutation({
+    mutationFn: async ({ target, url }: { target: string; url: string }) => {
+      let result: SiteProbeResult
+      try {
+        const response = await nfqwsAction<NfqwsActionResult>({
           action: "check_url",
           url,
-        }).then((response) => {
-          if (typeof response.reachable !== "boolean") {
-            throw new TypeError()
-          }
-          return response.reachable
-        }),
-      ])
-
-      const browserReachable =
-        browserProbe.status === "fulfilled" && browserProbe.value
-      const routerReachable =
-        routerProbe.status === "fulfilled" && routerProbe.value
-
-      if (!browserReachable && routerProbe.status === "rejected") {
-        throw routerProbe.reason
+        })
+        result = routerProbeResult(response)
+      } catch (error) {
+        result = routerProbeRequestFailure(error)
       }
-
-      return { reachable: browserReachable || routerReachable, target }
+      return { target, result }
     },
   })
   const routingDiagnostics =
@@ -102,17 +102,16 @@ export function RoutingTestPanel({
         ? routingTestMutation.data.data
         : undefined
       : undefined
-  const siteAvailability: SiteAvailability = !activeTarget
-    ? "idle"
-    : siteAvailabilityMutation.isPending
-      ? "checking"
-      : siteAvailabilityMutation.isError
-        ? "error"
-        : siteAvailabilityMutation.data?.target === activeTarget
-          ? siteAvailabilityMutation.data.reachable
-            ? "reachable"
-            : "unreachable"
-          : "idle"
+  const browserProbe: SiteProbeState = browserProbeMutation.isPending
+    ? { status: "checking" }
+    : browserProbeMutation.data?.target === activeTarget
+      ? browserProbeMutation.data.result
+      : { status: "idle" }
+  const routerProbe: SiteProbeState = routerProbeMutation.isPending
+    ? { status: "checking" }
+    : routerProbeMutation.data?.target === activeTarget
+      ? routerProbeMutation.data.result
+      : { status: "idle" }
 
   return (
     <SectionCard title={t("overview.routingTest.title")}>
@@ -135,10 +134,12 @@ export function RoutingTestPanel({
           }
           setActiveTarget(sanitized)
           routingTestMutation.mutate({ data: { target: sanitized } })
-          siteAvailabilityMutation.mutate({
+          const probe = {
             target: sanitized,
             url: siteCheckUrl(testTarget, sanitized),
-          })
+          }
+          browserProbeMutation.mutate(probe)
+          routerProbeMutation.mutate(probe)
         }}
       >
         <InputGroup>
@@ -219,7 +220,8 @@ export function RoutingTestPanel({
           nfqws={routingDiagnostics?.nfqws}
           nfqwsPending={routingTestMutation.isPending}
           registryEnabled={registryEnabled}
-          siteAvailability={siteAvailability}
+          browserProbe={browserProbe}
+          routerProbe={routerProbe}
           target={activeTarget}
         />
       ) : null}
@@ -273,25 +275,4 @@ function siteCheckUrl(input: string, target: string): string {
   }
   const host = target.includes(":") ? `[${target}]` : target
   return `https://${host}/`
-}
-
-async function probeBrowserReachability(url: string): Promise<boolean> {
-  const controller = new AbortController()
-  const timeout = window.setTimeout(() => controller.abort(), 10_000)
-
-  try {
-    const response = await fetch(url, {
-      cache: "no-store",
-      credentials: "omit",
-      mode: "no-cors",
-      referrerPolicy: "no-referrer",
-      signal: controller.signal,
-    })
-    await response.body?.cancel().catch(() => undefined)
-    return true
-  } catch {
-    return false
-  } finally {
-    window.clearTimeout(timeout)
-  }
 }

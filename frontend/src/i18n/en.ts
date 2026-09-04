@@ -1633,7 +1633,7 @@ export const enTranslation = {
       processRunning: "Process running",
       verificationPending: "Awaiting verification",
       healthy: "Working",
-      runtimeDegraded: "Not working",
+      runtimeDegraded: "Has issues",
       runtimeUnavailable: "Unresponsive",
       runtimeUnknown: "Status unknown",
     },
@@ -2078,12 +2078,32 @@ export const enTranslation = {
     targetFacts: {
       availabilityTitle: "Website availability",
       availability: {
+        device: "This device",
+        router: "Router",
         idle: "The check has not run yet.",
         checking: "Checking availability…",
-        reachable: "The website responds.",
-        unreachable:
-          "The website did not respond to either this device or the router.",
-        error: "The availability check could not be completed.",
+        responded: "Response received.",
+        httpResponse: "The server responded: HTTP {{status}}.",
+        unconfirmed: "The check did not complete successfully.",
+        checkScope:
+          "A failed check does not mean the website or VPN is unavailable. The router may use a different path from this device.",
+        details: "Check details",
+        reasons: {
+          browser:
+            "The browser did not complete the request: a network error or browser restriction may be responsible.",
+          timeout: "No response was received within the time limit.",
+          dns: "The router could not resolve the website's IP address through DNS.",
+          tls: "A secure connection to the website (TLS) could not be established.",
+          connection:
+            "The router could not connect, or the connection was interrupted.",
+          sizeLimit: "The response exceeded this check's size limit.",
+          request:
+            "The panel did not receive the check result from the router.",
+          invalidResponse:
+            "The router returned a response without a check result.",
+          unknown:
+            "The router could not complete the HTTP request to the website.",
+        },
       },
       nfqwsTitle: "nfqws",
       nfqwsChecking: "Checking whether DPI circumvention applies…",

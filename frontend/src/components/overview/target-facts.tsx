@@ -1,4 +1,4 @@
-import { CircleCheck, CircleX, Loader2 } from "lucide-react"
+import { CircleCheck, CircleHelp, Loader2 } from "lucide-react"
 import { useEffect, useRef } from "react"
 import { useTranslation } from "react-i18next"
 
@@ -10,9 +10,7 @@ import {
   registryVerdict,
   summariseNfqwsCoverage,
 } from "./target-facts-model"
-
-export type SiteAvailability =
-  "idle" | "checking" | "reachable" | "unreachable" | "error"
+import type { SiteProbeState } from "./site-probe-model"
 
 /**
  * Three facts about the target that the routing verdict does not answer,
@@ -26,13 +24,15 @@ export function TargetFacts({
   nfqws,
   nfqwsPending = false,
   registryEnabled,
-  siteAvailability,
+  browserProbe,
+  routerProbe,
   target,
 }: {
   nfqws?: RoutingTestNfqws
   nfqwsPending?: boolean
   registryEnabled: boolean
-  siteAvailability: SiteAvailability
+  browserProbe: SiteProbeState
+  routerProbe: SiteProbeState
   target: string
 }) {
   const { t } = useTranslation()
@@ -72,32 +72,22 @@ export function TargetFacts({
         <div className="text-xs font-medium">
           {t("overview.targetFacts.availabilityTitle")}
         </div>
-        <div aria-atomic="true" aria-live="polite">
-          {siteAvailability === "checking" ? (
-            <p className="inline-flex items-center gap-2 text-sm text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              {t("overview.targetFacts.availability.checking")}
-            </p>
-          ) : siteAvailability === "reachable" ? (
-            <p className="inline-flex items-center gap-2 text-sm text-green-700">
-              <CircleCheck className="h-4 w-4" />
-              {t("overview.targetFacts.availability.reachable")}
-            </p>
-          ) : siteAvailability === "unreachable" ? (
-            <p className="inline-flex items-center gap-2 text-sm text-destructive">
-              <CircleX className="h-4 w-4" />
-              {t("overview.targetFacts.availability.unreachable")}
-            </p>
-          ) : siteAvailability === "error" ? (
-            <p className="text-sm text-destructive">
-              {t("overview.targetFacts.availability.error")}
-            </p>
-          ) : (
-            <p className="text-sm text-muted-foreground">
-              {t("overview.targetFacts.availability.idle")}
-            </p>
-          )}
+        <div className="space-y-2" aria-live="polite">
+          <SiteProbeLine
+            label={t("overview.targetFacts.availability.device")}
+            probe={browserProbe}
+          />
+          <SiteProbeLine
+            label={t("overview.targetFacts.availability.router")}
+            probe={routerProbe}
+          />
         </div>
+        {browserProbe.status === "unconfirmed" ||
+        routerProbe.status === "unconfirmed" ? (
+          <p className="text-xs text-muted-foreground">
+            {t("overview.targetFacts.availability.checkScope")}
+          </p>
+        ) : null}
       </div>
 
       <div className="space-y-1">
@@ -171,6 +161,64 @@ export function TargetFacts({
           ) : null}
         </div>
       </div>
+    </div>
+  )
+}
+
+function SiteProbeLine({
+  label,
+  probe,
+}: {
+  label: string
+  probe: SiteProbeState
+}) {
+  const { t } = useTranslation()
+  const responded = probe.status === "responded"
+  return (
+    <div className="space-y-1">
+      <p
+        className={`flex items-center gap-2 text-sm ${responded ? "text-green-700" : "text-muted-foreground"}`}
+      >
+        {probe.status === "checking" ? (
+          <Loader2
+            aria-hidden="true"
+            className="h-4 w-4 shrink-0 animate-spin"
+          />
+        ) : responded ? (
+          <CircleCheck aria-hidden="true" className="h-4 w-4 shrink-0" />
+        ) : (
+          <CircleHelp aria-hidden="true" className="h-4 w-4 shrink-0" />
+        )}
+        <span>
+          <span className="font-medium">{label}: </span>
+          {probe.status === "checking"
+            ? t("overview.targetFacts.availability.checking")
+            : probe.status === "idle"
+              ? t("overview.targetFacts.availability.idle")
+              : probe.status === "responded"
+                ? probe.httpStatus
+                  ? t("overview.targetFacts.availability.httpResponse", {
+                      status: probe.httpStatus,
+                    })
+                  : t("overview.targetFacts.availability.responded")
+                : t("overview.targetFacts.availability.unconfirmed")}
+        </span>
+      </p>
+      {probe.status === "unconfirmed" ? (
+        <>
+          <p className="pl-6 text-xs text-muted-foreground">
+            {t(`overview.targetFacts.availability.reasons.${probe.reason}`)}
+          </p>
+          {probe.detail ? (
+            <details className="pl-6 text-xs text-muted-foreground">
+              <summary className="cursor-pointer">
+                {t("overview.targetFacts.availability.details")}
+              </summary>
+              <p className="mt-1 [overflow-wrap:anywhere]">{probe.detail}</p>
+            </details>
+          ) : null}
+        </>
+      ) : null}
     </div>
   )
 }
