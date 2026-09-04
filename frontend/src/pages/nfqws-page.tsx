@@ -121,6 +121,7 @@ import {
   type NfqwsUpgradeCapability,
 } from "@/lib/nfqws-upgrade-capability"
 import {
+  canSnapshotActiveNfqwsConfig,
   canonicalNfqwsProfileTier,
   nfqwsBreakdownSubject,
   nfqwsProfileMatchesPackage,
@@ -1717,6 +1718,10 @@ function StrategiesEditor({
         name: "nfqws2.conf",
       }),
   })
+  const canSnapshotActiveConfig = canSnapshotActiveNfqwsConfig({
+    activeStrategy: status.active_strategy,
+    activeConfigContent: activeConfigQuery.data?.content,
+  })
   const saveActiveAsStrategy = async (name: string) => {
     const activeContent = activeConfigQuery.data?.content
     if (activeContent === undefined) return
@@ -1966,8 +1971,15 @@ function StrategiesEditor({
             строку целиком, как главному действию. */}
         <div className="col-span-2 *:w-full sm:col-auto sm:*:w-auto">
           <Button
-            disabled={activeConfigQuery.data === undefined}
+            disabled={!canSnapshotActiveConfig}
             onClick={() => setSnapshotting(true)}
+            title={
+              status.active_strategy
+                ? t("nfqws.snapshotActiveAlreadySaved", {
+                    name: displayStrategyName(status.active_strategy),
+                  })
+                : undefined
+            }
             variant="outline"
           >
             <SaveIcon />

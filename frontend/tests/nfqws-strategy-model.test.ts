@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 
 import {
+  canSnapshotActiveNfqwsConfig,
   canonicalNfqwsProfileTier,
   nfqwsProfileMatchesPackage,
   nfqwsBreakdownSubject,
@@ -9,6 +10,35 @@ import {
   parseNfqwsStrategy,
   parseShellAssignments,
 } from "../src/pages/nfqws-strategy-model"
+
+describe("active nfqws config snapshot", () => {
+  test("is offered only for a loaded custom configuration", () => {
+    expect(
+      canSnapshotActiveNfqwsConfig({
+        activeStrategy: "",
+        activeConfigContent: "NFQWS_ARGS=''",
+      })
+    ).toBe(true)
+    expect(
+      canSnapshotActiveNfqwsConfig({
+        activeStrategy: "",
+        activeConfigContent: "",
+      })
+    ).toBe(true)
+    expect(
+      canSnapshotActiveNfqwsConfig({
+        activeStrategy: "02 balanced",
+        activeConfigContent: "NFQWS_ARGS=''",
+      })
+    ).toBe(false)
+    expect(
+      canSnapshotActiveNfqwsConfig({
+        activeStrategy: "",
+        activeConfigContent: undefined,
+      })
+    ).toBe(false)
+  })
+})
 
 const SAMPLE = `# a real strategy-shaped subset
 NFQWS_BASE_ARGS="--lua-init=@/x.lua --blob=quic:@/q.bin --blob=tls:@/t.bin"

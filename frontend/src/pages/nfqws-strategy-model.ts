@@ -660,6 +660,22 @@ export function nfqwsProfileMatchesPackage(
   return strategy.canonical === true
 }
 
+/**
+ * The active file needs a snapshot only when it matches no saved strategy.
+ * Loading the file is a separate prerequisite: an empty file is still a
+ * loaded, valid snapshot source, while `undefined` means there is no content
+ * to save yet.
+ */
+export function canSnapshotActiveNfqwsConfig(params: {
+  readonly activeStrategy: string
+  readonly activeConfigContent: string | undefined
+}): boolean {
+  return (
+    params.activeStrategy.length === 0 &&
+    params.activeConfigContent !== undefined
+  )
+}
+
 export type NfqwsBuiltinStrategyDisplayKey =
   | "ver5Aggressive"
   | "ver7MoreAggressive"

@@ -125,6 +125,8 @@ export const enTranslation = {
     customConfigDescription:
       "The active nfqws2.conf matches none of the strategies in the list - that happens after editing it on the Settings tab or over ssh. Save it as a strategy, or the first Apply will overwrite it for good.",
     snapshotActive: "Save the current one as a strategy",
+    snapshotActiveAlreadySaved:
+      "The current configuration is already saved as strategy “{{name}}”.",
     snapshotActiveDescription:
       "The whole active nfqws2.conf becomes a new strategy - with every setting, port and argument it currently holds.",
     applyConfirmTitle: "Apply the strategy?",
