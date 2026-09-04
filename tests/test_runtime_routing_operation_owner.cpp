@@ -303,6 +303,99 @@ TEST_CASE("runtime routing inventory authority has one fail-closed classifier") 
           RuntimeRoutingInventoryAuthority::kernel_state_unknown);
 }
 
+TEST_CASE("runtime routing inventory drift check is read-only and concrete-family aware") {
+    RuntimeRoutingInventorySnapshot inventory;
+    inventory.routes = {route_for(150)};
+    auto dual_stack_rule = rule_for(150);
+    dual_stack_rule.family = 0;
+    inventory.rules = {dual_stack_rule};
+
+    DumpedRoute live_route;
+    live_route.destination = "default";
+    live_route.table = 150;
+    live_route.blackhole = true;
+    live_route.family = AF_INET;
+    live_route.protocol = KEEN_PBR_GENERATED_ROUTE_PROTOCOL;
+    const auto live_rule = [](int family) {
+        DumpedRule rule;
+        rule.priority = 150;
+        rule.fwmark = 150;
+        rule.fwmask = 0xFFFFFFFFU;
+        rule.table = 150;
+        rule.family = family;
+        return rule;
+    };
+
+    const std::vector<DumpedRoute> live_routes{live_route};
+    const std::vector<DumpedRule> live_rules{
+        live_rule(AF_INET), live_rule(AF_INET6)};
+    CHECK(
+        classify_runtime_routing_inventory_live_state(
+            inventory, live_routes, live_rules) ==
+        RuntimeRoutingInventoryLiveState::healthy);
+
+    CHECK(
+        classify_runtime_routing_inventory_live_state(
+            inventory, {}, live_rules) ==
+        RuntimeRoutingInventoryLiveState::missing);
+    CHECK(
+        classify_runtime_routing_inventory_live_state(
+            inventory, live_routes, {live_rule(AF_INET)}) ==
+        RuntimeRoutingInventoryLiveState::missing);
+
+    SUBCASE("changed or unrepresentable route slot is inconclusive") {
+        auto changed = live_route;
+        changed.protocol = 4U;
+        CHECK(
+            classify_runtime_routing_inventory_live_state(
+                inventory, {changed}, live_rules) ==
+            RuntimeRoutingInventoryLiveState::inconclusive);
+
+        auto unrepresentable = live_route;
+        unrepresentable.exact_identity_representable = false;
+        CHECK(
+            classify_runtime_routing_inventory_live_state(
+                inventory, {unrepresentable}, live_rules) ==
+            RuntimeRoutingInventoryLiveState::inconclusive);
+    }
+
+    SUBCASE("duplicate exact route slot is inconclusive") {
+        CHECK(
+            classify_runtime_routing_inventory_live_state(
+                inventory, {live_route, live_route}, live_rules) ==
+            RuntimeRoutingInventoryLiveState::inconclusive);
+    }
+
+    SUBCASE("unrepresentable or duplicate rule identity is inconclusive") {
+        auto unrepresentable_v6 = live_rule(AF_INET6);
+        unrepresentable_v6.exact_identity_representable = false;
+        CHECK(
+            classify_runtime_routing_inventory_live_state(
+                inventory,
+                live_routes,
+                {live_rule(AF_INET), unrepresentable_v6}) ==
+            RuntimeRoutingInventoryLiveState::inconclusive);
+
+        CHECK(
+            classify_runtime_routing_inventory_live_state(
+                inventory,
+                live_routes,
+                {live_rule(AF_INET),
+                 live_rule(AF_INET6),
+                 live_rule(AF_INET6)}) ==
+            RuntimeRoutingInventoryLiveState::inconclusive);
+    }
+
+    SUBCASE("a conflict dominates an unrelated repairable absence") {
+        auto changed = live_route;
+        changed.protocol = 4U;
+        CHECK(
+            classify_runtime_routing_inventory_live_state(
+                inventory, {changed}, {live_rule(AF_INET)}) ==
+            RuntimeRoutingInventoryLiveState::inconclusive);
+    }
+}
+
 TEST_CASE("runtime routing owner rejects invalid stale and replayed identity before netlink") {
     RecordingRuntimeRoutingNetlink netlink;
     auto owner = make_owner(netlink);

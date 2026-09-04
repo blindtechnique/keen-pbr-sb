@@ -104,6 +104,15 @@ api::RuntimeOutboundsResponse build_for(
 
 } // namespace
 
+TEST_CASE("interface probe freshness follows the production rotation cadence") {
+    CHECK(runtime_outbound_detail::interface_probe_freshness_limit(2) ==
+          std::chrono::seconds{60});
+    CHECK(runtime_outbound_detail::interface_probe_freshness_limit(5) ==
+          std::chrono::seconds{80});
+    CHECK(runtime_outbound_detail::interface_probe_freshness_limit(12) ==
+          std::chrono::seconds{140});
+}
+
 TEST_CASE("probe classification refuses to call unattributable evidence health") {
     const auto now = std::chrono::steady_clock::time_point{} +
                      std::chrono::hours(9);
@@ -146,6 +155,20 @@ TEST_CASE("probe classification refuses to call unattributable evidence health")
               ProbeVerdict::Verified);
     }
 
+    SUBCASE("cadence boundary is current at the limit and stale after it") {
+        const auto freshness_limit =
+            runtime_outbound_detail::interface_probe_freshness_limit(12);
+        CHECK(runtime_outbound_detail::classify_interface_probe(
+                  probe_result(
+                      true, /*attributed=*/true, now - freshness_limit),
+                  now, freshness_limit) == ProbeVerdict::Verified);
+        CHECK(runtime_outbound_detail::classify_interface_probe(
+                  probe_result(
+                      true, /*attributed=*/true,
+                      now - freshness_limit - std::chrono::seconds{1}),
+                  now, freshness_limit) == ProbeVerdict::Unverifiable);
+    }
+
     // steady_clock's epoch is boot time on Linux, so an unstamped result is
     // only old once the machine has been up a while. The clock is injected
     // here rather than read, so this pins the rule and not the uptime.
@@ -157,6 +180,60 @@ TEST_CASE("probe classification refuses to call unattributable evidence health")
                                                                 now) ==
               ProbeVerdict::Unverifiable);
     }
+}
+
+TEST_CASE(
+    "runtime outbound builder derives probe freshness from configured "
+    "interface count") {
+    const auto now = std::chrono::steady_clock::time_point{} +
+                     std::chrono::hours(9);
+
+    Config config;
+    std::vector<Outbound> outbounds;
+    for (std::size_t index = 0; index < 12; ++index) {
+        Outbound outbound;
+        outbound.tag = "member-" + std::to_string(index);
+        outbound.type = OutboundType::INTERFACE;
+        outbound.interface = "nwg" + std::to_string(index);
+        outbounds.push_back(std::move(outbound));
+    }
+
+    api::OutboundGroupElement members;
+    members.outbounds = std::vector<std::string>{"member-0"};
+    Outbound urltest;
+    urltest.tag = "group";
+    urltest.type = OutboundType::URLTEST;
+    urltest.outbound_groups =
+        std::vector<api::OutboundGroupElement>{members};
+    outbounds.push_back(std::move(urltest));
+    config.outbounds = std::move(outbounds);
+
+    ModelledRoutes routes({default_route_via(kOutboundTable, "nwg0"),
+                           default_route_via(162, "nwg0"),
+                           default_route_via(254, "nwg0")});
+    const auto response = build_for(
+        config,
+        routes,
+        probe_result(
+            /*success=*/true, /*attributed=*/true,
+            now - std::chrono::seconds{100}),
+        now);
+
+    REQUIRE(response.outbounds.size() == 13);
+    CHECK(response.outbounds.front().status ==
+          api::ResolverLiveStatus::HEALTHY);
+    REQUIRE(response.outbounds.front().interfaces.size() == 1);
+    CHECK(response.outbounds.front().interfaces.front().status ==
+          api::RuntimeInterfaceStatusEnum::ACTIVE);
+    CHECK(response.outbounds.front().interfaces.front().latency_ms ==
+          std::optional<int64_t>{163});
+
+    // The URLTEST fallback classification receives that same calculated
+    // limit; it must not silently fall back to the old fixed 60 seconds.
+    const auto& group_state = response.outbounds.back();
+    REQUIRE(group_state.interfaces.size() == 1);
+    CHECK(group_state.interfaces.front().latency_ms ==
+          std::optional<int64_t>{163});
 }
 
 // The reported defect: a tunnel device stays UP after its remote server is
@@ -317,6 +394,106 @@ TEST_CASE(
         for (const auto& member : outbound.interfaces) {
             CHECK_FALSE(member.latency_ms.has_value());
         }
+    }
+}
+
+TEST_CASE(
+    "selected urltest child needs a successful probe before it is active and "
+    "the group is healthy") {
+    const auto now = std::chrono::steady_clock::time_point{} +
+                     std::chrono::hours(9);
+
+    Outbound child;
+    child.tag = "member";
+    child.type = OutboundType::INTERFACE;
+    child.interface = "nwg5";
+
+    api::OutboundGroupElement members;
+    members.outbounds = std::vector<std::string>{"member"};
+
+    Outbound urltest;
+    urltest.tag = "group";
+    urltest.type = OutboundType::URLTEST;
+    urltest.outbound_groups =
+        std::vector<api::OutboundGroupElement>{members};
+
+    Config config;
+    config.outbounds = std::vector<Outbound>{child, urltest};
+
+    // The child consumes table 150 and the group table 151. Table 151 has the
+    // metric-0 route that used to short-circuit the member to ACTIVE even when
+    // its latest URLTEST probe had failed.
+    ModelledRoutes routes({default_route_via(151, "nwg5"),
+                           default_route_via(254, "nwg5")});
+
+    auto build_with = [&](std::optional<URLTestResult> latest_result) {
+        UrltestState manager_state;
+        manager_state.selected_outbound = "member";
+        if (latest_result.has_value()) {
+            manager_state.last_results.emplace("member", *latest_result);
+        }
+
+        return build_runtime_outbounds_response(
+            config,
+            routes,
+            [&manager_state](const std::string& tag)
+                -> std::optional<UrltestState> {
+                return tag == "group"
+                    ? std::optional<UrltestState>{manager_state}
+                    : std::nullopt;
+            },
+            [](const std::string&)
+                -> std::optional<InterfaceProbeResult> {
+                return std::nullopt;
+            },
+            now);
+    };
+
+    SUBCASE("a failed selected probe publishes degraded rather than green") {
+        URLTestResult failed;
+        failed.success = false;
+        failed.error = "probe timed out";
+
+        const auto response = build_with(failed);
+        REQUIRE(response.outbounds.size() == 2);
+        const auto& group_state = response.outbounds.at(1);
+        CHECK(group_state.status == api::ResolverLiveStatus::DEGRADED);
+        REQUIRE(group_state.interfaces.size() == 1);
+        CHECK(group_state.interfaces.front().status ==
+              api::RuntimeInterfaceStatusEnum::DEGRADED);
+        CHECK(group_state.interfaces.front().status !=
+              api::RuntimeInterfaceStatusEnum::ACTIVE);
+        CHECK(group_state.status != api::ResolverLiveStatus::HEALTHY);
+        CHECK_FALSE(group_state.interfaces.front().latency_ms.has_value());
+    }
+
+    SUBCASE("a selected route without probe evidence remains unknown") {
+        const auto response = build_with(std::nullopt);
+        REQUIRE(response.outbounds.size() == 2);
+        const auto& group_state = response.outbounds.at(1);
+        CHECK(group_state.status == api::ResolverLiveStatus::UNKNOWN);
+        REQUIRE(group_state.interfaces.size() == 1);
+        CHECK(group_state.interfaces.front().status ==
+              api::RuntimeInterfaceStatusEnum::UNKNOWN);
+        CHECK(group_state.interfaces.front().status !=
+              api::RuntimeInterfaceStatusEnum::ACTIVE);
+        CHECK(group_state.status != api::ResolverLiveStatus::HEALTHY);
+    }
+
+    SUBCASE("a successful selected probe still publishes active and healthy") {
+        URLTestResult success;
+        success.success = true;
+        success.latency_ms = 91;
+
+        const auto response = build_with(success);
+        REQUIRE(response.outbounds.size() == 2);
+        const auto& group_state = response.outbounds.at(1);
+        CHECK(group_state.status == api::ResolverLiveStatus::HEALTHY);
+        REQUIRE(group_state.interfaces.size() == 1);
+        CHECK(group_state.interfaces.front().status ==
+              api::RuntimeInterfaceStatusEnum::ACTIVE);
+        CHECK(group_state.interfaces.front().latency_ms ==
+              std::optional<int64_t>{91});
     }
 }
 

@@ -849,6 +849,26 @@ TEST_CASE("periodic probing rotates instead of sweeping everything") {
     CHECK(second.slice[1].tag == "d");
 }
 
+TEST_CASE("periodic interface probe completion fences the full configured snapshot") {
+    const std::vector<InterfaceProbe::Target> configured = {
+        {"a", 1, "nwg1"}, {"b", 2, "nwg2"}, {"c", 3, "nwg3"},
+        {"d", 4, "nwg4"}, {"e", 5, "nwg5"},
+    };
+    const auto rotation =
+        select_interface_probe_rotation(configured, 0, 2);
+    REQUIRE(rotation.slice.size() == 2);
+
+    // A periodic round measures only the slice, but its authority snapshot is
+    // still the complete ordered target set captured before measurement. If
+    // the slice is used as that snapshot, an unchanged configuration is
+    // falsely classified as stale and an unnecessary full trailing round is
+    // launched after every periodic tick.
+    CHECK_FALSE(interface_probe_snapshot_is_current(
+        42, 42, rotation.slice, configured));
+    CHECK(interface_probe_snapshot_is_current(
+        42, 42, configured, configured));
+}
+
 TEST_CASE("rotation wraps and eventually covers every target") {
     const std::vector<InterfaceProbe::Target> targets = {
         {"a", 1, "nwg1"}, {"b", 2, "nwg2"}, {"c", 3, "nwg3"},

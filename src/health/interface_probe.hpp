@@ -219,6 +219,10 @@ std::vector<std::string> select_initial_interface_probe_tags(
     const std::vector<InterfaceProbe::Target>& previous_targets,
     const std::vector<InterfaceProbe::Target>& current_targets);
 
+// Production cadence shared by the scheduler and freshness calculation. A
+// reading stays current long enough for one complete rotation plus one tick.
+inline constexpr std::chrono::seconds kInterfaceProbeInterval{20};
+
 // How many targets one periodic tick measures. Small on purpose: the point of
 // rotating is that a tick stops being a synchronised sweep, and a slice large
 // enough to cover a typical configuration would restore exactly that.

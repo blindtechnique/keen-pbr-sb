@@ -9,6 +9,7 @@
 #include "interface_probe.hpp"
 
 #include <chrono>
+#include <cstddef>
 #include <functional>
 #include <optional>
 #include <string>
@@ -37,10 +38,13 @@ enum class ProbeVerdict {
     Unverifiable,  // missing, unattributed, or too old to describe now
 };
 
-// Three probe intervals. One missed round is ordinary jitter; three means the
-// figure no longer describes the current state and must stop rendering as
-// current health.
+// Minimum for small configurations. Larger configurations rotate over several
+// production ticks, so their calculated limit must cover one full rotation
+// plus one additional tick.
 constexpr std::chrono::seconds kInterfaceProbeFreshnessLimit{60};
+
+std::chrono::seconds interface_probe_freshness_limit(
+    std::size_t interface_target_count) noexcept;
 
 ProbeVerdict classify_interface_probe(
     const std::optional<InterfaceProbeResult>& probe,

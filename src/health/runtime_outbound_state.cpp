@@ -24,6 +24,17 @@ std::optional<int64_t> latency_from_urltest_result(
     return static_cast<int64_t>(result.latency_ms);
 }
 
+std::chrono::seconds interface_probe_freshness_limit(
+    std::size_t interface_target_count) noexcept {
+    const auto complete_rotation_ticks =
+        interface_target_count / kInterfaceProbeRotationSlice +
+        (interface_target_count % kInterfaceProbeRotationSlice == 0 ? 0 : 1);
+    const auto cadence_limit =
+        kInterfaceProbeInterval *
+        static_cast<std::chrono::seconds::rep>(complete_rotation_ticks + 1);
+    return std::max(kInterfaceProbeFreshnessLimit, cadence_limit);
+}
+
 ProbeVerdict classify_interface_probe(
     const std::optional<InterfaceProbeResult>& probe,
     std::chrono::steady_clock::time_point now,
@@ -170,16 +181,18 @@ api::RuntimeInterfaceStatusEnum map_urltest_child_status(
         return api::RuntimeInterfaceStatusEnum::UNKNOWN;
     }
 
-    if (is_active) {
-        return api::RuntimeInterfaceStatusEnum::ACTIVE;
-    }
-
-    if (!reachable) {
+    // A metric-0 route proves which child is selected, not that the selected
+    // transport currently carries traffic. Preserve the old reachability
+    // handling for standby children, but require URLTEST evidence before the
+    // selected child can be published as ACTIVE.
+    if (!is_active && !reachable) {
         return api::RuntimeInterfaceStatusEnum::UNAVAILABLE;
     }
 
     if (!urltest_state.has_value()) {
-        return api::RuntimeInterfaceStatusEnum::BACKUP;
+        return is_active
+            ? api::RuntimeInterfaceStatusEnum::UNKNOWN
+            : api::RuntimeInterfaceStatusEnum::BACKUP;
     }
 
     const auto result_it = urltest_state->last_results.find(child.tag);
@@ -197,7 +210,9 @@ api::RuntimeInterfaceStatusEnum map_urltest_child_status(
     }
 
     if (result_it->second.success) {
-        return api::RuntimeInterfaceStatusEnum::BACKUP;
+        return is_active
+            ? api::RuntimeInterfaceStatusEnum::ACTIVE
+            : api::RuntimeInterfaceStatusEnum::BACKUP;
     }
 
     return api::RuntimeInterfaceStatusEnum::DEGRADED;
@@ -213,12 +228,15 @@ api::ResolverLiveStatus derive_overall_status(
 
     bool has_backup = false;
     bool has_degraded = false;
+    bool has_unknown = false;
 
     for (const auto& interface_state : interfaces) {
         if (interface_state.status == api::RuntimeInterfaceStatusEnum::BACKUP) {
             has_backup = true;
         } else if (interface_state.status == api::RuntimeInterfaceStatusEnum::DEGRADED) {
             has_degraded = true;
+        } else if (interface_state.status == api::RuntimeInterfaceStatusEnum::UNKNOWN) {
+            has_unknown = true;
         }
     }
 
@@ -234,13 +252,17 @@ api::ResolverLiveStatus derive_overall_status(
         return api::ResolverLiveStatus::DEGRADED;
     }
 
+    if (has_unknown) {
+        return api::ResolverLiveStatus::UNKNOWN;
+    }
+
     if (!interfaces.empty()) {
         return api::ResolverLiveStatus::UNAVAILABLE;
     }
 
-    return has_live_route
-        ? api::ResolverLiveStatus::HEALTHY
-        : api::ResolverLiveStatus::UNKNOWN;
+    // A route without a resolved child is still only routing state. It cannot
+    // prove URLTEST health on its own.
+    return api::ResolverLiveStatus::UNKNOWN;
 }
 
 std::optional<uint32_t> outbound_table_id(const Config& config,
@@ -281,7 +303,8 @@ api::RuntimeOutboundStateElement build_interface_outbound_state(
     const std::vector<DumpedRoute>& all_routes,
     const std::vector<DumpedRoute>& main_table_routes,
     const InterfaceProbeLookupFn& interface_probe_lookup,
-    std::chrono::steady_clock::time_point now) {
+    std::chrono::steady_clock::time_point now,
+    std::chrono::steady_clock::duration freshness_limit) {
     api::RuntimeOutboundStateElement state;
     state.tag = outbound.tag;
     state.type = outbound.type;
@@ -308,7 +331,8 @@ api::RuntimeOutboundStateElement build_interface_outbound_state(
         probe = interface_probe_lookup(outbound.tag);
     }
     const auto verdict =
-        runtime_outbound_detail::classify_interface_probe(probe, now);
+        runtime_outbound_detail::classify_interface_probe(
+            probe, now, freshness_limit);
 
     if (verdict == runtime_outbound_detail::ProbeVerdict::Verified) {
         interface_state.latency_ms = static_cast<int64_t>(probe->latency_ms);
@@ -407,7 +431,8 @@ api::RuntimeOutboundStateElement build_urltest_outbound_state(const Config& conf
                                                               const std::vector<DumpedRoute>& main_table_routes,
                                                               const UrltestStateLookupFn& urltest_state_lookup,
                                                               const InterfaceProbeLookupFn& interface_probe_lookup,
-                                                              std::chrono::steady_clock::time_point now) {
+                                                              std::chrono::steady_clock::time_point now,
+                                                              std::chrono::steady_clock::duration freshness_limit) {
     api::RuntimeOutboundStateElement state;
     state.tag = outbound.tag;
     state.type = outbound.type;
@@ -469,7 +494,8 @@ api::RuntimeOutboundStateElement build_urltest_outbound_state(const Config& conf
             // Only an attributed, current measurement belongs to this child.
             // An unpinned probe may have travelled the WAN, and publishing its
             // latency here would make a dead member look fast.
-            if (runtime_outbound_detail::classify_interface_probe(probe, now) ==
+            if (runtime_outbound_detail::classify_interface_probe(
+                    probe, now, freshness_limit) ==
                 runtime_outbound_detail::ProbeVerdict::Verified) {
                 interface_state.latency_ms = static_cast<int64_t>(probe->latency_ms);
             }
@@ -494,9 +520,15 @@ api::RuntimeOutboundStateElement build_urltest_outbound_state(const Config& conf
         state.detail = "live route selection differs from urltest manager selection";
     }
 
+    const bool has_verified_active_child = std::any_of(
+        state.interfaces.begin(), state.interfaces.end(),
+        [](const api::RuntimeInterfaceState& interface_state) {
+            return interface_state.status ==
+                   api::RuntimeInterfaceStatusEnum::ACTIVE;
+        });
     state.status = derive_overall_status(
         state.interfaces,
-        !live_active_child_tag.empty(),
+        has_verified_active_child,
         primary_route != nullptr);
     return state;
 }
@@ -513,6 +545,15 @@ api::RuntimeOutboundsResponse build_runtime_outbounds_response(
     const auto outbounds = config.outbounds.value_or(std::vector<Outbound>{});
     const auto all_routes = netlink.dump_routes();
     const auto main_table_routes = routes_for_table(all_routes, 254);
+    const auto interface_target_count = static_cast<std::size_t>(
+        std::count_if(
+            outbounds.begin(), outbounds.end(),
+            [](const Outbound& outbound) {
+                return outbound.type == OutboundType::INTERFACE;
+            }));
+    const auto freshness_limit =
+        runtime_outbound_detail::interface_probe_freshness_limit(
+            interface_target_count);
     response.outbounds.reserve(outbounds.size());
 
     for (const auto& outbound : outbounds) {
@@ -520,7 +561,7 @@ api::RuntimeOutboundsResponse build_runtime_outbounds_response(
             case OutboundType::INTERFACE:
                 response.outbounds.push_back(build_interface_outbound_state(
                     config, outbound, all_routes, main_table_routes,
-                    interface_probe_lookup, now));
+                    interface_probe_lookup, now, freshness_limit));
                 break;
             case OutboundType::TABLE:
                 response.outbounds.push_back(
@@ -531,7 +572,8 @@ api::RuntimeOutboundsResponse build_runtime_outbounds_response(
                     build_urltest_outbound_state(config, outbound,
                                                  all_routes, main_table_routes,
                                                  urltest_state_lookup,
-                                                 interface_probe_lookup, now));
+                                                 interface_probe_lookup, now,
+                                                 freshness_limit));
                 break;
             case OutboundType::BLACKHOLE:
             case OutboundType::IGNORE: {

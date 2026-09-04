@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <netinet/in.h>
 #include <optional>
 #include <set>
 #include <string>
@@ -122,6 +123,84 @@ classify_runtime_routing_inventory(
         return RuntimeRoutingInventoryAuthority::kernel_state_unknown;
     }
     return RuntimeRoutingInventoryAuthority::authoritative;
+}
+
+enum class RuntimeRoutingInventoryLiveState : std::uint8_t {
+    healthy,
+    missing,
+    inconclusive,
+};
+
+// Pure read-only drift check against one stable live kernel snapshot. The
+// caller establishes inventory authority/revision before using the answer.
+// Only an empty exact slot is repairable `missing`: an unrepresentable,
+// changed, or duplicate occupant is `inconclusive` and must not open an
+// automatic mutation loop against a foreign/conflicting kernel object.
+inline RuntimeRoutingInventoryLiveState
+classify_runtime_routing_inventory_live_state(
+    const RuntimeRoutingInventorySnapshot& inventory,
+    const std::vector<DumpedRoute>& live_routes,
+    const std::vector<DumpedRule>& live_rules) {
+    bool saw_missing = false;
+
+    for (const auto& expected : inventory.routes) {
+        std::size_t slot_count = 0U;
+        std::size_t exact_count = 0U;
+        for (const auto& candidate : live_routes) {
+            if (!route_table_detail::route_occupies_same_slot(
+                    expected, candidate)) {
+                continue;
+            }
+            ++slot_count;
+            if (candidate.exact_identity_representable &&
+                route_table_detail::route_matches_live(
+                    expected, candidate)) {
+                ++exact_count;
+            }
+        }
+        if (slot_count == 0U) {
+            saw_missing = true;
+        } else if (slot_count != 1U || exact_count != 1U) {
+            return RuntimeRoutingInventoryLiveState::inconclusive;
+        }
+    }
+
+    for (const auto& logical : inventory.rules) {
+        const int dual_stack_families[] = {AF_INET, AF_INET6};
+        const int* begin = dual_stack_families;
+        const int* end = dual_stack_families + 2;
+        int single_family = logical.family;
+        if (logical.family != 0) {
+            begin = &single_family;
+            end = begin + 1;
+        }
+
+        for (auto family = begin; family != end; ++family) {
+            RuleSpec expected = logical;
+            expected.family = *family;
+            std::size_t identity_count = 0U;
+            std::size_t exact_count = 0U;
+            for (const auto& candidate : live_rules) {
+                if (!policy_rule_detail::rule_matches_live(
+                        expected, candidate)) {
+                    continue;
+                }
+                ++identity_count;
+                if (candidate.exact_identity_representable) {
+                    ++exact_count;
+                }
+            }
+            if (identity_count == 0U) {
+                saw_missing = true;
+            } else if (identity_count != 1U || exact_count != 1U) {
+                return RuntimeRoutingInventoryLiveState::inconclusive;
+            }
+        }
+    }
+
+    return saw_missing
+        ? RuntimeRoutingInventoryLiveState::missing
+        : RuntimeRoutingInventoryLiveState::healthy;
 }
 
 using RuntimeRoutingInventorySnapshotFactory = std::function<

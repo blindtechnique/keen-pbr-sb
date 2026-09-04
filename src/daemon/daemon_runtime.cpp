@@ -105,6 +105,11 @@ constexpr std::array<std::chrono::seconds, 3>
 constexpr auto META_UDP443_ACTIVATION_MAINTENANCE_RETRY_DELAY =
     std::chrono::minutes{1};
 
+struct InterfaceProbeRoutingDriftObservation final {
+    std::uint64_t inventory_revision{0U};
+    std::uint64_t route_epoch{0U};
+};
+
 void require_authoritative_runtime_routing(
     const RuntimeRoutingInventorySnapshotPtr& inventory,
     const char* operation) {
@@ -2171,6 +2176,7 @@ void Daemon::start_interface_probe_round_impl(
             "interface-probe",
             [this,
              targets,
+             configured_targets,
              expected_runtime_generation,
              failure_retry_round,
              publication_failed,
@@ -2295,14 +2301,93 @@ void Daemon::start_interface_probe_round_impl(
             } catch (...) {
                 probe_error = "interface probe failed";
             }
+
+            // Health reads must not become a write transaction on every
+            // twenty-second tick. Preserve the old self-heal for silently
+            // vanished Keenetic routes/rules, but first compare one stable
+            // published owner revision with one live kernel snapshot. A
+            // normal healthy round therefore never competes with Save for
+            // the shared runtime-firewall worker.
+            std::optional<InterfaceProbeRoutingDriftObservation>
+                routing_drift_observation;
+            if (probe_error.empty()) {
+                try {
+                    // One combined lease makes the route and policy-rule
+                    // dumps a single in-process routing observation. Both
+                    // dump methods take this recursive lock internally.
+                    auto exact_lease =
+                        netlink_.acquire_exact_transaction_lease();
+                    if (!exact_lease) {
+                        throw std::runtime_error(
+                            "exact routing observation lease is unavailable");
+                    }
+                    const auto route_epoch_before =
+                        routing_observation_epoch_.load(
+                            std::memory_order_acquire);
+                    const auto inventory_before =
+                        routing_operation_owner_.snapshot();
+                    if (classify_runtime_routing_inventory(
+                            inventory_before) ==
+                        RuntimeRoutingInventoryAuthority::authoritative) {
+                        const auto live_routes = netlink_.dump_routes();
+                        const auto live_rules =
+                            netlink_.dump_policy_rules();
+                        const auto inventory_after =
+                            routing_operation_owner_.snapshot();
+                        const auto route_epoch_after =
+                            routing_observation_epoch_.load(
+                                std::memory_order_acquire);
+                        if (classify_runtime_routing_inventory(
+                                inventory_after) ==
+                                RuntimeRoutingInventoryAuthority::
+                                    authoritative &&
+                            inventory_before->revision ==
+                                inventory_after->revision &&
+                            route_epoch_before == route_epoch_after) {
+                            const auto live_state =
+                                classify_runtime_routing_inventory_live_state(
+                                    *inventory_before,
+                                    live_routes,
+                                    live_rules);
+                            if (live_state ==
+                                RuntimeRoutingInventoryLiveState::missing) {
+                                routing_drift_observation =
+                                    InterfaceProbeRoutingDriftObservation{
+                                        inventory_before->revision,
+                                        route_epoch_before};
+                            } else if (
+                                live_state ==
+                                RuntimeRoutingInventoryLiveState::
+                                    inconclusive) {
+                                Logger::instance().trace(
+                                    "interface_probe_route_health_skip",
+                                    "reason=inconclusive "
+                                    "inventory_revision={} route_epoch={}",
+                                    inventory_before->revision,
+                                    route_epoch_before);
+                            }
+                        }
+                    }
+                } catch (const std::exception& error) {
+                    try {
+                        Logger::instance().trace(
+                            "interface_probe_route_health_skip",
+                            "error={}",
+                            error.what());
+                    } catch (...) {
+                    }
+                } catch (...) {
+                }
+            }
             bool posted = false;
             try {
                 posted = post_control_task(
                     [this,
-                     targets,
+                     configured_targets,
                      expected_runtime_generation,
                      failure_retry_round,
                      probe_error = std::move(probe_error),
+                     routing_drift_observation,
                      publication_failed,
                      task_metrics]() {
                     const bool accepting_commits =
@@ -2328,7 +2413,7 @@ void Daemon::start_interface_probe_round_impl(
                                 expected_runtime_generation,
                                 runtime_generation_.load(
                                     std::memory_order_acquire),
-                                targets,
+                                configured_targets,
                                 current_targets);
                         snapshot_known = true;
                     } catch (const std::exception& error) {
@@ -2364,35 +2449,63 @@ void Daemon::start_interface_probe_round_impl(
                             } catch (...) {
                             }
                         } else {
-                            std::string reconciliation_error;
-                            if (routing_runtime_active()) {
-                                // Keenetic may recreate a tunnel route without
-                                // changing administrative UP. Route this
-                                // repair through the one coalescing runtime
-                                // worker instead of opening a synchronous
-                                // writer between worker mutation and its
-                                // control-loop publication checkpoint.
+                            if (routing_runtime_active() &&
+                                routing_drift_observation.has_value()) {
+                                // Revalidate the exact owner revision observed
+                                // beside the live dump and the route epoch
+                                // spanning that observation. A newer
+                                // publication or topology event already
+                                // supersedes this health decision.
                                 try {
-                                    const auto disposition =
-                                        refresh_iproute_and_firewall_runtime(
-                                            0,
-                                            {},
-                                            /*schedule_catalog_refresh=*/
-                                                false);
-                                    if (disposition ==
-                                        RuntimeFirewallImmediateDisposition::
-                                            rejected) {
-                                        reconciliation_error =
-                                            "central runtime routing refresh "
-                                            "was not accepted";
+                                    const auto current_inventory =
+                                        routing_operation_owner_.snapshot();
+                                    if (classify_runtime_routing_inventory(
+                                            current_inventory) ==
+                                            RuntimeRoutingInventoryAuthority::
+                                                authoritative &&
+                                        current_inventory->revision ==
+                                            routing_drift_observation
+                                                ->inventory_revision &&
+                                        routing_observation_epoch_.load(
+                                            std::memory_order_acquire) ==
+                                            routing_drift_observation
+                                                ->route_epoch) {
+                                        const auto disposition =
+                                            refresh_iproute_and_firewall_runtime(
+                                                0,
+                                                {},
+                                                /*schedule_catalog_refresh=*/
+                                                    false);
+                                        if (disposition ==
+                                                RuntimeFirewallImmediateDisposition::
+                                                    handed_off ||
+                                            disposition ==
+                                                RuntimeFirewallImmediateDisposition::
+                                                    coalesced) {
+                                            Logger::instance().trace(
+                                                "interface_probe_route_repair_requested",
+                                                "inventory_revision={} "
+                                                "route_epoch={}",
+                                                routing_drift_observation
+                                                    ->inventory_revision,
+                                                routing_drift_observation
+                                                    ->route_epoch);
+                                        } else {
+                                            Logger::instance().trace(
+                                                "interface_probe_route_repair_deferred",
+                                                "inventory_revision={} "
+                                                "route_epoch={}",
+                                                routing_drift_observation
+                                                    ->inventory_revision,
+                                                routing_drift_observation
+                                                    ->route_epoch);
+                                        }
                                     }
                                 } catch (const std::exception& error) {
-                                    reconciliation_error = error.what();
                                     try {
-                                        Logger::instance().info(
-                                            "Interface-probe central runtime "
-                                            "refresh was deferred: "
-                                            "{}",
+                                        Logger::instance().trace(
+                                            "interface_probe_route_repair_deferred",
+                                            "error={}",
                                             error.what());
                                     } catch (...) {
                                     }
@@ -2419,12 +2532,8 @@ void Daemon::start_interface_probe_round_impl(
                                     task_metrics->failure(
                                         "one or more interface probe results "
                                         "could not be published");
-                                } else if (
-                                    reconciliation_error.empty()) {
-                                    task_metrics->success();
                                 } else {
-                                    task_metrics->failure(
-                                        reconciliation_error);
+                                    task_metrics->success();
                                 }
                             } catch (...) {
                             }
@@ -2542,13 +2651,11 @@ void Daemon::schedule_interface_probe() {
     // Twenty seconds keeps the figure feeling live without turning every
     // tunnel into a permanent TLS handshake generator: each probe is a full
     // HTTPS request, and network latency does not change faster than this.
-    constexpr auto kInterval = std::chrono::seconds(20);
-
     // A repeating timer owns periodic liveness independently of an
     // individual probe round. A coalesced tick or any fenced callback failure
     // therefore cannot silently remove the next 20-second observation.
     scheduler_->schedule_repeating(
-        kInterval,
+        kInterfaceProbeInterval,
         [this]() {
             probe_interfaces_now();
         },
