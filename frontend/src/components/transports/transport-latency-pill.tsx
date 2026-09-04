@@ -9,17 +9,19 @@ import { cn } from "@/lib/utils"
 
 export function TransportLatencyPill({
   probe,
+  manualProbe,
   runtimeMilliseconds,
   onRefresh,
   refreshing,
 }: {
   readonly probe?: LatencyProbe
+  readonly manualProbe?: LatencyProbe
   readonly runtimeMilliseconds?: number
   readonly onRefresh?: () => void
   readonly refreshing?: boolean
 }) {
   const { t } = useTranslation()
-  const latency = selectVisibleLatency(probe, runtimeMilliseconds)
+  const latency = selectVisibleLatency(probe, runtimeMilliseconds, manualProbe)
 
   if (!latency && !onRefresh) {
     return null

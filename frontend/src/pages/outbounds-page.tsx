@@ -183,8 +183,7 @@ export function OutboundsPage({
   // Сколько правил ведёт в это направление и сколько списков через них
   // проходит. Это единственное, чего в прежней таблице не было совсем, а
   // именно оно отвечает на вопрос «можно ли это удалить».
-  // Проверка задержки бьёт по всем точкам выхода разом: у демона одна
-  // общая проверка, отдельной «проверь только этот» не существует.
+  // Ручные проверки строк ожидают только новое измерение выбранного выхода.
   const probeMutation = useRunSystemProbes()
   const { protocolOf, protocolOfGroup } = useInterfaceProtocols()
   // Тег группы резервирования складывается из тегов её участников, а те
@@ -381,15 +380,12 @@ export function OutboundsPage({
                     // запускала общий раунд по всем сразу — владелец увидел
                     // это в интерфейсе, и он был прав: раунд действительно
                     // трогал все.
-                    disabled:
-                      probeMutation.isPending &&
-                      probeMutation.variables === item.id,
+                    disabled: probeMutation.pendingTags.has(item.id),
                     icon: (
                       <RotateCw
                         className={cn(
                           "h-4 w-4",
-                          probeMutation.isPending &&
-                            probeMutation.variables === item.id &&
+                          probeMutation.pendingTags.has(item.id) &&
                             "animate-spin"
                         )}
                       />

@@ -7,6 +7,28 @@ import {
 } from "@/components/transports/transport-latency-model"
 
 describe("transport latency presentation", () => {
+  test("shows a confirmed manual result before runtime SSE catches up", () => {
+    expect(
+      selectVisibleLatency(undefined, 95, {
+        success: true,
+        attributed: true,
+        latency_ms: 31,
+        age_seconds: 0,
+      })
+    ).toEqual({ milliseconds: 31, ageSeconds: 0 })
+  })
+
+  test("a completed manual failure hides the old successful runtime figure", () => {
+    expect(
+      selectVisibleLatency(undefined, 95, {
+        success: false,
+        attributed: true,
+        latency_ms: 0,
+        age_seconds: 0,
+      })
+    ).toBeUndefined()
+  })
+
   test("prefers the SSE runtime value over a stale probe-details response", () => {
     expect(
       selectVisibleLatency(

@@ -742,6 +742,13 @@ export const enTranslation = {
     latencyAge: "{{seconds}}s ago",
     latencyRefresh: "Measure now",
     latencyRefreshFailed: "Could not start the check",
+    latencyMeasurementFailed: "Could not measure this VPN's latency.",
+    latencyRefreshNotStarted:
+      "A new check was not started. Try again in a few seconds.",
+    latencyRefreshTimedOut:
+      "A fresh check result has not arrived yet. Try again.",
+    latencyRefreshNeedsRoute:
+      "Add a route to this VPN before measuring its latency.",
     traffic: {
       receive: "Receive",
       transmit: "Transmit",

@@ -128,6 +128,10 @@ import {
   type ServerLocation,
 } from "@/hooks/use-server-locations"
 import { useRunSystemProbes } from "@/hooks/use-run-system-probes"
+import {
+  readInterfaceProbes,
+  type InterfaceProbesResponse,
+} from "@/lib/manual-interface-probe"
 import { cn } from "@/lib/utils"
 import { downloadJson, formatDownloadTimestamp } from "@/lib/download"
 import { queryKeys } from "@/api/query-keys"
@@ -150,25 +154,10 @@ import {
   updateHiddenNativeInterfacePreference,
 } from "@/lib/hidden-native-interfaces"
 
-type ProbeEntry = {
-  success: boolean
-  // Absent on daemons that predate probe attribution; treated as unattributed.
-  attributed?: boolean
-  latency_ms: number
-  age_seconds: number
-  error?: string
-  interface?: string
-}
-
 type NativeDeleteSelection = Readonly<{
   id: string
   expectedOwnershipRevision: string
 }>
-
-type ProbesResponse = {
-  interval_seconds: number
-  probes: Record<string, ProbeEntry>
-}
 
 type TransportProviderGroup = {
   key: string
@@ -274,10 +263,6 @@ export function TransportsPage({
   const [expandedTransportIds, setExpandedTransportIds] = useState(
     () => new Set<string>()
   )
-  const [requestedProbe, setRequestedProbe] = useState<{
-    interfaceName: string
-    baselineRuntimeUpdatedAt: number
-  } | null>(null)
   const [showHiddenNative, setShowHiddenNative] = useState(false)
   // «Не предлагать» из вопроса о новом туннеле; читается один раз при
   // открытии страницы, дальше живёт в состоянии и localStorage.
@@ -542,72 +527,43 @@ export function TransportsPage({
     naiveComponentQuery.data?.installed === false
   const error = getApiErrorMessage(query.error as ApiError | null)
   const runtimeOutboundsQuery = useGetRuntimeOutbounds()
-  const probesQuery = useQuery<ProbesResponse>({
+  const probesQuery = useQuery<InterfaceProbesResponse>({
     queryKey: ["system-probes"],
-    queryFn: async () => {
-      const response = await fetch("/api/system/probes")
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      return response.json()
-    },
+    queryFn: ({ signal }) => readInterfaceProbes(signal),
     refetchInterval: 10_000,
     refetchIntervalInBackground: false,
   })
-  const refetchProbes = probesQuery.refetch
-
   const runProbeMutation = useRunSystemProbes()
-
-  useEffect(() => {
-    if (
-      !requestedProbe ||
-      runtimeOutboundsQuery.dataUpdatedAt <=
-        requestedProbe.baselineRuntimeUpdatedAt
-    ) {
-      return
-    }
-
-    let active = true
-    const completedRequest = requestedProbe
-    void refetchProbes().finally(() => {
-      if (!active) return
-      setRequestedProbe((current) =>
-        current === completedRequest ? null : current
-      )
-    })
-    return () => {
-      active = false
-    }
-  }, [refetchProbes, requestedProbe, runtimeOutboundsQuery.dataUpdatedAt])
-
-  useEffect(() => {
-    if (!requestedProbe) return
-    const expiredRequest = requestedProbe
-    const timeout = window.setTimeout(() => {
-      setRequestedProbe((current) =>
-        current === expiredRequest ? null : current
-      )
-    }, 30_000)
-    return () => window.clearTimeout(timeout)
-  }, [requestedProbe])
-
-  const refreshLatency = (interfaceName: string) => {
-    setRequestedProbe({
-      interfaceName,
-      baselineRuntimeUpdatedAt: runtimeOutboundsQuery.dataUpdatedAt,
-    })
-    // The tag of the outbound bound to this interface, so the daemon measures
-    // this row and nothing else. Falling back to the whole round when the
-    // interface has no bound outbound keeps the button working rather than
-    // making it silently do nothing.
-    const boundTag = (keenConfig?.outbounds ?? []).find(
+  const probeTagForInterface = (interfaceName: string) =>
+    (keenConfig?.outbounds ?? []).find(
       (outbound) =>
         outbound.type === "interface" && outbound.interface === interfaceName
     )?.tag
-    runProbeMutation.mutate(boundTag, {
-      onError: () => setRequestedProbe(null),
-    })
+
+  const refreshLatency = (interfaceName: string) => {
+    const boundTag = probeTagForInterface(interfaceName)
+    if (!boundTag) {
+      toast.info(t("transports.latencyRefreshNeedsRoute"))
+      return
+    }
+    runProbeMutation.mutate(boundTag)
   }
-  const latencyRefreshPending = (interfaceName: string) =>
-    requestedProbe?.interfaceName === interfaceName
+  const latencyRefreshPending = (interfaceName: string) => {
+    const tag = probeTagForInterface(interfaceName)
+    return Boolean(tag && runProbeMutation.pendingTags.has(tag))
+  }
+  const manualProbeForInterface = (interfaceName: string) => {
+    const tag = probeTagForInterface(interfaceName)
+    const measured = tag ? runProbeMutation.measurements.get(tag) : undefined
+    const current = tag ? probesQuery.data?.probes[tag] : undefined
+    // Prefer this real manual observation until a later observation replaces
+    // it. A matching value alone is not evidence that the request completed.
+    return measured?.observation_id &&
+      current?.observation_id === measured.observation_id &&
+      current.interface === interfaceName
+      ? current
+      : undefined
+  }
 
   const interfaceOutboundByInterface = new Map(
     (keenConfig?.outbounds ?? [])
@@ -1323,6 +1279,7 @@ export function TransportsPage({
         key="latency"
         onRefresh={() => refreshLatency(item.interface)}
         probe={probeByInterface.get(item.interface)}
+        manualProbe={manualProbeForInterface(item.interface)}
         refreshing={latencyRefreshPending(item.interface)}
         runtimeMilliseconds={transportLatencyByInterface.get(item.interface)}
       />,
@@ -1631,6 +1588,11 @@ export function TransportsPage({
       showLatency ? (
         <TransportLatencyPill
           key="latency"
+          manualProbe={
+            nativeInterface.kernelName
+              ? manualProbeForInterface(nativeInterface.kernelName)
+              : undefined
+          }
           onRefresh={
             nativeInterface.kernelName && boundOutbound
               ? () => refreshLatency(nativeInterface.kernelName!)

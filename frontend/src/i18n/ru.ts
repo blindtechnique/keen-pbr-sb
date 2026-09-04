@@ -743,6 +743,13 @@ export const ruTranslation = {
     latencyAge: "{{seconds}} с назад",
     latencyRefresh: "Измерить сейчас",
     latencyRefreshFailed: "Не удалось запустить проверку",
+    latencyMeasurementFailed: "Не удалось измерить задержку этого VPN.",
+    latencyRefreshNotStarted:
+      "Новая проверка не запущена. Повторите через несколько секунд.",
+    latencyRefreshTimedOut:
+      "Свежий результат проверки пока не получен. Попробуйте ещё раз.",
+    latencyRefreshNeedsRoute:
+      "Для измерения задержки сначала добавьте маршрут к этому VPN.",
     traffic: {
       receive: "Приём",
       transmit: "Передача",

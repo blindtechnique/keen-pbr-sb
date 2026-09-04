@@ -98,10 +98,7 @@ export function collectProbeByInterface<T extends InterfaceLatencyProbe>(
   probes: Readonly<Record<string, T>>,
   preferredOutboundTagByInterface: ReadonlyMap<string, string>
 ): Map<string, T> {
-  const selected = new Map<
-    string,
-    Readonly<{ probe: T; preferred: boolean }>
-  >()
+  const selected = new Map<string, Readonly<{ probe: T; preferred: boolean }>>()
 
   for (const [outboundTag, probe] of Object.entries(probes)) {
     const interfaceName = probe.interface
@@ -128,10 +125,7 @@ export function collectProbeByInterface<T extends InterfaceLatencyProbe>(
   }
 
   return new Map(
-    [...selected].map(([interfaceName, value]) => [
-      interfaceName,
-      value.probe,
-    ])
+    [...selected].map(([interfaceName, value]) => [interfaceName, value.probe])
   )
 }
 
@@ -142,8 +136,19 @@ export function collectProbeByInterface<T extends InterfaceLatencyProbe>(
  */
 export function selectVisibleLatency(
   probe: LatencyProbe | undefined,
-  runtimeMilliseconds: number | undefined
+  runtimeMilliseconds: number | undefined,
+  manualProbe?: LatencyProbe
 ): VisibleLatency | undefined {
+  // A completed manual observation may precede/deduplicate the runtime SSE.
+  // Its failure must also clear the old number instead of looking successful.
+  if (manualProbe) {
+    return isAttributedSuccess(manualProbe) && isLatency(manualProbe.latency_ms)
+      ? {
+          milliseconds: manualProbe.latency_ms,
+          ageSeconds: nonNegativeInteger(manualProbe.age_seconds),
+        }
+      : undefined
+  }
   if (isLatency(runtimeMilliseconds)) {
     return {
       milliseconds: runtimeMilliseconds,

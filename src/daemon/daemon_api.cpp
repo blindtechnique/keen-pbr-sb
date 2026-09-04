@@ -2548,6 +2548,10 @@ void Daemon::setup_api() {
             // from a measurement of the router's own WAN.
             entry["attributed"] = result->attributed;
             entry["latency_ms"] = result->latency_ms;
+            // Equality token for a completed observation, including repeated
+            // latency values. Keep clock ticks opaque to JavaScript numbers.
+            entry["observation_id"] = std::to_string(
+                result->measured_at.time_since_epoch().count());
             entry["age_seconds"] = std::chrono::duration_cast<std::chrono::seconds>(
                                        now - result->measured_at).count();
             if (!result->error.empty()) {
