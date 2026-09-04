@@ -144,8 +144,18 @@ function seq_ge(left, right)
     return left >= right
 end
 
-function bitand(_, _)
-    return 0
+function bitand(left, right)
+    local result = 0
+    local place = 1
+    while left > 0 and right > 0 do
+        if left % 2 == 1 and right % 2 == 1 then
+            result = result + place
+        end
+        left = math.floor(left / 2)
+        right = math.floor(right / 2)
+        place = place * 2
+    end
+    return result
 end
 
 function pos_get(desync, kind)
@@ -198,21 +208,22 @@ local function make_plan(count)
     return plan
 end
 
-local function run_event(hostname, revision, slot_count, kind)
-    local outgoing = kind ~= "success"
+local function run_event(hostname, revision, slot_count, kind, options)
+    options = options or {}
+    local outgoing = kind ~= "success" and kind ~= "failure"
     local desync = {
         arg = {
             key = "yt_tcp",
             kpbr_rev = revision,
             nld = "2",
-            fails = "2",
+            fails = tostring(options.fails or 2),
             time = "300",
             retrans = "2",
             maxseq = "32768",
-            inseq = "4096",
+            inseq = tostring(options.inseq or 4096),
         },
         dis = {
-            tcp = {th_flags = 0},
+            tcp = {th_flags = kind == "failure" and TH_RST or 0},
             -- An empty first payload keeps this smoke away from the unrelated
             -- retransmission detector. Incoming s5000 is a stock success.
             payload = outgoing and "" or "serverhello",
@@ -220,7 +231,8 @@ local function run_event(hostname, revision, slot_count, kind)
         func_instance = "persistence-smoke",
         outgoing = outgoing,
         plan = make_plan(slot_count),
-        test_sequence = outgoing and 100 or 5000,
+        test_sequence = options.sequence
+            or (outgoing and 100 or (kind == "failure" and 1 or 5000)),
         track = {
             hostname = hostname,
             hostname_is_ip = false,
@@ -276,6 +288,19 @@ selected = run_event(
     "sub.expired.example", REVISION, 3, "original")
 assert_equal(selected, 1, "expired selection must fail open")
 
+-- The live nfqws2-keenetic firewall queues only the first 15 reply packets.
+-- A failure rotates the slot but is not durable by itself; a new connection
+-- must prove more than 8 KiB of incoming application data before that exact
+-- rotated slot may be persisted.
+selected = run_event(
+    "visibility.example", REVISION, 3, "failure",
+    {fails = 1, inseq = 8192, sequence = 1})
+assert_equal(selected, 2, "bounded failure rotates to slot 2")
+selected = run_event(
+    "visibility.example", REVISION, 3, "success",
+    {fails = 1, inseq = 8192, sequence = 8193})
+assert_equal(selected, 2, "new bounded success keeps rotated slot 2")
+
 selected = run_event("fresh.example", REVISION, 3, "success")
 assert_equal(selected, 1, "new host starts on stock slot 1")
 
@@ -289,9 +314,11 @@ timer_callback("keen_pbr_rotator_telemetry", nil)
 assert_equal(persistent_writes, 1, "first learned-state publication")
 
 local first_persisted = read_file(persistent_prefix .. ".0")
-assert(string.match(first_persisted, "^KPRS1\t8\t%d+\t5\n"))
+assert(string.match(first_persisted, "^KPRS1\t8\t%d+\t6\n"))
 assert(string.find(
     first_persisted, hex_encode("fresh.example"), 1, true))
+assert(string.find(
+    first_persisted, hex_encode("visibility.example"), 1, true))
 assert(not string.find(
     first_persisted, hex_encode("expired.example"), 1, true))
 assert(not string.find(

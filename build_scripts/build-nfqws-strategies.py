@@ -30,6 +30,18 @@ ROTATOR_TELEMETRY_LUA = (
     "/opt/var/lib/keen-pbr/nfqws-rotator-telemetry-v1.lua"
 )
 ROTATOR_TELEMETRY_WRITABLE = "/var/run/keen-pbr-nfqws"
+# nfqws2-keenetic 1.2.6 queues only the first 15 reply packets.  Keep the
+# stock success proof comfortably inside that existing visibility window:
+# 8 KiB is application data, while the former 18/24 KiB thresholds were
+# marginal or unreachable and therefore could never make a rotated slot
+# durable on the live router.
+ROTATOR_TCP_SUCCESS_INSEQ = 8192
+# nfqws range cutoffs match the packet start position.  Keep enough of the
+# incoming stream visible for standard_success_detector to observe a packet
+# beyond inseq (one maximum TCP payload past the threshold).
+ROTATOR_TCP_REPLY_RANGE_SEQ = ROTATOR_TCP_SUCCESS_INSEQ + 1460
+# udp_in=1 proves success on the second incoming datagram.
+ROTATOR_UDP_REPLY_RANGE_PACKETS = 2
 
 # alias -> файл в /opt/etc/nfqws2/blobs
 BLOB_FILES = {
@@ -314,25 +326,37 @@ def build(profile_name, spec):
             "--filter-l7=tls",
             f"--hostlist-domains={GV_DOMAINS}",
             excl,
-            "--payload=tls_client_hello",
+            "--payload=all",
+            f"--in-range=-s{ROTATOR_TCP_REPLY_RANGE_SEQ}",
         ]
-        gv_actions = pool(GV_TCP_TIERS, gv_n)
+        gv_actions = [
+            "--in-range=x",
+            "--payload=tls_client_hello",
+        ] + pool(GV_TCP_TIERS, gv_n)
         yt_matcher = [
             f"--filter-tcp={FILTER_TCP}",
             "--filter-l7=tls",
             f"--hostlist-domains={YT_DOMAINS}",
             excl,
-            "--payload=tls_client_hello",
+            "--payload=all",
+            f"--in-range=-s{ROTATOR_TCP_REPLY_RANGE_SEQ}",
         ]
-        yt_actions = pool(YT_TCP_TIERS, yt_n)
+        yt_actions = [
+            "--in-range=x",
+            "--payload=tls_client_hello",
+        ] + pool(YT_TCP_TIERS, yt_n)
         yt_quic_matcher = [
             "--filter-udp=443",
             "--filter-l7=quic",
             f"--hostlist-domains={YT_DOMAINS},{GV_DOMAINS}",
             excl,
-            "--payload=quic_initial",
+            "--payload=all",
+            f"--in-range=-n{ROTATOR_UDP_REPLY_RANGE_PACKETS}",
         ]
-        yt_quic_actions = pool(YT_QUIC_TIERS, yq_n)
+        yt_quic_actions = [
+            "--in-range=x",
+            "--payload=quic_initial",
+        ] + pool(YT_QUIC_TIERS, yq_n)
 
         # ВАЖНО про --new. Init-скрипт собирает строку как
         #   ... $NFQWS_BASE_ARGS $NFQWS_ARGS_CUSTOM --new $NFQWS_ARGS ... --new $NFQWS_ARGS_QUIC ...
@@ -347,7 +371,7 @@ def build(profile_name, spec):
                 "gv_tcp",
                 gv_matcher,
                 gv_actions,
-                inseq=24000,
+                inseq=ROTATOR_TCP_SUCCESS_INSEQ,
                 retrans=2,
                 maxseq=65536,
             )] + gv_actions,
@@ -358,7 +382,7 @@ def build(profile_name, spec):
                 yt_actions,
                 fails=1,
                 reset=True,
-                inseq=18000,
+                inseq=ROTATOR_TCP_SUCCESS_INSEQ,
                 retrans=2,
                 maxseq=65536,
             )] + yt_actions,

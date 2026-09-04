@@ -275,6 +275,28 @@ class NfqwsAssetsGateFixture(unittest.TestCase):
                         rf"circular:[^\s\"]*key={key}:kpbr_rev=[0-9a-f]{{16}}",
                         profile,
                     )
+                for key in ("gv_tcp", "yt_tcp"):
+                    tcp_pool = re.search(
+                        rf"circular:[^\s\"]*key={key}:kpbr_rev=[0-9a-f]{{16}}",
+                        config,
+                    )
+                    self.assertIsNotNone(tcp_pool, profile)
+                    self.assertIn("inseq=8192", tcp_pool.group(0))
+                reply_filters = {
+                    "gv_tcp": ("-s9652", "tls_client_hello"),
+                    "yt_tcp": ("-s9652", "tls_client_hello"),
+                    "yt_quic": ("-n2", "quic_initial"),
+                }
+                for key, (incoming_range, payload) in reply_filters.items():
+                    self.assertRegex(
+                        config,
+                        rf"--payload=all\s+--in-range={incoming_range}\s+"
+                        rf"--lua-desync=circular:[^\s\"]*key={key}"
+                        rf":kpbr_rev=[0-9a-f]{{16}}\s+--in-range=x\s+"
+                        rf"--payload={payload}\s+"
+                        r"--lua-desync=[^\s\"]*:strategy=1",
+                        profile,
+                    )
                 yt_tcp = re.search(
                     r"circular:[^\s\"]*key=yt_tcp:kpbr_rev=[0-9a-f]{16}",
                     config,
