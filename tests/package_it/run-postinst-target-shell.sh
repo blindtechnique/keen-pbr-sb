@@ -59,6 +59,9 @@ if [ "$VARIANT" = full ]; then
     mkdir -p /opt/usr/share/keen-pbr/nfqws-lua
     cp "$SOURCE_ROOT/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-lua/rotator-telemetry.lua" \
         /opt/usr/share/keen-pbr/nfqws-lua/rotator-telemetry.lua
+    printf '%s\n' 'preserve learned slot zero' > \
+        /opt/var/lib/keen-pbr/nfqws-rotator-learned-v1.0
+    chmod 0644 /opt/var/lib/keen-pbr/nfqws-rotator-learned-v1.0
 fi
 
 for service in S79transport-manager S80keen-pbr; do
@@ -97,6 +100,18 @@ case "$VARIANT" in
         [ "$(keen_pbr_stat_value '%a:%u' "$reporter_live")" = \
             "644:$(id -u)" ]
         cmp "$reporter_source" "$reporter_live"
+        learned_zero=/opt/var/lib/keen-pbr/nfqws-rotator-learned-v1.0
+        learned_one=/opt/var/lib/keen-pbr/nfqws-rotator-learned-v1.1
+        [ -f "$learned_zero" ]
+        [ ! -L "$learned_zero" ]
+        [ -f "$learned_one" ]
+        [ ! -L "$learned_one" ]
+        [ "$(keen_pbr_stat_value '%a:%u:%g' "$learned_zero")" = \
+            "600:$(id -u nobody):$(id -g root)" ]
+        [ "$(keen_pbr_stat_value '%a:%u:%g' "$learned_one")" = \
+            "600:$(id -u nobody):$(id -g root)" ]
+        [ "$(cat "$learned_zero")" = 'preserve learned slot zero' ]
+        [ ! -s "$learned_one" ]
         rm -f /opt/usr/share/keen-pbr/nfqws-lua/rotator-telemetry.lua
         cmp "$reporter_source" "$reporter_live"
         [ "$(grep -c 'S79transport-manager start' \

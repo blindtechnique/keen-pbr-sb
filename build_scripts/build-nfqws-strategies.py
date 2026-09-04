@@ -8,6 +8,7 @@ required-blobs.txt) не могут разъехаться между файла
 
 Запуск:  python3 build_scripts/build-nfqws-strategies.py <каталог-назначения>
 """
+import hashlib
 import os
 import re
 import sys
@@ -222,9 +223,18 @@ def pool(tiers, count):
     return out
 
 
-def circular(key, *, inseq=None, retrans=2, udp=False, maxseq=None):
+def circular(
+    key,
+    *,
+    fails=2,
+    reset=False,
+    inseq=None,
+    retrans=2,
+    udp=False,
+    maxseq=None,
+):
     """circular с обязательным key= (стабильное пространство состояний)."""
-    parts = ["fails=2", "time=300"]
+    parts = [f"fails={fails}", "time=300"]
     if udp:
         parts += ["udp_in=1", "udp_out=4"]
     else:
@@ -233,8 +243,18 @@ def circular(key, *, inseq=None, retrans=2, udp=False, maxseq=None):
             parts.append(f"inseq={inseq}")
         if maxseq:
             parts.append(f"maxseq={maxseq}")
+    if reset:
+        parts.append("reset=1")
     parts += ["nld=2", f"key={key}"]
     return "--lua-desync=circular:" + ":".join(parts)
+
+
+def revisioned_circular(key, matcher, actions, **options):
+    """Bind a learned slot to the exact matcher, detector and action pool."""
+    detector = circular(key, **options)
+    material = "\0".join([*matcher, detector, *actions]).encode("utf-8")
+    revision = hashlib.sha256(material).hexdigest()[:16]
+    return f"{detector}:kpbr_rev={revision}"
 
 
 def wrap(name, tokens, indent=None):
@@ -289,6 +309,31 @@ def build(profile_name, spec):
         yq_n = min(5, quic_n + 1)
         dc_n = min(4, udp_n + 1)
 
+        gv_matcher = [
+            f"--filter-tcp={FILTER_TCP}",
+            "--filter-l7=tls",
+            f"--hostlist-domains={GV_DOMAINS}",
+            excl,
+            "--payload=tls_client_hello",
+        ]
+        gv_actions = pool(GV_TCP_TIERS, gv_n)
+        yt_matcher = [
+            f"--filter-tcp={FILTER_TCP}",
+            "--filter-l7=tls",
+            f"--hostlist-domains={YT_DOMAINS}",
+            excl,
+            "--payload=tls_client_hello",
+        ]
+        yt_actions = pool(YT_TCP_TIERS, yt_n)
+        yt_quic_matcher = [
+            "--filter-udp=443",
+            "--filter-l7=quic",
+            f"--hostlist-domains={YT_DOMAINS},{GV_DOMAINS}",
+            excl,
+            "--payload=quic_initial",
+        ]
+        yt_quic_actions = pool(YT_QUIC_TIERS, yq_n)
+
         # ВАЖНО про --new. Init-скрипт собирает строку как
         #   ... $NFQWS_BASE_ARGS $NFQWS_ARGS_CUSTOM --new $NFQWS_ARGS ... --new $NFQWS_ARGS_QUIC ...
         # то есть перед CUSTOM разделителя НЕТ (первый блок делит профиль с BASE_ARGS,
@@ -298,20 +343,32 @@ def build(profile_name, spec):
         # validate_config() в init-скрипте на это прерывает запуск.
         blocks = [
             # googlevideo идёт раньше youtube: он специфичнее
-            [f"--filter-tcp={FILTER_TCP}", "--filter-l7=tls",
-             f"--hostlist-domains={GV_DOMAINS}", excl,
-             "--payload=tls_client_hello",
-             circular("gv_tcp", inseq=24000, retrans=2, maxseq=65536)] + pool(GV_TCP_TIERS, gv_n),
+            gv_matcher + [revisioned_circular(
+                "gv_tcp",
+                gv_matcher,
+                gv_actions,
+                inseq=24000,
+                retrans=2,
+                maxseq=65536,
+            )] + gv_actions,
 
-            ["--new=yt_tcp", f"--filter-tcp={FILTER_TCP}", "--filter-l7=tls",
-             f"--hostlist-domains={YT_DOMAINS}", excl,
-             "--payload=tls_client_hello",
-             circular("yt_tcp", inseq=18000, retrans=2, maxseq=65536)] + pool(YT_TCP_TIERS, yt_n),
+            ["--new=yt_tcp"] + yt_matcher + [revisioned_circular(
+                "yt_tcp",
+                yt_matcher,
+                yt_actions,
+                fails=1,
+                reset=True,
+                inseq=18000,
+                retrans=2,
+                maxseq=65536,
+            )] + yt_actions,
 
-            ["--new=yt_quic", "--filter-udp=443", "--filter-l7=quic",
-             f"--hostlist-domains={YT_DOMAINS},{GV_DOMAINS}", excl,
-             "--payload=quic_initial",
-             circular("yt_quic", udp=True)] + pool(YT_QUIC_TIERS, yq_n),
+            ["--new=yt_quic"] + yt_quic_matcher + [revisioned_circular(
+                "yt_quic",
+                yt_quic_matcher,
+                yt_quic_actions,
+                udp=True,
+            )] + yt_quic_actions,
 
             ["--new=discord_udp", "--filter-udp=50000-50099,3478-3481,5349,19294-19344",
              "--filter-l7=discord,stun", "--out-range=<n2",

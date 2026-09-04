@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -220,6 +221,68 @@ class NfqwsAssetsGateFixture(unittest.TestCase):
                         self.assertNotIn("retrans=", circular, (profile, key))
                         self.assertIn("udp_in=1", circular, (profile, key))
                         self.assertIn("udp_out=4", circular, (profile, key))
+
+    def test_generated_target_pools_bind_learned_slots_to_exact_revisions(self) -> None:
+        generator = REPO_ROOT / "build_scripts" / "build-nfqws-strategies.py"
+        namespace = runpy.run_path(str(generator))
+        detector = namespace["circular"](
+            "fixture", fails=1, reset=True, retrans=2, inseq=4096
+        )
+        matcher = ["--filter-tcp=443", "--filter-l7=tls"]
+        actions = ["--lua-desync=fake:strategy=1"]
+        expected_revision = hashlib.sha256(
+            "\0".join([*matcher, detector, *actions]).encode("utf-8")
+        ).hexdigest()[:16]
+        self.assertEqual(
+            namespace["revisioned_circular"](
+                "fixture",
+                matcher,
+                actions,
+                fails=1,
+                reset=True,
+                retrans=2,
+                inseq=4096,
+            ),
+            f"{detector}:kpbr_rev={expected_revision}",
+        )
+
+        with tempfile.TemporaryDirectory() as raw:
+            output = Path(raw)
+            result = subprocess.run(
+                [sys.executable, str(generator), str(output)],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            safe = (output / "01 safe" / "nfqws2.conf").read_text(
+                encoding="utf-8"
+            )
+            self.assertNotIn("kpbr_rev=", safe)
+            for profile in ("02 balanced", "03 max"):
+                config = (output / profile / "nfqws2.conf").read_text(
+                    encoding="utf-8"
+                )
+                revisions = re.findall(
+                    r"kpbr_rev=([0-9a-f]{16})(?=[\s\"])", config
+                )
+                self.assertEqual(len(revisions), 3, profile)
+                self.assertEqual(len(set(revisions)), 3, profile)
+                for key in ("gv_tcp", "yt_tcp", "yt_quic"):
+                    self.assertRegex(
+                        config,
+                        rf"circular:[^\s\"]*key={key}:kpbr_rev=[0-9a-f]{{16}}",
+                        profile,
+                    )
+                yt_tcp = re.search(
+                    r"circular:[^\s\"]*key=yt_tcp:kpbr_rev=[0-9a-f]{16}",
+                    config,
+                )
+                self.assertIsNotNone(yt_tcp, profile)
+                self.assertIn("fails=1", yt_tcp.group(0))
+                self.assertIn("retrans=2", yt_tcp.group(0))
+                self.assertIn("reset=1", yt_tcp.group(0))
 
     def test_git_attributes_keep_http_packet_bytes_binary(self) -> None:
         relative = Path(

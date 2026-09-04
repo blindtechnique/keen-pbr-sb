@@ -85,6 +85,8 @@ end
 assert(loadfile(companion), "companion has a syntax error")
 dofile(companion)
 assert(type(timer_callback) == "function", "periodic timer was not installed")
+assert(logged_error == nil,
+    "absent stock rotator hooks must silently disable only persistence")
 
 local function read_file(path)
     local handle = assert(io.open(path, "rb"))

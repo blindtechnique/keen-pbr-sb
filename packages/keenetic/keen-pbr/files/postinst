@@ -8,6 +8,7 @@ DNSMASQ_BACKUP="/opt/etc/dnsmasq.conf.backup-pre-keen-pbr"
 METADATA_HELPER="/opt/usr/lib/keen-pbr/portable-stat.sh"
 NFQWS_ROTATOR_REPORTER_SOURCE="/opt/usr/share/keen-pbr/nfqws-lua/rotator-telemetry.lua"
 NFQWS_ROTATOR_REPORTER="/opt/var/lib/keen-pbr/nfqws-rotator-telemetry-v1.lua"
+NFQWS_ROTATOR_LEARNED_PREFIX="/opt/var/lib/keen-pbr/nfqws-rotator-learned-v1"
 
 echo "keen-pbr installation"
 echo "------------------------"
@@ -75,6 +76,19 @@ runtime_data_owner="$(keen_pbr_stat_value '%u' /opt/var/lib/keen-pbr)" ||
     exit 1
 }
 chmod 0755 /opt/var/lib/keen-pbr || exit 1
+for learned_slot in 0 1; do
+    learned_file="${NFQWS_ROTATOR_LEARNED_PREFIX}.${learned_slot}"
+    [ ! -L "$learned_file" ] &&
+        { [ ! -e "$learned_file" ] || [ -f "$learned_file" ]; } || {
+        echo "Unsafe durable nfqws rotator learned-state path" >&2
+        exit 1
+    }
+    if [ ! -e "$learned_file" ]; then
+        : > "$learned_file" || exit 1
+    fi
+    chown nobody:root "$learned_file" || exit 1
+    chmod 0600 "$learned_file" || exit 1
+done
 [ ! -L "$NFQWS_ROTATOR_REPORTER" ] &&
     { [ ! -e "$NFQWS_ROTATOR_REPORTER" ] ||
       [ -f "$NFQWS_ROTATOR_REPORTER" ]; } || {

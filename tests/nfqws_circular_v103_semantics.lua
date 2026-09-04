@@ -24,6 +24,28 @@ function bitand(_, _)
     return 0
 end
 
+local reset_send_count = 0
+
+function deepcopy(value)
+    if type(value) ~= "table" then
+        return value
+    end
+    local copied = {}
+    for key, item in pairs(value) do
+        copied[key] = deepcopy(item)
+    end
+    return copied
+end
+
+function dis_reverse(_)
+end
+
+function rawsend_dissect(dis, options)
+    assert(dis.tcp.th_flags == TH_RST)
+    assert(options.ifout == "test-in")
+    reset_send_count = reset_send_count + 1
+end
+
 function pos_get(desync, kind)
     assert(kind == "s", "this TCP-only harness requested an unexpected position")
     return assert(desync.test_sequence, "test sequence is missing")
@@ -69,6 +91,11 @@ local function new_track()
                     pos = 100,
                 },
             },
+            reverse = {
+                tcp = {
+                    winsize = 64,
+                },
+            },
         },
     }
 end
@@ -95,12 +122,14 @@ local function run_event(track, options)
             retrans = tostring(options.retrans),
             maxseq = "32768",
             inseq = "4096",
+            reset = options.reset and "1" or nil,
         },
         dis = {
             tcp = {th_flags = 0},
             payload = outgoing and "clienthello" or "serverhello",
         },
         func_instance = "circular-v103-test",
+        ifin = "test-in",
         outgoing = outgoing,
         plan = make_plan(),
         test_sequence = outgoing and 100 or 5000,
@@ -233,5 +262,33 @@ for retrans_threshold = 1, 3 do
                 retransmit))
     end
 end
+
+-- 5. reset=1 is a stock v1.0.3 detector option: once the retransmission
+-- threshold is reached it sends one RST to release the waiting client.  It
+-- does not weaken retrans=2 or rotate before the second retransmission.
+reset_state()
+reset_send_count = 0
+local reset_track = new_track()
+run_event(reset_track, {
+    kind = "original",
+    retrans = 2,
+    fails = 1,
+    reset = true,
+})
+run_event(reset_track, {
+    kind = "retransmission",
+    retrans = 2,
+    fails = 1,
+    reset = true,
+})
+assert_equal(reset_send_count, 0, "reset before retransmission threshold")
+local reset_selected = run_event(reset_track, {
+    kind = "retransmission",
+    retrans = 2,
+    fails = 1,
+    reset = true,
+})
+assert_equal(reset_send_count, 1, "reset at retransmission threshold")
+assert_equal(reset_selected, 2, "fails=1 rotates after bounded reset")
 
 print("zapret2 v1.0.3 circular semantic test passed")
