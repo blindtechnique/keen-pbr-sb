@@ -354,9 +354,11 @@ export const useApplyConfigMutation = (options?: UsePostConfigSaveOptions) => {
     mutation: {
       ...options?.mutation,
       onSuccess: async (data, variables, onMutateResult, context) => {
-        for (const queryKey of invalidationKeysAfterApplyConfigMutation) {
-          await queryClient.invalidateQueries({ queryKey })
-        }
+        await Promise.all(
+          invalidationKeysAfterApplyConfigMutation.map((queryKey) =>
+            queryClient.invalidateQueries({ queryKey })
+          )
+        )
 
         await options?.mutation?.onSuccess?.(
           data,
