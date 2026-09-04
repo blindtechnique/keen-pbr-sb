@@ -3536,8 +3536,12 @@ void Daemon::schedule_deferred_list_refresh(
 }
 
 PreparedRuntimeInputs Daemon::prepare_runtime_inputs(const Config& config,
-                                                     RemoteListPreparationMode list_mode) {
+                                                     RemoteListPreparationMode list_mode,
+                                                     HttpCancellationToken cancellation) {
     TraceSpan span("prepare-runtime-inputs");
+    if (cancellation && cancellation->load(std::memory_order_acquire)) {
+        throw RemoteListRefreshCancelled{};
+    }
     validate_config(config);
 
     PreparedRuntimeInputs prepared;
@@ -3560,6 +3564,7 @@ PreparedRuntimeInputs Daemon::prepare_runtime_inputs(const Config& config,
 
     if (list_mode != RemoteListPreparationMode::None) {
         RemoteListRefreshControl control;
+        control.cancellation = std::move(cancellation);
         control.cache_commit = make_guarded_cache_commit_callback();
         if (list_mode == RemoteListPreparationMode::MissingOrInvalid) {
             const auto result = list_service_.download_uncached(

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../http/http_transport.hpp"
+
 #include <cstdint>
 #include <mutex>
 
@@ -110,6 +112,11 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         stopped_ = true;
         pending_ = false;
+        cancellation_->store(true, std::memory_order_release);
+    }
+
+    HttpCancellationToken cancellation_token() const noexcept {
+        return cancellation_;
     }
 
 private:
@@ -131,6 +138,10 @@ private:
     Phase phase_{Phase::idle};
     bool pending_{false};
     bool stopped_{false};
+    // One lifetime token covers workers already downloading and workers that
+    // start after stop(). Ordinary coalescing/completion does not cancel it.
+    const std::shared_ptr<std::atomic<bool>> cancellation_{
+        std::make_shared<std::atomic<bool>>(false)};
 };
 
 } // namespace keen_pbr3

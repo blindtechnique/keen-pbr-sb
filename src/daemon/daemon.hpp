@@ -784,7 +784,8 @@ private:
         std::vector<UdpCallAffinityDecision> decisions);
     PreparedRuntimeInputs prepare_runtime_inputs(const Config& config,
                                                   RemoteListPreparationMode list_mode =
-                                                      RemoteListPreparationMode::RefreshAll);
+                                                      RemoteListPreparationMode::RefreshAll,
+                                                  HttpCancellationToken cancellation = {});
     KeeneticDnsCacheView prepare_keenetic_dns_view(
         const Config& config,
         bool allow_refresh,

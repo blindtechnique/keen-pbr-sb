@@ -3414,10 +3414,12 @@ void Daemon::handle_sighup(
                         validate_config(next_config);
                         *prepared = prepare_runtime_inputs(
                             next_config,
-                            RemoteListPreparationMode::RefreshAll);
+                            RemoteListPreparationMode::RefreshAll,
+                            sighup_reload_coordinator_.cancellation_token());
                         *rollback_prepared = prepare_runtime_inputs(
                             rollback_snapshot->config,
-                            RemoteListPreparationMode::None);
+                            RemoteListPreparationMode::None,
+                            sighup_reload_coordinator_.cancellation_token());
                     } catch (const std::exception& error) {
                         preparation_error = error.what();
                     } catch (...) {

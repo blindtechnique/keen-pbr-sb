@@ -140,12 +140,17 @@ TEST_CASE("config reload cancel and callback race has exactly one owner") {
 
 TEST_CASE("config reload stopped before commit cannot publish or rerun") {
     ConfigReloadCoordinator coordinator;
+    const auto cancellation = coordinator.cancellation_token();
+    REQUIRE(static_cast<bool>(cancellation));
+    CHECK_FALSE(cancellation->load(std::memory_order_acquire));
     const auto request = coordinator.request();
     REQUIRE(request.status == ConfigReloadRequestStatus::started);
 
     coordinator.request();
     coordinator.stop();
 
+    CHECK(cancellation->load(std::memory_order_acquire));
+    CHECK(coordinator.cancellation_token()->load(std::memory_order_acquire));
     CHECK(coordinator.claim_commit(request.claim) ==
           ConfigReloadCommitStatus::stopped);
     const auto completion = coordinator.complete(request.claim);
@@ -155,6 +160,26 @@ TEST_CASE("config reload stopped before commit cannot publish or rerun") {
     const auto after_stop = coordinator.request();
     CHECK(after_stop.status == ConfigReloadRequestStatus::stopped);
     CHECK_FALSE(after_stop.claim);
+}
+
+TEST_CASE("config reload completion and coalescing keep later downloads usable") {
+    ConfigReloadCoordinator coordinator;
+    const auto cancellation = coordinator.cancellation_token();
+    const auto first = coordinator.request();
+    coordinator.request();
+    REQUIRE(coordinator.claim_commit(first.claim) ==
+            ConfigReloadCommitStatus::superseded);
+    REQUIRE(coordinator.complete(first.claim).rerun_requested);
+    CHECK_FALSE(cancellation->load(std::memory_order_acquire));
+
+    const auto next = coordinator.request();
+    REQUIRE(coordinator.claim_commit(next.claim) ==
+            ConfigReloadCommitStatus::claimed);
+    REQUIRE(coordinator.complete(next.claim).owned);
+    CHECK_FALSE(cancellation->load(std::memory_order_acquire));
+
+    coordinator.stop();
+    CHECK(cancellation->load(std::memory_order_acquire));
 }
 
 TEST_CASE("config reload rejects stale lost and empty tokens") {

@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include "../src/daemon/list_service.hpp"
+#include "../src/daemon/config_reload_coordinator.hpp"
 #include "../src/log/logger.hpp"
 #include "../src/http/curl_runtime.hpp"
 #include "../src/lists/srs_decoder.hpp"
@@ -501,7 +502,7 @@ TEST_CASE("list refresh reports bounded per-list progress and cancels distinctly
     std::filesystem::remove_all(temp_dir);
 }
 
-TEST_CASE("cancellation racing cache commit preserves relevant changed lists") {
+TEST_CASE("stopping SIGHUP during cache commit preserves relevant changed lists") {
     const auto temp_dir = make_temp_dir();
     auto transport = std::make_shared<StaticHttpTransport>();
     ListService service(temp_dir, kDefaultMaxFileSizeBytes, transport);
@@ -514,12 +515,14 @@ TEST_CASE("cancellation racing cache commit preserves relevant changed lists") {
     const std::set<std::string> relevant{"remote"};
     const std::set<std::string> dns_relevant{"remote"};
 
-    auto cancellation = std::make_shared<std::atomic<bool>>(false);
+    ConfigReloadCoordinator coordinator;
+    const auto request = coordinator.request();
+    REQUIRE(request.status == ConfigReloadRequestStatus::started);
     RemoteListRefreshControl control;
-    control.cancellation = cancellation;
+    control.cancellation = coordinator.cancellation_token();
     control.cache_commit = [&](const std::function<void()>& commit) {
         commit();
-        cancellation->store(true, std::memory_order_release);
+        coordinator.stop();
     };
 
     try {
@@ -541,6 +544,11 @@ TEST_CASE("cancellation racing cache commit preserves relevant changed lists") {
     }
 
     CHECK(service.cache_manager().has_cache("remote"));
+    CHECK(transport->last_request.cancellation == control.cancellation);
+    CHECK(coordinator.claim_commit(request.claim) ==
+          ConfigReloadCommitStatus::stopped);
+    CHECK(coordinator.complete(request.claim).owned);
+    CHECK_FALSE(coordinator.complete(request.claim).owned);
     std::filesystem::remove_all(temp_dir);
 }
 
