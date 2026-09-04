@@ -1,9 +1,23 @@
 import type {
   ConfigObject,
   RouteRule,
+  RoutingTestEntry,
   RoutingTestRuleDiagnostic,
 } from "@/api/generated/model"
 import { formatListReferenceLabels } from "@/lib/list-display"
+
+export type RoutingPathStepState =
+  | "verified"
+  | "failed"
+  | "unknown"
+  | "blocked"
+  | "not_applicable"
+
+export type RoutingPathStates = {
+  rule: RoutingPathStepState
+  firewall: RoutingPathStepState
+  kernel: RoutingPathStepState
+}
 
 export type RuleCondition = {
   key:
@@ -79,6 +93,51 @@ export function getRuleConditions(
   }
 
   return conditions
+}
+
+export function getRoutingPathStates(
+  entry: RoutingTestEntry
+): RoutingPathStates {
+  const contextUnknown = entry.evaluation === "insufficient_context"
+  const ruleUnknown = contextUnknown || entry.expected_outbound === "(unknown)"
+  const firewallUnknown =
+    contextUnknown || entry.actual_outbound === "(unknown)"
+
+  let kernel: RoutingPathStepState
+  switch (entry.kernel_route?.route_status) {
+    case "resolved":
+      kernel = "verified"
+      break
+    case "unroutable":
+      kernel = "blocked"
+      break
+    case "not_applicable":
+      kernel = "not_applicable"
+      break
+    case "unavailable":
+    default:
+      kernel = "unknown"
+      break
+  }
+
+  return {
+    rule: ruleUnknown ? "unknown" : "verified",
+    firewall: firewallUnknown ? "unknown" : entry.ok ? "verified" : "failed",
+    kernel,
+  }
+}
+
+export function formatRoutingFwmark(fwmark: number | null | undefined) {
+  if (
+    fwmark == null ||
+    !Number.isFinite(fwmark) ||
+    fwmark < 0 ||
+    fwmark > 0xffffffff
+  ) {
+    return null
+  }
+
+  return `0x${Math.trunc(fwmark).toString(16).padStart(8, "0")}`
 }
 
 function hasText(value: string | undefined): value is string {

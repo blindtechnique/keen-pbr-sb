@@ -6687,9 +6687,49 @@ components:
         - firewall_tool
         - resolved_ip
 
+    RoutingTestKernelRouteStatus:
+      type: string
+      enum: [resolved, unroutable, unavailable, not_applicable]
+      description: >
+        Result of a read-only kernel FIB lookup for the destination and the
+        mark published by the realized firewall rule. unavailable is
+        inconclusive and must not be presented as a routing failure.
+        unroutable may describe an intentional fail-closed or kill-switch
+        route and therefore reports the packet outcome, not necessarily a
+        configuration fault.
+
+    RoutingTestKernelRoute:
+      type: object
+      required: [route_status, interface, detail]
+      properties:
+        route_status:
+          $ref: "#/components/schemas/RoutingTestKernelRouteStatus"
+        fwmark:
+          type: integer
+          format: int64
+          nullable: true
+          minimum: 0
+          maximum: 4294967295
+          description: >
+            Exact mark from the published realized firewall rule. Null for
+            unmarked traffic and when no conclusive firewall action was found.
+        table:
+          type: integer
+          format: int64
+          nullable: true
+          minimum: 0
+          maximum: 4294967295
+          description: Routing table reported by the kernel when available.
+        interface:
+          type: string
+          description: Outgoing interface reported for a resolved route.
+        detail:
+          type: string
+          description: Safe diagnostic detail; empty when no detail is needed.
+
     RoutingTestEntry:
       type: object
-      required: [ip, expected_outbound, actual_outbound, ok, evaluation, unknown_conditions]
+      required: [ip, expected_outbound, actual_outbound, ok, evaluation, unknown_conditions, kernel_route]
       properties:
         ip:
           type: string
@@ -6724,6 +6764,12 @@ components:
           description: Packet or runtime fields required for a conclusive result.
           items:
             $ref: "#/components/schemas/RoutingTestUnknownCondition"
+        kernel_route:
+          $ref: "#/components/schemas/RoutingTestKernelRoute"
+          description: >
+            Read-only kernel route evidence for this exact destination and
+            realized packet mark. This describes router-local policy lookup,
+            not a complete forwarded-client connectivity test.
 
     RoutingTestRuleIpDiagnostic:
       type: object

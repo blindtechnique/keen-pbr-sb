@@ -1251,7 +1251,8 @@ void Daemon::handle_ipc_control_requests() {
                                         target,
                                         &snapshot.realized_rules,
                                         operation_deadline,
-                                        snapshot.firewall_backend);
+                                        snapshot.firewall_backend,
+                                        system_fib_lookup);
                                     result.unapplied_draft =
                                         snapshot.unapplied_draft;
                                     if (result.unapplied_draft) {
@@ -1276,6 +1277,26 @@ void Daemon::handle_ipc_control_requests() {
                                             {"unknown_conditions",
                                              entry.unknown_conditions},
                                         };
+                                        nlohmann::json kernel_route = {
+                                            {"route_status",
+                                             routing_fib_verdict_code(
+                                                 entry.fib.verdict)},
+                                            {"interface",
+                                             entry.fib.interface},
+                                            {"detail", entry.fib.detail},
+                                        };
+                                        kernel_route["fwmark"] =
+                                            entry.fib.fwmark.has_value()
+                                                ? nlohmann::json(
+                                                      *entry.fib.fwmark)
+                                                : nlohmann::json(nullptr);
+                                        kernel_route["table"] =
+                                            entry.fib.table.has_value()
+                                                ? nlohmann::json(
+                                                      *entry.fib.table)
+                                                : nlohmann::json(nullptr);
+                                        entry_json["kernel_route"] =
+                                            std::move(kernel_route);
                                         if (entry.list_match.has_value()) {
                                             entry_json["list_match"] = {
                                                 {"list",

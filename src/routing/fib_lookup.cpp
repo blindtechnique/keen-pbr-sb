@@ -81,7 +81,7 @@ FibAnswer no_verdict(std::string detail) noexcept {
 
 bool refusing_route_type(const unsigned char type) noexcept {
     return type == RTN_UNREACHABLE || type == RTN_BLACKHOLE ||
-           type == RTN_PROHIBIT || type == RTN_THROW;
+           type == RTN_PROHIBIT;
 }
 
 }  // namespace

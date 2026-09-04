@@ -253,6 +253,8 @@ export * from './routingHealthResponseSystemAuthState';
 export * from './routingHealthResponseTtlBypassState';
 export * from './routingTestEntry';
 export * from './routingTestEvaluation';
+export * from './routingTestKernelRoute';
+export * from './routingTestKernelRouteStatus';
 export * from './routingTestListMatch';
 export * from './routingTestNfqws';
 export * from './routingTestNfqwsMatch';

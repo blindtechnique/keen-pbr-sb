@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test"
 
+import type { RoutingTestEntry } from "../src/api/generated/model/routingTestEntry"
 import type { RoutingTestRuleDiagnostic } from "../src/api/generated/model/routingTestRuleDiagnostic"
 import {
+  formatRoutingFwmark,
   getRuleConditions,
+  getRoutingPathStates,
   getVisibleRuleDiagnostics,
   isGrayRuleDiagnostic,
 } from "../src/components/overview/routing-diagnostics-utils"
@@ -100,7 +103,90 @@ describe("routing diagnostics helpers", () => {
       )
     ).toEqual([{ key: "lists", value: "Работа" }])
   })
+
+  test("maps a resolved marked route to three verified path steps", () => {
+    const entry = buildRoutingEntry()
+
+    expect(getRoutingPathStates(entry)).toEqual({
+      rule: "verified",
+      firewall: "verified",
+      kernel: "verified",
+    })
+    expect(formatRoutingFwmark(entry.kernel_route.fwmark)).toBe("0x00040000")
+  })
+
+  test("keeps a firewall mismatch separate from a resolved kernel route", () => {
+    const entry = buildRoutingEntry({
+      actualOutbound: "direct",
+      ok: false,
+    })
+
+    expect(getRoutingPathStates(entry)).toEqual({
+      rule: "verified",
+      firewall: "failed",
+      kernel: "verified",
+    })
+  })
+
+  test("treats an unavailable FIB answer as unknown, not unroutable", () => {
+    const entry = buildRoutingEntry({ fibVerdict: "unavailable" })
+
+    expect(getRoutingPathStates(entry).kernel).toBe("unknown")
+  })
+
+  test("distinguishes an explicit unroutable FIB answer", () => {
+    const entry = buildRoutingEntry({ fibVerdict: "unroutable" })
+
+    expect(getRoutingPathStates(entry).kernel).toBe("blocked")
+  })
+
+  test("shows incomplete packet context and a non-applicable lookup neutrally", () => {
+    const entry = buildRoutingEntry({
+      evaluation: "insufficient_context",
+      expectedOutbound: "(unknown)",
+      actualOutbound: "(unknown)",
+      fibVerdict: "not_applicable",
+    })
+
+    expect(getRoutingPathStates(entry)).toEqual({
+      rule: "unknown",
+      firewall: "unknown",
+      kernel: "not_applicable",
+    })
+  })
+
+  test("rejects invalid marks instead of presenting misleading hex values", () => {
+    expect(formatRoutingFwmark(undefined)).toBeNull()
+    expect(formatRoutingFwmark(-1)).toBeNull()
+    expect(formatRoutingFwmark(0x1_0000_0000)).toBeNull()
+  })
 })
+
+function buildRoutingEntry(
+  options: {
+    expectedOutbound?: string
+    actualOutbound?: string
+    ok?: boolean
+    evaluation?: RoutingTestEntry["evaluation"]
+    fibVerdict?: RoutingTestEntry["kernel_route"]["route_status"]
+  } = {}
+): RoutingTestEntry {
+  return {
+    ip: "8.8.8.8",
+    expected_outbound: options.expectedOutbound ?? "vpn",
+    actual_outbound: options.actualOutbound ?? "vpn",
+    ok: options.ok ?? true,
+    evaluation: options.evaluation ?? "matched",
+    unknown_conditions: [],
+    kernel_route: {
+      route_status: options.fibVerdict ?? "resolved",
+      fwmark: 0x00040000,
+      table: 152,
+      interface: "nwg1",
+      detail: "",
+    },
+  }
+}
 
 function buildRuleDiagnostic(
   ruleIndex: number,

@@ -660,6 +660,8 @@ struct OutboundEvaluation {
     std::optional<ListMatchInfo> list_match;
     RoutingMatchEvaluation evaluation{RoutingMatchEvaluation::NotMatched};
     std::vector<std::string> unknown_conditions;
+    std::optional<std::uint32_t> realized_fwmark;
+    bool fib_lookup_applicable{true};
 };
 
 OutboundEvaluation find_expected_outbound(
@@ -874,21 +876,79 @@ OutboundEvaluation find_actual_outbound(
         }
         if (evaluation.evaluation ==
             RoutingMatchEvaluation::InsufficientContext) {
-            return OutboundEvaluation{
+            auto result = OutboundEvaluation{
                 "(unknown)",
                 std::nullopt,
                 evaluation.evaluation,
                 std::move(evaluation.unknown_conditions),
             };
+            result.fib_lookup_applicable = false;
+            return result;
         }
-        return OutboundEvaluation{
+        auto result = OutboundEvaluation{
             state != nullptr ? state->outbound_tag : "(unknown)",
             std::nullopt,
             RoutingMatchEvaluation::Matched,
             {},
         };
+        // Use the mark from the published realized rule, not one recomputed
+        // from config: this diagnostic is meant to expose drift between those
+        // two layers. Pass rules and the default path deliberately ask about
+        // an unmarked packet; a DROP action never reaches routing at all.
+        result.fib_lookup_applicable =
+            state != nullptr && state->action_type != RuleActionType::Drop;
+        if (state != nullptr && state->action_type == RuleActionType::Mark) {
+            result.realized_fwmark = state->fwmark;
+        }
+        return result;
     }
     return {};
+}
+
+RoutingFibResult perform_routing_fib_lookup(
+    const std::string& ip,
+    bool applicable,
+    std::optional<std::uint32_t> realized_fwmark,
+    const RoutingFibLookup& fib_lookup) {
+    RoutingFibResult result;
+    result.fwmark = realized_fwmark;
+    if (!applicable) {
+        result.verdict = RoutingFibVerdict::NotApplicable;
+        result.detail = "the realized firewall action does not reach routing";
+        return result;
+    }
+    if (!fib_lookup) {
+        result.verdict = RoutingFibVerdict::Unavailable;
+        result.detail = "kernel FIB lookup is unavailable";
+        return result;
+    }
+
+    FibAnswer answer;
+    try {
+        answer = fib_lookup(FibQuery{ip, realized_fwmark});
+    } catch (...) {
+        // FIB evidence is a read-only diagnostic. A diagnostic adapter failure
+        // must not discard the rule/list result that was already computed.
+        result.verdict = RoutingFibVerdict::Unavailable;
+        result.detail = "kernel FIB lookup failed";
+        return result;
+    }
+
+    result.table = answer.table;
+    result.interface = std::move(answer.interface);
+    result.detail = std::move(answer.detail);
+    switch (answer.verdict) {
+        case FibVerdict::resolved:
+            result.verdict = RoutingFibVerdict::Resolved;
+            break;
+        case FibVerdict::unroutable:
+            result.verdict = RoutingFibVerdict::Unroutable;
+            break;
+        case FibVerdict::unavailable:
+            result.verdict = RoutingFibVerdict::Unavailable;
+            break;
+    }
+    return result;
 }
 
 // Every membership check may spawn an nft/ipset subprocess. Keep the inner
@@ -929,12 +989,27 @@ const char* routing_match_evaluation_code(
     return "insufficient_context";
 }
 
+const char* routing_fib_verdict_code(RoutingFibVerdict verdict) noexcept {
+    switch (verdict) {
+        case RoutingFibVerdict::Resolved:
+            return "resolved";
+        case RoutingFibVerdict::Unroutable:
+            return "unroutable";
+        case RoutingFibVerdict::Unavailable:
+            return "unavailable";
+        case RoutingFibVerdict::NotApplicable:
+            return "not_applicable";
+    }
+    return "unavailable";
+}
+
 TestRoutingResult compute_test_routing(const Config& config,
                                         const CacheManager& cache,
                                         const std::string& target,
                                         const std::vector<RuleState>* realized_rule_states,
                                         std::optional<RoutingTestDeadline> deadline,
-                                        std::optional<FirewallBackend> realized_firewall_backend) {
+                                        std::optional<FirewallBackend> realized_firewall_backend,
+                                        RoutingFibLookup fib_lookup) {
     enforce_routing_test_deadline(deadline);
     TestRoutingResult result;
     result.target = target;
@@ -1014,6 +1089,7 @@ TestRoutingResult compute_test_routing(const Config& config,
         entry.evaluation = RoutingMatchEvaluation::InsufficientContext;
         entry.unknown_conditions = std::move(expected.unknown_conditions);
         append_unknown_condition(entry.unknown_conditions, "resolved_ip");
+        entry.fib.detail = "no resolved IP address";
         result.entries.push_back(std::move(entry));
     }
 
@@ -1099,12 +1175,25 @@ TestRoutingResult compute_test_routing(const Config& config,
                         per_ip.entry.unknown_conditions, condition);
                 }
             }
+            if (per_ip.entry.evaluation !=
+                RoutingMatchEvaluation::InsufficientContext) {
+                per_ip.entry.fib = perform_routing_fib_lookup(
+                    ip,
+                    actual.fib_lookup_applicable,
+                    actual.realized_fwmark,
+                    fib_lookup);
+            } else {
+                per_ip.entry.fib.detail =
+                    "packet context is insufficient for a FIB lookup";
+            }
         } else {
             per_ip.entry.actual_outbound = "(unknown)";
             per_ip.entry.evaluation =
                 RoutingMatchEvaluation::InsufficientContext;
             append_unknown_condition(
                 per_ip.entry.unknown_conditions, "firewall_tool");
+            per_ip.entry.fib.detail =
+                "realized firewall state is unavailable";
         }
         per_ip.entry.ok =
             per_ip.entry.expected_outbound != "(unknown)" &&
@@ -1182,6 +1271,33 @@ TestRoutingResult compute_test_routing(const Config& config,
 }
 
 namespace {
+std::string render_kernel_route(const RoutingFibResult& fib) {
+    switch (fib.verdict) {
+        case RoutingFibVerdict::Resolved: {
+            std::string value =
+                fib.interface.empty() ? "UNKNOWN" : fib.interface;
+            if (fib.table.has_value()) {
+                value += keen_pbr3::format(
+                    " table {}", *fib.table);
+            }
+            if (fib.fwmark.has_value()) {
+                value += keen_pbr3::format(
+                    " mark 0x{:08x}", *fib.fwmark);
+            }
+            return value;
+        }
+        case RoutingFibVerdict::Unroutable:
+            return fib.table.has_value()
+                ? keen_pbr3::format("BLOCKED table {}", *fib.table)
+                : "BLOCKED";
+        case RoutingFibVerdict::Unavailable:
+            return "UNKNOWN";
+        case RoutingFibVerdict::NotApplicable:
+            return "N/A";
+    }
+    return "UNKNOWN";
+}
+
 int render_test_routing_result(const TestRoutingResult& result) {
     for (const auto& w : result.warnings) {
         std::cerr << "Warning: " << w << "\n";
@@ -1204,14 +1320,19 @@ int render_test_routing_result(const TestRoutingResult& result) {
     constexpr int ip_w        = 25;
     constexpr int list_w      = 35;
     constexpr int outbound_w  = 18;
+    constexpr int kernel_w    = 34;
 
-    std::cout << keen_pbr3::format("{:<{}} | {:<{}} | {:<{}} | {:<{}} | {}\n",
+    std::cout << keen_pbr3::format("{:<{}} | {:<{}} | {:<{}} | {:<{}} | {:<{}} | {}\n",
                              "IP", ip_w,
                              "List Match", list_w,
                              "Expected Outbound", outbound_w,
                              "Actual Outbound", outbound_w,
+                             "Kernel Route", kernel_w,
                              "Status");
-    std::cout << std::string(ip_w + 3 + list_w + 3 + outbound_w + 3 + outbound_w + 3 + 6, '-')
+    std::cout << std::string(
+                     ip_w + 3 + list_w + 3 + outbound_w + 3 +
+                         outbound_w + 3 + kernel_w + 3 + 6,
+                     '-')
               << "\n";
 
     bool all_ok = !result.dns_error.has_value();
@@ -1231,11 +1352,12 @@ int render_test_routing_result(const TestRoutingResult& result) {
                 : (entry.ok ? "OK" : "NOK");
         if (!entry.ok) all_ok = false;
 
-        std::cout << keen_pbr3::format("{:<{}} | {:<{}} | {:<{}} | {:<{}} | {}\n",
+        std::cout << keen_pbr3::format("{:<{}} | {:<{}} | {:<{}} | {:<{}} | {:<{}} | {}\n",
                                  entry.ip, ip_w,
                                  list_str, list_w,
                                  entry.expected_outbound, outbound_w,
                                  entry.actual_outbound, outbound_w,
+                                 render_kernel_route(entry.fib), kernel_w,
                                  status);
     }
 
@@ -1247,7 +1369,14 @@ int run_test_routing_command(const Config& config,
                               const CacheManager& cache,
                               const std::string& target) {
     return render_test_routing_result(
-        compute_test_routing(config, cache, target));
+        compute_test_routing(
+            config,
+            cache,
+            target,
+            nullptr,
+            std::nullopt,
+            std::nullopt,
+            system_fib_lookup));
 }
 
 int run_test_routing_command(const nlohmann::json& response) {
@@ -1285,6 +1414,47 @@ int run_test_routing_command(const nlohmann::json& response) {
         }
         entry.unknown_conditions = item.value(
             "unknown_conditions", std::vector<std::string>{});
+        if (item.contains("kernel_route") &&
+            item.at("kernel_route").is_object()) {
+            const auto& kernel_route = item.at("kernel_route");
+            const std::string route_status =
+                kernel_route.value("route_status", "unavailable");
+            if (route_status == "resolved") {
+                entry.fib.verdict = RoutingFibVerdict::Resolved;
+            } else if (route_status == "unroutable") {
+                entry.fib.verdict = RoutingFibVerdict::Unroutable;
+            } else if (route_status == "not_applicable") {
+                entry.fib.verdict = RoutingFibVerdict::NotApplicable;
+            } else {
+                entry.fib.verdict = RoutingFibVerdict::Unavailable;
+            }
+            entry.fib.interface =
+                kernel_route.value("interface", "");
+            entry.fib.detail = kernel_route.value("detail", "");
+            const auto read_uint32 =
+                [&](const char* key) -> std::optional<std::uint32_t> {
+                const auto found = kernel_route.find(key);
+                if (found == kernel_route.end() || found->is_null()) {
+                    return std::nullopt;
+                }
+                if (found->is_number_unsigned()) {
+                    const auto value = found->get<std::uint64_t>();
+                    if (value <= 0xffffffffULL) {
+                        return static_cast<std::uint32_t>(value);
+                    }
+                } else if (found->is_number_integer()) {
+                    const auto value = found->get<std::int64_t>();
+                    if (value >= 0 &&
+                        static_cast<std::uint64_t>(value) <=
+                            0xffffffffULL) {
+                        return static_cast<std::uint32_t>(value);
+                    }
+                }
+                return std::nullopt;
+            };
+            entry.fib.fwmark = read_uint32("fwmark");
+            entry.fib.table = read_uint32("table");
+        }
         if (item.contains("list_match") &&
             item.at("list_match").is_object()) {
             const auto& match = item.at("list_match");

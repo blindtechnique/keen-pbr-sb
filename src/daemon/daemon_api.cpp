@@ -1706,7 +1706,8 @@ TestRoutingResult Daemon::run_api_routing_test(
                         target,
                         &snapshot->realized_rules,
                         operation_deadline,
-                        snapshot->firewall_backend);
+                        snapshot->firewall_backend,
+                        system_fib_lookup);
                     result.unapplied_draft =
                         snapshot->unapplied_draft;
                     if (result.unapplied_draft) {

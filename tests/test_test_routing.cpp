@@ -598,7 +598,8 @@ TEST_CASE("compute_test_routing includes route rule conditions in diagnostics") 
     std::filesystem::remove_all(temp_dir);
 }
 
-TEST_CASE("compute_test_routing uses captured iptables backend and realized A-B names") {
+TEST_CASE(
+    "compute_test_routing uses captured firewall state and returns typed marked FIB evidence") {
     const auto temp_dir = make_temp_dir();
     const auto bin_dir = temp_dir / "bin";
     const auto invocation_log = temp_dir / "ipset-invocations.txt";
@@ -655,7 +656,42 @@ TEST_CASE("compute_test_routing uses captured iptables backend and realized A-B 
     realized.set_names = {"kpbr4S_remote_B"};
     realized.outbound_tag = "vpn";
     realized.action_type = RuleActionType::Mark;
+    realized.fwmark = 0x000d0000U;
+
+    FibAnswer fib_answer;
+    fib_answer.verdict = FibVerdict::resolved;
+    fib_answer.interface = "wg-test";
+    fib_answer.table = 152U;
+    RoutingFibVerdict expected_fib_verdict = RoutingFibVerdict::Resolved;
+    std::string expected_fib_code = "resolved";
+    bool expect_lookup = true;
+
+    SUBCASE("resolved") {}
+    SUBCASE("unroutable") {
+        fib_answer.verdict = FibVerdict::unroutable;
+        fib_answer.interface.clear();
+        fib_answer.detail = "marked table is unreachable";
+        expected_fib_verdict = RoutingFibVerdict::Unroutable;
+        expected_fib_code = "unroutable";
+    }
+    SUBCASE("unavailable") {
+        fib_answer.verdict = FibVerdict::unavailable;
+        fib_answer.interface.clear();
+        fib_answer.table.reset();
+        fib_answer.detail = "the kernel did not echo the requested mark";
+        expected_fib_verdict = RoutingFibVerdict::Unavailable;
+        expected_fib_code = "unavailable";
+    }
+    SUBCASE("drop never asks the FIB") {
+        realized.action_type = RuleActionType::Drop;
+        expected_fib_verdict = RoutingFibVerdict::NotApplicable;
+        expected_fib_code = "not_applicable";
+        expect_lookup = false;
+    }
     const std::vector<RuleState> realized_rules{realized};
+
+    std::optional<FibQuery> observed_fib_query;
+    std::size_t fib_lookup_calls = 0;
 
     const auto result = compute_test_routing(
         config,
@@ -663,12 +699,39 @@ TEST_CASE("compute_test_routing uses captured iptables backend and realized A-B 
         "203.0.113.10",
         &realized_rules,
         std::nullopt,
-        FirewallBackend::iptables);
+        FirewallBackend::iptables,
+        [&](const FibQuery& query) {
+            ++fib_lookup_calls;
+            observed_fib_query = query;
+            return fib_answer;
+        });
 
     REQUIRE(result.entries.size() == 1);
     CHECK(result.entries.front().expected_outbound == "vpn");
     CHECK(result.entries.front().actual_outbound == "vpn");
     CHECK(result.entries.front().ok);
+    const auto& fib = result.entries.front().fib;
+    CHECK(fib.verdict == expected_fib_verdict);
+    CHECK(std::string(routing_fib_verdict_code(fib.verdict)) ==
+          expected_fib_code);
+    CHECK(fib_lookup_calls == (expect_lookup ? 1U : 0U));
+    if (expect_lookup) {
+        REQUIRE(observed_fib_query.has_value());
+        CHECK(observed_fib_query->destination == "203.0.113.10");
+        REQUIRE(observed_fib_query->fwmark.has_value());
+        CHECK(*observed_fib_query->fwmark == realized.fwmark);
+        REQUIRE(fib.fwmark.has_value());
+        CHECK(*fib.fwmark == realized.fwmark);
+        CHECK(fib.table == fib_answer.table);
+        CHECK(fib.interface == fib_answer.interface);
+        CHECK(fib.detail == fib_answer.detail);
+    } else {
+        CHECK_FALSE(observed_fib_query.has_value());
+        CHECK_FALSE(fib.fwmark.has_value());
+        CHECK_FALSE(fib.table.has_value());
+        CHECK(fib.interface.empty());
+        CHECK_FALSE(fib.detail.empty());
+    }
     REQUIRE(result.rule_diagnostics.size() == 1);
     REQUIRE(result.rule_diagnostics.front().ip_rows.size() == 1);
     const auto& row = result.rule_diagnostics.front().ip_rows.front();
@@ -1176,6 +1239,12 @@ TEST_CASE("daemon test-routing response is rendered as a human-readable table") 
              {"ok", true},
              {"evaluation", "matched"},
              {"unknown_conditions", nlohmann::json::array()},
+             {"kernel_route",
+              {{"route_status", "resolved"},
+               {"fwmark", 0x00040000U},
+               {"table", 152U},
+               {"interface", "nwg1"},
+               {"detail", ""}}},
              {"list_match",
               {{"list", "domains"},
                {"via", "example.com"}}}}}}}}};
@@ -1195,6 +1264,11 @@ TEST_CASE("daemon test-routing response is rendered as a human-readable table") 
     CHECK(stdout_capture.str().find("Target: example.com") !=
           std::string::npos);
     CHECK(stdout_capture.str().find("Expected Outbound") !=
+          std::string::npos);
+    CHECK(stdout_capture.str().find("Kernel Route") !=
+          std::string::npos);
+    CHECK(stdout_capture.str().find(
+              "nwg1 table 152 mark 0x00040000") !=
           std::string::npos);
     CHECK(stdout_capture.str().find(
               "domains (via example.com)") != std::string::npos);

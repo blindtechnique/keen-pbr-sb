@@ -3,11 +3,14 @@
 #include "../cache/cache_manager.hpp"
 #include "../config/config.hpp"
 #include "../routing/firewall_state.hpp"
+#include "../routing/fib_lookup.hpp"
 
 #include <nlohmann/json.hpp>
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
+#include <functional>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -42,6 +45,32 @@ enum class RoutingMatchEvaluation {
 const char* routing_match_evaluation_code(
     RoutingMatchEvaluation evaluation) noexcept;
 
+enum class RoutingFibVerdict {
+    Resolved,
+    Unroutable,
+    Unavailable,
+    NotApplicable,
+};
+
+const char* routing_fib_verdict_code(RoutingFibVerdict verdict) noexcept;
+
+// Read-only evidence from the kernel for the exact mark published by the
+// realized firewall rule. `fwmark` is absent for ordinary unmarked routing and
+// when packet context did not identify one realized rule.
+struct RoutingFibResult {
+    RoutingFibVerdict verdict{RoutingFibVerdict::Unavailable};
+    std::optional<std::uint32_t> fwmark;
+    std::optional<std::uint32_t> table;
+    std::string interface;
+    std::string detail;
+};
+
+// The routing test may evaluate independent resolved addresses on two worker
+// threads. Injected implementations must therefore be safe for concurrent
+// calls. Production entry points pass the stateless raw-netlink adapter
+// explicitly; the empty default keeps pure unit tests off the host FIB.
+using RoutingFibLookup = std::function<FibAnswer(const FibQuery&)>;
+
 struct ListMatchInfo {
     std::string list_name;
     std::string via; // specific entry that triggered match: an IP, CIDR, or domain
@@ -55,6 +84,7 @@ struct TestRoutingEntry {
     bool ok;
     RoutingMatchEvaluation evaluation{RoutingMatchEvaluation::NotMatched};
     std::vector<std::string> unknown_conditions;
+    RoutingFibResult fib;
 };
 
 struct RuleIpDiagnostic {
@@ -97,7 +127,8 @@ TestRoutingResult compute_test_routing(const Config& config,
                                         const std::string& target,
                                         const std::vector<RuleState>* realized_rule_states = nullptr,
                                         std::optional<RoutingTestDeadline> deadline = std::nullopt,
-                                        std::optional<FirewallBackend> realized_firewall_backend = std::nullopt);
+                                        std::optional<FirewallBackend> realized_firewall_backend = std::nullopt,
+                                        RoutingFibLookup fib_lookup = {});
 
 #ifdef KEEN_PBR3_TESTING
 // Deterministic failure seams for exception-safety regressions. Each injected

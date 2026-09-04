@@ -76,7 +76,22 @@ ApiContext make_test_api_context(SseBroadcaster& broadcaster) {
                 "source_address", "destination_port"};
             entry.list_match =
                 ListMatchInfo{"work", "203.0.113.7"};
+            entry.fib.verdict = RoutingFibVerdict::Unavailable;
+            entry.fib.detail =
+                "packet context is insufficient for a FIB lookup";
             result.entries.push_back(std::move(entry));
+
+            TestRoutingEntry resolved;
+            resolved.ip = "203.0.113.8";
+            resolved.expected_outbound = "vpn";
+            resolved.actual_outbound = "vpn";
+            resolved.ok = true;
+            resolved.evaluation = RoutingMatchEvaluation::Matched;
+            resolved.fib.verdict = RoutingFibVerdict::Resolved;
+            resolved.fib.fwmark = 0x00040000U;
+            resolved.fib.table = 152U;
+            resolved.fib.interface = "nwg1";
+            result.entries.push_back(std::move(resolved));
 
             RuleDiagnostic rule;
             rule.rule_index = 0;
@@ -153,11 +168,24 @@ TEST_CASE("register_test_routing_handler: exposes active scope and honest per-IP
     const auto body = nlohmann::json::parse(response->body);
     CHECK(body.at("config_scope") == "active");
     CHECK(body.at("unapplied_draft") == true);
-    REQUIRE(body.at("results").size() == 1);
+    REQUIRE(body.at("results").size() == 2);
     CHECK(body.at("results")[0].at("evaluation") ==
           "insufficient_context");
     CHECK(body.at("results")[0].at("unknown_conditions") ==
           nlohmann::json{"source_address", "destination_port"});
+    const auto& kernel_route = body.at("results")[0].at("kernel_route");
+    CHECK(kernel_route.at("route_status") == "unavailable");
+    CHECK(kernel_route.at("fwmark").is_null());
+    CHECK(kernel_route.at("table").is_null());
+    CHECK(kernel_route.at("interface") == "");
+    CHECK_FALSE(kernel_route.at("detail").get<std::string>().empty());
+    const auto& resolved_route =
+        body.at("results")[1].at("kernel_route");
+    CHECK(resolved_route.at("route_status") == "resolved");
+    CHECK(resolved_route.at("fwmark") == 0x00040000U);
+    CHECK(resolved_route.at("table") == 152U);
+    CHECK(resolved_route.at("interface") == "nwg1");
+    CHECK(resolved_route.at("detail") == "");
     REQUIRE(body.at("rule_diagnostics").size() == 1);
     const auto& row =
         body.at("rule_diagnostics")[0].at("ip_rows")[0];

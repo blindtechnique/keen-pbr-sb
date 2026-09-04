@@ -144,6 +144,15 @@ TEST_CASE("fib: a refused packet is an answer, not a failure") {
     }
 }
 
+TEST_CASE("fib: a throw route is inconclusive rather than a terminal refusal") {
+    // RTN_THROW means policy lookup should continue in another table. It does
+    // not itself prove that the packet will be dropped.
+    const auto answer = Reply(RTN_THROW).table(152U).parse();
+
+    CHECK(answer.verdict == FibVerdict::unavailable);
+    CHECK(answer.interface.empty());
+}
+
 TEST_CASE("fib: a refusal is reported even when a mark went unanswered") {
     // The echo rule must not turn a blackhole into "no verdict": the check runs
     // before the interface is read, but after the mark is judged, so state the

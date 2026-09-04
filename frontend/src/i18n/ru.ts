@@ -2153,6 +2153,21 @@ export const ruTranslation = {
     routingDiagnostics: {
       noMatchingRule:
         "Для целевых списков не найдено подходящего правила маршрутизации.",
+      pathTitle: "Проверка пути маршрутизации",
+      pathDescription:
+        "Показаны решения правил, firewall и локального поиска маршрута на роутере. Это не проверка доступности сайта.",
+      pathRule: "Выбранное правило",
+      pathFirewall: "Firewall",
+      pathKernel: "Маршрут ядра",
+      pathDefault: "Обычный маршрут",
+      pathUnknown: "Не удалось подтвердить",
+      pathFirewallMarked: "{{outbound}}, метка {{mark}}",
+      pathKernelResolved: "{{interface}}",
+      pathKernelResolvedTable: "{{interface}}, таблица {{table}}",
+      pathKernelTableOnly: "Таблица {{table}}",
+      pathKernelUnroutable: "Маршрутизация заблокирована",
+      pathKernelUnavailable: "Маршрут не удалось подтвердить",
+      pathKernelNotApplicable: "До поиска маршрута не дошло",
       resultTitle: "Результат маршрутизации",
       ruleDetailsTitle: "Диагностика правил",
       ip: "IP",

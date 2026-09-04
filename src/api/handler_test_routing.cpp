@@ -36,6 +36,35 @@ api::Evaluation to_api_evaluation(RoutingMatchEvaluation evaluation) {
     return api::Evaluation::INSUFFICIENT_CONTEXT;
 }
 
+api::RouteStatus to_api_fib_verdict(
+    RoutingFibVerdict verdict) {
+    switch (verdict) {
+        case RoutingFibVerdict::Resolved:
+            return api::RouteStatus::RESOLVED;
+        case RoutingFibVerdict::Unroutable:
+            return api::RouteStatus::UNROUTABLE;
+        case RoutingFibVerdict::Unavailable:
+            return api::RouteStatus::UNAVAILABLE;
+        case RoutingFibVerdict::NotApplicable:
+            return api::RouteStatus::NOT_APPLICABLE;
+    }
+    return api::RouteStatus::UNAVAILABLE;
+}
+
+api::KernelRoute to_api_kernel_route(const RoutingFibResult& fib) {
+    api::KernelRoute converted;
+    converted.route_status = to_api_fib_verdict(fib.verdict);
+    if (fib.fwmark.has_value()) {
+        converted.fwmark = static_cast<int64_t>(*fib.fwmark);
+    }
+    if (fib.table.has_value()) {
+        converted.table = static_cast<int64_t>(*fib.table);
+    }
+    converted.interface = fib.interface;
+    converted.detail = fib.detail;
+    return converted;
+}
+
 std::vector<api::RoutingTestUnknownConditionElement>
 to_api_unknown_conditions(const std::vector<std::string>& conditions) {
     std::vector<api::RoutingTestUnknownConditionElement> converted;
@@ -613,6 +642,7 @@ void register_test_routing_handler(ApiServer& server, ApiContext& ctx) {
             e.evaluation = to_api_evaluation(entry.evaluation);
             e.unknown_conditions =
                 to_api_unknown_conditions(entry.unknown_conditions);
+            e.kernel_route = to_api_kernel_route(entry.fib);
             if (entry.list_match) {
                 e.list_match = to_api_list_match(*entry.list_match);
             }

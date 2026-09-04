@@ -6,6 +6,7 @@
  * OpenAPI spec version: 3.0.0
  */
 import type { RoutingTestEvaluation } from './routingTestEvaluation';
+import type { RoutingTestKernelRoute } from './routingTestKernelRoute';
 import type { RoutingTestListMatch } from './routingTestListMatch';
 import type { RoutingTestUnknownCondition } from './routingTestUnknownCondition';
 
@@ -26,4 +27,7 @@ export interface RoutingTestEntry {
   evaluation: RoutingTestEvaluation;
   /** Packet or runtime fields required for a conclusive result. */
   unknown_conditions: RoutingTestUnknownCondition[];
+  /** Read-only kernel route evidence for this exact destination and realized packet mark. This describes router-local policy lookup, not a complete forwarded-client connectivity test.
+   */
+  kernel_route: RoutingTestKernelRoute;
 }

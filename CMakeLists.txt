@@ -533,6 +533,7 @@ set(SOURCES
   src/health/tunnel_probe_report.cpp
   src/health/tunnel_candidate_scan.cpp
   src/routing/target.cpp
+  src/routing/fib_lookup.cpp
   src/routing/netlink.cpp
   src/routing/raw_rtnetlink_codec.cpp
   src/routing/interface_monitor.cpp

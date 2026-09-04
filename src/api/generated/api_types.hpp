@@ -1472,6 +1472,16 @@ namespace api {
 
     enum class Evaluation : int { INSUFFICIENT_CONTEXT, MATCHED, NOT_MATCHED };
 
+    enum class RouteStatus : int { NOT_APPLICABLE, RESOLVED, UNAVAILABLE, UNROUTABLE };
+
+    struct KernelRoute {
+        std::string detail;
+        std::optional<int64_t> fwmark;
+        std::string interface;
+        RouteStatus route_status;
+        std::optional<int64_t> table;
+    };
+
     struct ListMatch {
         std::string list;
         std::string via;
@@ -1484,6 +1494,7 @@ namespace api {
         Evaluation evaluation;
         std::string expected_outbound;
         std::string ip;
+        KernelRoute kernel_route;
         std::optional<ListMatch> list_match;
         bool ok = false;
         std::vector<RoutingTestUnknownConditionElement> unknown_conditions;
@@ -2176,6 +2187,8 @@ namespace api {
         std::optional<RoutingHealthResponse> routing_health_response;
         std::optional<RoutingTestEntry> routing_test_entry;
         std::optional<Evaluation> routing_test_evaluation;
+        std::optional<KernelRoute> routing_test_kernel_route;
+        std::optional<RouteStatus> routing_test_kernel_route_status;
         std::optional<ListMatch> routing_test_list_match;
         std::optional<RoutingTestNfqws> routing_test_nfqws;
         std::optional<RoutingTestNfqwsMatchElement> routing_test_nfqws_match;
@@ -2650,6 +2663,9 @@ void to_json(json & j, const RoutingHealthErrorResponse & x);
 void from_json(const json & j, RoutingHealthResponse & x);
 void to_json(json & j, const RoutingHealthResponse & x);
 
+void from_json(const json & j, KernelRoute & x);
+void to_json(json & j, const KernelRoute & x);
+
 void from_json(const json & j, ListMatch & x);
 void to_json(json & j, const ListMatch & x);
 
@@ -3087,6 +3103,9 @@ void to_json(json & j, const TtlBypassState & x);
 
 void from_json(const json & j, Evaluation & x);
 void to_json(json & j, const Evaluation & x);
+
+void from_json(const json & j, RouteStatus & x);
+void to_json(json & j, const RouteStatus & x);
 
 void from_json(const json & j, RoutingTestUnknownConditionElement & x);
 void to_json(json & j, const RoutingTestUnknownConditionElement & x);
@@ -5751,6 +5770,23 @@ namespace api {
         j["ttl_bypass_state"] = x.ttl_bypass_state;
     }
 
+    inline void from_json(const json & j, KernelRoute& x) {
+        x.detail = j.at("detail").get<std::string>();
+        x.fwmark = get_stack_optional<int64_t>(j, "fwmark");
+        x.interface = j.at("interface").get<std::string>();
+        x.route_status = j.at("route_status").get<RouteStatus>();
+        x.table = get_stack_optional<int64_t>(j, "table");
+    }
+
+    inline void to_json(json & j, const KernelRoute & x) {
+        j = json::object();
+        j["detail"] = x.detail;
+        j["fwmark"] = x.fwmark;
+        j["interface"] = x.interface;
+        j["route_status"] = x.route_status;
+        j["table"] = x.table;
+    }
+
     inline void from_json(const json & j, ListMatch& x) {
         x.list = j.at("list").get<std::string>();
         x.via = j.at("via").get<std::string>();
@@ -5767,6 +5803,7 @@ namespace api {
         x.evaluation = j.at("evaluation").get<Evaluation>();
         x.expected_outbound = j.at("expected_outbound").get<std::string>();
         x.ip = j.at("ip").get<std::string>();
+        x.kernel_route = j.at("kernel_route").get<KernelRoute>();
         x.list_match = get_stack_optional<ListMatch>(j, "list_match");
         x.ok = j.at("ok").get<bool>();
         x.unknown_conditions = j.at("unknown_conditions").get<std::vector<RoutingTestUnknownConditionElement>>();
@@ -5778,6 +5815,7 @@ namespace api {
         j["evaluation"] = x.evaluation;
         j["expected_outbound"] = x.expected_outbound;
         j["ip"] = x.ip;
+        j["kernel_route"] = x.kernel_route;
         j["list_match"] = x.list_match;
         j["ok"] = x.ok;
         j["unknown_conditions"] = x.unknown_conditions;
@@ -6877,6 +6915,8 @@ namespace api {
         x.routing_health_response = get_stack_optional<RoutingHealthResponse>(j, "RoutingHealthResponse");
         x.routing_test_entry = get_stack_optional<RoutingTestEntry>(j, "RoutingTestEntry");
         x.routing_test_evaluation = get_stack_optional<Evaluation>(j, "RoutingTestEvaluation");
+        x.routing_test_kernel_route = get_stack_optional<KernelRoute>(j, "RoutingTestKernelRoute");
+        x.routing_test_kernel_route_status = get_stack_optional<RouteStatus>(j, "RoutingTestKernelRouteStatus");
         x.routing_test_list_match = get_stack_optional<ListMatch>(j, "RoutingTestListMatch");
         x.routing_test_nfqws = get_stack_optional<RoutingTestNfqws>(j, "RoutingTestNfqws");
         x.routing_test_nfqws_match = get_stack_optional<RoutingTestNfqwsMatchElement>(j, "RoutingTestNfqwsMatch");
@@ -7129,6 +7169,8 @@ namespace api {
         j["RoutingHealthResponse"] = x.routing_health_response;
         j["RoutingTestEntry"] = x.routing_test_entry;
         j["RoutingTestEvaluation"] = x.routing_test_evaluation;
+        j["RoutingTestKernelRoute"] = x.routing_test_kernel_route;
+        j["RoutingTestKernelRouteStatus"] = x.routing_test_kernel_route_status;
         j["RoutingTestListMatch"] = x.routing_test_list_match;
         j["RoutingTestNfqws"] = x.routing_test_nfqws;
         j["RoutingTestNfqwsMatch"] = x.routing_test_nfqws_match;
@@ -9122,6 +9164,24 @@ namespace api {
             case Evaluation::MATCHED: j = "matched"; break;
             case Evaluation::NOT_MATCHED: j = "not_matched"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"Evaluation\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, RouteStatus & x) {
+        if (j == "not_applicable") x = RouteStatus::NOT_APPLICABLE;
+        else if (j == "resolved") x = RouteStatus::RESOLVED;
+        else if (j == "unavailable") x = RouteStatus::UNAVAILABLE;
+        else if (j == "unroutable") x = RouteStatus::UNROUTABLE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"RouteStatus\""); }
+    }
+
+    inline void to_json(json & j, const RouteStatus & x) {
+        switch (x) {
+            case RouteStatus::NOT_APPLICABLE: j = "not_applicable"; break;
+            case RouteStatus::RESOLVED: j = "resolved"; break;
+            case RouteStatus::UNAVAILABLE: j = "unavailable"; break;
+            case RouteStatus::UNROUTABLE: j = "unroutable"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"RouteStatus\": " + std::to_string(static_cast<int>(x)));
         }
     }
 
