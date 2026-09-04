@@ -61,6 +61,7 @@
 #include "../lists/list_streamer.hpp"
 #include "../log/logger.hpp"
 #include "../routing/urltest_manager.hpp"
+#include "../routing/urltest_selection_seed.hpp"
 #include "../runtime/meta_udp_443_policy.hpp"
 #include "../util/daemon_signals.hpp"
 #include "../util/ipv6_support.hpp"
@@ -523,37 +524,6 @@ static_assert(
     std::is_nothrow_swappable_v<OutboundMarkMap> &&
         std::is_nothrow_swappable_v<KeeneticDnsCacheView>,
     "config generation publication requires no-throw derived-state swaps");
-
-std::map<std::string, std::string>
-normalized_urltest_selections_for_config(
-    const Config& config,
-    const OutboundMarkMap& outbound_marks,
-    const std::map<std::string, std::string>& current) {
-    std::map<std::string, std::string> normalized;
-    for (const auto& outbound :
-         config.outbounds.value_or(std::vector<Outbound>{})) {
-        if (outbound.type != OutboundType::URLTEST) continue;
-        const auto selection = current.find(outbound.tag);
-        if (selection == current.end()) continue;
-        const auto groups = outbound.outbound_groups.value_or(
-            std::vector<OutboundGroup>{});
-        const bool contains_child = std::any_of(
-            groups.begin(),
-            groups.end(),
-            [&selection](const OutboundGroup& group) {
-                return std::find(
-                           group.outbounds.begin(),
-                           group.outbounds.end(),
-                           selection->second) != group.outbounds.end();
-            });
-        if (contains_child &&
-            outbound_marks.find(selection->second) !=
-                outbound_marks.end()) {
-            normalized.emplace(selection->first, selection->second);
-        }
-    }
-    return normalized;
-}
 
 bool config_forwarded_scope_restricted(
     const Config& config,
@@ -7126,7 +7096,7 @@ void Daemon::begin_preowned_runtime_firewall_config_generation(
         const auto current_urltest_selections =
             firewall_state_.get_urltest_selections();
         transaction->candidate_urltest_selections =
-            normalized_urltest_selections_for_config(
+            normalize_and_seed_urltest_selections(
                 candidate.config,
                 candidate.outbound_marks,
                 current_urltest_selections);

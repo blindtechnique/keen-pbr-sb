@@ -584,9 +584,14 @@ TEST_CASE("generate-resolver-config preserves scoped Keenetic DNS policy over gl
     CHECK(output.find(
               "server=/www.youtube.com/127.0.0.1#40509\n") !=
           std::string::npos);
-    CHECK(output.find("server=/youtube.com/77.88.8.1\n") ==
-          std::string::npos);
-    CHECK(output.find("server=/www.youtube.com/77.88.8.8\n") ==
+    const auto youtube_plaintext =
+        output.find("server=/youtube.com/77.88.8.1\n");
+    const auto youtube_encrypted =
+        output.find("server=/youtube.com/127.0.0.1#40508\n");
+    CHECK(youtube_plaintext != std::string::npos);
+    CHECK(youtube_encrypted != std::string::npos);
+    CHECK(youtube_plaintext < youtube_encrypted);
+    CHECK(output.find("server=/www.youtube.com/77.88.8.8\n") !=
           std::string::npos);
     CHECK(output.find("server=/youtube.com/8.8.8.8\n") ==
           std::string::npos);

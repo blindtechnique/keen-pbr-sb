@@ -93,12 +93,12 @@ TEST_CASE("keenetic dns: parse address from RCI System policy") {
         CHECK(snapshot.scoped_upstreams[1].address == "203.0.113.11");
     }
 
-    SUBCASE("prefers encrypted servers independently for each scoped domain") {
+    SUBCASE("retains scoped companions in source order without duplicates") {
         const std::string json = R"({
           "proxy-status": [
             {
               "proxy-name": "System",
-              "proxy-config": "dns_server = 77.88.8.1 youtube.com\ndns_server = 127.0.0.1:40508 youtube.com # https://doh.opendns.com/dns-query@dnsm\ndns_server = 77.88.8.8 www.youtube.com\ndns_server = 127.0.0.1:40509 www.youtube.com # https://doh.opendns.com/dns-query@dnsm\ndns_server = 127.0.0.1:40500 . # tls://common.dot.dns.example\n"
+              "proxy-config": "dns_server = 77.88.8.1 youtube.com\ndns_server = 127.0.0.1:40508 youtube.com # https://doh.opendns.com/dns-query@dnsm\ndns_server = 77.88.8.1 youtube.com\ndns_server = 77.88.8.8 www.youtube.com\ndns_server = 127.0.0.1:40509 www.youtube.com # https://doh.opendns.com/dns-query@dnsm\ndns_server = 127.0.0.1:40500 . # tls://common.dot.dns.example\n"
             }
           ]
         })";
@@ -107,15 +107,21 @@ TEST_CASE("keenetic dns: parse address from RCI System policy") {
             extract_keenetic_dns_snapshot_from_rci(json);
         CHECK(snapshot.addresses ==
               std::vector<std::string>{"127.0.0.1:40500"});
-        REQUIRE(snapshot.scoped_upstreams.size() == 2);
+        REQUIRE(snapshot.scoped_upstreams.size() == 4);
         CHECK(snapshot.scoped_upstreams[0].domain == "youtube.com");
-        CHECK(snapshot.scoped_upstreams[0].address == "127.0.0.1:40508");
-        CHECK(snapshot.scoped_upstreams[0].kind == "DoH");
-        CHECK(snapshot.scoped_upstreams[0].target ==
-              "https://doh.opendns.com/dns-query");
-        CHECK(snapshot.scoped_upstreams[1].domain == "www.youtube.com");
-        CHECK(snapshot.scoped_upstreams[1].address == "127.0.0.1:40509");
+        CHECK(snapshot.scoped_upstreams[0].address == "77.88.8.1");
+        CHECK(snapshot.scoped_upstreams[0].kind == "Plain");
+        CHECK(snapshot.scoped_upstreams[1].domain == "youtube.com");
+        CHECK(snapshot.scoped_upstreams[1].address == "127.0.0.1:40508");
         CHECK(snapshot.scoped_upstreams[1].kind == "DoH");
+        CHECK(snapshot.scoped_upstreams[1].target ==
+              "https://doh.opendns.com/dns-query");
+        CHECK(snapshot.scoped_upstreams[2].domain == "www.youtube.com");
+        CHECK(snapshot.scoped_upstreams[2].address == "77.88.8.8");
+        CHECK(snapshot.scoped_upstreams[2].kind == "Plain");
+        CHECK(snapshot.scoped_upstreams[3].domain == "www.youtube.com");
+        CHECK(snapshot.scoped_upstreams[3].address == "127.0.0.1:40509");
+        CHECK(snapshot.scoped_upstreams[3].kind == "DoH");
     }
 
     SUBCASE("normalizes safe scoped domains and skips invalid ones") {
@@ -135,7 +141,7 @@ TEST_CASE("keenetic dns: parse address from RCI System policy") {
         CHECK(snapshot.scoped_upstreams[0].address == "127.0.0.1:40508");
     }
 
-    SUBCASE("matches scoped domains case-insensitively when preferring encrypted servers") {
+    SUBCASE("matches scoped domains case-insensitively while retaining companions") {
         const std::string json = R"({
           "proxy-status": [
             {
@@ -147,10 +153,13 @@ TEST_CASE("keenetic dns: parse address from RCI System policy") {
 
         const KeeneticDnsSnapshot snapshot =
             extract_keenetic_dns_snapshot_from_rci(json);
-        REQUIRE(snapshot.scoped_upstreams.size() == 1);
+        REQUIRE(snapshot.scoped_upstreams.size() == 2);
         CHECK(snapshot.scoped_upstreams[0].domain == "youtube.com");
-        CHECK(snapshot.scoped_upstreams[0].address == "127.0.0.1:40508");
-        CHECK(snapshot.scoped_upstreams[0].kind == "DoH");
+        CHECK(snapshot.scoped_upstreams[0].address == "77.88.8.1");
+        CHECK(snapshot.scoped_upstreams[0].kind == "Plain");
+        CHECK(snapshot.scoped_upstreams[1].domain == "youtube.com");
+        CHECK(snapshot.scoped_upstreams[1].address == "127.0.0.1:40508");
+        CHECK(snapshot.scoped_upstreams[1].kind == "DoH");
     }
 
     SUBCASE("extracts static a and aaaa entries from System policy") {

@@ -4,6 +4,7 @@
 #include "../src/daemon/scheduler.hpp"
 #include "../src/health/url_tester.hpp"
 #include "../src/routing/urltest_manager.hpp"
+#include "../src/routing/urltest_selection_seed.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -443,6 +444,70 @@ bool wait_until(Predicate&& predicate) {
 }
 
 } // namespace
+
+TEST_CASE("urltest startup seed follows stable group weight and child order") {
+    OutboundGroup later_group;
+    later_group.outbounds = {"later"};
+    later_group.weight = 20;
+
+    OutboundGroup preferred_group;
+    preferred_group.outbounds = {"unmarked", "preferred", "same-group-later"};
+    preferred_group.weight = 5;
+
+    OutboundGroup equal_weight_later_group;
+    equal_weight_later_group.outbounds = {"equal-weight-later"};
+    equal_weight_later_group.weight = 5;
+
+    auto urltest = make_urltest_outbound();
+    urltest.outbound_groups = std::vector<OutboundGroup>{
+        later_group,
+        preferred_group,
+        equal_weight_later_group,
+    };
+
+    Config config;
+    config.outbounds = std::vector<Outbound>{urltest};
+    const OutboundMarkMap marks{
+        {"later", 0x10000U},
+        {"preferred", 0x20000U},
+        {"same-group-later", 0x30000U},
+        {"equal-weight-later", 0x40000U},
+    };
+
+    const auto selections = normalize_and_seed_urltest_selections(
+        config, marks, {});
+
+    REQUIRE(selections.size() == 1U);
+    CHECK(selections.at("automatic") == "preferred");
+}
+
+TEST_CASE("urltest startup seed retains valid cursor and replaces stale cursor") {
+    Config config;
+    config.outbounds =
+        std::vector<Outbound>{make_urltest_outbound()};
+    const auto marks = make_marks();
+
+    const auto retained = normalize_and_seed_urltest_selections(
+        config, marks, {{"automatic", "backup"}});
+    REQUIRE(retained.size() == 1U);
+    CHECK(retained.at("automatic") == "backup");
+
+    const auto replaced = normalize_and_seed_urltest_selections(
+        config, marks, {{"automatic", "removed"}});
+    REQUIRE(replaced.size() == 1U);
+    CHECK(replaced.at("automatic") == "primary");
+}
+
+TEST_CASE("urltest startup seed omits selector without a configured and marked child") {
+    Config config;
+    config.outbounds =
+        std::vector<Outbound>{make_urltest_outbound()};
+
+    const auto selections = normalize_and_seed_urltest_selections(
+        config, {}, {{"automatic", "primary"}});
+
+    CHECK(selections.empty());
+}
 
 TEST_CASE("initial urltest probe commits through the controller callback") {
     auto transport = std::make_shared<UrltestTransport>();

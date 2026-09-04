@@ -22,6 +22,7 @@
 #include "../keenetic/ndms_vpn_server_service_cache.hpp"
 #include "../log/logger.hpp"
 #include "../routing/urltest_manager.hpp"
+#include "../routing/urltest_selection_seed.hpp"
 #include "../runtime/meta_udp_443_policy.hpp"
 #include "../runtime/meta_udp_443_activation_contract.hpp"
 #ifdef WITH_API
@@ -252,19 +253,6 @@ bool same_forwarded_five_tuple(
            left.destination == right.destination &&
            left.source_port == right.source_port &&
            left.destination_port == right.destination_port;
-}
-
-bool urltest_contains_child(const Outbound& urltest,
-                            const std::string& child_tag) {
-    for (const auto& group :
-         urltest.outbound_groups.value_or(std::vector<OutboundGroup>{})) {
-        if (std::find(group.outbounds.begin(),
-                      group.outbounds.end(),
-                      child_tag) != group.outbounds.end()) {
-            return true;
-        }
-    }
-    return false;
 }
 
 } // namespace
@@ -1461,32 +1449,11 @@ void Daemon::apply_firewall(
 
 void Daemon::normalize_urltest_selections() {
     const auto current = firewall_state_.get_urltest_selections();
-    std::map<std::string, std::string> normalized;
-
-    for (const auto& outbound :
-         active_config_snapshot_->config.outbounds.value_or(std::vector<Outbound>{})) {
-        if (outbound.type != OutboundType::URLTEST) {
-            continue;
-        }
-        const auto selection = current.find(outbound.tag);
-        if (selection == current.end()) {
-            continue;
-        }
-        if (urltest_contains_child(outbound, selection->second) &&
-            active_config_snapshot_->outbound_marks.find(
-                selection->second) !=
-                active_config_snapshot_->outbound_marks.end()) {
-            normalized.emplace(selection->first, selection->second);
-            continue;
-        }
-        Logger::instance().info(
-            "Dropping retained urltest selection '{}' for '{}': child is no "
-            "longer configured or routable",
-            selection->second,
-            outbound.tag);
-    }
-
-    firewall_state_.set_urltest_selections(std::move(normalized));
+    firewall_state_.set_urltest_selections(
+        normalize_and_seed_urltest_selections(
+            active_config_snapshot_->config,
+            active_config_snapshot_->outbound_marks,
+            current));
 }
 
 void Daemon::defer_urltest_switch_to_firewall_recovery(

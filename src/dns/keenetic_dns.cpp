@@ -6,10 +6,10 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <functional>
-#include <map>
 #include <mutex>
 #include <sstream>
 #include <utility>
@@ -296,19 +296,16 @@ std::vector<ParsedDnsServerLine> collect_selected_keenetic_dns_servers(
 std::vector<ParsedDnsServerLine>
 collect_selected_keenetic_scoped_dns_servers(
     const std::vector<ParsedDnsServerLine>& scoped_servers) {
-    std::map<std::string, bool> domain_has_encrypted_server;
-    for (const auto& server : scoped_servers) {
-        auto& has_encrypted =
-            domain_has_encrypted_server[server.domain];
-        has_encrypted = has_encrypted || server.is_encrypted;
-    }
-
     std::vector<ParsedDnsServerLine> selected;
     selected.reserve(scoped_servers.size());
     for (const auto& server : scoped_servers) {
-        const bool prefer_encrypted =
-            domain_has_encrypted_server.at(server.domain);
-        if (!prefer_encrypted || server.is_encrypted) {
+        const auto duplicate = std::find_if(
+            selected.begin(), selected.end(),
+            [&server](const ParsedDnsServerLine& existing) {
+                return existing.domain == server.domain &&
+                       existing.address == server.address;
+            });
+        if (duplicate == selected.end()) {
             selected.push_back(server);
         }
     }
