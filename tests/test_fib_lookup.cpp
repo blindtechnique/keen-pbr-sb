@@ -214,6 +214,10 @@ TEST_CASE("fib: a destination that is not an address is refused before asking") 
     }
 }
 
+TEST_CASE("fib: the request asks for the table selected by policy lookup") {
+    CHECK((fib_lookup_request_flags_for_testing() & 0x1000U) != 0U);
+}
+
 TEST_CASE("fib: the kernel on this host answers about the loopback") {
     // The one case that exercises the socket rather than the parser. Loopback
     // is routed on any host that can run this suite at all.

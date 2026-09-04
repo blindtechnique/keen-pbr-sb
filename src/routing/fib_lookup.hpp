@@ -67,6 +67,10 @@ struct FibAnswer {
 // carries its own proof.
 FibAnswer system_fib_lookup(const FibQuery& query) noexcept;
 
+#ifdef KEEN_PBR3_TESTING
+std::uint32_t fib_lookup_request_flags_for_testing() noexcept;
+#endif
+
 // The reply parser, kept separate so it can be tested against synthetic
 // messages without a kernel. `family` is the family the request was made for;
 // `requested_mark` mirrors FibQuery::fwmark and drives the echo rule above.

@@ -17,11 +17,31 @@ namespace keen_pbr3 {
 
 namespace {
 
+#ifdef RTM_F_LOOKUP_TABLE
+constexpr std::uint32_t kLookupTableFlag = RTM_F_LOOKUP_TABLE;
+#else
+// Older Entware build headers predate the flag, while KeeneticOS 4.9 accepts
+// the stable UAPI value and uses it to return the table selected by policy.
+constexpr std::uint32_t kLookupTableFlag = 0x1000U;
+#endif
+
 struct ParsedDestination {
     int family{AF_UNSPEC};
     std::array<std::uint8_t, 16> bytes{};
     std::size_t size{0U};
 };
+
+rtmsg make_route_message(const ParsedDestination& destination) noexcept {
+    rtmsg message{};
+    message.rtm_family = static_cast<unsigned char>(destination.family);
+    message.rtm_dst_len = static_cast<unsigned char>(destination.size * 8U);
+    message.rtm_table = RT_TABLE_UNSPEC;
+    message.rtm_protocol = RTPROT_UNSPEC;
+    message.rtm_scope = RT_SCOPE_UNIVERSE;
+    message.rtm_type = RTN_UNSPEC;
+    message.rtm_flags = kLookupTableFlag;
+    return message;
+}
 
 std::optional<ParsedDestination> parse_destination(
     const std::string& value) noexcept {
@@ -85,6 +105,15 @@ bool refusing_route_type(const unsigned char type) noexcept {
 }
 
 }  // namespace
+
+#ifdef KEEN_PBR3_TESTING
+std::uint32_t fib_lookup_request_flags_for_testing() noexcept {
+    ParsedDestination destination;
+    destination.family = AF_INET;
+    destination.size = 4U;
+    return make_route_message(destination).rtm_flags;
+}
+#endif
 
 FibAnswer parse_fib_reply(const void* bytes,
                           const std::size_t size,
@@ -236,12 +265,7 @@ FibAnswer system_fib_lookup(const FibQuery& query) noexcept {
     }
 
     auto& message = *reinterpret_cast<rtmsg*>(NLMSG_DATA(&header));
-    message.rtm_family = static_cast<unsigned char>(destination->family);
-    message.rtm_dst_len = static_cast<unsigned char>(destination->size * 8U);
-    message.rtm_table = RT_TABLE_UNSPEC;
-    message.rtm_protocol = RTPROT_UNSPEC;
-    message.rtm_scope = RT_SCOPE_UNIVERSE;
-    message.rtm_type = RTN_UNSPEC;
+    message = make_route_message(*destination);
 
     if (!append_attribute(header, request_bytes.size(), RTA_DST,
                           destination->bytes.data(), destination->size)) {
